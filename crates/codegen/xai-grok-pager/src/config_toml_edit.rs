@@ -35,6 +35,61 @@ pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io
     set_hint_at(&path, key, value)
 }
 
+/// Read `[models].hidden_models` from `~/.grok/config.toml` (absent → empty).
+///
+/// Entries are glob patterns matched against the catalog key or model slug;
+/// the picker's hide action writes exact catalog keys, which are valid globs.
+pub(crate) fn hidden_model_ids() -> Vec<String> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    hidden_model_ids_at(&path)
+}
+
+/// Path-injectable core of [`hidden_model_ids`].
+fn hidden_model_ids_at(path: &Path) -> Vec<String> {
+    let Some(doc) = read_config_document_for_edit(path) else {
+        return Vec::new();
+    };
+    doc.get("models")
+        .and_then(|m| m.get("hidden_models"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write the full `[models].hidden_models` array back to `~/.grok/config.toml`
+/// (empty removes the key). The shell's config watcher hot-reloads the model
+/// catalog, so hidden rows drop out of the projection on their own.
+pub(crate) fn set_hidden_model_ids(ids: &[String]) -> std::io::Result<()> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    set_hidden_model_ids_at(&path, ids)
+}
+
+/// Path-injectable core of [`set_hidden_model_ids`].
+fn set_hidden_model_ids_at(path: &Path, ids: &[String]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let Some(mut doc) = read_config_document_for_edit(path) else {
+        return Ok(());
+    };
+    if ids.is_empty() {
+        if let Some(models) = doc.get_mut("models").and_then(|m| m.as_table_mut()) {
+            models.remove("hidden_models");
+        }
+    } else {
+        let mut arr = toml_edit::Array::default();
+        for id in ids {
+            arr.push(id.as_str());
+        }
+        doc["models"]["hidden_models"] = toml_edit::value(arr);
+    }
+    std::fs::write(path, doc.to_string())
+}
+
 /// Path-injectable core of [`set_hint`].
 fn set_hint_at(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -177,5 +232,45 @@ mod tests {
             body.contains("compact_mode"),
             "sibling [ui] keys should be preserved"
         );
+    }
+
+    #[test]
+    fn hidden_models_round_trip_preserves_siblings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[models]\ndefault = \"grok-4.5\"\n\n[ui]\ncompact_mode = true\n",
+        )
+        .unwrap();
+
+        assert!(hidden_model_ids_at(&path).is_empty());
+        set_hidden_model_ids_at(
+            &path,
+            &["deepseek/deepseek-v4-flash".to_string(), "gpt-5".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            hidden_model_ids_at(&path),
+            ["deepseek/deepseek-v4-flash", "gpt-5"]
+        );
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("default = \"grok-4.5\""), "[models] sibling kept");
+        assert!(body.contains("compact_mode"), "[ui] table kept");
+
+        // Empty clears the key but leaves the file parseable and siblings intact.
+        set_hidden_model_ids_at(&path, &[]).unwrap();
+        assert!(hidden_model_ids_at(&path).is_empty());
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("default = \"grok-4.5\""));
+        assert!(!body.contains("hidden_models"));
+    }
+
+    #[test]
+    fn hidden_models_set_creates_missing_table_and_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/config.toml");
+        set_hidden_model_ids_at(&path, &["grok-4.5".to_string()]).unwrap();
+        assert_eq!(hidden_model_ids_at(&path), ["grok-4.5"]);
     }
 }

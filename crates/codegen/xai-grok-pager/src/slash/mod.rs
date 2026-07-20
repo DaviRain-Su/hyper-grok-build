@@ -966,7 +966,16 @@ impl SlashController {
         }
         let trimmed = query.trim();
         if trimmed.is_empty() {
-            return items.iter().map(SuggestionRow::from_arg).collect();
+            // Scoped default: locked BYOK rows (credential-less platform
+            // models shown for discovery) are excluded from the empty-query
+            // list — hundreds of them would flood it. Typing a query ranks
+            // across them; the /model picker's Tab (All) view also reveals
+            // them.
+            return items
+                .iter()
+                .filter(|item| !item.locked)
+                .map(SuggestionRow::from_arg)
+                .collect();
         }
         let hits = self
             .matcher
@@ -2608,7 +2617,7 @@ mod tests {
                 match_text: match_text.into(),
                 insert_text: insert.into(),
                 description: String::new(),
-                locked: false,
+                locked: false, action_id: None, hidden: false,
             };
             if let Some(rest) = args_query.strip_prefix("first")
                 && rest.starts_with(char::is_whitespace)
@@ -2681,6 +2690,68 @@ mod tests {
         assert!(
             !displays.contains(&"/terminal-check"),
             "/terminal-check (alias) should be deduplicated in favor of canonical"
+        );
+    }
+
+    /// Command whose rows include a locked BYOK model, to exercise the
+    /// scoped suggestion filter.
+    struct LockedRowCmd;
+
+    impl SlashCommand for LockedRowCmd {
+        fn name(&self) -> &str {
+            "lockchain"
+        }
+        fn description(&self) -> &str {
+            "test locked rows"
+        }
+        fn usage(&self) -> &str {
+            "/lockchain <model>"
+        }
+        fn takes_args(&self) -> bool {
+            true
+        }
+        fn suggest_args(&self, _ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
+            let item = |display: &str, locked: bool| ArgItem {
+                display: display.into(),
+                match_text: display.into(),
+                insert_text: display.into(),
+                description: String::new(),
+                locked,
+                action_id: None,
+                hidden: false,
+            };
+            Some(vec![
+                item("grok-4.5", false),
+                item("🔒 DeepSeek V4 Flash — DeepSeek", true),
+            ])
+        }
+        fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+            CommandResult::Handled
+        }
+    }
+
+    #[test]
+    fn arg_suggestions_empty_query_hides_locked_rows_typed_query_reveals() {
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(vec![Arc::new(LockedRowCmd)]),
+            std::path::PathBuf::from("."),
+        );
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        // Empty query (scoped default): the locked BYOK row is hidden.
+        ctrl.refresh(&state, "/lockchain ", 11, &models);
+        let snap = state.snapshot();
+        let displays: Vec<&str> = snap.matches.iter().map(|r| r.display.as_str()).collect();
+        assert_eq!(displays, ["grok-4.5"]);
+
+        // Typing a query searches across locked rows (BYOK discovery).
+        ctrl.refresh(&state, "/lockchain deep", 15, &models);
+        let snap = state.snapshot();
+        let displays: Vec<&str> = snap.matches.iter().map(|r| r.display.as_str()).collect();
+        assert!(
+            displays.iter().any(|d| d.contains("DeepSeek")),
+            "typed query must surface locked rows, got {displays:?}"
         );
     }
 }

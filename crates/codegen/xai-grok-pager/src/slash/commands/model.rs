@@ -200,6 +200,8 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
                 insert_text: info.name.clone(),
                 description: lock.setup_hint.clone(),
                 locked: true,
+                action_id: Some(id.0.to_string()),
+                hidden: false,
             });
             continue;
         }
@@ -227,6 +229,8 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             insert_text,
             description: info.description.clone().unwrap_or_default(),
             locked: false,
+            action_id: Some(id.0.to_string()),
+            hidden: false,
         });
     }
     items.extend(locked_items);

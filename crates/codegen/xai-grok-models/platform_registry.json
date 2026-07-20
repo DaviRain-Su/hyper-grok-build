@@ -227,7 +227,7 @@
       ],
       "uses_x_api_key": false,
       "uses_oauth": false,
-      "live_models_list": false
+      "live_models_list": true
     }
   ]
 }

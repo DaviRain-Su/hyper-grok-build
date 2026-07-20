@@ -213,7 +213,10 @@ Set `OLLAMA_API_KEY` (or `GROK_OLLAMA_API_KEY`) in your environment:
 export OLLAMA_API_KEY=your-key
 ```
 
-Then select models via `/model ollama/<model-name>`.
+Then select models via `/model ollama/<model-name>`. Once the key resolves,
+the **full Ollama Cloud roster is live-synced** from `GET /v1/models` — the
+offline catalog entries are only a pre-key fallback (shown dimmed in the
+/model picker's All view until then).
 
 **Local override:** Set `GROK_OLLAMA_BASE_URL` to point at your local instance:
 

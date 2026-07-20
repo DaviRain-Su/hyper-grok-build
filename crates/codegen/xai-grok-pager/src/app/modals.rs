@@ -18,6 +18,80 @@ use super::app_view::InputOutcome;
 use crate::theme::Theme;
 use crate::views::modal::{self, ActiveModal};
 
+/// Items for the `/model` picker's current view.
+///
+/// **Scoped** (default): drops locked BYOK rows and currently-hidden models
+/// so the everyday list stays small — the full catalog flooded it with
+/// hundreds of rows. **All**: everything, plus synthesized rows for hidden
+/// ids that already fell out of the catalog projection (so ^X can unhide
+/// them). Rows whose `action_id` is currently hidden are flagged
+/// [`ArgItem::hidden`] for dimmed rendering.
+pub(crate) fn model_picker_view_items(
+    original_items: &[crate::slash::command::ArgItem],
+    hidden_ids: &[String],
+    show_all: bool,
+) -> Vec<crate::slash::command::ArgItem> {
+    use crate::slash::command::ArgItem;
+    let is_hidden = |item: &ArgItem| {
+        item.action_id
+            .as_deref()
+            .is_some_and(|id| hidden_ids.iter().any(|h| h == id))
+    };
+    if !show_all {
+        return original_items
+            .iter()
+            .filter(|item| !item.locked && !is_hidden(item))
+            .cloned()
+            .collect();
+    }
+    let mut out: Vec<ArgItem> = original_items
+        .iter()
+        .cloned()
+        .map(|mut item| {
+            if is_hidden(&item) {
+                item.hidden = true;
+            }
+            item
+        })
+        .collect();
+    for id in hidden_ids {
+        if out.iter().any(|i| i.action_id.as_deref() == Some(id.as_str())) {
+            continue;
+        }
+        out.push(ArgItem {
+            display: format!("🚫 {id} (hidden)"),
+            match_text: id.clone(),
+            insert_text: id.clone(),
+            description: "hidden by your config — ^X to unhide".to_string(),
+            locked: false,
+            action_id: Some(id.clone()),
+            hidden: true,
+        });
+    }
+    out
+}
+
+/// View items further narrowed by the picker's type-to-filter query.
+fn apply_model_picker_filter(
+    original_items: &[crate::slash::command::ArgItem],
+    hidden_ids: &[String],
+    show_all: bool,
+    query: &str,
+) -> Vec<crate::slash::command::ArgItem> {
+    let base = model_picker_view_items(original_items, hidden_ids, show_all);
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return base;
+    }
+    base.into_iter()
+        .filter(|item| {
+            item.match_text.to_lowercase().contains(&q)
+                || item.display.to_lowercase().contains(&q)
+                || item.description.to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
 impl AgentView {
     /// `suggest_args` falls back to model rows when the query is not in effort
     /// phase. Model-phase reasoning rows use a trailing space in `insert_text`;
@@ -78,12 +152,14 @@ impl AgentView {
             args_query,
             items,
             original_items,
+            show_all,
+            hidden_ids,
             state,
             ..
         }) = active_modal.as_mut()
         {
             args_query.clear();
-            *items = model_items.clone();
+            *items = model_picker_view_items(&model_items, hidden_ids, *show_all);
             *original_items = model_items;
             // Model list is type-to-find: reopen input-default like the initial /model open.
             *state = crate::views::picker::PickerState::input_active();
@@ -541,6 +617,65 @@ impl AgentView {
             _ => return InputOutcome::Changed,
         };
 
+        // `/model` scoping keys (model phase only, i.e. not in the effort
+        // sub-menu): Tab toggles scoped ↔ all view; ^X hides/unhides the
+        // selected model via `[models].hidden_models` in config.toml. The
+        // shell's config watcher hot-reloads the catalog on write.
+        if matches!(command_clone.as_str(), "model" | "m")
+            && !in_effort_phase
+            && let crossterm::event::Event::Key(key) = ev
+            && key.kind == KeyEventKind::Press
+        {
+            if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                if let Some(ActiveModal::ArgPicker {
+                    items,
+                    original_items,
+                    show_all,
+                    hidden_ids,
+                    state,
+                    ..
+                }) = self.active_modal.as_mut()
+                {
+                    *show_all = !*show_all;
+                    let q = state.query().to_string();
+                    *items = apply_model_picker_filter(original_items, hidden_ids, *show_all, &q);
+                    state.selected = state.selected.min(items.len().saturating_sub(1));
+                }
+                return InputOutcome::Changed;
+            }
+            if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::CONTROL {
+                if let Some(ActiveModal::ArgPicker {
+                    items,
+                    original_items,
+                    show_all,
+                    hidden_ids,
+                    state,
+                    ..
+                }) = self.active_modal.as_mut()
+                {
+                    let target = items
+                        .get(state.selected)
+                        .and_then(|item| item.action_id.clone());
+                    if let Some(id) = target {
+                        if let Some(pos) = hidden_ids.iter().position(|h| h == &id) {
+                            hidden_ids.remove(pos);
+                        } else {
+                            hidden_ids.push(id);
+                        }
+                        if let Err(e) = crate::config_toml_edit::set_hidden_model_ids(hidden_ids)
+                        {
+                            tracing::warn!(error = %e, "failed to persist hidden_models");
+                        }
+                        let q = state.query().to_string();
+                        *items =
+                            apply_model_picker_filter(original_items, hidden_ids, *show_all, &q);
+                        state.selected = state.selected.min(items.len().saturating_sub(1));
+                    }
+                }
+                return InputOutcome::Changed;
+            }
+        }
+
         let config = PickerConfig {
             title: None,
             show_search_hint: false,
@@ -584,23 +719,32 @@ impl AgentView {
         match step {
             ArgPickerStep::FilterChanged => {
                 if let Some(ActiveModal::ArgPicker {
+                    command,
+                    args_query,
                     items,
                     original_items,
+                    show_all,
+                    hidden_ids,
                     state,
                     ..
                 }) = self.active_modal.as_mut()
                 {
                     let q = state.query().to_lowercase();
-                    *items = original_items
-                        .iter()
-                        .filter(|item| {
-                            q.is_empty()
-                                || item.match_text.to_lowercase().contains(&q)
-                                || item.display.to_lowercase().contains(&q)
-                                || item.description.to_lowercase().contains(&q)
-                        })
-                        .cloned()
-                        .collect();
+                    if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                        *items =
+                            apply_model_picker_filter(original_items, hidden_ids, *show_all, &q);
+                    } else {
+                        *items = original_items
+                            .iter()
+                            .filter(|item| {
+                                q.is_empty()
+                                    || item.match_text.to_lowercase().contains(&q)
+                                    || item.display.to_lowercase().contains(&q)
+                                    || item.description.to_lowercase().contains(&q)
+                            })
+                            .cloned()
+                            .collect();
+                    }
                     state.selected = state.selected.min(items.len().saturating_sub(1));
                 }
                 InputOutcome::Changed
@@ -861,19 +1005,32 @@ impl AgentView {
                                                 state: state.clone(),
                                             })
                                         };
-                                        self.active_modal = Some(ActiveModal::ArgPicker {
-                                            command: trimmed,
-                                            args_query: String::new(),
-                                            items: items.clone(),
-                                            original_items: items,
-                                            // Type-to-find: open in input mode (vim: Esc→nav, i→input).
-                                            state: crate::views::picker::PickerState::input_active(
-                                            ),
-                                            previous_palette: prev,
-                                            window:
-                                                crate::views::modal_window::ModalWindowState::new(),
-                                        });
-                                        return InputOutcome::Changed;
+                                    let is_model = matches!(trimmed.as_str(), "model" | "m");
+                                    let hidden_ids = if is_model {
+                                        crate::config_toml_edit::hidden_model_ids()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let view_items = if is_model {
+                                        model_picker_view_items(&items, &hidden_ids, false)
+                                    } else {
+                                        items.clone()
+                                    };
+                                    self.active_modal = Some(ActiveModal::ArgPicker {
+                                        command: trimmed,
+                                        args_query: String::new(),
+                                        items: view_items,
+                                        original_items: items,
+                                        show_all: false,
+                                        hidden_ids,
+                                        // Type-to-find: open in input mode (vim: Esc→nav, i→input).
+                                        state: crate::views::picker::PickerState::input_active(
+                                        ),
+                                        previous_palette: prev,
+                                        window:
+                                            crate::views::modal_window::ModalWindowState::new(),
+                                    });
+                                    return InputOutcome::Changed;
                                     }
                                 }
                                 self.active_modal = None;
@@ -1661,6 +1818,10 @@ impl AgentView {
                     id: 0,
                 },
             ];
+            // Backing storage for the `/model` picker's dynamic Tab hint; must
+            // outlive `picker_shortcuts` which borrows it (assigned in the
+            // ArgPicker arm below).
+            let mut model_tab_hint: Option<String> = None;
 
             // EditConfirm has no draw arm and is no longer armed anywhere (the
             // dirty pane-switch lock blocks instead) — arming it would capture
@@ -1740,6 +1901,8 @@ impl AgentView {
                 command,
                 args_query,
                 items,
+                original_items,
+                show_all,
                 state,
                 window,
                 ..
@@ -1748,6 +1911,7 @@ impl AgentView {
                 // Arg picker: ModalWindow chrome + picker content.
                 let title = match command.as_str() {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
+                    "model" | "m" if *show_all => "Pick model (all)",
                     "model" | "m" => "Pick model",
                     "theme" | "t" => "Pick theme",
                     _ => "Pick option",
@@ -1765,7 +1929,7 @@ impl AgentView {
                             fields: &[],
                             description_lines: &[],
                             summary_lines: &[],
-                            dimmed: item.locked,
+                            dimmed: item.locked || item.hidden,
                             indent: 0,
                             badge: "",
                             badge_color: None,
@@ -1775,13 +1939,33 @@ impl AgentView {
                     })
                     .collect();
                 let compact = self.scrollback.appearance().prompt.compact;
-                // BYOK discovery: when the model list contains locked
-                // (credential-less) platform rows, point at /providers.
-                if matches!(command.as_str(), "model" | "m")
-                    && items.iter().any(|item| item.locked)
-                {
+                // `/model` scoping hints (model phase): Tab toggles the full
+                // catalog (locked BYOK rows), ^X hides a model from the list.
+                let locked_count = original_items.iter().filter(|i| i.locked).count();
+                if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                    model_tab_hint = if *show_all {
+                        Some("Tab scoped".to_string())
+                    } else if locked_count > 0 {
+                        Some(format!("Tab all (+{locked_count} 🔒)"))
+                    } else {
+                        None
+                    };
+                    if let Some(hint) = &model_tab_hint {
+                        picker_shortcuts.push(Shortcut {
+                            label: hint,
+                            clickable: false,
+                            id: 0,
+                        });
+                    }
+                    if *show_all && locked_count > 0 {
+                        picker_shortcuts.push(Shortcut {
+                            label: "🔒 needs key → /providers",
+                            clickable: false,
+                            id: 0,
+                        });
+                    }
                     picker_shortcuts.push(Shortcut {
-                        label: "🔒 needs API key → /providers",
+                        label: "^X hide",
                         clickable: false,
                         id: 0,
                     });
@@ -2961,5 +3145,77 @@ mod settings_memory_paste_routing_tests {
         };
         assert_eq!(state.query(), "a中b");
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod model_picker_view_tests {
+    use super::*;
+    use crate::slash::command::ArgItem;
+
+    fn row(id: &str, locked: bool) -> ArgItem {
+        ArgItem {
+            display: id.to_string(),
+            match_text: id.to_string(),
+            insert_text: id.to_string(),
+            description: String::new(),
+            locked,
+            action_id: Some(id.to_string()),
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn scoped_drops_locked_and_hidden_rows() {
+        let items = vec![
+            row("grok-4.5", false),
+            row("deepseek/deepseek-v4-flash", true),
+            row("openai/gpt-5", false),
+        ];
+        let hidden = vec!["openai/gpt-5".to_string()];
+        let view = model_picker_view_items(&items, &hidden, false);
+        let ids: Vec<_> = view.iter().map(|i| i.action_id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["grok-4.5"]);
+    }
+
+    #[test]
+    fn all_view_marks_hidden_and_synthesizes_missing_rows() {
+        let items = vec![row("grok-4.5", false), row("deepseek/deepseek-v4-flash", true)];
+        // One hidden id still in the catalog projection, one already gone.
+        let hidden = vec![
+            "grok-4.5".to_string(),
+            "ollama/gpt-oss:120b".to_string(),
+        ];
+        let view = model_picker_view_items(&items, &hidden, true);
+        let grok = view
+            .iter()
+            .find(|i| i.action_id.as_deref() == Some("grok-4.5"))
+            .unwrap();
+        assert!(grok.hidden, "hidden id in catalog flagged for dimming");
+        assert!(
+            view.iter().any(|i| i.locked),
+            "locked rows visible in All view"
+        );
+        let synth = view
+            .iter()
+            .find(|i| i.action_id.as_deref() == Some("ollama/gpt-oss:120b"))
+            .expect("synthesized row for hidden id absent from projection");
+        assert!(synth.hidden);
+        assert!(synth.display.contains("hidden"));
+        // No duplicate when the id exists in the projection already.
+        assert_eq!(
+            view.iter()
+                .filter(|i| i.action_id.as_deref() == Some("grok-4.5"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn filter_narrows_view_by_query() {
+        let items = vec![row("grok-4.5", false), row("deepseek/deepseek-v4-flash", true)];
+        let view = apply_model_picker_filter(&items, &[], true, "deepseek");
+        assert_eq!(view.len(), 1);
+        assert!(view[0].locked);
     }
 }

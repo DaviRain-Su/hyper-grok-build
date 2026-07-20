@@ -50,14 +50,14 @@ impl SlashCommand for DocsCommand {
                 match_text: "how-to".into(),
                 insert_text: "how-to".into(),
                 description: "Browse in-TUI How-to Guides".into(),
-                locked: false,
+                locked: false, action_id: None, hidden: false,
             },
             ArgItem {
                 display: "web".into(),
                 match_text: "web".into(),
                 insert_text: "web".into(),
                 description: "Open docs.x.ai/build in the browser".into(),
-                locked: false,
+                locked: false, action_id: None, hidden: false,
             },
         ];
         items.extend(all_titles().map(|title| ArgItem {
@@ -65,7 +65,7 @@ impl SlashCommand for DocsCommand {
             match_text: title.into(),
             insert_text: title.into(),
             description: format!("Open \"{title}\""),
-            locked: false,
+            locked: false, action_id: None, hidden: false,
         }));
         Some(items)
     }

@@ -362,12 +362,12 @@ impl PlatformId {
 
     /// Whether to auto-fetch live `GET /models` for this platform.
     ///
-    /// Only Kimi / Moonshot auto-sync; others use the Pi offline catalog
-    /// (org listings are huge / noisy).
+    /// Kimi / Moonshot / Ollama Cloud auto-sync; others use the Pi offline
+    /// catalog (org listings are huge / noisy).
     pub fn live_models_list_enabled(self) -> bool {
         matches!(
             self,
-            Self::KimiCode | Self::MoonshotCn | Self::MoonshotAi
+            Self::KimiCode | Self::MoonshotCn | Self::MoonshotAi | Self::Ollama
         )
     }
 
@@ -1027,6 +1027,10 @@ mod tests {
         assert_eq!(PlatformId::parse("anthropic"), Some(PlatformId::Anthropic));
         assert!(PlatformId::Anthropic.uses_x_api_key());
         assert!(!PlatformId::OpenAi.uses_x_api_key());
+        // Ollama Cloud live-syncs its `/models` listing once OLLAMA_API_KEY resolves.
+        assert!(PlatformId::Ollama.live_models_list_enabled());
+        assert!(PlatformId::KimiCode.live_models_list_enabled());
+        assert!(!PlatformId::DeepSeek.live_models_list_enabled());
     }
 
     #[test]
@@ -1209,6 +1213,9 @@ mod tests {
             "openrouter/openai/gpt-4o",
             "deepseek/deepseek-v4-flash",
             "groq/llama-3.3-70b-versatile",
+            "ollama/gpt-oss:120b",
+            "ollama/kimi-k2.7-code",
+            "ollama/deepseek-v4-pro",
         ] {
             assert!(keys.contains(id), "missing offline fallback {id}");
         }

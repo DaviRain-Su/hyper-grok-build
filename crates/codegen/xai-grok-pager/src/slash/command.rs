@@ -89,8 +89,17 @@ pub struct ArgItem {
     pub description: String,
     /// Render dimmed with a lock affordance (credential-less BYOK models).
     /// Selecting a locked item surfaces its setup hint via the command's
-    /// `run()` rather than performing the action.
+    /// `run()` rather than performing the action. Locked rows are excluded
+    /// from the default (scoped) suggestion view; typing a query or opening
+    /// the picker's All view reveals them.
     pub locked: bool,
+    /// Catalog/id payload for row-level actions (e.g. model id for hide).
+    /// `None` when the row has no actionable identity (effort rows, plain
+    /// option rows).
+    pub action_id: Option<String>,
+    /// The row represents a model currently in `[models].hidden_models`
+    /// (only synthesized into the picker's All view so it can be unhidden).
+    pub hidden: bool,
 }
 
 impl ArgItem {
@@ -107,6 +116,8 @@ impl ArgItem {
             insert_text: insert_text.into(),
             description: description.into(),
             locked: false,
+            action_id: None,
+            hidden: false,
         }
     }
 }

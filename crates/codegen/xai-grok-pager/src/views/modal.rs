@@ -196,6 +196,12 @@ pub enum ActiveModal {
         items: Vec<crate::slash::command::ArgItem>,
         /// Original items from suggest_args() (source for filtering).
         original_items: Vec<crate::slash::command::ArgItem>,
+        /// `/model` only: show the full catalog (locked BYOK rows + hidden
+        /// models) instead of the scoped default. Toggled with Tab.
+        show_all: bool,
+        /// `/model` only: ids currently in `[models].hidden_models` (for
+        /// hide/unhide via ^X and All-view synthesis).
+        hidden_ids: Vec<String>,
         /// Unified picker state.
         state: crate::views::picker::PickerState,
         /// Previous command palette state (if opened from palette). Restored on Esc.

@@ -67,13 +67,22 @@ default = "anthropic/claude-sonnet-4-5"
 
 ---
 
-## Discovery: locked models and `/providers`
+## Discovery: locked models, scoping, and `/providers`
 
-You do not need a key configured to see what a platform offers. The `/model`
-picker lists **every** catalog model: usable ones first, then credential-less
-platform models dimmed with a 🔒 and a one-line setup hint (exact env var
-names + the `[platforms.<id>]` config table). Picking a locked model prints
-its setup instructions instead of switching.
+You do not need a key configured to see what a platform offers — but the full
+catalog is ~450 models, so the `/model` picker is **scoped** by default:
+
+- **Scoped view (default)** lists only usable models (xAI + platforms whose
+  key resolved). Locked BYOK models stay out of the way.
+- **Tab** toggles the All view: every catalog model, with locked rows dimmed
+  and marked 🔒 plus a one-line setup hint (exact env var names + the
+  `[platforms.<id>]` config table). Picking a locked model prints its setup
+  instructions instead of switching.
+- **Typing a query** in any surface (picker, inline dropdown) also searches
+  across locked models — type `deepseek` to find them.
+- **^X** hides the selected model (persists an exact entry to
+  `[models].hidden_models` in `~/.grok/config.toml`; the catalog hot-reloads).
+  In the All view, hidden models show dimmed as 🚫 and ^X unhides them.
 
 `/providers` shows one row per platform — configured ✓ vs locked 🔒, model
 count, and its unlock method (`/login kimi` for the OAuth subscription).
@@ -82,6 +91,10 @@ As soon as the key resolves (env or config reload), the platform's models
 become selectable — no restart, no other toggle. Selecting a locked model is
 also rejected agent-side, and the credential seam never falls through to your
 xAI session token for a third-party base URL.
+
+Kimi Code + Moonshot + Ollama Cloud additionally **live-sync** their
+`/models` listing once the credential resolves, so new models (e.g. the full
+Ollama Cloud roster) appear without waiting for a catalog update.
 
 ---
 
