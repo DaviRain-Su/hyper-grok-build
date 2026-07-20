@@ -60,6 +60,49 @@ where
     Option::<T>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
 }
 
+/// Moonshot / Kimi K2.x `thinking` request object.
+///
+/// Wire shape (platform.kimi.ai):
+/// ```json
+/// { "type": "enabled"|"disabled", "keep": "all"|null }
+/// ```
+/// - K2.6: both fields
+/// - K2.5: `type` only (no `keep`)
+/// - K2.7-code: do not send (always on / keep=all)
+/// - K3: use top-level `reasoning_effort` instead
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct KimiThinkingParam {
+    /// `"enabled"` | `"disabled"`.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// `"all"` to preserve historical `reasoning_content`; omit/null otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<String>,
+}
+
+impl KimiThinkingParam {
+    pub fn enabled() -> Self {
+        Self {
+            type_: "enabled".into(),
+            keep: None,
+        }
+    }
+
+    pub fn enabled_keep_all() -> Self {
+        Self {
+            type_: "enabled".into(),
+            keep: Some("all".into()),
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            type_: "disabled".into(),
+            keep: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,8 +128,19 @@ pub struct ChatCompletionRequest {
     pub search_parameters: Option<SearchParameters>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<crate::rs::ResponseFormat>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Chat Completions wire: [`ReasoningEffort::Xhigh`] serializes as `"max"`
+    /// (Kimi K3 / OpenAI alias). See [`serialize_chat_reasoning_effort`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_chat_reasoning_effort"
+    )]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Moonshot / Kimi K2.x thinking control (`thinking.type` / `thinking.keep`).
+    /// K3 uses top-level [`Self::reasoning_effort`] instead; K2.7-code ignores
+    /// this (always on). See platform.kimi.ai thinking-mode docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<KimiThinkingParam>,
 
     /// custom headers
     #[serde(skip)]
@@ -127,6 +181,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,
@@ -153,6 +208,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,
@@ -760,6 +816,12 @@ impl CompactionsRemaining {
 }
 
 /// Reasoning effort level. `None`/`Minimal` are omitted on the Anthropic Messages API.
+///
+/// Canonical serialize token for [`Self::Xhigh`] is **`xhigh`** (session
+/// persistence, Responses API mapping, UI). Chat Completions requests map
+/// `Xhigh` → `"max"` only on the [`ChatCompletionRequest`] field (Kimi K3 /
+/// OpenAI-style alias) via [`serialize_chat_reasoning_effort`].
+/// `"max"` is accepted on deserialize / parse as an alias of `Xhigh`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -769,7 +831,35 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
+    /// Canonical wire/id is `"xhigh"`; `"max"` is a deserialize/parse alias.
+    #[serde(alias = "max")]
     Xhigh,
+}
+
+/// Chat Completions wire for [`ChatCompletionRequest::reasoning_effort`].
+///
+/// Maps [`ReasoningEffort::Xhigh`] → `"max"` so Moonshot/Kimi K3 (and
+/// OpenAI-style aliases) accept the field, without changing the enum's
+/// global serialize form used for conversation persistence.
+fn serialize_chat_reasoning_effort<S: serde::Serializer>(
+    effort: &Option<ReasoningEffort>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match effort {
+        None => serializer.serialize_none(),
+        Some(e) => {
+            let token = match e {
+                ReasoningEffort::None => "none",
+                ReasoningEffort::Minimal => "minimal",
+                ReasoningEffort::Low => "low",
+                ReasoningEffort::Medium => "medium",
+                ReasoningEffort::High => "high",
+                // Kimi K3 documents `reasoning_effort: "max"` only.
+                ReasoningEffort::Xhigh => "max",
+            };
+            serializer.serialize_str(token)
+        }
+    }
 }
 
 impl ReasoningEffort {
@@ -1214,7 +1304,16 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
-        assert!(serde_json::from_str::<ReasoningEffort>("\"max\"").is_err());
+        // `"max"` is a deserialize alias of Xhigh (Kimi K3 / CLI); serialize
+        // still emits canonical `"xhigh"` so session persistence stays stable.
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
+            ReasoningEffort::Xhigh
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Xhigh).unwrap(),
+            "\"xhigh\""
+        );
     }
 
     #[test]

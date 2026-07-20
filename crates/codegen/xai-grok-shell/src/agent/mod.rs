@@ -10,6 +10,7 @@ pub mod folder_trust;
 pub(crate) mod handlers;
 pub mod init;
 pub mod models;
+pub(crate) mod platform_models_fetch;
 pub mod mvp_agent;
 pub(crate) mod proxy;
 pub mod relay;

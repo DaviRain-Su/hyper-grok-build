@@ -255,6 +255,9 @@ fn build_unpinned(
         login_label,
         has_auth_provider_command,
     );
+    // Always advertise Kimi Code as an optional interactive method so the
+    // TUI/CLI can select it without replacing the primary xAI login.
+    methods.push(kimi_code_auth_method());
 
     BuiltAuthMethods {
         methods,
@@ -291,6 +294,8 @@ pub enum AuthMethodKind {
     CachedToken,
     GrokCom,
     Oidc,
+    /// Kimi Code subscription device OAuth (third-party; not xAI session).
+    KimiCode,
     Unknown,
 }
 
@@ -301,6 +306,7 @@ impl AuthMethodKind {
             CACHED_TOKEN_AUTH_METHOD_ID => Self::CachedToken,
             GROK_COM_METHOD_ID => Self::GrokCom,
             OIDC_METHOD_ID => Self::Oidc,
+            KIMI_CODE_METHOD_ID => Self::KimiCode,
             _ => Self::Unknown,
         }
     }
@@ -311,13 +317,15 @@ impl AuthMethodKind {
     }
 
     /// `true` for session-based methods (cached_token, grok.com, oidc).
+    /// Kimi Code is intentionally excluded — it must not unlock xAI
+    /// OAuth-only catalog entries or drive xAI refresh.
     pub fn is_session_based(self) -> bool {
         matches!(self, Self::CachedToken | Self::GrokCom | Self::Oidc)
     }
 
     /// Requires user interaction (browser, OIDC redirect, or external auth command).
     pub fn needs_interactive_login(self) -> bool {
-        matches!(self, Self::GrokCom | Self::Oidc)
+        matches!(self, Self::GrokCom | Self::Oidc | Self::KimiCode)
     }
 
     pub fn auth_error_message(self) -> &'static str {
@@ -476,6 +484,21 @@ pub fn oidc_auth_method(issuer: &str, label: Option<&str>) -> acp::AuthMethod {
     acp::AuthMethod::Agent(
         acp::AuthMethodAgent::new(acp::AuthMethodId::new(OIDC_METHOD_ID), name.clone())
             .description(Some(format!("Sign in with {name}"))),
+    )
+}
+
+/// ACP method id for Kimi Code subscription device OAuth.
+pub const KIMI_CODE_METHOD_ID: &str = "kimi-code";
+
+pub fn kimi_code_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(KIMI_CODE_METHOD_ID),
+            "Kimi Code".to_string(),
+        )
+        .description(Some(
+            "Sign in with a Kimi Code subscription (device OAuth)".to_string(),
+        )),
     )
 }
 

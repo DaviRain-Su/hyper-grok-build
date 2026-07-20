@@ -1,9 +1,8 @@
 # Moonshot Providers (Kimi open platform)
 
-Grok can call **Moonshot AI** open-platform models (Kimi K2 family) with an
-API key — no xAI login required for those models. This is Phase 1 of
-built-in multi-provider support (subscription-style Kimi Code login comes
-later).
+Grok can call **Moonshot AI** open-platform models with an API key — no xAI
+login required for those models. This is Phase 1 of built-in multi-provider
+support (Kimi Code subscription OAuth is separate: [26-kimi-code.md](26-kimi-code.md)).
 
 Catalog keys use the form `{platform}/{model}` so the same model id can exist
 on more than one host.
@@ -13,14 +12,48 @@ on more than one host.
 | `moonshot-cn` | China | `https://api.moonshot.cn/v1` |
 | `moonshot-ai` | Global | `https://api.moonshot.ai/v1` |
 
-Built-in offline models (also overridable via `[model.*]`):
+## Models (official lineup)
 
-- `moonshot-cn/kimi-k2-turbo-preview`
-- `moonshot-cn/kimi-k2-thinking-turbo`
-- `moonshot-ai/kimi-k2-turbo-preview`
-- `moonshot-ai/kimi-k2-thinking-turbo`
+Source: [platform.kimi.ai Model List](https://platform.kimi.ai/docs/models)
+(2026-07). Offline fallbacks match this list; live `GET {base}/models` with an
+API key replaces/extends them.
+
+| Model id | Catalog keys | Context | Notes |
+|----------|--------------|---------|--------|
+| `kimi-k3` | `moonshot-cn/kimi-k3`, `moonshot-ai/kimi-k3` | 1M | Flagship; always thinking; `reasoning_effort` (docs: `max`) |
+| `kimi-k2.7-code` | `…/kimi-k2.7-code` | 256k | Coding; thinking **always on** |
+| `kimi-k2.7-code-highspeed` | `…/kimi-k2.7-code-highspeed` | 256k | **HyperSpeed** (~180–260 tok/s); same quality as 2.7 Code |
+| `kimi-k2.6` | `…/kimi-k2.6` | 256k | Thinking on/off + Preserved Thinking (`thinking.keep`) |
+| `kimi-k2.5` | `…/kimi-k2.5` | 256k | Thinking on/off; no preserved thinking |
+
+Deprecated aliases still injected offline for older configs (prefer the table
+above): `kimi-k2-turbo-preview`, `kimi-k2-thinking-turbo`.
 
 Protocol: OpenAI **Chat Completions** (`api_backend = "chat_completions"`).
+
+---
+
+## Request parameters (important)
+
+Moonshot documents **model-specific** request fields. Grok applies these when
+building the chat body (do not set conflicting `[model.*]` temperature unless
+you know the model accepts it).
+
+| Field | `kimi-k3` | `kimi-k2.7-code` (+ highspeed) | `kimi-k2.6` | `kimi-k2.5` |
+|-------|-----------|--------------------------------|-------------|-------------|
+| `reasoning_effort` | `"max"` (default) | not used | not used | not used |
+| `thinking.type` | — | omit (always on) | `enabled` / `disabled` | `enabled` / `disabled` |
+| `thinking.keep` | — | always `all` server-side | `null` / `"all"` | not supported |
+| `temperature` / `top_p` / penalties | normal | **fixed** — omit (server 1.0 / 0.95 / 0) | fixed — omit | fixed — omit |
+| `max_tokens` | default **32768** | default **32768** | default **32768** | default **32768** |
+| `tool_choice` | auto/none preferred | **only** `auto` / `none` | auto/none preferred | auto/none preferred |
+
+Multi-step tool calls must keep assistant `reasoning_content` in `messages`
+(Grok’s chat path already maps reasoning into that field). For K2.6 tool
+loops Grok sets `thinking.keep = "all"`.
+
+Details: [Thinking Mode](https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model),
+[K2.7 Code params](https://platform.kimi.ai/docs/guide/kimi-k2-7-code-quickstart).
 
 ---
 
@@ -39,10 +72,10 @@ export GROK_MOONSHOT_API_KEY="sk-..."
 ```
 
 ```bash
-grok models
-grok -m moonshot-cn/kimi-k2-turbo-preview -p "ping"
-# or in the TUI:
-# /model moonshot-cn/kimi-k2-turbo-preview
+grok models | grep moonshot
+grok -m moonshot-cn/kimi-k2.7-code-highspeed -p "ping"
+grok -m moonshot-cn/kimi-k3 -p "ping"
+# TUI: /model moonshot-cn/kimi-k2.6
 ```
 
 ---
@@ -60,7 +93,7 @@ api_key = "sk-..."
 
 [models]
 # optional: make a Moonshot model the session default
-default = "moonshot-cn/kimi-k2-turbo-preview"
+default = "moonshot-cn/kimi-k2.7-code"
 ```
 
 **Credential precedence** (first match wins):
@@ -75,73 +108,20 @@ be committed to shared repos.
 
 ---
 
-## Per-model overrides
+## Live catalog sync
 
-You can override any field of a built-in entry the same way as other custom
-models:
-
-```toml
-[model."moonshot-cn/kimi-k2-turbo-preview"]
-temperature = 0.3
-context_window = 262144
-# base_url inherits the platform default unless set:
-# base_url = "https://api.moonshot.cn/v1"
-```
-
-To add another Moonshot model id that is not in the built-in list:
-
-```toml
-[model."moonshot-cn/my-custom-kimi"]
-model = "kimi-k2-0905-preview"
-base_url = "https://api.moonshot.cn/v1"
-name = "Kimi K2 0905"
-context_window = 262144
-api_backend = "chat_completions"
-env_key = ["GROK_MOONSHOT_CN_API_KEY", "GROK_MOONSHOT_API_KEY", "MOONSHOT_API_KEY"]
-```
-
-If the catalog key starts with `moonshot-cn/` or `moonshot-ai/`, Grok also
-applies the platform credential stamp from `[platforms.*]` / env.
+When a platform API key is present and `remote_fetch` is enabled, Grok calls
+`GET {base}/models` and merges coding-family models (`kimi-k*`) into the
+catalog. Live entries override offline fallbacks (context window, think
+efforts, display names).
 
 ---
 
-## Dev / test base URL overrides
+## Moonshot vs Kimi Code subscription
 
-```bash
-export GROK_MOONSHOT_CN_BASE_URL="http://127.0.0.1:8080/v1"
-export GROK_MOONSHOT_AI_BASE_URL="http://127.0.0.1:8081/v1"
-```
-
----
-
-## Notes
-
-- xAI models and auth continue to work as before; Moonshot entries are additive.
-- Hosted xAI tools (server-side web/x search) are not available on Moonshot.
-- For **Kimi Code subscription** login (device OAuth), see
-  [Kimi Code Subscription](26-kimi-code.md).
-- For a generic OpenAI-compatible gateway (LiteLLM, etc.), continue to use
-  [Custom Models](11-custom-models.md) / `models_base_url`.
-
----
-
-## Troubleshooting
-
-```bash
-# Is the model in the catalog?
-grok models | grep moonshot
-
-# Does the key resolve? (do not paste secrets into chat logs)
-test -n "$GROK_MOONSHOT_CN_API_KEY" && echo "cn env set"
-
-# Request logging
-RUST_LOG=debug GROK_LOG_FILE=/tmp/grok.log grok -m moonshot-cn/kimi-k2-turbo-preview -p "hi"
-```
-
-Common failures:
-
-| Symptom | Check |
-|---------|--------|
-| Model not listed | Rebuild from a tree that includes platform support; restart the TUI |
-| 401 Unauthorized | Key env/config for the correct platform; CN vs AI hosts differ |
-| Connection error | Network / region; try the matching host (`moonshot.cn` vs `moonshot.ai`) |
+| | Moonshot open API | Kimi Code subscription |
+|--|-------------------|-------------------------|
+| Auth | API key | Device OAuth (`grok login --kimi`) |
+| Hosts | `api.moonshot.cn` / `api.moonshot.ai` | `api.kimi.com/coding` |
+| Model ids | `kimi-k3`, `kimi-k2.7-code`, … | live list (often `k3`, `kimi-for-coding`, …) |
+| Docs | this page | [26-kimi-code.md](26-kimi-code.md) |

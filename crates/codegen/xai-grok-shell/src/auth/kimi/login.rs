@@ -33,8 +33,10 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
                 store_kimi_code_auth(&xai_grok_config::grok_home(), &auth)?;
                 eprintln!("✓ Signed in to Kimi Code");
                 eprintln!(
-                    "  Use model: kimi-code/kimi-for-coding  (or set [models] default)"
+                    "  Models: kimi-code/k3, kimi-code/kimi-for-coding, … \
+                     (live list synced after login / on startup)"
                 );
+                eprintln!("  e.g. grok -m kimi-code/k3 -p \"ping\"");
                 return Ok(auth);
             }
             PollLoopOutcome::Restart => {
@@ -43,6 +45,21 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
                 continue;
             }
         }
+    }
+}
+
+/// Live bearer for Kimi Code inference. Kimi access tokens are short-lived
+/// (~15 minutes); the sampler must re-resolve per request instead of using
+/// the catalog stamp from login time.
+///
+/// Wired as [`xai_grok_sampler::SamplerConfig::bearer_resolver`] for
+/// `kimi-code/*` models.
+#[derive(Debug, Default)]
+pub struct KimiCodeBearerResolver;
+
+impl xai_grok_sampler::BearerResolver for KimiCodeBearerResolver {
+    fn current_bearer(&self) -> Option<String> {
+        ensure_kimi_code_access_token_blocking()
     }
 }
 
@@ -65,6 +82,68 @@ pub async fn ensure_kimi_code_access_token() -> Option<String> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "auth: Kimi token refresh failed");
+            None
+        }
+    }
+}
+
+/// Sync-friendly wrapper around [`ensure_kimi_code_access_token`].
+///
+/// Safe to call from:
+/// - multi-thread Tokio workers (`block_in_place` + `block_on`)
+/// - **current-thread** runtimes (ACP agent worker) — never uses
+///   `block_in_place` there (it panics: "can call blocking only when running
+///   on the multi-threaded runtime"); refreshes on a side thread instead
+/// - no runtime (config load / tests) — side-thread refresh when needed
+///
+/// Always prefers an unexpired disk cache with **no** network / runtime hop.
+pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
+    let home = xai_grok_config::grok_home();
+    let auth = read_kimi_code_auth(&home)?;
+    if !crate::auth::is_expired(&auth) {
+        return Some(auth.key);
+    }
+    // Nothing to refresh with — avoid spinning a runtime for a guaranteed miss.
+    if auth.refresh_token.as_deref().is_none_or(str::is_empty) {
+        return None;
+    }
+
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+        {
+            tokio::task::block_in_place(|| handle.block_on(ensure_kimi_code_access_token()))
+        }
+        // Current-thread (ACP `acp-agent-worker`) or no runtime: never
+        // `block_in_place` / nested `block_on` on the caller's runtime.
+        Ok(_) | Err(_) => refresh_kimi_token_on_side_thread(),
+    }
+}
+
+/// Run the async refresh on a dedicated OS thread with its own current-thread
+/// runtime. Isolates blocking from the caller's Tokio context.
+fn refresh_kimi_token_on_side_thread() -> Option<String> {
+    match std::thread::Builder::new()
+        .name("kimi-token-refresh".into())
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            rt.block_on(ensure_kimi_code_access_token())
+        }) {
+        Ok(join) => match join.join() {
+            Ok(token) => token,
+            Err(panic) => {
+                tracing::warn!(
+                    ?panic,
+                    "auth: Kimi token refresh thread panicked"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "auth: failed to spawn Kimi token refresh thread");
             None
         }
     }

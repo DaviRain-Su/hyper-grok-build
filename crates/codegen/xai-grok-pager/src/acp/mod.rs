@@ -610,14 +610,25 @@ pub fn startup_auth_metadata(
 ///
 /// Used when eager auth (cached_token / API key) fails and we need to fall
 /// back to the welcome screen with a working login button. Scans the list
-/// for a `grok.com` or `oidc` method — these are the ones that can trigger
-/// a browser-based re-auth flow.
+/// for a `grok.com`, `oidc`, or `kimi-code` method — these can trigger a
+/// browser-based re-auth flow. Prefers xAI methods over Kimi when both exist
+/// so the default welcome Login button stays on the primary product path.
 pub fn find_interactive_login_method(
     auth_methods: &[acp::AuthMethod],
 ) -> (Option<String>, Option<acp::AuthMethodId>, AuthStartMode) {
     let interactive = auth_methods
         .iter()
-        .find(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login());
+        .find(|m| {
+            matches!(
+                AuthMethodKind::from_id(m.id()),
+                AuthMethodKind::GrokCom | AuthMethodKind::Oidc
+            )
+        })
+        .or_else(|| {
+            auth_methods
+                .iter()
+                .find(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login())
+        });
 
     match interactive {
         Some(method) => {

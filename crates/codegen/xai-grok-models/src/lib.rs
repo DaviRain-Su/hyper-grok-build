@@ -9,10 +9,13 @@
 mod platforms;
 
 pub use platforms::{
-    BuiltinPlatformModel, KIMI_CODE_BASE_URL_ENV, KIMI_CODE_OAUTH_HOST_ENV, MOONSHOT_AI_API_KEY_ENV,
-    MOONSHOT_AI_BASE_URL_ENV, MOONSHOT_API_KEY_ALIAS_ENV, MOONSHOT_API_KEY_ENV,
-    MOONSHOT_CN_API_KEY_ENV, MOONSHOT_CN_BASE_URL_ENV, PlatformId, moonshot_builtin_models,
-    parse_managed_model_key, platform_builtin_models,
+    BuiltinPlatformModel, KIMI_CODE_BASE_URL_ENV, KIMI_CODE_OAUTH_HOST_ENV, KIMI_DEFAULT_MAX_TOKENS,
+    KimiRequestProfile, MOONSHOT_AI_API_KEY_ENV, MOONSHOT_AI_BASE_URL_ENV,
+    MOONSHOT_API_KEY_ALIAS_ENV, MOONSHOT_API_KEY_ENV, MOONSHOT_CN_API_KEY_ENV,
+    MOONSHOT_CN_BASE_URL_ENV, ModelCapability, PlatformId, WireModel, WireModelsResponse,
+    WireThinkEfforts, derive_capabilities, filter_allowed_models, kimi_request_profile,
+    kimi_sampling_is_fixed, moonshot_builtin_models, parse_managed_model_key,
+    platform_builtin_models,
 };
 
 use std::sync::LazyLock;

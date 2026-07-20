@@ -452,10 +452,13 @@ impl acp::Agent for MvpAgent {
         );
         if let Some(preferred) = self.cfg.borrow().grok_com_config.preferred_method {
             let kind = auth_method::AuthMethodKind::from_id(&arguments.method_id);
-            let allowed = match preferred {
-                crate::auth::PreferredAuthMethod::ApiKey => kind.is_api_key(),
-                crate::auth::PreferredAuthMethod::Oidc => kind.is_session_based(),
-            };
+            // Kimi Code is an independent third-party channel and is always
+            // allowed alongside preferred xAI methods.
+            let allowed = matches!(kind, auth_method::AuthMethodKind::KimiCode)
+                || match preferred {
+                    crate::auth::PreferredAuthMethod::ApiKey => kind.is_api_key(),
+                    crate::auth::PreferredAuthMethod::Oidc => kind.is_session_based(),
+                };
             if !allowed {
                 let msg = match preferred {
                     crate::auth::PreferredAuthMethod::ApiKey => {
@@ -682,6 +685,45 @@ impl acp::Agent for MvpAgent {
                 });
                 self.maybe_fetch_post_auth_settings().await;
                 Ok(self.auth_response_with_meta())
+            }
+            auth_method::KIMI_CODE_METHOD_ID => {
+                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
+                let client_seq = auth_meta.request_seq;
+                let mut cancelled = false;
+                let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                let auth_result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        cancelled = true;
+                        Err(anyhow::anyhow!("Authentication cancelled"))
+                    }
+                    r = crate::auth::kimi::run_kimi_code_login() => r,
+                };
+                let auth = auth_result.map_err(|e| {
+                    emit_login_span(
+                        false,
+                        "kimi-code",
+                        None,
+                        Some(if cancelled {
+                            "login_cancelled"
+                        } else {
+                            "login_flow_failed"
+                        }),
+                    );
+                    let mut err = acp::Error::auth_required();
+                    err.message = e.to_string();
+                    err
+                })?;
+                // Re-stamp kimi-code/* catalog entries with the new bearer.
+                self.models_manager.restamp_platform_credentials();
+                // Do not replace the primary xAI AuthManager session.
+                emit_login_span(true, "kimi-code", None, None);
+                log_event(xai_grok_telemetry::events::Login {
+                    auth_method: "kimi-code".to_string(),
+                    user_id: None,
+                });
+                let _ = auth;
+                Ok(Default::default())
             }
             auth_method::GROK_COM_METHOD_ID | auth_method::OIDC_METHOD_ID => {
                 let grok_ctx = self.auth_manager.grok_com_config();

@@ -277,6 +277,9 @@ impl SessionActor {
         let use_bearer_resolver = gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         let auth_scheme = model_facts.auth_scheme;
+        // Capture before `cfg` fields are moved into `SamplingConfig`.
+        let kimi_bearer_resolver =
+            crate::agent::config::kimi_code_bearer_resolver_for_base_url(&cfg.base_url);
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
@@ -343,7 +346,8 @@ impl SessionActor {
                         std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
                     })
             } else {
-                None
+                // Kimi Code (~15m access tokens): live-resolve every request.
+                kimi_bearer_resolver
             },
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),

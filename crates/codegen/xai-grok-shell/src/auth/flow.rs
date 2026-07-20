@@ -1030,6 +1030,21 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
     Ok(())
 }
 
+/// Clear only the Kimi Code subscription credential (`oauth/kimi-code`).
+/// Does not touch the xAI session or `XAI_API_KEY`.
+pub fn run_cli_logout_kimi() -> anyhow::Result<()> {
+    let home = grok_home::grok_home();
+    let had = crate::auth::read_kimi_code_auth(&home).is_some();
+    crate::auth::clear_kimi_code_auth(&home)
+        .map_err(|e| anyhow::anyhow!("Failed to clear Kimi Code auth: {e}"))?;
+    if had {
+        eprintln!("Logged out of Kimi Code (xAI session unchanged).");
+    } else {
+        eprintln!("No Kimi Code session to log out of.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
-use xai_grok_sampler::{AuthScheme, SamplerConfig};
+use xai_grok_sampler::{AuthScheme, SamplerConfig, SharedBearerResolver};
 use xai_grok_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
     REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
@@ -3376,9 +3376,11 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             context_window: builtin.context_window_nonzero(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
+            // Kimi fixed-sampling models error if temperature/top_p are set
+            // to non-default values — leave unset and let the API defaults apply.
             temperature: None,
             top_p: None,
-            max_completion_tokens: None,
+            max_completion_tokens: builtin.max_completion_tokens,
             api_backend: ApiBackend::ChatCompletions,
             auth_scheme: None,
             agent_type: default_agent_type(),
@@ -3421,17 +3423,8 @@ fn apply_platform_credentials(
     resolved: &mut IndexMap<String, ModelEntry>,
     platforms: &PlatformsConfig,
 ) {
-    // Sync read of the Kimi Code OAuth bearer (no refresh here — callers that
-    // need a guaranteed-fresh token should call ensure_kimi_code_access_token).
-    let kimi_bearer = crate::auth::read_kimi_code_auth(&xai_grok_config::grok_home()).and_then(
-        |auth| {
-            if crate::auth::is_expired(&auth) {
-                None
-            } else {
-                Some(auth.key)
-            }
-        },
-    );
+    // Prefer a live (refreshed when possible) Kimi Code bearer.
+    let kimi_bearer = crate::auth::kimi::ensure_kimi_code_access_token_blocking();
 
     for (key, entry) in resolved.iter_mut() {
         let id = entry.info.id.as_deref().unwrap_or(key.as_str());
@@ -4871,6 +4864,9 @@ pub fn sampling_config_for_model(
         &credentials.base_url,
     );
     let api_backend = info.api_backend.clone();
+    // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
+    // so a catalog stamp from login is never sent after expiry.
+    let bearer_resolver = kimi_code_bearer_resolver_for_model(model);
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -4893,13 +4889,41 @@ pub fn sampling_config_for_model(
         user_id,
         origin_client: None,
         attribution_callback: None,
-        bearer_resolver: None,
+        bearer_resolver,
         supports_backend_search: info.supports_backend_search,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
         header_injector: None,
     }
+}
+
+/// Whether this catalog entry routes through Kimi Code OAuth (subscription).
+pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
+    let catalog_id = model.info.id.as_deref().unwrap_or(model.info.model.as_str());
+    if xai_grok_models::parse_managed_model_key(catalog_id)
+        .is_some_and(|(p, _)| p.uses_oauth())
+    {
+        return true;
+    }
+    xai_grok_models::PlatformId::KimiCode.base_url_matches(&model.info.base_url)
+}
+
+/// Per-request bearer for Kimi Code models; `None` for everything else.
+pub fn kimi_code_bearer_resolver_for_model(model: &ModelEntry) -> Option<SharedBearerResolver> {
+    if !model_uses_kimi_code_oauth(model) {
+        return None;
+    }
+    Some(Arc::new(crate::auth::kimi::KimiCodeBearerResolver) as SharedBearerResolver)
+}
+
+/// Same as [`kimi_code_bearer_resolver_for_model`] but from a bare routing
+/// slug + base URL (session reconstruct path may not have the full entry).
+pub fn kimi_code_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBearerResolver> {
+    if !xai_grok_models::PlatformId::KimiCode.base_url_matches(base_url) {
+        return None;
+    }
+    Some(Arc::new(crate::auth::kimi::KimiCodeBearerResolver) as SharedBearerResolver)
 }
 /// Fold URL-derived headers into `extra_headers`.
 ///
@@ -11556,27 +11580,40 @@ default = "grok-4.5"
     fn moonshot_builtins_injected_into_catalog() {
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
         let models = resolve_model_list(&cfg, None);
-        let key = "moonshot-cn/kimi-k2-turbo-preview";
-        let entry = models
-            .get(key)
-            .expect("moonshot-cn turbo must be in catalog");
-        assert_eq!(entry.info.model, "kimi-k2-turbo-preview");
-        assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
-        assert!(entry.info.base_url.contains("moonshot.cn"));
-        assert!(entry.info.supported_in_api);
-        assert!(
-            entry.env_key.is_some(),
-            "builtin moonshot entries must carry env_key for BYOK"
-        );
-        assert!(models.contains_key("moonshot-ai/kimi-k2-turbo-preview"));
-        assert!(models.contains_key("moonshot-cn/kimi-k2-thinking-turbo"));
-        assert!(models.contains_key("moonshot-ai/kimi-k2-thinking-turbo"));
-        // Subscription entry present but API-hidden until OAuth is stamped.
-        let kimi = models
-            .get("kimi-code/kimi-for-coding")
-            .expect("kimi-code entry must be in catalog");
-        assert!(kimi.info.base_url.contains("kimi.com"));
-        assert!(!kimi.info.supported_in_api || kimi.has_own_credentials());
+        // Official open-platform lineup (platform.kimi.ai/docs/models).
+        for key in [
+            "moonshot-cn/kimi-k3",
+            "moonshot-cn/kimi-k2.7-code",
+            "moonshot-cn/kimi-k2.7-code-highspeed",
+            "moonshot-cn/kimi-k2.6",
+            "moonshot-cn/kimi-k2.5",
+            "moonshot-ai/kimi-k3",
+            "moonshot-ai/kimi-k2.7-code-highspeed",
+            "moonshot-ai/kimi-k2.6",
+        ] {
+            let entry = models.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
+            assert!(entry.info.supported_in_api);
+            assert!(entry.env_key.is_some(), "{key} needs env_key for BYOK");
+            assert_eq!(
+                entry.info.max_completion_tokens,
+                Some(32_768),
+                "{key} should default max_tokens to 32k per Kimi docs"
+            );
+        }
+        let hs = models
+            .get("moonshot-cn/kimi-k2.7-code-highspeed")
+            .expect("HyperSpeed");
+        assert_eq!(hs.info.model, "kimi-k2.7-code-highspeed");
+        assert!(hs.info.base_url.contains("moonshot.cn"));
+        // Deprecated aliases still present for older configs.
+        assert!(models.contains_key("moonshot-cn/kimi-k2-turbo-preview"));
+        // Subscription entries present but API-hidden until OAuth is stamped.
+        for key in ["kimi-code/k3", "kimi-code/kimi-for-coding"] {
+            let kimi = models.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(kimi.info.base_url.contains("kimi.com"));
+            assert!(!kimi.info.supported_in_api || kimi.has_own_credentials());
+        }
         // xAI defaults still present
         assert!(models.contains_key("grok-4.5") || models.values().any(|m| m.model == "grok-4.5"));
     }

@@ -9,5 +9,8 @@ mod login;
 mod oauth;
 
 pub use device::device_headers;
-pub use login::{ensure_kimi_code_access_token, run_kimi_code_login};
+pub use login::{
+    KimiCodeBearerResolver, ensure_kimi_code_access_token, ensure_kimi_code_access_token_blocking,
+    run_kimi_code_login,
+};
 pub use crate::auth::model::KIMI_CODE_OAUTH_SCOPE;

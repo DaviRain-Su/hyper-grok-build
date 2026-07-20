@@ -18,7 +18,11 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Clear only the Kimi Code subscription credential (leave xAI alone).
+        #[arg(long = "kimi")]
+        kimi: bool,
+    },
     /// Sign in to Grok
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
@@ -1167,7 +1171,12 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { kimi: false })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--kimi"]).expect("parses");
+        assert!(matches!(args.command, Some(Command::Logout { kimi: true })));
         assert!(args.prompt.is_none());
     }
     #[test]

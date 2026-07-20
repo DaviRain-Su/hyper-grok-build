@@ -2087,8 +2087,8 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 },
             });
 
-        ChatCompletionRequest {
-            model: req.model,
+        let mut chat = ChatCompletionRequest {
+            model: req.model.clone(),
             messages,
             temperature: req.temperature,
             max_tokens: req.max_output_tokens,
@@ -2101,6 +2101,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             search_parameters: None,
             response_format,
             reasoning_effort: req.reasoning_effort,
+            thinking: None,
             x_grok_conv_id: req.x_grok_conv_id,
             x_grok_req_id: req.x_grok_req_id,
             x_grok_session_id: req.x_grok_session_id,
@@ -2109,6 +2110,98 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             x_grok_deployment_id: req.x_grok_deployment_id,
             x_grok_user_id: req.x_grok_user_id,
             trace: None,
+        };
+        apply_kimi_chat_request_rules(&mut chat, req.reasoning_effort);
+        chat
+    }
+}
+
+/// Shape chat-completions body for Moonshot / Kimi Code models.
+///
+/// Docs: platform.kimi.ai Thinking Mode + K2.7 Code parameter differences.
+/// - K3: keep/set `reasoning_effort`; do not send K2 `thinking`.
+/// - K2.7-code (+ highspeed): omit temperature/top_p/penalties (fixed server-
+///   side); omit `thinking` (always on); clamp max_tokens default.
+/// - K2.6: map effort→`thinking.type`; prefer `keep: "all"` when tools present
+///   so multi-step tool loops preserve reasoning.
+/// - K2.5: `thinking.type` only.
+fn apply_kimi_chat_request_rules(
+    chat: &mut ChatCompletionRequest,
+    effort: Option<crate::ReasoningEffort>,
+) {
+    let Some(model) = chat.model.as_deref() else {
+        return;
+    };
+    let Some(profile) = xai_grok_models::kimi_request_profile(model) else {
+        return;
+    };
+
+    use xai_grok_models::{KIMI_DEFAULT_MAX_TOKENS, KimiRequestProfile, kimi_sampling_is_fixed};
+
+    if chat.max_tokens.is_none() {
+        chat.max_tokens = Some(KIMI_DEFAULT_MAX_TOKENS);
+    }
+
+    if kimi_sampling_is_fixed(profile) {
+        // Kimi rejects non-default sampling for these models — omit entirely.
+        chat.temperature = None;
+        chat.top_p = None;
+        chat.frequency_penalty = None;
+        chat.presence_penalty = None;
+    }
+
+    // tool_choice: only auto/none are safe on thinking coding models.
+    if matches!(
+        profile,
+        KimiRequestProfile::K27Code | KimiRequestProfile::K26 | KimiRequestProfile::LegacyCoding
+    ) {
+        if let Some(crate::ToolChoice::Preset(mode)) = chat.tool_choice.as_ref()
+            && mode != "auto"
+            && mode != "none"
+        {
+            chat.tool_choice = Some(crate::ToolChoice::auto());
+        } else if matches!(chat.tool_choice, Some(crate::ToolChoice::Function { .. })) {
+            chat.tool_choice = Some(crate::ToolChoice::auto());
+        }
+    }
+
+    match profile {
+        KimiRequestProfile::K3 => {
+            // K3 always thinks; open platform documents reasoning_effort=max.
+            // Keep caller effort when set; default max so the field is present.
+            if chat.reasoning_effort.is_none() {
+                chat.reasoning_effort = Some(crate::ReasoningEffort::Xhigh);
+            }
+            chat.thinking = None;
+        }
+        KimiRequestProfile::K27Code | KimiRequestProfile::LegacyCoding => {
+            // Always-on thinking; server ignores / errors on thinking object.
+            chat.thinking = None;
+            // K2.7 does not take reasoning_effort.
+            if matches!(profile, KimiRequestProfile::K27Code) {
+                chat.reasoning_effort = None;
+            }
+        }
+        KimiRequestProfile::K26 => {
+            let thinking_off = matches!(effort, Some(crate::ReasoningEffort::None));
+            chat.thinking = Some(if thinking_off {
+                crate::KimiThinkingParam::disabled()
+            } else if chat.tools.as_ref().is_some_and(|t| !t.is_empty()) {
+                // Multi-step tool loops need preserved reasoning content.
+                crate::KimiThinkingParam::enabled_keep_all()
+            } else {
+                crate::KimiThinkingParam::enabled()
+            });
+            chat.reasoning_effort = None;
+        }
+        KimiRequestProfile::K25 => {
+            let thinking_off = matches!(effort, Some(crate::ReasoningEffort::None));
+            chat.thinking = Some(if thinking_off {
+                crate::KimiThinkingParam::disabled()
+            } else {
+                crate::KimiThinkingParam::enabled()
+            });
+            chat.reasoning_effort = None;
         }
     }
 }
@@ -5134,6 +5227,72 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k27_highspeed_omits_fixed_sampling_and_thinking() {
+        let req = ConversationRequest {
+            model: Some("kimi-k2.7-code-highspeed".into()),
+            temperature: Some(0.3),
+            top_p: Some(0.5),
+            max_output_tokens: None,
+            reasoning_effort: Some(crate::ReasoningEffort::High),
+            ..ConversationRequest::default()
+        };
+        let chat: ChatCompletionRequest = req.into();
+        assert_eq!(chat.max_tokens, Some(32_768));
+        assert!(chat.temperature.is_none(), "fixed sampling must omit temp");
+        assert!(chat.top_p.is_none());
+        assert!(chat.thinking.is_none(), "K2.7 must not send thinking");
+        assert!(chat.reasoning_effort.is_none(), "K2.7 has no reasoning_effort");
+        let json = serde_json::to_value(&chat).unwrap();
+        assert!(json.get("thinking").is_none());
+        assert!(json.get("temperature").is_none());
+    }
+
+    #[test]
+    fn kimi_k26_maps_effort_to_thinking_param() {
+        let req = ConversationRequest {
+            model: Some("kimi-k2.6".into()),
+            reasoning_effort: Some(crate::ReasoningEffort::None),
+            ..ConversationRequest::default()
+        };
+        let chat: ChatCompletionRequest = req.into();
+        let thinking = chat.thinking.expect("thinking present");
+        assert_eq!(thinking.type_, "disabled");
+        assert!(thinking.keep.is_none());
+
+        let req_on = ConversationRequest {
+            model: Some("kimi-k2.6".into()),
+            tools: vec![ToolSpec {
+                name: "bash".into(),
+                description: Some("x".into()),
+                parameters: serde_json::json!({}),
+            }],
+            reasoning_effort: Some(crate::ReasoningEffort::High),
+            ..ConversationRequest::default()
+        };
+        let chat_on: ChatCompletionRequest = req_on.into();
+        let t = chat_on.thinking.expect("thinking");
+        assert_eq!(t.type_, "enabled");
+        assert_eq!(t.keep.as_deref(), Some("all"));
+        assert!(chat_on.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn kimi_k3_defaults_reasoning_effort_max() {
+        let req = ConversationRequest {
+            model: Some("kimi-k3".into()),
+            ..ConversationRequest::default()
+        };
+        let chat: ChatCompletionRequest = req.into();
+        assert_eq!(chat.reasoning_effort, Some(crate::ReasoningEffort::Xhigh));
+        assert!(chat.thinking.is_none());
+        let json = serde_json::to_value(&chat).unwrap();
+        assert_eq!(
+            json.pointer("/reasoning_effort").and_then(|v| v.as_str()),
+            Some("max")
+        );
+    }
+
+    #[test]
     fn test_chat_completion_request_carries_reasoning_effort_top_level() {
         for (variant, expected) in [
             (crate::ReasoningEffort::None, "none"),
@@ -5141,7 +5300,8 @@ mod tests {
             (crate::ReasoningEffort::Low, "low"),
             (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
-            (crate::ReasoningEffort::Xhigh, "xhigh"),
+            // Xhigh serializes as "max" (Kimi K3 / OpenAI alias).
+            (crate::ReasoningEffort::Xhigh, "max"),
         ] {
             let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
                 .with_model("test");

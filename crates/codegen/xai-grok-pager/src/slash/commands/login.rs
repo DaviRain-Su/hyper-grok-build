@@ -1,4 +1,7 @@
 //! `/login` -- log in or re-authenticate with your account.
+//!
+//! Optional argument: `kimi` / `kimi-code` starts Kimi Code device OAuth
+//! instead of the default xAI login.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -11,14 +14,23 @@ impl SlashCommand for LoginCommand {
     }
 
     fn description(&self) -> &str {
-        "Log in or re-authenticate with your account"
+        "Log in or re-authenticate (optional: kimi)"
     }
 
     fn usage(&self) -> &str {
-        "/login"
+        "/login [kimi]"
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::Login)
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        let arg = args.trim().to_ascii_lowercase();
+        if matches!(arg.as_str(), "kimi" | "kimi-code") {
+            CommandResult::Action(Action::LoginKimi)
+        } else if arg.is_empty() {
+            CommandResult::Action(Action::Login)
+        } else {
+            CommandResult::Error(format!(
+                "Unknown login target '{arg}'. Try `/login` or `/login kimi`."
+            ))
+        }
     }
 }

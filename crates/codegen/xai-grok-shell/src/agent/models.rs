@@ -559,6 +559,33 @@ impl ModelsManager {
         *self.inner.models.write() = resolve_model_catalog(cfg, prefetched);
     }
 
+    /// Re-run catalog resolution so platform credentials (e.g. a freshly
+    /// minted Kimi Code OAuth bearer) are stamped onto `kimi-code/*` entries.
+    ///
+    /// Also attempts a live `GET {base}/models` per platform with credentials
+    /// so K3 and the rest of the subscription listing replace offline
+    /// fallbacks in the catalog.
+    ///
+    /// Safe from the ACP agent async task: the live fetch uses
+    /// [`crate::agent::platform_models_fetch::run_blocking_io`] so
+    /// `reqwest::blocking` never runs on the current-thread runtime.
+    pub fn restamp_platform_credentials(&self) {
+        let cfg = self.inner.cfg.read().clone();
+        let prefetched = self.inner.prefetched.read().clone();
+        // First stamp credentials from disk (no network) so the picker
+        // unlocks immediately even if the live listing fails.
+        self.rebuild(&cfg, prefetched.clone());
+        // Live listing (blocking HTTP) — must leave the async context.
+        let platforms = cfg.platforms.clone();
+        let merged = crate::agent::platform_models_fetch::fetch_and_merge_platform_models(
+            prefetched,
+            &platforms,
+        );
+        *self.inner.prefetched.write() = merged.clone();
+        self.rebuild(&cfg, merged);
+        self.notify_models_updated();
+    }
+
     /// Refresh models when the etag changes.
     ///
     /// Writes etag optimistically before spawning the fetch to coalesce
@@ -1450,8 +1477,18 @@ fn prefetch_models_blocking_gated(
     // Same URL the fetch below will hit — the cache is only valid for it.
     let cache_origin = crate::remote::models_list_url(endpoints, fetch_auth);
     let cache = ModelsCacheManager::new();
+    let platforms = crate::agent::platform_models_fetch::load_platforms_config();
+
+    // xAI disk cache hit: still merge live platform listings so Kimi/Moonshot
+    // models stay current without waiting for the xAI etag to change.
     if let Some(cached) = cache.load_fresh(&cache_auth, &cache_origin) {
-        return Some(cached.models);
+        if !remote_fetch_enabled {
+            return Some(cached.models);
+        }
+        return crate::agent::platform_models_fetch::fetch_and_merge_platform_models(
+            Some(cached.models),
+            &platforms,
+        );
     }
 
     // Every catalog fetch in the product funnels through here, so this single
@@ -1463,7 +1500,7 @@ fn prefetch_models_blocking_gated(
     }
 
     let _timer = crate::instrumentation_timer!("startup.fetch_models_blocking");
-    match fetch_models_blocking(endpoints, auth, fetch_auth) {
+    let xai_map = match fetch_models_blocking(endpoints, auth, fetch_auth) {
         Ok(FetchModelsResult { models, etag }) if !models.is_empty() => {
             let api_base_url_override = match fetch_auth {
                 ModelFetchAuth::ApiKey => Some(endpoints.xai_api_base_url.clone()),
@@ -1476,6 +1513,8 @@ fn prefetch_models_blocking_gated(
             // `resolve_model_list` (config.rs), not here. Don't re-add it.
 
             tracing::info!(count = map.len(), etag = ?etag, "Prefetched models");
+            // Persist the xAI-only map so the cache origin stays tied to the
+            // xAI list URL; platform entries are re-merged on every load.
             cache.persist(&map, etag.as_deref(), cache_auth, &cache_origin);
             Some(map)
         }
@@ -1487,7 +1526,11 @@ fn prefetch_models_blocking_gated(
             tracing::warn!("Failed to fetch models: {:?}", e);
             None
         }
-    }
+    };
+
+    // Live Kimi Code / Moonshot catalogs (K3, etc.) merge in whether or not
+    // the xAI fetch succeeded — platform-only logins still get a real list.
+    crate::agent::platform_models_fetch::fetch_and_merge_platform_models(xai_map, &platforms)
 }
 
 /// Startup prefetch result: models + remote settings.
@@ -1541,9 +1584,13 @@ fn resolve_prefetch_env_from_parts(
 
     let model_fetch_auth = ModelFetchAuth::resolve(&endpoints, auth.is_some());
 
+    // No xAI session / custom endpoint / API key: still prefetch when a
+    // built-in platform has credentials so Kimi Code / Moonshot live
+    // `/models` can run (offline builtins alone are not enough for K3).
     if auth.is_none()
         && !endpoints.has_custom_endpoint()
         && model_fetch_auth == ModelFetchAuth::Session
+        && !has_any_platform_credentials()
     {
         return None;
     }
@@ -1552,6 +1599,18 @@ fn resolve_prefetch_env_from_parts(
         auth,
         endpoints,
         model_fetch_auth,
+    })
+}
+
+/// True when Kimi OAuth or any Moonshot API key is available for a live
+/// platform catalog fetch. Used to arm startup prefetch without an xAI session.
+fn has_any_platform_credentials() -> bool {
+    if crate::auth::kimi::ensure_kimi_code_access_token_blocking().is_some() {
+        return true;
+    }
+    let platforms = crate::agent::platform_models_fetch::load_platforms_config();
+    xai_grok_models::PlatformId::ALL.iter().any(|p| {
+        !p.uses_oauth() && crate::agent::config::resolve_platform_api_key(*p, &platforms).is_some()
     })
 }
 

@@ -1,5 +1,7 @@
 //! Login, logout, account switching, and auth-code submission dispatchers.
 
+use agent_client_protocol as acp;
+
 use super::ctx::{restore_auth_return_view, show_welcome};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::router::dispatch;
@@ -217,7 +219,35 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
         };
         return vec![];
     };
+    start_login_with_method(app, method_id, app.auth_start_mode, app.auth_use_oauth)
+}
 
+/// `/login kimi` — Kimi Code subscription device OAuth.
+pub(super) fn dispatch_login_kimi(app: &mut AppView) -> Vec<Effect> {
+    let method_id = acp::AuthMethodId::new(
+        xai_grok_shell::agent::auth_method::KIMI_CODE_METHOD_ID,
+    );
+    // Prefer the advertised label when present.
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::KIMI_CODE_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("Kimi Code".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+fn start_login_with_method(
+    app: &mut AppView,
+    method_id: acp::AuthMethodId,
+    mode: AuthMode,
+    use_oauth: bool,
+) -> Vec<Effect> {
     // Surface the auth UI when triggered from inside a session. `show_welcome`
     // resets ephemeral state here, covering the AuthComplete / cancel-login
     // fallbacks too (`auth_return_view` is only ever set here).
@@ -235,14 +265,14 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
         request_seq,
         handle: None,
         auth_url: None,
-        mode: app.auth_start_mode,
+        mode,
     };
 
     vec![
         Effect::Authenticate {
             request_seq,
             method_id,
-            use_oauth: app.auth_use_oauth,
+            use_oauth,
             force_interactive: true,
         },
         Effect::PollAuthUrl { request_seq },
