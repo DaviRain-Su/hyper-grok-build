@@ -13372,6 +13372,7 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-markdown",
  "xai-grok-mermaid",
+ "xai-grok-models",
  "xai-grok-pager-pty-harness",
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",

@@ -101,11 +101,12 @@ pub enum PlatformId {
     MiniMaxCn,
     Zai,
     ZaiCodingCn,
+    Ollama,
 }
 
 impl PlatformId {
     /// All platforms; subscription first.
-    pub const ALL: [PlatformId; 18] = [
+    pub const ALL: [PlatformId; 19] = [
         Self::KimiCode,
         Self::MoonshotCn,
         Self::MoonshotAi,
@@ -124,6 +125,7 @@ impl PlatformId {
         Self::MiniMaxCn,
         Self::Zai,
         Self::ZaiCodingCn,
+        Self::Ollama,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -146,6 +148,7 @@ impl PlatformId {
             Self::MiniMaxCn => "minimax-cn",
             Self::Zai => "zai",
             Self::ZaiCodingCn => "zai-coding-cn",
+            Self::Ollama => "ollama",
         }
     }
 
@@ -169,6 +172,7 @@ impl PlatformId {
             "minimax-cn" => Some(Self::MiniMaxCn),
             "zai" => Some(Self::Zai),
             "zai-coding-cn" => Some(Self::ZaiCodingCn),
+            "ollama" => Some(Self::Ollama),
             _ => None,
         }
     }
@@ -193,6 +197,7 @@ impl PlatformId {
             Self::MiniMaxCn => "MiniMax (China)",
             Self::Zai => "Z.AI",
             Self::ZaiCodingCn => "Z.AI Coding Plan (CN)",
+            Self::Ollama => "Ollama Cloud",
         }
     }
 
@@ -218,6 +223,7 @@ impl PlatformId {
             Self::MiniMaxCn => "https://api.minimaxi.com/v1",
             Self::Zai => "https://api.z.ai/api/paas/v4",
             Self::ZaiCodingCn => "https://open.bigmodel.cn/api/coding/paas/v4",
+            Self::Ollama => "https://ollama.com/v1",
         }
     }
 
@@ -315,6 +321,7 @@ impl PlatformId {
             Self::MiniMaxCn => &["GROK_MINIMAX_CN_API_KEY", "MINIMAX_API_KEY"],
             Self::Zai => &["GROK_ZAI_API_KEY", "ZAI_API_KEY"],
             Self::ZaiCodingCn => &["GROK_ZAI_CODING_CN_API_KEY", "ZAI_API_KEY"],
+            Self::Ollama => &["GROK_OLLAMA_API_KEY", "OLLAMA_API_KEY"],
         }
     }
 
@@ -322,6 +329,35 @@ impl PlatformId {
     pub fn models_list_url(self) -> String {
         let base = self.base_url().trim_end_matches('/').to_string();
         format!("{base}/models")
+    }
+
+    /// Human setup instructions for enabling this platform (no secrets).
+    ///
+    /// Shown wherever a locked (credential-less) platform model surfaces:
+    /// the model picker description, `set_session_model` rejections, and
+    /// the pager's `/providers` overview.
+    pub fn setup_hint(self) -> String {
+        if self.uses_oauth() {
+            return format!(
+                "Sign in with your {} subscription: run /login kimi",
+                self.display_name()
+            );
+        }
+        let envs = self.api_key_env_names();
+        let env_part = match envs {
+            [] => String::new(),
+            [one] => format!("export {one}=<key>"),
+            [first, rest @ ..] => format!("export {first}=<key> (or {})", rest.join(" / ")),
+        };
+        let config_part = format!(
+            "add `api_key = \"<key>\"` under `[platforms.{}]` in ~/.grok/config.toml",
+            self.as_str()
+        );
+        if env_part.is_empty() {
+            config_part
+        } else {
+            format!("{env_part}, or {config_part}")
+        }
     }
 
     /// Whether to auto-fetch live `GET /models` for this platform.

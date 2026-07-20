@@ -3,11 +3,17 @@
 use agent_client_protocol as acp;
 use indexmap::IndexMap;
 use xai_grok_shell::sampling::types::{
-    ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
-    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    PlatformLockMeta, ReasoningEffort, ReasoningEffortOption, parse_platform_lock_meta,
+    parse_reasoning_effort_meta, parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
 };
 
 use crate::slash::commands::effort_levels::legacy_effort_options;
+
+/// Lock/setup metadata of a credential-less managed platform model, parsed
+/// from its ACP meta. `None` for ordinary (usable) models.
+pub(crate) fn platform_lock(info: &acp::ModelInfo) -> Option<PlatformLockMeta> {
+    parse_platform_lock_meta(info.meta.as_ref())
+}
 
 /// Why an effort token could not be applied to a model. Shared by every effort
 /// surface (`/effort`, the CLI deferred switch, and headless) so they classify
@@ -291,16 +297,22 @@ impl ModelState {
             .unwrap_or_else(|| id.0.to_string())
     }
 
-    /// Cycle to the next model.
+    /// Cycle to the next usable model. Locked platform models (credential-less
+    /// BYOK entries shown for discovery) are skipped — they can't sample.
     pub fn next_model(&self) -> Option<acp::ModelId> {
-        if self.available.is_empty() {
+        let usable: Vec<&acp::ModelId> = self
+            .available
+            .iter()
+            .filter(|(_, info)| platform_lock(info).is_none())
+            .map(|(id, _)| id)
+            .collect();
+        if usable.is_empty() {
             None
         } else if let Some(ref current) = self.current {
-            let idx = self.available.get_index_of(current)?;
-            let idx = (idx + 1) % self.available.len();
-            Some(self.available.get_index(idx)?.0.clone())
+            let idx = usable.iter().position(|id| *id == current)?;
+            Some(usable[(idx + 1) % usable.len()].clone())
         } else {
-            Some(self.available.first()?.0.clone())
+            usable.first().map(|id| (*id).clone())
         }
     }
 }
@@ -363,6 +375,37 @@ mod tests {
         let state = sample_models();
         let next = state.next_model().unwrap();
         assert_eq!(next.0.as_ref(), "model-b");
+    }
+
+    #[test]
+    fn next_model_skips_locked_platform_models() {
+        let mut state = sample_models();
+        let locked_id = acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash"));
+        let meta = serde_json::json!({
+            "requiresApiKey": true,
+            "platform": "deepseek",
+            "platformName": "DeepSeek",
+            "apiKeyEnv": ["DEEPSEEK_API_KEY"],
+            "setupHint": "export DEEPSEEK_API_KEY=…",
+        })
+        .as_object()
+        .cloned();
+        state.available.insert(
+            locked_id,
+            acp::ModelInfo::new(
+                acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash")),
+                "DeepSeek V4 Flash".to_string(),
+            )
+            .meta(meta),
+        );
+        // model-a → model-b (skipping the locked row appended after it).
+        let next = state.next_model().unwrap();
+        assert_eq!(next.0.as_ref(), "model-b");
+        // model-b wraps to model-a, never landing on the locked entry.
+        let mut state = state;
+        state.current = Some(acp::ModelId::new(Arc::from("model-b")));
+        let next = state.next_model().unwrap();
+        assert_eq!(next.0.as_ref(), "model-a");
     }
 
     #[test]

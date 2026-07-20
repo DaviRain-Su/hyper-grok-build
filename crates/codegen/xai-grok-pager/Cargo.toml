@@ -96,6 +96,7 @@ xai-grok-config = { workspace = true }
 # (cpal is target-gated to non-Linux inside xai-grok-voice).
 xai-grok-voice = { path = "../xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
+xai-grok-models = { workspace = true }
 xai-grok-workspace = { workspace = true }
 xai-token-estimation = { workspace = true }
 xai-grok-telemetry = { workspace = true }

@@ -1768,7 +1768,23 @@ name = "Local Llama"
 temperature = 0.8
 ```
 
-**Ollama:**
+**Ollama (built-in platform — cloud by default):**
+
+Ollama is available as a built-in platform, defaulting to the Ollama Cloud API
+at `https://ollama.com/v1`. Set `OLLAMA_API_KEY` (or `GROK_OLLAMA_API_KEY`)
+in your environment:
+
+```bash
+export OLLAMA_API_KEY=your-key
+```
+
+Override for a local instance via `GROK_OLLAMA_BASE_URL`:
+
+```bash
+export GROK_OLLAMA_BASE_URL=http://localhost:11434/v1
+```
+
+You can also configure it manually:
 
 ```toml
 [model.ollama-codellama]

@@ -216,6 +216,18 @@
       "uses_x_api_key": false,
       "uses_oauth": false,
       "live_models_list": false
+    },
+    {
+      "platform": "ollama",
+      "pi_id": "ollama",
+      "base_url": "https://ollama.com/v1",
+      "env_keys": [
+        "GROK_OLLAMA_API_KEY",
+        "OLLAMA_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
     }
   ]
 }

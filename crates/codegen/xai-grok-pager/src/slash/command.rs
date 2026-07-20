@@ -87,6 +87,28 @@ pub struct ArgItem {
     pub insert_text: String,
     /// Description shown alongside the item.
     pub description: String,
+    /// Render dimmed with a lock affordance (credential-less BYOK models).
+    /// Selecting a locked item surfaces its setup hint via the command's
+    /// `run()` rather than performing the action.
+    pub locked: bool,
+}
+
+impl ArgItem {
+    /// Convenience constructor for ordinary (non-locked) items.
+    pub fn new(
+        display: impl Into<String>,
+        match_text: impl Into<String>,
+        insert_text: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            display: display.into(),
+            match_text: match_text.into(),
+            insert_text: insert_text.into(),
+            description: description.into(),
+            locked: false,
+        }
+    }
 }
 
 /// Read-only context for generating suggestions.

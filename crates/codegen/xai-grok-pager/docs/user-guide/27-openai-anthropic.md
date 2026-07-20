@@ -23,6 +23,7 @@ gateway process — each platform talks to the vendor API with Grok’s existing
 | `together` / `fireworks` / `cerebras` / `nvidia` | matching `*_API_KEY` | vendor URLs | |
 | `minimax` / `minimax-cn` | `MINIMAX_API_KEY` | | |
 | `zai` / `zai-coding-cn` | `ZAI_API_KEY` | | |
+| `ollama` | `OLLAMA_API_KEY` | `ollama.com/v1` | Cloud models; override `GROK_OLLAMA_BASE_URL` for local |
 | `xai-direct` | `XAI_API_KEY` | `api.x.ai/v1` | BYOK xAI (vs Grok login session) |
 
 `mistral` is reserved; Pi Mistral uses a proprietary conversations API we do
@@ -63,6 +64,24 @@ default = "anthropic/claude-sonnet-4-5"
 
 **Credential precedence:** env (`GROK_*` then common aliases) >
 `[platforms.*].api_key` > per-model `[model.*]`.
+
+---
+
+## Discovery: locked models and `/providers`
+
+You do not need a key configured to see what a platform offers. The `/model`
+picker lists **every** catalog model: usable ones first, then credential-less
+platform models dimmed with a 🔒 and a one-line setup hint (exact env var
+names + the `[platforms.<id>]` config table). Picking a locked model prints
+its setup instructions instead of switching.
+
+`/providers` shows one row per platform — configured ✓ vs locked 🔒, model
+count, and its unlock method (`/login kimi` for the OAuth subscription).
+
+As soon as the key resolves (env or config reload), the platform's models
+become selectable — no restart, no other toggle. Selecting a locked model is
+also rejected agent-side, and the credential seam never falls through to your
+xAI session token for a third-party base URL.
 
 ---
 

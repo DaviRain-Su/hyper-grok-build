@@ -372,6 +372,11 @@ impl ModelsManager {
     /// ACP-visible (non-hidden) projection of the catalog.
     /// The catalog coming from `resolve_model_catalog` already has
     /// allowed_models + disabled_models + hidden_models applied.
+    ///
+    /// Includes locked platform models (credential-less BYOK entries) as a
+    /// trailing tier with `requiresApiKey`/`requiresOAuth` meta — clients
+    /// render them dimmed for discovery; selection is rejected at
+    /// `set_session_model` and they never resolve credentials.
     pub fn available(&self) -> IndexMap<acp::ModelId, acp::ModelInfo> {
         let snapshot = {
             let models = self.inner.models.read();
@@ -1691,21 +1696,35 @@ pub(crate) fn resolve_catalog_key(
 /// entries. A selectable exact-key match wins (as in [`resolve_catalog_key`]);
 /// otherwise the last selectable entry whose routing slug matches `id`, so a
 /// non-selectable exact-key entry never shadows a selectable slug match.
+/// Whether `id` is in the ACP projection AND actually usable — locked
+/// platform models (credential-less BYOK entries shown for discovery) do not
+/// count, so session restore / recovery falls back instead of latching onto a
+/// model that cannot sample.
+pub(crate) fn usable_in_projection(
+    available: &IndexMap<acp::ModelId, acp::ModelInfo>,
+    id: &acp::ModelId,
+) -> bool {
+    available.get(id).is_some_and(|info| {
+        xai_grok_sampling_types::parse_platform_lock_meta(info.meta.as_ref()).is_none()
+    })
+}
+
 pub(crate) fn selectable_catalog_key_for_persisted(
     models: &IndexMap<String, ModelEntry>,
     available: &IndexMap<acp::ModelId, acp::ModelInfo>,
     id: &acp::ModelId,
 ) -> Option<acp::ModelId> {
-    if available.contains_key(id) {
+    if usable_in_projection(available, id) {
         return Some(id.clone());
     }
     let id_str = id.0.as_ref();
     if let Some((key, _)) = models.iter().rev().find(|(key, entry)| {
-        available.contains_key(&acp::ModelId::new((*key).clone())) && entry.info.model == id_str
+        usable_in_projection(available, &acp::ModelId::new((*key).clone()))
+            && entry.info.model == id_str
     }) {
         return Some(acp::ModelId::new(key.clone()));
     }
-    resolve_catalog_key(models, id).filter(|key| available.contains_key(key))
+    resolve_catalog_key(models, id).filter(|key| usable_in_projection(available, key))
 }
 
 /// A "campaign-only" preferred flip: the default changed and either side's value
@@ -1833,6 +1852,18 @@ pub(crate) fn resolve_default_model(
 }
 
 /// Filter hidden and auth-gated entries out of `catalog` and convert to ACP wire format.
+///
+/// The projection has two tiers:
+/// 1. **Usable** models — pass [`ModelEntry::visible_for_auth`].
+/// 2. **Locked** models — managed platform entries (`{platform}/{model}`) whose
+///    provider credentials are not configured. They ride along with
+///    `requiresApiKey` / `requiresOAuth` meta so clients can render them dimmed
+///    with a setup hint (BYOK discovery) instead of hiding them outright.
+///    Selecting one is rejected at `set_session_model`; the credential seam
+///    never falls through to the xAI session token for these entries.
+///
+/// `user_selectable` is the caller's gate (`ModelsManager::available` filters
+/// before calling); `hidden_models` config wins over locked display here.
 pub fn available_models(
     catalog: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
@@ -1842,7 +1873,54 @@ pub fn available_models(
         .filter(|(_, e)| e.visible_for_auth(is_session_auth))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    config::to_acp_model_info(&visible)
+    let mut out = config::to_acp_model_info(&visible);
+
+    let locked: IndexMap<String, ModelEntry> = catalog
+        .iter()
+        .filter(|(_, e)| {
+            !e.info.hidden && e.is_managed_platform_model() && !e.has_own_credentials()
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    out.extend(locked_platform_acp_infos(&locked));
+    out
+}
+
+/// ACP wire infos for locked platform models, stamped with lock/setup meta.
+fn locked_platform_acp_infos(
+    locked: &IndexMap<String, ModelEntry>,
+) -> IndexMap<acp::ModelId, acp::ModelInfo> {
+    use xai_grok_sampling_types as meta_keys;
+    let mut infos = config::to_acp_model_info(locked);
+    for (key, info) in infos.iter_mut() {
+        let Some((platform, _)) = xai_grok_models::parse_managed_model_key(key.0.as_ref()) else {
+            continue;
+        };
+        let mut map = info.meta.clone().unwrap_or_default();
+        map.insert(
+            meta_keys::PLATFORM_ID_META_KEY.to_string(),
+            platform.as_str().into(),
+        );
+        map.insert(
+            meta_keys::PLATFORM_NAME_META_KEY.to_string(),
+            platform.display_name().into(),
+        );
+        map.insert(
+            meta_keys::SETUP_HINT_META_KEY.to_string(),
+            platform.setup_hint().into(),
+        );
+        if platform.uses_oauth() {
+            map.insert(meta_keys::REQUIRES_OAUTH_META_KEY.to_string(), true.into());
+        } else {
+            map.insert(meta_keys::REQUIRES_API_KEY_META_KEY.to_string(), true.into());
+            map.insert(
+                meta_keys::API_KEY_ENV_META_KEY.to_string(),
+                serde_json::json!(platform.api_key_env_names()),
+            );
+        }
+        info.meta = Some(map);
+    }
+    infos
 }
 
 /// Compiled glob matcher shared by `allowed_models`, `disabled_models`, and
@@ -2065,6 +2143,24 @@ mod tests {
         config::Config::new_from_toml_cfg(&toml::from_str(toml).unwrap()).unwrap()
     }
 
+    /// Hermetic platform-credential isolation for tests that assert
+    /// no-credentials behavior: unset every registry platform's API-key env
+    /// vars (dev boxes export real keys) and redirect `GROK_AUTH_PATH` to a
+    /// scratch dir (the real `~/.grok/auth.json` may hold a Kimi OAuth token).
+    fn isolate_platform_credentials() -> (tempfile::TempDir, Vec<xai_grok_test_support::EnvGuard>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut guards = vec![xai_grok_test_support::EnvGuard::set(
+            "GROK_AUTH_PATH",
+            dir.path().join("auth.json").to_str().unwrap(),
+        )];
+        for platform in xai_grok_models::PlatformId::ALL {
+            for name in platform.api_key_env_names() {
+                guards.push(xai_grok_test_support::EnvGuard::unset(name));
+            }
+        }
+        (dir, guards)
+    }
+
     #[test]
     fn model_show_model_fingerprint_reads_catalog_flag() {
         let mgr = test_manager();
@@ -2140,6 +2236,91 @@ mod tests {
             "picked non-selectable {}",
             entry.model
         );
+    }
+
+    #[test]
+    fn available_models_projects_locked_platform_models_with_setup_meta() {
+        use xai_grok_sampling_types::{
+            API_KEY_ENV_META_KEY, PLATFORM_ID_META_KEY, REQUIRES_API_KEY_META_KEY,
+            SETUP_HINT_META_KEY,
+        };
+        let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
+        let platform_entry = |slug: &str, key: Option<&str>, hidden: bool| {
+            let mut info = config::ModelInfo::fallback(slug);
+            info.hidden = hidden;
+            ModelEntry {
+                info,
+                api_key: key.map(str::to_owned),
+                env_key: None,
+                api_base_url: None,
+            }
+        };
+        // Locked: managed platform id without credentials.
+        catalog.insert(
+            "deepseek/deepseek-v4-flash".to_string(),
+            platform_entry("deepseek/deepseek-v4-flash", None, false),
+        );
+        // Usable: same platform with a stamped key → visible tier, no lock meta.
+        catalog.insert(
+            "openai/gpt-5".to_string(),
+            platform_entry("openai/gpt-5", Some("sk-test"), false),
+        );
+        // Hidden wins over locked display.
+        catalog.insert(
+            "groq/llama-3.3-70b-versatile".to_string(),
+            platform_entry("groq/llama-3.3-70b-versatile", None, true),
+        );
+
+        let out = available_models(&catalog, false);
+
+        let locked_id = acp::ModelId::new("deepseek/deepseek-v4-flash");
+        let locked = out
+            .get(&locked_id)
+            .expect("locked platform model must be projected");
+        let meta = locked.meta.as_ref().expect("lock meta present");
+        assert_eq!(
+            meta.get(REQUIRES_API_KEY_META_KEY).and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            meta.get(PLATFORM_ID_META_KEY).and_then(|v| v.as_str()),
+            Some("deepseek")
+        );
+        assert_eq!(
+            meta.get(API_KEY_ENV_META_KEY)
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2),
+            "deepseek has two env aliases"
+        );
+        assert!(
+            meta.get(SETUP_HINT_META_KEY)
+                .and_then(|v| v.as_str())
+                .is_some_and(|h| h.contains("[platforms.deepseek]")),
+            "setup hint mentions the config table: {meta:?}"
+        );
+
+        let usable = out
+            .get(&acp::ModelId::new("openai/gpt-5"))
+            .expect("credentialed entry stays visible");
+        let usable_meta = usable.meta.as_ref().expect("meta present");
+        assert!(
+            !usable_meta
+                .get(REQUIRES_API_KEY_META_KEY)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "credentialed entry must not be marked locked"
+        );
+
+        assert!(
+            out.get(&acp::ModelId::new("groq/llama-3.3-70b-versatile"))
+                .is_none(),
+            "hidden_models config wins over locked display"
+        );
+
+        // Locked rows sort after the usable tier.
+        let keys: Vec<_> = out.keys().map(|k| k.0.as_ref().to_string()).collect();
+        assert_eq!(keys, ["openai/gpt-5", "deepseek/deepseek-v4-flash"]);
     }
 
     #[test]
@@ -3302,6 +3483,10 @@ mod tests {
     fn prefetch_env_resolves_when_remote_fetch_enabled() {
         let _unset = EnvGuard::unset("XAI_API_KEY");
         let _unset_legacy = EnvGuard::unset("GROK_CODE_XAI_API_KEY");
+        // Dev boxes export real platform keys (DEEPSEEK_API_KEY, …) and hold a
+        // Kimi OAuth token in ~/.grok/auth.json — both arm the platform
+        // prefetch path. Isolate so the no-credentials assertion is hermetic.
+        let (_dir, _platform_guards) = isolate_platform_credentials();
         let endpoints = config::EndpointsConfig {
             deployment_key: Some("deploy-key".to_owned()),
             ..config::EndpointsConfig::default()
@@ -3681,5 +3866,47 @@ mod tests {
                 (id.clone(), acp::ModelInfo::new(id, (*k).to_string()))
             })
             .collect()
+    }
+
+    #[test]
+    fn selectable_catalog_key_for_persisted_skips_locked_platform_models() {
+        // Persisted a DeepSeek session, then the API key was removed: the
+        // locked projection still lists the model (discovery) but restore must
+        // not latch onto it.
+        let mut models = IndexMap::new();
+        models.insert(
+            "deepseek/deepseek-v4-flash".to_string(),
+            make_model_entry("deepseek-v4-flash"),
+        );
+        models.insert("grok-4.5".to_string(), make_model_entry("grok-4.5"));
+
+        let mut available = test_available_keys(&["grok-4.5"]);
+        let locked_id = acp::ModelId::new("deepseek/deepseek-v4-flash");
+        let lock_meta = serde_json::json!({
+            "requiresApiKey": true,
+            "platform": "deepseek",
+            "platformName": "DeepSeek",
+            "apiKeyEnv": ["GROK_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+            "setupHint": "export DEEPSEEK_API_KEY=…",
+        })
+        .as_object()
+        .cloned();
+        available.insert(
+            locked_id.clone(),
+            acp::ModelInfo::new(locked_id.clone(), "DeepSeek V4 Flash".to_string())
+                .meta(lock_meta),
+        );
+
+        let persisted = acp::ModelId::new("deepseek/deepseek-v4-flash");
+        assert!(
+            selectable_catalog_key_for_persisted(&models, &available, &persisted).is_none(),
+            "locked platform model must not count as selectable for restore"
+        );
+        // Sanity: a usable row still resolves.
+        let usable = acp::ModelId::new("grok-4.5");
+        assert_eq!(
+            selectable_catalog_key_for_persisted(&models, &available, &usable),
+            Some(usable)
+        );
     }
 }

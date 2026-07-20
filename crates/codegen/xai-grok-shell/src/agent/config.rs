@@ -4191,7 +4191,11 @@ impl ModelEntry {
     /// an xAI login session (which would otherwise unlock
     /// `supported_in_api: false` first-party models).
     pub fn is_managed_platform_model(&self) -> bool {
-        xai_grok_models::parse_managed_model_key(self.catalog_id()).is_some()
+        self.managed_platform().is_some()
+    }
+    /// The registry platform this entry belongs to (`{platform}/{model}` ids).
+    pub fn managed_platform(&self) -> Option<xai_grok_models::PlatformId> {
+        xai_grok_models::parse_managed_model_key(self.catalog_id()).map(|(p, _)| p)
     }
     /// Whether this model appears in the picker for the given auth mode.
     ///
@@ -4599,6 +4603,23 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
     let (api_key, mut base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
+    } else if model.is_managed_platform_model() {
+        // Managed platform entry without its platform credential: do NOT fall
+        // through to the xAI session token / global key — that would send xAI
+        // credentials to a third-party base URL. These models are locked in
+        // the catalog projection and rejected at set_session_model; this arm
+        // is the defense-in-depth seam for residual paths (session restore,
+        // config races). The request fails unauthenticated instead.
+        tracing::warn!(
+            model = %info.model,
+            "managed platform model has no platform credential; \
+             refusing session/global key fallthrough"
+        );
+        (
+            None,
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
@@ -6048,6 +6069,32 @@ reasoning_effort = "low"
         let creds = resolve_credentials(&model, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
         assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
+    }
+    #[test]
+    #[serial]
+    fn resolve_credentials_managed_platform_model_never_falls_through() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        // A credential-less managed platform entry must NOT fall through to
+        // the xAI session token or the global xAI key — either would send xAI
+        // credentials to the third-party base URL.
+        let _global = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-global-sentinel");
+        let _legacy = EnvGuard::set(LEGACY_XAI_API_KEY_ENV_VAR, "xai-legacy-sentinel");
+        let model = test_model_entry(
+            "deepseek/deepseek-v4-flash",
+            "https://api.deepseek.com",
+            None,
+            None,
+            None,
+        );
+        assert!(model.is_managed_platform_model());
+        assert!(!model.has_own_credentials());
+        let creds = resolve_credentials(&model, Some("session-jwt"));
+        assert_eq!(creds.api_key, None, "session token must not leak");
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        let creds = resolve_credentials(&model, None);
+        assert_eq!(creds.api_key, None, "global xAI key must not leak");
     }
     #[test]
     #[serial]
@@ -7924,7 +7971,18 @@ reasoning_effort = "low"
             !resolved.contains_key(crate::models::default_model()),
             "xAI default must not leak into enterprise model list"
         );
-        assert_eq!(resolved.len(), 1, "only the prefetched enterprise model");
+        // Built-in offline platform entries are always injected (locked until
+        // BYOK credentials resolve); everything else must be the enterprise
+        // model — no xAI first-party defaults.
+        let non_platform: Vec<_> = resolved
+            .keys()
+            .filter(|k| xai_grok_models::parse_managed_model_key(k).is_none())
+            .collect();
+        assert_eq!(
+            non_platform,
+            ["acme-model"],
+            "only the prefetched enterprise model plus locked platform builtins"
+        );
     }
     #[test]
     fn e2e_default_endpoint_still_injects_defaults() {
@@ -11366,10 +11424,23 @@ default = "grok-4.5"
         assert!(!resolved.contains_key(dm));
     }
     #[test]
-    fn resolve_model_list_empty_prefetch_yields_empty_base() {
+    fn resolve_model_list_empty_prefetch_yields_only_platform_builtins() {
         let cfg = Config::default();
         let resolved = resolve_model_list(&cfg, Some(IndexMap::new()));
-        assert!(resolved.is_empty());
+        // No xAI first-party models without a prefetch/catalog — but the
+        // built-in offline platform entries are always present (locked until
+        // BYOK credentials resolve).
+        assert!(
+            !resolved.contains_key(crate::models::default_model()),
+            "xAI default must not appear without a catalog"
+        );
+        assert!(
+            resolved
+                .keys()
+                .all(|k| xai_grok_models::parse_managed_model_key(k).is_some()),
+            "empty prefetch yields only managed platform builtins, got: {:?}",
+            resolved.keys().take(5).collect::<Vec<_>>()
+        );
     }
     /// Regression: enterprise managed config overlays env_key on an oauth-only
     /// catalog entry. BYOK must force visibility for API-key users so a

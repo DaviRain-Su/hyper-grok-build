@@ -1782,10 +1782,20 @@ impl acp::Agent for MvpAgent {
             "load_session: restoring persisted model (debug)"
         );
         let is_grok_build = persisted_model.0.starts_with("grok-build");
+        // Locked BYOK rows ride in `available` for discovery but can't sample —
+        // fallbacks must skip them or a restored session breaks on first prompt.
+        let usable =
+            |id: &acp::ModelId| crate::agent::models::usable_in_projection(&available, id);
         let same_family_fallback = if is_grok_build {
-            available.keys().find(|id| id.0.starts_with("grok-build")).cloned()
+            available
+                .keys()
+                .find(|id| usable(id) && id.0.starts_with("grok-build"))
+                .cloned()
         } else {
-            available.keys().find(|id| !id.0.starts_with("grok-build")).cloned()
+            available
+                .keys()
+                .find(|id| usable(id) && !id.0.starts_with("grok-build"))
+                .cloned()
         };
         let selectable_catalog_key = selectable_catalog_key_for_persisted(
             &models,
@@ -1847,7 +1857,7 @@ impl acp::Agent for MvpAgent {
         } else {
             let fallback = available
                 .keys()
-                .next()
+                .find(|id| usable(id))
                 .cloned()
                 .unwrap_or_else(|| persisted_model.clone());
             tracing::warn!(
@@ -2070,7 +2080,7 @@ impl acp::Agent for MvpAgent {
                     &unavailable_model,
                 )
                 .unwrap_or(unavailable_model.clone());
-            if available.contains_key(&restore_model_id) {
+            if crate::agent::models::usable_in_projection(&available, &restore_model_id) {
                 tracing::info!(
                     session_id = % arguments.session_id.0, model_id = % restore_model_id
                     .0,
@@ -3176,6 +3186,19 @@ impl acp::Agent for MvpAgent {
                 acp::Error::invalid_params()
                     .data("This model isn't allowed by your allowed_models setting."),
             );
+        }
+        // Locked platform model: present in the picker for BYOK discovery but
+        // not usable until the provider credential is configured. Reject here
+        // too (not just client-side) so a third-party base URL can never be
+        // reached with the xAI session token via a crafted set_model call.
+        if model.is_managed_platform_model() && !model.has_own_credentials() {
+            let (platform, hint) = model
+                .managed_platform()
+                .map(|p| (p.display_name(), p.setup_hint()))
+                .unwrap_or(("this platform", String::new()));
+            return Err(acp::Error::invalid_params().data(format!(
+                "Provider '{platform}' is not configured. To enable it: {hint}"
+            )));
         }
         let session_id = args.session_id.clone();
         let res = crate::agent::handlers::model_switch::apply(self, args).await;

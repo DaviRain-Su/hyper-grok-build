@@ -88,6 +88,7 @@ impl SlashCommand for ThemeCommand {
             match_text: "auto".to_string(),
             insert_text: "auto".to_string(),
             description: format!("auto (follow system){auto_active}"),
+            locked: false,
         }];
 
         // Concrete themes — only show "(active)" when not in auto mode.
@@ -102,6 +103,7 @@ impl SlashCommand for ThemeCommand {
                 match_text: kind.display_name().to_string(),
                 insert_text: kind.display_name().to_string(),
                 description: format!("{}{active}", kind.display_name()),
+                locked: false,
             }
         }));
 

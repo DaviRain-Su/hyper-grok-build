@@ -1765,7 +1765,7 @@ impl AgentView {
                             fields: &[],
                             description_lines: &[],
                             summary_lines: &[],
-                            dimmed: false,
+                            dimmed: item.locked,
                             indent: 0,
                             badge: "",
                             badge_color: None,
@@ -1775,6 +1775,17 @@ impl AgentView {
                     })
                     .collect();
                 let compact = self.scrollback.appearance().prompt.compact;
+                // BYOK discovery: when the model list contains locked
+                // (credential-less) platform rows, point at /providers.
+                if matches!(command.as_str(), "model" | "m")
+                    && items.iter().any(|item| item.locked)
+                {
+                    picker_shortcuts.push(Shortcut {
+                        label: "🔒 needs API key → /providers",
+                        clickable: false,
+                        id: 0,
+                    });
+                }
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
                 let modal_config = ModalWindowConfig {

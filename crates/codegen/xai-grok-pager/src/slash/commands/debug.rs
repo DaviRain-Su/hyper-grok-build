@@ -73,6 +73,7 @@ impl SlashCommand for DebugCommand {
                     match_text: name.to_string(),
                     insert_text: name.to_string(),
                     description: desc.to_string(),
+                    locked: false,
                 })
                 .collect(),
         )

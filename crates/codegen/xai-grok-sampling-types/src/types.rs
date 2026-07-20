@@ -1097,6 +1097,83 @@ pub fn reasoning_efforts_meta_value(opts: &[ReasoningEffortOption]) -> serde_jso
     serde_json::to_value(opts).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
 }
 
+// ── Platform lock meta (BYOK discovery) ────────────────────────────────────
+//
+// Managed platform models (`{platform}/{model}`) whose provider credentials
+// are not configured are projected onto the ACP wire with these meta keys so
+// clients can render them dimmed with a lock affordance instead of hiding
+// them outright. Selecting one is rejected shell-side with the setup hint.
+
+/// `true` when the model needs a platform API key (BYOK) to become usable.
+pub const REQUIRES_API_KEY_META_KEY: &str = "requiresApiKey";
+/// `true` when the model needs a platform OAuth sign-in (e.g. Kimi Code).
+pub const REQUIRES_OAUTH_META_KEY: &str = "requiresOAuth";
+/// Registry platform id, e.g. `"deepseek"`.
+pub const PLATFORM_ID_META_KEY: &str = "platform";
+/// Human platform name, e.g. `"DeepSeek"`.
+pub const PLATFORM_NAME_META_KEY: &str = "platformName";
+/// Env var names that can hold the platform API key (BYOK platforms only).
+pub const API_KEY_ENV_META_KEY: &str = "apiKeyEnv";
+/// One-line setup instructions (env var or `[platforms.<id>]` config table).
+pub const SETUP_HINT_META_KEY: &str = "setupHint";
+
+/// Parsed lock/setup metadata for a credential-less managed platform model.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlatformLockMeta {
+    pub platform: String,
+    pub platform_name: String,
+    pub setup_hint: String,
+    pub requires_oauth: bool,
+    pub api_key_env: Vec<String>,
+}
+
+/// Returns the lock meta when the model info is a credential-less managed
+/// platform model, `None` for ordinary (usable) models.
+pub fn parse_platform_lock_meta(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<PlatformLockMeta> {
+    let map = meta?;
+    let requires_api_key = map
+        .get(REQUIRES_API_KEY_META_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let requires_oauth = map
+        .get(REQUIRES_OAUTH_META_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !requires_api_key && !requires_oauth {
+        return None;
+    }
+    let api_key_env = map
+        .get(API_KEY_ENV_META_KEY)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PlatformLockMeta {
+        platform: map
+            .get(PLATFORM_ID_META_KEY)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        platform_name: map
+            .get(PLATFORM_NAME_META_KEY)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        setup_hint: map
+            .get(SETUP_HINT_META_KEY)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        requires_oauth,
+        api_key_env,
+    })
+}
+
 /// Which API backend to use for model inference.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

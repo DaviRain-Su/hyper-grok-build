@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use serde::Serialize;
-use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
+use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption, parse_platform_lock_meta};
 
 use crate::session::unified_list::SessionKind;
 
@@ -92,11 +92,15 @@ pub(crate) fn build_session_config_options(
         } else {
             model.name.clone()
         };
+        // Locked BYOK platform models carry their setup hint so clients
+        // rendering these options can show why the row is gated.
+        let description =
+            parse_platform_lock_meta(model.meta.as_ref()).map(|lock| format!("🔒 {}", lock.setup_hint));
         options.push(SessionConfigOption {
             id: model.model_id.0.to_string(),
             category: "model".to_string(),
             label,
-            description: None,
+            description,
             selected: model.model_id == *current_model_id,
         });
     }

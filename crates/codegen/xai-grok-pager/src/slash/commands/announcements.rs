@@ -40,12 +40,14 @@ impl SlashCommand for AnnouncementsCommand {
                 match_text: "hide".to_string(),
                 insert_text: "hide".to_string(),
                 description: "Hide the announcement banner".to_string(),
+                locked: false,
             },
             ArgItem {
                 display: "show".to_string(),
                 match_text: "show".to_string(),
                 insert_text: "show".to_string(),
                 description: "Show the announcement banner".to_string(),
+                locked: false,
             },
         ])
     }

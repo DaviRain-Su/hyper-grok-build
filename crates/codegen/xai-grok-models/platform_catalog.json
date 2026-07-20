@@ -5289,6 +5289,42 @@
       "supports_reasoning_effort": true,
       "supported_in_api": true,
       "source": "earendil-works/pi packages/ai providers/data"
+    },
+    {
+      "platform": "ollama",
+      "model": "gpt-oss:120b-cloud",
+      "name": "GPT-OSS 120B (Ollama Cloud)",
+      "description": "OpenAI open-weight flagship, tools + configurable reasoning (offline fallback)",
+      "context_window": 131072,
+      "max_completion_tokens": 32768,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "ollama.com/search?c=cloud (2026-07, offline fallback)"
+    },
+    {
+      "platform": "ollama",
+      "model": "gpt-oss:20b-cloud",
+      "name": "GPT-OSS 20B (Ollama Cloud)",
+      "description": "OpenAI open-weight mid-size, tools + configurable reasoning (offline fallback)",
+      "context_window": 131072,
+      "max_completion_tokens": 32768,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "ollama.com/search?c=cloud (2026-07, offline fallback)"
+    },
+    {
+      "platform": "ollama",
+      "model": "qwen3-coder:480b-cloud",
+      "name": "Qwen3 Coder 480B (Ollama Cloud)",
+      "description": "Alibaba agentic coding MoE on Ollama Cloud (offline fallback)",
+      "context_window": 262144,
+      "max_completion_tokens": 32768,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": false,
+      "supported_in_api": true,
+      "source": "ollama.com/search?c=cloud (2026-07, offline fallback)"
     }
   ]
 }

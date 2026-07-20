@@ -3,9 +3,9 @@
 //! re-opens the dropdown into a `low|medium|high|xhigh` sub-menu.
 
 use agent_client_protocol as acp;
-use xai_grok_shell::sampling::types::supports_reasoning_effort_meta;
+use xai_grok_shell::sampling::types::{PlatformLockMeta, supports_reasoning_effort_meta};
 
-use crate::acp::model_state::ModelState;
+use crate::acp::model_state::{ModelState, platform_lock};
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::commands::effort_levels::build_effort_arg_items;
@@ -75,6 +75,9 @@ impl SlashCommand for ModelCommand {
         // first, a shorter catalog entry ("Grok") would steal the prefix and
         // treat "4.5" as an effort level.
         if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
+            if let Some(lock) = locked_model(ctx.models, &id) {
+                return CommandResult::Error(lock_message(&lock, trimmed));
+            }
             return CommandResult::Action(Action::SetDefaultModel(id));
         }
 
@@ -91,6 +94,9 @@ impl SlashCommand for ModelCommand {
                 .map(supports_reasoning_effort)
                 .unwrap_or(false)
         {
+            if let Some(lock) = locked_model(ctx.models, &id) {
+                return CommandResult::Error(lock_message(&lock, prefix));
+            }
             return match ctx.models.resolve_effort_for_model(&id, token) {
                 Ok(effort) => CommandResult::Action(Action::SwitchModel {
                     model_id: id,
@@ -102,6 +108,25 @@ impl SlashCommand for ModelCommand {
 
         CommandResult::Error(format!("Unknown model: {trimmed}"))
     }
+}
+
+/// Lock metadata when `id` is a credential-less managed platform model.
+fn locked_model(models: &ModelState, id: &acp::ModelId) -> Option<PlatformLockMeta> {
+    models.available.get(id).and_then(platform_lock)
+}
+
+/// User-facing rejection for picking a locked model: what to configure.
+fn lock_message(lock: &PlatformLockMeta, requested: &str) -> String {
+    let provider = if lock.platform_name.is_empty() {
+        lock.platform.as_str()
+    } else {
+        lock.platform_name.as_str()
+    };
+    format!(
+        "'{requested}' is provided by {provider}, which is not configured yet. \
+         To enable it: {}. See /providers for all platforms.",
+        lock.setup_hint
+    )
 }
 
 /// Look up a model by case-insensitive display name OR model id match.
@@ -126,12 +151,14 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
 }
 
 /// Returns the matched model id when `args_query` is `"<reasoning-model> ..."`.
-/// Longest-name-first to disambiguate names that share a prefix.
+/// Longest-name-first to disambiguate names that share a prefix. Locked
+/// platform models are excluded — picking one must hit the lock error in
+/// `run()`, not chain into an effort sub-menu.
 fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
     let mut candidates: Vec<(&acp::ModelId, &str)> = models
         .available
         .iter()
-        .filter(|(_, info)| supports_reasoning_effort(info))
+        .filter(|(_, info)| supports_reasoning_effort(info) && platform_lock(info).is_none())
         .map(|(id, info)| (id, info.name.as_str()))
         .collect();
     candidates.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
@@ -150,11 +177,33 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
 
 /// One row per logical model. Reasoning models get a trailing space in
 /// `insert_text` so the prompt widget chains into the effort sub-menu.
+///
+/// Locked platform models (provider credential not configured) sort after all
+/// usable models, render with a 🔒 prefix and carry the setup hint as their
+/// description; their `insert_text` never chains to the effort phase.
 fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
     let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
+    let mut locked_items: Vec<ArgItem> = Vec::new();
     for (id, info) in &models.available {
         let is_current = current_id == Some(id);
+
+        if let Some(lock) = platform_lock(info) {
+            let provider = if lock.platform_name.is_empty() {
+                lock.platform.as_str()
+            } else {
+                lock.platform_name.as_str()
+            };
+            locked_items.push(ArgItem {
+                display: format!("🔒 {} — {provider}", info.name),
+                match_text: format!("{} {provider}", info.name),
+                insert_text: info.name.clone(),
+                description: lock.setup_hint.clone(),
+                locked: true,
+            });
+            continue;
+        }
+
         let supports = supports_reasoning_effort(info);
 
         let display = if is_current {
@@ -177,8 +226,10 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             match_text: info.name.clone(),
             insert_text,
             description: info.description.clone().unwrap_or_default(),
+            locked: false,
         });
     }
+    items.extend(locked_items);
     items
 }
 
@@ -479,6 +530,107 @@ mod tests {
                 assert_eq!(resolved_id, id);
             }
             other => panic!("expected Action::SetDefaultModel(<id>), got {other:?}"),
+        }
+    }
+
+    // ── Locked platform models (BYOK discovery) ─────────────────────
+
+    fn locked_platform_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(Arc::from(id));
+        let meta = serde_json::json!({
+            "supportsReasoningEffort": true,
+            "requiresApiKey": true,
+            "platform": "deepseek",
+            "platformName": "DeepSeek",
+            "apiKeyEnv": ["GROK_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+            "setupHint": "export GROK_DEEPSEEK_API_KEY=<key> (or DEEPSEEK_API_KEY), or add `api_key = \"<key>\"` under `[platforms.deepseek]` in ~/.grok/config.toml",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let info = acp::ModelInfo::new(id.clone(), name.to_string()).meta(Some(meta));
+        (id, info)
+    }
+
+    #[test]
+    fn locked_models_sort_last_with_lock_marker_and_no_effort_chain() {
+        let mut state = ModelState::default();
+        let (lid, linfo) = locked_platform_model("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash");
+        let (pid, pinfo) = plain_model("grok-4.5", "Grok 4.5");
+        state.available.insert(lid, linfo);
+        state.available.insert(pid, pinfo);
+
+        let cmd = ModelCommand;
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+        };
+        let items = cmd.suggest_args(&ctx, "").unwrap();
+        assert_eq!(items.len(), 2);
+        // Usable model first, locked row last.
+        assert_eq!(items[0].match_text, "Grok 4.5");
+        assert!(!items[0].locked);
+        let locked = &items[1];
+        assert!(locked.locked, "locked row must carry the flag for dimming");
+        assert!(locked.display.starts_with('🔒'), "lock marker: {locked:?}");
+        assert!(locked.display.contains("DeepSeek"), "provider in display");
+        // No trailing space — Enter must submit (→ lock error), never chain
+        // into an effort sub-menu, even though the model supports effort.
+        assert_eq!(locked.insert_text, "DeepSeek V4 Flash");
+        assert!(locked.description.contains("DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn locked_reasoning_model_trailing_space_stays_in_model_phase() {
+        let mut state = ModelState::default();
+        let (lid, linfo) = locked_platform_model("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash");
+        state.available.insert(lid, linfo);
+
+        let cmd = ModelCommand;
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+        };
+        // Trailing space after a locked reasoning-capable model must NOT
+        // enter the effort phase — the model list is re-rendered instead.
+        let items = cmd.suggest_args(&ctx, "DeepSeek V4 Flash ").unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].locked);
+    }
+
+    #[test]
+    fn run_locked_model_exact_match_returns_setup_error() {
+        let mut state = ModelState::default();
+        let (lid, linfo) = locked_platform_model("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash");
+        state.available.insert(lid, linfo);
+        let mut ctx = dummy_exec_ctx(&state);
+        let result = ModelCommand.run(&mut ctx, "DeepSeek V4 Flash");
+        match result {
+            CommandResult::Error(msg) => {
+                assert!(msg.contains("DeepSeek"), "provider named: {msg}");
+                assert!(msg.contains("DEEPSEEK_API_KEY"), "env var in hint: {msg}");
+                assert!(msg.contains("/providers"), "points at /providers: {msg}");
+            }
+            other => panic!("expected lock Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_locked_model_with_effort_token_returns_setup_error() {
+        let mut state = ModelState::default();
+        let (lid, linfo) = locked_platform_model("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash");
+        state.available.insert(lid, linfo);
+        let mut ctx = dummy_exec_ctx(&state);
+        let result = ModelCommand.run(&mut ctx, "DeepSeek V4 Flash high");
+        match result {
+            CommandResult::Error(msg) => {
+                assert!(msg.contains("DEEPSEEK_API_KEY"), "env var in hint: {msg}");
+            }
+            other => panic!("expected lock Error, got {other:?}"),
         }
     }
 }

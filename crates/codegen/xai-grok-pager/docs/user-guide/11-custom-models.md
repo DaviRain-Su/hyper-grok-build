@@ -201,9 +201,27 @@ api_backend = "responses"
 env_key = "OPENAI_API_KEY"
 ```
 
-### Ollama (Local Models)
+### Ollama (Local / Cloud)
 
-Run models locally with [Ollama](https://ollama.ai):
+Run models via [Ollama](https://ollama.ai) — either the cloud service or a local instance.
+
+**Built-in platform (cloud):** Ollama is available as a built-in platform (id: `ollama`),
+defaulting to the Ollama Cloud API at `https://ollama.com/v1`.
+Set `OLLAMA_API_KEY` (or `GROK_OLLAMA_API_KEY`) in your environment:
+
+```bash
+export OLLAMA_API_KEY=your-key
+```
+
+Then select models via `/model ollama/<model-name>`.
+
+**Local override:** Set `GROK_OLLAMA_BASE_URL` to point at your local instance:
+
+```bash
+export GROK_OLLAMA_BASE_URL=http://localhost:11434/v1
+```
+
+**Custom model (alternative):** You can also configure Ollama manually:
 
 ```toml
 [model.ollama-codellama]

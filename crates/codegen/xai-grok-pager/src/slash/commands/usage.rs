@@ -45,12 +45,14 @@ impl SlashCommand for UsageCommand {
                 match_text: "show".to_string(),
                 insert_text: "show".to_string(),
                 description: "View credit usage".to_string(),
+                locked: false,
             },
             ArgItem {
                 display: "manage".to_string(),
                 match_text: "manage".to_string(),
                 insert_text: "manage".to_string(),
                 description: "Open billing management page".to_string(),
+                locked: false,
             },
         ])
     }
