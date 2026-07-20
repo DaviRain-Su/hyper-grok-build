@@ -801,6 +801,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             platform,
             cleared,
             models_unlocked,
+            env_still_active,
             error,
         } => {
             let label = xai_grok_models::PlatformId::parse(&platform)
@@ -809,7 +810,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if let Some(err) = error {
                 app.show_toast(&format!("✗ Couldn't save {label} key: {err}"));
             } else if cleared {
-                app.show_toast(&format!("✓ Cleared API key for {label}"));
+                if env_still_active.is_empty() {
+                    app.show_toast(&format!(
+                        "✓ Logged out {label} API key (cleared from auth.json)"
+                    ));
+                } else {
+                    app.show_toast(&format!(
+                        "✓ Cleared stored {label} key — but env still set: {}. Unset it or models may stay unlocked.",
+                        env_still_active.join(", ")
+                    ));
+                }
             } else {
                 app.show_toast(&format!(
                     "✓ Saved API key for {label} — {models_unlocked} model(s) unlocked. /model to pick one."

@@ -2285,11 +2285,13 @@ pub enum TaskResult {
         agent_id: AgentId,
         result: Result<(), String>,
     },
-    /// `/providers` API key save completed.
+    /// `/providers` API key save / clear completed.
     SetPlatformApiKeyComplete {
         platform: String,
         cleared: bool,
         models_unlocked: u64,
+        /// Env var *names* still set after clear (values never included).
+        env_still_active: Vec<String>,
         error: Option<String>,
     },
     /// Background task kill result. `outcome` is `None` when the agent

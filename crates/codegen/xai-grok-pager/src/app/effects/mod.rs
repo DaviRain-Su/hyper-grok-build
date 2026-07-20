@@ -1485,6 +1485,15 @@ pub(crate) fn execute(
                             .get("modelsUnlocked")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
+                        let env_still_active = body
+                            .get("envStillActive")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_owned))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let platform = body
                             .get("platform")
                             .and_then(|v| v.as_str())
@@ -1494,6 +1503,7 @@ pub(crate) fn execute(
                             platform,
                             cleared,
                             models_unlocked,
+                            env_still_active,
                             error: None,
                         }
                     }
@@ -1501,6 +1511,7 @@ pub(crate) fn execute(
                         platform: platform_for_err,
                         cleared: false,
                         models_unlocked: 0,
+                        env_still_active: Vec::new(),
                         error: Some(sanitize_user_error(&e.to_string())),
                     },
                 }

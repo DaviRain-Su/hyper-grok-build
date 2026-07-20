@@ -1,9 +1,10 @@
-//! `/providers` — third-party platform (BYOK) status + API key setup.
+//! `/providers` — third-party platform (BYOK) status + API key setup / logout.
 //!
-//! - Bare `/providers` (or incomplete args) opens an ArgPicker of platforms.
-//! - `/providers <platform> <api_key>` saves the key to `~/.grok/auth.json`
-//!   and restamps the model catalog so locked models unlock.
-//! - OAuth platforms (kimi-code) redirect to `/login kimi`.
+//! - Bare `/providers` opens an ArgPicker of platforms.
+//! - `/providers <platform> <api_key>` saves the key to `~/.grok/auth.json`.
+//! - `/providers clear|logout|remove [platform]` removes a stored key
+//!   (platform API-key "logout").
+//! - OAuth platforms (kimi-code) redirect to `/login kimi` / `grok logout --kimi`.
 
 use xai_grok_models::PlatformId;
 
@@ -20,12 +21,16 @@ impl SlashCommand for ProvidersCommand {
         "providers"
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["provider"]
+    }
+
     fn description(&self) -> &str {
-        "Configure third-party platform API keys (or show status)"
+        "Configure or clear third-party platform API keys"
     }
 
     fn usage(&self) -> &str {
-        "/providers [platform] [api_key]"
+        "/providers [clear|logout] [platform] [api_key]"
     }
 
     fn takes_args(&self) -> bool {
@@ -33,72 +38,121 @@ impl SlashCommand for ProvidersCommand {
     }
 
     fn args_required(&self) -> bool {
-        // Empty → open platform picker. Picking inserts platform id; user
-        // pastes the key and hits Enter again.
+        // Empty → open platform picker (or subcommand list via suggest).
         true
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("<platform> <api_key>")
+        Some("[clear|logout] <platform> [api_key]")
     }
 
     fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
-        // Once a platform is already chosen as the first token, free-type the
-        // API key (no second suggestion list — paste + Enter).
         let (first, rest) = split_first_token(args_query);
-        if !first.is_empty() && PlatformId::parse(first).is_some() && !rest.is_empty() {
+
+        // `/providers clear ` → pick a platform to log out of.
+        if is_clear_verb(first) {
+            if rest.is_empty() {
+                return Some(build_clear_platform_items(ctx.models));
+            }
+            // Platform already typed after clear — no further suggestions.
             return None;
         }
-        if !first.is_empty() && PlatformId::parse(first).is_some() && rest.is_empty() {
-            // Platform selected; waiting for key — no suggestion rows.
+
+        // `/providers zai ` → free-type the API key (use `/providers clear zai` to remove).
+        if !first.is_empty() && PlatformId::parse(first).is_some() {
             return None;
         }
-        Some(build_platform_items(ctx.models))
+
+        // Bare / partial first token: subcommands + platforms.
+        let mut items = build_clear_verb_items();
+        items.extend(build_platform_items(ctx.models));
+        Some(items)
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
-            // ArgPicker should have opened; if run still fires bare, show status.
             return CommandResult::Message(render_providers(ctx.models));
         }
 
-        let (platform_tok, key_rest) = split_first_token(trimmed);
-        let Some(platform) = PlatformId::parse(platform_tok) else {
+        let (first, rest) = split_first_token(trimmed);
+
+        // `/providers clear [platform]` / `logout` / `remove`
+        if is_clear_verb(first) {
+            let platform_tok = rest.trim();
+            if platform_tok.is_empty() {
+                return CommandResult::Error(
+                    "Usage: /providers clear <platform>\n\
+                     Example: /providers clear zai-coding\n\
+                     Tip: /providers clear  then pick a platform from the list."
+                        .into(),
+                );
+            }
+            // Allow accidental extra tokens: "clear zai-coding now"
+            let (plat, _) = split_first_token(platform_tok);
+            return clear_platform(plat);
+        }
+
+        let Some(platform) = PlatformId::parse(first) else {
             return CommandResult::Error(format!(
-                "Unknown platform '{platform_tok}'. Run /providers to pick one."
+                "Unknown platform or command '{first}'.\n\
+                 Set key:   /providers <platform> <api_key>\n\
+                 Clear key: /providers clear <platform>   (or /providers logout <platform>)"
             ));
         };
 
         if platform.uses_oauth() {
             return CommandResult::Error(format!(
-                "{} uses OAuth — run /login kimi (not an API key).",
+                "{} uses OAuth — run /login kimi to sign in, or `grok logout --kimi` to sign out.",
                 platform.display_name()
             ));
         }
 
-        let api_key = key_rest.trim();
+        let api_key = rest.trim();
         if api_key.is_empty() {
             return CommandResult::Error(format!(
                 "Paste an API key after the platform name:\n  /providers {} <api_key>\n\
-                 Or clear a stored key with: /providers {} clear",
+                 Or clear a stored key with:\n  /providers clear {}\n  /providers {} clear",
                 platform.as_str(),
-                platform.as_str()
+                platform.as_str(),
+                platform.as_str(),
             ));
         }
 
-        let clear = api_key.eq_ignore_ascii_case("clear")
-            || api_key.eq_ignore_ascii_case("none")
-            || api_key.eq_ignore_ascii_case("remove");
+        if is_clear_verb(api_key) || is_clear_verb(split_first_token(api_key).0) {
+            return clear_platform(platform.as_str());
+        }
+
         CommandResult::Action(Action::SetPlatformApiKey {
             platform: platform.as_str().to_owned(),
-            api_key: if clear {
-                String::new()
-            } else {
-                api_key.to_owned()
-            },
+            api_key: api_key.to_owned(),
         })
     }
+}
+
+fn clear_platform(platform_tok: &str) -> CommandResult {
+    let Some(platform) = PlatformId::parse(platform_tok) else {
+        return CommandResult::Error(format!(
+            "Unknown platform '{platform_tok}'. Run /providers clear and pick one."
+        ));
+    };
+    if platform.uses_oauth() {
+        return CommandResult::Error(format!(
+            "{} uses OAuth — run `grok logout --kimi` (not /providers clear).",
+            platform.display_name()
+        ));
+    }
+    CommandResult::Action(Action::SetPlatformApiKey {
+        platform: platform.as_str().to_owned(),
+        api_key: String::new(),
+    })
+}
+
+fn is_clear_verb(s: &str) -> bool {
+    matches!(
+        s.to_ascii_lowercase().as_str(),
+        "clear" | "logout" | "remove" | "unset" | "delete" | "off"
+    )
 }
 
 fn split_first_token(s: &str) -> (&str, &str) {
@@ -154,6 +208,44 @@ fn compact_hint(platform: PlatformId) -> String {
     format!("/providers {} <api_key>", platform.as_str())
 }
 
+fn build_clear_verb_items() -> Vec<ArgItem> {
+    vec![
+        ArgItem::new(
+            "clear / logout  (remove stored API key)",
+            "clear logout remove unset delete",
+            "clear ",
+            "Pick a platform next — removes platform/<id> from ~/.grok/auth.json",
+        ),
+    ]
+}
+
+fn build_clear_platform_items(models: &ModelState) -> Vec<ArgItem> {
+    PlatformId::ALL
+        .into_iter()
+        .filter(|p| !p.uses_oauth())
+        .map(|platform| {
+            let (status, usable, locked) = platform_status(models, platform);
+            let total = usable + locked;
+            let desc = match status {
+                PlatformStatus::Ready => {
+                    format!("✓ {total} models currently unlocked — clear stored key")
+                }
+                PlatformStatus::Locked => {
+                    format!("🔒 {total} models locked — clear stored key anyway")
+                }
+                PlatformStatus::NoCatalog => "clear stored key if present".to_string(),
+            };
+            ArgItem::new(
+                format!("{}  {}", platform.as_str(), platform.display_name()),
+                platform.as_str(),
+                // No trailing space — Enter runs `/providers clear <id>` immediately.
+                platform.as_str(),
+                desc,
+            )
+        })
+        .collect()
+}
+
 fn build_platform_items(models: &ModelState) -> Vec<ArgItem> {
     PlatformId::ALL
         .into_iter()
@@ -163,7 +255,10 @@ fn build_platform_items(models: &ModelState) -> Vec<ArgItem> {
             let (icon, desc) = match status {
                 PlatformStatus::Ready => (
                     "✓",
-                    format!("{total} models ready — re-paste key to replace"),
+                    format!(
+                        "{total} models ready — re-paste key to replace, or /providers clear {}",
+                        platform.as_str()
+                    ),
                 ),
                 PlatformStatus::Locked if platform.uses_oauth() => {
                     ("🔒", format!("{total} models — run /login kimi"))
@@ -194,8 +289,9 @@ fn build_platform_items(models: &ModelState) -> Vec<ArgItem> {
 fn render_providers(models: &ModelState) -> String {
     let mut out = String::new();
     out.push_str(
-        "Third-party platforms (BYOK). Select one, then paste an API key:\n\
-         /providers <platform> <api_key>\n\n",
+        "Third-party platforms (BYOK).\n\
+         Set key:    /providers <platform> <api_key>\n\
+         Clear key:  /providers clear <platform>   (alias: logout / remove)\n\n",
     );
 
     let mut any_ready = false;
@@ -206,7 +302,11 @@ fn render_providers(models: &ModelState) -> String {
         let (icon, models_col, tail) = match status {
             PlatformStatus::Ready => {
                 any_ready = true;
-                ("✓", format!("{total} models"), String::new())
+                (
+                    "✓",
+                    format!("{total} models"),
+                    format!(" — /providers clear {}", platform.as_str()),
+                )
             }
             PlatformStatus::Locked => {
                 any_locked = true;
@@ -232,9 +332,9 @@ fn render_providers(models: &ModelState) -> String {
         );
     }
     out.push_str(
-        "Keys are stored in ~/.grok/auth.json (scope platform/<id>). Env vars still win \
-         over the stored key; config.toml [platforms.<id>] api_key is the final fallback. \
-         Clear with: /providers <platform> clear",
+        "Keys live in ~/.grok/auth.json under platform/<id>. Env vars still win over the \
+         stored key (e.g. ZAI_API_KEY overrides /providers zai-coding). After clear, also \
+         unset conflicting env vars if models stay unlocked.",
     );
     out
 }
@@ -315,7 +415,7 @@ mod tests {
                 platform.as_str()
             );
         }
-        assert!(out.contains("/providers"));
+        assert!(out.contains("/providers clear"));
     }
 
     #[test]
@@ -353,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn run_clear_sends_empty_key() {
+    fn run_clear_suffix_sends_empty_key() {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
         match ProvidersCommand.run(&mut ctx, "zai clear") {
@@ -366,7 +466,36 @@ mod tests {
     }
 
     #[test]
-    fn suggest_args_lists_platforms() {
+    fn run_clear_subcommand_sends_empty_key() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        for cmd in [
+            "clear zai-coding",
+            "logout zai-coding",
+            "remove zai-coding",
+        ] {
+            match ProvidersCommand.run(&mut ctx, cmd) {
+                CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+                    assert_eq!(platform, "zai-coding", "cmd={cmd}");
+                    assert!(api_key.is_empty(), "cmd={cmd}");
+                }
+                other => panic!("expected clear for {cmd}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn run_clear_without_platform_errors() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match ProvidersCommand.run(&mut ctx, "clear") {
+            CommandResult::Error(msg) => assert!(msg.contains("clear <platform>"), "{msg}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggest_args_includes_clear_verb() {
         let models = ModelState::default();
         let ctx = AppCtx {
             models: &models,
@@ -375,7 +504,27 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Inline,
         };
         let items = ProvidersCommand.suggest_args(&ctx, "").expect("items");
-        assert_eq!(items.len(), PlatformId::ALL.len());
+        assert!(
+            items.iter().any(|i| i.insert_text.starts_with("clear")),
+            "missing clear verb: {:?}",
+            items.iter().map(|i| &i.insert_text).collect::<Vec<_>>()
+        );
         assert!(items.iter().any(|i| i.insert_text.starts_with("zai")));
+    }
+
+    #[test]
+    fn suggest_args_after_clear_lists_platforms() {
+        let models = ModelState::default();
+        let ctx = AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            screen_mode: crate::app::ScreenMode::Inline,
+        };
+        let items = ProvidersCommand
+            .suggest_args(&ctx, "clear ")
+            .expect("clear platform list");
+        assert!(items.iter().any(|i| i.insert_text == "zai-coding"));
+        assert!(items.iter().all(|i| !i.insert_text.contains("kimi-code")));
     }
 }

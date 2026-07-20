@@ -113,7 +113,16 @@ default = "moonshot-cn/kimi-k2.7-code"
 /model moonshot-cn/kimi-k3
 ```
 
-Clear a stored key with `/providers moonshot-cn clear`.
+Clear (log out) a stored key:
+
+```
+/providers clear moonshot-cn
+/providers logout moonshot-cn
+/providers moonshot-cn clear
+```
+
+Note: environment variables still win over the stored key. After clear, also
+`unset GROK_MOONSHOT_CN_API_KEY` / `MOONSHOT_API_KEY` if models stay unlocked.
 
 API keys are never written back into re-serialized config dumps and must not
 be committed to shared repos.

@@ -665,10 +665,23 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         })
         .count();
     let cleared = req.api_key.trim().is_empty();
+    // Env vars still win over auth.json — surface names (never values) so the
+    // TUI can warn after a "logout" that models may stay unlocked.
+    let env_still_active: Vec<&str> = platform_id
+        .api_key_env_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            std::env::var(name)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .collect();
     tracing::info!(
         platform = platform_id.as_str(),
         unlocked,
         cleared,
+        env_still_active = ?env_still_active,
         "platform API key updated via /providers"
     );
     ExtMethodResult::success(serde_json::json!({
@@ -676,6 +689,7 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         "displayName": platform_id.display_name(),
         "cleared": cleared,
         "modelsUnlocked": unlocked,
+        "envStillActive": env_still_active,
     }))
     .to_ext_response()
     .map_err(|e| acp::Error::internal_error().data(e.to_string()))
