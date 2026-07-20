@@ -426,28 +426,35 @@ pub fn read_kimi_code_auth(grok_home: &Path) -> Option<GrokAuth> {
 }
 
 /// Persist a Kimi Code OAuth credential under [`KIMI_CODE_OAUTH_SCOPE`].
-/// Merges with existing scopes so xAI login is preserved.
+/// Merges with existing scopes so xAI / OpenAI Codex login is preserved.
+///
+/// Serializes through `auth.json.lock` (same as Codex) so a concurrent
+/// whole-map RMW cannot drop sibling scopes.
 pub fn store_kimi_code_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
-    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    let mut stored = auth.clone();
-    stored.auth_mode = AuthMode::KimiCode;
-    map.insert(KIMI_CODE_OAUTH_SCOPE.to_owned(), stored);
-    write_auth_json(&path, &map)
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        let mut stored = auth.clone();
+        stored.auth_mode = AuthMode::KimiCode;
+        map.insert(KIMI_CODE_OAUTH_SCOPE.to_owned(), stored);
+        write_auth_json(&path, &map)
+    })
 }
 
 /// Remove the Kimi Code OAuth scope from auth.json.
 pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
-    if let Ok(mut map) = read_auth_json(&path) {
-        map.remove(KIMI_CODE_OAUTH_SCOPE);
-        if map.is_empty() {
-            let _ = std::fs::remove_file(&path);
-        } else {
-            write_auth_json(&path, &map)?;
+    with_auth_json_scope_lock(&path, || {
+        if let Ok(mut map) = read_auth_json(&path) {
+            map.remove(KIMI_CODE_OAUTH_SCOPE);
+            if map.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                write_auth_json(&path, &map)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Read the OpenAI Codex (ChatGPT) OAuth credential, if present and correctly scoped.
@@ -474,10 +481,15 @@ pub fn store_openai_codex_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Re
     })
 }
 
-/// Like [`store_openai_codex_auth`], but if the disk already holds a **fresh**
-/// Codex credential that no longer uses `spent_refresh` (sibling refresh won),
-/// adopt that entry instead of overwriting. Returns the credential that is on
-/// disk after the call.
+/// Like [`store_openai_codex_auth`], but if a sibling already rotated past
+/// `spent_refresh` (their RT no longer matches the one we just spent), adopt
+/// their on-disk entry instead of overwriting. Returns the credential that is
+/// on disk after the call.
+///
+/// Important: a still-valid access token that still uses `spent_refresh` must
+/// **not** block us — force-refresh after a 401 mints a new access token under
+/// the same RT, and preferring the old access would re-send the rejected
+/// bearer.
 pub(crate) fn store_openai_codex_auth_after_refresh(
     grok_home: &Path,
     candidate: &GrokAuth,
@@ -491,11 +503,17 @@ pub(crate) fn store_openai_codex_auth_after_refresh(
             && !super::model::is_expired(&existing)
         {
             let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
-            // Sibling already rotated past the RT we spent, or simply has a
-            // still-valid access token — prefer disk to avoid clobbering.
-            if existing_rt != spent_refresh || existing.key != candidate.key {
+            // Sibling already rotated past the RT we spent — prefer their write
+            // so we do not clobber a newer family or double-spend.
+            if existing_rt != spent_refresh {
                 return Ok(existing);
             }
+            // Same RT, same access: idempotent no-op.
+            if existing.key == candidate.key {
+                return Ok(existing);
+            }
+            // Same RT, different access: we just minted a replacement (e.g.
+            // force-refresh after 401) — fall through and persist candidate.
         }
         let mut stored = candidate.clone();
         stored.auth_mode = AuthMode::OpenAiCodex;

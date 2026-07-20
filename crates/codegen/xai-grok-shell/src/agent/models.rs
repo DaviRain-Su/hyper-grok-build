@@ -2260,6 +2260,7 @@ mod tests {
                 info,
                 api_key: key.map(str::to_owned),
                 env_key: None,
+                auth_provider: None,
                 api_base_url: None,
             }
         };
@@ -3615,6 +3616,7 @@ mod tests {
             info: config::ModelInfo::fallback("gpt-5"),
             api_key: None,
             env_key: Some(config::EnvKeys::new(["OPENAI_API_KEY_MUST_NOT_EXIST_XYZ"])),
+            auth_provider: None,
             api_base_url: None,
         };
         entry.info.id = Some("openai/gpt-5".into());

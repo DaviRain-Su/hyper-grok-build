@@ -416,8 +416,37 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
+        // Platform OAuth (Kimi / OpenAI Codex) always wins over the xAI session
+        // resolver. `session_token_auth_gate` is true whenever the user is on
+        // cached_token/grok.com/oidc AND the model is NotByok — common for
+        // openai-codex/* when the catalog stamp is not yet memoized as Byok.
+        // Preferring AuthManager here previously sent the xAI OIDC JWT to
+        // chatgpt.com → 401 "Could not parse your authentication token" while
+        // recovery "succeeded" by refreshing the *wrong* token.
+        let (api_key, bearer_resolver) = if responses_codex_dialect {
+            (
+                crate::auth::openai_codex::ensure_openai_codex_access_token_blocking(),
+                codex_bearer_resolver,
+            )
+        } else if let Some(kimi) = kimi_bearer_resolver {
+            (
+                crate::auth::kimi::ensure_kimi_code_access_token_blocking(),
+                Some(kimi),
+            )
+        } else if use_bearer_resolver {
+            (
+                creds.api_key,
+                self.auth_manager
+                    .as_ref()
+                    .map(|am| -> xai_grok_sampler::SharedBearerResolver {
+                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
+                    }),
+            )
+        } else {
+            (creds.api_key, None)
+        };
         SamplingConfig {
-            api_key: creds.api_key,
+            api_key,
             base_url: cfg.base_url,
             model: cfg.model,
             max_completion_tokens: cfg.max_completion_tokens,
@@ -445,16 +474,7 @@ impl SessionActor {
                 .map(|a| a.user_id),
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
-            bearer_resolver: if use_bearer_resolver {
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| -> xai_grok_sampler::SharedBearerResolver {
-                        std::sync::Arc::new(AuthManagerBearerResolver(am.clone()))
-                    })
-            } else {
-                // Kimi Code (~15m access tokens): live-resolve every request.
-                kimi_bearer_resolver.or(codex_bearer_resolver)
-            },
+            bearer_resolver,
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
@@ -808,7 +828,59 @@ impl SessionActor {
                 )),
             );
         }
-        if auth_recovery_eligible
+        // Third-party OAuth platforms must never recover via xAI AuthManager —
+        // that refreshes the wrong credential and reports "recovery succeeded"
+        // while chatgpt.com/kimi still 401.
+        let is_openai_codex =
+            xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&failed_base_url);
+        let is_kimi_code =
+            xai_grok_models::PlatformId::KimiCode.base_url_matches(&failed_base_url);
+        if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && is_openai_codex
+        {
+            match crate::auth::openai_codex::force_refresh_openai_codex_auth().await {
+                Some(_) => {
+                    tracing::info!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, openai-codex re-mint, retrying"
+                    );
+                    xai_grok_telemetry::unified_log::info(
+                        "auth recovery: sampler 401, openai-codex re-mint, retrying",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                    self.prepare_sampler_for_turn().await;
+                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, openai-codex re-mint failed"
+                    );
+                    xai_grok_telemetry::unified_log::warn(
+                        "auth recovery: sampler 401, openai-codex re-mint failed",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                }
+            }
+        } else if (matches!(error.kind, SamplingErrorKind::Auth)
+            || error.status_code == Some(401))
+            && is_kimi_code
+        {
+            // Do not fall through to xAI AuthManager recovery (wrong credential).
+            // Kimi only refreshes on local TTL expiry today; surface the 401 so
+            // the user can `/login kimi` rather than looping a false recovery.
+            tracing::warn!(
+                session_id = % self.session_info.id.0,
+                "auth recovery: sampler 401 on kimi-code — not refreshable via xAI session"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth recovery: sampler 401 on kimi-code — not refreshable via xAI session",
+                Some(self.session_info.id.0.as_ref()),
+                None,
+            );
+        } else if auth_recovery_eligible
             && crate::auth::devbox_login::is_devbox_environment()
             && let Some(ref am) = self.auth_manager
         {
@@ -833,8 +905,7 @@ impl SessionActor {
                     );
                 }
             }
-        }
-        if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
+        } else if auth_recovery_eligible && let Some(ref am) = self.auth_manager {
             if am
                 .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
                 .await

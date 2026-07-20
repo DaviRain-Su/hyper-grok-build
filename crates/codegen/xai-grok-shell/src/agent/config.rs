@@ -3509,6 +3509,131 @@ pub fn resolve_platform_api_key_with(
     platforms.config_api_key(platform)
 }
 
+/// Build a selectable effort row for a platform catalog entry.
+fn platform_effort_option(
+    value: ReasoningEffort,
+    label: &str,
+    description: &str,
+    default: bool,
+) -> ReasoningEffortOption {
+    ReasoningEffortOption {
+        id: value.as_str().to_string(),
+        value,
+        label: label.to_string(),
+        description: Some(description.to_string()),
+        default,
+    }
+}
+
+/// Official OpenAI Codex catalog (`codex-rs/models-manager/models.json`)
+/// `supported_reasoning_levels` for a model id (slug without platform prefix).
+///
+/// Source of truth for GPT-5.6 Sol/Terra/Luna effort menus (includes `max` /
+/// `ultra` where the Codex CLI exposes them). Pi's thinkingLevelMap is a
+/// partial projection (has `max` for 5.6, not `ultra`); we prefer the Codex
+/// catalog so Sol/Terra users can pick Ultra for automatic task delegation.
+fn openai_codex_catalog_efforts(model: &str) -> Option<(ReasoningEffort, Vec<(ReasoningEffort, &'static str)>)> {
+    use ReasoningEffort as E;
+    // Descriptions copied from Codex models.json.
+    const LOW: (E, &str) = (E::Low, "Fast responses with lighter reasoning");
+    const MEDIUM: (E, &str) = (
+        E::Medium,
+        "Balances speed and reasoning depth for everyday tasks",
+    );
+    const HIGH: (E, &str) = (E::High, "Greater reasoning depth for complex problems");
+    const XHIGH: (E, &str) = (
+        E::Xhigh,
+        "Extra high reasoning depth for complex problems",
+    );
+    const MAX: (E, &str) = (E::Max, "Maximum reasoning depth for the hardest problems");
+    const ULTRA: (E, &str) = (
+        E::Ultra,
+        "Maximum reasoning with automatic task delegation",
+    );
+    // Base ladder shared by gpt-5.2 … gpt-5.5.
+    let base = [LOW, MEDIUM, HIGH, XHIGH];
+    // GPT-5.6 adds max; Sol/Terra also add ultra.
+    let with_max = [LOW, MEDIUM, HIGH, XHIGH, MAX];
+    let with_ultra = [LOW, MEDIUM, HIGH, XHIGH, MAX, ULTRA];
+
+    let (default, rows) = match model {
+        // Codex catalog (2026): sol default low; terra/luna default medium.
+        "gpt-5.6-sol" => (E::Low, with_ultra.as_slice()),
+        "gpt-5.6-terra" => (E::Medium, with_ultra.as_slice()),
+        "gpt-5.6-luna" => (E::Medium, with_max.as_slice()), // max yes, ultra no
+        "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.2" => (E::Medium, base.as_slice()),
+        // Offline fallback not in current Codex models.json — same as 5.4.
+        "gpt-5.3-codex-spark" => (E::Low, base.as_slice()),
+        _ if model.starts_with("gpt-5.6") => (E::Medium, with_max.as_slice()),
+        _ if model.starts_with("gpt-5") => (E::Medium, base.as_slice()),
+        _ => return None,
+    };
+    Some((default, rows.to_vec()))
+}
+
+/// Per-model reasoning-effort menu for built-in platform catalogs.
+///
+/// OpenAI Codex: official Codex CLI `supported_reasoning_levels` (not a
+/// single global low/medium/max). GPT-5.6 Sol/Terra expose **max** and
+/// **ultra**; Luna exposes max but not ultra; 5.5/5.4 stop at xhigh.
+///
+/// Kimi K3: Pi `KIMI_K3_THINKING_LEVEL_MAP` → low / high / max only.
+fn platform_builtin_reasoning_efforts(
+    platform: xai_grok_models::PlatformId,
+    model: &str,
+) -> (bool, Option<ReasoningEffort>, Vec<ReasoningEffortOption>) {
+    use ReasoningEffort as E;
+    match platform {
+        xai_grok_models::PlatformId::OpenAiCodex => {
+            let Some((default, rows)) = openai_codex_catalog_efforts(model) else {
+                return (true, Some(E::Medium), vec![
+                    platform_effort_option(E::Low, "Low", "Faster, lighter reasoning", false),
+                    platform_effort_option(E::Medium, "Medium", "Balanced reasoning", true),
+                    platform_effort_option(E::High, "High", "Heavy reasoning", false),
+                    platform_effort_option(E::Xhigh, "X-High", "Extra-high reasoning", false),
+                ]);
+            };
+            let opts = rows
+                .into_iter()
+                .map(|(value, desc)| {
+                    platform_effort_option(
+                        value,
+                        match value {
+                            E::Low => "Low",
+                            E::Medium => "Medium",
+                            E::High => "High",
+                            E::Xhigh => "X-High",
+                            E::Max => "Max",
+                            E::Ultra => "Ultra",
+                            E::None => "Off",
+                            E::Minimal => "Minimal",
+                        },
+                        desc,
+                        value == default,
+                    )
+                })
+                .collect();
+            (true, Some(default), opts)
+        }
+        xai_grok_models::PlatformId::KimiCode if model == "k3" || model.starts_with("kimi-k3") => {
+            // Pi KIMI_K3_THINKING_LEVEL_MAP: off/minimal/medium/xhigh null;
+            // low/high/max only.
+            let opts = vec![
+                platform_effort_option(E::Low, "Low", "Faster K3 thinking", false),
+                platform_effort_option(E::High, "High", "Stronger K3 thinking", false),
+                platform_effort_option(
+                    E::Max,
+                    "Max",
+                    "Maximum K3 thinking (wire `max`)",
+                    true,
+                ),
+            ];
+            (true, Some(E::Max), opts)
+        }
+        _ => (false, None, Vec::new()),
+    }
+}
+
 /// Insert built-in platform catalog entries when missing. Does not overwrite
 /// prefetched / `[model.*]` / xAI defaults that already occupy the same key.
 fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
@@ -3552,6 +3677,21 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
             );
         }
+        // Prefer an explicit per-platform effort menu over the legacy
+        // low/medium/high/xhigh fallback so GPT-5 / Kimi show their real tiers.
+        let (menu_supports, menu_default, menu_opts) =
+            platform_builtin_reasoning_efforts(builtin.platform, &builtin.model);
+        let supports_reasoning_effort = builtin.supports_reasoning_effort || menu_supports;
+        let reasoning_effort = if supports_reasoning_effort {
+            menu_default
+        } else {
+            None
+        };
+        let reasoning_efforts = if supports_reasoning_effort {
+            menu_opts
+        } else {
+            Vec::new()
+        };
         let config = ModelEntryConfig {
             id: Some(key.clone()),
             model: builtin.model.clone(),
@@ -3578,9 +3718,9 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             use_concise: false,
             hidden: false,
             supported_in_api: builtin.supported_in_api,
-            reasoning_effort: None,
-            supports_reasoning_effort: builtin.supports_reasoning_effort,
-            reasoning_efforts: Vec::new(),
+            reasoning_effort,
+            supports_reasoning_effort,
+            reasoning_efforts,
             supports_backend_search: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -6643,6 +6783,96 @@ if field.as_deref() == Some("auth_provider"))
         assert!(model_uses_openai_codex_oauth(&codex));
         assert!(kimi_code_bearer_resolver_for_model(&codex).is_none());
         assert!(openai_codex_bearer_resolver_for_model(&codex).is_some());
+    }
+
+    /// GPT-5.6 Sol/Terra expose max+ultra; Luna max only — matches Codex
+    /// `models.json` `supported_reasoning_levels`.
+    #[test]
+    fn openai_codex_builtin_exposes_codex_catalog_effort_menu() {
+        let mut catalog = IndexMap::new();
+        inject_moonshot_builtin_models(&mut catalog);
+        let sol = catalog
+            .get("openai-codex/gpt-5.6-sol")
+            .expect("sol builtin present");
+        assert!(sol.info.supports_reasoning_effort);
+        assert_eq!(sol.info.reasoning_effort, Some(ReasoningEffort::Low));
+        let values: Vec<_> = sol
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|o| o.value)
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+                ReasoningEffort::Max,
+                ReasoningEffort::Ultra,
+            ]
+        );
+        let terra = catalog
+            .get("openai-codex/gpt-5.6-terra")
+            .expect("terra present");
+        assert!(terra
+            .info
+            .reasoning_efforts
+            .iter()
+            .any(|o| o.value == ReasoningEffort::Ultra));
+        let luna = catalog
+            .get("openai-codex/gpt-5.6-luna")
+            .expect("luna present");
+        let luna_vals: Vec<_> = luna
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|o| o.value)
+            .collect();
+        assert!(luna_vals.contains(&ReasoningEffort::Max));
+        assert!(
+            !luna_vals.contains(&ReasoningEffort::Ultra),
+            "Luna has max but not ultra in Codex catalog"
+        );
+        // 5.5 stops at xhigh (no max/ultra).
+        let g55 = catalog
+            .get("openai-codex/gpt-5.5")
+            .expect("5.5 present");
+        let g55_vals: Vec<_> = g55
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|o| o.value)
+            .collect();
+        assert_eq!(
+            g55_vals,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+            ]
+        );
+    }
+
+    /// Kimi K3 menu is low/high/max (not the Grok or Codex ladder).
+    #[test]
+    fn kimi_k3_builtin_exposes_low_high_max_effort_menu() {
+        let mut catalog = IndexMap::new();
+        inject_moonshot_builtin_models(&mut catalog);
+        let k3 = catalog.get("kimi-code/k3").expect("k3 builtin present");
+        assert!(k3.info.supports_reasoning_effort);
+        assert_eq!(k3.info.reasoning_effort, Some(ReasoningEffort::Max));
+        let values: Vec<_> = k3.info.reasoning_efforts.iter().map(|o| o.value).collect();
+        assert_eq!(
+            values,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ]
+        );
     }
 
     /// The effective-model RE-support lookup must use the model ACTUALLY used:

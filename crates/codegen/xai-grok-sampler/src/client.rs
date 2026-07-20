@@ -234,6 +234,54 @@ fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
     }
 }
 
+/// Codex / ChatGPT Responses wire form for `reasoning.effort`.
+///
+/// async-openai's typed `ReasoningEffort` only goes up to `xhigh`, so Max /
+/// Ultra would collapse on serialize. Official Codex catalog (and the ChatGPT
+/// backend) accept free-form effort strings including **`max`** and
+/// **`ultra`** (GPT-5.6 Sol/Terra). After JSON serialize we rewrite
+/// `reasoning.effort` from the session's canonical effort:
+///
+/// - `None` → drop `reasoning` (off)
+/// - `Minimal` → `"low"` (Pi alias on Codex)
+/// - `Max` → `"max"`, `Ultra` → `"ultra"` (must not collapse to xhigh)
+/// - others → their `as_str()` token
+fn patch_codex_reasoning_effort_wire(
+    body: &mut serde_json::Value,
+    effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+) {
+    use xai_grok_sampling_types::ReasoningEffort as E;
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    match effort {
+        None => {}
+        Some(E::None) => {
+            obj.remove("reasoning");
+        }
+        Some(e) => {
+            let wire = match e {
+                E::None => unreachable!(),
+                E::Minimal => "low",
+                E::Low => "low",
+                E::Medium => "medium",
+                E::High => "high",
+                E::Xhigh => "xhigh",
+                E::Max => "max",
+                E::Ultra => "ultra",
+            };
+            let reasoning = obj
+                .entry("reasoning")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(r) = reasoning.as_object_mut() {
+                r.insert("effort".into(), serde_json::Value::String(wire.into()));
+                r.entry("summary")
+                    .or_insert_with(|| serde_json::Value::String("auto".into()));
+            }
+        }
+    }
+}
+
 /// Metadata key for cost ticks past typed Response events.
 pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "xai.cost_usd_ticks";
 
@@ -371,6 +419,9 @@ struct ClientDefaults {
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     responses_codex_dialect: bool,
+    /// Session reasoning effort. Needed for Codex wire rewrite: async-openai
+    /// only types through `xhigh`, so Max/Ultra must be restored post-serialize.
+    reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
 }
 
 // =============================================================================
@@ -584,6 +635,7 @@ impl SamplingClient {
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
             responses_codex_dialect: config.responses_codex_dialect,
+            reasoning_effort: config.reasoning_effort,
         };
 
         Ok(Self {
@@ -1123,6 +1175,12 @@ impl SamplingClient {
         // it in post-serialize. This is the last surviving piece of the
         // old raw_output machinery.
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        if self.defaults.responses_codex_dialect {
+            patch_codex_reasoning_effort_wire(
+                &mut request_body,
+                self.defaults.reasoning_effort,
+            );
+        }
         let http_request = grok_headers
             .apply(self.post(self.endpoint("responses")))
             .json(&request_body);
@@ -1259,6 +1317,12 @@ impl SamplingClient {
             }
         }
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        if self.defaults.responses_codex_dialect {
+            patch_codex_reasoning_effort_wire(
+                &mut request_body,
+                self.defaults.reasoning_effort,
+            );
+        }
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
         let doom_loop = self

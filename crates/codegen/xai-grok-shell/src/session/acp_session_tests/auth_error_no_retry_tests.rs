@@ -750,6 +750,79 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
         .await;
 }
 
+/// Regression: when the active model routes to the ChatGPT Codex backend,
+/// `reconstruct_full_config` must wire the OpenAI Codex bearer resolver even
+/// if the ACP session method is still `cached_token` / OIDC. Preferring the
+/// xAI AuthManager resolver previously sent the session JWT to
+/// `chatgpt.com/backend-api/codex/responses` → 401 "Could not parse your
+/// authentication token" with a false "auth recovery succeeded" loop.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_prefers_codex_resolver_over_session_auth_manager() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _guard = xai_grok_test_support::EnvGuard::set(
+                "GROK_AUTH_PATH",
+                auth_path.to_str().unwrap(),
+            );
+            // Minimal valid Codex JWT payload with chatgpt_account_id claim.
+            use base64::Engine as _;
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-test"}}"#);
+            let access = format!("hdr.{payload}.sig");
+            let auth = crate::auth::GrokAuth {
+                key: access.clone(),
+                auth_mode: crate::auth::AuthMode::OpenAiCodex,
+                account_id: Some("acct-test".into()),
+                refresh_token: Some("rt".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                ..crate::auth::GrokAuth::test_default()
+            };
+            crate::auth::store_openai_codex_auth(dir.path(), &auth).unwrap();
+
+            let (_am_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "xai-session-jwt".to_string(),
+            )
+            .await;
+
+            // Point the session sampling config at the Codex backend.
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://chatgpt.com/backend-api/codex".into();
+                cfg.model = "gpt-5.6-sol".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_some(),
+                "openai-codex base_url must install a live bearer resolver"
+            );
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some(access.as_str()),
+                "must use the Codex access token, not the xAI session JWT"
+            );
+            // Live resolver must also surface the Codex bearer (not AuthManager).
+            let live = cfg
+                .bearer_resolver
+                .as_ref()
+                .and_then(|r| r.current_bearer());
+            assert_eq!(live.as_deref(), Some(access.as_str()));
+            assert!(
+                cfg.responses_codex_dialect,
+                "Codex dialect flag must be set for the chatgpt backend"
+            );
+        })
+        .await;
+}
+
 /// Without the live bearer resolver here the sampler would sign requests with
 /// the stale buffered token.
 #[tokio::test(flavor = "current_thread")]
@@ -1143,6 +1216,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 compaction_at_tokens: None,
                 doom_loop_recovery: None,
                 header_injector: None,
+                responses_codex_dialect: false,
             };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, true, 85)

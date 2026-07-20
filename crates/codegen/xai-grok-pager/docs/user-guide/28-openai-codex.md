@@ -70,6 +70,26 @@ grok -m openai-codex/gpt-5.6-sol -p "ping"
 
 TUI: `/model openai-codex/gpt-5.6-sol`
 
+### Reasoning effort (Codex catalog)
+
+Menus follow the official OpenAI Codex CLI catalog
+(`codex-rs/models-manager/models.json` `supported_reasoning_levels`) —
+**each model has its own ladder**, not a single global low/medium/max.
+
+| Model | Levels | Default |
+|-------|--------|---------|
+| `gpt-5.6-sol` | low · medium · high · xhigh · **max** · **ultra** | low |
+| `gpt-5.6-terra` | low · medium · high · xhigh · **max** · **ultra** | medium |
+| `gpt-5.6-luna` | low · medium · high · xhigh · **max** | medium |
+| `gpt-5.5` / `gpt-5.4` / mini | low · medium · high · xhigh | medium |
+
+- **max** — maximum single-agent reasoning depth  
+- **ultra** — maximum reasoning **with automatic task delegation** (Sol/Terra only)
+
+Wire values are sent as free-form `reasoning.effort` strings (`max` /
+`ultra` included). Override with `/effort max`, `/effort ultra`, or
+`grok --effort ultra`.
+
 The `grok codex` convenience subcommand pins a Codex model and drops into
 the standard flows:
 

@@ -508,23 +508,35 @@ impl xai_grok_sampler::HeaderInjector for OpenAiCodexAccountHeaderInjector {
 /// Load a usable OpenAI Codex access token: cached if still valid, otherwise
 /// refreshed (when possible) and persisted.
 pub async fn ensure_openai_codex_access_token() -> Option<String> {
-    refresh_openai_codex_auth().await.map(|auth| auth.key)
+    refresh_openai_codex_auth(false).await.map(|auth| auth.key)
 }
 
 /// Like [`ensure_openai_codex_access_token`] but returns the whole credential
 /// (bearer + account id) so callers can stamp the `chatgpt-account-id` header.
 pub async fn ensure_openai_codex_auth() -> Option<GrokAuth> {
-    refresh_openai_codex_auth().await
+    refresh_openai_codex_auth(false).await
 }
 
-async fn refresh_openai_codex_auth() -> Option<GrokAuth> {
+/// Force a network refresh of the Codex access token even when the local TTL
+/// still looks valid. Used on 401 from `chatgpt.com/backend-api` so recovery
+/// does not no-op on a still-cached rejected bearer.
+pub async fn force_refresh_openai_codex_auth() -> Option<GrokAuth> {
+    refresh_openai_codex_auth(true).await
+}
+
+/// `force`: when true, always hit the token endpoint (401 recovery). When
+/// false, return the cached credential if it is still within its local TTL.
+async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
     let path = auth_json_path();
     let home = path.parent().unwrap_or(&path);
     let auth = read_openai_codex_auth(home)?;
-    if !crate::auth::is_expired(&auth) {
+    if !force && !crate::auth::is_expired(&auth) {
         return Some(auth);
     }
     let refresh = auth.refresh_token.as_deref()?.to_owned();
+    if refresh.is_empty() {
+        return None;
+    }
     let host = xai_grok_models::PlatformId::OpenAiCodex.oauth_host()?;
     // Network call outside the flock (do not hold auth.json.lock across I/O).
     match oauth::refresh_access_token(&host, &refresh).await {
