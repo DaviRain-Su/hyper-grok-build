@@ -11625,6 +11625,7 @@ default = "grok-4.5"
     // ── Moonshot / platforms (Phase 1) ──────────────────────────────
 
     #[test]
+    #[serial]
     fn moonshot_builtins_injected_into_catalog() {
         let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
@@ -11674,8 +11675,8 @@ default = "grok-4.5"
             assert!(kimi.info.base_url.contains("kimi.com"), "{key}");
             assert_eq!(
                 kimi.info.api_backend,
-                ApiBackend::ChatCompletions,
-                "{key}: Kimi Code uses OpenAI Chat Completions"
+                ApiBackend::Messages,
+                "{key}: Kimi Code uses Anthropic Messages (official Pi)"
             );
             assert!(
                 !kimi.info.supported_in_api || kimi.has_own_credentials(),
@@ -11705,6 +11706,7 @@ default = "grok-4.5"
     }
 
     #[test]
+    #[serial]
     fn apply_platform_credentials_reveals_with_bearer() {
         let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
@@ -11767,6 +11769,7 @@ default = "grok-4.5"
     }
 
     #[test]
+    #[serial]
     fn platforms_config_stamps_api_key_when_env_absent() {
         let (_dir, _guards) = isolated_auth_home();
         let raw: toml::Value = toml::from_str(
@@ -11800,6 +11803,7 @@ api_key = "sk-test-cn-key-not-for-prod"
     }
 
     #[test]
+    #[serial]
     fn kimi_code_oauth_reveals_subscription_models() {
         let (dir, _guards) = isolated_auth_home();
         let auth = crate::auth::GrokAuth {
@@ -11815,11 +11819,14 @@ api_key = "sk-test-cn-key-not-for-prod"
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
         let models = resolve_model_list(&cfg, None);
         let entry = models
-            .get("kimi-code/kimi-k2.7-code")
+            .get("kimi-code/k2p7")
+            .or_else(|| models.get("kimi-code/kimi-k2.7-code"))
             .expect("kimi-code k2.7 entry");
-        eprintln!("DEBUG backend={:?} model={} supported={} api_key={:?}",
-                  entry.info.api_backend, entry.info.model, entry.info.supported_in_api, entry.api_key);
-        assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
+        assert_eq!(
+            entry.info.api_backend,
+            ApiBackend::Messages,
+            "Kimi Code subscription uses Anthropic Messages (Pi)"
+        );
         assert!(entry.info.supported_in_api, "Kimi Code entry visible after login");
         assert_eq!(entry.api_key.as_deref(), Some("kimi-access-token"));
     }

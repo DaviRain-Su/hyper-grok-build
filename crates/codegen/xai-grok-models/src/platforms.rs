@@ -500,7 +500,7 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
 
 fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     // ── Kimi Code subscription (api.kimi.com/coding/v1) ──────────────
-    // Grok speaks the Kimi Code inference endpoint as OpenAI Chat Completions.
+    // Official Pi `kimi-coding` uses Anthropic Messages + forceAdaptiveThinking.
     // Canonical ids: k3, k2p7, kimi-for-coding-highspeed. Older open-platform
     // style ids remain as offline aliases for configs that still reference them.
     macro_rules! kimi {
@@ -514,7 +514,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supports_reasoning_effort: $effort,
                 supported_in_api: false,
                 max_completion_tokens: $max_tok,
-                api_backend: PlatformApiBackend::ChatCompletions,
+                api_backend: PlatformApiBackend::Messages,
             }
         };
     }
@@ -1163,8 +1163,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {key}"));
             assert_eq!(
                 m.api_backend,
-                PlatformApiBackend::ChatCompletions,
-                "{key}: Kimi Code uses OpenAI Chat Completions"
+                PlatformApiBackend::Messages,
+                "{key}: official Pi kimi-coding uses anthropic-messages"
             );
             assert!(
                 !m.supported_in_api,
