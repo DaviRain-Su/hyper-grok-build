@@ -1,6 +1,8 @@
-use std::fs::File;
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
 
 use super::model::{
     API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, KIMI_CODE_OAUTH_SCOPE, OPENAI_CODEX_OAUTH_SCOPE,
@@ -458,26 +460,115 @@ pub fn read_openai_codex_auth(grok_home: &Path) -> Option<GrokAuth> {
 
 /// Persist an OpenAI Codex OAuth credential under [`OPENAI_CODEX_OAUTH_SCOPE`].
 /// Merges with existing scopes so xAI login is preserved.
+///
+/// Serializes through `auth.json.lock` and re-reads under the lock so a
+/// concurrent xAI/Kimi writer cannot be clobbered by a stale whole-map RMW.
 pub fn store_openai_codex_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
-    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    let mut stored = auth.clone();
-    stored.auth_mode = AuthMode::OpenAiCodex;
-    map.insert(OPENAI_CODEX_OAUTH_SCOPE.to_owned(), stored);
-    write_auth_json(&path, &map)
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        let mut stored = auth.clone();
+        stored.auth_mode = AuthMode::OpenAiCodex;
+        map.insert(OPENAI_CODEX_OAUTH_SCOPE.to_owned(), stored);
+        write_auth_json(&path, &map)
+    })
+}
+
+/// Like [`store_openai_codex_auth`], but if the disk already holds a **fresh**
+/// Codex credential that no longer uses `spent_refresh` (sibling refresh won),
+/// adopt that entry instead of overwriting. Returns the credential that is on
+/// disk after the call.
+pub(crate) fn store_openai_codex_auth_after_refresh(
+    grok_home: &Path,
+    candidate: &GrokAuth,
+    spent_refresh: &str,
+) -> std::io::Result<GrokAuth> {
+    let path = grok_home.join("auth.json");
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        if let Some(existing) = map.get(OPENAI_CODEX_OAUTH_SCOPE).cloned()
+            && existing.auth_mode == AuthMode::OpenAiCodex
+            && !super::model::is_expired(&existing)
+        {
+            let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
+            // Sibling already rotated past the RT we spent, or simply has a
+            // still-valid access token — prefer disk to avoid clobbering.
+            if existing_rt != spent_refresh || existing.key != candidate.key {
+                return Ok(existing);
+            }
+        }
+        let mut stored = candidate.clone();
+        stored.auth_mode = AuthMode::OpenAiCodex;
+        map.insert(OPENAI_CODEX_OAUTH_SCOPE.to_owned(), stored.clone());
+        write_auth_json(&path, &map)?;
+        Ok(stored)
+    })
 }
 
 /// Remove the OpenAI Codex OAuth scope from auth.json.
 pub fn clear_openai_codex_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
-    if let Ok(mut map) = read_auth_json(&path) {
-        map.remove(OPENAI_CODEX_OAUTH_SCOPE);
-        if map.is_empty() {
-            let _ = std::fs::remove_file(&path);
-        } else {
-            write_auth_json(&path, &map)?;
+    with_auth_json_scope_lock(&path, || {
+        if let Ok(mut map) = read_auth_json(&path) {
+            map.remove(OPENAI_CODEX_OAUTH_SCOPE);
+            if map.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                write_auth_json(&path, &map)?;
+            }
         }
+        Ok(())
+    })
+}
+
+/// Hold an exclusive flock on `auth.json.lock` for a short disk RMW.
+///
+/// Blocking is intentional: these writers only touch disk (no network under
+/// the lock). Writes `PID:TS` holder info so the AuthManager stale-lock path
+/// can still identify the holder.
+fn with_auth_json_scope_lock<R>(auth_json_path: &Path, f: impl FnOnce() -> R) -> R {
+    let lock_path = auth_json_path.with_file_name("auth.json.lock");
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .ok();
+    if let Some(ref mut file) = file {
+        if let Err(e) = file.lock_exclusive() {
+            tracing::warn!(
+                error = %e,
+                path = %lock_path.display(),
+                "auth: could not flock auth.json.lock for scope write; proceeding unlocked"
+            );
+        } else if let Err(e) = write_scope_lock_holder_info(file) {
+            tracing::warn!(
+                error = %e,
+                "auth: failed to write auth.json.lock holder info"
+            );
+        }
+    } else {
+        tracing::warn!(
+            path = %lock_path.display(),
+            "auth: could not open auth.json.lock for scope write; proceeding unlocked"
+        );
     }
+    let out = f();
+    drop(file); // unlock
+    out
+}
+
+fn write_scope_lock_holder_info(file: &mut File) -> std::io::Result<()> {
+    let pid = std::process::id();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    write!(file, "{pid}:{ts}")?;
+    file.sync_all()?;
     Ok(())
 }
 

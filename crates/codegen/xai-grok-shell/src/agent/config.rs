@@ -5196,6 +5196,14 @@ pub fn sampling_config_for_model(
     let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
         .or_else(|| openai_codex_bearer_resolver_for_model(model));
     let responses_codex_dialect = model_uses_openai_codex_oauth(model);
+    // Live-refresh chatgpt-account-id per request (same cadence as the bearer).
+    let header_injector = if responses_codex_dialect {
+        Some(std::sync::Arc::new(
+            crate::auth::openai_codex::OpenAiCodexAccountHeaderInjector,
+        ) as xai_grok_sampler::SharedHeaderInjector)
+    } else {
+        None
+    };
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5223,7 +5231,7 @@ pub fn sampling_config_for_model(
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
-        header_injector: None,
+        header_injector,
         responses_codex_dialect,
     }
 }
@@ -5345,6 +5353,11 @@ pub fn inject_url_derived_headers(
     // tag, and the per-account header (Pi `buildBaseCodexHeaders`). The
     // account id comes from the stored OAuth credential; skip silently when
     // signed out (the request will 401 and surface the login hint).
+    //
+    // Always overwrite `chatgpt-account-id` (do not `or_insert`): session
+    // sampling configs carry `extra_headers` across turns, so a sticky first
+    // value would pair a re-login bearer with a stale account after
+    // `/login openai` as a different ChatGPT account.
     if xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(base_url) {
         headers
             .entry("OpenAI-Beta".to_string())
@@ -5352,12 +5365,21 @@ pub fn inject_url_derived_headers(
         headers
             .entry("originator".to_string())
             .or_insert_with(|| "grok-build".to_string());
-        if let Some(account_id) = crate::auth::read_openai_codex_auth(&xai_grok_config::grok_home())
-            .and_then(|auth| auth.account_id)
-        {
-            headers
-                .entry("chatgpt-account-id".to_string())
-                .or_insert(account_id);
+        // Honor `GROK_AUTH_PATH` (same path login/store use), not only `~/.grok`.
+        let account_id = {
+            let auth_path = crate::auth::auth_json_path();
+            let home = auth_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            crate::auth::read_openai_codex_auth(home).and_then(|auth| auth.account_id)
+        };
+        match account_id {
+            Some(account_id) => {
+                headers.insert("chatgpt-account-id".to_string(), account_id);
+            }
+            None => {
+                headers.shift_remove("chatgpt-account-id");
+            }
         }
     }
     let _ = (alpha_test_key, base_url);
@@ -5765,6 +5787,42 @@ reasoning_effort = "low"
             );
         }
     }
+    /// Stale `chatgpt-account-id` in carried session headers must be overwritten
+    /// from the current on-disk Codex credential (not `or_insert`).
+    #[test]
+    #[serial]
+    fn inject_url_derived_headers_overwrites_codex_account_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let _guard = xai_grok_test_support::EnvGuard::set(
+            "GROK_AUTH_PATH",
+            auth_path.to_str().unwrap(),
+        );
+        let auth = crate::auth::GrokAuth {
+            key: "access".into(),
+            auth_mode: crate::auth::AuthMode::OpenAiCodex,
+            account_id: Some("acct-new".into()),
+            ..Default::default()
+        };
+        crate::auth::store_openai_codex_auth(dir.path(), &auth).unwrap();
+
+        let mut headers = IndexMap::new();
+        headers.insert("chatgpt-account-id".to_string(), "acct-stale".to_string());
+        inject_url_derived_headers(
+            &mut headers,
+            None,
+            "https://chatgpt.com/backend-api/codex",
+        );
+        assert_eq!(
+            headers.get("chatgpt-account-id").map(String::as_str),
+            Some("acct-new")
+        );
+        assert_eq!(
+            headers.get("OpenAI-Beta").map(String::as_str),
+            Some("responses=experimental")
+        );
+    }
+
     #[test]
     fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
         let mut headers = IndexMap::new();

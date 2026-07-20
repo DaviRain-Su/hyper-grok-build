@@ -24,6 +24,7 @@ use crate::auth::flow::AuthChannels;
 use crate::auth::model::GrokAuth;
 use crate::auth::storage::{
     auth_json_path, read_openai_codex_auth, store_openai_codex_auth,
+    store_openai_codex_auth_after_refresh,
 };
 
 /// How the user wants to authenticate (Pi `Select OpenAI Codex login method`).
@@ -473,6 +474,37 @@ impl xai_grok_sampler::BearerResolver for OpenAiCodexBearerResolver {
     }
 }
 
+/// Per-request `chatgpt-account-id` aligned with the live Codex credential.
+///
+/// Bearer tokens refresh via [`OpenAiCodexBearerResolver`]; without this
+/// injector the account header would stick from the first
+/// `inject_url_derived_headers` stamp and break after re-login as a different
+/// ChatGPT account mid-session.
+#[derive(Debug, Default)]
+pub struct OpenAiCodexAccountHeaderInjector;
+
+impl OpenAiCodexAccountHeaderInjector {
+    /// Apply the current account id (or remove the header when signed out).
+    pub fn apply(headers: &mut reqwest::header::HeaderMap) {
+        match ensure_openai_codex_auth_blocking().and_then(|a| a.account_id) {
+            Some(account_id) => {
+                if let Ok(v) = reqwest::header::HeaderValue::from_str(&account_id) {
+                    headers.insert("chatgpt-account-id", v);
+                }
+            }
+            None => {
+                headers.remove("chatgpt-account-id");
+            }
+        }
+    }
+}
+
+impl xai_grok_sampler::HeaderInjector for OpenAiCodexAccountHeaderInjector {
+    fn inject(&self, headers: &mut reqwest::header::HeaderMap) {
+        Self::apply(headers);
+    }
+}
+
 /// Load a usable OpenAI Codex access token: cached if still valid, otherwise
 /// refreshed (when possible) and persisted.
 pub async fn ensure_openai_codex_access_token() -> Option<String> {
@@ -492,19 +524,28 @@ async fn refresh_openai_codex_auth() -> Option<GrokAuth> {
     if !crate::auth::is_expired(&auth) {
         return Some(auth);
     }
-    let refresh = auth.refresh_token.as_deref()?;
+    let refresh = auth.refresh_token.as_deref()?.to_owned();
     let host = xai_grok_models::PlatformId::OpenAiCodex.oauth_host()?;
-    match oauth::refresh_access_token(&host, refresh).await {
-        Ok(token) => match oauth::credentials_from_token(token, Some(refresh)) {
+    // Network call outside the flock (do not hold auth.json.lock across I/O).
+    match oauth::refresh_access_token(&host, &refresh).await {
+        Ok(token) => match oauth::credentials_from_token(token, Some(&refresh)) {
             Ok(mut new_auth) => {
                 // The refresh response has no id_token — carry the email over.
                 if new_auth.email.is_none() {
                     new_auth.email = auth.email.clone();
                 }
-                if let Err(e) = store_openai_codex_auth(home, &new_auth) {
-                    tracing::warn!(error = %e, "auth: failed to persist refreshed Codex token");
+                // Under lock: re-read and adopt a sibling's fresher write if one
+                // landed while we were on the network, else persist ours.
+                match store_openai_codex_auth_after_refresh(home, &new_auth, &refresh) {
+                    Ok(on_disk) => Some(on_disk),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "auth: failed to persist refreshed Codex token"
+                        );
+                        Some(new_auth)
+                    }
                 }
-                Some(new_auth)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "auth: Codex token refresh parse failed");

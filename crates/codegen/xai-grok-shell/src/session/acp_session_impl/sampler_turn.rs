@@ -326,13 +326,20 @@ impl SessionActor {
     pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
         #[allow(clippy::items_after_statements)]
         #[derive(Debug)]
-        struct TraceContextInjector;
-        impl xai_grok_sampler::HeaderInjector for TraceContextInjector {
+        struct SessionHeaderInjector {
+            /// When true, refresh `chatgpt-account-id` from the live Codex
+            /// credential so re-login mid-session cannot stick a stale account.
+            codex_account: bool,
+        }
+        impl xai_grok_sampler::HeaderInjector for SessionHeaderInjector {
             fn inject(&self, headers: &mut reqwest::header::HeaderMap) {
                 if let Some(tp) = xai_file_utils::trace_context::current_traceparent()
                     && let Ok(v) = reqwest::header::HeaderValue::from_str(&tp)
                 {
                     headers.insert("traceparent", v);
+                }
+                if self.codex_account {
+                    crate::auth::openai_codex::OpenAiCodexAccountHeaderInjector::apply(headers);
                 }
             }
         }
@@ -452,7 +459,9 @@ impl SessionActor {
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
-            header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            header_injector: Some(std::sync::Arc::new(SessionHeaderInjector {
+                codex_account: responses_codex_dialect,
+            })),
             responses_codex_dialect,
         }
     }

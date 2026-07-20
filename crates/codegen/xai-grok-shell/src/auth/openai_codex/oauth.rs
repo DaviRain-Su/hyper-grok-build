@@ -124,6 +124,33 @@ struct TokenResponse {
     id_token: Option<String>,
 }
 
+/// Fallback access-token TTL when the token endpoint omits `expires_in`
+/// (common on some refresh responses). Conservative enough to refresh early.
+const DEFAULT_ACCESS_TOKEN_TTL_SECS: i64 = 3600;
+
+/// Parse a successful token-endpoint JSON body.
+///
+/// `access_token` is required. `refresh_token` is often omitted on refresh
+/// when the server reuses the existing one — leave empty so
+/// [`credentials_from_token`] can keep `previous_refresh`. `expires_in` may
+/// also be omitted; default rather than failing a valid HTTP 200.
+fn codex_token_from_response(json: TokenResponse) -> anyhow::Result<CodexToken> {
+    let Some(access) = json.access_token.filter(|s| !s.trim().is_empty()) else {
+        anyhow::bail!("OpenAI Codex token response missing access_token");
+    };
+    let refresh = json.refresh_token.unwrap_or_default();
+    let expires_in_secs = json
+        .expires_in
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_ACCESS_TOKEN_TTL_SECS);
+    Ok(CodexToken {
+        access,
+        refresh,
+        expires_in_secs,
+        id_token: json.id_token,
+    })
+}
+
 async fn read_token_response(
     response: reqwest::Response,
     operation: &str,
@@ -134,15 +161,9 @@ async fn read_token_response(
         anyhow::bail!("OpenAI Codex token {operation} failed (HTTP {status}): {body}");
     }
     let json: TokenResponse = response.json().await?;
-    match (json.access_token, json.refresh_token, json.expires_in) {
-        (Some(access), Some(refresh), Some(expires_in)) => Ok(CodexToken {
-            access,
-            refresh,
-            expires_in_secs: expires_in,
-            id_token: json.id_token,
-        }),
-        _ => anyhow::bail!("OpenAI Codex token {operation} response missing fields"),
-    }
+    codex_token_from_response(json).map_err(|e| {
+        anyhow::anyhow!("OpenAI Codex token {operation} response invalid: {e}")
+    })
 }
 
 /// Exchange an authorization code for tokens (`grant_type=authorization_code`).
@@ -490,6 +511,41 @@ mod tests {
             std::time::Duration::from_secs(1)
         );
 
+    }
+
+    #[test]
+    fn token_response_tolerates_missing_refresh_and_expires() {
+        let access_only = TokenResponse {
+            access_token: Some("at".into()),
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+        };
+        let token = codex_token_from_response(access_only).unwrap();
+        assert_eq!(token.access, "at");
+        assert!(token.refresh.is_empty());
+        assert_eq!(token.expires_in_secs, DEFAULT_ACCESS_TOKEN_TTL_SECS);
+
+        // Empty refresh + previous_refresh reuses the prior RT.
+        let token = CodexToken {
+            access: jwt_with_claim(r#"{"chatgpt_account_id": "acct-1"}"#),
+            refresh: String::new(),
+            expires_in_secs: DEFAULT_ACCESS_TOKEN_TTL_SECS,
+            id_token: None,
+        };
+        let auth = credentials_from_token(token, Some("prev-rt")).unwrap();
+        assert_eq!(auth.refresh_token.as_deref(), Some("prev-rt"));
+        assert_eq!(auth.account_id.as_deref(), Some("acct-1"));
+
+        assert!(
+            codex_token_from_response(TokenResponse {
+                access_token: None,
+                refresh_token: Some("rt".into()),
+                expires_in: Some(60),
+                id_token: None,
+            })
+            .is_err()
+        );
     }
 
     #[test]

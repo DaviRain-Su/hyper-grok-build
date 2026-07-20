@@ -10,8 +10,8 @@ mod login;
 mod oauth;
 
 pub use login::{
-    CodexLoginMethod, OpenAiCodexBearerResolver, ensure_openai_codex_access_token,
-    ensure_openai_codex_access_token_blocking, ensure_openai_codex_auth,
-    ensure_openai_codex_auth_blocking, run_openai_codex_login,
+    CodexLoginMethod, OpenAiCodexAccountHeaderInjector, OpenAiCodexBearerResolver,
+    ensure_openai_codex_access_token, ensure_openai_codex_access_token_blocking,
+    ensure_openai_codex_auth, ensure_openai_codex_auth_blocking, run_openai_codex_login,
 };
 pub use crate::auth::model::OPENAI_CODEX_OAUTH_SCOPE;
