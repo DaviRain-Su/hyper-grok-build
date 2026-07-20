@@ -258,6 +258,8 @@ fn build_unpinned(
     // Always advertise Kimi Code as an optional interactive method so the
     // TUI/CLI can select it without replacing the primary xAI login.
     methods.push(kimi_code_auth_method());
+    // Same for the OpenAI Codex (ChatGPT) subscription OAuth login.
+    methods.push(openai_codex_auth_method());
 
     BuiltAuthMethods {
         methods,
@@ -296,6 +298,8 @@ pub enum AuthMethodKind {
     Oidc,
     /// Kimi Code subscription device OAuth (third-party; not xAI session).
     KimiCode,
+    /// OpenAI Codex subscription ChatGPT OAuth (third-party; not xAI session).
+    OpenAiCodex,
     Unknown,
 }
 
@@ -307,6 +311,7 @@ impl AuthMethodKind {
             GROK_COM_METHOD_ID => Self::GrokCom,
             OIDC_METHOD_ID => Self::Oidc,
             KIMI_CODE_METHOD_ID => Self::KimiCode,
+            OPENAI_CODEX_METHOD_ID => Self::OpenAiCodex,
             _ => Self::Unknown,
         }
     }
@@ -317,15 +322,15 @@ impl AuthMethodKind {
     }
 
     /// `true` for session-based methods (cached_token, grok.com, oidc).
-    /// Kimi Code is intentionally excluded — it must not unlock xAI
-    /// OAuth-only catalog entries or drive xAI refresh.
+    /// Kimi Code / OpenAI Codex are intentionally excluded — they must not
+    /// unlock xAI OAuth-only catalog entries or drive xAI refresh.
     pub fn is_session_based(self) -> bool {
         matches!(self, Self::CachedToken | Self::GrokCom | Self::Oidc)
     }
 
     /// Requires user interaction (browser, OIDC redirect, or external auth command).
     pub fn needs_interactive_login(self) -> bool {
-        matches!(self, Self::GrokCom | Self::Oidc | Self::KimiCode)
+        matches!(self, Self::GrokCom | Self::Oidc | Self::KimiCode | Self::OpenAiCodex)
     }
 
     pub fn auth_error_message(self) -> &'static str {
@@ -498,6 +503,21 @@ pub fn kimi_code_auth_method() -> acp::AuthMethod {
         )
         .description(Some(
             "Sign in with a Kimi Code subscription (device OAuth)".to_string(),
+        )),
+    )
+}
+
+/// ACP method id for the OpenAI Codex (ChatGPT) subscription OAuth login.
+pub const OPENAI_CODEX_METHOD_ID: &str = "openai-codex";
+
+pub fn openai_codex_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(OPENAI_CODEX_METHOD_ID),
+            "OpenAI Codex".to_string(),
+        )
+        .description(Some(
+            "Sign in with a ChatGPT Plus/Pro subscription (browser or device code)".to_string(),
         )),
     )
 }
@@ -706,8 +726,8 @@ mod tests {
 
     /// Brand-new user (no API key, no cached token): `grok.com` leads so the
     /// pager shows the login screen with the primary xAI method, with
-    /// Kimi Code device OAuth always advertised as the alternative
-    /// interactive method. `default_auth_method_id` is None so the pager
+    /// Kimi Code / OpenAI Codex OAuth always advertised as alternative
+    /// interactive methods. `default_auth_method_id` is None so the pager
     /// falls back to the advertised login method.
     #[test]
     fn fresh_user_requires_login_grok_com_first_kimi_code_advertised() {
@@ -721,7 +741,11 @@ mod tests {
                 .iter()
                 .map(|m| AuthMethodKind::from_id(m.id()))
                 .collect::<Vec<_>>(),
-            [AuthMethodKind::GrokCom, AuthMethodKind::KimiCode],
+            [
+                AuthMethodKind::GrokCom,
+                AuthMethodKind::KimiCode,
+                AuthMethodKind::OpenAiCodex
+            ],
         );
     }
 

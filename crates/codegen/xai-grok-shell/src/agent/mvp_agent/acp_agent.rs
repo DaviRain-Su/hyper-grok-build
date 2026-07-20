@@ -725,6 +725,78 @@ impl acp::Agent for MvpAgent {
                 let _ = auth;
                 Ok(Default::default())
             }
+            auth_method::OPENAI_CODEX_METHOD_ID => {
+                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
+                let client_seq = auth_meta.request_seq;
+                let mut cancelled = false;
+                let auth_result = if !auth_meta.headless {
+                    // Interactive (TUI): push the auth URL and accept a
+                    // manually pasted code through the client UI channels.
+                    let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+                    let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+                    let (cancel, _guard) = self.interactive_auth.begin(
+                        Some(crate::auth::single_flight::AttemptChannels::new(
+                            code_tx, url_rx,
+                        )),
+                        client_seq,
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::openai_codex::run_openai_codex_login(
+                            Some(crate::auth::AuthChannels {
+                                url_tx: Some(url_tx),
+                                code_rx,
+                            }),
+                            crate::auth::openai_codex::CodexLoginMethod::Browser,
+                        ) => r,
+                    }
+                } else {
+                    // Headless ACP: device code is reliable over SSH/CI where
+                    // loopback browser callbacks are unavailable (even if the
+                    // agent process has a pseudo-TTY on stdin).
+                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::openai_codex::run_openai_codex_login(
+                            None,
+                            crate::auth::openai_codex::CodexLoginMethod::DeviceCode,
+                        ) => r,
+                    }
+                };
+                let auth = auth_result.map_err(|e| {
+                    emit_login_span(
+                        false,
+                        "openai-codex",
+                        None,
+                        Some(if cancelled {
+                            "login_cancelled"
+                        } else {
+                            "login_flow_failed"
+                        }),
+                    );
+                    let mut err = acp::Error::auth_required();
+                    err.message = e.to_string();
+                    err
+                })?;
+                // Re-stamp openai-codex/* catalog entries with the new bearer.
+                self.models_manager.restamp_platform_credentials();
+                // Do not replace the primary xAI AuthManager session.
+                emit_login_span(true, "openai-codex", None, None);
+                log_event(xai_grok_telemetry::events::Login {
+                    auth_method: "openai-codex".to_string(),
+                    user_id: None,
+                });
+                let _ = auth;
+                Ok(Default::default())
+            }
             auth_method::GROK_COM_METHOD_ID | auth_method::OIDC_METHOD_ID => {
                 let grok_ctx = self.auth_manager.grok_com_config();
                 let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());

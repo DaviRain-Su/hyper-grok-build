@@ -950,6 +950,12 @@ async fn read_parent_sampling_config(
             let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
                 .map(|r| r.auth_scheme)
                 .unwrap_or_default();
+            // Codex subagent sessions keep the live bearer resolver + dialect
+            // of the parent's platform (stamped api_key alone goes stale).
+            let codex_bearer_resolver =
+                crate::agent::config::openai_codex_bearer_resolver_for_base_url(&cfg.base_url);
+            let responses_codex_dialect =
+                xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
@@ -972,7 +978,7 @@ async fn read_parent_sampling_config(
                 user_id: ctx.sampling_config.user_id.clone(),
                 origin_client: ctx.sampling_config.origin_client.clone(),
                 attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: None,
+                bearer_resolver: codex_bearer_resolver,
                 supports_backend_search: ctx
                     .models_manager
                     .model_supports_backend_search(ctx.model_id.0.as_ref()),
@@ -984,6 +990,7 @@ async fn read_parent_sampling_config(
                     .model_compaction_at_tokens(ctx.model_id.0.as_ref()),
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
+                responses_codex_dialect,
             };
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();

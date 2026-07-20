@@ -3611,14 +3611,16 @@ fn apply_platform_credentials(
     platforms: &PlatformsConfig,
 ) {
     let kimi_bearer = crate::auth::kimi::ensure_kimi_code_access_token_blocking();
-    apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer);
+    let codex_bearer = crate::auth::openai_codex::ensure_openai_codex_access_token_blocking();
+    apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer, codex_bearer);
 }
 
-/// Testable core of [`apply_platform_credentials`] with an injected Kimi bearer.
+/// Testable core of [`apply_platform_credentials`] with injected OAuth bearers.
 fn apply_platform_credentials_with_bearer(
     resolved: &mut IndexMap<String, ModelEntry>,
     platforms: &PlatformsConfig,
     kimi_bearer: Option<String>,
+    codex_bearer: Option<String>,
 ) {
     for (key, entry) in resolved.iter_mut() {
         let id = entry.info.id.as_deref().unwrap_or(key.as_str());
@@ -3627,13 +3629,18 @@ fn apply_platform_credentials_with_bearer(
         };
 
         if platform.uses_oauth() {
+            let bearer = match platform {
+                xai_grok_models::PlatformId::KimiCode => kimi_bearer.as_ref(),
+                xai_grok_models::PlatformId::OpenAiCodex => codex_bearer.as_ref(),
+                _ => None,
+            };
             if entry.api_key.is_none()
-                && let Some(ref bearer) = kimi_bearer
+                && let Some(bearer) = bearer
             {
                 tracing::debug!(
                     model_key = %key,
                     platform = platform.as_str(),
-                    "stamped Kimi Code OAuth bearer onto subscription entry"
+                    "stamped OAuth bearer onto subscription entry"
                 );
                 entry.api_key = Some(bearer.clone());
                 // OAuth-gated models become selectable once a token is present.
@@ -5186,7 +5193,9 @@ pub fn sampling_config_for_model(
     let api_backend = info.api_backend.clone();
     // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
     // so a catalog stamp from login is never sent after expiry.
-    let bearer_resolver = kimi_code_bearer_resolver_for_model(model);
+    let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
+        .or_else(|| openai_codex_bearer_resolver_for_model(model));
+    let responses_codex_dialect = model_uses_openai_codex_oauth(model);
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5215,14 +5224,19 @@ pub fn sampling_config_for_model(
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
         header_injector: None,
+        responses_codex_dialect,
     }
 }
 
 /// Whether this catalog entry routes through Kimi Code OAuth (subscription).
+///
+/// Must match Kimi explicitly — not every OAuth platform. `PlatformId::uses_oauth()`
+/// also covers OpenAI Codex; treating Codex as Kimi would install the wrong
+/// bearer resolver ahead of [`openai_codex_bearer_resolver_for_model`].
 pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
     let catalog_id = model.info.id.as_deref().unwrap_or(model.info.model.as_str());
     if xai_grok_models::parse_managed_model_key(catalog_id)
-        .is_some_and(|(p, _)| p.uses_oauth())
+        .is_some_and(|(p, _)| p == xai_grok_models::PlatformId::KimiCode)
     {
         return true;
     }
@@ -5244,6 +5258,33 @@ pub fn kimi_code_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBe
         return None;
     }
     Some(Arc::new(crate::auth::kimi::KimiCodeBearerResolver) as SharedBearerResolver)
+}
+
+/// Whether this catalog entry routes through OpenAI Codex (ChatGPT) OAuth.
+pub fn model_uses_openai_codex_oauth(model: &ModelEntry) -> bool {
+    let catalog_id = model.info.id.as_deref().unwrap_or(model.info.model.as_str());
+    if xai_grok_models::parse_managed_model_key(catalog_id)
+        .is_some_and(|(p, _)| p == xai_grok_models::PlatformId::OpenAiCodex)
+    {
+        return true;
+    }
+    xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&model.info.base_url)
+}
+
+/// Per-request bearer for OpenAI Codex models; `None` for everything else.
+pub fn openai_codex_bearer_resolver_for_model(model: &ModelEntry) -> Option<SharedBearerResolver> {
+    if !model_uses_openai_codex_oauth(model) {
+        return None;
+    }
+    Some(Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver) as SharedBearerResolver)
+}
+
+/// Same as [`openai_codex_bearer_resolver_for_model`] but from a bare base URL.
+pub fn openai_codex_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBearerResolver> {
+    if !xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(base_url) {
+        return None;
+    }
+    Some(Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver) as SharedBearerResolver)
 }
 /// Fold URL-derived headers into `extra_headers`.
 ///
@@ -5298,6 +5339,25 @@ pub fn inject_url_derived_headers(
                     "auth: could not attach Kimi device identity headers"
                 );
             }
+        }
+    }
+    // ChatGPT Codex backend requires the Responses-beta flag, an originator
+    // tag, and the per-account header (Pi `buildBaseCodexHeaders`). The
+    // account id comes from the stored OAuth credential; skip silently when
+    // signed out (the request will 401 and surface the login hint).
+    if xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(base_url) {
+        headers
+            .entry("OpenAI-Beta".to_string())
+            .or_insert_with(|| "responses=experimental".to_string());
+        headers
+            .entry("originator".to_string())
+            .or_insert_with(|| "grok-build".to_string());
+        if let Some(account_id) = crate::auth::read_openai_codex_auth(&xai_grok_config::grok_home())
+            .and_then(|auth| auth.account_id)
+        {
+            headers
+                .entry("chatgpt-account-id".to_string())
+                .or_insert(account_id);
         }
     }
     let _ = (alpha_test_key, base_url);
@@ -6492,6 +6552,41 @@ if field.as_deref() == Some("auth_provider"))
             api_base_url: api_base_url.map(|s| s.to_string()),
         }
     }
+
+    /// Codex and Kimi both use OAuth, but must not share bearer resolvers.
+    /// Regression: `model_uses_kimi_code_oauth` used to match any `uses_oauth()`
+    /// platform and installed `KimiCodeBearerResolver` on `openai-codex/*`.
+    #[test]
+    fn oauth_platform_helpers_distinguish_kimi_and_codex() {
+        let mut kimi = test_model_entry(
+            "kimi-for-coding",
+            "https://api.kimi.com/coding/v1",
+            None,
+            None,
+            None,
+        );
+        kimi.info.id = Some("kimi-code/kimi-for-coding".into());
+
+        let mut codex = test_model_entry(
+            "gpt-5.1-codex",
+            "https://chatgpt.com/backend-api/codex",
+            None,
+            None,
+            None,
+        );
+        codex.info.id = Some("openai-codex/gpt-5.1-codex".into());
+
+        assert!(model_uses_kimi_code_oauth(&kimi));
+        assert!(!model_uses_openai_codex_oauth(&kimi));
+        assert!(kimi_code_bearer_resolver_for_model(&kimi).is_some());
+        assert!(openai_codex_bearer_resolver_for_model(&kimi).is_none());
+
+        assert!(!model_uses_kimi_code_oauth(&codex));
+        assert!(model_uses_openai_codex_oauth(&codex));
+        assert!(kimi_code_bearer_resolver_for_model(&codex).is_none());
+        assert!(openai_codex_bearer_resolver_for_model(&codex).is_some());
+    }
+
     /// The effective-model RE-support lookup must use the model ACTUALLY used:
     /// the resolved aux model when present, else the session model (an
     /// unresolvable slug ⇒ aux `None` ⇒ session model's capability wins).
@@ -12620,12 +12715,42 @@ default = "grok-4.5"
             &mut models,
             &cfg.platforms,
             Some("fake-kimi-token".into()),
+            Some("fake-codex-token".into()),
         );
         let entry = models
             .get("kimi-code/k2p7")
             .expect("kimi-code entry");
         assert!(entry.info.supported_in_api, "bearer makes Kimi entry visible");
         assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
+
+        // Codex bearer stamps only openai-codex/* entries.
+        let codex_entry = models
+            .get("openai-codex/gpt-5.6-sol")
+            .expect("openai-codex entry");
+        assert!(
+            codex_entry.info.supported_in_api,
+            "bearer makes Codex entry visible"
+        );
+        assert_eq!(codex_entry.api_key.as_deref(), Some("fake-codex-token"));
+        // …and never leaks onto the Kimi entry.
+        assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
+    }
+
+    #[test]
+    #[serial]
+    fn apply_platform_credentials_without_bearer_keeps_codex_locked() {
+        let (_dir, _guards) = isolated_auth_home();
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let mut models = resolve_model_list(&cfg, None);
+        apply_platform_credentials_with_bearer(&mut models, &cfg.platforms, None, None);
+        let codex_entry = models
+            .get("openai-codex/gpt-5.6-sol")
+            .expect("openai-codex entry");
+        assert!(
+            !codex_entry.info.supported_in_api,
+            "no credential → Codex entry stays locked"
+        );
+        assert!(codex_entry.api_key.is_none());
     }
 
     #[test]

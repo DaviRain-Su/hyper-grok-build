@@ -16,6 +16,9 @@ pub const API_KEY_SCOPE: &str = "xai::api_key";
 /// auth.json scope key for the Kimi Code subscription OAuth session.
 pub const KIMI_CODE_OAUTH_SCOPE: &str = "oauth/kimi-code";
 
+/// auth.json scope key for the OpenAI Codex (ChatGPT) subscription OAuth session.
+pub const OPENAI_CODEX_OAUTH_SCOPE: &str = "oauth/openai-codex";
+
 /// Prefix for third-party platform API keys stored via `/providers` (e.g.
 /// `platform/zai`, `platform/openai`). One scope per platform id.
 pub const PLATFORM_API_KEY_SCOPE_PREFIX: &str = "platform/";
@@ -52,6 +55,9 @@ pub enum AuthMode {
     /// Kimi Code subscription (device OAuth). Stored under
     /// [`crate::auth::kimi::KIMI_CODE_OAUTH_SCOPE`]; not an xAI session.
     KimiCode,
+    /// OpenAI Codex subscription (ChatGPT OAuth). Stored under
+    /// [`crate::auth::openai_codex::OPENAI_CODEX_OAUTH_SCOPE`]; not an xAI session.
+    OpenAiCodex,
 }
 
 /// Wire value of `principal_type` for team OAuth principals (capitalized by
@@ -119,6 +125,12 @@ pub struct GrokAuth {
     /// OIDC client_id used to obtain this token (needed for refresh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc_client_id: Option<String>,
+
+    /// Provider-side account id (OpenAI Codex: `chatgpt_account_id` from the
+    /// access-token JWT). Sent back as the `chatgpt-account-id` header on
+    /// every ChatGPT backend request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl std::fmt::Debug for GrokAuth {
@@ -161,7 +173,9 @@ impl GrokAuth {
                 .oidc_issuer
                 .as_deref()
                 .is_some_and(is_xai_oauth2_issuer),
-            AuthMode::ApiKey | AuthMode::WebLogin | AuthMode::KimiCode => false,
+            AuthMode::ApiKey | AuthMode::WebLogin | AuthMode::KimiCode | AuthMode::OpenAiCodex => {
+                false
+            }
         }
     }
 
@@ -182,7 +196,7 @@ impl GrokAuth {
             AuthMode::External => self.is_xai_auth(),
             // Kimi Code is a third-party session for its own models only; it
             // must not unlock xAI `supported_in_api: false` catalog entries.
-            AuthMode::ApiKey | AuthMode::KimiCode => false,
+            AuthMode::ApiKey | AuthMode::KimiCode | AuthMode::OpenAiCodex => false,
         }
     }
 
@@ -220,6 +234,7 @@ impl GrokAuth {
         self.user_blocked_reason = prev.user_blocked_reason.clone();
         self.team_blocked_reasons = prev.team_blocked_reasons.clone();
         self.coding_data_retention_opt_out = prev.coding_data_retention_opt_out;
+        self.account_id = prev.account_id.clone();
     }
 }
 
@@ -250,6 +265,7 @@ impl Default for GrokAuth {
             expires_at: None,
             oidc_issuer: None,
             oidc_client_id: None,
+            account_id: None,
         }
     }
 }
@@ -403,6 +419,7 @@ mod tests {
             expires_at: None,
             oidc_issuer: None,
             oidc_client_id: None,
+        account_id: None,
         }
     }
 

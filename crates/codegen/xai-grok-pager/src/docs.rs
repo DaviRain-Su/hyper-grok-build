@@ -117,6 +117,11 @@ pub static USER_GUIDE: &[Doc] = &[
         "Built-in OpenAI Responses and Anthropic Messages platforms"
     ),
     guide!(
+        "28-openai-codex.md",
+        "OpenAI Codex (ChatGPT)",
+        "ChatGPT subscription login (grok login --openai) and Codex models"
+    ),
+    guide!(
         "12-project-rules.md",
         "Project Rules (AGENTS.md)",
         "Per-directory instructions and precedence rules"

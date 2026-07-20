@@ -1734,6 +1734,15 @@ async fn async_main() -> Result<()> {
         sandbox_profile_arg.as_deref(),
         args.cwd.as_deref(),
     );
+    // `grok codex` is a shim over the native OpenAI Codex platform: rewrite
+    // the invocation into the standard pager flows (TUI / headless) pinned
+    // to an `openai-codex/*` model before interactive-mode detection.
+    if let Some(Command::Codex(codex_args)) = args.command.clone() {
+        match xai_grok_pager::codex::rewrite_pager_args(&codex_args, &mut args).await? {
+            xai_grok_pager::codex::CodexRewrite::Handled => return Ok(()),
+            xai_grok_pager::codex::CodexRewrite::Continue => {}
+        }
+    }
     flag_dashboard_at_startup_if_requested(&mut args)?;
     let is_interactive = args.command.is_none()
         && args.single.is_none()
@@ -1788,8 +1797,8 @@ async fn async_main() -> Result<()> {
                 )
                 .await;
             }
-            Command::Codex(codex_args) => {
-                return xai_grok_pager::codex::run(codex_args).await;
+            Command::Codex(_) => {
+                unreachable!("grok codex is rewritten into pager args before dispatch");
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
@@ -1900,12 +1909,21 @@ async fn async_main() -> Result<()> {
                 oauth,
                 device_auth,
                 kimi,
+                openai,
                 devbox,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 if kimi {
                     xai_grok_shell::auth::kimi::run_kimi_code_login().await?;
+                } else if openai {
+                    let method = if device_auth {
+                        xai_grok_shell::auth::openai_codex::CodexLoginMethod::DeviceCode
+                    } else {
+                        xai_grok_shell::auth::openai_codex::CodexLoginMethod::Browser
+                    };
+                    xai_grok_shell::auth::openai_codex::run_openai_codex_login(None, method)
+                        .await?;
                 } else {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
                         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
@@ -1917,10 +1935,12 @@ async fn async_main() -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout { kimi } => {
+            Command::Logout { kimi, openai } => {
                 init_tracing_simple("cli");
                 if kimi {
                     xai_grok_shell::auth::run_cli_logout_kimi()?;
+                } else if openai {
+                    xai_grok_shell::auth::run_cli_logout_openai_codex()?;
                 } else {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
                         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;

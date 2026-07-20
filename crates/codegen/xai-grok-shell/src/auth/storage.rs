@@ -3,8 +3,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::model::{
-    API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, KIMI_CODE_OAUTH_SCOPE, lookup_auth,
-    platform_api_key_scope,
+    API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, KIMI_CODE_OAUTH_SCOPE, OPENAI_CODEX_OAUTH_SCOPE,
+    lookup_auth, platform_api_key_scope,
 };
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
@@ -439,6 +439,39 @@ pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
     if let Ok(mut map) = read_auth_json(&path) {
         map.remove(KIMI_CODE_OAUTH_SCOPE);
+        if map.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            write_auth_json(&path, &map)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read the OpenAI Codex (ChatGPT) OAuth credential, if present and correctly scoped.
+pub fn read_openai_codex_auth(grok_home: &Path) -> Option<GrokAuth> {
+    let path = grok_home.join("auth.json");
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(OPENAI_CODEX_OAUTH_SCOPE)?.clone();
+    (auth.auth_mode == AuthMode::OpenAiCodex).then_some(auth)
+}
+
+/// Persist an OpenAI Codex OAuth credential under [`OPENAI_CODEX_OAUTH_SCOPE`].
+/// Merges with existing scopes so xAI login is preserved.
+pub fn store_openai_codex_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
+    let path = grok_home.join("auth.json");
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    let mut stored = auth.clone();
+    stored.auth_mode = AuthMode::OpenAiCodex;
+    map.insert(OPENAI_CODEX_OAUTH_SCOPE.to_owned(), stored);
+    write_auth_json(&path, &map)
+}
+
+/// Remove the OpenAI Codex OAuth scope from auth.json.
+pub fn clear_openai_codex_auth(grok_home: &Path) -> std::io::Result<()> {
+    let path = grok_home.join("auth.json");
+    if let Ok(mut map) = read_auth_json(&path) {
+        map.remove(OPENAI_CODEX_OAUTH_SCOPE);
         if map.is_empty() {
             let _ = std::fs::remove_file(&path);
         } else {

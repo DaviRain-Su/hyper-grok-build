@@ -641,8 +641,12 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         ))
     })?;
     if platform_id.uses_oauth() {
+        let login = match platform_id {
+            xai_grok_models::PlatformId::OpenAiCodex => "/login openai",
+            _ => "/login kimi",
+        };
         return Err(acp::Error::invalid_params().data(format!(
-            "{} uses OAuth — run /login kimi instead of pasting an API key",
+            "{} uses OAuth — run {login} instead of pasting an API key",
             platform_id.display_name()
         )));
     }

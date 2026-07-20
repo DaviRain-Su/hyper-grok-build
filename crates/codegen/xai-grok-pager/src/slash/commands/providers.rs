@@ -102,8 +102,9 @@ impl SlashCommand for ProvidersCommand {
         };
 
         if platform.uses_oauth() {
+            let (login, logout) = oauth_login_logout_hint(platform);
             return CommandResult::Error(format!(
-                "{} uses OAuth — run /login kimi to sign in, or `grok logout --kimi` to sign out.",
+                "{} uses OAuth — run {login} to sign in, or `{logout}` to sign out.",
                 platform.display_name()
             ));
         }
@@ -137,8 +138,9 @@ fn clear_platform(platform_tok: &str) -> CommandResult {
         ));
     };
     if platform.uses_oauth() {
+        let (_, logout) = oauth_login_logout_hint(platform);
         return CommandResult::Error(format!(
-            "{} uses OAuth — run `grok logout --kimi` (not /providers clear).",
+            "{} uses OAuth — run `{logout}` (not /providers clear).",
             platform.display_name()
         ));
     }
@@ -146,6 +148,14 @@ fn clear_platform(platform_tok: &str) -> CommandResult {
         platform: platform.as_str().to_owned(),
         api_key: String::new(),
     })
+}
+
+/// Per-platform OAuth login/logout commands shown in error hints.
+fn oauth_login_logout_hint(platform: PlatformId) -> (&'static str, &'static str) {
+    match platform {
+        PlatformId::OpenAiCodex => ("/login openai", "grok logout --openai"),
+        _ => ("/login kimi", "grok logout --kimi"),
+    }
 }
 
 fn is_clear_verb(s: &str) -> bool {
@@ -203,7 +213,8 @@ fn platform_status(
 /// Compact one-line unlock instruction for the table.
 fn compact_hint(platform: PlatformId) -> String {
     if platform.uses_oauth() {
-        return "/login kimi (OAuth)".to_string();
+        let (login, _) = oauth_login_logout_hint(platform);
+        return format!("{login} (OAuth)");
     }
     format!("/providers {} <api_key>", platform.as_str())
 }

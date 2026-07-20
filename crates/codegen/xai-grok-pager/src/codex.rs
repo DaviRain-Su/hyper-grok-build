@@ -1,267 +1,134 @@
-//! Codex subscription connector backed by `codex app-server`.
+//! `grok codex` — ChatGPT subscription access via the native OpenAI Codex
+//! platform backend.
 //!
-//! This is the thin `grok codex` CLI: it spawns a `codex app-server`,
-//! authenticates against the user's ChatGPT/OpenAI subscription, and drives a
-//! single thread interactively. The pager's in-process routing through ACP
-//! lives in `crate::acp::router` and shares the same `CodexAppServer` client
-//! defined in `crate::codex_app_server`.
+//! Historically this subcommand spawned the external `codex app-server`
+//! binary; authentication and inference are now first-party:
+//!
+//! * login: `grok login --openai` (browser PKCE or `--device-code`), stored
+//!   under the `oauth/openai-codex` scope in `~/.grok/auth.json`;
+//! * inference: the native sampler speaks the ChatGPT Codex Responses
+//!   backend directly (`openai-codex/*` catalog models).
+//!
+//! This shim rewrites the process arguments so `grok codex` drops into the
+//! standard pager flows (TUI, or headless with `-p`) pinned to an
+//! `openai-codex/*` model, then gets out of the way.
 
-use crate::app::cli::CodexArgs;
-use crate::codex_app_server::{CodexAppServer, danger_full_access_sandbox, workspace_write_sandbox};
-use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
-use std::io::Write as _;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::app::cli::{CodexArgs, PagerArgs};
+use anyhow::{Result, bail};
 
-/// Sandbox string sent to `thread/start` / `thread/resume`.
-fn thread_sandbox(full_access: bool) -> &'static str {
-    if full_access {
-        "danger-full-access"
-    } else {
-        "workspace-write"
+/// Default Codex subscription model (catalog id form).
+pub const DEFAULT_CODEX_MODEL: &str = "openai-codex/gpt-5.6-sol";
+
+/// Outcome of [`rewrite_pager_args`].
+pub enum CodexRewrite {
+    /// The shim fully handled the invocation (e.g. `--status`); the caller
+    /// should exit successfully.
+    Handled,
+    /// Pager args were rewritten; continue normal startup (TUI or headless).
+    Continue,
+}
+
+/// Normalize a user-supplied Codex model id to the catalog form
+/// `openai-codex/<id>`. Accepts bare ids (`gpt-5.5`) and the legacy
+/// app-server prefix (`codex:gpt-5.5`).
+fn normalize_model(model: Option<&str>) -> String {
+    let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
+        return DEFAULT_CODEX_MODEL.to_owned();
+    };
+    if let Some(rest) = model.strip_prefix("codex:") {
+        return format!("openai-codex/{rest}");
     }
-}
-
-/// Sandbox policy sent to `turn/start`.
-fn turn_sandbox(full_access: bool, cwd: &std::path::Path) -> Value {
-    if full_access {
-        danger_full_access_sandbox()
-    } else {
-        workspace_write_sandbox(cwd)
+    if model.contains('/') {
+        return model.to_owned();
     }
+    format!("openai-codex/{model}")
 }
 
-/// Run the `grok codex` connector.
-pub async fn run(args: CodexArgs) -> Result<()> {
-    // `CodexAppServer` is single-threaded: its reader/writer tasks are
-    // `spawn_local` jobs sharing an `Rc` pending-request map. The pager's
-    // agent thread already runs inside a `LocalSet`; the CLI entry point
-    // runs on the main multi-thread runtime, so drive the connector inside
-    // a `LocalSet` here to give those spawns a home.
-    let local = tokio::task::LocalSet::new();
-    local.run_until(run_inner(args)).await
-}
-
-async fn run_inner(args: CodexArgs) -> Result<()> {
-    let server = CodexAppServer::start(&args.codex_binary).await?;
-    let status = server.status().await?;
-    if args.status {
-        println!("Codex authentication: {}", status.account_label);
-        println!(
-            "Default model: {}",
-            status
-                .default_model
-                .as_deref()
-                .unwrap_or("Codex configuration default")
+/// Rewrite `grok codex …` process args into the equivalent native pager
+/// invocation. Runs before subcommand dispatch in `main`.
+pub async fn rewrite_pager_args(codex: &CodexArgs, args: &mut PagerArgs) -> Result<CodexRewrite> {
+    if codex.status {
+        print_status();
+        return Ok(CodexRewrite::Handled);
+    }
+    if let Some(thread) = codex.resume.as_deref() {
+        bail!(
+            "`grok codex --resume` referred to a Codex app-server thread ({thread}), which the \
+             native backend cannot resume. Use Grok sessions instead: `grok sessions` to list, \
+             `grok --resume <id>` to continue."
         );
-        println!("Available models:");
-        for model in &status.models {
-            println!("  {}", model.id);
-        }
-        return Ok(());
+    }
+    if codex.codex_binary != std::path::Path::new("codex") {
+        eprintln!(
+            "note: --codex-binary is deprecated — Grok Build now talks to the ChatGPT Codex \
+             backend directly and no external Codex CLI is used."
+        );
     }
 
-    let cwd = std::env::current_dir()?;
-    let mut model = args.model.or(status.default_model);
-    let thread_id = server
-        .open_thread(
-            &cwd,
-            model.as_deref(),
-            args.resume.as_deref(),
-            thread_sandbox(args.full_access),
-        )
-        .await
-        .with_context(|| "could not start Codex thread")?;
-
-    let initial_prompt = args.prompt.or(args.message);
-    if let Some(prompt) = initial_prompt {
-        run_turn(
-            &server,
-            &thread_id,
-            &prompt,
-            model.as_deref(),
-            args.full_access,
-            &cwd,
-        )
-        .await?;
-        eprintln!("\x1b[2mCodex thread: {thread_id}\x1b[0m");
-        return Ok(());
-    }
-
-    eprintln!(
-        "Codex • {} • model {}",
-        status.account_label,
-        model.as_deref().unwrap_or("default")
-    );
-    eprintln!("Thread {thread_id} • /help for commands");
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
-    loop {
-        eprint!("\n\x1b[1;36m›\x1b[0m ");
-        std::io::stderr().flush()?;
-        let Some(line) = lines.next_line().await? else {
-            break;
-        };
-        let prompt = line.trim();
-        if prompt.is_empty() {
-            continue;
-        }
-        match prompt {
-            "/exit" | "/quit" => break,
-            "/help" => {
-                eprintln!("/model <id>  switch model for following turns");
-                eprintln!("/models      list subscription models");
-                eprintln!("/thread      print the resumable Codex thread id");
-                eprintln!("/exit        quit");
-            }
-            "/models" => {
-                for available in &status.models {
-                    eprintln!("{}", available.id);
-                }
-            }
-            "/thread" => eprintln!("{thread_id}"),
-            _ if prompt.starts_with("/model ") => {
-                let requested = prompt.trim_start_matches("/model ").trim();
-                if requested.is_empty() {
-                    eprintln!("usage: /model <id>");
-                } else {
-                    model = Some(requested.to_owned());
-                    eprintln!("model: {requested}");
-                }
-            }
-            _ => {
-                if let Err(error) = run_turn(
-                    &server,
-                    &thread_id,
-                    prompt,
-                    model.as_deref(),
-                    args.full_access,
-                    &cwd,
-                )
-                .await
-                {
-                    eprintln!("Codex error: {error:#}");
-                }
-            }
+    // Auto-guide login when unauthenticated (interactive terminals only).
+    let home = xai_grok_config::grok_home();
+    if xai_grok_shell::auth::read_openai_codex_auth(&home).is_none() {
+        use std::io::IsTerminal as _;
+        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            eprintln!("Not signed in to OpenAI Codex (ChatGPT) — starting login…");
+            xai_grok_shell::auth::openai_codex::run_openai_codex_login(
+                None,
+                xai_grok_shell::auth::openai_codex::CodexLoginMethod::Browser,
+            )
+            .await?;
+        } else {
+            bail!(
+                "Not signed in to OpenAI Codex (ChatGPT). Run `grok login --openai` \
+                 (or `grok login --openai --device-code` if no browser is available)."
+            );
         }
     }
-    Ok(())
+
+    args.command = None;
+    if args.model.is_none() {
+        args.model = Some(normalize_model(codex.model.as_deref()));
+    }
+    if codex.full_access {
+        args.yolo = true;
+    }
+    if let Some(prompt) = codex.prompt.clone().or_else(|| codex.message.clone())
+        && args.single.is_none()
+    {
+        args.single = Some(prompt);
+    }
+    Ok(CodexRewrite::Continue)
 }
 
-/// Run one turn against `thread_id`, streaming deltas to stdout and tool
-/// activity to stderr. Returns when the turn completes or the server reports
-/// an error.
-async fn run_turn(
-    server: &CodexAppServer,
-    thread_id: &str,
-    prompt: &str,
-    model: Option<&str>,
-    full_access: bool,
-    cwd: &std::path::Path,
-) -> Result<()> {
-    // Subscribe before starting the turn so we never miss the first
-    // notification (broadcast fans out from the moment of subscribe).
-    let mut notifications = server.subscribe();
-    let turn_id = server
-        .start_turn_with(
-            thread_id,
-            vec![json!({ "type": "text", "text": prompt })],
-            model,
-            None,
-            turn_sandbox(full_access, cwd),
-        )
-        .await?;
-    let mut wrote_text = false;
-
-    loop {
-        let notification = match notifications.recv().await {
-            Ok(notification) => notification,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                eprintln!("\x1b[2m[codex: lagged {skipped} notifications]\x1b[0m");
-                continue;
+/// `grok codex --status`: subscription credential + catalog models.
+fn print_status() {
+    let home = xai_grok_config::grok_home();
+    match xai_grok_shell::auth::read_openai_codex_auth(&home) {
+        Some(auth) => {
+            println!("OpenAI Codex (ChatGPT): signed in");
+            if let Some(email) = auth.email.as_deref() {
+                println!("  Account: {email}");
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                bail!("Codex app-server notification stream closed");
+            if let Some(account_id) = auth.account_id.as_deref() {
+                println!("  Account id: {account_id}");
             }
-        };
-        if notification
-            .pointer("/params/threadId")
-            .and_then(Value::as_str)
-            .is_some_and(|id| id != thread_id)
-        {
-            continue;
+            match auth.expires_at {
+                Some(expiry) => println!("  Token expires: {}", expiry.to_rfc3339()),
+                None => println!("  Token expires: unknown"),
+            }
         }
-        match notification.get("method").and_then(Value::as_str) {
-            Some("item/agentMessage/delta" | "item/plan/delta") => {
-                if let Some(delta) = notification
-                    .pointer("/params/delta")
-                    .and_then(Value::as_str)
-                {
-                    print!("{delta}");
-                    std::io::stdout().flush()?;
-                    wrote_text = true;
-                }
-            }
-            Some("item/started") => {
-                if let Some(label) = tool_label(notification.pointer("/params/item")) {
-                    eprintln!("\x1b[2m[{label}]\x1b[0m");
-                }
-            }
-            Some("error") if notification.pointer("/params/willRetry") != Some(&Value::Bool(true)) => {
-                let message = notification
-                    .pointer("/params/error/message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex app-server reported an error");
-                bail!("{message}");
-            }
-            Some("turn/completed") => {
-                if notification
-                    .pointer("/params/turn/id")
-                    .and_then(Value::as_str)
-                    != Some(turn_id.as_str())
-                {
-                    continue;
-                }
-                let status = notification
-                    .pointer("/params/turn/status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("completed");
-                if status == "failed" {
-                    let message = notification
-                        .pointer("/params/turn/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Codex turn failed");
-                    bail!("{message}");
-                }
-                break;
-            }
-            _ => {}
+        None => {
+            println!("OpenAI Codex (ChatGPT): not signed in");
+            println!("  Run `grok login --openai` to sign in (browser), or");
+            println!("      `grok login --openai --device-code` (headless).");
         }
     }
-    if wrote_text {
-        println!();
-    }
-    Ok(())
-}
-
-fn tool_label(item: Option<&Value>) -> Option<String> {
-    let item = item?;
-    match item.get("type").and_then(Value::as_str)? {
-        "commandExecution" => Some(format!(
-            "shell: {}",
-            item.get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("command")
-        )),
-        "fileChange" => Some("apply patch".to_owned()),
-        "mcpToolCall" => Some(format!(
-            "{}.{}",
-            item.get("server").and_then(Value::as_str).unwrap_or("mcp"),
-            item.get("tool").and_then(Value::as_str).unwrap_or("tool")
-        )),
-        "webSearch" => Some("web search".to_owned()),
-        "collabAgentToolCall" => Some("collaboration agent".to_owned()),
-        _ => None,
+    println!("Default model: {DEFAULT_CODEX_MODEL}");
+    println!("Available models:");
+    for model in xai_grok_models::platform_builtin_models()
+        .iter()
+        .filter(|m| m.platform == xai_grok_models::PlatformId::OpenAiCodex)
+    {
+        println!("  openai-codex/{}", model.model);
     }
 }
 
@@ -270,29 +137,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn labels_command_and_mcp_activity() {
+    fn normalize_model_accepts_bare_prefixed_and_legacy_ids() {
+        assert_eq!(normalize_model(None), DEFAULT_CODEX_MODEL);
+        assert_eq!(normalize_model(Some("gpt-5.5")), "openai-codex/gpt-5.5");
         assert_eq!(
-            tool_label(Some(
-                &json!({ "type": "commandExecution", "command": "cargo test" })
-            )),
-            Some("shell: cargo test".to_owned())
+            normalize_model(Some("openai-codex/gpt-5.4")),
+            "openai-codex/gpt-5.4"
         );
         assert_eq!(
-            tool_label(Some(
-                &json!({ "type": "mcpToolCall", "server": "docs", "tool": "search" })
-            )),
-            Some("docs.search".to_owned())
+            normalize_model(Some("codex:gpt-5.4")),
+            "openai-codex/gpt-5.4"
         );
-    }
-
-    #[test]
-    fn sandbox_selectors_match_full_access_flag() {
-        assert_eq!(thread_sandbox(false), "workspace-write");
-        assert_eq!(thread_sandbox(true), "danger-full-access");
-        assert_eq!(
-            turn_sandbox(false, std::path::Path::new("/tmp/proj"))["type"],
-            "workspaceWrite"
-        );
-        assert_eq!(turn_sandbox(true, std::path::Path::new("/tmp/proj"))["type"], "dangerFullAccess");
     }
 }

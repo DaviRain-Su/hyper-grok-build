@@ -124,6 +124,16 @@ pub struct SamplerConfig {
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
+
+    /// ChatGPT Codex backend dialect for Responses API requests. When true
+    /// the client (a) moves the system prompt from `input` items into the
+    /// top-level `instructions` field, (b) stamps `prompt_cache_key` from
+    /// the session id for cache affinity, and (c) defaults `text.verbosity`
+    /// to `low` — mirroring official Pi `openai-codex-responses.ts`.
+    /// `store: false` and `include: ["reasoning.encrypted_content"]` are
+    /// already unconditional sampler defaults.
+    #[serde(default)]
+    pub responses_codex_dialect: bool,
 }
 
 impl Default for SamplerConfig {
@@ -158,6 +168,7 @@ impl Default for SamplerConfig {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            responses_codex_dialect: false,
         }
     }
 }

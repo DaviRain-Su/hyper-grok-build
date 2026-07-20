@@ -1045,6 +1045,20 @@ pub fn run_cli_logout_kimi() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `grok logout --openai`: clear only the OpenAI Codex (ChatGPT) OAuth scope.
+pub fn run_cli_logout_openai_codex() -> anyhow::Result<()> {
+    let home = grok_home::grok_home();
+    let had = crate::auth::read_openai_codex_auth(&home).is_some();
+    crate::auth::clear_openai_codex_auth(&home)
+        .map_err(|e| anyhow::anyhow!("Failed to clear OpenAI Codex auth: {e}"))?;
+    if had {
+        eprintln!("Logged out of OpenAI Codex (xAI session unchanged).");
+    } else {
+        eprintln!("No OpenAI Codex session to log out of.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1582,6 +1596,7 @@ mod tests {
             expires_at: None,
             oidc_issuer: None,
             oidc_client_id: None,
+        account_id: None,
         }
     }
 

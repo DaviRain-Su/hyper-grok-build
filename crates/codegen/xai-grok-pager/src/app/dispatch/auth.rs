@@ -259,6 +259,25 @@ pub(super) fn dispatch_login_kimi(app: &mut AppView) -> Vec<Effect> {
     start_login_with_method(app, method_id, AuthMode::Pending, false)
 }
 
+/// `/login openai` — OpenAI Codex (ChatGPT) subscription browser OAuth.
+pub(super) fn dispatch_login_openai_codex(app: &mut AppView) -> Vec<Effect> {
+    let method_id = acp::AuthMethodId::new(
+        xai_grok_shell::agent::auth_method::OPENAI_CODEX_METHOD_ID,
+    );
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::OPENAI_CODEX_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("OpenAI Codex".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
 fn start_login_with_method(
     app: &mut AppView,
     method_id: acp::AuthMethodId,

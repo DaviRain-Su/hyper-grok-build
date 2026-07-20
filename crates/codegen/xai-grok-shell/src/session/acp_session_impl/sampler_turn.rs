@@ -375,6 +375,10 @@ impl SessionActor {
         // Capture before `cfg` fields are moved into `SamplingConfig`.
         let kimi_bearer_resolver =
             crate::agent::config::kimi_code_bearer_resolver_for_base_url(&cfg.base_url);
+        let codex_bearer_resolver =
+            crate::agent::config::openai_codex_bearer_resolver_for_base_url(&cfg.base_url);
+        let responses_codex_dialect =
+            xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
@@ -442,13 +446,14 @@ impl SessionActor {
                     })
             } else {
                 // Kimi Code (~15m access tokens): live-resolve every request.
-                kimi_bearer_resolver
+                kimi_bearer_resolver.or(codex_bearer_resolver)
             },
             supports_backend_search: self.supports_backend_search.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            responses_codex_dialect,
         }
     }
     /// Install auto-mode permission classifier with a live LLM side-query

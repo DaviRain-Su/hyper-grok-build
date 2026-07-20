@@ -27,6 +27,11 @@ pub const KIMI_CODE_BASE_URL_ENV: &str = "GROK_KIMI_CODE_BASE_URL";
 /// Env override for the Kimi Code OAuth host.
 pub const KIMI_CODE_OAUTH_HOST_ENV: &str = "GROK_KIMI_CODE_OAUTH_HOST";
 
+/// Env override for the OpenAI Codex (ChatGPT subscription) inference base.
+pub const OPENAI_CODEX_BASE_URL_ENV: &str = "GROK_OPENAI_CODEX_BASE_URL";
+/// Env override for the OpenAI Codex OAuth host.
+pub const OPENAI_CODEX_OAUTH_HOST_ENV: &str = "GROK_OPENAI_CODEX_OAUTH_HOST";
+
 /// OpenAI API key (platform-scoped, wins over `OPENAI_API_KEY`).
 pub const OPENAI_API_KEY_ENV: &str = "GROK_OPENAI_API_KEY";
 /// Common OpenAI SDK alias.
@@ -50,6 +55,11 @@ const MOONSHOT_AI_BASE_URL_DEFAULT: &str = "https://api.moonshot.ai/v1";
 /// `GROK_KIMI_CODE_BASE_URL`.
 const KIMI_CODE_BASE_URL_DEFAULT: &str = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_OAUTH_HOST_DEFAULT: &str = "https://auth.kimi.com";
+/// OpenAI Codex (ChatGPT subscription) inference base. Grok's sampler joins
+/// `{base}/responses`, producing the Codex backend SSE endpoint
+/// `https://chatgpt.com/backend-api/codex/responses` (same as official Pi).
+const OPENAI_CODEX_BASE_URL_DEFAULT: &str = "https://chatgpt.com/backend-api/codex";
+const OPENAI_CODEX_OAUTH_HOST_DEFAULT: &str = "https://auth.openai.com";
 const OPENAI_BASE_URL_DEFAULT: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL_DEFAULT: &str = "https://api.anthropic.com/v1";
 /// Required Anthropic Messages API version header (also sent for Kimi Code).
@@ -83,6 +93,8 @@ pub fn normalize_kimi_code_base_url(url: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlatformId {
     KimiCode,
+    /// OpenAI Codex subscription via ChatGPT OAuth (`chatgpt.com/backend-api`).
+    OpenAiCodex,
     MoonshotCn,
     MoonshotAi,
     OpenAi,
@@ -109,8 +121,9 @@ pub enum PlatformId {
 
 impl PlatformId {
     /// All platforms; subscription first.
-    pub const ALL: [PlatformId; 20] = [
+    pub const ALL: [PlatformId; 21] = [
         Self::KimiCode,
+        Self::OpenAiCodex,
         Self::MoonshotCn,
         Self::MoonshotAi,
         Self::OpenAi,
@@ -135,6 +148,7 @@ impl PlatformId {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::KimiCode => "kimi-code",
+            Self::OpenAiCodex => "openai-codex",
             Self::MoonshotCn => "moonshot-cn",
             Self::MoonshotAi => "moonshot-ai",
             Self::OpenAi => "openai",
@@ -160,6 +174,7 @@ impl PlatformId {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "kimi-code" | "kimi-coding" => Some(Self::KimiCode),
+            "openai-codex" | "chatgpt-codex" => Some(Self::OpenAiCodex),
             "moonshot-cn" | "moonshotai-cn" => Some(Self::MoonshotCn),
             "moonshot-ai" | "moonshotai" => Some(Self::MoonshotAi),
             "openai" => Some(Self::OpenAi),
@@ -186,6 +201,7 @@ impl PlatformId {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::KimiCode => "Kimi For Coding",
+            Self::OpenAiCodex => "OpenAI Codex (ChatGPT)",
             Self::MoonshotCn => "Moonshot AI (moonshot.cn)",
             Self::MoonshotAi => "Moonshot AI (moonshot.ai)",
             Self::OpenAi => "OpenAI",
@@ -213,6 +229,7 @@ impl PlatformId {
         match self {
             // Kimi Code subscription: https://api.kimi.com/coding/v1.
             Self::KimiCode => KIMI_CODE_BASE_URL_DEFAULT,
+            Self::OpenAiCodex => OPENAI_CODEX_BASE_URL_DEFAULT,
             Self::MoonshotCn => MOONSHOT_CN_BASE_URL_DEFAULT,
             Self::MoonshotAi => MOONSHOT_AI_BASE_URL_DEFAULT,
             Self::OpenAi => OPENAI_BASE_URL_DEFAULT,
@@ -242,6 +259,7 @@ impl PlatformId {
         // Prefer well-known envs for core platforms; generic GROK_{ID}_BASE_URL for others.
         let specific = match self {
             Self::KimiCode => Some(KIMI_CODE_BASE_URL_ENV),
+            Self::OpenAiCodex => Some(OPENAI_CODEX_BASE_URL_ENV),
             Self::MoonshotCn => Some(MOONSHOT_CN_BASE_URL_ENV),
             Self::MoonshotAi => Some(MOONSHOT_AI_BASE_URL_ENV),
             Self::OpenAi => Some(OPENAI_BASE_URL_ENV),
@@ -271,13 +289,17 @@ impl PlatformId {
     pub fn oauth_host(self) -> Option<String> {
         match self {
             Self::KimiCode => Some(env_or(KIMI_CODE_OAUTH_HOST_ENV, KIMI_CODE_OAUTH_HOST_DEFAULT)),
+            Self::OpenAiCodex => Some(env_or(
+                OPENAI_CODEX_OAUTH_HOST_ENV,
+                OPENAI_CODEX_OAUTH_HOST_DEFAULT,
+            )),
             _ => None,
         }
     }
 
     /// True for the OAuth-bearer subscription channel.
     pub fn uses_oauth(self) -> bool {
-        matches!(self, Self::KimiCode)
+        matches!(self, Self::KimiCode | Self::OpenAiCodex)
     }
 
     /// Anthropic Messages uses `x-api-key` rather than Bearer.
@@ -301,7 +323,7 @@ impl PlatformId {
     /// SECURITY: the *values* behind these names must never be logged.
     pub fn api_key_env_names(self) -> &'static [&'static str] {
         match self {
-            Self::KimiCode => &[],
+            Self::KimiCode | Self::OpenAiCodex => &[],
             Self::MoonshotCn => &[
                 MOONSHOT_CN_API_KEY_ENV,
                 MOONSHOT_API_KEY_ENV,
@@ -349,8 +371,12 @@ impl PlatformId {
     /// the pager's `/providers` overview.
     pub fn setup_hint(self) -> String {
         if self.uses_oauth() {
+            let login_target = match self {
+                Self::OpenAiCodex => "/login openai",
+                _ => "/login kimi",
+            };
             return format!(
-                "Sign in with your {} subscription: run /login kimi",
+                "Sign in with your {} subscription: run {login_target}",
                 self.display_name()
             );
         }
@@ -563,9 +589,82 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
                 out.push(m);
             }
         }
+        // OpenAI Codex (ChatGPT subscription) is not part of the Pi offline
+        // catalog — always hand-maintained here.
+        for m in openai_codex_offline_fallbacks() {
+            if let Some(idx) = existing.get(&m.catalog_key()) {
+                out[*idx] = m;
+            } else {
+                existing.insert(m.catalog_key(), out.len());
+                out.push(m);
+            }
+        }
         out
     });
     &MODELS
+}
+
+/// OpenAI Codex subscription models (`chatgpt.com/backend-api/codex`).
+///
+/// Model lineup mirrors the Codex app-server `model/list` response and
+/// official Pi `openai-codex` provider. The backend speaks the Responses
+/// API with `store: false` + encrypted reasoning; GPT-5 family window is
+/// 400k with 128k max output.
+fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
+    const CTX_400K: u64 = 400_000;
+    const MAX_TOK_128K: Option<u32> = Some(131_072);
+    macro_rules! codex {
+        ($id:literal, $name:literal, $desc:literal) => {
+            BuiltinPlatformModel {
+                platform: PlatformId::OpenAiCodex,
+                model: $id.into(),
+                name: $name.into(),
+                description: $desc.into(),
+                context_window: CTX_400K,
+                supports_reasoning_effort: true,
+                supported_in_api: false,
+                max_completion_tokens: MAX_TOK_128K,
+                api_backend: PlatformApiBackend::Responses,
+            }
+        };
+    }
+    vec![
+        codex!(
+            "gpt-5.6-sol",
+            "GPT-5.6 Sol (ChatGPT)",
+            "Latest frontier agentic coding model (ChatGPT subscription)"
+        ),
+        codex!(
+            "gpt-5.6-terra",
+            "GPT-5.6 Terra (ChatGPT)",
+            "Balanced agentic coding model for everyday work (ChatGPT subscription)"
+        ),
+        codex!(
+            "gpt-5.6-luna",
+            "GPT-5.6 Luna (ChatGPT)",
+            "Fast and affordable agentic coding model (ChatGPT subscription)"
+        ),
+        codex!(
+            "gpt-5.5",
+            "GPT-5.5 (ChatGPT)",
+            "Frontier model for complex coding and research (ChatGPT subscription)"
+        ),
+        codex!(
+            "gpt-5.4",
+            "GPT-5.4 (ChatGPT)",
+            "Strong model for everyday coding (ChatGPT subscription)"
+        ),
+        codex!(
+            "gpt-5.4-mini",
+            "GPT-5.4 Mini (ChatGPT)",
+            "Small, fast model for simpler coding tasks (ChatGPT subscription)"
+        ),
+        codex!(
+            "gpt-5.3-codex-spark",
+            "GPT-5.3 Codex Spark (ChatGPT)",
+            "Ultra-fast coding model (ChatGPT subscription)"
+        ),
+    ]
 }
 
 fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
@@ -998,9 +1097,26 @@ mod tests {
             assert!(!p.base_url().is_empty());
         }
         assert!(PlatformId::KimiCode.uses_oauth());
+        assert!(PlatformId::OpenAiCodex.uses_oauth());
         assert!(!PlatformId::MoonshotCn.uses_oauth());
         assert!(PlatformId::KimiCode.api_key_env_names().is_empty());
+        assert!(PlatformId::OpenAiCodex.api_key_env_names().is_empty());
         assert!(!PlatformId::MoonshotCn.api_key_env_names().is_empty());
+        assert_eq!(
+            PlatformId::OpenAiCodex.oauth_host().as_deref(),
+            Some("https://auth.openai.com")
+        );
+        assert_eq!(
+            PlatformId::OpenAiCodex.base_url(),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(
+            PlatformId::OpenAiCodex.models_list_url(),
+            "https://chatgpt.com/backend-api/codex/models"
+        );
+        assert!(PlatformId::OpenAiCodex
+            .base_url_matches("https://chatgpt.com/backend-api/codex/responses"));
+        assert!(!PlatformId::OpenAiCodex.base_url_matches("https://api.openai.com/v1"));
         assert_eq!(PlatformId::parse("openai"), Some(PlatformId::OpenAi));
         assert_eq!(PlatformId::parse("anthropic"), Some(PlatformId::Anthropic));
         assert!(PlatformId::Anthropic.uses_x_api_key());

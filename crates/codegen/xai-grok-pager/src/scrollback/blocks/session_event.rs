@@ -215,8 +215,8 @@ impl SessionEvent {
             }
             SessionEvent::ReAuthRequired => {
                 "Authentication required \u{2014} your session has expired or your \
-                 credentials were rejected. Run /login (xAI) or /login kimi (Kimi Code), \
-                 then resend your message."
+                 credentials were rejected. Run /login (xAI), /login kimi (Kimi Code) \
+                 or /login openai (OpenAI Codex), then resend your message."
                     .to_string()
             }
             SessionEvent::ContextTooLarge => {

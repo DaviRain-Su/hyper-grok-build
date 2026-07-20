@@ -180,6 +180,60 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
     usage.total_tokens = total;
 }
 
+/// Apply the ChatGPT Codex backend dialect to a Responses API request.
+///
+/// Mirrors official Pi `openai-codex-responses.ts` request building:
+/// - the system prompt travels in the top-level `instructions` field, not as
+///   `input` items (Pi: `convertResponsesMessages` with
+///   `includeSystemPrompt: false` + `instructions: context.systemPrompt`);
+/// - `prompt_cache_key` pins the session for server-side cache affinity;
+/// - `text.verbosity` defaults to `low` (Pi default) unless a text format
+///   (e.g. structured output) is already set.
+fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
+    if let rs::InputParam::Items(items) = &mut request.inner.input {
+        let mut system_texts: Vec<String> = Vec::new();
+        items.retain(|item| {
+            if let rs::InputItem::EasyMessage(message) = item
+                && message.role == rs::Role::System
+            {
+                if let rs::EasyInputContent::Text(text) = &message.content {
+                    system_texts.push(text.clone());
+                }
+                return false;
+            }
+            true
+        });
+        if !system_texts.is_empty() && request.inner.instructions.is_none() {
+            request.inner.instructions = Some(system_texts.join("\n\n"));
+        }
+    }
+    if request.inner.instructions.is_none() {
+        // Pi: `instructions: context.systemPrompt || "You are a helpful assistant."`
+        request.inner.instructions = Some("You are a helpful assistant.".to_string());
+    }
+    if request.inner.prompt_cache_key.is_none()
+        && let Some(session_id) = request
+            .x_grok_session_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+    {
+        // Pi `clampOpenAIPromptCacheKey`: the backend caps cache keys at 64 chars.
+        const PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
+        let clamped: String = session_id.chars().take(PROMPT_CACHE_KEY_MAX_CHARS).collect();
+        request.inner.prompt_cache_key = Some(clamped);
+    }
+    if request.inner.text.is_none() {
+        request.inner.text = Some(rs::ResponseTextParam {
+            format: rs::TextResponseFormatConfiguration::Text,
+            verbosity: Some(rs::Verbosity::Low),
+        });
+    }
+    // Pi sends `reasoning.summary: "auto"` (the shared default is `concise`).
+    if let Some(reasoning) = request.inner.reasoning.as_mut() {
+        reasoning.summary = Some(rs::ReasoningSummary::Auto);
+    }
+}
+
 /// Metadata key for cost ticks past typed Response events.
 pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "xai.cost_usd_ticks";
 
@@ -316,6 +370,7 @@ struct ClientDefaults {
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    responses_codex_dialect: bool,
 }
 
 // =============================================================================
@@ -528,6 +583,7 @@ impl SamplingClient {
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
+            responses_codex_dialect: config.responses_codex_dialect,
         };
 
         Ok(Self {
@@ -1017,6 +1073,10 @@ impl SamplingClient {
         let includes = request.inner.include.get_or_insert_with(Vec::new);
         if !includes.contains(&rs::IncludeEnum::ReasoningEncryptedContent) {
             includes.push(rs::IncludeEnum::ReasoningEncryptedContent);
+        }
+
+        if self.defaults.responses_codex_dialect {
+            apply_codex_dialect(request);
         }
 
         Ok(())
@@ -1925,6 +1985,7 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            responses_codex_dialect: false,
         }
     }
 
@@ -1991,6 +2052,64 @@ mod tests {
 
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
+    }
+
+    #[test]
+    fn codex_dialect_moves_system_prompt_to_instructions() {
+        use xai_grok_sampling_types::ConversationRequest;
+
+        let mut config = minimal_config();
+        config.api_backend = ApiBackend::Responses;
+        config.responses_codex_dialect = true;
+        let client = SamplingClient::new(config).unwrap();
+
+        let request = ConversationRequest::from_items(vec![
+            xai_grok_sampling_types::ConversationItem::system("you are codex"),
+            xai_grok_sampling_types::ConversationItem::user("hello"),
+        ]);
+        let responses_request: rs::CreateResponse = (&request).into();
+        let mut wrapper = CreateResponseWrapper::new(responses_request);
+        wrapper.x_grok_session_id = Some("session-123".to_string());
+
+        client.apply_response_defaults(&mut wrapper).unwrap();
+        let body = serde_json::to_value(&wrapper.inner).unwrap();
+
+        assert_eq!(body["instructions"], "you are codex");
+        assert_eq!(body["prompt_cache_key"], "session-123");
+        assert_eq!(body["text"]["verbosity"], "low");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(body["store"], false);
+        let input = body["input"].as_array().expect("input items");
+        assert!(
+            input.iter().all(|item| item["role"] != "system"),
+            "system items must be lifted out of input: {input:?}"
+        );
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn codex_dialect_off_keeps_system_in_input() {
+        use xai_grok_sampling_types::ConversationRequest;
+
+        let mut config = minimal_config();
+        config.api_backend = ApiBackend::Responses;
+        let client = SamplingClient::new(config).unwrap();
+
+        let request = ConversationRequest::from_items(vec![
+            xai_grok_sampling_types::ConversationItem::system("you are grok"),
+            xai_grok_sampling_types::ConversationItem::user("hello"),
+        ]);
+        let responses_request: rs::CreateResponse = (&request).into();
+        let mut wrapper = CreateResponseWrapper::new(responses_request);
+
+        client.apply_response_defaults(&mut wrapper).unwrap();
+        let body = serde_json::to_value(&wrapper.inner).unwrap();
+
+        assert!(body.get("instructions").is_none());
+        let input = body["input"].as_array().expect("input items");
+        assert!(input.iter().any(|item| item["role"] == "system"));
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]

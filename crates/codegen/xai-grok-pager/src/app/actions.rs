@@ -618,6 +618,8 @@ pub enum Action {
     Login,
     /// Interactive Kimi Code subscription login (`/login kimi`).
     LoginKimi,
+    /// Interactive OpenAI Codex (ChatGPT) subscription login (`/login openai`).
+    LoginOpenAiCodex,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit

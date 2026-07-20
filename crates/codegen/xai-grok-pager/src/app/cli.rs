@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Use an existing Codex/ChatGPT subscription through the Codex CLI
+    /// Use an existing Codex/ChatGPT subscription (native backend)
     Codex(CodexArgs),
     /// Run Grok without the interactive UI
     Agent(Box<AgentArgs>),
@@ -24,6 +24,9 @@ pub enum Command {
         /// Clear only the Kimi Code subscription credential (leave xAI alone).
         #[arg(long = "kimi")]
         kimi: bool,
+        /// Clear only the OpenAI Codex (ChatGPT) subscription credential.
+        #[arg(long = "openai", conflicts_with = "kimi")]
+        openai: bool,
     },
     /// Sign in to Grok
     Login {
@@ -31,7 +34,7 @@ pub enum Command {
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "kimi"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "kimi", "openai"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
@@ -44,8 +47,16 @@ pub enum Command {
         ///
         /// Stores credentials under the `oauth/kimi-code` scope and unlocks
         /// `kimi-code/*` models. Independent of xAI login.
-        #[arg(long = "kimi", conflicts_with_all = ["oauth", "device_auth"])]
+        #[arg(long = "kimi", conflicts_with_all = ["oauth", "device_auth", "openai"])]
         kimi: bool,
+        /// Sign in with an OpenAI Codex (ChatGPT Plus/Pro) subscription.
+        ///
+        /// Browser OAuth by default (PKCE + loopback callback, manual paste
+        /// supported); combine with `--device-auth` for headless environments.
+        /// Stores credentials under the `oauth/openai-codex` scope and unlocks
+        /// `openai-codex/*` models. Independent of xAI login.
+        #[arg(long = "openai", alias = "chatgpt", conflicts_with_all = ["oauth", "kimi"])]
+        openai: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -163,11 +174,11 @@ pub struct CodexArgs {
     /// Codex model ID. Defaults to the subscription's current default.
     #[arg(short = 'm', long = "model")]
     pub model: Option<String>,
-    /// Path to the official Codex CLI binary.
-    #[arg(long = "codex-binary", default_value = "codex", value_hint = ValueHint::FilePath)]
+    /// Deprecated: the native backend talks to ChatGPT directly (no Codex CLI).
+    #[arg(long = "codex-binary", default_value = "codex", value_hint = ValueHint::FilePath, hide = true)]
     pub codex_binary: PathBuf,
-    /// Resume an existing Codex app-server thread ID.
-    #[arg(long = "resume", value_name = "THREAD_ID")]
+    /// Deprecated: app-server threads are not resumable; use `grok sessions`.
+    #[arg(long = "resume", value_name = "THREAD_ID", hide = true)]
     pub resume: Option<String>,
     /// Allow Codex to access the host without its workspace sandbox.
     #[arg(long = "full-access")]
@@ -1200,11 +1211,43 @@ mod tests {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
         assert!(matches!(
             args.command,
-            Some(Command::Logout { kimi: false })
+            Some(Command::Logout {
+                kimi: false,
+                openai: false
+            })
         ));
         let args = PagerArgs::try_parse_from(["grok", "logout", "--kimi"]).expect("parses");
-        assert!(matches!(args.command, Some(Command::Logout { kimi: true })));
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: true,
+                openai: false
+            })
+        ));
         assert!(args.prompt.is_none());
+    }
+
+    #[test]
+    fn login_openai_flag_parses_and_conflicts() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--openai"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login { openai: true, .. })
+        ));
+        // --openai may combine with --device-auth (headless device flow)…
+        let args =
+            PagerArgs::try_parse_from(["grok", "login", "--openai", "--device-auth"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                openai: true,
+                device_auth: true,
+                ..
+            })
+        ));
+        // …but conflicts with --kimi and --oauth.
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--openai", "--kimi"]).is_err());
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--openai", "--oauth"]).is_err());
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {
