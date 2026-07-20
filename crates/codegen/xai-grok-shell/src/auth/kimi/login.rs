@@ -8,7 +8,7 @@ use super::oauth::{
     DeviceAuthorization, DevicePollResult, poll_device_token, request_device_authorization,
 };
 use crate::auth::model::GrokAuth;
-use crate::auth::storage::{read_kimi_code_auth, store_kimi_code_auth};
+use crate::auth::storage::{auth_json_path, read_kimi_code_auth, store_kimi_code_auth};
 
 const SLOW_DOWN_INCREMENT_SECS: u64 = 5;
 
@@ -31,12 +31,17 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
             PollLoopOutcome::Done(auth) => {
                 let auth = *auth;
                 store_kimi_code_auth(&xai_grok_config::grok_home(), &auth)?;
-                eprintln!("✓ Signed in to Kimi Code");
+                eprintln!("✓ Signed in to Kimi For Coding");
                 eprintln!(
-                    "  Models: kimi-code/k3, kimi-code/kimi-for-coding, … \
-                     (live list synced after login / on startup)"
+                    "  Models:"
                 );
-                eprintln!("  e.g. grok -m kimi-code/k3 -p \"ping\"");
+                eprintln!("    kimi-code/k3");
+                eprintln!("    kimi-code/k2p7                     # Kimi K2.7 Code");
+                eprintln!("    kimi-code/kimi-for-coding-highspeed # Kimi K2.7 Hyper Speed");
+                eprintln!("    kimi-code/kimi-k2.6                # Kimi K2.6");
+                eprintln!("    kimi-code/kimi-k2.5                # Kimi K2.5");
+                eprintln!("  e.g.  grok -m kimi-code/k3 -p \"ping\"");
+                eprintln!("  TUI:  /model kimi-code/k3");
                 return Ok(auth);
             }
             PollLoopOutcome::Restart => {
@@ -66,8 +71,9 @@ impl xai_grok_sampler::BearerResolver for KimiCodeBearerResolver {
 /// Load a usable Kimi Code access token: return cached if still valid,
 /// otherwise refresh (when possible) and persist.
 pub async fn ensure_kimi_code_access_token() -> Option<String> {
-    let home = xai_grok_config::grok_home();
-    let auth = read_kimi_code_auth(&home)?;
+    let path = auth_json_path();
+    let home = path.parent().unwrap_or(&path);
+    let auth = read_kimi_code_auth(home)?;
     if !crate::auth::is_expired(&auth) {
         return Some(auth.key);
     }
@@ -75,7 +81,7 @@ pub async fn ensure_kimi_code_access_token() -> Option<String> {
     let host = xai_grok_models::PlatformId::KimiCode.oauth_host()?;
     match super::oauth::refresh_token(&host, refresh).await {
         Ok(new_auth) => {
-            if let Err(e) = store_kimi_code_auth(&home, &new_auth) {
+            if let Err(e) = store_kimi_code_auth(home, &new_auth) {
                 tracing::warn!(error = %e, "auth: failed to persist refreshed Kimi token");
             }
             Some(new_auth.key)
@@ -98,8 +104,9 @@ pub async fn ensure_kimi_code_access_token() -> Option<String> {
 ///
 /// Always prefers an unexpired disk cache with **no** network / runtime hop.
 pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
-    let home = xai_grok_config::grok_home();
-    let auth = read_kimi_code_auth(&home)?;
+    let path = auth_json_path();
+    let home = path.parent().unwrap_or(&path);
+    let auth = read_kimi_code_auth(home)?;
     if !crate::auth::is_expired(&auth) {
         return Some(auth.key);
     }

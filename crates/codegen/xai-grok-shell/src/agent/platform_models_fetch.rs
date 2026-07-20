@@ -285,7 +285,13 @@ pub(crate) fn platform_wire_model_to_entry(
         top_p: None,
         api_key: None,
         env_key,
-        api_backend: ApiBackend::ChatCompletions,
+        // Official Pi kimi-coding uses anthropic-messages; open platforms stay
+        // on OpenAI-compatible chat completions.
+        api_backend: if platform == PlatformId::KimiCode {
+            ApiBackend::Messages
+        } else {
+            ApiBackend::ChatCompletions
+        },
         auth_scheme: None,
         reasoning_effort: think_efforts
             .and_then(|t| t.default_effort.as_deref())
@@ -293,7 +299,17 @@ pub(crate) fn platform_wire_model_to_entry(
         // Live think levels, or any reasoning-capable model without levels.
         supports_reasoning_effort: think_efforts.is_some() || supports_reasoning,
         reasoning_efforts,
-        extra_headers: IndexMap::new(),
+        extra_headers: {
+            let mut headers = IndexMap::new();
+            if platform == PlatformId::KimiCode {
+                headers.insert("User-Agent".into(), "KimiCLI/1.5".into());
+                headers.insert(
+                    "anthropic-version".into(),
+                    xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
+                );
+            }
+            headers
+        },
         context_window,
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
@@ -397,7 +413,11 @@ mod tests {
         assert_eq!(entry.reasoning_effort, Some(ReasoningEffort::Xhigh));
         assert_eq!(entry.reasoning_efforts.len(), 3);
         assert!(!entry.supported_in_api, "OAuth-gated until stamp");
-        assert_eq!(entry.api_backend, ApiBackend::ChatCompletions);
+        assert_eq!(
+            entry.api_backend,
+            ApiBackend::Messages,
+            "Kimi Code live listing must use Anthropic Messages (Pi)"
+        );
         assert!(entry.env_key.is_none());
     }
 

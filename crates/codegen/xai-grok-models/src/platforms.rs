@@ -42,11 +42,17 @@ pub const ANTHROPIC_BASE_URL_ENV: &str = "GROK_ANTHROPIC_BASE_URL";
 
 const MOONSHOT_CN_BASE_URL_DEFAULT: &str = "https://api.moonshot.cn/v1";
 const MOONSHOT_AI_BASE_URL_DEFAULT: &str = "https://api.moonshot.ai/v1";
+/// Kimi Code subscription base for Grok's HTTP client.
+///
+/// Official Pi stores `https://api.kimi.com/coding` and lets the Anthropic SDK
+/// append `/v1/messages`. Grok's sampler joins `{base}/messages`, so the base
+/// must include `/v1` (same pattern as Anthropic's `…/v1`). Override with
+/// `GROK_KIMI_CODE_BASE_URL`.
 const KIMI_CODE_BASE_URL_DEFAULT: &str = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_OAUTH_HOST_DEFAULT: &str = "https://auth.kimi.com";
 const OPENAI_BASE_URL_DEFAULT: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL_DEFAULT: &str = "https://api.anthropic.com/v1";
-/// Required Anthropic Messages API version header.
+/// Required Anthropic Messages API version header (also sent for Kimi Code).
 pub const ANTHROPIC_VERSION_HEADER_VALUE: &str = "2023-06-01";
 
 fn env_or(var: &str, compiled: &str) -> String {
@@ -56,29 +62,52 @@ fn env_or(var: &str, compiled: &str) -> String {
     }
 }
 
-/// Built-in inference platforms.
+/// Built-in inference platforms (aligned with official Pi `@earendil-works/pi-ai`
+/// provider ids where applicable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlatformId {
-    /// Kimi Code subscription (device OAuth → api.kimi.com/coding/v1).
     KimiCode,
-    /// Moonshot AI open platform — api.moonshot.cn (China).
     MoonshotCn,
-    /// Moonshot AI open platform — api.moonshot.ai (global).
     MoonshotAi,
-    /// OpenAI API (api.openai.com) — Chat Completions / Responses.
     OpenAi,
-    /// Anthropic API (api.anthropic.com) — Messages + x-api-key.
     Anthropic,
+    DeepSeek,
+    Groq,
+    /// Reserved; Pi Mistral uses a proprietary API we do not speak yet.
+    Mistral,
+    XaiDirect,
+    Together,
+    Fireworks,
+    Cerebras,
+    Nvidia,
+    OpenRouter,
+    MiniMax,
+    MiniMaxCn,
+    Zai,
+    ZaiCodingCn,
 }
 
 impl PlatformId {
-    /// All platforms; subscription first so "default = first" can favor it.
-    pub const ALL: [PlatformId; 5] = [
+    /// All platforms; subscription first.
+    pub const ALL: [PlatformId; 18] = [
         Self::KimiCode,
         Self::MoonshotCn,
         Self::MoonshotAi,
         Self::OpenAi,
         Self::Anthropic,
+        Self::DeepSeek,
+        Self::Groq,
+        Self::Mistral,
+        Self::XaiDirect,
+        Self::Together,
+        Self::Fireworks,
+        Self::Cerebras,
+        Self::Nvidia,
+        Self::OpenRouter,
+        Self::MiniMax,
+        Self::MiniMaxCn,
+        Self::Zai,
+        Self::ZaiCodingCn,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -88,38 +117,115 @@ impl PlatformId {
             Self::MoonshotAi => "moonshot-ai",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::DeepSeek => "deepseek",
+            Self::Groq => "groq",
+            Self::Mistral => "mistral",
+            Self::XaiDirect => "xai-direct",
+            Self::Together => "together",
+            Self::Fireworks => "fireworks",
+            Self::Cerebras => "cerebras",
+            Self::Nvidia => "nvidia",
+            Self::OpenRouter => "openrouter",
+            Self::MiniMax => "minimax",
+            Self::MiniMaxCn => "minimax-cn",
+            Self::Zai => "zai",
+            Self::ZaiCodingCn => "zai-coding-cn",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "kimi-code" => Some(Self::KimiCode),
-            "moonshot-cn" => Some(Self::MoonshotCn),
-            "moonshot-ai" => Some(Self::MoonshotAi),
+            "kimi-code" | "kimi-coding" => Some(Self::KimiCode),
+            "moonshot-cn" | "moonshotai-cn" => Some(Self::MoonshotCn),
+            "moonshot-ai" | "moonshotai" => Some(Self::MoonshotAi),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
+            "deepseek" => Some(Self::DeepSeek),
+            "groq" => Some(Self::Groq),
+            "mistral" => Some(Self::Mistral),
+            "xai-direct" | "xai" => Some(Self::XaiDirect),
+            "together" => Some(Self::Together),
+            "fireworks" => Some(Self::Fireworks),
+            "cerebras" => Some(Self::Cerebras),
+            "nvidia" => Some(Self::Nvidia),
+            "openrouter" => Some(Self::OpenRouter),
+            "minimax" => Some(Self::MiniMax),
+            "minimax-cn" => Some(Self::MiniMaxCn),
+            "zai" => Some(Self::Zai),
+            "zai-coding-cn" => Some(Self::ZaiCodingCn),
             _ => None,
         }
     }
 
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::KimiCode => "Kimi Code",
-            Self::MoonshotCn => "Moonshot AI Open Platform (moonshot.cn)",
-            Self::MoonshotAi => "Moonshot AI Open Platform (moonshot.ai)",
+            Self::KimiCode => "Kimi For Coding",
+            Self::MoonshotCn => "Moonshot AI (moonshot.cn)",
+            Self::MoonshotAi => "Moonshot AI (moonshot.ai)",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
+            Self::DeepSeek => "DeepSeek",
+            Self::Groq => "Groq",
+            Self::Mistral => "Mistral",
+            Self::XaiDirect => "xAI (direct API key)",
+            Self::Together => "Together AI",
+            Self::Fireworks => "Fireworks",
+            Self::Cerebras => "Cerebras",
+            Self::Nvidia => "NVIDIA NIM",
+            Self::OpenRouter => "OpenRouter",
+            Self::MiniMax => "MiniMax",
+            Self::MiniMaxCn => "MiniMax (China)",
+            Self::Zai => "Z.AI",
+            Self::ZaiCodingCn => "Z.AI Coding Plan (CN)",
+        }
+    }
+
+    /// Compiled-in default base (overridable via `GROK_*_BASE_URL` env).
+    fn default_base_url(self) -> &'static str {
+        match self {
+            // Kimi Code subscription: https://api.kimi.com/coding/v1.
+            Self::KimiCode => KIMI_CODE_BASE_URL_DEFAULT,
+            Self::MoonshotCn => MOONSHOT_CN_BASE_URL_DEFAULT,
+            Self::MoonshotAi => MOONSHOT_AI_BASE_URL_DEFAULT,
+            Self::OpenAi => OPENAI_BASE_URL_DEFAULT,
+            Self::Anthropic => ANTHROPIC_BASE_URL_DEFAULT,
+            Self::DeepSeek => "https://api.deepseek.com",
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::Mistral => "https://api.mistral.ai/v1",
+            Self::XaiDirect => "https://api.x.ai/v1",
+            Self::Together => "https://api.together.xyz/v1",
+            Self::Fireworks => "https://api.fireworks.ai/inference/v1",
+            Self::Cerebras => "https://api.cerebras.ai/v1",
+            Self::Nvidia => "https://integrate.api.nvidia.com/v1",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::MiniMax => "https://api.minimax.io/v1",
+            Self::MiniMaxCn => "https://api.minimaxi.com/v1",
+            Self::Zai => "https://api.z.ai/api/paas/v4",
+            Self::ZaiCodingCn => "https://open.bigmodel.cn/api/coding/paas/v4",
         }
     }
 
     /// Inference / model-list base URL.
     pub fn base_url(self) -> String {
-        match self {
-            Self::KimiCode => env_or(KIMI_CODE_BASE_URL_ENV, KIMI_CODE_BASE_URL_DEFAULT),
-            Self::MoonshotCn => env_or(MOONSHOT_CN_BASE_URL_ENV, MOONSHOT_CN_BASE_URL_DEFAULT),
-            Self::MoonshotAi => env_or(MOONSHOT_AI_BASE_URL_ENV, MOONSHOT_AI_BASE_URL_DEFAULT),
-            Self::OpenAi => env_or(OPENAI_BASE_URL_ENV, OPENAI_BASE_URL_DEFAULT),
-            Self::Anthropic => env_or(ANTHROPIC_BASE_URL_ENV, ANTHROPIC_BASE_URL_DEFAULT),
+        // Prefer well-known envs for core platforms; generic GROK_{ID}_BASE_URL for others.
+        let specific = match self {
+            Self::KimiCode => Some(KIMI_CODE_BASE_URL_ENV),
+            Self::MoonshotCn => Some(MOONSHOT_CN_BASE_URL_ENV),
+            Self::MoonshotAi => Some(MOONSHOT_AI_BASE_URL_ENV),
+            Self::OpenAi => Some(OPENAI_BASE_URL_ENV),
+            Self::Anthropic => Some(ANTHROPIC_BASE_URL_ENV),
+            _ => None,
+        };
+        if let Some(var) = specific {
+            return env_or(var, self.default_base_url());
+        }
+        let generic = format!(
+            "GROK_{}_BASE_URL",
+            self.as_str().replace('-', "_").to_ascii_uppercase()
+        );
+        match std::env::var(&generic) {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => self.default_base_url().to_string(),
         }
     }
 
@@ -127,7 +233,7 @@ impl PlatformId {
     pub fn oauth_host(self) -> Option<String> {
         match self {
             Self::KimiCode => Some(env_or(KIMI_CODE_OAUTH_HOST_ENV, KIMI_CODE_OAUTH_HOST_DEFAULT)),
-            Self::MoonshotCn | Self::MoonshotAi | Self::OpenAi | Self::Anthropic => None,
+            _ => None,
         }
     }
 
@@ -142,16 +248,12 @@ impl PlatformId {
     }
 
     /// Model-id prefixes admitted from this platform's `/models` listing.
-    /// `None` = no filtering (subscription listing is already curated).
+    /// `None` = no filtering.
     pub fn allowed_model_prefixes(self) -> Option<&'static [&'static str]> {
         match self {
-            // Subscription: accept the full listing (k3, kimi-for-coding, …).
             Self::KimiCode => None,
-            // Open platform: keep coding-family models (kimi-k*, kimi-k3, …).
-            Self::MoonshotCn | Self::MoonshotAi => Some(&["kimi-k", "kimi-k3", "k3"]),
-            // OpenAI / Anthropic: live /models is large; no prefix filter when
-            // we sync (optional later). Offline catalog is curated separately.
-            Self::OpenAi | Self::Anthropic => None,
+            Self::MoonshotCn | Self::MoonshotAi => Some(&["kimi-k", "kimi-k3", "k3", "k2p7"]),
+            _ => None,
         }
     }
 
@@ -178,19 +280,32 @@ impl PlatformId {
                 ANTHROPIC_API_KEY_ALIAS_ENV,
                 ANTHROPIC_AUTH_TOKEN_ENV,
             ],
+            Self::DeepSeek => &["GROK_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+            Self::Groq => &["GROK_GROQ_API_KEY", "GROQ_API_KEY"],
+            Self::Mistral => &["GROK_MISTRAL_API_KEY", "MISTRAL_API_KEY"],
+            Self::XaiDirect => &["GROK_XAI_DIRECT_API_KEY", "XAI_API_KEY"],
+            Self::Together => &["GROK_TOGETHER_API_KEY", "TOGETHER_API_KEY"],
+            Self::Fireworks => &["GROK_FIREWORKS_API_KEY", "FIREWORKS_API_KEY"],
+            Self::Cerebras => &["GROK_CEREBRAS_API_KEY", "CEREBRAS_API_KEY"],
+            Self::Nvidia => &["GROK_NVIDIA_API_KEY", "NVIDIA_API_KEY"],
+            Self::OpenRouter => &["GROK_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"],
+            Self::MiniMax => &["GROK_MINIMAX_API_KEY", "MINIMAX_API_KEY"],
+            Self::MiniMaxCn => &["GROK_MINIMAX_CN_API_KEY", "MINIMAX_API_KEY"],
+            Self::Zai => &["GROK_ZAI_API_KEY", "ZAI_API_KEY"],
+            Self::ZaiCodingCn => &["GROK_ZAI_CODING_CN_API_KEY", "ZAI_API_KEY"],
         }
     }
 
     /// `{base}/models` URL for catalog sync.
     pub fn models_list_url(self) -> String {
-        format!("{}/models", self.base_url().trim_end_matches('/'))
+        let base = self.base_url().trim_end_matches('/').to_string();
+        format!("{base}/models")
     }
 
     /// Whether to auto-fetch live `GET /models` for this platform.
     ///
-    /// OpenAI / Anthropic org listings are huge and include fine-tunes; we ship
-    /// a Pi-curated offline catalog instead. Kimi / Moonshot listings are small
-    /// and curated for coding.
+    /// Only Kimi / Moonshot auto-sync; others use the Pi offline catalog
+    /// (org listings are huge / noisy).
     pub fn live_models_list_enabled(self) -> bool {
         matches!(
             self,
@@ -324,7 +439,8 @@ struct CatalogModelRow {
     max_completion_tokens: Option<u32>,
     api_backend: String,
     supports_reasoning_effort: bool,
-    supported_in_api: bool,
+    // `supported_in_api` is intentionally ignored: all built-in platform
+    // entries start hidden until the shell stamps credentials.
 }
 
 fn load_pi_catalog_models() -> Vec<BuiltinPlatformModel> {
@@ -342,7 +458,12 @@ fn load_pi_catalog_models() -> Vec<BuiltinPlatformModel> {
                 description: row.description,
                 context_window: row.context_window,
                 supports_reasoning_effort: row.supports_reasoning_effort,
-                supported_in_api: row.supported_in_api,
+                // Pi catalog ships `supported_in_api: true` for many providers,
+                // but we must not show models in the picker until credentials
+                // (env/config OAuth) are actually available. The shell's
+                // `apply_platform_credentials` re-enables visibility when keys
+                // resolve.
+                supported_in_api: false,
                 max_completion_tokens: row.max_completion_tokens,
                 api_backend,
             })
@@ -350,16 +471,28 @@ fn load_pi_catalog_models() -> Vec<BuiltinPlatformModel> {
         .collect()
 }
 
-/// Offline last-resort catalog. Live `/models` sync replaces/extends this
-/// when credentials are available (full subscription listing, live think
-/// efforts, etc. come from the server).
-///
-/// Includes Kimi/Moonshot hand-maintained fallbacks plus the Pi-curated
-/// OpenAI/Anthropic catalog (`platform_catalog.json`).
+/// Offline catalog. Primary source: official Pi `packages/ai` generated data
+/// (`platform_catalog.json`). Hand-maintained Kimi/Moonshot rows fill gaps only
+/// when the Pi catalog lacks that catalog key.
 pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
     static MODELS: LazyLock<Vec<BuiltinPlatformModel>> = LazyLock::new(|| {
-        let mut out = kimi_moonshot_offline_fallbacks();
-        out.extend(load_pi_catalog_models());
+        let mut out: Vec<BuiltinPlatformModel> = load_pi_catalog_models();
+        let mut existing: std::collections::HashMap<String, usize> = out
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.catalog_key(), i))
+            .collect();
+        // Hand-maintained Kimi/Moonshot fallbacks override the Pi catalog so
+        // we keep canonical ids / descriptions. Kimi Code subscription uses
+        // Anthropic Messages (same as official Pi kimi-coding).
+        for m in kimi_moonshot_offline_fallbacks() {
+            if let Some(idx) = existing.get(&m.catalog_key()) {
+                out[*idx] = m;
+            } else {
+                existing.insert(m.catalog_key(), out.len());
+                out.push(m);
+            }
+        }
         out
     });
     &MODELS
@@ -367,32 +500,93 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
 
 fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     // ── Kimi Code subscription (api.kimi.com/coding/v1) ──────────────
-    // Wire ids verified against live listing: `k3`, `kimi-for-coding`.
-    let kimi_coding = BuiltinPlatformModel {
-        platform: PlatformId::KimiCode,
-        model: "kimi-for-coding".into(),
-        name: "Kimi for Coding".into(),
-        description: "Kimi Code subscription coding model (offline fallback)".into(),
-        context_window: CTX_256K,
-        supports_reasoning_effort: true,
-        supported_in_api: false,
-        max_completion_tokens: MAX_TOK_32K,
-        api_backend: PlatformApiBackend::ChatCompletions,
-    };
-    let kimi_k3 = BuiltinPlatformModel {
-        platform: PlatformId::KimiCode,
-        model: "k3".into(),
-        name: "K3".into(),
-        description: "Kimi Code flagship (1M context; offline fallback)".into(),
-        context_window: CTX_1M,
-        supports_reasoning_effort: true,
-        supported_in_api: false,
-        max_completion_tokens: MAX_TOK_32K,
-        api_backend: PlatformApiBackend::ChatCompletions,
-    };
+    // Grok speaks the Kimi Code inference endpoint as OpenAI Chat Completions.
+    // Canonical ids: k3, k2p7, kimi-for-coding-highspeed. Older open-platform
+    // style ids remain as offline aliases for configs that still reference them.
+    macro_rules! kimi {
+        ($id:literal, $name:literal, $desc:literal, $ctx:expr, $effort:expr, $max_tok:expr) => {
+            BuiltinPlatformModel {
+                platform: PlatformId::KimiCode,
+                model: $id.into(),
+                name: $name.into(),
+                description: $desc.into(),
+                context_window: $ctx,
+                supports_reasoning_effort: $effort,
+                supported_in_api: false,
+                max_completion_tokens: $max_tok,
+                api_backend: PlatformApiBackend::ChatCompletions,
+            }
+        };
+    }
+    let kimi_k3 = kimi!(
+        "k3",
+        "Kimi K3",
+        "Official Pi catalog (kimi-coding); adaptive thinking; 1M context",
+        CTX_1M,
+        true,
+        Some(131_072)
+    );
+    let kimi_k2p7 = kimi!(
+        "k2p7",
+        "Kimi K2.7 Code",
+        "Official Pi catalog (kimi-coding); adaptive thinking; 256k context",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
+    let kimi_hs = kimi!(
+        "kimi-for-coding-highspeed",
+        "Kimi For Coding HighSpeed",
+        "Official Pi catalog (kimi-coding); adaptive thinking; HyperSpeed",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
+    // Legacy / open-platform-style aliases still accepted after login.
+    let kimi_k27 = kimi!(
+        "kimi-k2.7-code",
+        "Kimi K2.7 Code (alias)",
+        "Alias of k2p7 for older configs",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
+    let kimi_k27_hs = kimi!(
+        "kimi-k2.7-code-highspeed",
+        "Kimi K2.7 Code HighSpeed (alias)",
+        "Alias of kimi-for-coding-highspeed for older configs",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
+    let kimi_k26 = kimi!(
+        "kimi-k2.6",
+        "Kimi K2.6",
+        "Legacy subscription listing id; prefer live /models after login",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
+    let kimi_k25 = kimi!(
+        "kimi-k2.5",
+        "Kimi K2.5",
+        "Legacy subscription listing id; prefer live /models after login",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
+    let kimi_coding = kimi!(
+        "kimi-for-coding",
+        "Kimi for Coding",
+        "Legacy Kimi Code subscription id (offline fallback)",
+        CTX_256K,
+        true,
+        MAX_TOK_32K
+    );
 
     // ── Moonshot open platform — current multimodal lineup ───────────
-    // Official Model List (platform.kimi.ai/docs/models).
+    // Official Model List (platform.kimi.ai/docs/models). Hidden until an API
+    // key is configured; the shell's `apply_platform_credentials` reveals them.
     macro_rules! open {
         ($plat:ident, $id:literal, $name:literal, $desc:literal, $ctx:expr, $effort:expr) => {
             BuiltinPlatformModel {
@@ -402,7 +596,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 description: $desc.into(),
                 context_window: $ctx,
                 supports_reasoning_effort: $effort,
-                supported_in_api: true,
+                supported_in_api: false,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::ChatCompletions,
             }
@@ -410,7 +604,14 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     }
 
     vec![
+        // Subscription first (Pi canonical ids, then aliases).
         kimi_k3,
+        kimi_k2p7,
+        kimi_hs,
+        kimi_k27,
+        kimi_k27_hs,
+        kimi_k26,
+        kimi_k25,
         kimi_coding,
         open!(
             MoonshotCn,
@@ -530,24 +731,48 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
 
 // ── Per-model request-body profiles (platform.kimi.ai docs) ────────────────
 
-/// How a Kimi/Moonshot model expects chat-completions request fields.
+/// How a Kimi/Moonshot model expects request fields.
 ///
-/// Source: platform.kimi.ai "Thinking Mode" + "K2.7 Code Parameters Differences".
+/// Sources:
+/// - platform.kimi.ai "Thinking Mode" + "K2.7 Code Parameters Differences" (Chat Completions)
+/// - official Pi `kimi-coding` catalog: Anthropic Messages + `forceAdaptiveThinking`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KimiRequestProfile {
-    /// `kimi-k3` / subscription `k3`: always thinks; top-level `reasoning_effort`
-    /// (wire tokens e.g. low/high/max; open platform currently documents `max`).
+    /// `kimi-k3` / subscription `k3`: always thinks.
+    /// - Chat Completions: top-level `reasoning_effort` (default `max`).
+    /// - Messages (Pi): `thinking.type=adaptive` + `output_config.effort`
+    ///   (`thinkingLevelMap` documents `max` only; default effort `max`).
     K3,
-    /// `kimi-k2.7-code` (+ highspeed): thinking always on; fixed sampling
-    /// (temp=1.0, top_p=0.95, n=1, penalties=0); do not send `thinking`.
+    /// Official Pi `k2p7` / `kimi-for-coding-highspeed` and open-platform
+    /// `kimi-k2.7-code` (+ highspeed): thinking always on.
+    /// - Chat Completions: fixed sampling; omit K2 `thinking` object.
+    /// - Messages (Pi): `forceAdaptiveThinking` — adaptive + effort, no budget.
     K27Code,
     /// `kimi-k2.6`: `thinking.type` enabled/disabled; `thinking.keep` null|all.
     K26,
     /// `kimi-k2.5`: `thinking.type` only (no `keep`).
     K25,
     /// Older k2 turbo / thinking-turbo / kimi-for-coding — treat like always-thinking
-    /// coding models (omit fixed-param fields; reasoning_effort optional).
+    /// coding models (omit fixed-param fields; Messages adaptive when used).
     LegacyCoding,
+}
+
+/// Whether this profile uses Pi-style Anthropic adaptive thinking on the
+/// Messages path (`thinking.type=adaptive` + `output_config.effort`).
+pub fn kimi_force_adaptive_thinking(profile: KimiRequestProfile) -> bool {
+    matches!(
+        profile,
+        KimiRequestProfile::K3 | KimiRequestProfile::K27Code | KimiRequestProfile::LegacyCoding
+    )
+}
+
+/// Whether empty thinking `signature: ""` must be replayed (Pi
+/// `compat.allowEmptySignature` for K3 / legacy kimi-for-coding).
+pub fn kimi_allow_empty_thinking_signature(profile: KimiRequestProfile) -> bool {
+    matches!(
+        profile,
+        KimiRequestProfile::K3 | KimiRequestProfile::LegacyCoding
+    )
 }
 
 /// Classify a bare model id (or catalog key's model half) for request shaping.
@@ -560,7 +785,11 @@ pub fn kimi_request_profile(model_id: &str) -> Option<KimiRequestProfile> {
         .to_ascii_lowercase();
     match id.as_str() {
         "k3" | "kimi-k3" => Some(KimiRequestProfile::K3),
-        "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => Some(KimiRequestProfile::K27Code),
+        // Official Pi subscription ids + open-platform aliases.
+        "k2p7"
+        | "kimi-k2.7-code"
+        | "kimi-k2.7-code-highspeed"
+        | "kimi-for-coding-highspeed" => Some(KimiRequestProfile::K27Code),
         "kimi-k2.6" => Some(KimiRequestProfile::K26),
         "kimi-k2.5" => Some(KimiRequestProfile::K25),
         "kimi-for-coding"
@@ -569,7 +798,9 @@ pub fn kimi_request_profile(model_id: &str) -> Option<KimiRequestProfile> {
         | "kimi-k2-thinking"
         | "kimi-k2-0905-preview"
         | "kimi-k2-0711-preview" => Some(KimiRequestProfile::LegacyCoding),
-        _ if id.starts_with("kimi-k2.7") => Some(KimiRequestProfile::K27Code),
+        _ if id.starts_with("kimi-k2.7") || id.starts_with("k2p7") => {
+            Some(KimiRequestProfile::K27Code)
+        }
         _ if id.starts_with("kimi-k2.6") => Some(KimiRequestProfile::K26),
         _ if id.starts_with("kimi-k2.5") => Some(KimiRequestProfile::K25),
         _ if id.starts_with("kimi-k3") || id == "k3" => Some(KimiRequestProfile::K3),
@@ -677,21 +908,27 @@ pub fn derive_capabilities(
     if supports_video_in {
         caps.insert(ModelCapability::VideoIn);
     }
-    // Current multimodal coding lineup + legacy k2*: thinking + vision.
+    // Current multimodal coding lineup + legacy k2* / Pi ids: thinking + vision.
     if id_lower.starts_with("kimi-k2")
         || id_lower == "k3"
         || id_lower.starts_with("kimi-k3")
+        || id_lower == "k2p7"
+        || id_lower.starts_with("k2p7")
         || id_lower == "kimi-for-coding"
+        || id_lower == "kimi-for-coding-highspeed"
     {
         caps.insert(ModelCapability::Thinking);
         caps.insert(ModelCapability::ImageIn);
         caps.insert(ModelCapability::VideoIn);
     }
-    // K2.7 Code / HighSpeed / K3: thinking cannot be disabled.
+    // K2.7 Code / HighSpeed / K3 / Pi coding ids: thinking cannot be disabled.
     if id_lower.contains("k2.7-code")
+        || id_lower == "k2p7"
+        || id_lower.starts_with("k2p7")
         || id_lower == "k3"
         || id_lower.starts_with("kimi-k3")
         || id_lower == "kimi-for-coding"
+        || id_lower == "kimi-for-coding-highspeed"
     {
         caps.insert(ModelCapability::AlwaysThinking);
     }
@@ -878,15 +1115,29 @@ mod tests {
             "moonshot-ai/kimi-k2.6",
             "moonshot-ai/kimi-k2.5",
             "kimi-code/k3",
+            "kimi-code/k2p7",
+            "kimi-code/kimi-for-coding-highspeed",
+            "kimi-code/kimi-k2.7-code",
+            "kimi-code/kimi-k2.7-code-highspeed",
+            "kimi-code/kimi-k2.6",
+            "kimi-code/kimi-k2.5",
             "kimi-code/kimi-for-coding",
-            // Pi-curated OpenAI / Anthropic
             "openai/gpt-4.1",
             "openai/gpt-5",
             "anthropic/claude-sonnet-4-5",
             "anthropic/claude-opus-4-5",
+            "anthropic/claude-opus-4-8",
+            "openrouter/openai/gpt-4o",
+            "deepseek/deepseek-v4-flash",
+            "groq/llama-3.3-70b-versatile",
         ] {
             assert!(keys.contains(id), "missing offline fallback {id}");
         }
+        assert!(
+            platform_builtin_models().len() >= 100,
+            "expected full Pi-derived catalog, got {}",
+            platform_builtin_models().len()
+        );
         let anth = platform_builtin_models()
             .iter()
             .find(|m| m.catalog_key() == "anthropic/claude-sonnet-4-5")
@@ -897,12 +1148,55 @@ mod tests {
             .find(|m| m.catalog_key() == "openai/gpt-5")
             .expect("gpt-5");
         assert_eq!(oai.api_backend, PlatformApiBackend::Responses);
+        for key in [
+            "kimi-code/k3",
+            "kimi-code/k2p7",
+            "kimi-code/kimi-for-coding-highspeed",
+            "kimi-code/kimi-k2.7-code",
+            "kimi-code/kimi-k2.7-code-highspeed",
+            "kimi-code/kimi-k2.6",
+            "kimi-code/kimi-k2.5",
+        ] {
+            let m = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(
+                m.api_backend,
+                PlatformApiBackend::ChatCompletions,
+                "{key}: Kimi Code uses OpenAI Chat Completions"
+            );
+            assert!(
+                !m.supported_in_api,
+                "{key} starts hidden until OAuth"
+            );
+            assert!(
+                m.supports_reasoning_effort,
+                "{key} supports adaptive effort"
+            );
+        }
     }
 
     #[test]
     fn request_profiles_cover_official_ids() {
         assert_eq!(kimi_request_profile("kimi-k3"), Some(KimiRequestProfile::K3));
         assert_eq!(kimi_request_profile("k3"), Some(KimiRequestProfile::K3));
+        assert_eq!(
+            kimi_request_profile("kimi-code/k3"),
+            Some(KimiRequestProfile::K3)
+        );
+        assert_eq!(
+            kimi_request_profile("k2p7"),
+            Some(KimiRequestProfile::K27Code)
+        );
+        assert_eq!(
+            kimi_request_profile("kimi-code/k2p7"),
+            Some(KimiRequestProfile::K27Code)
+        );
+        assert_eq!(
+            kimi_request_profile("kimi-for-coding-highspeed"),
+            Some(KimiRequestProfile::K27Code)
+        );
         assert_eq!(
             kimi_request_profile("kimi-k2.7-code"),
             Some(KimiRequestProfile::K27Code)
@@ -925,5 +1219,11 @@ mod tests {
         );
         assert!(kimi_sampling_is_fixed(KimiRequestProfile::K27Code));
         assert!(!kimi_sampling_is_fixed(KimiRequestProfile::K3));
+        assert!(kimi_force_adaptive_thinking(KimiRequestProfile::K3));
+        assert!(kimi_force_adaptive_thinking(KimiRequestProfile::K27Code));
+        assert!(kimi_allow_empty_thinking_signature(KimiRequestProfile::K3));
+        assert!(!kimi_allow_empty_thinking_signature(
+            KimiRequestProfile::K27Code
+        ));
     }
 }

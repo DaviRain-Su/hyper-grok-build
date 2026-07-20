@@ -9,9 +9,9 @@ built-in multi-provider support.
 | Platform id | `kimi-code` |
 | Inference | `https://api.kimi.com/coding/v1` |
 | OAuth host | `https://auth.kimi.com` |
-| Catalog models | Live `GET …/models` after login (e.g. `kimi-code/k3`, `kimi-code/kimi-for-coding`) |
-| Offline fallback | `kimi-code/k3`, `kimi-code/kimi-for-coding` |
-| Protocol | OpenAI Chat Completions |
+| Catalog models | `kimi-code/k3`, `kimi-code/k2p7`, `kimi-code/kimi-for-coding-highspeed` (K2.7 Hyper Speed), plus `kimi-code/kimi-k2.6`, `kimi-code/kimi-k2.5` and open-platform-style aliases |
+| Offline fallback | Same ids; synced live after login via `GET …/coding/v1/models` |
+| Protocol | **OpenAI Chat Completions**; base `https://api.kimi.com/coding/v1` |
 
 xAI login and Moonshot API keys remain independent. Kimi credentials live in
 `~/.grok/auth.json` under the scope `oauth/kimi-code` and do **not** replace
@@ -54,13 +54,16 @@ model catalog. That is how **K3** and other subscription models show up —
 not only the offline fallbacks.
 
 ```bash
-grok models | grep kimi-code
-# typically includes:
+grokk models | grep kimi-code
+# typically:
 #   kimi-code/k3
-#   kimi-code/kimi-for-coding
-#   …plus anything else the subscription listing returns
+#   kimi-code/k2p7                      # Kimi K2.7 Code
+#   kimi-code/kimi-for-coding-highspeed # Kimi K2.7 Hyper Speed
+#   kimi-code/kimi-k2.6                 # Kimi K2.6
+#   kimi-code/kimi-k2.5                 # Kimi K2.5
 
 grok -m kimi-code/k3 -p "ping"
+grok -m kimi-code/k2p7 -p "ping"
 ```
 
 In the TUI:
@@ -118,17 +121,33 @@ export GROK_KIMI_CODE_OAUTH_HOST="https://auth.kimi.com"
 
 ## Request parameters
 
-Subscription and open-platform Kimi models share the same chat-completions
-shaping rules (see [25-moonshot-providers.md](25-moonshot-providers.md)
-“Request parameters”). In short:
+### Subscription path (OpenAI Chat Completions)
+
+Grok speaks the Kimi Code endpoint as OpenAI Chat Completions, using the
+same reasoning/thinking mapping as the Moonshot open platform:
 
 | Concern | Behavior in Grok |
 |---------|------------------|
-| `max_tokens` | Defaults to **32768** when unset (thinking + tool loops) |
-| K3 / `k3` | Sends top-level `reasoning_effort` (`max` / Xhigh default) |
-| K2.7 / HyperSpeed-style coding | Omits temperature/top_p/penalties (server-fixed); no `thinking` object |
-| K2.6-style | Maps effort → `thinking.type`; tool loops set `thinking.keep = "all"` |
-| Multi-turn tools | Assistant `reasoning_content` is preserved on the chat path |
+| Protocol | `POST {base}/chat/completions` with `User-Agent: KimiCLI/1.5` |
+| Base URL | `https://api.kimi.com/coding/v1` (env: `GROK_KIMI_CODE_BASE_URL`) |
+| Thinking | K3 / K2.7 Code / K2.7 Hyper Speed keep thinking enabled; reasoning effort is mapped to the model's thinking fields |
+| Temperature | Omitted for fixed-sampling models (K2.7 Code / K2.7 Hyper Speed) |
+| `max_tokens` / `max_completion_tokens` | Defaults to **32768** when unset |
+
+| Model id | Notes |
+|----------|-------|
+| `k3` | 1M context; selectable reasoning effort |
+| `k2p7` | Kimi K2.7 Code; 256k context |
+| `kimi-for-coding-highspeed` | Kimi K2.7 Hyper Speed |
+| `kimi-k2.6` | Kimi K2.6 |
+| `kimi-k2.5` | Kimi K2.5 |
+
+### Open-platform Moonshot (Chat Completions)
+
+Separate from the subscription path — see
+[25-moonshot-providers.md](25-moonshot-providers.md). In short: K3 uses
+top-level `reasoning_effort`; K2.7 omits the K2 `thinking` object; K2.6 maps
+effort → `thinking.type` (+ `keep: all` for tool loops).
 
 Exact model ids on the **subscription** host come from live
 `GET …/coding/v1/models` after login (not the open-platform id table alone).

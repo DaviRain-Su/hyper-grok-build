@@ -3356,6 +3356,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         });
 
     // thinking is driven by reasoning_effort only, not by json_schema.
+    // Kimi Code (Pi forceAdaptiveThinking) may override defaults below.
     let thinking = effort
         .as_ref()
         .map(|_| crate::messages::ThinkingConfig::Adaptive {
@@ -3368,7 +3369,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         None
     };
 
-    MessagesRequest {
+    let mut msgs = MessagesRequest {
         model: req.model.clone().unwrap_or_default(),
         messages,
         max_tokens: req.max_output_tokens.unwrap_or(0),
@@ -3383,6 +3384,133 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         thinking,
         output_config,
         metadata: None,
+    };
+    apply_kimi_messages_request_rules(&mut msgs, req.reasoning_effort);
+    msgs
+}
+
+/// Shape Anthropic Messages body for Kimi Code / coding models (Pi alignment).
+///
+/// Official Pi `kimi-coding` models set `compat.forceAdaptiveThinking: true`:
+/// - `thinking: { type: "adaptive", display: "summarized" }`
+/// - `output_config.effort` from the thinking-level map (no `budget_tokens`)
+/// - temperature omitted while thinking is enabled
+///
+/// Profile defaults when `reasoning_effort` is unset:
+/// - K3 → effort `max` (Pi `thinkingLevelMap.max`, open-platform docs)
+/// - K2.7 / HighSpeed / legacy coding → effort `high` (Pi `mapThinkingLevelToEffort` default)
+///
+/// Explicit `ReasoningEffort::None` omits thinking (Pi `thinkingEnabled: false`;
+/// K3's map marks `off: null` so we do not send `type: disabled`).
+///
+/// Empty thinking signatures: K3 / legacy coding allow `signature: ""` (Pi
+/// `allowEmptySignature`); other coding models convert empty-sig thinking to
+/// plain text so Anthropic-compatible APIs accept multi-turn replay.
+fn apply_kimi_messages_request_rules(
+    msgs: &mut crate::messages::MessagesRequest,
+    effort: Option<crate::ReasoningEffort>,
+) {
+    use crate::messages::{
+        ContentBlock, MessageContent, OutputConfig, ThinkingConfig, ThinkingDisplay,
+        ToolChoiceParam,
+    };
+    use xai_grok_models::{
+        KIMI_DEFAULT_MAX_TOKENS, KimiRequestProfile, kimi_allow_empty_thinking_signature,
+        kimi_force_adaptive_thinking, kimi_request_profile, kimi_sampling_is_fixed,
+    };
+
+    let Some(profile) = kimi_request_profile(&msgs.model) else {
+        return;
+    };
+    if !kimi_force_adaptive_thinking(profile) {
+        // K2.5/K2.6 open-platform stay on Chat Completions; no Messages shaping.
+        return;
+    }
+
+    if msgs.max_tokens == 0 {
+        msgs.max_tokens = KIMI_DEFAULT_MAX_TOKENS;
+    }
+
+    // Map effort → wire token (Pi streamSimple + mapThinkingLevelToEffort).
+    let wire_effort: Option<&'static str> = match effort {
+        Some(crate::ReasoningEffort::None) => None,
+        // Pi maps minimal → low for adaptive models.
+        Some(crate::ReasoningEffort::Minimal) => Some("low"),
+        Some(crate::ReasoningEffort::Low) => Some("low"),
+        Some(crate::ReasoningEffort::Medium) => Some("medium"),
+        Some(crate::ReasoningEffort::High) => Some("high"),
+        // K3 thinkingLevelMap: max → "max"; Xhigh is Grok's id for max/xhigh.
+        Some(crate::ReasoningEffort::Xhigh) => Some("max"),
+        None => match profile {
+            KimiRequestProfile::K3 => Some("max"),
+            KimiRequestProfile::K27Code | KimiRequestProfile::LegacyCoding => Some("high"),
+            KimiRequestProfile::K25 | KimiRequestProfile::K26 => None,
+        },
+    };
+
+    if let Some(e) = wire_effort {
+        msgs.thinking = Some(ThinkingConfig::Adaptive {
+            display: Some(ThinkingDisplay::Summarized),
+        });
+        let format = msgs
+            .output_config
+            .as_ref()
+            .and_then(|c| c.format.clone());
+        msgs.output_config = Some(OutputConfig {
+            effort: Some(e.to_string()),
+            format,
+        });
+        // Pi: temperature is incompatible with thinking.
+        msgs.temperature = None;
+        if kimi_sampling_is_fixed(profile) {
+            msgs.top_p = None;
+        }
+    } else {
+        // Explicit off / unmapped: do not send adaptive thinking.
+        msgs.thinking = None;
+        if let Some(cfg) = msgs.output_config.as_mut() {
+            cfg.effort = None;
+            if cfg.format.is_none() {
+                msgs.output_config = None;
+            }
+        }
+    }
+
+    // Coding models: only auto/none tool_choice is safe with adaptive thinking.
+    if matches!(
+        profile,
+        KimiRequestProfile::K27Code | KimiRequestProfile::LegacyCoding
+    ) {
+        match msgs.tool_choice.as_ref() {
+            Some(ToolChoiceParam::Any) | Some(ToolChoiceParam::Tool { .. }) => {
+                msgs.tool_choice = Some(ToolChoiceParam::Auto);
+            }
+            _ => {}
+        }
+    }
+
+    // Pi allowEmptySignature: keep thinking with signature "".
+    // Otherwise convert empty-signature thinking blocks to text.
+    if !kimi_allow_empty_thinking_signature(profile) {
+        for message in &mut msgs.messages {
+            let MessageContent::Blocks(blocks) = &mut message.content else {
+                continue;
+            };
+            for block in blocks.iter_mut() {
+                if let ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } = block
+                {
+                    if signature.trim().is_empty() && !thinking.trim().is_empty() {
+                        *block = ContentBlock::Text {
+                            text: std::mem::take(thinking),
+                            cache_control: None,
+                        };
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -5289,6 +5417,156 @@ mod tests {
         assert_eq!(
             json.pointer("/reasoning_effort").and_then(|v| v.as_str()),
             Some("max")
+        );
+    }
+
+    /// Pi forceAdaptiveThinking for Kimi Coding: adaptive + effort, no budget.
+    /// Mirrors packages/ai test anthropic-force-adaptive-thinking.test.ts.
+    #[test]
+    fn kimi_code_messages_force_adaptive_thinking_pi_aligned() {
+        // k2p7 + medium → adaptive + effort medium (Pi table).
+        let req = ConversationRequest {
+            model: Some("kimi-code/k2p7".into()),
+            items: vec![ConversationItem::user("Hello")],
+            reasoning_effort: Some(crate::ReasoningEffort::Medium),
+            temperature: Some(0.4),
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("adaptive")
+        );
+        assert_eq!(
+            json.pointer("/thinking/display").and_then(|v| v.as_str()),
+            Some("summarized")
+        );
+        assert_eq!(
+            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            Some("medium")
+        );
+        assert!(
+            json.get("temperature").is_none()
+                || json.pointer("/temperature").is_some_and(|v| v.is_null()),
+            "temperature omitted with thinking; got {json:#}"
+        );
+        assert!(
+            json.pointer("/thinking/budget_tokens").is_none(),
+            "adaptive path must not send budget_tokens"
+        );
+
+        // k3 + max → adaptive + effort max.
+        let req = ConversationRequest {
+            model: Some("k3".into()),
+            items: vec![ConversationItem::user("Hello")],
+            reasoning_effort: Some(crate::ReasoningEffort::Xhigh),
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("adaptive")
+        );
+        assert_eq!(
+            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            Some("max")
+        );
+
+        // highspeed + medium.
+        let req = ConversationRequest {
+            model: Some("kimi-for-coding-highspeed".into()),
+            items: vec![ConversationItem::user("Hello")],
+            reasoning_effort: Some(crate::ReasoningEffort::Medium),
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("adaptive")
+        );
+        assert_eq!(
+            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn kimi_code_messages_defaults_effort_when_unset() {
+        // K3 defaults to max when effort unset.
+        let req = ConversationRequest {
+            model: Some("kimi-code/k3".into()),
+            items: vec![ConversationItem::user("ping")],
+            max_output_tokens: None,
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("adaptive")
+        );
+        assert_eq!(
+            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            Some("max")
+        );
+        assert_eq!(msgs.max_tokens, 32_768);
+
+        // k2p7 defaults to high (Pi mapThinkingLevelToEffort default).
+        let req = ConversationRequest {
+            model: Some("k2p7".into()),
+            items: vec![ConversationItem::user("ping")],
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn kimi_code_messages_explicit_none_omits_thinking() {
+        let req = ConversationRequest {
+            model: Some("k2p7".into()),
+            items: vec![ConversationItem::user("ping")],
+            reasoning_effort: Some(crate::ReasoningEffort::None),
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert!(
+            json.get("thinking").is_none()
+                || json.pointer("/thinking").is_some_and(|v| v.is_null()),
+            "explicit None must omit thinking; got {json:#}"
+        );
+        assert!(
+            json.pointer("/output_config/effort").is_none(),
+            "explicit None must omit effort"
+        );
+    }
+
+    #[test]
+    fn kimi_code_messages_maps_minimal_to_low() {
+        let req = ConversationRequest {
+            model: Some("kimi-code/k2p7".into()),
+            items: vec![ConversationItem::user("ping")],
+            reasoning_effort: Some(crate::ReasoningEffort::Minimal),
+            ..Default::default()
+        };
+        let msgs = build_messages_request(&req);
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("adaptive")
+        );
+        assert_eq!(
+            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            Some("low"),
+            "Pi mapThinkingLevelToEffort: minimal → low"
         );
     }
 

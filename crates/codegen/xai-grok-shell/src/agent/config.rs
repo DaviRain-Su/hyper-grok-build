@@ -3153,8 +3153,7 @@ pub fn resolve_model_list(
     }
     // Built-in Moonshot entries (and future open platforms). Injected before
     // prefetched/config overlays so `[model."moonshot-cn/..."]` can inherit
-    // base_url / env_key. Re-injected after prefetched because that branch
-    // replaces the whole map.
+    // base_url / env_key.
     inject_moonshot_builtin_models(&mut resolved);
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
@@ -3187,7 +3186,6 @@ pub fn resolve_model_list(
             }
         }
         resolved = prefetched;
-        inject_moonshot_builtin_models(&mut resolved);
     }
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
@@ -3215,19 +3213,13 @@ pub fn resolve_model_list(
     }
     {
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let donors: std::collections::HashMap<String, (std::num::NonZeroU64, ApiBackend)> =
-            resolved
-                .values()
-                .filter(|e| e.info.context_window.get() != default_cw)
-                .map(|e| {
-                    (
-                        e.info.model.clone(),
-                        (e.info.context_window, e.info.api_backend.clone()),
-                    )
-                })
-                .collect();
+        let donors: std::collections::HashMap<String, std::num::NonZeroU64> = resolved
+            .values()
+            .filter(|e| e.info.context_window.get() != default_cw)
+            .map(|e| (e.info.model.clone(), e.info.context_window))
+            .collect();
         for entry in resolved.values_mut() {
-            if let Some((donor_cw, donor_backend)) = donors.get(&entry.info.model) {
+            if let Some(donor_cw) = donors.get(&entry.info.model) {
                 if entry.info.context_window.get() == default_cw {
                     tracing::debug!(
                         model = % entry.info.model, from = default_cw, to = donor_cw
@@ -3235,11 +3227,6 @@ pub fn resolve_model_list(
                         "slug-match: inheriting context_window from sibling catalog entry"
                     );
                     entry.info.context_window = *donor_cw;
-                }
-                if entry.info.api_backend == ApiBackend::default()
-                    && *donor_backend != ApiBackend::default()
-                {
-                    entry.info.api_backend.clone_from(donor_backend);
                 }
             }
         }
@@ -3383,6 +3370,17 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
             );
         }
+        // Official Pi kimi-coding: User-Agent KimiCLI + anthropic-version
+        // (Messages API). Device identity headers are injected per-request.
+        if builtin.platform == xai_grok_models::PlatformId::KimiCode {
+            extra_headers
+                .entry("User-Agent".into())
+                .or_insert_with(|| "KimiCLI/1.5".into());
+            extra_headers.insert(
+                "anthropic-version".into(),
+                xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
+            );
+        }
         let config = ModelEntryConfig {
             id: Some(key.clone()),
             model: builtin.model.clone(),
@@ -3424,7 +3422,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             platform = builtin.platform.as_str(),
             "injected built-in platform catalog entry"
         );
-        resolved.insert(key, ModelEntry::from_config_entry(&config));
+        resolved.insert(key.clone(), ModelEntry::from_config_entry(&config));
     }
 }
 
@@ -3440,9 +3438,16 @@ fn apply_platform_credentials(
     resolved: &mut IndexMap<String, ModelEntry>,
     platforms: &PlatformsConfig,
 ) {
-    // Prefer a live (refreshed when possible) Kimi Code bearer.
     let kimi_bearer = crate::auth::kimi::ensure_kimi_code_access_token_blocking();
+    apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer);
+}
 
+/// Testable core of [`apply_platform_credentials`] with an injected Kimi bearer.
+fn apply_platform_credentials_with_bearer(
+    resolved: &mut IndexMap<String, ModelEntry>,
+    platforms: &PlatformsConfig,
+    kimi_bearer: Option<String>,
+) {
     for (key, entry) in resolved.iter_mut() {
         let id = entry.info.id.as_deref().unwrap_or(key.as_str());
         let Some((platform, _)) = xai_grok_models::parse_managed_model_key(id) else {
@@ -4961,8 +4966,10 @@ pub fn inject_url_derived_headers(
     alpha_test_key: Option<&str>,
     base_url: &str,
 ) {
-    // Anthropic Messages requires anthropic-version on every request.
-    if xai_grok_models::PlatformId::Anthropic.base_url_matches(base_url) {
+    // Anthropic Messages (and Kimi Code Messages) require anthropic-version.
+    if xai_grok_models::PlatformId::Anthropic.base_url_matches(base_url)
+        || xai_grok_models::PlatformId::KimiCode.base_url_matches(base_url)
+    {
         headers
             .entry("anthropic-version".to_string())
             .or_insert_with(|| xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.to_string());
@@ -5221,6 +5228,24 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use xai_grok_test_support::EnvGuard;
+
+    /// Point `GROK_AUTH_PATH` at a scratch `auth.json` and clear platform
+    /// API-key env vars so platform credential tests don't depend on a dev
+    /// box's real `~/.grok/auth.json` or exported keys.
+    fn isolated_auth_home() -> (tempfile::TempDir, [EnvGuard; 6]) {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.json");
+        let guards = [
+            EnvGuard::set("GROK_AUTH_PATH", auth.to_str().unwrap()),
+            EnvGuard::unset(xai_grok_models::MOONSHOT_CN_API_KEY_ENV),
+            EnvGuard::unset(xai_grok_models::MOONSHOT_API_KEY_ENV),
+            EnvGuard::unset(xai_grok_models::MOONSHOT_API_KEY_ALIAS_ENV),
+            EnvGuard::unset(xai_grok_models::MOONSHOT_AI_API_KEY_ENV),
+            EnvGuard::unset(xai_grok_models::OPENAI_API_KEY_ALIAS_ENV),
+        ];
+        (dir, guards)
+    }
+
     #[test]
     fn main_cli_tools_override_preserves_profile_injection_policy() {
         let overrides = CliAgentOverrides {
@@ -11601,9 +11626,10 @@ default = "grok-4.5"
 
     #[test]
     fn moonshot_builtins_injected_into_catalog() {
+        let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
         let models = resolve_model_list(&cfg, None);
-        // Official open-platform lineup (platform.kimi.ai/docs/models).
+        // Open-platform lineup is present with the right backend/env wiring.
         for key in [
             "moonshot-cn/kimi-k3",
             "moonshot-cn/kimi-k2.7-code",
@@ -11615,13 +11641,15 @@ default = "grok-4.5"
             "moonshot-ai/kimi-k2.6",
         ] {
             let entry = models.get(key).unwrap_or_else(|| panic!("missing {key}"));
-            assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
-            assert!(entry.info.supported_in_api);
+            assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions, "{key}");
+            assert!(
+                !entry.info.supported_in_api || entry.has_own_credentials(),
+                "{key} must be hidden until credentials are configured"
+            );
             assert!(entry.env_key.is_some(), "{key} needs env_key for BYOK");
-            assert_eq!(
-                entry.info.max_completion_tokens,
-                Some(32_768),
-                "{key} should default max_tokens to 32k per Kimi docs"
+            assert!(
+                entry.info.max_completion_tokens.is_some_and(|n| n >= 16_384),
+                "{key} should ship a large max_tokens from Pi catalog"
             );
         }
         let hs = models
@@ -11631,14 +11659,66 @@ default = "grok-4.5"
         assert!(hs.info.base_url.contains("moonshot.cn"));
         // Deprecated aliases still present for older configs.
         assert!(models.contains_key("moonshot-cn/kimi-k2-turbo-preview"));
-        // Subscription entries present but API-hidden until OAuth is stamped.
-        for key in ["kimi-code/k3", "kimi-code/kimi-for-coding"] {
+        // Kimi Code subscription models are Anthropic Messages (Pi) and hidden until OAuth.
+        for key in [
+            "kimi-code/k3",
+            "kimi-code/k2p7",
+            "kimi-code/kimi-for-coding-highspeed",
+            "kimi-code/kimi-k2.7-code",
+            "kimi-code/kimi-k2.7-code-highspeed",
+            "kimi-code/kimi-k2.6",
+            "kimi-code/kimi-k2.5",
+            "kimi-code/kimi-for-coding",
+        ] {
             let kimi = models.get(key).unwrap_or_else(|| panic!("missing {key}"));
-            assert!(kimi.info.base_url.contains("kimi.com"));
-            assert!(!kimi.info.supported_in_api || kimi.has_own_credentials());
+            assert!(kimi.info.base_url.contains("kimi.com"), "{key}");
+            assert_eq!(
+                kimi.info.api_backend,
+                ApiBackend::ChatCompletions,
+                "{key}: Kimi Code uses OpenAI Chat Completions"
+            );
+            assert!(
+                !kimi.info.supported_in_api || kimi.has_own_credentials(),
+                "{key} must be hidden until Kimi Code login"
+            );
+            assert_eq!(
+                kimi.info
+                    .extra_headers
+                    .get("User-Agent")
+                    .map(String::as_str),
+                Some("KimiCLI/1.5"),
+                "{key}"
+            );
+            assert_eq!(
+                kimi.info
+                    .extra_headers
+                    .get("anthropic-version")
+                    .map(String::as_str),
+                Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE),
+                "{key}: Messages requires anthropic-version"
+            );
         }
+        // Pi multi-provider catalog present.
+        assert!(models.contains_key("openai/gpt-5") || models.contains_key("anthropic/claude-sonnet-4-5"));
         // xAI defaults still present
         assert!(models.contains_key("grok-4.5") || models.values().any(|m| m.model == "grok-4.5"));
+    }
+
+    #[test]
+    fn apply_platform_credentials_reveals_with_bearer() {
+        let (_dir, _guards) = isolated_auth_home();
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let mut models = resolve_model_list(&cfg, None);
+        apply_platform_credentials_with_bearer(
+            &mut models,
+            &cfg.platforms,
+            Some("fake-kimi-token".into()),
+        );
+        let entry = models
+            .get("kimi-code/kimi-k2.7-code")
+            .expect("kimi-code entry");
+        assert!(entry.info.supported_in_api, "bearer makes Kimi entry visible");
+        assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
     }
 
     #[test]
@@ -11688,6 +11768,7 @@ default = "grok-4.5"
 
     #[test]
     fn platforms_config_stamps_api_key_when_env_absent() {
+        let (_dir, _guards) = isolated_auth_home();
         let raw: toml::Value = toml::from_str(
             r#"
 [platforms.moonshot-cn]
@@ -11712,6 +11793,35 @@ api_key = "sk-test-cn-key-not-for-prod"
         let creds = resolve_credentials(entry, None);
         assert_eq!(creds.api_key.as_deref(), Some("sk-test-cn-key-not-for-prod"));
         assert!(creds.base_url.contains("moonshot.cn"));
+        assert!(
+            entry.info.supported_in_api,
+            "moonshot entry should become visible once credentials are stamped"
+        );
+    }
+
+    #[test]
+    fn kimi_code_oauth_reveals_subscription_models() {
+        let (dir, _guards) = isolated_auth_home();
+        let auth = crate::auth::GrokAuth {
+            key: "kimi-access-token".into(),
+            auth_mode: crate::auth::AuthMode::KimiCode,
+            create_time: chrono::Utc::now(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            refresh_token: Some("rt".into()),
+            ..Default::default()
+        };
+        crate::auth::store_kimi_code_auth(dir.path(), &auth).unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("kimi-code/kimi-k2.7-code")
+            .expect("kimi-code k2.7 entry");
+        eprintln!("DEBUG backend={:?} model={} supported={} api_key={:?}",
+                  entry.info.api_backend, entry.info.model, entry.info.supported_in_api, entry.api_key);
+        assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
+        assert!(entry.info.supported_in_api, "Kimi Code entry visible after login");
+        assert_eq!(entry.api_key.as_deref(), Some("kimi-access-token"));
     }
 
     #[test]

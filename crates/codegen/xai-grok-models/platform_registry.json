@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "platforms": [
+    {
+      "platform": "openai",
+      "pi_id": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "env_keys": [
+        "GROK_OPENAI_API_KEY",
+        "OPENAI_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "anthropic",
+      "pi_id": "anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "env_keys": [
+        "GROK_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN"
+      ],
+      "uses_x_api_key": true,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "kimi-code",
+      "pi_id": "kimi-coding",
+      "base_url": "https://api.kimi.com/coding",
+      "env_keys": [],
+      "uses_x_api_key": false,
+      "uses_oauth": true,
+      "live_models_list": true
+    },
+    {
+      "platform": "moonshot-ai",
+      "pi_id": "moonshotai",
+      "base_url": "https://api.moonshot.ai/v1",
+      "env_keys": [
+        "GROK_MOONSHOT_AI_API_KEY",
+        "GROK_MOONSHOT_API_KEY",
+        "MOONSHOT_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": true
+    },
+    {
+      "platform": "moonshot-cn",
+      "pi_id": "moonshotai-cn",
+      "base_url": "https://api.moonshot.cn/v1",
+      "env_keys": [
+        "GROK_MOONSHOT_CN_API_KEY",
+        "GROK_MOONSHOT_API_KEY",
+        "MOONSHOT_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": true
+    },
+    {
+      "platform": "deepseek",
+      "pi_id": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "env_keys": [
+        "GROK_DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "groq",
+      "pi_id": "groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "env_keys": [
+        "GROK_GROQ_API_KEY",
+        "GROQ_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "mistral",
+      "pi_id": "mistral",
+      "base_url": "https://api.mistral.ai/v1",
+      "env_keys": [
+        "GROK_MISTRAL_API_KEY",
+        "MISTRAL_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "xai-direct",
+      "pi_id": "xai",
+      "base_url": "https://api.x.ai/v1",
+      "env_keys": [
+        "GROK_XAI_DIRECT_API_KEY",
+        "XAI_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "together",
+      "pi_id": "together",
+      "base_url": "https://api.together.xyz/v1",
+      "env_keys": [
+        "GROK_TOGETHER_API_KEY",
+        "TOGETHER_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "fireworks",
+      "pi_id": "fireworks",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "env_keys": [
+        "GROK_FIREWORKS_API_KEY",
+        "FIREWORKS_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "cerebras",
+      "pi_id": "cerebras",
+      "base_url": "https://api.cerebras.ai/v1",
+      "env_keys": [
+        "GROK_CEREBRAS_API_KEY",
+        "CEREBRAS_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "nvidia",
+      "pi_id": "nvidia",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "env_keys": [
+        "GROK_NVIDIA_API_KEY",
+        "NVIDIA_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "openrouter",
+      "pi_id": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "env_keys": [
+        "GROK_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "minimax",
+      "pi_id": "minimax",
+      "base_url": "https://api.minimax.io/v1",
+      "env_keys": [
+        "GROK_MINIMAX_API_KEY",
+        "MINIMAX_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "minimax-cn",
+      "pi_id": "minimax-cn",
+      "base_url": "https://api.minimaxi.com/v1",
+      "env_keys": [
+        "GROK_MINIMAX_CN_API_KEY",
+        "MINIMAX_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "zai",
+      "pi_id": "zai",
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "env_keys": [
+        "GROK_ZAI_API_KEY",
+        "ZAI_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
+      "platform": "zai-coding-cn",
+      "pi_id": "zai-coding-cn",
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "env_keys": [
+        "GROK_ZAI_CODING_CN_API_KEY",
+        "ZAI_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    }
+  ]
+}

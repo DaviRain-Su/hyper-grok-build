@@ -49,6 +49,16 @@ impl AuthFileLock {
     }
 }
 
+/// Resolve the path to the user's `auth.json`.
+///
+/// Honors `GROK_AUTH_PATH` so tests can point at a scratch file instead of a
+/// developer's real `~/.grok/auth.json`. Falls back to `$GROK_HOME/auth.json`.
+pub fn auth_json_path() -> PathBuf {
+    std::env::var("GROK_AUTH_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| xai_grok_config::grok_home().join("auth.json"))
+}
+
 pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
     let mut file = File::open(auth_file)?;
     let mut contents = String::new();

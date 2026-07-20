@@ -1,16 +1,34 @@
-# OpenAI & Anthropic (built-in platforms)
+# Multi-provider catalog (official Pi)
 
-Grok can call **OpenAI** and **Anthropic** directly (no separate gateway).
-Model entries are curated from the Pi `models.generated` catalog (same source
-as pi_agent_rust / pi-mono) and live under `{platform}/{model}` keys.
+Grok’s third-party model catalog is generated from the official
+[earendil-works/pi](https://github.com/earendil-works/pi) package
+`@earendil-works/pi-ai` (`packages/ai/src/providers/data/*.json` after
+`npm run generate-models`).
 
-| Platform id | Auth | Default base | Protocol |
-|-------------|------|--------------|----------|
-| `openai` | API key | `https://api.openai.com/v1` | Chat Completions / **Responses** (per model) |
-| `anthropic` | API key (`x-api-key`) | `https://api.anthropic.com/v1` | **Messages** |
+**~400+ tool-capable models**, keys `{platform}/{model_id}`. No separate
+gateway process — each platform talks to the vendor API with Grok’s existing
+`chat_completions` / `responses` / `messages` backends.
 
-Moonshot / Kimi Code remain separate; see
-[25-moonshot-providers.md](25-moonshot-providers.md) and
+## Platforms (API key unless noted)
+
+| Platform id | Env keys (examples) | Default base | Notes |
+|-------------|---------------------|--------------|--------|
+| `openai` | `OPENAI_API_KEY` | `api.openai.com/v1` | Responses (most models) |
+| `anthropic` | `ANTHROPIC_API_KEY` | `api.anthropic.com/v1` | Messages + `x-api-key` |
+| `kimi-code` | OAuth `login --kimi` | `api.kimi.com/coding/v1` | **Messages** + adaptive thinking (Pi official) |
+| `moonshot-cn` / `moonshot-ai` | `GROK_MOONSHOT_*` | moonshot.cn / .ai | Chat Completions |
+| `deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com` | |
+| `groq` | `GROQ_API_KEY` | `api.groq.com/openai/v1` | |
+| `openrouter` | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | Large catalog |
+| `together` / `fireworks` / `cerebras` / `nvidia` | matching `*_API_KEY` | vendor URLs | |
+| `minimax` / `minimax-cn` | `MINIMAX_API_KEY` | | |
+| `zai` / `zai-coding-cn` | `ZAI_API_KEY` | | |
+| `xai-direct` | `XAI_API_KEY` | `api.x.ai/v1` | BYOK xAI (vs Grok login session) |
+
+`mistral` is reserved; Pi Mistral uses a proprietary conversations API we do
+not implement yet.
+
+Also see [25-moonshot-providers.md](25-moonshot-providers.md) and
 [26-kimi-code.md](26-kimi-code.md).
 
 ---
@@ -18,74 +36,62 @@ Moonshot / Kimi Code remain separate; see
 ## Quick start
 
 ```bash
-# OpenAI
-export GROK_OPENAI_API_KEY="sk-..."     # or OPENAI_API_KEY
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENROUTER_API_KEY=sk-or-...
 
-# Anthropic
-export GROK_ANTHROPIC_API_KEY="sk-ant-..."  # or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
-
-./target/debug/xai-grok-pager models | grep -E 'openai/|anthropic/'
-./target/debug/xai-grok-pager -m openai/gpt-4.1 -p "ping"
+./target/debug/xai-grok-pager models | head
+./target/debug/xai-grok-pager -m openai/gpt-5 -p "ping"
 ./target/debug/xai-grok-pager -m anthropic/claude-sonnet-4-5 -p "ping"
+./target/debug/xai-grok-pager -m openrouter/openai/gpt-4o -p "ping"
 ```
 
-Config file (`~/.grok/config.toml`):
-
 ```toml
+# ~/.grok/config.toml
 [platforms.openai]
 api_key = "sk-..."
 
 [platforms.anthropic]
 api_key = "sk-ant-..."
 
+[platforms.openrouter]
+api_key = "sk-or-..."
+
 [models]
 default = "anthropic/claude-sonnet-4-5"
 ```
 
-**Credential precedence:** env (`GROK_*` then common aliases) > `[platforms.*].api_key`
-> per-model `[model.*]`.
+**Credential precedence:** env (`GROK_*` then common aliases) >
+`[platforms.*].api_key` > per-model `[model.*]`.
 
 ---
 
-## Offline catalog (Pi-curated)
+## Refreshing the catalog from Pi
 
-Shipped in `xai-grok-models/platform_catalog.json` (generated from Pi
-`models.generated.ts`). Typical entries:
-
-**OpenAI** (mostly `api_backend = responses`):
-
-- `openai/gpt-5.2`, `gpt-5.1`, `gpt-5.1-codex`, `gpt-5`, `gpt-5-mini`, `gpt-5-codex`
-- `openai/gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini`
-- `openai/o3`, `o3-mini`, `o4-mini`
-
-**Anthropic** (`api_backend = messages`, `auth_scheme = x-api-key`,
-`anthropic-version: 2023-06-01`):
-
-- `anthropic/claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`
-- `anthropic/claude-opus-4-1`, `claude-sonnet-4-0`, `claude-opus-4-0`
-- `anthropic/claude-3-7-sonnet-latest`, `claude-3-5-haiku-latest`
-
-We do **not** auto-expand the full org `/models` list for OpenAI/Anthropic
-(too large / noisy). To add a model:
-
-1. Append to `platform_catalog.json`, or
-2. Declare `[model."openai/…"]` / `[model."anthropic/…"]` with the usual fields.
-
----
-
-## Env overrides
+On a checkout of [earendil-works/pi](https://github.com/earendil-works/pi):
 
 ```bash
-export GROK_OPENAI_BASE_URL="https://api.openai.com/v1"
-export GROK_ANTHROPIC_BASE_URL="https://api.anthropic.com/v1"
+cd packages/ai && npm run generate-models -- --pretty
+# then re-run the import script used in hyper-grok-build development
+# (copies providers/data/*.json → platform_catalog.json)
 ```
+
+Shipped files:
+
+- `xai-grok-models/platform_catalog.json` — models
+- `xai-grok-models/platform_registry.json` — platform metadata
+
+We do **not** auto-fetch OpenAI/Anthropic/OpenRouter org `/models` at runtime
+(too large). Kimi Code + Moonshot still live-sync when credentials exist.
 
 ---
 
 ## Notes
 
-- Anthropic uses **Messages** + `x-api-key` (not Bearer). Grok sets this via
-  `auth_scheme` and injects `anthropic-version`.
-- OpenAI flagship entries default to **Responses** (Pi mapping); override with
-  `[model."openai/…"].api_backend = "chat_completions"` if needed.
-- No LiteLLM / external gateway required for these platforms.
+- Anthropic: Messages + `x-api-key` + `anthropic-version: 2023-06-01`.
+- Kimi For Coding (official Pi): **Messages** at `https://api.kimi.com/coding/v1`,
+  models `k3` / `k2p7` / `kimi-for-coding-highspeed`, `User-Agent: KimiCLI/1.5`,
+  `anthropic-version`, adaptive thinking (`thinking.type=adaptive` +
+  `output_config.effort`).
+- OpenAI flagships: **Responses** per Pi mapping.
+- No LiteLLM sidecar required.

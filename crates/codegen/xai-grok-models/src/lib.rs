@@ -16,7 +16,8 @@ pub use platforms::{
     MOONSHOT_API_KEY_ENV, MOONSHOT_CN_API_KEY_ENV, MOONSHOT_CN_BASE_URL_ENV, ModelCapability,
     OPENAI_API_KEY_ALIAS_ENV, OPENAI_API_KEY_ENV, OPENAI_BASE_URL_ENV, PLATFORM_CATALOG_JSON,
     PlatformApiBackend, PlatformId, WireModel, WireModelsResponse, WireThinkEfforts,
-    derive_capabilities, filter_allowed_models, kimi_request_profile, kimi_sampling_is_fixed,
+    derive_capabilities, filter_allowed_models, kimi_allow_empty_thinking_signature,
+    kimi_force_adaptive_thinking, kimi_request_profile, kimi_sampling_is_fixed,
     moonshot_builtin_models, parse_managed_model_key, platform_builtin_models,
 };
 

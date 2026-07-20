@@ -43,6 +43,6 @@ pub(crate) use model::{
 };
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{
-    clear_api_key, clear_kimi_code_auth, read_api_key, read_auth_json, read_kimi_code_auth,
-    read_token_by_scope, store_api_key, store_kimi_code_auth,
+    auth_json_path, clear_api_key, clear_kimi_code_auth, read_api_key, read_auth_json,
+    read_kimi_code_auth, read_token_by_scope, store_api_key, store_kimi_code_auth,
 };
