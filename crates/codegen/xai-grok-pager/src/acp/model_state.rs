@@ -279,14 +279,40 @@ impl ModelState {
 
     /// Resolve a user-supplied name to a `ModelId` via case-insensitive
     /// ASCII match against the catalog.
+    ///
+    /// Catalog **ids** win over display names (so `zai-coding-cn/glm-5.2` is
+    /// unambiguous when several rows share the label "GLM-5.2"). Display-name
+    /// matches only succeed when exactly one model uses that name; collisions
+    /// return `None` so the caller can ask the user to pick a provider-scoped
+    /// id instead of silently routing to the first catalog entry.
     pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available.iter().find_map(|(id, info)| {
-            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
-                Some(id.clone())
-            } else {
-                None
+        if let Some((id, _)) = self
+            .available
+            .iter()
+            .find(|(id, _)| id.0.as_ref().eq_ignore_ascii_case(query))
+        {
+            return Some(id.clone());
+        }
+        let mut name_match: Option<acp::ModelId> = None;
+        for (id, info) in &self.available {
+            if info.name.eq_ignore_ascii_case(query) {
+                if name_match.is_some() {
+                    return None; // ambiguous display name
+                }
+                name_match = Some(id.clone());
             }
-        })
+        }
+        name_match
+    }
+
+    /// All catalog ids whose display name matches `query` (case-insensitive).
+    /// Used for ambiguous-name error messages.
+    pub fn ids_matching_name(&self, query: &str) -> Vec<acp::ModelId> {
+        self.available
+            .iter()
+            .filter(|(_, info)| info.name.eq_ignore_ascii_case(query))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Look up the display name for a `ModelId` in the catalog.
@@ -368,6 +394,28 @@ mod tests {
     fn test_current_model_name() {
         let state = sample_models();
         assert_eq!(state.current_model_name(), Some("Model A".to_string()));
+    }
+
+    #[test]
+    fn resolve_by_name_or_id_prefers_id_and_rejects_ambiguous_names() {
+        let mut state = ModelState::default();
+        let zai = acp::ModelId::new(Arc::from("zai-coding-cn/glm-5.2"));
+        let ollama = acp::ModelId::new(Arc::from("ollama/glm-5.2"));
+        state.available.insert(
+            zai.clone(),
+            acp::ModelInfo::new(zai.clone(), "GLM-5.2".to_string()),
+        );
+        state.available.insert(
+            ollama.clone(),
+            acp::ModelInfo::new(ollama.clone(), "GLM-5.2".to_string()),
+        );
+
+        assert_eq!(
+            state.resolve_by_name_or_id("zai-coding-cn/glm-5.2"),
+            Some(zai)
+        );
+        assert_eq!(state.resolve_by_name_or_id("GLM-5.2"), None);
+        assert_eq!(state.ids_matching_name("glm-5.2").len(), 2);
     }
 
     #[test]

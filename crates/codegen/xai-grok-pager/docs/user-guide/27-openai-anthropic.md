@@ -22,7 +22,9 @@ gateway process — each platform talks to the vendor API with Grok’s existing
 | `openrouter` | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | Large catalog |
 | `together` / `fireworks` / `cerebras` / `nvidia` | matching `*_API_KEY` | vendor URLs | |
 | `minimax` / `minimax-cn` | `MINIMAX_API_KEY` | | |
-| `zai` / `zai-coding-cn` | `ZAI_API_KEY` | | |
+| `zai` | `ZAI_API_KEY` / `GROK_ZAI_API_KEY` | `api.z.ai/api/paas/v4` | General PaaS |
+| `zai-coding` | `ZAI_API_KEY` / `GROK_ZAI_CODING_API_KEY` | `api.z.ai/api/coding/paas/v4` | International Coding Plan |
+| `zai-coding-cn` | `ZAI_API_KEY` / `GROK_ZAI_CODING_CN_API_KEY` | `open.bigmodel.cn/api/coding/paas/v4` | CN Coding Plan |
 | `ollama` | `OLLAMA_API_KEY` | `ollama.com/v1` | Cloud models; override `GROK_OLLAMA_BASE_URL` for local |
 | `xai-direct` | `XAI_API_KEY` | `api.x.ai/v1` | BYOK xAI (vs Grok login session) |
 

@@ -206,6 +206,18 @@
       "live_models_list": false
     },
     {
+      "platform": "zai-coding",
+      "pi_id": "zai-coding",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "env_keys": [
+        "GROK_ZAI_CODING_API_KEY",
+        "ZAI_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
       "platform": "zai-coding-cn",
       "pi_id": "zai-coding-cn",
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",

@@ -100,13 +100,16 @@ pub enum PlatformId {
     MiniMax,
     MiniMaxCn,
     Zai,
+    /// International Z.AI Coding Plan (`api.z.ai` coding/paas endpoint).
+    ZaiCoding,
+    /// China Z.AI / BigModel Coding Plan (`open.bigmodel.cn` coding/paas).
     ZaiCodingCn,
     Ollama,
 }
 
 impl PlatformId {
     /// All platforms; subscription first.
-    pub const ALL: [PlatformId; 19] = [
+    pub const ALL: [PlatformId; 20] = [
         Self::KimiCode,
         Self::MoonshotCn,
         Self::MoonshotAi,
@@ -124,6 +127,7 @@ impl PlatformId {
         Self::MiniMax,
         Self::MiniMaxCn,
         Self::Zai,
+        Self::ZaiCoding,
         Self::ZaiCodingCn,
         Self::Ollama,
     ];
@@ -147,6 +151,7 @@ impl PlatformId {
             Self::MiniMax => "minimax",
             Self::MiniMaxCn => "minimax-cn",
             Self::Zai => "zai",
+            Self::ZaiCoding => "zai-coding",
             Self::ZaiCodingCn => "zai-coding-cn",
             Self::Ollama => "ollama",
         }
@@ -171,6 +176,7 @@ impl PlatformId {
             "minimax" => Some(Self::MiniMax),
             "minimax-cn" => Some(Self::MiniMaxCn),
             "zai" => Some(Self::Zai),
+            "zai-coding" | "zai-code-plan" => Some(Self::ZaiCoding),
             "zai-coding-cn" => Some(Self::ZaiCodingCn),
             "ollama" => Some(Self::Ollama),
             _ => None,
@@ -196,6 +202,7 @@ impl PlatformId {
             Self::MiniMax => "MiniMax",
             Self::MiniMaxCn => "MiniMax (China)",
             Self::Zai => "Z.AI",
+            Self::ZaiCoding => "Z.AI Coding Plan",
             Self::ZaiCodingCn => "Z.AI Coding Plan (CN)",
             Self::Ollama => "Ollama Cloud",
         }
@@ -221,7 +228,10 @@ impl PlatformId {
             Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::MiniMax => "https://api.minimax.io/v1",
             Self::MiniMaxCn => "https://api.minimaxi.com/v1",
+            // General Z.AI PaaS (pay-as-you-go). Coding Plan uses `ZaiCoding`.
             Self::Zai => "https://api.z.ai/api/paas/v4",
+            // International Coding Plan OpenAI-compatible endpoint.
+            Self::ZaiCoding => "https://api.z.ai/api/coding/paas/v4",
             Self::ZaiCodingCn => "https://open.bigmodel.cn/api/coding/paas/v4",
             Self::Ollama => "https://ollama.com/v1",
         }
@@ -320,6 +330,7 @@ impl PlatformId {
             Self::MiniMax => &["GROK_MINIMAX_API_KEY", "MINIMAX_API_KEY"],
             Self::MiniMaxCn => &["GROK_MINIMAX_CN_API_KEY", "MINIMAX_API_KEY"],
             Self::Zai => &["GROK_ZAI_API_KEY", "ZAI_API_KEY"],
+            Self::ZaiCoding => &["GROK_ZAI_CODING_API_KEY", "ZAI_API_KEY"],
             Self::ZaiCodingCn => &["GROK_ZAI_CODING_CN_API_KEY", "ZAI_API_KEY"],
             Self::Ollama => &["GROK_OLLAMA_API_KEY", "OLLAMA_API_KEY"],
         }
@@ -1044,6 +1055,37 @@ mod tests {
         for m in platform_builtin_models() {
             assert!(keys.insert(m.catalog_key()), "duplicate {}", m.catalog_key());
         }
+    }
+
+    #[test]
+    fn zai_coding_platform_is_international_code_plan() {
+        assert_eq!(PlatformId::parse("zai-coding"), Some(PlatformId::ZaiCoding));
+        assert_eq!(
+            PlatformId::parse("zai-code-plan"),
+            Some(PlatformId::ZaiCoding)
+        );
+        assert_eq!(PlatformId::ZaiCoding.as_str(), "zai-coding");
+        assert_eq!(PlatformId::ZaiCoding.display_name(), "Z.AI Coding Plan");
+        assert_eq!(
+            PlatformId::ZaiCoding.default_base_url(),
+            "https://api.z.ai/api/coding/paas/v4"
+        );
+        assert_eq!(
+            PlatformId::Zai.default_base_url(),
+            "https://api.z.ai/api/paas/v4"
+        );
+        assert_eq!(
+            PlatformId::ZaiCodingCn.default_base_url(),
+            "https://open.bigmodel.cn/api/coding/paas/v4"
+        );
+        let zai_coding: Vec<_> = platform_builtin_models()
+            .iter()
+            .filter(|m| m.platform == PlatformId::ZaiCoding)
+            .map(|m| m.model.as_str())
+            .collect();
+        assert!(zai_coding.contains(&"glm-5.2"));
+        assert!(zai_coding.contains(&"glm-5.1"));
+        assert_eq!(zai_coding.len(), 6);
     }
 
     /// Mirror of the live `api.kimi.com/coding/v1/models` K3 entry

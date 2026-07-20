@@ -5219,6 +5219,78 @@
       "source": "earendil-works/pi packages/ai providers/data"
     },
     {
+      "platform": "zai-coding",
+      "model": "glm-4.5-air",
+      "name": "GLM-4.5-Air",
+      "description": "Z.AI Coding Plan (international)",
+      "context_window": 131072,
+      "max_completion_tokens": 98304,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "z.ai Coding Plan OpenAI-compatible API"
+    },
+    {
+      "platform": "zai-coding",
+      "model": "glm-4.7",
+      "name": "GLM-4.7",
+      "description": "Z.AI Coding Plan (international)",
+      "context_window": 204800,
+      "max_completion_tokens": 131072,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "z.ai Coding Plan OpenAI-compatible API"
+    },
+    {
+      "platform": "zai-coding",
+      "model": "glm-5-turbo",
+      "name": "GLM-5-Turbo",
+      "description": "Z.AI Coding Plan (international)",
+      "context_window": 200000,
+      "max_completion_tokens": 131072,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "z.ai Coding Plan OpenAI-compatible API"
+    },
+    {
+      "platform": "zai-coding",
+      "model": "glm-5.1",
+      "name": "GLM-5.1",
+      "description": "Z.AI Coding Plan (international)",
+      "context_window": 200000,
+      "max_completion_tokens": 131072,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "z.ai Coding Plan OpenAI-compatible API"
+    },
+    {
+      "platform": "zai-coding",
+      "model": "glm-5.2",
+      "name": "GLM-5.2",
+      "description": "Z.AI Coding Plan (international)",
+      "context_window": 1000000,
+      "max_completion_tokens": 131072,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "z.ai Coding Plan OpenAI-compatible API"
+    },
+    {
+      "platform": "zai-coding",
+      "model": "glm-5v-turbo",
+      "name": "GLM-5V-Turbo",
+      "description": "Z.AI Coding Plan (international)",
+      "context_window": 200000,
+      "max_completion_tokens": 131072,
+      "api_backend": "chat_completions",
+      "supports_reasoning_effort": true,
+      "supported_in_api": true,
+      "source": "z.ai Coding Plan OpenAI-compatible API"
+    },
+    {
       "platform": "zai-coding-cn",
       "model": "glm-4.5-air",
       "name": "GLM-4.5-Air",
