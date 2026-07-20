@@ -410,6 +410,7 @@ fn served_principal_prefers_deployment_id() {
         requirements: None,
         fail_closed: false,
         expires_at: 0,
+        nonce: String::new(),
         key_id: "v1".into(),
     };
     assert_eq!(

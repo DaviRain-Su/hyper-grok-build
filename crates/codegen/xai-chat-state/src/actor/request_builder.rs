@@ -598,12 +598,13 @@ mod tests {
 
     fn has_placeholder(item: &ConversationItem) -> bool {
         matches!(
-            item,
-            ConversationItem::User(u) if u.content.iter().any(|p| matches!(
-                p,
-                ContentPart::Text { text } if text.as_ref() == IMAGE_COMPACT_PLACEHOLDER
-            ))
-        )
+                    item,
+                    ConversationItem::User(u) if u.content.iter().any(|p| matches!(
+                        p,
+                        ContentPart::Text { text }
+        if text.as_ref() == IMAGE_COMPACT_PLACEHOLDER
+                    ))
+                )
     }
 
     // Images are sized ~100 KB so the ~235 B placeholder that replaces an

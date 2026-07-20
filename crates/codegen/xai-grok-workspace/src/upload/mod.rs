@@ -392,7 +392,8 @@ mod tests {
         let cfg = source.resolve();
         assert_eq!(cfg.bucket_url.as_deref(), Some("gs://placeholder"));
         assert!(
-            matches!(& cfg.upload_method, UploadMethod::Proxy { proxy_base_url, .. } if
+            matches!(& cfg.upload_method, UploadMethod::Proxy { proxy_base_url, .. }
+if
             proxy_base_url == "https://proxy.example/v1"),
             "resolve() must carry the proxy upload method + base url"
         );

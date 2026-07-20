@@ -992,11 +992,10 @@ impl TasksPane {
         };
         if changed {
             self.rebuild_entries();
-            if let Some(header) = self
-                .entries
-                .iter()
-                .find(|e| matches!(e, TaskEntry::Header { group: g, .. } if *g == group))
-            {
+            if let Some(header) = self.entries.iter().find(|e| {
+                matches!(e, TaskEntry::Header { group: g, .. }
+if *g == group)
+            }) {
                 let id = header.stable_id();
                 self.list_state.select_by_id(id);
             }

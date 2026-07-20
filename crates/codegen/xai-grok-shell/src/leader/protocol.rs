@@ -445,15 +445,16 @@ mod tests {
         let received: ClientMessage = read_message(&mut server).await.unwrap();
 
         assert!(matches!(
-            received,
-            ClientMessage::Control {
-                request_id,
-                command: ControlCommand::StartCpuProfile {
-                    output: Some(output),
-                    frequency_hz: Some(250),
-                },
-            } if request_id == "req-1" && output == "/tmp/profile.folded"
-        ));
+                    received,
+                    ClientMessage::Control {
+                        request_id,
+                        command: ControlCommand::StartCpuProfile {
+                            output: Some(output),
+                            frequency_hz: Some(250),
+                        },
+                    }
+        if request_id == "req-1" && output == "/tmp/profile.folded"
+                ));
     }
 
     #[tokio::test]
@@ -539,21 +540,22 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(
-            decoded,
-            ServerMessage::Registered {
-                client_id: 7,
-                ready: true,
-                leader_protocol_version: Some(LEADER_PROTOCOL_VERSION),
-                leader_binary_version: Some(_),
-                leader_capabilities: Some(LeaderCapabilities {
-                    control_v1: true,
-                    runtime_cpu_profile: true,
-                    profile_formats,
-                    workspace_exposure: true,
-                    relaunch_v1: true,
-                }),
-            } if profile_formats == vec![ProfileArtifactFormat::Svg]
-        ));
+                    decoded,
+                    ServerMessage::Registered {
+                        client_id: 7,
+                        ready: true,
+                        leader_protocol_version: Some(LEADER_PROTOCOL_VERSION),
+                        leader_binary_version: Some(_),
+                        leader_capabilities: Some(LeaderCapabilities {
+                            control_v1: true,
+                            runtime_cpu_profile: true,
+                            profile_formats,
+                            workspace_exposure: true,
+                            relaunch_v1: true,
+                        }),
+                    }
+        if profile_formats == vec![ProfileArtifactFormat::Svg]
+                ));
     }
 
     #[test]
@@ -637,14 +639,15 @@ mod tests {
         let received: ClientMessage = read_message(&mut server).await.unwrap();
 
         assert!(matches!(
-            received,
-            ClientMessage::Control {
-                request_id,
-                command: ControlCommand::WorkspaceStart { hub_url: Some(url), cwd },
-            } if request_id == "ws-1"
-                && url == "wss://hub.example/v1/tools"
-                && cwd == "/home/u/proj"
-        ));
+                    received,
+                    ClientMessage::Control {
+                        request_id,
+                        command: ControlCommand::WorkspaceStart { hub_url: Some(url), cwd },
+                    }
+        if request_id == "ws-1"
+                        && url == "wss://hub.example/v1/tools"
+                        && cwd == "/home/u/proj"
+                ));
     }
 
     #[test]
@@ -669,15 +672,16 @@ mod tests {
         let json = r#"{"type":"workspace_status","state":"none","uptime_ms":0,"active_tool_calls":0,"pid":1}"#;
         let decoded: ControlPayload = serde_json::from_str(json).unwrap();
         assert!(matches!(
-            decoded,
-            ControlPayload::WorkspaceStatus {
-                state,
-                hub_url: None,
-                cwd: None,
-                sessions,
-                ..
-            } if state == "none" && sessions.is_empty()
-        ));
+                    decoded,
+                    ControlPayload::WorkspaceStatus {
+                        state,
+                        hub_url: None,
+                        cwd: None,
+                        sessions,
+                        ..
+                    }
+        if state == "none" && sessions.is_empty()
+                ));
     }
 
     #[test]

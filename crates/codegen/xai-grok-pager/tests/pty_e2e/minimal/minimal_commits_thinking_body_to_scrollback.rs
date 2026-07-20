@@ -6,20 +6,11 @@ use crate::common::*;
 /// so screen assertions can tell the two apart.
 const REASONING_SENTINEL: &str = "REASONINGSENTINEL";
 
-/// Dogfood bug: "I don't see thoughts in the transcript". With thinking
-/// enabled (`[ui] show_thinking_blocks` — the default, set
-/// explicitly here so the test doesn't depend on the rollout default),
-/// minimal commits reasoning as a **collapsed** `Thought for Xs` header
-/// (print-once display policy) — the body is intentionally not in the live
-/// scrollback. The advertised full-fidelity `/transcript` view must therefore
-/// render the thinking body **expanded**, or the reasoning is unreachable.
-///
-/// Flow: stream a reasoning+text turn → the answer commits, the reasoning
-/// collapses to its header (body nowhere on screen) → `/transcript` with
-/// `PAGER=cat` dumps the full view → the reasoning body appears.
+/// `[ui] show_thinking_blocks` is set explicitly (not left to the default)
+/// so the test doesn't depend on the rollout default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn minimal_transcript_expands_collapsed_thinking() {
+async fn minimal_commits_thinking_body_to_scrollback() {
     // The model must run on the Responses backend — reasoning summary deltas
     // are a Responses-API stream shape (the scripted events below).
     let content = ContentController::start_with_models(vec![
@@ -54,10 +45,7 @@ async fn minimal_transcript_expands_collapsed_thinking() {
     )
     .expect("write config");
 
-    // Minimal env + PAGER=cat (non-interactive dump, same as
-    // `minimal_transcript_opens_in_pager`).
-    let mut env = content.env_for_pager();
-    env.push(("PAGER".to_string(), "cat".to_string()));
+    let env = content.env_for_pager();
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, &env_refs)
@@ -73,34 +61,17 @@ async fn minimal_transcript_expands_collapsed_thinking() {
         .wait_for_full_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("turn committed");
 
-    // The reasoning committed as its collapsed header: the body is NOT in the
-    // live view (that's the print-once display policy, not a bug)…
     harness
         .wait_for_full_text("Thought for", Duration::from_secs(10))
-        .expect("collapsed thinking header committed");
-    assert!(
-        !harness.full_text().contains(REASONING_SENTINEL),
-        "reasoning body must be collapsed in the live view\nfull:\n{}",
-        harness.full_text()
-    );
-
-    // …so the transcript is the only way to read it. cat dumps the full view.
-    inject_keys_paced(&mut harness, b"/transcript");
-    harness.inject_keys(b"\r").expect("submit /transcript");
-
+        .expect("thinking header committed");
     harness
-        .wait_for_full_text(REASONING_SENTINEL, Duration::from_secs(15))
+        .wait_for_full_text(REASONING_SENTINEL, Duration::from_secs(10))
         .unwrap_or_else(|e| {
             panic!(
-                "transcript must expand the collapsed thinking body: {e}\nfull:\n{}",
+                "reasoning body must be committed to scrollback: {e}\nfull:\n{}",
                 harness.full_text()
             )
         });
-
-    // And the inline TUI survives the suspend/restore round trip.
-    harness
-        .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(10))
-        .expect("inline TUI restored after the pager exited");
     assert!(
         !harness.contains_text("panicked"),
         "pager panicked\nscreen:\n{}",

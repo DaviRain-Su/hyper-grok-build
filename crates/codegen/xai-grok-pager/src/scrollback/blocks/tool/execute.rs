@@ -579,10 +579,13 @@ impl ExecuteToolCallBlock {
                                 .with_joiner(joiner.clone()),
                         );
                     }
-                    // Ellipsis (non-selectable, breaks range continuity)
+                    let hidden = total - threshold;
                     lines.push(
-                        BlockLine::separator(Line::from(Span::styled("\u{2026}", theme.muted())))
-                            .with_panel_background(theme.bg_dark),
+                        BlockLine::separator(Line::from(Span::styled(
+                            format!("\u{2026} +{hidden} lines"),
+                            theme.muted(),
+                        )))
+                        .with_panel_background(theme.bg_dark),
                     );
                     // Last M lines: range base + 1 (distinct from first chunk)
                     for (wrapped_line, joiner) in

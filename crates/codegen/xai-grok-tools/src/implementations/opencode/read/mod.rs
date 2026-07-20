@@ -40,13 +40,13 @@ Assume this tool is able to read all files on the machine. If the User provides 
 Usage:
 - The ${{ params.read.filePath }} parameter must be an absolute path, not a relative path
 - By default, it reads up to {max_lines_read} lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- You can optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
 - Any lines longer than {max_chars_per_line} characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1. The format is: LINE_NUMBER→LINE_CONTENT, where LINE_NUMBER is right-aligned and padded with spaces
 - This tool can read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as this tool uses multimodal LLMs.
 - This tool can read PDF files (.pdf). PDFs are processed page by page, extracting both text and visual content for analysis.
 - This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.
-- This tool can only read files, not directories. To read a directory, use an ls command via the Bash tool.
+- This tool can only read files, not directories.${%- if tools.by_kind.execute %} To read a directory, use an ls command via the ${{ tools.by_kind.execute }} tool.${%- endif %}
 - You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel.
 - You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."#;
@@ -147,16 +147,20 @@ impl xai_tool_runtime::Tool for ReadTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: ReadInput,
     ) -> Result<ReadFileOutput, xai_tool_runtime::ToolError> {
-        use crate::types::tool_metadata::{resolve_cwd, shared_resources};
+        use crate::types::tool_metadata::{invoking_param_names, resolve_cwd, shared_resources};
         let resources = shared_resources(&ctx)?;
+        // Client-facing `offset` name for runtime "read beyond…" hints; a
+        // rename must not tell the model to pass a key its schema lacks.
+        let invoking = invoking_param_names(&ctx);
+        let offset_param = invoking.resolve("offset");
 
         // ── Validate offset ─────────────────────────────────────────
         if let Some(offset) = input.offset
             && offset < 1
         {
-            return Ok(ReadFileOutput::FileReadError(
-                "offset must be >= 1".to_string(),
-            ));
+            return Ok(ReadFileOutput::FileReadError(format!(
+                "{offset_param} must be >= 1"
+            )));
         }
 
         // ── Resolve path (single lock acquisition) ─────────────────
@@ -188,7 +192,7 @@ impl xai_tool_runtime::Tool for ReadTool {
         // BRANCH A: DIRECTORY
         // ═══════════════════════════════════════════════════════════
         if metadata.is_dir() {
-            return Ok(read_directory(&path, input.offset, input.limit).await);
+            return Ok(read_directory(&path, input.offset, input.limit, offset_param).await);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -265,8 +269,7 @@ impl xai_tool_runtime::Tool for ReadTool {
         // Validate offset against file size.
         if total_lines > 0 && start >= total_lines {
             return Ok(ReadFileOutput::FileReadError(format!(
-                "Offset {} is out of range for this file ({} lines)",
-                offset, total_lines,
+                "{offset_param} {offset} is out of range for this file ({total_lines} lines)"
             )));
         }
 
@@ -329,16 +332,14 @@ impl xai_tool_runtime::Tool for ReadTool {
 
         let footer = if truncated_by_bytes {
             format!(
-                "\n\n(Output capped at 50 KB. Showing lines {}-{}. Use offset={} to continue.)",
-                offset, last_read_line, next_offset,
+                "\n\n(Output capped at 50 KB. Showing lines {offset}-{last_read_line}. Use {offset_param}={next_offset} to continue.)"
             )
         } else if has_more_lines {
             format!(
-                "\n\n(Showing lines {}-{} of {}. Use offset={} to continue.)",
-                offset, last_read_line, total_lines, next_offset,
+                "\n\n(Showing lines {offset}-{last_read_line} of {total_lines}. Use {offset_param}={next_offset} to continue.)"
             )
         } else {
-            format!("\n\n(End of file - total {} lines)", total_lines)
+            format!("\n\n(End of file - total {total_lines} lines)")
         };
 
         let formatted = format!(
@@ -370,6 +371,8 @@ async fn read_directory(
     path: &std::path::Path,
     offset: Option<u32>,
     limit: Option<u32>,
+    // Client-facing `offset` param name for the "read beyond…" hint.
+    offset_param: &str,
 ) -> ReadFileOutput {
     let mut entries = Vec::new();
 
@@ -423,11 +426,9 @@ async fn read_directory(
     let truncated = (start + shown) < total;
 
     let entries_footer = if truncated {
+        let beyond = offset_val + shown;
         format!(
-            "\n(Showing {} of {} entries. Use 'offset' parameter to read beyond entry {})",
-            shown,
-            total,
-            offset_val + shown,
+            "\n(Showing {shown} of {total} entries. Use the {offset_param} parameter to read beyond entry {beyond})"
         )
     } else {
         format!("\n({} entries)", total)
@@ -511,6 +512,115 @@ mod tests {
         resources.insert(FileSystem(Arc::new(LocalFs)));
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
         resources
+    }
+
+    #[test]
+    fn description_template_tracks_renamed_offset_limit_and_execute() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool::ToolKind;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([
+            (ToolKind::Read, "read".to_string()),
+            (ToolKind::Execute, "run_command".to_string()),
+        ]);
+        let params = HashMap::from([(
+            ToolKind::Read,
+            HashMap::from([
+                ("filePath".to_string(), "filePath".to_string()),
+                ("offset".to_string(), "start_line".to_string()),
+                ("limit".to_string(), "max_lines".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&ReadTool))
+            .unwrap();
+        assert!(
+            rendered.contains("start_line and max_lines"),
+            "renamed offset/limit must appear:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("via the run_command tool"),
+            "resolved execute tool name must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("a line offset and limit") && !rendered.contains("Bash tool"),
+            "stale offset/limit/Bash-tool literals must not remain:\n{rendered}"
+        );
+    }
+
+    /// Runtime "read beyond…" footer must name this tool's client-facing
+    /// offset param, not the canonical `offset`, after a rename.
+    #[tokio::test]
+    async fn runtime_footer_tracks_renamed_offset() {
+        let tmp = TempDir::new().unwrap();
+        let canonical_tmp = dunce::canonicalize(tmp.path()).unwrap();
+        let file_path = canonical_tmp.join("big.txt");
+        let content = (1..=100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file_path, &content).unwrap();
+
+        let resources = test_resources(&canonical_tmp);
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions
+            .insert(crate::types::resources::InvokingToolParamNames(
+                [("offset".to_string(), "start_line".to_string())].into(),
+            ));
+
+        let input = ReadInput {
+            file_path: file_path.to_string_lossy().to_string(),
+            offset: None,
+            limit: Some(5),
+        };
+        let result = xai_tool_runtime::Tool::run(&ReadTool, ctx, input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(
+                    fc.content.contains("Use start_line=6 to continue")
+                        && !fc.content.contains("Use offset="),
+                    "footer must use renamed offset param: {}",
+                    fc.content
+                );
+            }
+            other => panic!("Expected FileContent, got {other:?}"),
+        }
+    }
+
+    /// The invalid-offset validation error must name this tool's client-facing
+    /// offset param, not the canonical `offset`, after a rename. (Fires before
+    /// path resolution, so no file is needed.)
+    #[tokio::test]
+    async fn validation_error_tracks_renamed_offset() {
+        let tmp = TempDir::new().unwrap();
+        let resources = test_resources(tmp.path());
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions
+            .insert(crate::types::resources::InvokingToolParamNames(
+                [("offset".to_string(), "start_line".to_string())].into(),
+            ));
+
+        let input = ReadInput {
+            file_path: "whatever.txt".to_string(),
+            offset: Some(0),
+            limit: None,
+        };
+        let result = xai_tool_runtime::Tool::run(&ReadTool, ctx, input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(
+                    msg.contains("start_line must be >= 1") && !msg.contains("offset must"),
+                    "validation error must use renamed offset param: {msg}"
+                );
+            }
+            other => panic!("Expected FileReadError, got {other:?}"),
+        }
     }
 
     #[tokio::test]

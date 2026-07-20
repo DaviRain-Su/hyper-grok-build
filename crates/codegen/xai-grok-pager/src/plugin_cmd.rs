@@ -888,9 +888,10 @@ fn marketplace_add(
                     if u.trim_end_matches(".git") == normalized)
             })
         }
-        MarketplaceAddInput::LocalPath(path) => sources
-            .iter()
-            .any(|s| matches!(&s.kind, SourceKind::Local { path: p } if p == path)),
+        MarketplaceAddInput::LocalPath(path) => sources.iter().any(|s| {
+            matches!(&s.kind, SourceKind::Local { path: p }
+if p == path)
+        }),
     };
     if already_configured {
         bail!("Marketplace source already configured: {identity}");

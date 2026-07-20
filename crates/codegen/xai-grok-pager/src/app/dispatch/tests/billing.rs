@@ -492,7 +492,8 @@ fn show_usage_returns_fetch_billing_effect() {
     // together and renders a single summary.
     assert_eq!(effects.len(), 1, "got: {effects:?}");
     assert!(
-        matches!(&effects[0], Effect::FetchBilling { agent_id, silent } if *agent_id == AgentId(0) && !*silent),
+        matches!(&effects[0], Effect::FetchBilling { agent_id, silent }
+if *agent_id == AgentId(0) && !*silent),
         "effect should be a non-silent FetchBilling, got: {effects:?}"
     );
 }
@@ -859,7 +860,8 @@ fn free_usage_failure_opens_paywall_modal() {
     // 1. Real send.
     let effects = dispatch(Action::SendPrompt("draw me a cat".into()), &mut app);
     assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "draw me a cat"),
+        matches!(&effects[0], Effect::SendPrompt { text, .. }
+if text == "draw me a cat"),
         "send must dispatch: {effects:?}"
     );
     let prompt_id = app.agents[&id].session.current_prompt_id.clone();
@@ -1051,7 +1053,8 @@ fn unknown_non_restricted_command_still_passes_through() {
 
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "/frobnicate arg"),
+        matches!(&effects[0], Effect::SendPrompt { text, .. }
+if text == "/frobnicate arg"),
         "unknown command must still pass through: {effects:?}"
     );
     assert!(

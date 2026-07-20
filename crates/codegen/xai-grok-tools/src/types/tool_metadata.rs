@@ -180,3 +180,19 @@ pub fn behavior_version(ctx: &xai_tool_runtime::ToolCallContext) -> Option<Strin
         .get::<xai_tool_runtime::BehaviorVersion>()
         .map(|v| v.0.clone())
 }
+
+/// This tool's own canonical→client param-name map, stamped on the dispatch
+/// context by `prepare_dispatch` / `call_raw`. Returns an empty (identity)
+/// map when absent — e.g. unit tests that call `Tool::run` directly — so
+/// callers resolve to canonical names. Prefer this over kind-wide
+/// [`crate::types::template_renderer::TemplateRenderer::param_for_kind`] when
+/// naming *this* tool's own params (a sibling tool sharing the `ToolKind`
+/// can rename the same field differently).
+pub fn invoking_param_names(
+    ctx: &xai_tool_runtime::ToolCallContext,
+) -> crate::types::resources::InvokingToolParamNames {
+    ctx.extensions
+        .get::<crate::types::resources::InvokingToolParamNames>()
+        .map(|arc| (*arc).clone())
+        .unwrap_or_default()
+}

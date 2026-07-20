@@ -581,9 +581,10 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
             return; // pprof can't start in sandbox — skip
         };
         assert!(matches!(
-            started,
-            ControlPayload::CpuProfileStarted { svg_path, .. } if svg_path == output_path
-        ));
+                    started,
+                    ControlPayload::CpuProfileStarted { svg_path, .. }
+        if svg_path == output_path
+                ));
 
         let status = client_b
             .send_control(ControlCommand::CpuProfileStatus)
@@ -595,15 +596,16 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
             "registration should stay consistent with status behavior"
         );
         assert!(matches!(
-            status,
-            ControlPayload::CpuProfileStatus {
-                active: true,
-                stopping: false,
-                svg_path: Some(path),
-                frequency_hz: Some(200),
-                ..
-            } if path == output_path
-        ));
+                    status,
+                    ControlPayload::CpuProfileStatus {
+                        active: true,
+                        stopping: false,
+                        svg_path: Some(path),
+                        frequency_hz: Some(200),
+                        ..
+                    }
+        if path == output_path
+                ));
 
         let stopped = client_b
             .send_control(ControlCommand::StopCpuProfile)
@@ -611,9 +613,10 @@ async fn test_runtime_profile_start_status_stop_across_clients() {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
-        ));
+                    stopped,
+                    ControlPayload::CpuProfileStopped { svg_path, .. }
+        if svg_path == output_path
+                ));
         assert!(output_path.exists());
     } else {
         let error = client_a
@@ -726,9 +729,10 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
             return; // pprof can't start in sandbox — skip
         };
         assert!(matches!(
-            started,
-            ControlPayload::CpuProfileStarted { svg_path, .. } if svg_path == nested_output
-        ));
+                    started,
+                    ControlPayload::CpuProfileStarted { svg_path, .. }
+        if svg_path == nested_output
+                ));
 
         let stopped = client
             .send_control(ControlCommand::StopCpuProfile)
@@ -736,9 +740,10 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == nested_output
-        ));
+                    stopped,
+                    ControlPayload::CpuProfileStopped { svg_path, .. }
+        if svg_path == nested_output
+                ));
         assert!(nested_output.exists());
     } else {
         let error = client

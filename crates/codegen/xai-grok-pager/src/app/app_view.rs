@@ -343,8 +343,9 @@ impl VoiceState {
     /// it). `/voice` and toggle-style starts leave this false.
     pub(crate) fn hold(&self) -> bool {
         matches!(
-            self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. } if * hold
-        )
+                    self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
+        if * hold
+                )
     }
 }
 /// Entry in the session picker list on the welcome screen.

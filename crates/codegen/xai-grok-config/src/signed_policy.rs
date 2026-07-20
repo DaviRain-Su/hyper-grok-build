@@ -9,8 +9,8 @@
 //! marker stays the (best-effort) authority.
 use base64::Engine;
 pub use prod_mc_cli_chat_proxy_types::{
-    MANAGED_IDENTITY_TYP, MANAGED_POLICY_TYP, ManagedIdentityClaim, SignatureEnvelope,
-    SignedPayload, now_unix,
+    MANAGED_CONFIG_NONCE_ECHO_HEADER, MANAGED_IDENTITY_TYP, MANAGED_POLICY_TYP,
+    ManagedIdentityClaim, SignatureEnvelope, SignedPayload, is_server_nonce_shape, now_unix,
 };
 /// Compiled-in trusted Ed25519 public keys, `(key_id, raw 32 bytes)`; more than one
 /// entry only during a rotation. Empty ships dark (see [`verification_active`]).
@@ -326,6 +326,27 @@ fn write_envelope_at(path: &std::path::Path, sidecar: &SignatureEnvelope) -> std
     let json = serde_json::to_string(sidecar)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     crate::fs_atomic::write_atomically(path, &json, Some(0o600))
+}
+/// Persisted envelope nonce for [`MANAGED_CONFIG_NONCE_ECHO_HEADER`] (unverified;
+/// telemetry only, never a trust input). Both guards fail open by skipping the
+/// echo: only the server mint shape (header-safe, so a corrupt sidecar can't brick
+/// the fetch), and only a payload issued to `fetch_principal`. A leftover sidecar
+/// from a prior identity must not read as a cross-tenant replay upstream.
+pub fn stored_envelope_nonce(
+    home: &std::path::Path,
+    fetch_principal: Option<&str>,
+) -> Option<String> {
+    let fetch_principal = fetch_principal?;
+    let SidecarRead::Present(sidecar) = read_sidecar(home) else {
+        return None;
+    };
+    let payload: SignedPayload = serde_json::from_str(&sidecar.signed_payload).ok()?;
+    let issued_to = payload
+        .deployment_id
+        .as_deref()
+        .or(payload.team_id.as_deref());
+    (issued_to == Some(fetch_principal) && is_server_nonce_shape(&payload.nonce))
+        .then_some(payload.nonce)
 }
 /// Whether an authentic claim IMPOSES fail-closed enforcement: verified, bound to
 /// the KNOWN `expected_principal`, in-date vs the caller-clamped `now_unix`, and

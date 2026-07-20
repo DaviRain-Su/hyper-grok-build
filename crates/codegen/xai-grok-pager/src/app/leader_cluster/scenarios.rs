@@ -258,9 +258,11 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             if matches!(
-                *status_rx.borrow_and_update(),
-                ConnectionStatus::Connected { generation } if generation >= 1
-            ) {
+                            *status_rx.borrow_and_update(),
+                            ConnectionStatus::Connected { generation }
+            if generation >= 1
+                        )
+            {
                 break;
             }
             assert!(

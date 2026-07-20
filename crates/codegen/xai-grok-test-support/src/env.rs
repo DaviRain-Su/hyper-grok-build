@@ -77,7 +77,13 @@ fn ensure_local_grok_binary(binary: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(&cargo)
         .current_dir(workspace_root())
-        .args(["build", "-p", "xai-grok-pager", "--bin", "xai-grok-pager"])
+        .args([
+            "build",
+            "-p",
+            "xai-grok-pager-bin",
+            "--bin",
+            "xai-grok-pager",
+        ])
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn {cargo} to build xai-grok-pager: {e}"));
 

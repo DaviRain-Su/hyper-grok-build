@@ -64,7 +64,7 @@ Before executing the command, please follow these steps:
    - Capture the output of the command.
 
 Usage notes:
-  - The command argument is required.
+  - The ${{ params.execute.command }} argument is required.
   - You can specify an optional ${{ params.execute.timeout }} in milliseconds. If not specified, commands will use the default timeout.
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
@@ -111,7 +111,7 @@ Git Safety Protocol:
 - CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)
 - NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.
 
-1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel, each using the Bash tool:
+1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel, each using this tool:
   - Run a git status command to see all untracked files.
   - Run a git diff command to see both staged and unstaged changes that will be committed.
   - Run a git log command to see recent commit messages, so that you can follow this repository's commit message style.
@@ -134,11 +134,11 @@ Important notes:
 - If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit
 
 # Creating pull requests
-Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a GitHub URL use the gh command to get the information needed.
+Use the gh command via this tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a GitHub URL use the gh command to get the information needed.
 
 IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
 
-1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:
+1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel using this tool, in order to understand the current state of the branch since it diverged from the main branch:
    - Run a git status command to see all untracked files
    - Run a git diff command to see both staged and unstaged changes that will be committed
    - Check if the current branch tracks a remote branch and is up to date with the remote, so you know if you need to push to the remote
@@ -594,6 +594,35 @@ mod tests {
         assert!(
             !rendered.contains("optional timeout in milliseconds"),
             "canonical timeout must not remain after rename:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn description_template_tracks_renamed_command() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool::ToolKind;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([(ToolKind::Execute, "run_command".to_string())]);
+        let params = HashMap::from([(
+            ToolKind::Execute,
+            HashMap::from([
+                ("command".to_string(), "script".to_string()),
+                ("timeout".to_string(), "timeout".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&BashTool))
+            .unwrap();
+        assert!(
+            rendered.contains("The script argument is required."),
+            "renamed command must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("The command argument is required.")
+                && !rendered.contains("Bash tool"),
+            "stale command/tool-name literals must not remain:\n{rendered}"
         );
     }
 

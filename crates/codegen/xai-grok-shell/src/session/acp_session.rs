@@ -560,6 +560,14 @@ impl PreparedToolCall {
 #[cfg(test)]
 pub(crate) use crate::session::streaming_capture::STREAMING_CAPTURE_MAX_BYTES;
 pub(crate) use crate::session::streaming_capture::StreamingTurnCapture;
+/// One memoized model's auth state, keyed by model id; see
+/// [`SessionActor::model_auth_memo`] for the invalidation contract.
+#[derive(Clone)]
+pub(crate) struct ModelAuthMemo {
+    pub(crate) model_id: String,
+    pub(crate) facts: crate::agent::config::ModelAuthFacts,
+    pub(crate) provider: Option<crate::auth::AuthProviderRef>,
+}
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
     pub(crate) session_info: SessionInfo,
@@ -569,10 +577,17 @@ pub(crate) struct SessionActor {
     /// fresh, isolated handle seeded once at spawn (frozen for their lifetime).
     /// `None` until the agent has selected a method.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
-    /// Memoized per-model auth facts, keyed by model id — see
-    /// [`SessionActor::model_auth_facts`].
-    pub(crate) model_auth_facts:
-        std::cell::RefCell<Option<(String, crate::agent::config::ModelAuthFacts)>>,
+    /// Memoized per-model auth state, read through
+    /// [`SessionActor::model_auth_facts`] and
+    /// [`SessionActor::model_auth_provider`].
+    ///
+    /// A fresh `Unknown` (config currently unparseable) falls back to the
+    /// last definite value for the same model rather than demoting a live
+    /// session to non-refreshable api-key mode. Because a config edit can
+    /// turn the selected model into a per-model BYOK model without changing
+    /// its id, keying on the id alone is insufficient: each model/credential
+    /// chokepoint must clear this memo (`replace(None)`).
+    pub(crate) model_auth_memo: std::cell::RefCell<Option<ModelAuthMemo>>,
     /// 401-attribution callback. Joined with the bearer the
     /// sampler sends on the wire to emit an `auth 401 attribution`
     /// event at each of the six `OaiCompatClient` 401 arms in

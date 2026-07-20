@@ -342,6 +342,25 @@ impl ToolCallBlock {
         }
     }
 
+    /// Whether the tool call finished without an error.
+    pub fn is_success(&self) -> bool {
+        match self {
+            ToolCallBlock::Execute(b) => b.is_success(),
+            ToolCallBlock::Read(b) => b.is_success(),
+            ToolCallBlock::Edit(b) => b.is_success(),
+            ToolCallBlock::Search(b) => b.is_success(),
+            ToolCallBlock::ListDir(b) => b.is_success(),
+            ToolCallBlock::WebFetch(b) => b.is_success(),
+            ToolCallBlock::WebSearch(b) => b.is_success(),
+            ToolCallBlock::IntegrationSearch(b) => b.is_success(),
+            ToolCallBlock::UseTool(b) => b.is_success(),
+            ToolCallBlock::MemorySearch(b) => b.is_success(),
+            ToolCallBlock::Skill(b) => b.is_success(),
+            ToolCallBlock::Other(b) => b.is_success(),
+            ToolCallBlock::Lifecycle(_) => true,
+        }
+    }
+
     /// Set `started_at` on the inner variant block.
     ///
     /// Unlike `transfer_timing_from`, this works across variant boundaries

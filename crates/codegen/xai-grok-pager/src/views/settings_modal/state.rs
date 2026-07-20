@@ -275,21 +275,20 @@ impl SettingsModalState {
         self.invalidate_filter();
 
         if let Some(key) = subpane_key {
-            let still_visible = self
-                .rows
-                .iter()
-                .any(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key));
+            let still_visible = self.rows.iter().any(|r| {
+                matches!(r, RowEntry::Setting { key: k, .. }
+if *k == key)
+            });
             if !still_visible {
                 self.transition_to_browse();
             }
         }
 
         if let Some(key) = prev_key {
-            if let Some(idx) = self
-                .rows
-                .iter()
-                .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
-            {
+            if let Some(idx) = self.rows.iter().position(|r| {
+                matches!(r, RowEntry::Setting { key: k, .. }
+if *k == key)
+            }) {
                 self.selected = idx;
             } else {
                 self.selected = self

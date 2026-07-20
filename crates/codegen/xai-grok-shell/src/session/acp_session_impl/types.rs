@@ -19,8 +19,9 @@ pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran. The turn loop should rebuild the request from
     /// the compacted conversation and resubmit.
     CompactAndResubmit,
-    /// Auth 401 recovery succeeded (devbox re-mint or OIDC refresh).
-    /// The turn loop should resubmit once with the fresh token.
+    /// Auth 401 recovery succeeded (devbox re-mint, OIDC refresh, or auth
+    /// provider re-mint). The turn loop should resubmit once with the
+    /// fresh token.
     RefreshAuthAndResubmit,
 }
 

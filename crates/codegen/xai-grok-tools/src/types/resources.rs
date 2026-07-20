@@ -712,6 +712,35 @@ impl ParamNameMapping {
             .unwrap_or(canonical)
     }
 }
+/// Canonical → client-facing param names for the tool currently executing.
+///
+/// Stamped onto [`xai_tool_runtime::ToolCallContext::extensions`] by
+/// `prepare_dispatch` / `call_raw` from that tool's own
+/// `params_name_overrides`. Prefer this over kind-wide
+/// [`crate::types::template_renderer::TemplateRenderer::param_for_kind`] when
+/// naming params in that tool's own errors — multiple tools can share a
+/// `ToolKind` with different renames, and the kind map is first/last-wins.
+#[derive(Debug, Clone, Default)]
+pub struct InvokingToolParamNames(pub HashMap<String, String>);
+impl InvokingToolParamNames {
+    /// Build from a client→canonical reverse map (the dispatch remap direction).
+    pub fn from_reverse_params(reverse_params: &HashMap<String, String>) -> Self {
+        Self(
+            reverse_params
+                .iter()
+                .map(|(client, canonical)| (canonical.clone(), client.clone()))
+                .collect(),
+        )
+    }
+    /// Resolve a canonical parameter name for the invoking tool.
+    /// Falls back to the canonical name if not in the map.
+    pub fn resolve<'a>(&'a self, canonical: &'a str) -> &'a str {
+        self.0
+            .get(canonical)
+            .map(String::as_str)
+            .unwrap_or(canonical)
+    }
+}
 /// Map of `ToolKind` → client-facing tool name.
 ///
 /// Built at finalize time from the enabled tools and client name overrides.
@@ -1201,6 +1230,17 @@ mod tests {
             "new_string"
         );
         assert_eq!(mapping.resolve("other_tool", "old_string"), "old_string");
+    }
+    #[test]
+    fn invoking_tool_param_names_from_reverse_and_resolve() {
+        let reverse = HashMap::from([
+            ("start_line".to_string(), "offset".to_string()),
+            ("max_lines".to_string(), "limit".to_string()),
+        ]);
+        let names = InvokingToolParamNames::from_reverse_params(&reverse);
+        assert_eq!(names.resolve("offset"), "start_line");
+        assert_eq!(names.resolve("limit"), "max_lines");
+        assert_eq!(names.resolve("path"), "path");
     }
     #[test]
     fn params_deref() {

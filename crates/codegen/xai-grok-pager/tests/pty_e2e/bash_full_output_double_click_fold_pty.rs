@@ -42,15 +42,17 @@ async fn bash_full_output_double_click_fold_pty() {
     harness
         .wait_for_text("L12", Duration::from_secs(30))
         .expect("bash output tail");
+    // Live tail can show L06–L12 while L01 is still clipped; wait for
+    // expand-on-finish before asserting the head is present.
     harness
-        .wait_for_text("L06", Duration::from_secs(10))
+        .wait_for_text("L01", Duration::from_secs(15))
         .unwrap_or_else(|_| {
             panic!(
-                "finished ! command must show its full output (middle lines); got:\n{}",
+                "finished ! command must not truncate output (L01 missing)\nscreen:\n{}",
                 harness.screen_contents()
             )
         });
-    for line in ["L01", "L03", "L09"] {
+    for line in ["L03", "L06", "L09"] {
         assert!(
             harness.contains_text(line),
             "finished ! command must not truncate output ({line} missing)\nscreen:\n{}",

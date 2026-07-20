@@ -170,7 +170,8 @@ impl InitProgress {
     /// True iff every per-server handshake has settled and `finish_init`
     /// has fired. Pairs with [`Self::is_in_progress`].
     pub fn is_complete(&self) -> bool {
-        matches!(self, Self::Finished { handshaking } if handshaking.is_empty())
+        matches!(self, Self::Finished { handshaking }
+if handshaking.is_empty())
     }
 
     /// True iff any init work is outstanding — either we are pre-

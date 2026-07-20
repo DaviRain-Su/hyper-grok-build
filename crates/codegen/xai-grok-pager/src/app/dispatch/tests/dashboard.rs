@@ -568,7 +568,8 @@ async fn dashboard_change_location_valid_updates_cwd_and_closes_modal() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetWorkingDir { path } if path == &target))
+            .any(|e| matches!(e, Effect::SetWorkingDir { path }
+if path == &target))
     );
     assert!(
         app.dashboard.as_ref().unwrap().location_picker.is_none(),
@@ -2187,9 +2188,10 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     let new_id = *app.agents.keys().next().unwrap();
     // CreateSession carries the staged model id.
     assert!(effects.iter().any(|e| matches!(
-        e,
-        Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
-    )));
+            e,
+            Effect::CreateSession { model_id: Some(m), .. }
+    if *m == model_id
+        )));
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
@@ -2230,9 +2232,10 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     let new_id = *app.agents.keys().next().unwrap();
     // CreateSession carries the staged model id.
     assert!(effects.iter().any(|e| matches!(
-        e,
-        Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
-    )));
+            e,
+            Effect::CreateSession { model_id: Some(m), .. }
+    if *m == model_id
+        )));
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
@@ -2277,7 +2280,8 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetSessionMode { session_id: s, .. } if *s == session_id)),
+            .any(|e| matches!(e, Effect::SetSessionMode { session_id: s, .. }
+if *s == session_id)),
         "SessionCreated must emit SetSessionMode for the deferred plan mode"
     );
 }
@@ -5077,7 +5081,8 @@ fn dashboard_peek_reply_to_idle_agent_sends() {
         /* attach */ false,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "please continue"));
+    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. }
+if text == "please continue"));
     assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
     assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
     // Reply draft cleared after sending.

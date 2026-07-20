@@ -2196,7 +2196,10 @@ extra_rule_dirs = ["/c/rules"]
             let leaked: Vec<&RequirementSource> = r
                 .sources
                 .iter()
-                .filter(|s| matches!(s, RequirementSource::Settings { path } if path == &tempdir_claude))
+                .filter(|s| {
+                    matches!(s, RequirementSource::Settings { path }
+if path == &tempdir_claude)
+                })
                 .collect();
             assert!(
                 leaked.is_empty(),

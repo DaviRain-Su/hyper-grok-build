@@ -299,6 +299,7 @@ pub(crate) async fn run_read_file(
     contract_version: Option<&str>,
     resources: SharedResources,
     streamable_out: Option<&mut bool>,
+    invoking_param_names: &crate::types::resources::InvokingToolParamNames,
 ) -> Result<ReadFileOutput, xai_tool_runtime::ToolError> {
     let (cwd, display_cwd, fs, hints_enabled);
     {
@@ -473,11 +474,13 @@ pub(crate) async fn run_read_file(
                 .render("${{ tools.by_kind.execute }}")
                 .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
         }
+        let offset_param = invoking_param_names.resolve("offset");
+        let limit_param = invoking_param_names.resolve("limit");
         let single_content_line = extracted.raw_output.lines().count() <= 1;
         let single_line_hint = if single_content_line && !execute_name.is_empty() {
             format!(
                 "\nNote: the requested read is a single very long line, so \
-                 line-based offset/limit cannot narrow it further. Use the \
+                 line-based {offset_param}/{limit_param} cannot narrow it further. Use the \
                  '{execute_name}' tool to extract the parts you need (e.g. \
                  `jq`, `python3`, or `cut -c`)."
             )
@@ -493,18 +496,16 @@ pub(crate) async fn run_read_file(
                 .limit
                 .map_or_else(|| "to end".to_string(), |v| v.to_string());
             format!(
-                "The requested line range (offset={}, limit={}) contains {} tokens, \
-                 which exceeds the maximum allowed tokens ({} tokens).\n\
-                 Try a smaller `limit`, a different starting `offset`, \
-                 or use the '{}' tool to search for specific content.{}",
-                off, lim, token_count, MAX_NUM_TOKENS, grep_name, single_line_hint
+                "The requested line range ({offset_param}={off}, {limit_param}={lim}) contains {token_count} tokens, \
+                 which exceeds the maximum allowed tokens ({MAX_NUM_TOKENS} tokens).\n\
+                 Try a smaller `{limit_param}`, a different starting `{offset_param}`, \
+                 or use the '{grep_name}' tool to search for specific content.{single_line_hint}"
             )
         } else {
             format!(
-                "File content ({} tokens) exceeds maximum allowed tokens ({} tokens).\n\
-                 Please use offset and limit parameters to read a shorter range, \
-                 or use the '{}' to search for specific content.{}",
-                token_count, MAX_NUM_TOKENS, grep_name, single_line_hint
+                "File content ({token_count} tokens) exceeds maximum allowed tokens ({MAX_NUM_TOKENS} tokens).\n\
+                 Please use {offset_param} and {limit_param} parameters to read a shorter range, \
+                 or use the '{grep_name}' to search for specific content.{single_line_hint}"
             )
         };
         return Ok(ReadFileOutput::FileTooLarge(msg));
@@ -601,21 +602,22 @@ impl xai_tool_runtime::Tool for ReadFileTool {
             });
         };
         Box::pin(async_stream::stream! {
-            match ReadFileTool::read_with_streamability(& ctx, input). await {
-            Ok((output, streamable)) => { if streamable && let
-            ReadFileOutput::FileContent(fc) = & output && ! fc.content.is_empty() {
-            let content = fc.content.as_bytes(); let mut last_total : u64 = 0; let
-            mut window_start = 0usize; while window_start < content.len() { let mut
-            window_end = (window_start + STREAM_DELTA_TARGET_BYTES).min(content
-            .len()); while window_end > window_start && ! fc.content
-            .is_char_boundary(window_end) { window_end -= 1; } if let Some(p) =
-            xai_tool_runtime::stream_chunk(spec, & content[..window_end], window_end
-            as u64, & mut last_total, false,) { yield
-            xai_tool_runtime::ToolStreamItem::Progress(p); } window_start =
-            window_end; } } yield
-            xai_tool_runtime::ToolStreamItem::Terminal(Ok(output)); } Err(e) => yield
-            xai_tool_runtime::ToolStreamItem::Terminal(Err(e)), }
-        })
+                    match ReadFileTool::read_with_streamability(& ctx, input). await {
+                    Ok((output, streamable)) => { if streamable && let
+                    ReadFileOutput::FileContent(fc) = & output && ! fc.content.is_empty() {
+                    let content = fc.content.as_bytes(); let mut last_total : u64 = 0; let
+                    mut window_start = 0usize; while window_start < content.len() { let mut
+                    window_end = (window_start + STREAM_DELTA_TARGET_BYTES).min(content
+                    .len()); while window_end > window_start && ! fc.content
+                    .is_char_boundary(window_end) { window_end -= 1; }
+        if let Some(p) =
+                    xai_tool_runtime::stream_chunk(spec, & content[..window_end], window_end
+                    as u64, & mut last_total, false,) { yield
+                    xai_tool_runtime::ToolStreamItem::Progress(p); } window_start =
+                    window_end; } } yield
+                    xai_tool_runtime::ToolStreamItem::Terminal(Ok(output)); } Err(e) => yield
+                    xai_tool_runtime::ToolStreamItem::Terminal(Err(e)), }
+                })
     }
     #[tracing::instrument(name = "tool.read_file", skip_all, fields(path = %input.path))]
     async fn run(
@@ -643,12 +645,14 @@ impl ReadFileTool {
             .map(|c| c.0.clone());
         let bv = crate::types::tool_metadata::behavior_version(ctx);
         let mut streamable_text = false;
+        let invoking = crate::types::tool_metadata::invoking_param_names(ctx);
         let output = run_read_file(
             input,
             cwd_override.clone(),
             bv.as_deref(),
             resources.clone(),
             Some(&mut streamable_text),
+            &invoking,
         )
         .await?;
         Ok((output, streamable_text))
@@ -1003,6 +1007,63 @@ mod tests {
                     msg
                 );
                 assert!(!msg.contains("Please use offset and limit parameters"));
+            }
+            other => panic!("Expected FileTooLarge, got {:?}", other),
+        }
+    }
+    /// Regression: FileTooLarge must name *this* tool's schema keys, not
+    /// whatever a sibling Read tool last wrote into the kind-wide param map.
+    #[tokio::test]
+    async fn token_limit_error_uses_invoking_tool_param_names_not_kind_wide() {
+        let tmp = TempDir::new().unwrap();
+        let line = "x".repeat(200);
+        let big_content = std::iter::repeat_n(line.as_str(), 1100)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(tmp.path().join("big.txt"), &big_content).unwrap();
+        let tool = ReadFileTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(TemplateRenderer::new(
+            [(ToolKind::Search, "Grep".to_string())].into(),
+            [(
+                ToolKind::Read,
+                [
+                    ("offset".to_string(), "poisoned_offset".to_string()),
+                    ("limit".to_string(), "poisoned_limit".to_string()),
+                ]
+                .into(),
+            )]
+            .into(),
+        ));
+        let input = ReadFileInput {
+            path: "big.txt".to_string(),
+            offset: Some(1),
+            limit: Some(800),
+            pages: None,
+            format: None,
+        };
+        let mut ctx = test_ctx(resources.into_shared());
+        ctx.extensions
+            .insert(crate::types::resources::InvokingToolParamNames(
+                [
+                    ("offset".to_string(), "start_line".to_string()),
+                    ("limit".to_string(), "max_lines".to_string()),
+                ]
+                .into(),
+            ));
+        let result = xai_tool_runtime::Tool::run(&tool, ctx, input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileTooLarge(msg) => {
+                assert!(
+                    msg.contains("start_line=1") && msg.contains("max_lines=800"),
+                    "expected invoking-tool names, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("poisoned_offset") && !msg.contains("poisoned_limit"),
+                    "must not use kind-wide sibling renames: {msg}"
+                );
             }
             other => panic!("Expected FileTooLarge, got {:?}", other),
         }

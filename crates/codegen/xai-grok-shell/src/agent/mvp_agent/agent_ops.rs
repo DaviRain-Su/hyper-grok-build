@@ -58,10 +58,12 @@ impl MvpAgent {
             client_version,
         ) {
             Some(mut cfg) => {
-                cfg.client_identifier = primary.client_identifier.clone();
-                cfg.attribution_callback = primary.attribution_callback.clone();
-                cfg.bearer_resolver = primary.bearer_resolver.clone();
-                cfg.max_retries = primary.max_retries;
+                crate::agent::config::stamp_session_local_sampler_fields(
+                    &mut cfg,
+                    primary,
+                    primary.client_identifier.clone(),
+                    primary.max_retries,
+                );
                 cfg
             }
             None => {

@@ -75,14 +75,12 @@ pub fn patch_touches_any(patch: &toml::Table, paths: &[PatchPath]) -> bool {
     paths.iter().any(|p| patch_touches_path(patch, p))
 }
 
-/// Keys stripped from every applied patch so an override can't re-introduce a
-/// nested `version_overrides`/`campaigns` array (recursive re-injection). This
-/// const owns the recursive-injection keys for every override kind; [`apply_patches`]
-/// takes the strip list as a parameter so the strip step itself stays key-agnostic.
-pub const PATCH_STRIP_KEYS: &[&str] = &["version_overrides", "campaigns"];
+/// Keys stripped from every applied patch: an override cannot re-inject nested
+/// `version_overrides`/`campaigns` or define `[auth_provider.*]` command tables.
+pub const PATCH_STRIP_KEYS: &[&str] = &["version_overrides", "campaigns", "auth_provider"];
 
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping
-/// `strip_keys` from every patch first.
+/// `strip_keys` (top level) first.
 pub fn apply_patches(
     config: &mut toml::Value,
     patches: impl IntoIterator<Item = toml::Table>,
@@ -133,10 +131,28 @@ mod tests {
         let mut p = toml::Table::new();
         p.insert("version_overrides".into(), toml::Value::Array(vec![]));
         p.insert("campaigns".into(), toml::Value::Array(vec![]));
+        p.insert(
+            "auth_provider".into(),
+            toml::Value::Table(toml::Table::new()),
+        );
         p.insert("keep".into(), toml::Value::Boolean(true));
         apply_patches(&mut cfg2, std::iter::once(p), PATCH_STRIP_KEYS);
         assert!(cfg2.get("version_overrides").is_none());
         assert!(cfg2.get("campaigns").is_none());
+        assert!(cfg2.get("auth_provider").is_none());
         assert_eq!(cfg2["keep"].as_bool(), Some(true));
+
+        // Top-level strip only: a model may still reference a local provider by name.
+        let mut cfg3 = toml::Value::Table(toml::Table::new());
+        let p = table(
+            "[auth_provider.injected]\ncommand = \"evil\"\n\
+             [model.x]\nauth_provider = \"local-name\"\n",
+        );
+        apply_patches(&mut cfg3, std::iter::once(p), PATCH_STRIP_KEYS);
+        assert!(cfg3.get("auth_provider").is_none());
+        assert_eq!(
+            cfg3["model"]["x"]["auth_provider"].as_str(),
+            Some("local-name")
+        );
     }
 }

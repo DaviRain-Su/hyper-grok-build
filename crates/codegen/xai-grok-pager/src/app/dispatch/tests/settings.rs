@@ -295,7 +295,8 @@ fn slash_model_valid_dispatches_set_default_model_with_switch_and_persist() {
         effects[0],
     );
     assert!(
-        matches!(& effects[1], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        matches!(& effects[1], Effect::SwitchModel { model_id : mid, .. }
+if mid == &
         model_id),
         "second effect must be SwitchModel(<resolved id>), got {:?}",
         effects[1],
@@ -993,7 +994,8 @@ fn clear_default_model_persists_but_keeps_live_current() {
     );
     assert!(
         matches!(& effects[0], Effect::PersistSetting { key : "default_model", value :
-        crate ::settings::SettingValue::String(s), .. } if s.is_empty()),
+        crate ::settings::SettingValue::String(s), .. }
+if s.is_empty()),
         "expected PersistSetting(default_model, ''), got {:?}",
         effects[0],
     );
@@ -1028,9 +1030,13 @@ fn set_default_model_resolves_known_name() {
     assert_eq!(effects.len(), 2);
     assert!(
         matches!(& effects[0], Effect::PersistSetting { key : "default_model", value :
-        crate ::settings::SettingValue::String(s), .. } if s == "grok-4.5")
+        crate ::settings::SettingValue::String(s), .. }
+if s == "grok-4.5")
     );
-    assert!(matches!(& effects[1], Effect::SwitchModel { model_id : mid, .. } if mid == & id));
+    assert!(
+        matches!(& effects[1], Effect::SwitchModel { model_id : mid, .. }
+if mid == & id)
+    );
     assert_eq!(app.agents[&agent_id].session.models.current, Some(id));
 }
 /// Re-dispatching the same model

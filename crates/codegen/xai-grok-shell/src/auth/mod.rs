@@ -1,4 +1,5 @@
 pub(crate) mod attribution;
+mod auth_provider;
 mod config;
 pub mod credential_provider;
 #[path = "devbox_login_stub.rs"]
@@ -16,7 +17,14 @@ pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub(crate) mod single_flight;
 mod storage;
+mod token_output;
 pub(crate) mod token_type;
+pub use auth_provider::{AuthProviderConfig, AuthProviderRef};
+pub(crate) use auth_provider::{
+    PROVIDER_TIMEOUT_CEILING_SECS, PROVIDER_TOKEN_EXPIRY_SKEW_SECS, ProviderRefreshOutcome,
+};
+#[cfg(test)]
+pub(crate) use auth_provider::{test_backdate_provider_mint, test_counting_provider};
 pub(crate) use config::LEGACY_AUTH_SCOPE;
 pub use config::{
     ForceLoginTeam, GrokComConfig, OAuth2ProviderConfig, OidcAuthConfig, PreferredAuthMethod,

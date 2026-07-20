@@ -2949,10 +2949,12 @@ mod tests {
 
         // Verify headers
         assert!(
-            matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"fw-1")
+            matches!(&result[0], crate::views::picker::PickerEntry::Header { label }
+if label == &"fw-1")
         );
         assert!(
-            matches!(&result[2], crate::views::picker::PickerEntry::Header { label } if label == &"xai")
+            matches!(&result[2], crate::views::picker::PickerEntry::Header { label }
+if label == &"xai")
         );
     }
 
@@ -2981,11 +2983,13 @@ mod tests {
             Some("zzz"),
         );
         assert!(
-            matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"zzz"),
+            matches!(&result[0], crate::views::picker::PickerEntry::Header { label }
+if label == &"zzz"),
             "current repo group pinned first"
         );
         assert!(
-            matches!(&result[2], crate::views::picker::PickerEntry::Header { label } if label == &"aaa"),
+            matches!(&result[2], crate::views::picker::PickerEntry::Header { label }
+if label == &"aaa"),
             "remaining group follows alphabetically"
         );
     }

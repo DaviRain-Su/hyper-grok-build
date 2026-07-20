@@ -397,21 +397,18 @@ mod tests {
         assert!(check_quiet(0).is_pass());
         assert!(check_quiet(QUIET_MAX_FRAMES).is_pass());
         let result = check_quiet(QUIET_MAX_FRAMES + 1);
-        assert!(
-            matches!(result, InvariantResult::Violated { ref detail } if detail.contains("churn"))
-        );
+        assert!(matches!(result, InvariantResult::Violated { ref detail }
+if detail.contains("churn")));
     }
 
     #[test]
     fn screen_rejects_streaming_sessions_and_marker_loss() {
         let streaming = check_screen(SessionKind::Streaming, 100, Some(100), &[]);
-        assert!(
-            matches!(streaming, InvariantResult::Violated { ref detail } if detail.contains("streaming"))
-        );
+        assert!(matches!(streaming, InvariantResult::Violated { ref detail }
+if detail.contains("streaming")));
         let lost = check_screen(SessionKind::BottomPinned, 100, None, &[]);
-        assert!(
-            matches!(lost, InvariantResult::Violated { ref detail } if detail.contains("no marker"))
-        );
+        assert!(matches!(lost, InvariantResult::Violated { ref detail }
+if detail.contains("no marker")));
         // Empty capture ⇒ no movement expected; a matching marker passes.
         assert!(check_screen(SessionKind::BottomPinned, 100, Some(100), &[]).is_pass());
         let moved = check_screen(SessionKind::BottomPinned, 100, Some(97), &[]);

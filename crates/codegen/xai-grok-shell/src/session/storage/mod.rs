@@ -944,15 +944,16 @@ pub trait StorageAdapter: Send + Sync {
             .map_err(AppendUpdateError::NotCommitted)
     }
 
-    /// Append one update with the ordinary bookkeeping and a durable log barrier.
-    ///
-    /// Adapters without this capability return `Unsupported`; callers must tolerate a duplicate
-    /// record when retrying an error that occurred after the append reached storage.
-    async fn append_update_durable(&self, _info: &Info, _update: &SessionUpdate) -> io::Result<()> {
-        Err(io::Error::new(
+    /// Append one update durably, preserving whether the replay record committed before failure.
+    async fn append_update_durable_commit_aware(
+        &self,
+        _info: &Info,
+        _update: &SessionUpdate,
+    ) -> Result<(), AppendUpdateError> {
+        Err(AppendUpdateError::NotCommitted(io::Error::new(
             io::ErrorKind::Unsupported,
             "durable session update append is unsupported",
-        ))
+        )))
     }
 
     /// Append a chat message and increment counter

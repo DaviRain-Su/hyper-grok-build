@@ -2020,10 +2020,12 @@ description: Minimal agent
         assert_eq!(v, McpServerRef::Named("slack".to_string()));
         let v: McpServerRef =
             serde_json::from_value(serde_json::json!({ "s" : { "type" : "stdio" } })).unwrap();
-        assert!(matches!(v, McpServerRef::Inline { ref name, .. } if name == "s"));
+        assert!(matches!(v, McpServerRef::Inline { ref name, .. }
+if name == "s"));
         let v: McpServerRef =
             serde_json::from_value(serde_json::json!({ "name" : "s", "type" : "stdio" })).unwrap();
-        assert!(matches!(v, McpServerRef::Inline { ref name, .. } if name == "s"));
+        assert!(matches!(v, McpServerRef::Inline { ref name, .. }
+if name == "s"));
         assert!(
             serde_json::from_value::<McpServerRef>(serde_json::json!({ "type" :
             "stdio" }))

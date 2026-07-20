@@ -47,7 +47,7 @@ Operations (use the "op" field):
   "write" — Replace entire file content (no anchors needed).
     { "op": "write", "content": "full file content here" }
 
-Batch edits: pass multiple operations in "edits". They are validated against the
+Batch edits: pass multiple operations in "${{ params.edit.edits }}". They are validated against the
 pre-edit snapshot and applied atomically bottom-up — if any anchor fails
 validation, ALL edits in the batch are rejected (none are applied).
 Overlapping ranges are also rejected.
@@ -459,6 +459,35 @@ mod tests {
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
         resources.insert(PathNotFoundHints(hints_enabled));
         resources
+    }
+
+    #[test]
+    fn description_template_tracks_renamed_edits() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool::ToolKind;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([
+            (ToolKind::Edit, "hashline_edit".to_string()),
+            (ToolKind::Read, "hashline_read".to_string()),
+            (ToolKind::Search, "hashline_grep".to_string()),
+        ]);
+        let params = HashMap::from([(
+            ToolKind::Edit,
+            HashMap::from([("edits".to_string(), "changes".to_string())]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&HashlineEditTool))
+            .unwrap();
+        assert!(
+            rendered.contains("pass multiple operations in \"changes\""),
+            "renamed edits param must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("in \"edits\""),
+            "canonical edits must not remain after rename:\n{rendered}"
+        );
     }
 
     fn anchors_for(content: &str) -> Vec<String> {

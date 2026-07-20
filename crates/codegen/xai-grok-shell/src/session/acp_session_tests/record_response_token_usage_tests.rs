@@ -180,6 +180,7 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
                 info: ModelInfo::fallback("test"),
                 api_key: None,
                 env_key: None,
+                auth_provider: None,
                 api_base_url: None,
             };
             entry.info.show_model_fingerprint = false;

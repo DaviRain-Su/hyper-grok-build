@@ -115,21 +115,18 @@ pub fn is_committable(entry: &ScrollbackEntry, turn_running: bool, is_last: bool
 }
 
 /// The display mode a block should be committed in (minimal mode, print-once).
-///
-/// Independent of the interactive `default_display_mode` / `finished_display_mode`
-/// because committed scrollback can't be re-folded later (it is static terminal
-/// text). The per-type fidelity policy (design decision K9) lives here in one
-/// place: messages full, reasoning collapsed-but-expandable, tool output
-/// truncated, diffs always full.
 pub fn minimal_commit_display_mode(block: &RenderBlock) -> DisplayMode {
     match block {
-        // Diffs are the key artifact of an edit — always full.
         RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => DisplayMode::Expanded,
-        // Other tool calls: truncated (first/last N + hidden-line count).
+        RenderBlock::ToolCall(
+            tc @ (ToolCallBlock::Search(_)
+            | ToolCallBlock::Read(_)
+            | ToolCallBlock::ListDir(_)
+            | ToolCallBlock::MemorySearch(_)
+            | ToolCallBlock::IntegrationSearch(_)),
+        ) if tc.is_success() => DisplayMode::Collapsed,
         RenderBlock::ToolCall(_) => DisplayMode::Truncated,
-        // Reasoning: collapsed marker ("Thought for Xs"); expandable via Ctrl+E.
-        RenderBlock::Thinking(_) => DisplayMode::Collapsed,
-        // Messages, system/session events, etc.: full.
+        RenderBlock::Thinking(_) => DisplayMode::Expanded,
         _ => DisplayMode::Expanded,
     }
 }
@@ -1342,7 +1339,7 @@ mod tests {
     fn commit_display_mode_policy() {
         assert_eq!(
             minimal_commit_display_mode(&RenderBlock::thinking("reasoning")),
-            DisplayMode::Collapsed
+            DisplayMode::Expanded
         );
         assert_eq!(
             minimal_commit_display_mode(&RenderBlock::edit("file.rs", None)),
@@ -1356,5 +1353,43 @@ mod tests {
             minimal_commit_display_mode(&RenderBlock::agent_message("hi")),
             DisplayMode::Expanded
         );
+    }
+
+    #[test]
+    fn commit_display_mode_lookups_collapse_on_success_only() {
+        use xai_grok_pager::scrollback::blocks::{
+            ListDirToolCallBlock, ReadToolCallBlock, SearchToolCallBlock,
+        };
+
+        assert_eq!(
+            minimal_commit_display_mode(&RenderBlock::search("pat", 3, vec![])),
+            DisplayMode::Collapsed
+        );
+        assert_eq!(
+            minimal_commit_display_mode(&RenderBlock::read("src/lib.rs", None)),
+            DisplayMode::Collapsed
+        );
+        assert_eq!(
+            minimal_commit_display_mode(&RenderBlock::list_dir_with_output("src", "a.rs\nb.rs")),
+            DisplayMode::Collapsed
+        );
+
+        for failed in [
+            RenderBlock::ToolCall(ToolCallBlock::Search(
+                SearchToolCallBlock::new("pat").with_error("regex parse error"),
+            )),
+            RenderBlock::ToolCall(ToolCallBlock::Read(
+                ReadToolCallBlock::new("gone.rs").with_error("file not found"),
+            )),
+            RenderBlock::ToolCall(ToolCallBlock::ListDir(
+                ListDirToolCallBlock::new("gone/").with_error("no such directory"),
+            )),
+        ] {
+            assert_eq!(
+                minimal_commit_display_mode(&failed),
+                DisplayMode::Truncated,
+                "failed lookup must stay truncated: {failed:?}"
+            );
+        }
     }
 }

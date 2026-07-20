@@ -274,7 +274,8 @@ fn compaction_preserves_inherited_prefix() {
                     .any(|p| {
                         matches!(
                             p, xai_grok_sampling_types::conversation::ContentPart::Text {
-                            text } if text.contains("<background_context>")
+                            text }
+if text.contains("<background_context>")
                         )
                     })
             } else {
@@ -2869,6 +2870,51 @@ async fn resolve_subagent_agent_definition_unknown_model_falls_through_to_inheri
         .await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "grok-4.5");
+}
+/// Spawn-time credentials are cache-only: a cold spawn has no key,
+/// never the parent session key.
+#[tokio::test]
+async fn subagent_override_provider_model_spawns_cache_only_credentials() {
+    use xai_grok_agent::config::ModelOverride;
+    let dir = tempfile::tempdir().unwrap();
+    let provider = crate::auth::test_counting_provider(
+        "test-subagent-spawn",
+        dir.path(),
+    );
+    let mut entry = test_model_entry("proxied-model");
+    entry.info.base_url = "https://gateway.example/v1".to_string();
+    entry.auth_provider = Some(provider.clone());
+    let mut models = indexmap::IndexMap::new();
+    models.insert("proxied".to_string(), entry);
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.model_id = acp::ModelId::new("grok-4.5");
+    ctx.available_models = models;
+    ctx.auth = Some(crate::auth::GrokAuth {
+        key: "parent-session-jwt".to_string(),
+        ..Default::default()
+    });
+    ctx.subagent_model_overrides.insert("explore".to_string(), "proxied".to_string());
+    let (config, model_id) = resolve_subagent_sampling_config(
+            "explore",
+            &ModelOverride::Inherit,
+            &ctx,
+        )
+        .await;
+    assert_eq!(model_id.0.as_ref(), "proxied");
+    assert_eq!(
+        config.api_key, None,
+        "a cold cache spawns with no key, never the parent session key"
+    );
+    provider.ensure_fresh_token(None).await.rotated().unwrap();
+    let (config, _) = resolve_subagent_sampling_config(
+            "explore",
+            &ModelOverride::Inherit,
+            &ctx,
+        )
+        .await;
+    assert_eq!(config.api_key.as_deref(), Some("tok-1"));
+    assert_eq!(config.base_url, "https://gateway.example/v1");
 }
 #[test]
 fn key_prefix_truncates_to_8_chars() {

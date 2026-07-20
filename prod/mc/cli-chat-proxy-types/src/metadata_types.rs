@@ -36,7 +36,8 @@ use serde::{Deserialize, Serialize};
 ///        has no configured effort.
 /// v1.23: Removed `prompt`, `full_prompt`, and `truncated_prompt_local_path`
 ///        from metadata.json (prompt content is no longer uploaded in metadata).
-pub const GCS_SCHEMA_VERSION: &str = "v1.23";
+/// v1.24: Prompt metadata updates.
+pub const GCS_SCHEMA_VERSION: &str = "v1.24";
 /// OS-level sandbox state for a trace turn (local `xai-grok-sandbox`, not cloud sandbox).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalSandboxTelemetry {

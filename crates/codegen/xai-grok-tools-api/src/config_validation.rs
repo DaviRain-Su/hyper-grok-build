@@ -170,9 +170,10 @@ mod tests {
     fn invalid_json_is_a_parse_error() {
         let err = parse_params_json(0, "t", Some("{not json")).unwrap_err();
         assert!(matches!(
-            err.kind,
-            ToolConfigEntryErrorKind::ParamsJsonParse { raw, .. } if raw == "{not json"
-        ));
+                    err.kind,
+                    ToolConfigEntryErrorKind::ParamsJsonParse { raw, .. }
+        if raw == "{not json"
+                ));
     }
 
     #[test]
@@ -206,9 +207,10 @@ mod tests {
             assert_eq!(err.field_path(), "tools[2].name_override");
             assert!(
                 matches!(
-                    &err.kind,
-                    ToolConfigEntryErrorKind::NameOverrideInvalid { name: n, .. } if n == name
-                ),
+                                    &err.kind,
+                                    ToolConfigEntryErrorKind::NameOverrideInvalid { name: n, .. }
+                if n == name
+                                ),
                 "name={name:?} kind={:?}",
                 err.kind
             );

@@ -281,9 +281,8 @@ mod tests {
         let sources = load_sources(&config);
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].name, "Local Dev");
-        assert!(
-            matches!(&sources[0].kind, SourceKind::Local { path } if path == &PathBuf::from("/home/user/plugins"))
-        );
+        assert!(matches!(&sources[0].kind, SourceKind::Local { path }
+if path == &PathBuf::from("/home/user/plugins")));
     }
 
     #[test]
@@ -300,9 +299,8 @@ mod tests {
         let sources = load_sources(&config);
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].name, "xAI Official");
-        assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, branch } if url.contains("xai-org") && branch.as_deref() == Some("main"))
-        );
+        assert!(matches!(&sources[0].kind, SourceKind::Git { url, branch }
+if url.contains("xai-org") && branch.as_deref() == Some("main")));
     }
 
     #[test]
@@ -397,9 +395,8 @@ mod tests {
         extract_marketplace_entries(marketplaces, &mut seen, &mut sources);
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].name, "my-marketplace");
-        assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, .. } if url == "https://github.com/anthropics/claude-plugins-official.git")
-        );
+        assert!(matches!(&sources[0].kind, SourceKind::Git { url, .. }
+if url == "https://github.com/anthropics/claude-plugins-official.git"));
     }
 
     #[test]
@@ -420,9 +417,8 @@ mod tests {
         let mut sources = Vec::new();
         extract_marketplace_entries(marketplaces, &mut seen, &mut sources);
         assert_eq!(sources.len(), 1);
-        assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, .. } if url == "git@github.com:org/repo.git")
-        );
+        assert!(matches!(&sources[0].kind, SourceKind::Git { url, .. }
+if url == "git@github.com:org/repo.git"));
     }
 
     #[test]

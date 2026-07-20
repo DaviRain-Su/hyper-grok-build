@@ -534,7 +534,8 @@ mod tests {
         });
         let access = AccessKind::from(&input);
         assert!(
-            matches!(access, AccessKind::MCPTool { ref name, ref input } if name ==
+            matches!(access, AccessKind::MCPTool { ref name, ref input }
+if name ==
             "linear__save_issue" && input["title"] == "test"),
             "UseTool should produce AccessKind::MCPTool carrying the inner tool name and args, got {access:?}"
         );

@@ -2691,6 +2691,29 @@ fn config_layers_user_overrides_managed() {
         Some(crate ::agent::config::TelemetryMode::Enabled), cfg.features.telemetry
     );
 }
+/// A provider in a trusted disk layer resolves through the real
+/// `ConfigLayers` → `effective_config_disk_only` → parse seam that the
+/// direct-TOML parse tests bypass. (`ConfigLayers` has no project slot, so
+/// a repo `.grok/config.toml` structurally cannot supply one.)
+#[test]
+fn auth_provider_honored_only_from_trusted_disk_layers() {
+    let layers = ConfigLayers {
+        managed: toml::from_str(
+                "[auth_provider.corp]\ncommand = \"/usr/local/bin/corp-token\"\n",
+            )
+            .unwrap(),
+        ..Default::default()
+    };
+    let cfg = crate::agent::config::Config::new_from_toml_cfg(
+            &layers.effective_config_disk_only(),
+        )
+        .unwrap();
+    assert_eq!(
+        cfg.auth_providers.get("corp").map(| c | c.command.as_str()),
+        Some("/usr/local/bin/corp-token"),
+        "a provider in a trusted disk layer is honored"
+    );
+}
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
 /// `requirements.toml` (deployment key + S3 trace upload) via the actual

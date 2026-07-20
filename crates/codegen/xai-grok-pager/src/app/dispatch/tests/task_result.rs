@@ -660,9 +660,10 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
     // PersistPreferredModel effect emitted.
     assert_eq!(effects.len(), 1);
     assert!(matches!(
-        &effects[0],
-        Effect::PersistPreferredModel { model_id: mid, .. } if *mid == model_id.clone()
-    ));
+            &effects[0],
+            Effect::PersistPreferredModel { model_id: mid, .. }
+    if *mid == model_id.clone()
+        ));
 }
 
 #[test]

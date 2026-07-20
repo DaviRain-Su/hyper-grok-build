@@ -16,7 +16,8 @@ pub enum LspConfig {
 
 impl LspConfig {
     pub fn is_enabled(&self) -> bool {
-        matches!(self, Self::Enabled { servers, .. } if !servers.is_empty())
+        matches!(self, Self::Enabled { servers, .. }
+if !servers.is_empty())
     }
 }
 

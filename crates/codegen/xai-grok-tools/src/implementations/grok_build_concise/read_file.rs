@@ -6,7 +6,7 @@ const DESCRIPTION_CONCISE: &str = r#"Reads a file from the computer's filesystem
 It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
-- You can optionally specify a line offset and limit (especially handy for long files).
+- You can optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} (especially handy for long files).
 - Lines in the output are numbered starting at 1, using following format: LINE_NUMBER→LINE_CONTENT.
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful."#;
 use crate::types::output::ReadFileOutput;
@@ -84,7 +84,8 @@ impl xai_tool_runtime::Tool for ReadFileConciseTool {
             .map(|c| c.0.clone());
         // `None`: the concise tool does not stream, so it needs no
         // text-path streamability signal (see `run_read_file`).
-        let result = run_read_file(input, cwd_override, None, resources, None).await?;
+        let invoking = crate::types::tool_metadata::invoking_param_names(&ctx);
+        let result = run_read_file(input, cwd_override, None, resources, None, &invoking).await?;
 
         match result {
             ReadFileOutput::FileContent(mut fc) => {
@@ -130,6 +131,33 @@ mod tests {
         assert_eq!(
             ToolMetadata::description_template(&concise_tool),
             super::DESCRIPTION_CONCISE
+        );
+    }
+
+    #[test]
+    fn description_template_tracks_renamed_offset_limit() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([(ToolKind::Read, "read_file".to_string())]);
+        let params = HashMap::from([(
+            ToolKind::Read,
+            HashMap::from([
+                ("offset".to_string(), "start_line".to_string()),
+                ("limit".to_string(), "num_lines".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&ReadFileConciseTool))
+            .unwrap();
+        assert!(
+            rendered.contains("start_line and num_lines"),
+            "renamed offset/limit must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("a line offset and limit"),
+            "canonical offset/limit must not remain after rename:\n{rendered}"
         );
     }
 

@@ -97,9 +97,6 @@ impl ListDirToolCallBlock {
         self.output = output.into();
     }
 
-    /// Render collapsed line: `List path`.
-    ///
-    /// When `width` is provided, the path is fish-shortened to fit.
     fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
@@ -114,15 +111,32 @@ impl ListDirToolCallBlock {
         };
 
         let prefix = "List ";
+        let entry_count = self.output.lines().filter(|l| !l.trim().is_empty()).count();
+        let suffix = if self.error.is_none() && entry_count > 0 {
+            let s = if entry_count == 1 { "y" } else { "ies" };
+            format!(" ({entry_count} entr{s})")
+        } else {
+            String::new()
+        };
+        let suffix_fits = width.is_none_or(|w| prefix.len() + suffix.len() < w);
+        let effective_suffix = if suffix_fits { suffix.as_str() } else { "" };
+
         let path_budget = width
-            .map(|w| w.saturating_sub(prefix.len()))
+            .map(|w| {
+                w.saturating_sub(prefix.len())
+                    .saturating_sub(effective_suffix.len())
+            })
             .unwrap_or(usize::MAX);
         let path = crate::render::tool_paths::shorten_path(&self.path, path_budget);
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(prefix, bold_style),
             Span::styled(path, path_style),
-        ])
+        ];
+        if !effective_suffix.is_empty() {
+            spans.push(Span::styled(effective_suffix.to_string(), theme.muted()));
+        }
+        Line::from(spans)
     }
 
     /// Header line with only the path span selectable (exclude "List " prefix).
@@ -222,5 +236,51 @@ impl BlockContent for ListDirToolCallBlock {
             DisplayMode::Collapsed => DisplayMode::Expanded,
             _ => DisplayMode::Collapsed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scrollback::types::BlockContext;
+
+    fn ctx() -> BlockContext {
+        BlockContext {
+            width: 80,
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    fn header_text(block: &ListDirToolCallBlock) -> String {
+        block.output(&ctx()).lines[0]
+            .content
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn collapsed_header_shows_entry_count() {
+        let block = ListDirToolCallBlock::new("src").with_output("a.rs\nb.rs\nsub/\n");
+        assert_eq!(header_text(&block), "List src (3 entries)");
+
+        let single = ListDirToolCallBlock::new("src").with_output("lonely.rs\n");
+        assert_eq!(header_text(&single), "List src (1 entry)");
+    }
+
+    #[test]
+    fn collapsed_header_omits_count_when_empty_or_failed() {
+        let empty = ListDirToolCallBlock::new("src");
+        assert_eq!(header_text(&empty), "List src");
+
+        let failed = ListDirToolCallBlock::new("gone").with_error("no such directory");
+        assert_eq!(header_text(&failed), "List gone");
     }
 }

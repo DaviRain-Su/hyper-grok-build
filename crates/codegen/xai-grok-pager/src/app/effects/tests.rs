@@ -249,7 +249,8 @@ fn parse_subagent_kill_outcome_reads_typed_outcome() {
     );
     assert!(
         matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"already_finished","status":"completed"}}}"#),
-        SubagentKillOutcome::NothingLive { status : Some(s) } if s == "completed")
+        SubagentKillOutcome::NothingLive { status : Some(s) }
+if s == "completed")
     );
     assert!(
         matches!(parse_subagent_kill_outcome(r#"{"result":{"subagentId":"sa-1","cancelled":false,"outcome":{"kind":"not_found"}}}"#),
@@ -302,7 +303,8 @@ fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
         .unwrap();
     assert!(
         matches!(parse_subagent_kill_outcome(& wire), SubagentKillOutcome::NothingLive {
-        status : Some(s) } if s == "failed")
+        status : Some(s) }
+if s == "failed")
     );
 }
 /// A top-level payload (no `result` envelope), error envelopes, and
@@ -1200,7 +1202,8 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
                             MarketplaceAction::Update {
                                 source_url_or_path,
                                 plugin_relative_path,
-                            } if source_url_or_path == "https://example.com/plugins.git"
+                            }
+if source_url_or_path == "https://example.com/plugins.git"
                                 && plugin_relative_path == "plugins/test-plugin" => {
                                 saw_update_for_task.store(true, Ordering::SeqCst);
                             }

@@ -86,8 +86,8 @@ use the fresh anchors returned by ${{ tools.by_kind.edit }} or re-read the file.
 Usage:
 - The ${{ params.read.target_file }} parameter must be an absolute path, not a relative path
 - By default reads up to {max_lines_read} lines from the beginning
-- Optionally specify offset and limit for large files
-- Can read images (PNG, JPG, etc.) and PDF files (each page rendered as an image; use `pages` parameter for PDFs with more than 10 pages, max 20 per call)
+- Optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} for large files
+- Can read images (PNG, JPG, etc.) and PDF files (each page rendered as an image; use ${{ params.read.pages }} for PDFs with more than 10 pages, max 20 per call)
 - You can call multiple tools in a single response
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."#;
 
@@ -188,7 +188,16 @@ impl xai_tool_runtime::Tool for HashlineReadTool {
             .map(|c| c.0.clone());
         // `None`: the hashline tool does not stream, so it needs no
         // text-path streamability signal (see `run_read_file`).
-        let result = run_read_file(input, cwd_override, None, resources.clone(), None).await?;
+        let invoking = crate::types::tool_metadata::invoking_param_names(&ctx);
+        let result = run_read_file(
+            input,
+            cwd_override,
+            None,
+            resources.clone(),
+            None,
+            &invoking,
+        )
+        .await?;
 
         match result {
             ReadFileOutput::FileContent(mut fc) => {
@@ -372,6 +381,38 @@ mod tests {
             ToolMetadata::description_template(&standard)
         );
         assert!(ToolMetadata::description_template(&hashline).contains("tools.by_kind.edit"));
+    }
+
+    #[test]
+    fn description_template_tracks_renamed_offset_limit() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool::ToolKind;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([
+            (ToolKind::Read, "hashline_read".to_string()),
+            (ToolKind::Edit, "hashline_edit".to_string()),
+        ]);
+        let params = HashMap::from([(
+            ToolKind::Read,
+            HashMap::from([
+                ("target_file".to_string(), "target_file".to_string()),
+                ("offset".to_string(), "start_line".to_string()),
+                ("limit".to_string(), "max_lines".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&HashlineReadTool))
+            .unwrap();
+        assert!(
+            rendered.contains("start_line and max_lines for large files"),
+            "renamed offset/limit must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("offset and limit for large files"),
+            "canonical offset/limit must not remain after rename:\n{rendered}"
+        );
     }
 
     #[tokio::test]

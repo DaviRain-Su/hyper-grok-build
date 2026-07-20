@@ -23,7 +23,7 @@ use super::{apply, errors::ApplyPatchError};
 // ─── Description ─────────────────────────────────────────────────────
 
 /// Tool description derived from the codex `apply_patch_tool_instructions.md`.
-const DESCRIPTION: &str = r#"Use the `apply_patch` tool to edit files.
+const DESCRIPTION: &str = r#"Use this tool to edit files.
 Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
 
 *** Begin Patch

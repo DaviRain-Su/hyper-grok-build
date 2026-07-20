@@ -25,9 +25,11 @@ impl AgentView {
         // BEFORE the removal so a potential auto-hide pane switch can't hit
         // the editing lock (see queue_edit.rs ordering invariant).
         if matches!(
-            self.prompt_mode,
-            PromptMode::EditingQueued { id: editing_id, server_id: None, .. } if editing_id == id
-        ) {
+                    self.prompt_mode,
+                    PromptMode::EditingQueued { id: editing_id, server_id: None, .. }
+        if editing_id == id
+                )
+        {
             self.exit_editing_mode();
         }
         self.queue.select_after_delete(id);

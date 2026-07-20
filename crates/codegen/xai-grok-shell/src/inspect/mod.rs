@@ -73,10 +73,9 @@ pub struct InspectReport {
     pub lsp_servers: Vec<LspServerEntry>,
     pub config_sources: ConfigSources,
     pub external_compat: ExternalCompatReport,
-    /// Warnings from `[model.*]` parsing.
+    /// Warnings from `[model.*]` and `[auth_provider.*]` parsing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub model_override_warnings:
-        Vec<crate::agent::config_model_override_parse::ModelOverrideWarning>,
+    pub config_warnings: Vec<crate::agent::config_model_override_parse::ConfigWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,9 +379,9 @@ async fn build_report(cwd: &Path) -> InspectReport {
     }
     let lsp = list_lsp_servers(cwd, &discovered_plugins);
     let configs = list_config_sources(cwd);
-    let model_override_warnings = parsed_config
+    let config_warnings = parsed_config
         .as_ref()
-        .map(|c| c.model_override_warnings.clone())
+        .map(|c| c.config_warnings.clone())
         .unwrap_or_default();
 
     InspectReport {
@@ -405,7 +404,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
         lsp_servers: lsp,
         config_sources: configs,
         external_compat,
-        model_override_warnings,
+        config_warnings,
     }
 }
 
@@ -1242,35 +1241,27 @@ fn disabled_compat_tags(
     }
 }
 
-/// Renders the "Model Overrides" section of the human report; empty when
-/// there are no warnings.
-fn render_model_override_warnings(
-    warnings: &[crate::agent::config_model_override_parse::ModelOverrideWarning],
+/// Renders the "Config Warnings" section of the human report; empty when
+/// there are no warnings. Covers `[model.*]` overrides and the
+/// `[auth_provider.*]` tables, which share the same warning channel.
+fn render_config_warnings(
+    warnings: &[crate::agent::config_model_override_parse::ConfigWarning],
 ) -> String {
     use std::fmt::Write as _;
 
     if warnings.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n  Model Overrides\n");
-    let _ = writeln!(
-        out,
-        "  {TREE} {} warning(s) (models with invalid fields kept in catalog)",
-        warnings.len()
-    );
+    let mut out = String::from("\n  Config Warnings\n");
+    let _ = writeln!(out, "  {TREE} {} warning(s)", warnings.len());
     for w in warnings {
-        let target = match w.model_key.as_deref() {
-            Some(key) => format!("[model.\"{key}\"]"),
-            None => "[model]".to_owned(),
-        };
-        match w.field.as_deref() {
-            Some(field) => {
-                let _ = writeln!(out, "    {TREE} {target} {field} — {}", w.reason);
-            }
-            None => {
-                let _ = writeln!(out, "    {TREE} {target} — {}", w.reason);
-            }
-        }
+        let field = w.field().map(|f| format!(" {f}")).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "    {TREE} [{}]{field} — {}",
+            w.target.label(),
+            w.reason
+        );
     }
     out
 }
@@ -1545,10 +1536,7 @@ fn print_human(r: &InspectReport) {
         println!("  {TREE} Project: (none)");
     }
 
-    print!(
-        "{}",
-        render_model_override_warnings(&r.model_override_warnings)
-    );
+    print!("{}", render_config_warnings(&r.config_warnings));
 
     print!("{}", render_harness_compatibility(&r.external_compat));
 }
@@ -1845,7 +1833,7 @@ mod tests {
     /// Model-override warnings flow from an effective config through `Config`
     /// to the human renderer and the JSON report.
     #[test]
-    fn model_override_warnings_inspect_smoke() {
+    fn config_warnings_inspect_smoke() {
         let effective: toml::Value = toml::from_str(
             r#"
             [model."grok-4.5"]
@@ -1858,23 +1846,23 @@ mod tests {
         )
         .unwrap();
         let cfg = crate::agent::config::Config::new_from_toml_cfg(&effective).unwrap();
-        let warnings = cfg.model_override_warnings;
+        let warnings = cfg.config_warnings;
         assert!(
             warnings
                 .iter()
-                .any(|w| w.field.as_deref() == Some("send_compactions_remaining")),
+                .any(|w| w.field() == Some("send_compactions_remaining")),
             "duplicate alias should warn: {warnings:?}"
         );
         assert!(
             warnings
                 .iter()
-                .any(|w| w.field.as_deref() == Some("reasoning_effort")),
+                .any(|w| w.field() == Some("reasoning_effort")),
             "invalid enum should warn: {warnings:?}"
         );
         assert!(cfg.config_models.contains_key("grok-4.5"));
 
-        let human = render_model_override_warnings(&warnings);
-        assert!(human.contains("Model Overrides"), "{human}");
+        let human = render_config_warnings(&warnings);
+        assert!(human.contains("Config Warnings"), "{human}");
         assert!(
             human.contains("[model.\"grok-4.5\"] send_compactions_remaining"),
             "{human}"
@@ -1883,7 +1871,33 @@ mod tests {
             human.contains("[model.\"grok-4.5\"] reasoning_effort"),
             "{human}"
         );
-        assert_eq!(render_model_override_warnings(&[]), "");
+        // Auth-provider warnings render under their own table syntax.
+        let provider_warning =
+            crate::agent::config_model_override_parse::ConfigWarning::auth_provider(
+                "litellm",
+                Some("command"),
+                crate::agent::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                "missing or empty command".to_owned(),
+            );
+        let human = render_config_warnings(&[provider_warning]);
+        assert!(
+            human.contains("[auth_provider.\"litellm\"] command"),
+            "{human}"
+        );
+        // A dotted provider name renders whole; the field splits off the
+        // right.
+        let dotted = crate::agent::config_model_override_parse::ConfigWarning::auth_provider(
+            "corp.gateway",
+            Some("token_ttl_secs"),
+            crate::agent::config_model_override_parse::ConfigWarningKind::InvalidValue,
+            "at or below the refresh margin".to_owned(),
+        );
+        let human = render_config_warnings(&[dotted]);
+        assert!(
+            human.contains("[auth_provider.\"corp.gateway\"] token_ttl_secs"),
+            "{human}"
+        );
+        assert_eq!(render_config_warnings(&[]), "");
 
         let json = serde_json::to_value(&warnings).unwrap();
         let alias_warning = json
@@ -1892,7 +1906,8 @@ mod tests {
             .iter()
             .find(|w| w["field"] == "send_compactions_remaining")
             .expect("alias warning present in JSON");
-        assert_eq!(alias_warning["modelKey"], "grok-4.5");
+        assert_eq!(alias_warning["target"], "model");
+        assert_eq!(alias_warning["key"], "grok-4.5");
         assert_eq!(alias_warning["kind"], "duplicate-alias");
         assert!(
             alias_warning["reason"]

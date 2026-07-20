@@ -3807,11 +3807,14 @@ mod tests {
         )
         .unwrap();
         assert!(s.items.iter().any(|it| matches!(it,
-            SeqItem::Message { text: Some(t), .. } if t.contains("call <svc>") && !t.contains("&lt;"))));
+            SeqItem::Message { text: Some(t), .. }
+if t.contains("call <svc>") && !t.contains("&lt;"))));
         assert!(s.items.iter().any(|it| matches!(it,
-            SeqItem::Note { text, .. } if text.contains("memo <o>") && !text.contains("&lt;"))));
+            SeqItem::Note { text, .. }
+if text.contains("memo <o>") && !text.contains("&lt;"))));
         assert!(s.items.iter().any(|it| matches!(it,
-            SeqItem::Divider { text } if text.contains("c <x>") && !text.contains("&lt;"))));
+            SeqItem::Divider { text }
+if text.contains("c <x>") && !text.contains("&lt;"))));
 
         // Class members and ER attributes have no clean quoted form (splitter
         // fragments unquoted `;`; ER drops quoted text as a comment), so exercise

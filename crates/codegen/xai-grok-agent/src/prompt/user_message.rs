@@ -35,7 +35,7 @@ pub const GIT_STATUS_CHARACTER_LIMIT: usize = 10_000;
 /// and no empty code fence is emitted), otherwise the status capped at
 /// [`GIT_STATUS_CHARACTER_LIMIT`] -- snapped back to the last newline -- with
 /// the `... (git status truncated)` marker appended.
-fn normalize_git_status(status: &str) -> Option<String> {
+pub fn normalize_git_status(status: &str) -> Option<String> {
     let status = status.trim();
     if status.is_empty() {
         return None;

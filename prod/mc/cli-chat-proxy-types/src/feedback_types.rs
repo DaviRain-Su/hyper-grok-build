@@ -442,6 +442,13 @@ pub struct FeedbackSubmission {
     /// Backend URL linking this feedback to its server-side session log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unified_log_url: Option<String>,
+
+    /// Client-reported display name; unverified, never used for authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+    /// Client-reported email; unverified, never used for authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_email: Option<String>,
 }
 
 impl FeedbackSubmission {
@@ -460,8 +467,8 @@ impl FeedbackSubmission {
         s
     }
 
-    /// Remove session context and model metadata, preserving only the
-    /// user's rating/text and essential identifiers (session_id, client_type).
+    /// Remove session context and model metadata. The author identity is
+    /// preserved so the author stays reachable after the strip.
     pub fn strip_metadata(&mut self) {
         self.model_id = None;
         self.resolved_model_id = None;

@@ -505,7 +505,8 @@ fn dispatch_send_prompt_announcements_via_registry() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
-        hidden_ids } if hidden_ids.contains("crit-a"))),
+        hidden_ids }
+if hidden_ids.contains("crit-a"))),
         "expected persist effect carrying the hidden id, got {effects:?}"
     );
     assert!(app.hidden_announcement_ids.contains("crit-a"));
@@ -569,7 +570,8 @@ fn announcements_show_clears_visible_critical_ids_only() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
-        hidden_ids } if ! hidden_ids.contains("outage-a"))),
+        hidden_ids }
+if ! hidden_ids.contains("outage-a"))),
         "expected persist effect without the un-hidden id, got {effects:?}"
     );
     assert_eq!(shown_banner_id(&app).as_deref(), Some("outage-a"));
@@ -661,7 +663,8 @@ fn announcements_show_clears_hidden_promo_ids() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
-        hidden_ids } if ! hidden_ids.contains("promo-a"))),
+        hidden_ids }
+if ! hidden_ids.contains("promo-a"))),
         "expected persist effect without the un-hidden promo id, got {effects:?}"
     );
     assert_eq!(shown_banner_id(&app).as_deref(), Some("promo-a"));
@@ -685,7 +688,8 @@ fn switch_model_dispatch_produces_effect_and_sets_pending() {
     );
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. }
+if mid == &
         model_id)
     );
     assert!(app.agents[&id].session.model_switch_pending);
@@ -706,7 +710,8 @@ fn switch_model_allowed_when_agent_chat_kind() {
     );
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. }
+if mid == &
         model_id)
     );
     assert!(app.agents[&id].session.model_switch_pending);
@@ -726,7 +731,8 @@ fn switch_model_allowed_when_app_chat_mode() {
     );
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. } if mid == &
+        matches!(& effects[0], Effect::SwitchModel { model_id : mid, .. }
+if mid == &
         model_id)
     );
     assert!(app.agents[&id].session.model_switch_pending);
@@ -946,7 +952,8 @@ fn acp_bootstrap_command_executes_as_passthrough() {
     let effects = dispatch(Action::SendPrompt("/flush".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::SendPrompt { text, .. } if text == "/flush"),
+        matches!(& effects[0], Effect::SendPrompt { text, .. }
+if text == "/flush"),
         "ACP command should passthrough, got: {effects:?}"
     );
 }
@@ -1081,7 +1088,8 @@ fn acp_command_with_args_passthrough_includes_args() {
     let effects = dispatch(Action::SendPrompt("/search find bugs".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::SendPrompt { text, .. } if text ==
+        matches!(& effects[0], Effect::SendPrompt { text, .. }
+if text ==
         "/search find bugs"),
         "ACP passthrough should preserve args, got: {effects:?}"
     );
@@ -1324,7 +1332,8 @@ fn view_catalog_entry_emits_fetch_effect() {
     );
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::FetchCatalogEntry { kind, name } if kind ==
+        matches!(& effects[0], Effect::FetchCatalogEntry { kind, name }
+if kind ==
         "persona" && name == "researcher")
     );
 }

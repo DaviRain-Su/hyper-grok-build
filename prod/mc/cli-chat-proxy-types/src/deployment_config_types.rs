@@ -4,15 +4,27 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The payload format version the server currently signs. Bump when the payload
-/// gains semantics (e.g. an anti-replay counter or a key-fingerprint binding) so
-/// verifiers can distinguish generations; `0` means a pre-versioned payload.
-pub const SIGNED_PAYLOAD_VERSION: u32 = 1;
+/// The payload format version the server currently signs. Informational for
+/// now: no verifier gates on it (every version verifies the same); enforce a
+/// minimum only once the fleet has rotated past older generations.
+/// `0` = pre-versioned, `1` = first versioned payload, `2` = per-fetch `nonce`.
+pub const SIGNED_PAYLOAD_VERSION: u32 = 2;
 
 /// Domain-separation tags inside the signed bytes: both message types share one
 /// signing key, so each verifier requires its own tag (no cross-substitution).
 pub const MANAGED_POLICY_TYP: &str = "grok.managed_policy.v1";
 pub const MANAGED_IDENTITY_TYP: &str = "grok.managed_identity.v1";
+
+/// Client echoes its persisted envelope `nonce` on this header for the server probe.
+pub const MANAGED_CONFIG_NONCE_ECHO_HEADER: &str = "x-grok-managed-config-nonce";
+
+/// Shape of a server-minted nonce (16 random bytes as hex): what `fresh_nonce`
+/// produces and the only shape the client echoes (hex is HTTP-header-safe).
+/// Shared so a mint change cannot silently disable the echo: the proxy pins
+/// its mint against this, the client gates its echo on it.
+pub fn is_server_nonce_shape(nonce: &str) -> bool {
+    nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 /// The exact bytes the server signs: the served policy, the principal it is
 /// bound to, and an expiry. Serialized once on the server and shipped verbatim
@@ -42,6 +54,10 @@ pub struct SignedPayload {
     pub fail_closed: bool,
     /// Unix seconds after which the signature is no longer trusted.
     pub expires_at: u64,
+    /// Per-response nonce in the signed bytes (echoed on [`MANAGED_CONFIG_NONCE_ECHO_HEADER`]).
+    /// `default` empty keeps pre-nonce sidecars verifiable.
+    #[serde(default)]
+    pub nonce: String,
     /// Identifies the signing key, so a rotation can be distinguished.
     pub key_id: String,
 }
@@ -144,6 +160,7 @@ mod tests {
             requirements: None,
             fail_closed: false,
             expires_at: 4_000_000_000,
+            nonce: "9f86d081884c7d6594a85abf0f0cf96b".into(),
             key_id: "v1".into(),
         };
         let json = serde_json::to_string(&versioned).unwrap();
@@ -159,6 +176,12 @@ mod tests {
             legacy.typ, "",
             "an untagged payload parses (verifiers reject it)"
         );
+        assert_eq!(
+            legacy.nonce, "",
+            "pre-nonce payloads default to an empty nonce"
+        );
+        assert!(is_server_nonce_shape("0123456789abcdef0123456789abcdef"));
+        assert!(!is_server_nonce_shape("short"));
     }
 
     /// The claim round-trips; `fail_closed` is additive (absent → permissive).

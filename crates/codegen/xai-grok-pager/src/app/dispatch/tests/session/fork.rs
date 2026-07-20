@@ -96,9 +96,10 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
     // Should emit LoadSession.
     assert_eq!(effects.len(), 1);
     assert!(matches!(
-        &effects[0],
-        Effect::LoadSession { session_id, .. } if session_id == "forked-sess-2"
-    ));
+            &effects[0],
+            Effect::LoadSession { session_id, .. }
+    if session_id == "forked-sess-2"
+        ));
     // Scrollback should contain the restore summary.
     let has_restore_msg = app.agents[&id]
         .scrollback

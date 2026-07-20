@@ -43,6 +43,20 @@ pub struct RemoteSync {
 }
 
 impl RemoteSync {
+    #[cfg(test)]
+    pub(crate) fn test_observer() -> (Self, mpsc::UnboundedReceiver<acp::SessionNotification>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (observed_tx, observed_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let SyncMsg::Queue(notification) = message {
+                    let _ = observed_tx.send(*notification);
+                }
+            }
+        });
+        (Self { tx }, observed_rx)
+    }
+
     /// Metadata is included on every flush to keep the backend session row current.
     pub(crate) fn new(
         session_id: String,

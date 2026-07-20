@@ -1138,41 +1138,14 @@ async fn test_append_feedback_creates_file_and_persists() {
         dismissed: false,
         submission: Some(FeedbackSubmission {
             session_id: "test-session-123".into(),
-            user_id: None,
             client_type: ClientType::Tui,
             feedback_type: FeedbackType::Rating,
             turn_number: Some(3),
             rating_type: Some(RatingType::Thumbs),
             rating_value: Some(1),
-            feedback_text: None,
-            feedback_categories: vec![],
-            message_id: None,
             model_id: Some("grok-3-fast".into()),
             resolved_model_id: Some("grok-4.5".into()),
-            model_fingerprint: None,
-            context_type: None,
-            feature_name: None,
-            tool_name: None,
-            experiment_id: None,
-            comparison_id: None,
-            preferred_model_id: None,
-            preference_strength: None,
-            preference_reasons: vec![],
-            request_id: None,
-            client_version: None,
-            shell_version: None,
-            extension_host: None,
-            metadata: None,
-            last_user_message: None,
-            last_assistant_message: None,
-            tool_outcomes: vec![],
-            session_cwd: None,
-            compaction_count: None,
-            context_window_usage: None,
-            context_tokens_used: None,
-            context_window_tokens: None,
-            terminal_info: None,
-            unified_log_url: None,
+            ..Default::default()
         }),
     });
     adapter.append_feedback(&info, &user_entry).await.unwrap();
@@ -1838,9 +1811,7 @@ fn write_test_summary(
 }
 #[test]
 fn scan_session_dirs_returns_empty_for_explicit_mode() {
-    let adapter = JsonlStorageAdapter {
-        dir_mode: SessionDirMode::Explicit(PathBuf::from("/fake")),
-    };
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(PathBuf::from("/fake"));
     assert!(adapter.scan_session_dirs(None).is_empty());
 }
 #[test]
@@ -2080,7 +2051,8 @@ fn strip_invalid_images_corrupt_base64_stripped() {
     if let ConversationItem::User(u) = &items[0] {
         assert_eq!(u.content.len(), 2);
         assert!(
-            matches!(& u.content[1], ContentPart::Text { text } if text
+            matches!(& u.content[1], ContentPart::Text { text }
+if text
             .contains("invalid data"))
         );
     } else {
@@ -2117,7 +2089,8 @@ fn strip_invalid_images_http_url_untouched() {
     assert_eq!(strip_invalid_images(& mut items), 0);
     assert!(
         matches!(& items[0], ConversationItem::User(u) if matches!(& u.content[0],
-        ContentPart::Image { url : u } if u.as_ref() == "https://example.com/photo.jpg"))
+        ContentPart::Image { url : u }
+if u.as_ref() == "https://example.com/photo.jpg"))
     );
 }
 #[test]
@@ -2146,19 +2119,23 @@ fn strip_invalid_images_mixed_valid_and_invalid() {
     if let ConversationItem::User(u) = &items[0] {
         assert_eq!(u.content.len(), 4);
         assert!(
-            matches!(& u.content[0], ContentPart::Text { text } if text.as_ref() ==
+            matches!(& u.content[0], ContentPart::Text { text }
+if text.as_ref() ==
             "check these")
         );
         assert!(
-            matches!(& u.content[1], ContentPart::Image { url } if url.as_ref() ==
+            matches!(& u.content[1], ContentPart::Image { url }
+if url.as_ref() ==
             valid_url.as_str())
         );
         assert!(
-            matches!(& u.content[2], ContentPart::Text { text } if text
+            matches!(& u.content[2], ContentPart::Text { text }
+if text
             .contains("invalid data"))
         );
         assert!(
-            matches!(& u.content[3], ContentPart::Image { url } if url.as_ref() ==
+            matches!(& u.content[3], ContentPart::Image { url }
+if url.as_ref() ==
             "https://example.com/img.png")
         );
     } else {
@@ -2197,7 +2174,8 @@ fn strip_invalid_images_heals_tool_result_images() {
     };
     assert_eq!(t.images.len(), 1, "only the invalid image is removed");
     assert!(
-        matches!(& t.images[0], ContentPart::Image { url } if url.as_ref() == good_url
+        matches!(& t.images[0], ContentPart::Image { url }
+if url.as_ref() == good_url
         .as_str())
     );
 }
@@ -2243,7 +2221,8 @@ fn strip_invalid_images_truncated_jpeg_stripped() {
     assert_eq!(strip_invalid_images(& mut items), 1);
     assert!(
         matches!(& items[0], ConversationItem::User(u) if matches!(& u.content[1],
-        ContentPart::Text { text } if text.contains("invalid data")))
+        ContentPart::Text { text }
+if text.contains("invalid data")))
     );
 }
 #[test]
@@ -2547,7 +2526,8 @@ fn read_chat_history_quarantines_original_on_image_strip() {
     let (_, chat_path, items) = load_raw_chat(&temp_dir, raw.as_bytes());
     assert!(
         matches!(& items[0], ConversationItem::User(u) if matches!(& u.content[0],
-        ContentPart::Text { text } if text.contains("invalid data")))
+        ContentPart::Text { text }
+if text.contains("invalid data")))
     );
     let quarantine = chat_path.with_extension("jsonl.corrupt");
     assert_eq!(

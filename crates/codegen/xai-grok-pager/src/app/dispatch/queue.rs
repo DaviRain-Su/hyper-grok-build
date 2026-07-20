@@ -965,7 +965,8 @@ mod tests {
         // Turn ends → should drain "second" (front, not being edited) + FetchBilling.
         let effects = dispatch(end_turn(), &mut app);
         assert_eq!(effects.len(), 2);
-        assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "second"));
+        assert!(matches!(&effects[0], Effect::SendPrompt { text, .. }
+if text == "second"));
         assert!(matches!(
             &effects[1],
             Effect::FetchBilling { silent: true, .. }
@@ -991,7 +992,8 @@ mod tests {
         // DrainQueue should pop and send.
         let effects = dispatch(Action::DrainQueue, &mut app);
         assert_eq!(effects.len(), 1);
-        assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "queued"));
+        assert!(matches!(&effects[0], Effect::SendPrompt { text, .. }
+if text == "queued"));
         assert_eq!(app.agents[&id].session.queue_len(), 0);
     }
 
@@ -1960,7 +1962,8 @@ mod tests {
         let effects = dispatch(Action::DrainQueue, &mut app);
         assert_eq!(effects.len(), 1);
         assert!(
-            matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "p3-edited"),
+            matches!(&effects[0], Effect::SendPrompt { text, .. }
+if text == "p3-edited"),
             "should send the edited prompt, got: {:?}",
             effects[0]
         );

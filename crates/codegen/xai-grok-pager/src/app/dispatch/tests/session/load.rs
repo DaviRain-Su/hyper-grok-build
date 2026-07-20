@@ -629,7 +629,8 @@ fn resume_known_session_id_loads_not_creates() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::LoadSession { session_id, .. } if
+            .any(|e| matches!(e, Effect::LoadSession { session_id, .. }
+if
         session_id == "resume-known-id")),
         "expected LoadSession, got {effects:?}"
     );
@@ -964,7 +965,8 @@ fn resume_unknown_session_still_creates_new_agent() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::LoadSession { agent_id, session_id,
-        .. } if * agent_id == new_id && session_id == "sess-never-open"))
+        .. }
+if * agent_id == new_id && session_id == "sess-never-open"))
     );
 }
 /// Stale `attached_agent` (not equal to visible agent) must not re-arm overlay.
@@ -1027,7 +1029,8 @@ fn resume_conversation_does_not_focus_build_id_collision() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::LoadSession { session_id, chat_kind
-        : true, .. } if session_id == "shared-id"))
+        : true, .. }
+if session_id == "shared-id"))
     );
     assert!(!app.agents[&agent_0].chat_kind);
 }
@@ -1165,7 +1168,8 @@ fn resume_after_load_failed_reissues_load() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::LoadSession { agent_id, .. } if *
+            .any(|e| matches!(e, Effect::LoadSession { agent_id, .. }
+if *
         agent_id == agent_0))
     );
     assert!(app.agents[&agent_0].loading_placeholder_id.is_some());
@@ -1188,7 +1192,8 @@ fn resume_after_load_failed_reissues_load() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::LoadSession { agent_id, session_id,
-        .. } if * agent_id != agent_0 && session_id == "fail-then-retry")),
+        .. }
+if * agent_id != agent_0 && session_id == "fail-then-retry")),
         "retry after failure must emit LoadSession for a new agent, got {effects:?}"
     );
     assert_eq!(app.agents.len(), count_before + 1);

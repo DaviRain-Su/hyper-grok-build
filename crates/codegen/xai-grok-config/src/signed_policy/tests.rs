@@ -33,6 +33,7 @@ fn payload() -> SignedPayload {
         requirements: Some("[features]\nweb_fetch = false\n".into()),
         fail_closed: false,
         expires_at: 4_000_000_000,
+        nonce: String::new(),
         key_id: "v1".into(),
     }
 }
@@ -888,6 +889,7 @@ fn unknown_signed_key_id_is_rejected() {
     let home = dir.path();
     let (kp, pubkey) = test_keypair();
     let p = SignedPayload {
+        nonce: String::new(),
         key_id: "v9".into(),
         fail_closed: true,
         ..payload()
@@ -930,6 +932,7 @@ fn rotation_selects_the_trusted_key_by_signed_key_id() {
 
     let v1 = sign(&kp1, &payload());
     let v2_payload = SignedPayload {
+        nonce: String::new(),
         key_id: "v2".into(),
         ..payload()
     };
