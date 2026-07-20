@@ -704,17 +704,25 @@ mod tests {
         );
     }
 
-    /// Brand-new user (no API key, no cached token): only `grok.com` is
-    /// advertised, and the pager will (correctly) show the login screen.
-    /// `default_auth_method_id` is None so the pager falls back to the
-    /// advertised login method.
+    /// Brand-new user (no API key, no cached token): `grok.com` leads so the
+    /// pager shows the login screen with the primary xAI method, with
+    /// Kimi Code device OAuth always advertised as the alternative
+    /// interactive method. `default_auth_method_id` is None so the pager
+    /// falls back to the advertised login method.
     #[test]
-    fn fresh_user_only_advertises_grok_com_and_requires_login() {
+    fn fresh_user_requires_login_grok_com_first_kimi_code_advertised() {
         let built = build_auth_methods(default_inputs());
 
         assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::GrokCom));
         assert!(built.default_auth_method_id.is_none());
-        assert_eq!(built.methods.len(), 1);
+        assert_eq!(
+            built
+                .methods
+                .iter()
+                .map(|m| AuthMethodKind::from_id(m.id()))
+                .collect::<Vec<_>>(),
+            [AuthMethodKind::GrokCom, AuthMethodKind::KimiCode],
+        );
     }
 
     /// Enterprise OIDC replaces `grok.com` (mutually exclusive). xai.api_key,
