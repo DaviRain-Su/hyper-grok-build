@@ -3546,9 +3546,12 @@ fn openai_codex_catalog_efforts(model: &str) -> Option<(ReasoningEffort, Vec<(Re
         "Extra high reasoning depth for complex problems",
     );
     const MAX: (E, &str) = (E::Max, "Maximum reasoning depth for the hardest problems");
+    // Codex CLI catalog description; wire still maps Ultra→max
+    // (openai/codex `reasoning_effort_for_request`). Delegation is client-side
+    // multi-agent policy when implemented, not a distinct API effort string.
     const ULTRA: (E, &str) = (
         E::Ultra,
-        "Maximum reasoning with automatic task delegation",
+        "Maximum reasoning with automatic task delegation (wire: max)",
     );
     // Base ladder shared by gpt-5.2 … gpt-5.5.
     let base = [LOW, MEDIUM, HIGH, XHIGH];

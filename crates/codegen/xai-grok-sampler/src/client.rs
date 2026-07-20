@@ -236,15 +236,28 @@ fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
 
 /// Codex / ChatGPT Responses wire form for `reasoning.effort`.
 ///
-/// async-openai's typed `ReasoningEffort` only goes up to `xhigh`, so Max /
-/// Ultra would collapse on serialize. Official Codex catalog (and the ChatGPT
-/// backend) accept free-form effort strings including **`max`** and
-/// **`ultra`** (GPT-5.6 Sol/Terra). After JSON serialize we rewrite
-/// `reasoning.effort` from the session's canonical effort:
+/// Mirrors official `openai/codex` `ModelClient::reasoning_effort_for_request`
+/// (`codex-rs/core/src/client.rs`):
+///
+/// ```ignore
+/// fn reasoning_effort_for_request(effort) {
+///     match effort {
+///         Ultra => Max,  // UI "ultra" never hits the Responses API as "ultra"
+///         other => other,
+///     }
+/// }
+/// ```
+///
+/// Ultra remains a **client** policy (Codex multi-agent v2 → `Proactive`
+/// delegation in `multi_agents.rs`); the HTTP body always carries
+/// `reasoning.effort: "max"`.
+///
+/// async-openai only types through `xhigh`, so Max would also collapse on
+/// serialize without this post-serialize rewrite.
 ///
 /// - `None` → drop `reasoning` (off)
-/// - `Minimal` → `"low"` (Pi alias on Codex)
-/// - `Max` → `"max"`, `Ultra` → `"ultra"` (must not collapse to xhigh)
+/// - `Minimal` → `"low"` (Pi alias on Codex xhigh models)
+/// - `Max` / `Ultra` → `"max"` (official Ultra→Max)
 /// - others → their `as_str()` token
 fn patch_codex_reasoning_effort_wire(
     body: &mut serde_json::Value,
@@ -260,6 +273,7 @@ fn patch_codex_reasoning_effort_wire(
             obj.remove("reasoning");
         }
         Some(e) => {
+            // Keep in lockstep with openai/codex `reasoning_effort_for_request`.
             let wire = match e {
                 E::None => unreachable!(),
                 E::Minimal => "low",
@@ -267,8 +281,8 @@ fn patch_codex_reasoning_effort_wire(
                 E::Medium => "medium",
                 E::High => "high",
                 E::Xhigh => "xhigh",
-                E::Max => "max",
-                E::Ultra => "ultra",
+                // Ultra is multi-agent UX only; backend receives max.
+                E::Max | E::Ultra => "max",
             };
             let reasoning = obj
                 .entry("reasoning")
@@ -2808,5 +2822,24 @@ mod tests {
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
+    }
+
+    /// openai/codex maps Ultra → Max before the Responses body is built
+    /// (`reasoning_effort_for_request`). Sending `effort: "ultra"` 400s.
+    #[test]
+    fn codex_wire_maps_ultra_to_max_like_official_cli() {
+        use xai_grok_sampling_types::ReasoningEffort as E;
+        let mut body = serde_json::json!({
+            "model": "gpt-5.6-sol",
+            "reasoning": { "effort": "xhigh", "summary": "auto" }
+        });
+        patch_codex_reasoning_effort_wire(&mut body, Some(E::Ultra));
+        assert_eq!(body["reasoning"]["effort"], "max");
+        patch_codex_reasoning_effort_wire(&mut body, Some(E::Max));
+        assert_eq!(body["reasoning"]["effort"], "max");
+        patch_codex_reasoning_effort_wire(&mut body, Some(E::Xhigh));
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        patch_codex_reasoning_effort_wire(&mut body, Some(E::None));
+        assert!(body.get("reasoning").is_none());
     }
 }
