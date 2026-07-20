@@ -1296,6 +1296,10 @@ pub struct Config {
     pub toolset: ShellToolsetConfig,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
+    /// `[platforms.<id>]` — Moonshot (and future) open-platform API keys.
+    /// Secrets; never re-serialized. See [`PlatformsConfig`].
+    #[serde(default, skip_serializing)]
+    pub platforms: PlatformsConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1715,6 +1719,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             toolset: ShellToolsetConfig::default(),
             endpoints,
+            platforms: PlatformsConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
@@ -1869,6 +1874,7 @@ impl Config {
         }
         config.config_models = config_models;
         config.model_override_warnings = model_override_warnings;
+        config.platforms.warn_unknown_platforms();
         if config.grok_com_config.oidc.is_none() {
             config.grok_com_config.oidc = OidcAuthConfig::from_env();
         }
@@ -3145,6 +3151,11 @@ pub fn resolve_model_list(
         tracing::debug!(count = defaults.len(), "loaded default models");
         resolved.extend(defaults);
     }
+    // Built-in Moonshot entries (and future open platforms). Injected before
+    // prefetched/config overlays so `[model."moonshot-cn/..."]` can inherit
+    // base_url / env_key. Re-injected after prefetched because that branch
+    // replaces the whole map.
+    inject_moonshot_builtin_models(&mut resolved);
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
         let default_cw = DEFAULT_CONTEXT_WINDOW;
@@ -3176,6 +3187,7 @@ pub fn resolve_model_list(
             }
         }
         resolved = prefetched;
+        inject_moonshot_builtin_models(&mut resolved);
     }
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
@@ -3245,11 +3257,228 @@ pub fn resolve_model_list(
     }
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
+    apply_platform_credentials(&mut resolved, &cfg.platforms);
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
     }
     resolved
 }
+
+/// `[platforms.<id>]` — API keys for the built-in platform registry
+/// ([`xai_grok_models::PlatformId`]).
+///
+/// ```toml
+/// [platforms.moonshot-cn]
+/// api_key = "sk-..."
+///
+/// [platforms.moonshot-ai]
+/// api_key = "sk-..."
+/// ```
+///
+/// Env vars win over the config file:
+/// `GROK_MOONSHOT_CN_API_KEY` / `GROK_MOONSHOT_AI_API_KEY` (platform-scoped),
+/// then `GROK_MOONSHOT_API_KEY` / `MOONSHOT_API_KEY` (both open platforms).
+///
+/// SECURITY: key values are never logged and never re-serialized
+/// (`Config.platforms` is `skip_serializing`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PlatformsConfig {
+    #[serde(flatten)]
+    pub entries: IndexMap<String, PlatformCredentialConfig>,
+}
+
+impl PlatformsConfig {
+    /// Config-file API key for `platform`, blank-as-unset. Unknown
+    /// `[platforms.*]` ids are warned about at load and never resolve.
+    pub fn config_api_key(&self, platform: xai_grok_models::PlatformId) -> Option<String> {
+        self.entries
+            .get(platform.as_str())
+            .and_then(|e| e.api_key.as_deref())
+            .filter(|k| !k.trim().is_empty())
+            .map(str::to_owned)
+    }
+
+    /// Warn about `[platforms.<id>]` tables that don't name a registry
+    /// platform (e.g. typo `moonshot_cn`). Key values are not logged.
+    pub fn warn_unknown_platforms(&self) {
+        for id in self.entries.keys() {
+            if xai_grok_models::PlatformId::parse(id).is_none() {
+                tracing::warn!(
+                    platform = %id,
+                    known = ?xai_grok_models::PlatformId::ALL
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<_>>(),
+                    "[platforms.{id}] does not match any registry platform; its api_key is ignored"
+                );
+            }
+        }
+    }
+}
+
+/// One `[platforms.<id>]` table.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformCredentialConfig {
+    /// API key for this platform. NEVER logged; never re-serialized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// Resolve the API key for an open-platform registry entry:
+/// platform-scoped env > generic env aliases > config file.
+/// The returned value must never be logged.
+pub fn resolve_platform_api_key(
+    platform: xai_grok_models::PlatformId,
+    platforms: &PlatformsConfig,
+) -> Option<String> {
+    resolve_platform_api_key_with(platform, platforms, |name| std::env::var(name).ok())
+}
+
+/// Testable core of [`resolve_platform_api_key`] with an injected getenv.
+pub fn resolve_platform_api_key_with(
+    platform: xai_grok_models::PlatformId,
+    platforms: &PlatformsConfig,
+    mut getenv: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    for name in platform.api_key_env_names() {
+        if let Some(value) = getenv(name)
+            && !value.trim().is_empty()
+        {
+            return Some(value);
+        }
+    }
+    platforms.config_api_key(platform)
+}
+
+/// Insert built-in platform catalog entries when missing. Does not overwrite
+/// prefetched / `[model.*]` / xAI defaults that already occupy the same key.
+fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
+    for builtin in xai_grok_models::platform_builtin_models() {
+        let key = builtin.catalog_key();
+        if resolved.contains_key(&key) {
+            continue;
+        }
+        let env_key = if builtin.platform.api_key_env_names().is_empty() {
+            None
+        } else {
+            Some(EnvKeys::new(
+                builtin.platform.api_key_env_names().iter().copied(),
+            ))
+        };
+        let config = ModelEntryConfig {
+            id: Some(key.clone()),
+            model: builtin.model.to_owned(),
+            base_url: builtin.platform.base_url(),
+            api_base_url: None,
+            name: Some(builtin.name.to_owned()),
+            description: Some(builtin.description.to_owned()),
+            context_window: builtin.context_window_nonzero(),
+            auto_compact_threshold_percent: None,
+            system_prompt_label: None,
+            temperature: None,
+            top_p: None,
+            max_completion_tokens: None,
+            api_backend: ApiBackend::ChatCompletions,
+            auth_scheme: None,
+            agent_type: default_agent_type(),
+            inference_idle_timeout_secs: None,
+            max_retries: None,
+            api_key: None,
+            env_key,
+            extra_headers: IndexMap::new(),
+            use_concise: false,
+            hidden: false,
+            supported_in_api: builtin.supported_in_api,
+            reasoning_effort: None,
+            supports_reasoning_effort: builtin.supports_reasoning_effort,
+            reasoning_efforts: Vec::new(),
+            supports_backend_search: false,
+            compactions_remaining: None,
+            compaction_at_tokens: None,
+            show_model_fingerprint: false,
+            stream_tool_calls: None,
+            laziness_detector: LazinessDetectorPerModelConfig::default(),
+        };
+        tracing::debug!(
+            model_key = %key,
+            platform = builtin.platform.as_str(),
+            "injected built-in platform catalog entry"
+        );
+        resolved.insert(key, ModelEntry::from_config_entry(&config));
+    }
+}
+
+/// Wire `[platforms.*]` credentials into open-platform catalog entries
+/// recognized by `{platform_id}/{model_id}` catalog ids.
+///
+/// - `env_key` defaults to the platform's env names when unset.
+/// - a config-file `api_key` is stamped only when no env name currently
+///   resolves (env > config). Per-model `[model.*]` credentials always win.
+///
+/// In-memory only; key values are never logged.
+fn apply_platform_credentials(
+    resolved: &mut IndexMap<String, ModelEntry>,
+    platforms: &PlatformsConfig,
+) {
+    // Sync read of the Kimi Code OAuth bearer (no refresh here — callers that
+    // need a guaranteed-fresh token should call ensure_kimi_code_access_token).
+    let kimi_bearer = crate::auth::read_kimi_code_auth(&xai_grok_config::grok_home()).and_then(
+        |auth| {
+            if crate::auth::is_expired(&auth) {
+                None
+            } else {
+                Some(auth.key)
+            }
+        },
+    );
+
+    for (key, entry) in resolved.iter_mut() {
+        let id = entry.info.id.as_deref().unwrap_or(key.as_str());
+        let Some((platform, _)) = xai_grok_models::parse_managed_model_key(id) else {
+            continue;
+        };
+
+        if platform.uses_oauth() {
+            if entry.api_key.is_none()
+                && let Some(ref bearer) = kimi_bearer
+            {
+                tracing::debug!(
+                    model_key = %key,
+                    platform = platform.as_str(),
+                    "stamped Kimi Code OAuth bearer onto subscription entry"
+                );
+                entry.api_key = Some(bearer.clone());
+                // OAuth-gated models become selectable once a token is present.
+                entry.info.supported_in_api = true;
+            }
+            continue;
+        }
+
+        if entry.env_key.is_none() {
+            entry.env_key = Some(EnvKeys::new(platform.api_key_env_names().iter().copied()));
+        }
+        let env_resolves = entry
+            .env_key
+            .as_ref()
+            .is_some_and(|k| k.resolve_value().is_some());
+        if entry.api_key.is_none()
+            && !env_resolves
+            && let Some(config_key) = platforms.config_api_key(platform)
+        {
+            tracing::debug!(
+                model_key = %key,
+                platform = platform.as_str(),
+                "stamped [platforms] config api_key onto open-platform entry"
+            );
+            entry.api_key = Some(config_key);
+        }
+        if entry.has_own_credentials() {
+            entry.info.supported_in_api = true;
+        }
+    }
+}
+
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
 /// into every model as a base. The presence check is case-insensitive because
 /// the sampler lowers these into an `http::HeaderMap`, so a global `X-Foo` must
@@ -4701,6 +4930,23 @@ pub fn inject_url_derived_headers(
         headers
             .entry(crate::http::CLIENT_MODE_HEADER.to_string())
             .or_insert_with(|| crate::http::process_client_mode().to_string());
+    }
+    // Kimi Code subscription inference expects device-identity headers
+    // (same as OAuth). Best-effort: skip on failure (e.g. read-only home).
+    if xai_grok_models::PlatformId::KimiCode.base_url_matches(base_url) {
+        match crate::auth::kimi::device_headers() {
+            Ok(device_headers) => {
+                for (name, value) in device_headers {
+                    headers.entry(name.to_string()).or_insert(value);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "auth: could not attach Kimi device identity headers"
+                );
+            }
+        }
     }
     let _ = (alpha_test_key, base_url);
 }
@@ -11302,5 +11548,169 @@ default = "grok-4.5"
         let r = resolve_mcp_recursive_config_watch(None, None, None, None, Some(false));
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
+    }
+
+    // ── Moonshot / platforms (Phase 1) ──────────────────────────────
+
+    #[test]
+    fn moonshot_builtins_injected_into_catalog() {
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let key = "moonshot-cn/kimi-k2-turbo-preview";
+        let entry = models
+            .get(key)
+            .expect("moonshot-cn turbo must be in catalog");
+        assert_eq!(entry.info.model, "kimi-k2-turbo-preview");
+        assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
+        assert!(entry.info.base_url.contains("moonshot.cn"));
+        assert!(entry.info.supported_in_api);
+        assert!(
+            entry.env_key.is_some(),
+            "builtin moonshot entries must carry env_key for BYOK"
+        );
+        assert!(models.contains_key("moonshot-ai/kimi-k2-turbo-preview"));
+        assert!(models.contains_key("moonshot-cn/kimi-k2-thinking-turbo"));
+        assert!(models.contains_key("moonshot-ai/kimi-k2-thinking-turbo"));
+        // Subscription entry present but API-hidden until OAuth is stamped.
+        let kimi = models
+            .get("kimi-code/kimi-for-coding")
+            .expect("kimi-code entry must be in catalog");
+        assert!(kimi.info.base_url.contains("kimi.com"));
+        assert!(!kimi.info.supported_in_api || kimi.has_own_credentials());
+        // xAI defaults still present
+        assert!(models.contains_key("grok-4.5") || models.values().any(|m| m.model == "grok-4.5"));
+    }
+
+    #[test]
+    fn kimi_code_auth_storage_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let auth = crate::auth::GrokAuth {
+            key: "kimi-access-token".into(),
+            auth_mode: crate::auth::AuthMode::KimiCode,
+            create_time: chrono::Utc::now(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            refresh_token: Some("rt".into()),
+            ..Default::default()
+        };
+        crate::auth::store_kimi_code_auth(home, &auth).unwrap();
+        let loaded = crate::auth::read_kimi_code_auth(home).expect("stored");
+        assert_eq!(loaded.key, "kimi-access-token");
+        assert_eq!(loaded.auth_mode, crate::auth::AuthMode::KimiCode);
+        // Sibling scopes must survive: write an API key too.
+        crate::auth::store_api_key(home, "xai-key").unwrap();
+        assert!(crate::auth::read_kimi_code_auth(home).is_some());
+        assert_eq!(
+            crate::auth::read_api_key(home).as_deref(),
+            Some("xai-key")
+        );
+        crate::auth::clear_kimi_code_auth(home).unwrap();
+        assert!(crate::auth::read_kimi_code_auth(home).is_none());
+        assert_eq!(
+            crate::auth::read_api_key(home).as_deref(),
+            Some("xai-key")
+        );
+    }
+
+    #[test]
+    fn inject_url_derived_headers_adds_kimi_device_identity() {
+        let mut headers = IndexMap::new();
+        inject_url_derived_headers(&mut headers, None, "https://api.kimi.com/coding/v1");
+        assert!(
+            headers.get("X-Msh-Device-Id").is_some()
+                || headers.get("X-Msh-Device-Name").is_some(),
+            "expected Kimi device headers when home is writable: {headers:?}"
+        );
+        let mut external = IndexMap::new();
+        inject_url_derived_headers(&mut external, None, "https://api.example.com/v1");
+        assert!(external.get("X-Msh-Device-Id").is_none());
+    }
+
+    #[test]
+    fn platforms_config_stamps_api_key_when_env_absent() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+[platforms.moonshot-cn]
+api_key = "sk-test-cn-key-not-for-prod"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        assert_eq!(
+            cfg.platforms
+                .config_api_key(xai_grok_models::PlatformId::MoonshotCn)
+                .as_deref(),
+            Some("sk-test-cn-key-not-for-prod")
+        );
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("moonshot-cn/kimi-k2-turbo-preview")
+            .expect("moonshot entry");
+        // Without the env set, config key is stamped onto the entry.
+        assert_eq!(entry.api_key.as_deref(), Some("sk-test-cn-key-not-for-prod"));
+        assert!(entry.has_own_credentials());
+        let creds = resolve_credentials(entry, None);
+        assert_eq!(creds.api_key.as_deref(), Some("sk-test-cn-key-not-for-prod"));
+        assert!(creds.base_url.contains("moonshot.cn"));
+    }
+
+    #[test]
+    fn resolve_platform_api_key_env_wins_over_config() {
+        let mut platforms = PlatformsConfig::default();
+        platforms.entries.insert(
+            "moonshot-cn".into(),
+            PlatformCredentialConfig {
+                api_key: Some("from-config".into()),
+            },
+        );
+        let key = resolve_platform_api_key_with(
+            xai_grok_models::PlatformId::MoonshotCn,
+            &platforms,
+            |name| {
+                if name == xai_grok_models::MOONSHOT_CN_API_KEY_ENV {
+                    Some("from-env".into())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(key.as_deref(), Some("from-env"));
+    }
+
+    #[test]
+    fn resolve_platform_api_key_falls_back_to_generic_env() {
+        let platforms = PlatformsConfig::default();
+        let key = resolve_platform_api_key_with(
+            xai_grok_models::PlatformId::MoonshotAi,
+            &platforms,
+            |name| {
+                if name == xai_grok_models::MOONSHOT_API_KEY_ENV {
+                    Some("generic-key".into())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(key.as_deref(), Some("generic-key"));
+    }
+
+    #[test]
+    fn model_override_wins_over_platform_stamp() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+[platforms.moonshot-cn]
+api_key = "platform-key"
+
+[model."moonshot-cn/kimi-k2-turbo-preview"]
+api_key = "per-model-key"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("moonshot-cn/kimi-k2-turbo-preview")
+            .expect("entry");
+        assert_eq!(entry.api_key.as_deref(), Some("per-model-key"));
     }
 }

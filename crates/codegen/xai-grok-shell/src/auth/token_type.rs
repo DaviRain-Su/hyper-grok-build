@@ -28,7 +28,9 @@ impl TokenType {
                 AuthMode::Oidc if a.refresh_token.is_some() => Self::OidcSession,
                 AuthMode::Oidc | AuthMode::WebLogin => Self::LegacySession,
                 AuthMode::External => Self::ExternalBinary,
-                AuthMode::ApiKey => Self::ApiKey,
+                // Kimi Code is not the primary AuthManager session; classify
+                // as ApiKey so xAI recovery paths do not treat it as OIDC.
+                AuthMode::ApiKey | AuthMode::KimiCode => Self::ApiKey,
             },
         }
     }

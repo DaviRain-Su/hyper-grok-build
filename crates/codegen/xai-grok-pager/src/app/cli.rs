@@ -25,15 +25,21 @@ pub enum Command {
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "kimi"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth"]
+            conflicts_with_all = ["oauth", "kimi"]
         )]
         device_auth: bool,
+        /// Sign in with a Kimi Code subscription (device OAuth).
+        ///
+        /// Stores credentials under the `oauth/kimi-code` scope and unlocks
+        /// `kimi-code/*` models. Independent of xAI login.
+        #[arg(long = "kimi", conflicts_with_all = ["oauth", "device_auth"])]
+        kimi: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe

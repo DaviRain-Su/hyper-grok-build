@@ -224,6 +224,13 @@ name = "Mixtral 8x7B"
 env_key = "TOGETHER_API_KEY"
 ```
 
+### Moonshot / Kimi (built-in platforms)
+
+Moonshot open platforms are first-class: catalog keys like
+`moonshot-cn/kimi-k2-turbo-preview`, env vars `GROK_MOONSHOT_*_API_KEY`, and
+`[platforms.moonshot-cn]` / `[platforms.moonshot-ai]` in config.toml. See
+[Moonshot Providers](25-moonshot-providers.md) for the full guide.
+
 ### Local OpenAI-Compatible Server
 
 Any server that implements the OpenAI Chat Completions or Responses API:

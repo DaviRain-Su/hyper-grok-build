@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::model::{API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, lookup_auth};
+use super::model::{
+    API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, KIMI_CODE_OAUTH_SCOPE, lookup_auth,
+};
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
 /// The lock is released when the inner `File` is dropped (closing the FD).
@@ -392,6 +394,40 @@ pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
     if let Ok(mut map) = read_auth_json(&path) {
         map.remove(API_KEY_SCOPE);
+        if map.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            write_auth_json(&path, &map)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read the Kimi Code OAuth credential from `auth.json` (scope
+/// [`KIMI_CODE_OAUTH_SCOPE`]).
+pub fn read_kimi_code_auth(grok_home: &Path) -> Option<GrokAuth> {
+    let path = grok_home.join("auth.json");
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(KIMI_CODE_OAUTH_SCOPE)?.clone();
+    (auth.auth_mode == AuthMode::KimiCode).then_some(auth)
+}
+
+/// Persist a Kimi Code OAuth credential under [`KIMI_CODE_OAUTH_SCOPE`].
+/// Merges with existing scopes so xAI login is preserved.
+pub fn store_kimi_code_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
+    let path = grok_home.join("auth.json");
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    let mut stored = auth.clone();
+    stored.auth_mode = AuthMode::KimiCode;
+    map.insert(KIMI_CODE_OAUTH_SCOPE.to_owned(), stored);
+    write_auth_json(&path, &map)
+}
+
+/// Remove the Kimi Code OAuth scope from auth.json.
+pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
+    let path = grok_home.join("auth.json");
+    if let Ok(mut map) = read_auth_json(&path) {
+        map.remove(KIMI_CODE_OAUTH_SCOPE);
         if map.is_empty() {
             let _ = std::fs::remove_file(&path);
         } else {

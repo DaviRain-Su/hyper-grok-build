@@ -1896,15 +1896,21 @@ async fn async_main() -> Result<()> {
                 legacy: _,
                 oauth,
                 device_auth,
+                kimi,
                 devbox,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
+                if kimi {
+                    xai_grok_shell::auth::kimi::run_kimi_code_login().await?;
+                } else {
+                    let config = xai_grok_shell::config::load_effective_config_disk_only()
+                        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+                    let config = AgentConfig::new_from_toml_cfg(&config)
+                        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                    xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox)
+                        .await?;
+                }
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }

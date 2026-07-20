@@ -30,6 +30,8 @@ Customize and extend Grok Build.
 | 9 | [Plugins](09-plugins.md) | Bundle and share skills, commands, agents, hooks, and MCP servers; install from marketplace sources |
 | 10 | [Hooks](10-hooks.md) | Lifecycle scripts and HTTP callbacks for pre- and post-tool-use events |
 | 11 | [Custom Models](11-custom-models.md) | Bring-your-own-key, Ollama, and OpenAI-compatible endpoints |
+| 25 | [Moonshot Providers](25-moonshot-providers.md) | Built-in Moonshot / Kimi open-platform API keys (`moonshot-cn`, `moonshot-ai`) |
+| 26 | [Kimi Code Subscription](26-kimi-code.md) | Device OAuth login for Kimi Code (`grok login --kimi`) |
 | 12 | [Project Rules (AGENTS.md)](12-project-rules.md) | Per-directory AGENTS.md instructions and their precedence |
 | 13 | [Memory](13-memory.md) | Cross-session knowledge persistence with `/flush`, `/dream`, and hybrid search |
 

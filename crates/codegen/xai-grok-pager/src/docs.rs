@@ -102,6 +102,16 @@ pub static USER_GUIDE: &[Doc] = &[
         "BYOK, Ollama, OpenAI-compatible endpoints"
     ),
     guide!(
+        "25-moonshot-providers.md",
+        "Moonshot Providers",
+        "Built-in Moonshot / Kimi open-platform API keys"
+    ),
+    guide!(
+        "26-kimi-code.md",
+        "Kimi Code Subscription",
+        "Device OAuth login for Kimi Code (grok login --kimi)"
+    ),
+    guide!(
         "12-project-rules.md",
         "Project Rules (AGENTS.md)",
         "Per-directory instructions and precedence rules"

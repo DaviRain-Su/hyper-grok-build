@@ -1,8 +1,19 @@
-//! Default model IDs loaded from `default_models.json` at runtime.
-//! Edit that JSON file to change them.
+//! Default model IDs and built-in third-party platform registry.
+//!
+//! - xAI defaults live in `default_models.json`
+//! - Moonshot open platforms (Phase 1) live in [`platforms`]
 //!
 //! At runtime each model is resolved via:
 //!   CLI flag > ENV var > config.toml > remote settings > these defaults
+
+mod platforms;
+
+pub use platforms::{
+    BuiltinPlatformModel, KIMI_CODE_BASE_URL_ENV, KIMI_CODE_OAUTH_HOST_ENV, MOONSHOT_AI_API_KEY_ENV,
+    MOONSHOT_AI_BASE_URL_ENV, MOONSHOT_API_KEY_ALIAS_ENV, MOONSHOT_API_KEY_ENV,
+    MOONSHOT_CN_API_KEY_ENV, MOONSHOT_CN_BASE_URL_ENV, PlatformId, moonshot_builtin_models,
+    parse_managed_model_key, platform_builtin_models,
+};
 
 use std::sync::LazyLock;
 
