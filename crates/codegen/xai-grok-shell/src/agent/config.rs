@@ -3151,10 +3151,10 @@ pub fn resolve_model_list(
         tracing::debug!(count = defaults.len(), "loaded default models");
         resolved.extend(defaults);
     }
-    // Built-in Moonshot entries (and future open platforms). Injected before
-    // prefetched/config overlays so `[model."moonshot-cn/..."]` can inherit
-    // base_url / env_key.
-    inject_moonshot_builtin_models(&mut resolved);
+    // xAI remote/cache catalog replaces first-party defaults entirely when
+    // present. Platform builtins are re-injected *after* this so DeepSeek /
+    // OpenAI / Anthropic offline rows are not wiped by the xAI list (Kimi /
+    // Moonshot live merges already land in `prefetched` and win on key).
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
         let default_cw = DEFAULT_CONTEXT_WINDOW;
@@ -3187,6 +3187,10 @@ pub fn resolve_model_list(
         }
         resolved = prefetched;
     }
+    // Offline multi-provider catalog (Pi). Skip keys already present (live
+    // Kimi/Moonshot merge or `[model.*]` donors). Runs after prefetch so an
+    // xAI-only list cannot drop `deepseek/*` / `openai/*` / …
+    inject_moonshot_builtin_models(&mut resolved);
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
@@ -4125,11 +4129,17 @@ impl ModelInfo {
     }
     /// Whether this model appears in the picker for the given auth mode.
     ///
+    /// First-party xAI catalog semantics (`supported_in_api`):
+    ///
     /// | `hidden` | `supported_in_api` | OAuth user | API-key user |
     /// |----------|--------------------|------------|--------------|
     /// | true     | _                  | hidden     | hidden       |
     /// | false    | true               | visible    | visible      |
     /// | false    | false              | visible    | **hidden**   |
+    ///
+    /// Multi-provider / managed keys (`openai/…`, `anthropic/…`, `kimi-code/…`)
+    /// must **not** use the OAuth-session bypass — see
+    /// [`ModelEntry::visible_for_auth`].
     pub fn visible_for_auth(&self, is_session_auth: bool) -> bool {
         !self.hidden && (is_session_auth || self.supported_in_api)
     }
@@ -4166,6 +4176,36 @@ impl ModelEntry {
             env_key: entry.env_key.clone(),
             api_base_url: entry.api_base_url.clone(),
         }
+    }
+    /// Catalog id used for platform key detection (`{platform}/{model}`).
+    fn catalog_id(&self) -> &str {
+        self.info
+            .id
+            .as_deref()
+            .unwrap_or(self.info.model.as_str())
+    }
+    /// Built-in multi-provider entry (`openai/gpt-5`, `kimi-code/k3`, …).
+    ///
+    /// These models always need their own API key / platform OAuth token and
+    /// must stay hidden when that credential is absent — even if the user has
+    /// an xAI login session (which would otherwise unlock
+    /// `supported_in_api: false` first-party models).
+    pub fn is_managed_platform_model(&self) -> bool {
+        xai_grok_models::parse_managed_model_key(self.catalog_id()).is_some()
+    }
+    /// Whether this model appears in the picker for the given auth mode.
+    ///
+    /// Prefer this over [`ModelInfo::visible_for_auth`] — it correctly gates
+    /// multi-provider entries on credentials.
+    pub fn visible_for_auth(&self, is_session_auth: bool) -> bool {
+        if self.info.hidden {
+            return false;
+        }
+        if self.is_managed_platform_model() {
+            // Only show once BYOK / platform OAuth has been stamped.
+            return self.has_own_credentials();
+        }
+        self.info.visible_for_auth(is_session_auth)
     }
     /// Non-empty `api_key`, else first non-empty resolved `env_key`.
     /// `None` → fall through to session / global key.
@@ -4556,7 +4596,7 @@ pub(crate) fn first_own_credential(
 /// When `env_key` lists multiple names, the first set non-empty value is used.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
     let info = model.info();
-    let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
+    let (api_key, mut base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
             info.base_url.clone(),
@@ -4590,6 +4630,10 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             xai_chat_state::AuthType::ApiKey,
         )
     };
+    // Pi-style `…/coding` base 404s as `…/coding/messages`; Grok needs `…/v1`.
+    if xai_grok_models::PlatformId::KimiCode.base_url_matches(&base_url) {
+        base_url = xai_grok_models::normalize_kimi_code_base_url(&base_url);
+    }
     let auth_scheme = info.auth_scheme;
     tracing::debug!(
         model = % info.model, auth_type = ? auth_type, "resolved credentials"
@@ -11623,6 +11667,111 @@ default = "grok-4.5"
     }
 
     // ── Moonshot / platforms (Phase 1) ──────────────────────────────
+
+    /// Platform models without API keys must stay out of the picker even when
+    /// the user has an xAI OAuth session (`supported_in_api: false` first-party
+    /// rule must not unlock `openai/*` / `anthropic/*`).
+    /// xAI prefetched catalogs must not wipe offline platform models (DeepSeek,
+    /// OpenAI, …). Regression: previously `resolved = prefetched` dropped every
+    /// inject_moonshot row, so only live-merged Kimi/Moonshot survived.
+    #[test]
+    #[serial]
+    fn prefetched_xai_catalog_keeps_platform_builtins_with_env_key() {
+        use xai_grok_test_support::EnvGuard;
+        let (_dir, _guards) = isolated_auth_home();
+        let _env = EnvGuard::set("DEEPSEEK_API_KEY", "sk-test-deepseek-not-for-prod");
+
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        // Simulate an xAI-only prefetch (what online `/v1/models` produces).
+        let mut prefetched = IndexMap::new();
+        prefetched.insert(
+            "grok-4.5".into(),
+            ModelEntry::fallback("grok-4.5", &cfg.endpoints),
+        );
+        let models = resolve_model_list(&cfg, Some(prefetched));
+
+        assert!(
+            models.contains_key("grok-4.5"),
+            "prefetched xAI model present"
+        );
+        let ds = models
+            .get("deepseek/deepseek-v4-flash")
+            .or_else(|| models.get("deepseek/deepseek-v4-pro"))
+            .expect("DeepSeek offline platform model must survive xAI prefetch");
+        assert!(
+            ds.env_key.is_some(),
+            "DeepSeek entry carries env_key for DEEPSEEK_API_KEY"
+        );
+        assert!(
+            ds.has_own_credentials(),
+            "DEEPSEEK_API_KEY must unlock DeepSeek visibility"
+        );
+        assert!(
+            ds.visible_for_auth(true),
+            "DeepSeek must appear in /model when API key is set"
+        );
+        // Live-only platforms without keys stay gated.
+        if let Some(oai) = models.get("openai/gpt-5") {
+            assert!(
+                !oai.visible_for_auth(true) || oai.has_own_credentials(),
+                "openai without key stays hidden"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn platform_models_invisible_without_credentials_for_session_users() {
+        use xai_grok_test_support::EnvGuard;
+        let (_dir, _guards) = isolated_auth_home();
+        // Clear common platform key envs so has_own_credentials is false even
+        // on developer machines that export ANTHROPIC_API_KEY / OPENAI_API_KEY.
+        let _env = [
+            EnvGuard::unset("OPENAI_API_KEY"),
+            EnvGuard::unset("GROK_OPENAI_API_KEY"),
+            EnvGuard::unset("ANTHROPIC_API_KEY"),
+            EnvGuard::unset("GROK_ANTHROPIC_API_KEY"),
+            EnvGuard::unset("ANTHROPIC_AUTH_TOKEN"),
+            EnvGuard::unset("GROK_MOONSHOT_API_KEY"),
+            EnvGuard::unset("GROK_MOONSHOT_CN_API_KEY"),
+            EnvGuard::unset("MOONSHOT_API_KEY"),
+        ];
+
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let mut checked = 0usize;
+        for key in [
+            "openai/gpt-5",
+            "anthropic/claude-sonnet-4-5",
+            "kimi-code/k3",
+            "moonshot-cn/kimi-k3",
+        ] {
+            let Some(entry) = models.get(key) else {
+                continue;
+            };
+            assert!(
+                entry.is_managed_platform_model(),
+                "{key} should be a managed platform key"
+            );
+            assert!(
+                !entry.has_own_credentials(),
+                "{key}: test env must not resolve credentials"
+            );
+            assert!(
+                !entry.visible_for_auth(true),
+                "{key} must stay hidden for session users without credentials"
+            );
+            assert!(
+                !entry.visible_for_auth(false),
+                "{key} must stay hidden for API-key users without credentials"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 2,
+            "expected at least two platform models in the offline catalog"
+        );
+    }
 
     #[test]
     #[serial]

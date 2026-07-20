@@ -70,7 +70,7 @@ pub(crate) fn task_model_error_for_catalog(
     is_session_auth: bool,
 ) -> Option<String> {
     let is_available = |entry: &ModelEntry| {
-        entry.info.user_selectable && entry.info.visible_for_auth(is_session_auth)
+        entry.info.user_selectable && entry.visible_for_auth(is_session_auth)
     };
     if config::find_model_by_id(available, requested).is_some_and(&is_available) {
         return None;
@@ -1737,7 +1737,7 @@ pub(crate) fn resolve_default_model(
 ) -> (String, ModelEntry, config::ConfigSource) {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| e.info.visible_for_auth(is_session_auth) && e.info.user_selectable)
+        .filter(|(_, e)| e.visible_for_auth(is_session_auth) && e.info.user_selectable)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -1839,7 +1839,7 @@ pub fn available_models(
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
     let visible: IndexMap<String, ModelEntry> = catalog
         .iter()
-        .filter(|(_, e)| e.info.visible_for_auth(is_session_auth))
+        .filter(|(_, e)| e.visible_for_auth(is_session_auth))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     config::to_acp_model_info(&visible)
@@ -3401,6 +3401,33 @@ mod tests {
         info.supported_in_api = false;
         assert!(info.visible_for_auth(true));
         assert!(!info.visible_for_auth(false));
+    }
+
+    #[test]
+    fn managed_platform_models_hidden_without_credentials_even_for_session() {
+        // Simulates injected openai/claude catalog entries: session auth must
+        // not unlock them until OPENAI_API_KEY / ANTHROPIC_API_KEY is present.
+        let mut entry = ModelEntry {
+            info: config::ModelInfo::fallback("gpt-5"),
+            api_key: None,
+            env_key: Some(config::EnvKeys::new(["OPENAI_API_KEY_MUST_NOT_EXIST_XYZ"])),
+            api_base_url: None,
+        };
+        entry.info.id = Some("openai/gpt-5".into());
+        entry.info.supported_in_api = false;
+        assert!(entry.is_managed_platform_model());
+        assert!(
+            !entry.visible_for_auth(true),
+            "xAI session must not show openai/* without an API key"
+        );
+        assert!(!entry.visible_for_auth(false));
+
+        entry.api_key = Some("sk-test".into());
+        assert!(
+            entry.visible_for_auth(true),
+            "stamped API key makes the platform model selectable"
+        );
+        assert!(entry.visible_for_auth(false));
     }
 
     // ── duplicate model slug re-keying (A/B experiment "auto" alias) ──

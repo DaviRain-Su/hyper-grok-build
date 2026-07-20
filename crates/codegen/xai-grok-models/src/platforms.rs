@@ -62,6 +62,22 @@ fn env_or(var: &str, compiled: &str) -> String {
     }
 }
 
+/// Grok's sampler joins `{base}/messages`. Official Pi stores
+/// `https://api.kimi.com/coding` and lets the Anthropic SDK append `/v1/messages`.
+/// Accept both shapes so `GROK_KIMI_CODE_BASE_URL=…/coding` does not 404 as
+/// `…/coding/messages` (`resource_not_found_error`).
+pub fn normalize_kimi_code_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return KIMI_CODE_BASE_URL_DEFAULT.to_string();
+    }
+    // Pi / Anthropic-SDK style base ends at `/coding` — add `/v1` for Grok.
+    if trimmed.ends_with("/coding") {
+        return format!("{trimmed}/v1");
+    }
+    trimmed.to_string()
+}
+
 /// Built-in inference platforms (aligned with official Pi `@earendil-works/pi-ai`
 /// provider ids where applicable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -216,16 +232,22 @@ impl PlatformId {
             Self::Anthropic => Some(ANTHROPIC_BASE_URL_ENV),
             _ => None,
         };
-        if let Some(var) = specific {
-            return env_or(var, self.default_base_url());
-        }
-        let generic = format!(
-            "GROK_{}_BASE_URL",
-            self.as_str().replace('-', "_").to_ascii_uppercase()
-        );
-        match std::env::var(&generic) {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => self.default_base_url().to_string(),
+        let raw = if let Some(var) = specific {
+            env_or(var, self.default_base_url())
+        } else {
+            let generic = format!(
+                "GROK_{}_BASE_URL",
+                self.as_str().replace('-', "_").to_ascii_uppercase()
+            );
+            match std::env::var(&generic) {
+                Ok(v) if !v.trim().is_empty() => v,
+                _ => self.default_base_url().to_string(),
+            }
+        };
+        if self == Self::KimiCode {
+            normalize_kimi_code_base_url(&raw)
+        } else {
+            raw
         }
     }
 
@@ -986,6 +1008,27 @@ mod tests {
         assert!(PlatformId::KimiCode.base_url_matches("https://api.kimi.com/coding/v1"));
         assert!(PlatformId::KimiCode.base_url_matches("https://api.kimi.com/coding/v1/chat"));
         assert!(!PlatformId::KimiCode.base_url_matches("https://api.moonshot.cn/v1"));
+    }
+
+    #[test]
+    fn normalize_kimi_code_base_url_adds_v1_for_pi_style() {
+        assert_eq!(
+            normalize_kimi_code_base_url("https://api.kimi.com/coding"),
+            "https://api.kimi.com/coding/v1"
+        );
+        assert_eq!(
+            normalize_kimi_code_base_url("https://api.kimi.com/coding/"),
+            "https://api.kimi.com/coding/v1"
+        );
+        // Already Grok-style — leave alone.
+        assert_eq!(
+            normalize_kimi_code_base_url("https://api.kimi.com/coding/v1"),
+            "https://api.kimi.com/coding/v1"
+        );
+        assert_eq!(
+            normalize_kimi_code_base_url("https://api.kimi.com/coding/v1/"),
+            "https://api.kimi.com/coding/v1"
+        );
     }
 
     #[test]

@@ -103,6 +103,8 @@ This clears the `oauth/kimi-code` scope only. Your xAI session (and
 ## Environment overrides (dev / test)
 
 ```bash
+# Must include /v1 — Grok posts to {base}/messages → …/coding/v1/messages.
+# Pi-style `…/coding` (no /v1) is auto-normalized to `…/coding/v1`.
 export GROK_KIMI_CODE_BASE_URL="https://api.kimi.com/coding/v1"
 export GROK_KIMI_CODE_OAUTH_HOST="https://auth.kimi.com"
 ```
