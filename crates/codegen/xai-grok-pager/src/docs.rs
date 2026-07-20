@@ -112,6 +112,11 @@ pub static USER_GUIDE: &[Doc] = &[
         "Device OAuth login for Kimi Code (grok login --kimi)"
     ),
     guide!(
+        "27-openai-anthropic.md",
+        "OpenAI & Anthropic",
+        "Built-in OpenAI Responses and Anthropic Messages platforms"
+    ),
+    guide!(
         "12-project-rules.md",
         "Project Rules (AGENTS.md)",
         "Per-directory instructions and precedence rules"

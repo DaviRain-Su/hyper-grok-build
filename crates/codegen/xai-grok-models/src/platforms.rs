@@ -186,6 +186,18 @@ impl PlatformId {
         format!("{}/models", self.base_url().trim_end_matches('/'))
     }
 
+    /// Whether to auto-fetch live `GET /models` for this platform.
+    ///
+    /// OpenAI / Anthropic org listings are huge and include fine-tunes; we ship
+    /// a Pi-curated offline catalog instead. Kimi / Moonshot listings are small
+    /// and curated for coding.
+    pub fn live_models_list_enabled(self) -> bool {
+        matches!(
+            self,
+            Self::KimiCode | Self::MoonshotCn | Self::MoonshotAi
+        )
+    }
+
     /// Managed catalog key: `{platform_id}/{model_id}`.
     pub fn managed_model_key(self, model_id: &str) -> String {
         format!("{}/{model_id}", self.as_str())
@@ -397,144 +409,122 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
         };
     }
 
-    const CN_K3: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k3",
-        "Kimi K3 (moonshot.cn)",
-        "Flagship 1M context / always-thinking (offline fallback)",
-        CTX_1M,
-        true
-    );
-    const CN_K27: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k2.7-code",
-        "Kimi K2.7 Code (moonshot.cn)",
-        "Dedicated coding model; thinking always on; 256k context",
-        CTX_256K,
-        false
-    );
-    const CN_K27_HS: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k2.7-code-highspeed",
-        "Kimi K2.7 Code HighSpeed (moonshot.cn)",
-        "HyperSpeed coding model (~180–260 tok/s); same quality as K2.7 Code",
-        CTX_256K,
-        false
-    );
-    const CN_K26: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k2.6",
-        "Kimi K2.6 (moonshot.cn)",
-        "General multimodal; thinking on/off + preserved thinking; 256k",
-        CTX_256K,
-        false
-    );
-    const CN_K25: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k2.5",
-        "Kimi K2.5 (moonshot.cn)",
-        "Multimodal agent model; thinking on/off (no preserved thinking); 256k",
-        CTX_256K,
-        false
-    );
-
-    const AI_K3: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k3",
-        "Kimi K3 (moonshot.ai)",
-        "Flagship 1M context / always-thinking global (offline fallback)",
-        CTX_1M,
-        true
-    );
-    const AI_K27: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k2.7-code",
-        "Kimi K2.7 Code (moonshot.ai)",
-        "Dedicated coding model; thinking always on; 256k context",
-        CTX_256K,
-        false
-    );
-    const AI_K27_HS: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k2.7-code-highspeed",
-        "Kimi K2.7 Code HighSpeed (moonshot.ai)",
-        "HyperSpeed coding model (~180–260 tok/s); same quality as K2.7 Code",
-        CTX_256K,
-        false
-    );
-    const AI_K26: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k2.6",
-        "Kimi K2.6 (moonshot.ai)",
-        "General multimodal; thinking on/off + preserved thinking; 256k",
-        CTX_256K,
-        false
-    );
-    const AI_K25: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k2.5",
-        "Kimi K2.5 (moonshot.ai)",
-        "Multimodal agent model; thinking on/off (no preserved thinking); 256k",
-        CTX_256K,
-        false
-    );
-
-    // Deprecated open-platform aliases (sunset schedule per docs; still
-    // accepted by older keys until live listing drops them).
-    const CN_TURBO: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k2-turbo-preview",
-        "Kimi K2 Turbo (deprecated, moonshot.cn)",
-        "Deprecated K2 turbo alias — prefer kimi-k2.7-code / kimi-k2.6",
-        CTX_256K,
-        true
-    );
-    const CN_THINKING: BuiltinPlatformModel = open!(
-        MoonshotCn,
-        "kimi-k2-thinking-turbo",
-        "Kimi K2 Thinking Turbo (deprecated, moonshot.cn)",
-        "Deprecated K2 thinking alias — prefer kimi-k2.6 / kimi-k3",
-        CTX_256K,
-        true
-    );
-    const AI_TURBO: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k2-turbo-preview",
-        "Kimi K2 Turbo (deprecated, moonshot.ai)",
-        "Deprecated K2 turbo alias — prefer kimi-k2.7-code / kimi-k2.6",
-        CTX_256K,
-        true
-    );
-    const AI_THINKING: BuiltinPlatformModel = open!(
-        MoonshotAi,
-        "kimi-k2-thinking-turbo",
-        "Kimi K2 Thinking Turbo (deprecated, moonshot.ai)",
-        "Deprecated K2 thinking alias — prefer kimi-k2.6 / kimi-k3",
-        CTX_256K,
-        true
-    );
-
-    &[
-        // Subscription first (default-friendly).
-        KIMI_K3,
-        KIMI_CODING,
-        // Open CN current lineup.
-        CN_K3,
-        CN_K27,
-        CN_K27_HS,
-        CN_K26,
-        CN_K25,
-        // Open AI (global) current lineup.
-        AI_K3,
-        AI_K27,
-        AI_K27_HS,
-        AI_K26,
-        AI_K25,
+    vec![
+        kimi_k3,
+        kimi_coding,
+        open!(
+            MoonshotCn,
+            "kimi-k3",
+            "Kimi K3 (moonshot.cn)",
+            "Flagship 1M context / always-thinking (offline fallback)",
+            CTX_1M,
+            true
+        ),
+        open!(
+            MoonshotCn,
+            "kimi-k2.7-code",
+            "Kimi K2.7 Code (moonshot.cn)",
+            "Dedicated coding model; thinking always on; 256k context",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotCn,
+            "kimi-k2.7-code-highspeed",
+            "Kimi K2.7 Code HighSpeed (moonshot.cn)",
+            "HyperSpeed coding model (~180–260 tok/s); same quality as K2.7 Code",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotCn,
+            "kimi-k2.6",
+            "Kimi K2.6 (moonshot.cn)",
+            "General multimodal; thinking on/off + preserved thinking; 256k",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotCn,
+            "kimi-k2.5",
+            "Kimi K2.5 (moonshot.cn)",
+            "Multimodal agent model; thinking on/off (no preserved thinking); 256k",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k3",
+            "Kimi K3 (moonshot.ai)",
+            "Flagship 1M context / always-thinking global (offline fallback)",
+            CTX_1M,
+            true
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k2.7-code",
+            "Kimi K2.7 Code (moonshot.ai)",
+            "Dedicated coding model; thinking always on; 256k context",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k2.7-code-highspeed",
+            "Kimi K2.7 Code HighSpeed (moonshot.ai)",
+            "HyperSpeed coding model (~180–260 tok/s); same quality as K2.7 Code",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k2.6",
+            "Kimi K2.6 (moonshot.ai)",
+            "General multimodal; thinking on/off + preserved thinking; 256k",
+            CTX_256K,
+            false
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k2.5",
+            "Kimi K2.5 (moonshot.ai)",
+            "Multimodal agent model; thinking on/off (no preserved thinking); 256k",
+            CTX_256K,
+            false
+        ),
         // Deprecated aliases last.
-        CN_TURBO,
-        CN_THINKING,
-        AI_TURBO,
-        AI_THINKING,
+        open!(
+            MoonshotCn,
+            "kimi-k2-turbo-preview",
+            "Kimi K2 Turbo (deprecated, moonshot.cn)",
+            "Deprecated K2 turbo alias — prefer kimi-k2.7-code / kimi-k2.6",
+            CTX_256K,
+            true
+        ),
+        open!(
+            MoonshotCn,
+            "kimi-k2-thinking-turbo",
+            "Kimi K2 Thinking Turbo (deprecated, moonshot.cn)",
+            "Deprecated K2 thinking alias — prefer kimi-k2.6 / kimi-k3",
+            CTX_256K,
+            true
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k2-turbo-preview",
+            "Kimi K2 Turbo (deprecated, moonshot.ai)",
+            "Deprecated K2 turbo alias — prefer kimi-k2.7-code / kimi-k2.6",
+            CTX_256K,
+            true
+        ),
+        open!(
+            MoonshotAi,
+            "kimi-k2-thinking-turbo",
+            "Kimi K2 Thinking Turbo (deprecated, moonshot.ai)",
+            "Deprecated K2 thinking alias — prefer kimi-k2.6 / kimi-k3",
+            CTX_256K,
+            true
+        ),
     ]
 }
 
@@ -738,7 +728,10 @@ mod tests {
         assert!(!PlatformId::MoonshotCn.uses_oauth());
         assert!(PlatformId::KimiCode.api_key_env_names().is_empty());
         assert!(!PlatformId::MoonshotCn.api_key_env_names().is_empty());
-        assert_eq!(PlatformId::parse("openai"), None);
+        assert_eq!(PlatformId::parse("openai"), Some(PlatformId::OpenAi));
+        assert_eq!(PlatformId::parse("anthropic"), Some(PlatformId::Anthropic));
+        assert!(PlatformId::Anthropic.uses_x_api_key());
+        assert!(!PlatformId::OpenAi.uses_x_api_key());
     }
 
     #[test]
@@ -886,9 +879,24 @@ mod tests {
             "moonshot-ai/kimi-k2.5",
             "kimi-code/k3",
             "kimi-code/kimi-for-coding",
+            // Pi-curated OpenAI / Anthropic
+            "openai/gpt-4.1",
+            "openai/gpt-5",
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-opus-4-5",
         ] {
             assert!(keys.contains(id), "missing offline fallback {id}");
         }
+        let anth = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "anthropic/claude-sonnet-4-5")
+            .expect("claude-sonnet-4-5");
+        assert_eq!(anth.api_backend, PlatformApiBackend::Messages);
+        let oai = platform_builtin_models()
+            .iter()
+            .find(|m| m.catalog_key() == "openai/gpt-5")
+            .expect("gpt-5");
+        assert_eq!(oai.api_backend, PlatformApiBackend::Responses);
     }
 
     #[test]

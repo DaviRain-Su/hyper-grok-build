@@ -3366,13 +3366,30 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 builtin.platform.api_key_env_names().iter().copied(),
             ))
         };
+        let api_backend = match builtin.api_backend {
+            xai_grok_models::PlatformApiBackend::ChatCompletions => ApiBackend::ChatCompletions,
+            xai_grok_models::PlatformApiBackend::Responses => ApiBackend::Responses,
+            xai_grok_models::PlatformApiBackend::Messages => ApiBackend::Messages,
+        };
+        let auth_scheme = if builtin.platform.uses_x_api_key() {
+            Some(AuthScheme::XApiKey)
+        } else {
+            None
+        };
+        let mut extra_headers = IndexMap::new();
+        if builtin.platform == xai_grok_models::PlatformId::Anthropic {
+            extra_headers.insert(
+                "anthropic-version".into(),
+                xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
+            );
+        }
         let config = ModelEntryConfig {
             id: Some(key.clone()),
-            model: builtin.model.to_owned(),
+            model: builtin.model.clone(),
             base_url: builtin.platform.base_url(),
             api_base_url: None,
-            name: Some(builtin.name.to_owned()),
-            description: Some(builtin.description.to_owned()),
+            name: Some(builtin.name.clone()),
+            description: Some(builtin.description.clone()),
             context_window: builtin.context_window_nonzero(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -3381,14 +3398,14 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             temperature: None,
             top_p: None,
             max_completion_tokens: builtin.max_completion_tokens,
-            api_backend: ApiBackend::ChatCompletions,
-            auth_scheme: None,
+            api_backend,
+            auth_scheme,
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
             api_key: None,
             env_key,
-            extra_headers: IndexMap::new(),
+            extra_headers,
             use_concise: false,
             hidden: false,
             supported_in_api: builtin.supported_in_api,
@@ -4944,6 +4961,12 @@ pub fn inject_url_derived_headers(
     alpha_test_key: Option<&str>,
     base_url: &str,
 ) {
+    // Anthropic Messages requires anthropic-version on every request.
+    if xai_grok_models::PlatformId::Anthropic.base_url_matches(base_url) {
+        headers
+            .entry("anthropic-version".to_string())
+            .or_insert_with(|| xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.to_string());
+    }
     if crate::util::is_cli_chat_proxy_url(base_url) {
         headers
             .entry("X-XAI-Token-Auth".to_string())

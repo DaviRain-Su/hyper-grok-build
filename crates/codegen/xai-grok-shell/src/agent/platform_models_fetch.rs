@@ -75,6 +75,9 @@ fn enabled_platforms(
     PlatformId::ALL
         .into_iter()
         .filter(|p| {
+            if !p.live_models_list_enabled() {
+                return false;
+            }
             if p.uses_oauth() {
                 has_kimi_oauth
             } else {

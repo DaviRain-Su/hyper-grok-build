@@ -32,6 +32,7 @@ Customize and extend Grok Build.
 | 11 | [Custom Models](11-custom-models.md) | Bring-your-own-key, Ollama, and OpenAI-compatible endpoints |
 | 25 | [Moonshot Providers](25-moonshot-providers.md) | Built-in Moonshot / Kimi open-platform API keys (`moonshot-cn`, `moonshot-ai`) |
 | 26 | [Kimi Code Subscription](26-kimi-code.md) | Device OAuth login for Kimi Code (`grok login --kimi`) |
+| 27 | [OpenAI & Anthropic](27-openai-anthropic.md) | Built-in OpenAI Responses and Anthropic Messages platforms |
 | 12 | [Project Rules (AGENTS.md)](12-project-rules.md) | Per-directory AGENTS.md instructions and their precedence |
 | 13 | [Memory](13-memory.md) | Cross-session knowledge persistence with `/flush`, `/dream`, and hybrid search |
 
