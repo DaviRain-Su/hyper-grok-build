@@ -6,6 +6,7 @@
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
+pub(crate) mod router;
 pub mod spawn;
 pub mod tracker;
 

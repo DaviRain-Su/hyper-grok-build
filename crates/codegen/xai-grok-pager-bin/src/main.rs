@@ -1788,6 +1788,9 @@ async fn async_main() -> Result<()> {
                 )
                 .await;
             }
+            Command::Codex(codex_args) => {
+                return xai_grok_pager::codex::run(codex_args).await;
+            }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 xai_grok_shell::inspect::inspect(&cwd, json).await?;

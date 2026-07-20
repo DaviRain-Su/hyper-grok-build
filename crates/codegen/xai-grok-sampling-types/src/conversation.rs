@@ -3440,7 +3440,9 @@ fn apply_kimi_messages_request_rules(
         Some(crate::ReasoningEffort::Medium) => Some("medium"),
         Some(crate::ReasoningEffort::High) => Some("high"),
         // K3 thinkingLevelMap: max → "max"; Xhigh is Grok's id for max/xhigh.
-        Some(crate::ReasoningEffort::Xhigh) => Some("max"),
+        Some(crate::ReasoningEffort::Xhigh)
+        | Some(crate::ReasoningEffort::Max)
+        | Some(crate::ReasoningEffort::Ultra) => Some("max"),
         None => match profile {
             KimiRequestProfile::K3 => Some("max"),
             KimiRequestProfile::K27Code | KimiRequestProfile::LegacyCoding => Some("high"),

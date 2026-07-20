@@ -13310,6 +13310,7 @@ dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
  "anyhow",
+ "async-trait",
  "backon",
  "base64",
  "blake3",

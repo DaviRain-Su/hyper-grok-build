@@ -1571,9 +1571,14 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
 
 /// Toast format for `default_model`. Mirrors `save_theme_toast` —
 /// renders the user-friendly model name (NOT the internal id) so the
-/// toast text matches what the user typed.
-fn save_default_model_toast(value: &str) -> String {
-    format!("\u{2713} Default model: {value}")
+/// toast text matches what the user typed. Session-only providers
+/// (Codex subscription) drop the "Default" wording since nothing persists.
+fn save_default_model_toast(value: &str, session_only: bool) -> String {
+    if session_only {
+        format!("\u{2713} Model: {value}")
+    } else {
+        format!("\u{2713} Default model: {value}")
+    }
 }
 
 /// Outer dispatcher for `Action::SetDefaultModel`. Switches and persists
@@ -1638,7 +1643,8 @@ pub(in crate::app::dispatch) fn set_default_model(
         prev_id = ?prev_id.as_ref().map(|id| id.0.as_ref()),
         "setting changed",
     );
-    app.show_toast(&save_default_model_toast(&new_display));
+    let is_codex = crate::acp::router::is_codex_model(&new_id);
+    app.show_toast(&save_default_model_toast(&new_display, is_codex));
 
     // Persist the **model ID** (catalog key), not the display name.
     // The shell's `resolve_default_model` matches by slug / map key,
@@ -1647,8 +1653,10 @@ pub(in crate::app::dispatch) fn set_default_model(
     //
     // Chat (`--chat` / GROK_CHAT_MODE) catalogs use opaque `/rest/modes`
     // slugs that must not become the global Build `default_model`.
+    // Codex (`codex:*`) ids are session-scoped subscription routes; they are
+    // not Grok catalog models and must never persist as `default_model`.
     let mut effects: Vec<Effect> = Vec::new();
-    if !xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() {
+    if !xai_grok_shell::agent::chat_modes::process_chat_mode_enabled() && !is_codex {
         let new_id_str = new_id.0.to_string();
         let prev_id_str = prev_id
             .as_ref()

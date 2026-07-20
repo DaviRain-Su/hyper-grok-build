@@ -5,7 +5,21 @@ use serde::Deserialize;
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
-        let new_models = ModelState::from(Some(model_state));
+        let mut new_models = ModelState::from(Some(model_state));
+        // Model refreshes replace the native catalog. Preserve provider models
+        // added by the ACP router (e.g. Codex subscription models) so `/model`
+        // does not lose them mid-run.
+        for (id, info) in &app.models.available {
+            if info
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("provider"))
+                .and_then(serde_json::Value::as_str)
+                == Some("codex")
+            {
+                new_models.available.insert(id.clone(), info.clone());
+            }
+        }
         tracing::info!(
             count = new_models.available.len(),
             "models updated via x.ai/models/update"

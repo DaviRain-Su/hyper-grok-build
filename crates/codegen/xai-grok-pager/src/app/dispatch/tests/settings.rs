@@ -303,6 +303,45 @@ if mid == &
     );
     assert!(app.agents[&id].session.model_switch_pending);
 }
+
+#[test]
+fn slash_codex_model_switch_never_persists_into_grok_config() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("codex:gpt-5.5"));
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(
+            model_id.clone(),
+            acp::ModelInfo::new(model_id.clone(), "Codex - GPT-5.5".to_string()),
+        );
+
+    let effects = dispatch(
+        Action::SendPrompt("/model Codex - GPT-5.5".into()),
+        &mut app,
+    );
+
+    assert_eq!(effects.len(), 1, "Codex selection must be session-only");
+    assert!(matches!(
+        &effects[0],
+        Effect::SwitchModel { model_id: selected, .. } if selected == &model_id
+    ));
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PersistSetting {
+                key: "default_model",
+                ..
+            }
+        )),
+        "a codex:* ID must never be written to xAI's default_model"
+    );
+}
+
 #[test]
 fn model_switch_pending_resets_correctly_across_success_and_failure() {
     let mut app = test_app_with_agent();

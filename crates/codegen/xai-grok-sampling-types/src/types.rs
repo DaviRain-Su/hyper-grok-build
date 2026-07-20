@@ -821,7 +821,9 @@ impl CompactionsRemaining {
 /// persistence, Responses API mapping, UI). Chat Completions requests map
 /// `Xhigh` → `"max"` only on the [`ChatCompletionRequest`] field (Kimi K3 /
 /// OpenAI-style alias) via [`serialize_chat_reasoning_effort`].
-/// `"max"` is accepted on deserialize / parse as an alias of `Xhigh`.
+/// `"max"` deserializes to the first-class [`Self::Max`] tier (Codex
+/// app-server; also what Kimi K3 catalogs emit), while `FromStr` keeps
+/// `"max"` as a CLI/UX alias of `Xhigh`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -831,9 +833,13 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
-    /// Canonical wire/id is `"xhigh"`; `"max"` is a deserialize/parse alias.
-    #[serde(alias = "max")]
+    /// Canonical wire/id is `"xhigh"`; `"max"` parses to [`Self::Max`] on
+    /// deserialize but stays a `FromStr` alias of `Xhigh`.
     Xhigh,
+    /// Codex app-server tier above `xhigh` for maximum single-agent depth.
+    Max,
+    /// Codex app-server tier that enables automatic subagent delegation.
+    Ultra,
 }
 
 /// Chat Completions wire for [`ChatCompletionRequest::reasoning_effort`].
@@ -855,7 +861,7 @@ fn serialize_chat_reasoning_effort<S: serde::Serializer>(
                 ReasoningEffort::Medium => "medium",
                 ReasoningEffort::High => "high",
                 // Kimi K3 documents `reasoning_effort: "max"` only.
-                ReasoningEffort::Xhigh => "max",
+                ReasoningEffort::Xhigh | ReasoningEffort::Max | ReasoningEffort::Ultra => "max",
             };
             serializer.serialize_str(token)
         }
@@ -870,7 +876,7 @@ impl ReasoningEffort {
             Self::Low => crate::rs::ReasoningEffort::Low,
             Self::Medium => crate::rs::ReasoningEffort::Medium,
             Self::High => crate::rs::ReasoningEffort::High,
-            Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
+            Self::Xhigh | Self::Max | Self::Ultra => crate::rs::ReasoningEffort::Xhigh,
         }
     }
 
@@ -895,6 +901,8 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
@@ -905,7 +913,7 @@ impl ReasoningEffort {
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
-            Self::Xhigh => Some("max"),
+            Self::Xhigh | Self::Max | Self::Ultra => Some("max"),
         }
     }
 }
@@ -926,9 +934,13 @@ impl std::str::FromStr for ReasoningEffort {
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
-            "xhigh" | "max" => Ok(Self::Xhigh), // max is a CLI/UX alias of xhigh
+            // Keep `max` as the historical CLI alias of `xhigh` for typed
+            // input. A model catalog can still expose first-class `Max` by
+            // deserializing an effort option whose value is `"max"`.
+            "xhigh" | "max" => Ok(Self::Xhigh),
+            "ultra" => Ok(Self::Ultra),
             _ => Err(format!(
-                "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max)"
+                "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max, ultra)"
             )),
         }
     }
@@ -1374,6 +1386,8 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningEffort::High,
             ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
+            ReasoningEffort::Ultra,
         ] {
             let json = serde_json::to_string(&v).unwrap();
             assert_eq!(json, format!("\"{}\"", v.as_str()), "serialize {v:?}");
@@ -1381,11 +1395,12 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
-        // `"max"` is a deserialize alias of Xhigh (Kimi K3 / CLI); serialize
-        // still emits canonical `"xhigh"` so session persistence stays stable.
+        // `"max"` deserializes to the first-class Max tier (Codex app-server;
+        // Kimi K3 catalogs emit the same token). Serialize still emits
+        // canonical `"xhigh"` for Xhigh so session persistence stays stable.
         assert_eq!(
             serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             serde_json::to_string(&ReasoningEffort::Xhigh).unwrap(),
@@ -1574,8 +1589,11 @@ mod tests {
         );
         let bad_type = as_map(serde_json::json!({"reasoningEffort": 3}));
         assert_eq!(parse_reasoning_effort_meta(Some(&bad_type)), None);
-        let unknown = as_map(serde_json::json!({"reasoningEffort": "ULTRA"}));
-        assert_eq!(parse_reasoning_effort_meta(Some(&unknown)), None);
+        let ultra = as_map(serde_json::json!({"reasoningEffort": "ULTRA"}));
+        assert_eq!(
+            parse_reasoning_effort_meta(Some(&ultra)),
+            Some(ReasoningEffort::Ultra)
+        );
     }
 
     #[test]

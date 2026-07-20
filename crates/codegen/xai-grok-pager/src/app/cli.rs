@@ -7,6 +7,8 @@ use std::path::PathBuf;
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Use an existing Codex/ChatGPT subscription through the Codex CLI
+    Codex(CodexArgs),
     /// Run Grok without the interactive UI
     Agent(Box<AgentArgs>),
     /// Show the configuration Grok discovers for this directory
@@ -148,6 +150,31 @@ See ~/.grok/README.md for more information.
     /// `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env
     /// var is set.
     Dashboard,
+}
+/// Arguments for the subscription-backed Codex connector.
+#[derive(Debug, clap::Args, Clone)]
+pub struct CodexArgs {
+    /// Run one Codex prompt and exit.
+    #[arg(short = 'p', long = "prompt", conflicts_with = "message")]
+    pub prompt: Option<String>,
+    /// Initial prompt. Without a prompt, starts an interactive session.
+    #[arg(value_name = "PROMPT", conflicts_with = "prompt")]
+    pub message: Option<String>,
+    /// Codex model ID. Defaults to the subscription's current default.
+    #[arg(short = 'm', long = "model")]
+    pub model: Option<String>,
+    /// Path to the official Codex CLI binary.
+    #[arg(long = "codex-binary", default_value = "codex", value_hint = ValueHint::FilePath)]
+    pub codex_binary: PathBuf,
+    /// Resume an existing Codex app-server thread ID.
+    #[arg(long = "resume", value_name = "THREAD_ID")]
+    pub resume: Option<String>,
+    /// Allow Codex to access the host without its workspace sandbox.
+    #[arg(long = "full-access")]
+    pub full_access: bool,
+    /// Check subscription authentication and list available Codex models.
+    #[arg(long = "status")]
+    pub status: bool,
 }
 /// Arguments for the `wrap` subcommand: the command to run, then its args.
 #[derive(Debug, clap::Args, Clone)]

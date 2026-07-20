@@ -667,6 +667,38 @@ fn switch_model_complete_success_updates_model_and_pushes_message() {
 }
 
 #[test]
+fn switch_model_complete_never_persists_codex_as_grok_default() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("codex:gpt-5.5"));
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.models.available.insert(
+        model_id.clone(),
+        acp::ModelInfo::new(model_id.clone(), "Codex - GPT-5.5".to_string()),
+    );
+    agent.session.model_switch_pending = true;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SwitchModelComplete {
+            agent_id: id,
+            model_id: model_id.clone(),
+            effort: None,
+            result: Ok(()),
+            prev_model_id: None,
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.agents[&id].session.models.current, Some(model_id));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistPreferredModel { .. })),
+        "a completed Codex switch must not persist codex:* into xAI config"
+    );
+}
+
+#[test]
 fn switch_model_complete_skips_message_and_persist_when_unchanged() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

@@ -19,6 +19,8 @@ use xai_grok_shell::{
     util::grok_home::grok_home,
 };
 
+use super::router::ProviderRouterAgent;
+
 /// Result of spawning a child agent.
 pub struct SpawnedAgent {
     /// Kept alive so the thread isn't detached. Will be used for graceful shutdown.
@@ -72,16 +74,16 @@ pub async fn spawn_grok_shell(
     // pager (voice channel) can share the same refreshing bearer.
     let auth_manager_for_pager = auth_manager.clone();
 
-    let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static> = {
+    let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<ProviderRouterAgent>> + Send + 'static> = {
         Box::new(move |client_tx| {
             let gateway = AcpGatewaySender::new(client_tx);
 
             let mut agent =
-                MvpAgent::with_models(gateway, &agent_config, auth_manager, models_manager);
+                MvpAgent::with_models(gateway.clone(), &agent_config, auth_manager, models_manager);
             if let Some(mc) = memory_config {
                 agent.set_memory_config(mc);
             }
-            Ok(Rc::new(agent))
+            Ok(Rc::new(ProviderRouterAgent::new(Rc::new(agent), gateway)))
         })
     };
 
@@ -101,7 +103,7 @@ pub async fn spawn_grok_shell(
 /// The agent runs on a single-threaded tokio LocalSet runtime.
 /// RPC requests go directly to the agent via Rc, bypassing simplex pipes.
 fn spawn_agent_thread_direct(
-    spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static>,
+    spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<ProviderRouterAgent>> + Send + 'static>,
     channel: AcpAgentChannel,
     cancel: CancellationToken,
 ) -> Result<thread::JoinHandle<Result<()>>> {

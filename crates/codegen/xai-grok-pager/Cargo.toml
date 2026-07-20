@@ -54,6 +54,7 @@ portable-pty = "0.9"
 # Utilities
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
 rand = { workspace = true }
