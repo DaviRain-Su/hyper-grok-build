@@ -38,8 +38,6 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
                 eprintln!("    kimi-code/k3");
                 eprintln!("    kimi-code/k2p7                     # Kimi K2.7 Code");
                 eprintln!("    kimi-code/kimi-for-coding-highspeed # Kimi K2.7 Hyper Speed");
-                eprintln!("    kimi-code/kimi-k2.6                # Kimi K2.6");
-                eprintln!("    kimi-code/kimi-k2.5                # Kimi K2.5");
                 eprintln!("  e.g.  grok -m kimi-code/k3 -p \"ping\"");
                 eprintln!("  TUI:  /model kimi-code/k3");
                 return Ok(auth);

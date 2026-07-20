@@ -16,6 +16,15 @@ pub const API_KEY_SCOPE: &str = "xai::api_key";
 /// auth.json scope key for the Kimi Code subscription OAuth session.
 pub const KIMI_CODE_OAUTH_SCOPE: &str = "oauth/kimi-code";
 
+/// Prefix for third-party platform API keys stored via `/providers` (e.g.
+/// `platform/zai`, `platform/openai`). One scope per platform id.
+pub const PLATFORM_API_KEY_SCOPE_PREFIX: &str = "platform/";
+
+/// Scope key for a registry platform's UI-pasted API key.
+pub fn platform_api_key_scope(platform: &str) -> String {
+    format!("{PLATFORM_API_KEY_SCOPE_PREFIX}{platform}")
+}
+
 const BLOCKED_REASON_NO_LOGS: &str = "BLOCKED_REASON_NO_LOGS";
 const BLOCKED_REASON_NO_LOGS_MODERATED: &str = "BLOCKED_REASON_NO_LOGS_MODERATED";
 

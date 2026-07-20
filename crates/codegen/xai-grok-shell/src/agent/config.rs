@@ -3317,7 +3317,8 @@ pub struct PlatformCredentialConfig {
 }
 
 /// Resolve the API key for an open-platform registry entry:
-/// platform-scoped env > generic env aliases > config file.
+/// platform-scoped env > generic env aliases > auth.json (`platform/<id>`,
+/// set via `/providers`) > config.toml `[platforms.<id>] api_key`.
 /// The returned value must never be logged.
 pub fn resolve_platform_api_key(
     platform: xai_grok_models::PlatformId,
@@ -3338,6 +3339,12 @@ pub fn resolve_platform_api_key_with(
         {
             return Some(value);
         }
+    }
+    // UI-pasted keys live under `platform/<id>` in auth.json (env wins).
+    if let Some(key) =
+        crate::auth::read_platform_api_key(&xai_grok_config::grok_home(), platform.as_str())
+    {
+        return Some(key);
     }
     platforms.config_api_key(platform)
 }
@@ -3434,8 +3441,9 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
 /// recognized by `{platform_id}/{model_id}` catalog ids.
 ///
 /// - `env_key` defaults to the platform's env names when unset.
-/// - a config-file `api_key` is stamped only when no env name currently
-///   resolves (env > config). Per-model `[model.*]` credentials always win.
+/// - an auth.json / config-file `api_key` is stamped only when no env name
+///   currently resolves (env > auth.json `/providers` > config.toml).
+///   Per-model `[model.*]` credentials always win.
 ///
 /// In-memory only; key values are never logged.
 fn apply_platform_credentials(
@@ -3481,16 +3489,21 @@ fn apply_platform_credentials_with_bearer(
             .env_key
             .as_ref()
             .is_some_and(|k| k.resolve_value().is_some());
-        if entry.api_key.is_none()
-            && !env_resolves
-            && let Some(config_key) = platforms.config_api_key(platform)
-        {
-            tracing::debug!(
-                model_key = %key,
-                platform = platform.as_str(),
-                "stamped [platforms] config api_key onto open-platform entry"
-            );
-            entry.api_key = Some(config_key);
+        if entry.api_key.is_none() && !env_resolves {
+            // Prefer UI-pasted auth.json keys, then config.toml.
+            let stamped = crate::auth::read_platform_api_key(
+                &xai_grok_config::grok_home(),
+                platform.as_str(),
+            )
+            .or_else(|| platforms.config_api_key(platform));
+            if let Some(config_key) = stamped {
+                tracing::debug!(
+                    model_key = %key,
+                    platform = platform.as_str(),
+                    "stamped platform api_key onto open-platform entry"
+                );
+                entry.api_key = Some(config_key);
+            }
         }
         if entry.has_own_credentials() {
             entry.info.supported_in_api = true;
@@ -11885,10 +11898,6 @@ default = "grok-4.5"
             "kimi-code/k3",
             "kimi-code/k2p7",
             "kimi-code/kimi-for-coding-highspeed",
-            "kimi-code/kimi-k2.7-code",
-            "kimi-code/kimi-k2.7-code-highspeed",
-            "kimi-code/kimi-k2.6",
-            "kimi-code/kimi-k2.5",
             "kimi-code/kimi-for-coding",
         ] {
             let kimi = models.get(key).unwrap_or_else(|| panic!("missing {key}"));
@@ -11937,7 +11946,7 @@ default = "grok-4.5"
             Some("fake-kimi-token".into()),
         );
         let entry = models
-            .get("kimi-code/kimi-k2.7-code")
+            .get("kimi-code/k2p7")
             .expect("kimi-code entry");
         assert!(entry.info.supported_in_api, "bearer makes Kimi entry visible");
         assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
@@ -12040,8 +12049,7 @@ api_key = "sk-test-cn-key-not-for-prod"
         let models = resolve_model_list(&cfg, None);
         let entry = models
             .get("kimi-code/k2p7")
-            .or_else(|| models.get("kimi-code/kimi-k2.7-code"))
-            .expect("kimi-code k2.7 entry");
+            .expect("kimi-code k2p7 entry");
         assert_eq!(
             entry.info.api_backend,
             ApiBackend::Messages,

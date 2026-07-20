@@ -1,14 +1,17 @@
-//! `/providers` — third-party platform (BYOK) status overview.
+//! `/providers` — third-party platform (BYOK) status + API key setup.
 //!
-//! Lists every registry platform: whether its credential is configured,
-//! how many catalog models it offers, and how to unlock it (env var,
-//! `[platforms.<id>]` config table, or OAuth). Locked models render dimmed
-//! with a 🔒 in `/model`; picking one prints its setup hint.
+//! - Bare `/providers` (or incomplete args) opens an ArgPicker of platforms.
+//! - `/providers <platform> <api_key>` saves the key to `~/.grok/auth.json`
+//!   and restamps the model catalog so locked models unlock.
+//! - OAuth platforms (kimi-code) redirect to `/login kimi`.
 
 use xai_grok_models::PlatformId;
 
 use crate::acp::model_state::{ModelState, platform_lock};
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::app::actions::Action;
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand,
+};
 
 pub struct ProvidersCommand;
 
@@ -18,15 +21,91 @@ impl SlashCommand for ProvidersCommand {
     }
 
     fn description(&self) -> &str {
-        "Show third-party platform (BYOK) status and how to enable them"
+        "Configure third-party platform API keys (or show status)"
     }
 
     fn usage(&self) -> &str {
-        "/providers"
+        "/providers [platform] [api_key]"
     }
 
-    fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Message(render_providers(ctx.models))
+    fn takes_args(&self) -> bool {
+        true
+    }
+
+    fn args_required(&self) -> bool {
+        // Empty → open platform picker. Picking inserts platform id; user
+        // pastes the key and hits Enter again.
+        true
+    }
+
+    fn arg_placeholder(&self) -> Option<&str> {
+        Some("<platform> <api_key>")
+    }
+
+    fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
+        // Once a platform is already chosen as the first token, free-type the
+        // API key (no second suggestion list — paste + Enter).
+        let (first, rest) = split_first_token(args_query);
+        if !first.is_empty() && PlatformId::parse(first).is_some() && !rest.is_empty() {
+            return None;
+        }
+        if !first.is_empty() && PlatformId::parse(first).is_some() && rest.is_empty() {
+            // Platform selected; waiting for key — no suggestion rows.
+            return None;
+        }
+        Some(build_platform_items(ctx.models))
+    }
+
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            // ArgPicker should have opened; if run still fires bare, show status.
+            return CommandResult::Message(render_providers(ctx.models));
+        }
+
+        let (platform_tok, key_rest) = split_first_token(trimmed);
+        let Some(platform) = PlatformId::parse(platform_tok) else {
+            return CommandResult::Error(format!(
+                "Unknown platform '{platform_tok}'. Run /providers to pick one."
+            ));
+        };
+
+        if platform.uses_oauth() {
+            return CommandResult::Error(format!(
+                "{} uses OAuth — run /login kimi (not an API key).",
+                platform.display_name()
+            ));
+        }
+
+        let api_key = key_rest.trim();
+        if api_key.is_empty() {
+            return CommandResult::Error(format!(
+                "Paste an API key after the platform name:\n  /providers {} <api_key>\n\
+                 Or clear a stored key with: /providers {} clear",
+                platform.as_str(),
+                platform.as_str()
+            ));
+        }
+
+        let clear = api_key.eq_ignore_ascii_case("clear")
+            || api_key.eq_ignore_ascii_case("none")
+            || api_key.eq_ignore_ascii_case("remove");
+        CommandResult::Action(Action::SetPlatformApiKey {
+            platform: platform.as_str().to_owned(),
+            api_key: if clear {
+                String::new()
+            } else {
+                api_key.to_owned()
+            },
+        })
+    }
+}
+
+fn split_first_token(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    match s.split_once(char::is_whitespace) {
+        Some((a, b)) => (a, b.trim_start()),
+        None => (s, ""),
     }
 }
 
@@ -72,21 +151,52 @@ fn compact_hint(platform: PlatformId) -> String {
     if platform.uses_oauth() {
         return "/login kimi (OAuth)".to_string();
     }
-    let envs = platform.api_key_env_names();
-    // Prefer the well-known alias (non-GROK name) for brevity.
-    let alias = envs
-        .iter()
-        .find(|e| !e.starts_with("GROK_"))
-        .or_else(|| envs.first());
-    match alias {
-        Some(e) => format!("export {e}=… or [platforms.{}] api_key", platform.as_str()),
-        None => format!("[platforms.{}] api_key", platform.as_str()),
-    }
+    format!("/providers {} <api_key>", platform.as_str())
+}
+
+fn build_platform_items(models: &ModelState) -> Vec<ArgItem> {
+    PlatformId::ALL
+        .into_iter()
+        .map(|platform| {
+            let (status, usable, locked) = platform_status(models, platform);
+            let total = usable + locked;
+            let (icon, desc) = match status {
+                PlatformStatus::Ready => (
+                    "✓",
+                    format!("{total} models ready — re-paste key to replace"),
+                ),
+                PlatformStatus::Locked if platform.uses_oauth() => {
+                    ("🔒", format!("{total} models — run /login kimi"))
+                }
+                PlatformStatus::Locked => (
+                    "🔒",
+                    format!("{total} models — paste API key after selecting"),
+                ),
+                PlatformStatus::NoCatalog if platform.uses_oauth() => {
+                    ("—", "OAuth — run /login kimi".to_string())
+                }
+                PlatformStatus::NoCatalog => (
+                    "—",
+                    "no catalog models yet — paste API key to enable".to_string(),
+                ),
+            };
+            ArgItem::new(
+                format!("{icon} {}  {}", platform.as_str(), platform.display_name()),
+                platform.as_str(),
+                // Trailing space so after pick the prompt is ready for the key.
+                format!("{} ", platform.as_str()),
+                desc,
+            )
+        })
+        .collect()
 }
 
 fn render_providers(models: &ModelState) -> String {
     let mut out = String::new();
-    out.push_str("Third-party platforms (BYOK). Locked models show dimmed with 🔒 in /model.\n\n");
+    out.push_str(
+        "Third-party platforms (BYOK). Select one, then paste an API key:\n\
+         /providers <platform> <api_key>\n\n",
+    );
 
     let mut any_ready = false;
     let mut any_locked = false;
@@ -122,10 +232,9 @@ fn render_providers(models: &ModelState) -> String {
         );
     }
     out.push_str(
-        "Unlock a platform by exporting its env var or adding `api_key = \"…\"` under \
-         `[platforms.<id>]` in ~/.grok/config.toml (env wins). Its models turn selectable in \
-         /model immediately after a config reload; see the user guide (25-moonshot, 26-kimi, \
-         27-openai-anthropic) for details.",
+        "Keys are stored in ~/.grok/auth.json (scope platform/<id>). Env vars still win \
+         over the stored key; config.toml [platforms.<id>] api_key is the final fallback. \
+         Clear with: /providers <platform> clear",
     );
     out
 }
@@ -135,6 +244,27 @@ mod tests {
     use super::*;
     use agent_client_protocol as acp;
     use std::sync::Arc;
+
+    static EMPTY_BUNDLE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {
+        has_cache: false,
+        version: String::new(),
+        personas: Vec::new(),
+        roles: Vec::new(),
+        agents: Vec::new(),
+        skills: Vec::new(),
+        persona_details: Vec::new(),
+        role_details: Vec::new(),
+    };
+
+    fn dummy_exec_ctx(models: &ModelState) -> CommandExecCtx<'_> {
+        CommandExecCtx {
+            models,
+            session_id: None,
+            bundle_state: &EMPTY_BUNDLE,
+            screen_mode: crate::app::ScreenMode::Inline,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        }
+    }
 
     fn insert_model(models: &mut ModelState, id: &str, locked: bool) {
         let mid = acp::ModelId::new(Arc::from(id));
@@ -185,7 +315,7 @@ mod tests {
                 platform.as_str()
             );
         }
-        assert!(out.contains("[platforms.<id>]"));
+        assert!(out.contains("/providers"));
     }
 
     #[test]
@@ -193,7 +323,59 @@ mod tests {
         let mut models = ModelState::default();
         insert_model(&mut models, "deepseek/deepseek-v4-flash", true);
         let out = render_providers(&models);
-        assert!(out.contains("DEEPSEEK_API_KEY"), "hint missing: {out}");
-        assert!(out.contains("[platforms.deepseek]"), "hint missing: {out}");
+        assert!(
+            out.contains("/providers deepseek"),
+            "hint missing: {out}"
+        );
+    }
+
+    #[test]
+    fn run_rejects_oauth_platform() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match ProvidersCommand.run(&mut ctx, "kimi-code sk-fake") {
+            CommandResult::Error(msg) => assert!(msg.contains("/login kimi"), "{msg}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_emits_set_platform_api_key() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match ProvidersCommand.run(&mut ctx, "zai sk-test-key") {
+            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+                assert_eq!(platform, "zai");
+                assert_eq!(api_key, "sk-test-key");
+            }
+            other => panic!("expected SetPlatformApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_clear_sends_empty_key() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match ProvidersCommand.run(&mut ctx, "zai clear") {
+            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+                assert_eq!(platform, "zai");
+                assert!(api_key.is_empty());
+            }
+            other => panic!("expected clear SetPlatformApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggest_args_lists_platforms() {
+        let models = ModelState::default();
+        let ctx = AppCtx {
+            models: &models,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            screen_mode: crate::app::ScreenMode::Inline,
+        };
+        let items = ProvidersCommand.suggest_args(&ctx, "").expect("items");
+        assert_eq!(items.len(), PlatformId::ALL.len());
+        assert!(items.iter().any(|i| i.insert_text.starts_with("zai")));
     }
 }

@@ -349,14 +349,15 @@ impl PlatformId {
             [one] => format!("export {one}=<key>"),
             [first, rest @ ..] => format!("export {first}=<key> (or {})", rest.join(" / ")),
         };
+        let ui_part = format!("run /providers {} <api_key>", self.as_str());
         let config_part = format!(
             "add `api_key = \"<key>\"` under `[platforms.{}]` in ~/.grok/config.toml",
             self.as_str()
         );
         if env_part.is_empty() {
-            config_part
+            format!("{ui_part}, or {config_part}")
         } else {
-            format!("{env_part}, or {config_part}")
+            format!("{ui_part}, or {env_part}, or {config_part}")
         }
     }
 
@@ -600,39 +601,9 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
         true,
         MAX_TOK_32K
     );
-    // Legacy / open-platform-style aliases still accepted after login.
-    let kimi_k27 = kimi!(
-        "kimi-k2.7-code",
-        "Kimi K2.7 Code (alias)",
-        "Alias of k2p7 for older configs",
-        CTX_256K,
-        true,
-        MAX_TOK_32K
-    );
-    let kimi_k27_hs = kimi!(
-        "kimi-k2.7-code-highspeed",
-        "Kimi K2.7 Code HighSpeed (alias)",
-        "Alias of kimi-for-coding-highspeed for older configs",
-        CTX_256K,
-        true,
-        MAX_TOK_32K
-    );
-    let kimi_k26 = kimi!(
-        "kimi-k2.6",
-        "Kimi K2.6",
-        "Legacy subscription listing id; prefer live /models after login",
-        CTX_256K,
-        true,
-        MAX_TOK_32K
-    );
-    let kimi_k25 = kimi!(
-        "kimi-k2.5",
-        "Kimi K2.5",
-        "Legacy subscription listing id; prefer live /models after login",
-        CTX_256K,
-        true,
-        MAX_TOK_32K
-    );
+    // Retired offline aliases (no longer listed in the picker):
+    // kimi-k2.7-code, kimi-k2.7-code-highspeed, kimi-k2.6, kimi-k2.5.
+    // Use k2p7 / kimi-for-coding-highspeed / k3 instead.
     let kimi_coding = kimi!(
         "kimi-for-coding",
         "Kimi for Coding",
@@ -662,14 +633,10 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     }
 
     vec![
-        // Subscription first (Pi canonical ids, then aliases).
+        // Subscription first (Pi canonical ids, then kimi-for-coding fallback).
         kimi_k3,
         kimi_k2p7,
         kimi_hs,
-        kimi_k27,
-        kimi_k27_hs,
-        kimi_k26,
-        kimi_k25,
         kimi_coding,
         open!(
             MoonshotCn,
@@ -1200,10 +1167,6 @@ mod tests {
             "kimi-code/k3",
             "kimi-code/k2p7",
             "kimi-code/kimi-for-coding-highspeed",
-            "kimi-code/kimi-k2.7-code",
-            "kimi-code/kimi-k2.7-code-highspeed",
-            "kimi-code/kimi-k2.6",
-            "kimi-code/kimi-k2.5",
             "kimi-code/kimi-for-coding",
             "openai/gpt-4.1",
             "openai/gpt-5",
@@ -1238,10 +1201,6 @@ mod tests {
             "kimi-code/k3",
             "kimi-code/k2p7",
             "kimi-code/kimi-for-coding-highspeed",
-            "kimi-code/kimi-k2.7-code",
-            "kimi-code/kimi-k2.7-code-highspeed",
-            "kimi-code/kimi-k2.6",
-            "kimi-code/kimi-k2.5",
         ] {
             let m = platform_builtin_models()
                 .iter()

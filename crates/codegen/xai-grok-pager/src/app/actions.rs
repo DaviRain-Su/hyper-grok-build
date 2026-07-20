@@ -543,6 +543,13 @@ pub enum Action {
     /// session and persists via `Effect::PersistSetting`. Does not
     /// carry effort — use `Action::SwitchModel` for that.
     SetDefaultModel(acp::ModelId),
+    /// Persist a third-party platform API key from `/providers` (stored in
+    /// `~/.grok/auth.json` under `platform/<id>`, then restamps the catalog).
+    /// Empty `api_key` clears the stored key.
+    SetPlatformApiKey {
+        platform: String,
+        api_key: String,
+    },
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves
     /// via the shell's default-resolution chain.
@@ -1489,6 +1496,12 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// Persist a BYOK platform API key via `x.ai/internal/set_platform_api_key`
+    /// and restamp the catalog. Empty `api_key` clears the stored key.
+    SetPlatformApiKey {
+        platform: String,
+        api_key: String,
+    },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -2271,6 +2284,13 @@ pub enum TaskResult {
     CompactComplete {
         agent_id: AgentId,
         result: Result<(), String>,
+    },
+    /// `/providers` API key save completed.
+    SetPlatformApiKeyComplete {
+        platform: String,
+        cleared: bool,
+        models_unlocked: u64,
+        error: Option<String>,
     },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as

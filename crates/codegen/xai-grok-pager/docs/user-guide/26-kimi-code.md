@@ -9,7 +9,7 @@ built-in multi-provider support.
 | Platform id | `kimi-code` |
 | Inference | `https://api.kimi.com/coding/v1` |
 | OAuth host | `https://auth.kimi.com` |
-| Catalog models | `kimi-code/k3`, `kimi-code/k2p7`, `kimi-code/kimi-for-coding-highspeed` (K2.7 Hyper Speed), plus `kimi-code/kimi-k2.6`, `kimi-code/kimi-k2.5` and open-platform-style aliases |
+| Catalog models | `kimi-code/k3`, `kimi-code/k2p7`, `kimi-code/kimi-for-coding-highspeed` (K2.7 Hyper Speed) |
 | Offline fallback | Same ids; synced live after login via `GET …/coding/v1/models` |
 | Protocol | **OpenAI Chat Completions**; base `https://api.kimi.com/coding/v1` |
 
@@ -59,8 +59,6 @@ grokk models | grep kimi-code
 #   kimi-code/k3
 #   kimi-code/k2p7                      # Kimi K2.7 Code
 #   kimi-code/kimi-for-coding-highspeed # Kimi K2.7 Hyper Speed
-#   kimi-code/kimi-k2.6                 # Kimi K2.6
-#   kimi-code/kimi-k2.5                 # Kimi K2.5
 
 grok -m kimi-code/k3 -p "ping"
 grok -m kimi-code/k2p7 -p "ping"
@@ -141,8 +139,6 @@ same reasoning/thinking mapping as the Moonshot open platform:
 | `k3` | 1M context; selectable reasoning effort |
 | `k2p7` | Kimi K2.7 Code; 256k context |
 | `kimi-for-coding-highspeed` | Kimi K2.7 Hyper Speed |
-| `kimi-k2.6` | Kimi K2.6 |
-| `kimi-k2.5` | Kimi K2.5 |
 
 ### Open-platform Moonshot (Chat Completions)
 

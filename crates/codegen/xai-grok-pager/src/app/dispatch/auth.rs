@@ -222,6 +222,23 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     start_login_with_method(app, method_id, app.auth_start_mode, app.auth_use_oauth)
 }
 
+/// `/providers <platform> <api_key>` — persist a BYOK platform key and restamp.
+pub(super) fn dispatch_set_platform_api_key(
+    app: &mut AppView,
+    platform: String,
+    api_key: String,
+) -> Vec<Effect> {
+    let label = xai_grok_models::PlatformId::parse(&platform)
+        .map(|p| p.display_name().to_string())
+        .unwrap_or_else(|| platform.clone());
+    if api_key.is_empty() {
+        app.show_toast(&format!("Clearing API key for {label}…"));
+    } else {
+        app.show_toast(&format!("Saving API key for {label}…"));
+    }
+    vec![Effect::SetPlatformApiKey { platform, api_key }]
+}
+
 /// `/login kimi` — Kimi Code subscription device OAuth.
 pub(super) fn dispatch_login_kimi(app: &mut AppView) -> Vec<Effect> {
     let method_id = acp::AuthMethodId::new(

@@ -797,6 +797,26 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::SetPlatformApiKeyComplete {
+            platform,
+            cleared,
+            models_unlocked,
+            error,
+        } => {
+            let label = xai_grok_models::PlatformId::parse(&platform)
+                .map(|p| p.display_name().to_string())
+                .unwrap_or_else(|| platform.clone());
+            if let Some(err) = error {
+                app.show_toast(&format!("✗ Couldn't save {label} key: {err}"));
+            } else if cleared {
+                app.show_toast(&format!("✓ Cleared API key for {label}"));
+            } else {
+                app.show_toast(&format!(
+                    "✓ Saved API key for {label} — {models_unlocked} model(s) unlocked. /model to pick one."
+                ));
+            }
+            vec![]
+        }
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }

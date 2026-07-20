@@ -1456,6 +1456,56 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::SetPlatformApiKey { platform, api_key } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let platform_for_err = platform.clone();
+                let params = serde_json::json!({
+                    "platform": platform,
+                    "apiKey": api_key,
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/internal/set_platform_api_key",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize set_platform_api_key params")
+                        .into(),
+                );
+                match acp_send(req, &tx).await {
+                    Ok(resp) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(resp.0.get()).unwrap_or_default();
+                        // ExtMethodResult wraps under "result" when using that envelope;
+                        // also accept a flat object for resilience.
+                        let body = value.get("result").cloned().unwrap_or(value);
+                        let cleared = body
+                            .get("cleared")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let models_unlocked = body
+                            .get("modelsUnlocked")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let platform = body
+                            .get("platform")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                            .unwrap_or(platform_for_err);
+                        TaskResult::SetPlatformApiKeyComplete {
+                            platform,
+                            cleared,
+                            models_unlocked,
+                            error: None,
+                        }
+                    }
+                    Err(e) => TaskResult::SetPlatformApiKeyComplete {
+                        platform: platform_for_err,
+                        cleared: false,
+                        models_unlocked: 0,
+                        error: Some(sanitize_user_error(&e.to_string())),
+                    },
+                }
+            });
+        }
         Effect::FetchPromptHistory { agent_id, cwd, session_id } => {
             let tx = acp_tx.clone();
             tasks

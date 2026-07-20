@@ -101,7 +101,19 @@ default = "moonshot-cn/kimi-k2.7-code"
 1. Per-model `[model.<id>].api_key` / `env_key`
 2. Platform-scoped env (`GROK_MOONSHOT_CN_API_KEY` / `GROK_MOONSHOT_AI_API_KEY`)
 3. Generic env (`GROK_MOONSHOT_API_KEY` or `MOONSHOT_API_KEY`)
-4. `[platforms.<id>].api_key` in config.toml
+4. UI-pasted key from `/providers moonshot-cn <api_key>` (stored in
+   `~/.grok/auth.json` under `platform/moonshot-cn`)
+5. `[platforms.<id>].api_key` in config.toml
+
+### TUI setup
+
+```
+/providers
+/providers moonshot-cn sk-...
+/model moonshot-cn/kimi-k3
+```
+
+Clear a stored key with `/providers moonshot-cn clear`.
 
 API keys are never written back into re-serialized config dumps and must not
 be committed to shared repos.

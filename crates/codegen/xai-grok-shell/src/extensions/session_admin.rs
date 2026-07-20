@@ -13,6 +13,7 @@
 //! - `x.ai/internal/reload_skills`          skills file watcher fan-out
 //! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
 //! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
+//! - `x.ai/internal/set_platform_api_key`   persist a BYOK platform key + restamp
 //! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
 //! - `x.ai/plugins/reload`                  rebuild shared plugin registry
 //! - `x.ai/commands/list`                   list slash commands
@@ -47,6 +48,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/internal/reload_skills" => handle_reload_skills(agent),
         "x.ai/internal/reload_models" => handle_reload_models(agent),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
+        "x.ai/internal/set_platform_api_key" => handle_set_platform_api_key(agent, args),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
         "x.ai/commands/list" => handle_commands_list(agent, args).await,
@@ -613,6 +615,70 @@ fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
     ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+// internal/set_platform_api_key
+
+/// Persist a third-party platform API key (from TUI `/providers`) and restamp
+/// the model catalog so locked models unlock without a restart.
+///
+/// OAuth platforms (Kimi Code) are rejected — use `/login kimi` instead.
+/// Empty `apiKey` clears the stored key.
+fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SetPlatformApiKeyRequest {
+        platform: String,
+        #[serde(default)]
+        api_key: String,
+    }
+
+    let req: SetPlatformApiKeyRequest = parse_params(args)?;
+    let platform_id = xai_grok_models::PlatformId::parse(req.platform.trim()).ok_or_else(|| {
+        acp::Error::invalid_params().data(format!(
+            "unknown platform '{}'; run /providers for the list",
+            req.platform.trim()
+        ))
+    })?;
+    if platform_id.uses_oauth() {
+        return Err(acp::Error::invalid_params().data(format!(
+            "{} uses OAuth — run /login kimi instead of pasting an API key",
+            platform_id.display_name()
+        )));
+    }
+
+    let home = xai_grok_config::grok_home();
+    crate::auth::store_platform_api_key(&home, platform_id.as_str(), &req.api_key)
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+
+    // Re-stamp catalog + live-fetch so models unlock immediately.
+    agent.models_manager.restamp_platform_credentials();
+    agent.sync_process_static_api_key(None);
+
+    let prefix = format!("{}/", platform_id.as_str());
+    let unlocked = agent
+        .models_manager
+        .models()
+        .iter()
+        .filter(|(id, entry)| {
+            id.starts_with(&prefix) && entry.info.supported_in_api && entry.has_own_credentials()
+        })
+        .count();
+    let cleared = req.api_key.trim().is_empty();
+    tracing::info!(
+        platform = platform_id.as_str(),
+        unlocked,
+        cleared,
+        "platform API key updated via /providers"
+    );
+    ExtMethodResult::success(serde_json::json!({
+        "platform": platform_id.as_str(),
+        "displayName": platform_id.display_name(),
+        "cleared": cleared,
+        "modelsUnlocked": unlocked,
+    }))
+    .to_ext_response()
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
 fn handle_auth_cleared(agent: &MvpAgent) -> ExtResult {
