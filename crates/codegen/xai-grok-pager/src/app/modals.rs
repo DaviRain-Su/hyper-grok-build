@@ -1818,10 +1818,6 @@ impl AgentView {
                     id: 0,
                 },
             ];
-            // Backing storage for the `/model` picker's dynamic Tab hint; must
-            // outlive `picker_shortcuts` which borrows it (assigned in the
-            // ArgPicker arm below).
-            let mut model_tab_hint: Option<String> = None;
 
             // EditConfirm has no draw arm and is no longer armed anywhere (the
             // dirty pane-switch lock blocks instead) — arming it would capture
@@ -1941,15 +1937,21 @@ impl AgentView {
                 let compact = self.scrollback.appearance().prompt.compact;
                 // `/model` scoping hints (model phase): Tab toggles the full
                 // catalog (locked BYOK rows), ^X hides a model from the list.
+                // Owned string must outlive `picker_shortcuts` which borrows it.
                 let locked_count = original_items.iter().filter(|i| i.locked).count();
-                if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
-                    model_tab_hint = if *show_all {
-                        Some("Tab scoped".to_string())
-                    } else if locked_count > 0 {
-                        Some(format!("Tab all (+{locked_count} 🔒)"))
+                let model_tab_hint: Option<String> =
+                    if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
+                        if *show_all {
+                            Some("Tab scoped".to_string())
+                        } else if locked_count > 0 {
+                            Some(format!("Tab all (+{locked_count} 🔒)"))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };
+                if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
                     if let Some(hint) = &model_tab_hint {
                         picker_shortcuts.push(Shortcut {
                             label: hint,
