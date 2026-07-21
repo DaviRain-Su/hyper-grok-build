@@ -777,11 +777,12 @@ fn responses_config(base_url: String, doom_loop: Option<DoomLoopRecoveryPolicy>)
     cfg
 }
 
-/// ChatGPT/Codex may inject a non-standard `response.metadata` frame into an
-/// otherwise valid Responses stream. It is side-band data, so the actor should
-/// skip it, preserve the surrounding output, and avoid a deterministic retry.
+/// ChatGPT/Codex may inject non-standard side-band frames into an otherwise
+/// valid Responses stream (`keepalive` heartbeats and `response.metadata`).
+/// Neither maps to async-openai's `ResponseStreamEvent`, so the actor must
+/// skip them, preserve surrounding output, and avoid a deterministic retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_metadata_frame_is_skipped_without_retry() {
+async fn responses_auxiliary_frames_are_skipped_without_retry() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -795,12 +796,35 @@ async fn responses_metadata_frame_is_skipped_without_retry() {
                     "an answer",
                     "test-model",
                 );
+                // Wire form used by ChatGPT/Codex + async-openai's own skip:
+                // `event: keepalive` with a typed JSON payload.
                 events.insert(
                     1,
+                    SseEvent::with_event(
+                        "keepalive",
+                        json!({
+                            "type": "keepalive"
+                        })
+                        .to_string(),
+                    ),
+                );
+                // Data-only form: no SSE event name, only the JSON type tag.
+                events.insert(
+                    2,
+                    SseEvent::data(
+                        json!({
+                            "type": "keepalive",
+                            "sequence_number": 1
+                        })
+                        .to_string(),
+                    ),
+                );
+                events.insert(
+                    3,
                     SseEvent::data(
                         json!({
                             "type": "response.metadata",
-                            "sequence_number": 1,
+                            "sequence_number": 2,
                             "metadata": { "request_id": "req_metadata" }
                         })
                         .to_string(),
@@ -822,11 +846,11 @@ async fn responses_metadata_frame_is_skipped_without_retry() {
     );
 
     let result = handle
-        .submit_and_collect(RequestId::from("req-metadata"), user_request("hi"))
+        .submit_and_collect(RequestId::from("req-auxiliary"), user_request("hi"))
         .await;
     server.shutdown();
 
-    let (response, _metrics) = result.expect("metadata frame should not fail the turn");
+    let (response, _metrics) = result.expect("auxiliary frames should not fail the turn");
     assert_eq!(response.assistant_text(), "an answer");
     assert_eq!(counter.load(Ordering::SeqCst), 1, "must not retry");
 }
