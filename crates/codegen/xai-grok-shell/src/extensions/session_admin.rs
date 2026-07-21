@@ -13,6 +13,7 @@
 //! - `x.ai/internal/reload_skills`          skills file watcher fan-out
 //! - `x.ai/internal/reload_models`          model list hot-reload from config.toml
 //! - `x.ai/internal/reload_models_cache`    model catalog hot-reload from disk cache
+//! - `x.ai/internal/reload_subagent_models` subagent model-pin hot-reload
 //! - `x.ai/internal/set_platform_api_key`   persist a BYOK platform key + restamp
 //! - `x.ai/internal/auth_cleared`           auth hot-clear cleanup
 //! - `x.ai/plugins/reload`                  rebuild shared plugin registry
@@ -48,6 +49,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/internal/reload_skills" => handle_reload_skills(agent),
         "x.ai/internal/reload_models" => handle_reload_models(agent),
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
+        "x.ai/internal/reload_subagent_models" => handle_reload_subagent_models(agent),
         "x.ai/internal/set_platform_api_key" => handle_set_platform_api_key(agent, args),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
@@ -613,6 +615,30 @@ fn handle_reload_models_cache(agent: &MvpAgent) -> ExtResult {
     agent.models_manager.reload_from_disk_cache();
     agent.sync_process_static_api_key(None);
     ExtMethodResult::success(serde_json::json!({ "reloaded": true }))
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+// internal/reload_subagent_models
+
+/// Re-resolve `[subagents.models]` pins from config.toml. Called by the
+/// config hot-reload watcher when the pin table changes — typically an edit
+/// from the TUI `/agents` modal (`m` on an agent).
+///
+/// Only the pin map is refreshed: `subagents_enabled` honors CLI/env intent
+/// from startup, and `subagent_toggle` is baked into the built toolset (a
+/// live swap would require an agent rebuild). The next subagent spawn reads
+/// `subagent_model_overrides` when building its `SubagentSpawnContext`, so
+/// new pins apply without restarting the session.
+fn handle_reload_subagent_models(agent: &MvpAgent) -> ExtResult {
+    let disk_config = crate::config::load_effective_config()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    // `cli_flag` only gates `enabled` (which we deliberately do not touch);
+    // `models` is parsed straight from the `[subagents]` table.
+    let resolved = crate::config::SubagentsConfig::resolve(false, &disk_config);
+    let count = resolved.models.len();
+    agent.cfg.borrow_mut().subagent_model_overrides = resolved.models;
+    ExtMethodResult::success(serde_json::json!({ "reloaded": true, "pins": count }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }

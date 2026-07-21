@@ -1670,6 +1670,10 @@ per-agent pin overrides that: `[subagents.models].<agent>` (highest priority),
 then the agent definition's `model`. Both pins apply unconditionally,
 regardless of which model the parent is on.
 
+Pins can be edited from the TUI (`/agents` → select agent → `m`) and are
+hot-reloaded: the config watcher detects the `[subagents.models]` change and
+live sessions apply it to the next subagent spawn.
+
 ### Roles and Personas
 
 Roles define reusable capability/model defaults. Personas layer tone and behavior instructions onto the child prompt.

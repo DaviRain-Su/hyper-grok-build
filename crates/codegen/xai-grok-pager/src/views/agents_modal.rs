@@ -53,6 +53,28 @@ impl AgentsTab {
         }
     }
 }
+/// A catalog entry offered by the model-pin picker: canonical id plus the
+/// display name from the session's model catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub name: String,
+}
+/// What the model picker is editing: an agent type's `[subagents.models]`
+/// pin, or a persona definition's own `model` field written into its file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelEditTarget {
+    /// Agent type name; pin lives in `~/.grok/config.toml`.
+    Agent(String),
+    /// Persona name + source file. `applies_live` is true for project-scope
+    /// files (re-discovered at every spawn); user-scope personas load at
+    /// session start, so their edits apply in new sessions.
+    Persona {
+        name: String,
+        path: PathBuf,
+        applies_live: bool,
+    },
+}
 /// A single entry in the agents list.
 pub struct AgentListEntry {
     pub name: String,
@@ -248,6 +270,25 @@ pub struct AgentsModalState {
     pub(crate) content_rect: Option<Rect>,
     pub persona_input: Option<PersonaCreateInput>,
     pub persona_confirm: Option<PersonaConfirmAction>,
+    /// Inline model-pin editor (either tab). While `Some`, the tab shows a
+    /// filterable picker instead of its list: typing narrows the catalog,
+    /// ↑/↓ moves, Enter applies, Esc cancels.
+    model_input: Option<LineEditor>,
+    /// Agent pin or persona definition the model editor applies to.
+    model_edit_target: Option<ModelEditTarget>,
+    /// Highlighted row in the model picker: 0 is the synthetic "inherit"
+    /// row, 1.. indexes into the current filtered match list.
+    model_picker_selected: usize,
+    /// `[subagents.models]` pins from the effective config, loaded with the
+    /// agent list and reloaded after every successful edit.
+    pub model_pins: HashMap<String, String>,
+    /// Current `model` values of persona definitions, keyed by persona name
+    /// and read from each persona's source file (display + picker preselect).
+    persona_models: HashMap<String, String>,
+    /// Catalog entries offered by the model picker and used for validation.
+    /// Empty (e.g. no session yet) falls back to free-text submit without a
+    /// picker list.
+    available_models: Vec<ModelChoice>,
     /// Inline message shown briefly. Cleared on next action.
     pub message: Option<AgentsModalMessage>,
     /// Working directory for rebuilding the agent list.
@@ -290,10 +331,16 @@ impl AgentsModalState {
         bundle: &BundleState,
         model_agent_type: Option<&str>,
         active_agent: Option<String>,
+        available_models: Vec<ModelChoice>,
     ) -> Self {
         let agents = build_agent_list(cwd, toggle);
         let personas = merge_persona_lists(bundle, cwd);
         let default_agent = resolve_default_agent_name(cwd, model_agent_type);
+        let model_pins = load_agent_model_pins();
+        let persona_models = load_persona_models(&personas);
+        let mut available_models = available_models;
+        available_models.sort_by(|a, b| a.id.cmp(&b.id));
+        available_models.dedup_by(|a, b| a.id == b.id);
         Self {
             window: ModalWindowState::with_tabs(AgentsTab::ALL.len()),
             active_tab: AgentsTab::Agents,
@@ -306,6 +353,12 @@ impl AgentsModalState {
             content_rect: None,
             persona_input: None,
             persona_confirm: None,
+            model_input: None,
+            model_edit_target: None,
+            model_picker_selected: 0,
+            model_pins,
+            persona_models,
+            available_models,
             message: None,
             cwd: cwd.to_path_buf(),
             bundle: bundle.clone(),
@@ -322,6 +375,7 @@ impl AgentsModalState {
     fn rebuild_agents(&mut self) {
         let toggle = load_agent_toggle();
         self.agents = build_agent_list(&self.cwd, &toggle);
+        self.model_pins = load_agent_model_pins();
         if self.selected >= self.agents.len() {
             self.selected = self.agents.len().saturating_sub(1);
         }
@@ -329,6 +383,7 @@ impl AgentsModalState {
     /// Rebuild persona list from bundle cache + local disk.
     pub fn refresh_personas(&mut self) {
         self.personas = merge_persona_lists(&self.bundle, &self.cwd);
+        self.persona_models = load_persona_models(&self.personas);
         self.persona_expanded.clear();
         if self.persona_selected >= self.personas.len() {
             self.persona_selected = self.personas.len().saturating_sub(1);
@@ -773,11 +828,145 @@ pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
         .map_err(|e| format!("Failed to write config.toml: {e}"))?;
     Ok(())
 }
+/// Load the `[subagents.models]` pin map from the effective config.
+pub fn load_agent_model_pins() -> HashMap<String, String> {
+    let root = match xai_grok_shell::config::load_effective_config() {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+    parse_model_pins(&root)
+}
+/// Extract the `[subagents.models]` string map from a resolved config value.
+fn parse_model_pins(root: &toml::Value) -> HashMap<String, String> {
+    root.get("subagents")
+        .and_then(|s| s.get("models"))
+        .and_then(|m| m.as_table())
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+/// Set or clear an agent's model pin via `[subagents.models]` in config.toml.
+///
+/// Pass `Some(model_id)` to pin the agent to that catalog id, `None` to
+/// clear the pin so the agent inherits the session model again.
+pub fn set_agent_model_pin(name: &str, model_id: Option<&str>) -> Result<(), String> {
+    let config_path = xai_grok_config::grok_home().join("config.toml");
+    set_agent_model_pin_at(&config_path, name, model_id)
+}
+/// Path-injectable core of [`set_agent_model_pin`].
+fn set_agent_model_pin_at(
+    config_path: &Path,
+    name: &str,
+    model_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Some(mut doc) = crate::config_toml_edit::read_config_document_for_edit(config_path) else {
+        return Err("Could not read or parse config.toml".to_string());
+    };
+    if !doc.contains_key("subagents") {
+        doc["subagents"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let subagents = doc["subagents"]
+        .as_table_mut()
+        .ok_or("subagents is not a table")?;
+    match model_id {
+        Some(id) => {
+            if !subagents.contains_key("models") {
+                subagents["models"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let models = subagents["models"]
+                .as_table_mut()
+                .ok_or("subagents.models is not a table")?;
+            models[name] = toml_edit::value(id);
+        }
+        None => {
+            if let Some(models) = subagents
+                .get_mut("models")
+                .and_then(|m| m.as_table_mut())
+            {
+                models.remove(name);
+                // Drop the table once it holds no pins so hand-edited
+                // configs don't accumulate an empty `[subagents.models]`.
+                if models.is_empty() {
+                    subagents.remove("models");
+                }
+            }
+        }
+    }
+    std::fs::write(config_path, doc.to_string())
+        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
+    Ok(())
+}
+/// Read each listed persona's `model` override from its source file.
+/// Personas without a source file (inline `[subagents.personas]` entries)
+/// or without the key simply have no entry.
+fn load_persona_models(personas: &[PersonaDetail]) -> HashMap<String, String> {
+    personas
+        .iter()
+        .filter_map(|p| {
+            let path = p.source_path.as_ref()?;
+            let model = read_persona_model(Path::new(path))?;
+            Some((p.name.clone(), model))
+        })
+        .collect()
+}
+/// Read the top-level `model` key from a persona `.toml` file.
+fn read_persona_model(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let doc: toml_edit::DocumentMut = content.parse().ok()?;
+    doc.get("model")?.as_str().map(str::to_owned)
+}
+/// Set or clear the `model` key in a persona's `.toml` file.
+fn set_persona_model_at(path: &Path, model_id: Option<&str>) -> Result<(), String> {
+    let Some(mut doc) = crate::config_toml_edit::read_config_document_for_edit(path) else {
+        return Err(format!("Could not read or parse {}", path.display()));
+    };
+    match model_id {
+        Some(id) => {
+            doc["model"] = toml_edit::value(id);
+        }
+        None => {
+            doc.as_table_mut().remove("model");
+        }
+    }
+    std::fs::write(path, doc.to_string())
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    Ok(())
+}
+/// The model the picker target currently resolves to (for the `(current)`
+/// marker and preselecting the picker row).
+fn current_target_model(state: &AgentsModalState) -> Option<&str> {
+    match state.model_edit_target.as_ref()? {
+        ModelEditTarget::Agent(name) => state.model_pins.get(name).map(String::as_str),
+        ModelEditTarget::Persona { name, .. } => {
+            state.persona_models.get(name).map(String::as_str)
+        }
+    }
+}
 /// Format detail lines for an expanded agent entry.
-pub fn format_agent_detail(entry: &AgentListEntry) -> Vec<String> {
+///
+/// `pin` is the agent's `[subagents.models]` override, if any — it wins over
+/// the agent definition's `model` at spawn time and is labeled as such.
+pub fn format_agent_detail(entry: &AgentListEntry, pin: Option<&str>) -> Vec<String> {
     let def = &entry.definition;
     let mut lines = Vec::new();
-    lines.push(format!("  Model: {}", def.model));
+    match pin {
+        Some(id) => lines.push(format!("  Model: {id} (pinned — [subagents.models])")),
+        None => match &def.model {
+            xai_grok_agent::config::ModelOverride::Inherit => {
+                lines.push("  Model: inherit (follows the session model)".to_string());
+            }
+            xai_grok_agent::config::ModelOverride::Override(id) => {
+                lines.push(format!("  Model: {id} (from agent definition)"));
+            }
+        },
+    }
     let mode_label = match def.prompt_mode {
         xai_grok_agent::config::PromptMode::Extend => "extend",
         xai_grok_agent::config::PromptMode::Full => "full",
@@ -1045,8 +1234,50 @@ pub fn render_agents_modal(
         AgentsTab::Personas => render_personas_tab(buf, &content_area, state, theme),
     }
 }
+/// Footer shortcuts while the model picker is open (either tab).
+fn model_picker_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
+    if state.available_models.is_empty() {
+        return vec![
+            Shortcut {
+                label: "Enter save (empty = inherit)",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
+                label: "Esc cancel",
+                clickable: false,
+                id: 0,
+            },
+        ];
+    }
+    vec![
+        Shortcut {
+            label: "type to filter",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
+            label: "\u{2191}/\u{2193} choose",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
+            label: "Enter apply",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
+            label: "Esc cancel",
+            clickable: false,
+            id: 0,
+        },
+    ]
+}
 /// Build footer shortcuts for the Agents tab.
 fn build_agents_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
+    if state.model_input.is_some() {
+        return model_picker_shortcuts(state);
+    }
     let mut shortcuts = vec![
         Shortcut {
             label: "j/k nav",
@@ -1084,6 +1315,11 @@ fn build_agents_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>>
             id: 0,
         },
         Shortcut {
+            label: "m model",
+            clickable: false,
+            id: 0,
+        },
+        Shortcut {
             label: "Tab switch tab",
             clickable: false,
             id: 0,
@@ -1099,6 +1335,9 @@ fn build_agents_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>>
 }
 /// Build footer shortcuts for the Personas tab.
 fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
+    if state.model_input.is_some() {
+        return model_picker_shortcuts(state);
+    }
     if state.persona_input.is_some() {
         vec![
             Shortcut {
@@ -1163,6 +1402,11 @@ fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a
                 id: 0,
             },
             Shortcut {
+                label: "m model",
+                clickable: false,
+                id: 0,
+            },
+            Shortcut {
                 label: "d delete",
                 clickable: false,
                 id: 0,
@@ -1189,6 +1433,17 @@ fn render_agents_search(
     focused: bool,
     theme: &Theme,
 ) {
+    render_prefixed_input(buf, area, "/ ", editor, focused, theme);
+}
+/// Render a single-line modal input with a styled prefix and block cursor.
+fn render_prefixed_input(
+    buf: &mut Buffer,
+    area: Rect,
+    prefix: &str,
+    editor: &LineEditor,
+    focused: bool,
+    theme: &Theme,
+) {
     if area.width == 0 {
         return;
     }
@@ -1198,7 +1453,6 @@ fn render_agents_search(
             cell.set_style(Style::default().fg(theme.gray_dim));
         }
     }
-    let prefix = "/ ";
     let prefix_width = prefix.width() as u16;
     let painted_prefix_width = prefix_width.min(area.width);
     buf.set_span(
@@ -1234,6 +1488,148 @@ fn render_agents_search(
         }
     }
 }
+/// Render the model-pin editor input and, with a catalog, the picker rows
+/// below it. Returns true when the picker owns the rest of the content area
+/// (caller should skip its normal list); without a catalog the editor stays
+/// a single free-text line above the caller's list.
+fn render_model_picker_block(
+    buf: &mut Buffer,
+    content_area: &Rect,
+    y: u16,
+    state: &mut AgentsModalState,
+    theme: &Theme,
+) -> bool {
+    let Some(ref editor) = state.model_input else {
+        return false;
+    };
+    let prefix = match state.model_edit_target.as_ref() {
+        Some(ModelEditTarget::Agent(name)) => format!("{name} model: "),
+        Some(ModelEditTarget::Persona { name, .. }) => format!("persona {name} model: "),
+        None => "model: ".to_string(),
+    };
+    render_prefixed_input(
+        buf,
+        Rect::new(content_area.x, y, content_area.width, 1),
+        &prefix,
+        editor,
+        true,
+        theme,
+    );
+    if state.available_models.is_empty() {
+        return false;
+    }
+    render_model_picker_rows(buf, content_area, y + 2, state, theme);
+    true
+}
+/// Render the model picker rows below the filter input: an "inherit" row
+/// followed by the filtered catalog entries. Row 0 is always inherit.
+fn render_model_picker_rows(
+    buf: &mut Buffer,
+    content_area: &Rect,
+    y: u16,
+    state: &mut AgentsModalState,
+    theme: &Theme,
+) {
+    let visible_height = (content_area.y + content_area.height).saturating_sub(y) as usize;
+    if visible_height == 0 {
+        return;
+    }
+    let query = state
+        .model_input
+        .as_ref()
+        .map(|e| e.text().to_string())
+        .unwrap_or_default();
+    let matches = filtered_model_matches(&query, &state.available_models);
+    let rows = 1 + matches.len();
+    let selected = state.model_picker_selected.min(rows.saturating_sub(1));
+    let scroll = if selected >= visible_height {
+        selected + 1 - visible_height
+    } else {
+        0
+    };
+    let current_pin = current_target_model(state);
+    let right = content_area.x + content_area.width;
+    for vi in 0..visible_height {
+        let ri = scroll + vi;
+        if ri >= rows {
+            break;
+        }
+        let row_y = y + vi as u16;
+        let is_selected = ri == selected;
+        let bg = if is_selected {
+            Some(theme.bg_highlight)
+        } else {
+            None
+        };
+        if let Some(bg_color) = bg {
+            let bg_style = Style::default().bg(bg_color);
+            for x in content_area.x..right {
+                if let Some(cell) = buf.cell_mut((x, row_y)) {
+                    cell.set_style(bg_style);
+                }
+            }
+        }
+        if ri == 0 {
+            let mut label = "  inherit — follow the session model".to_string();
+            if current_pin.is_none() {
+                label.push_str(" (current)");
+            }
+            let mut style = Style::default().fg(theme.gray_dim);
+            if let Some(bg_color) = bg {
+                style = style.bg(bg_color);
+            }
+            let truncated: String = label.chars().take(content_area.width as usize).collect();
+            buf.set_string(content_area.x, row_y, truncated, style);
+            continue;
+        }
+        let choice = matches[ri - 1];
+        let mut x = content_area.x + 2;
+        let mut id_style = Style::default().fg(theme.text_primary);
+        if is_selected {
+            id_style = id_style.add_modifier(Modifier::BOLD);
+        }
+        if let Some(bg_color) = bg {
+            id_style = id_style.bg(bg_color);
+        }
+        let id_w = choice.id.width();
+        let remaining = right.saturating_sub(x) as usize;
+        let id_display: String = choice.id.chars().take(remaining).collect();
+        buf.set_string(x, row_y, &id_display, id_style);
+        x += id_w.min(remaining) as u16;
+        if current_pin.is_some_and(|pin| pin == choice.id) {
+            let cur_label = " (current)";
+            let remaining = right.saturating_sub(x) as usize;
+            if remaining >= cur_label.len() {
+                let mut cur_style = Style::default().fg(theme.accent_success);
+                if let Some(bg_color) = bg {
+                    cur_style = cur_style.bg(bg_color);
+                }
+                buf.set_string(x, row_y, cur_label, cur_style);
+                x += cur_label.len() as u16;
+            }
+        }
+        if !choice.name.is_empty() && !choice.name.eq_ignore_ascii_case(&choice.id) {
+            let remaining = right.saturating_sub(x) as usize;
+            if remaining >= 3 {
+                let mut name_style = Style::default().fg(theme.gray_dim);
+                if let Some(bg_color) = bg {
+                    name_style = name_style.bg(bg_color);
+                }
+                let name_label = format!("  {}", choice.name);
+                let truncated: String = name_label.chars().take(remaining).collect();
+                buf.set_string(x, row_y, truncated, name_style);
+            }
+        }
+    }
+    if matches.is_empty() && !query.trim().is_empty() && visible_height > 1 {
+        buf.set_string(
+            content_area.x,
+            y + 1,
+            "  No matching models",
+            Style::default().fg(theme.gray_dim),
+        );
+    }
+}
 /// Render the Agents tab content (existing agents list).
 fn render_agents_tab(
     buf: &mut Buffer,
@@ -1245,6 +1641,9 @@ fn render_agents_tab(
     let w = content_area.width as usize;
     if let Some(ref msg) = state.message {
         y = render_modal_message_line(buf, content_area.x, y, w, msg, theme);
+    }
+    if render_model_picker_block(buf, content_area, y, state, theme) {
+        return;
     }
     if state.search_active || !state.search_query().is_empty() {
         render_agents_search(
@@ -1291,7 +1690,10 @@ fn render_agents_tab(
             }
         }
         if entry.expanded {
-            let details = format_agent_detail(entry);
+            let details = format_agent_detail(
+                entry,
+                state.model_pins.get(&entry.name).map(String::as_str),
+            );
             for line in details {
                 rows.push(FlatRow::Detail(line));
             }
@@ -1451,6 +1853,19 @@ fn render_agents_tab(
                         x += off_label.len() as u16;
                     }
                 }
+                if let Some(pin) = state.model_pins.get(&entry.name) {
+                    let pin_label = format!(" \u{2192} {pin}");
+                    let pin_remaining =
+                        (content_area.x + content_area.width).saturating_sub(x) as usize;
+                    if pin_remaining >= pin_label.width() {
+                        let mut pin_style = Style::default().fg(theme.gray_dim);
+                        if let Some(bg_color) = bg {
+                            pin_style = pin_style.bg(bg_color);
+                        }
+                        buf.set_string(x, row_y, &pin_label, pin_style);
+                        x += pin_label.width() as u16;
+                    }
+                }
                 let (badge_text, mut badge_style) = scope_badge(entry.scope, theme);
                 if let Some(bg_color) = bg {
                     badge_style = badge_style.bg(bg_color);
@@ -1515,6 +1930,9 @@ fn render_personas_tab(
     if let Some(ref msg) = state.message {
         y = render_modal_message_line(buf, content_area.x, y, w, msg, theme);
     }
+    if render_model_picker_block(buf, content_area, y, state, theme) {
+        return;
+    }
     let blurb = "Personas shape subagent behavior via the persona parameter on spawn_subagent.";
     let blurb_style = Style::default().fg(theme.gray_dim);
     buf.set_string(content_area.x, y, blurb, blurb_style);
@@ -1574,6 +1992,9 @@ fn render_personas_tab(
                 }
                 rows.push(PersonaFlatRow::Tags(idx, tags.join(" \u{00b7} ")));
             }
+            if let Some(model) = state.persona_models.get(&persona.name) {
+                rows.push(PersonaFlatRow::Model(idx, format!("model: {model}")));
+            }
             rows.push(PersonaFlatRow::Hint(
                 idx,
                 "Enter to view full definition".to_string(),
@@ -1588,7 +2009,10 @@ fn render_personas_tab(
     while selected_end < rows.len()
         && matches!(
             rows[selected_end],
-            PersonaFlatRow::Description(..) | PersonaFlatRow::Tags(..) | PersonaFlatRow::Hint(..)
+            PersonaFlatRow::Description(..)
+                | PersonaFlatRow::Tags(..)
+                | PersonaFlatRow::Model(..)
+                | PersonaFlatRow::Hint(..)
         )
     {
         selected_end += 1;
@@ -1729,6 +2153,27 @@ fn render_personas_tab(
                 let display = format!("[{tags}]");
                 buf.set_string(tag_x, row_y, &display, tag_style);
             }
+            PersonaFlatRow::Model(idx, label) => {
+                state.row_map.push((row_y, *idx));
+                let is_selected = *idx == state.persona_selected;
+                let bg = if is_selected {
+                    Some(theme.bg_highlight)
+                } else {
+                    None
+                };
+                let model_x = content_area.x + 4;
+                let mut model_style = Style::default().fg(theme.gray_dim);
+                if let Some(bg_color) = bg {
+                    model_style = model_style.bg(bg_color);
+                    let fill = Style::default().bg(bg_color);
+                    for cx in content_area.x..content_area.x + content_area.width {
+                        if let Some(cell) = buf.cell_mut((cx, row_y)) {
+                            cell.set_style(fill);
+                        }
+                    }
+                }
+                buf.set_string(model_x, row_y, label, model_style);
+            }
             PersonaFlatRow::Hint(idx, text) => {
                 state.row_map.push((row_y, *idx));
                 let is_selected = *idx == state.persona_selected;
@@ -1759,6 +2204,7 @@ enum PersonaFlatRow {
     Name(usize),
     Description(usize, String),
     Tags(usize, String),
+    Model(usize, String),
     Hint(usize, String),
 }
 fn next_persona_create_field(field: CreateField) -> CreateField {
@@ -1963,6 +2409,11 @@ fn clear_overlays_for_tab(state: &mut AgentsModalState, tab: AgentsTab) {
         }
         AgentsTab::Personas => {}
     }
+    // The model picker belongs to whichever tab opened it; switching tabs
+    // always cancels it.
+    state.model_input = None;
+    state.model_edit_target = None;
+    state.model_picker_selected = 0;
 }
 fn switch_agents_tab(state: &mut AgentsModalState, tab: AgentsTab) {
     clear_overlays_for_tab(state, tab);
@@ -1978,6 +2429,9 @@ pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
     }
     if state.persona_confirm.is_some() && state.active_tab == AgentsTab::Personas {
         return handle_persona_confirm_key(state, key);
+    }
+    if state.model_input.is_some() {
+        return handle_model_input_key(state, key);
     }
     if state.search_active {
         if key.code == KeyCode::Esc {
@@ -2049,6 +2503,14 @@ pub fn handle_agents_paste(state: &mut AgentsModalState, text: &str) -> AgentsMo
         }
         return finish_line_edit(outcome);
     }
+    if let Some(editor) = state.model_input.as_mut() {
+        let outcome = editor.insert_paste(text);
+        if outcome == LineEditOutcome::TextChanged {
+            state.message = None;
+            reset_picker_selection(state);
+        }
+        return finish_line_edit(outcome);
+    }
     if state.search_active {
         let outcome = state.search.insert_paste(text);
         if outcome == LineEditOutcome::TextChanged {
@@ -2073,6 +2535,224 @@ fn finish_line_edit(outcome: LineEditOutcome) -> AgentsModalOutcome {
         | LineEditOutcome::HandledNoChange
         | LineEditOutcome::CursorChanged => AgentsModalOutcome::Changed,
         LineEditOutcome::Unhandled => AgentsModalOutcome::Unchanged,
+    }
+}
+/// Handle keys while the inline model-pin editor is open (Agents tab).
+fn handle_model_input_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
+    let has_catalog = !state.available_models.is_empty();
+    match key.code {
+        KeyCode::Esc => {
+            state.model_input = None;
+            state.model_edit_target = None;
+            state.model_picker_selected = 0;
+            AgentsModalOutcome::Changed
+        }
+        KeyCode::Enter => {
+            submit_model_input(state);
+            AgentsModalOutcome::Changed
+        }
+        KeyCode::Up if has_catalog => {
+            state.model_picker_selected = state.model_picker_selected.saturating_sub(1);
+            AgentsModalOutcome::Changed
+        }
+        KeyCode::Down if has_catalog => {
+            if state.model_picker_selected + 1 < picker_row_count(state) {
+                state.model_picker_selected += 1;
+            }
+            AgentsModalOutcome::Changed
+        }
+        _ => {
+            let Some(editor) = state.model_input.as_mut() else {
+                return AgentsModalOutcome::Unchanged;
+            };
+            let outcome = editor.handle_key(key);
+            if outcome == LineEditOutcome::TextChanged {
+                reset_picker_selection(state);
+            }
+            finish_line_edit(outcome)
+        }
+    }
+}
+/// Picker height in rows: the synthetic inherit row plus filtered matches.
+fn picker_row_count(state: &AgentsModalState) -> usize {
+    let query = state.model_input.as_ref().map(|e| e.text()).unwrap_or("");
+    1 + filtered_model_matches(query, &state.available_models).len()
+}
+/// Reset the picker highlight after the filter text changed: with a query
+/// and at least one match, land on the first match so Enter reads as "pick
+/// the best match"; otherwise fall back to the inherit row.
+fn reset_picker_selection(state: &mut AgentsModalState) {
+    let query = state
+        .model_input
+        .as_ref()
+        .map(|e| e.text().trim().to_string())
+        .unwrap_or_default();
+    let has_match = !filtered_model_matches(&query, &state.available_models).is_empty();
+    state.model_picker_selected = if !query.is_empty() && has_match { 1 } else { 0 };
+}
+/// Outcome of resolving the model-pin editor's raw text against the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PinEdit {
+    /// Empty input — clear the pin, inherit the session model again.
+    Clear,
+    /// Pin to this (canonicalized) catalog id.
+    Set(String),
+    /// Not a catalog id — keep the editor open and show this error.
+    Invalid(String),
+}
+/// Resolve the editor text into a pin action. With no catalog (e.g. the
+/// modal opened before a session existed) any non-empty id passes through —
+/// the shell already warns and falls back to inherit on unknown pins, so a
+/// hand-typed id for a not-yet-fetched catalog still works.
+fn resolve_pin_edit(raw: &str, available_models: &[ModelChoice]) -> PinEdit {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return PinEdit::Clear;
+    }
+    if available_models.is_empty() {
+        return PinEdit::Set(raw.to_string());
+    }
+    match available_models.iter().find(|c| c.id.eq_ignore_ascii_case(raw)) {
+        Some(c) => PinEdit::Set(c.id.clone()),
+        None => PinEdit::Invalid(format!(
+            "Unknown model: {raw} — use a catalog id (see /model); editor kept open"
+        )),
+    }
+}
+/// Catalog entries matching the picker filter, best first: case-insensitive
+/// prefix matches (on id or display name) outrank substring matches.
+fn filtered_model_matches<'a>(query: &str, available: &'a [ModelChoice]) -> Vec<&'a ModelChoice> {
+    let query = query.trim();
+    if query.is_empty() {
+        return available.iter().collect();
+    }
+    let q = query.to_ascii_lowercase();
+    let mut prefix: Vec<&ModelChoice> = Vec::new();
+    let mut substring: Vec<&ModelChoice> = Vec::new();
+    for choice in available {
+        let id = choice.id.to_ascii_lowercase();
+        let name = choice.name.to_ascii_lowercase();
+        if id.starts_with(&q) || name.starts_with(&q) {
+            prefix.push(choice);
+        } else if id.contains(&q) || name.contains(&q) {
+            substring.push(choice);
+        }
+    }
+    prefix.extend(substring);
+    prefix
+}
+/// Submit action chosen from the picker state (catalog present).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PickerSubmit {
+    /// Apply the highlighted row.
+    Apply(PinEdit),
+    /// The typed query matches no catalog entry — keep editing.
+    NoMatch(String),
+}
+/// Map the picker selection to a pin action. Row 0 is always "inherit";
+/// hitting Enter there with a non-matching query is an unknown-id typo,
+/// not an intentional clear.
+fn resolve_picker_submit(query: &str, available: &[ModelChoice], selected: usize) -> PickerSubmit {
+    debug_assert!(!available.is_empty());
+    let matches = filtered_model_matches(query, available);
+    if selected == 0 {
+        if !query.trim().is_empty() && matches.is_empty() {
+            return PickerSubmit::NoMatch(format!(
+                "Unknown model: {} — no catalog match; editor kept open",
+                query.trim()
+            ));
+        }
+        return PickerSubmit::Apply(PinEdit::Clear);
+    }
+    match matches.get(selected - 1) {
+        Some(choice) => PickerSubmit::Apply(PinEdit::Set(choice.id.clone())),
+        // Stale selection past the filtered tail — treat as inherit rather
+        // than pinning the wrong model.
+        None => PickerSubmit::Apply(PinEdit::Clear),
+    }
+}
+/// Save the model picker. With a catalog, Enter applies the highlighted row
+/// (inherit or a model); without one, falls back to free-text resolution.
+/// Agent targets write a `[subagents.models]` pin (hot-reloaded, next spawn);
+/// persona targets write the definition's own `model` key into its file.
+fn submit_model_input(state: &mut AgentsModalState) {
+    let Some(target) = state.model_edit_target.clone() else {
+        state.model_input = None;
+        return;
+    };
+    let raw = state
+        .model_input
+        .as_ref()
+        .map(|e| e.text().to_string())
+        .unwrap_or_default();
+    let edit = if state.available_models.is_empty() {
+        match resolve_pin_edit(&raw, &state.available_models) {
+            edit @ (PinEdit::Clear | PinEdit::Set(_)) => edit,
+            PinEdit::Invalid(msg) => {
+                state.message = Some(AgentsModalMessage::error(msg));
+                return;
+            }
+        }
+    } else {
+        match resolve_picker_submit(&raw, &state.available_models, state.model_picker_selected) {
+            PickerSubmit::Apply(edit) => edit,
+            PickerSubmit::NoMatch(msg) => {
+                state.message = Some(AgentsModalMessage::error(msg));
+                return;
+            }
+        }
+    };
+    let (pin, what) = match edit {
+        PinEdit::Clear => (None, "inherits the session model again".to_string()),
+        PinEdit::Set(model_id) => (Some(model_id.clone()), format!("\u{2192} {model_id}")),
+        PinEdit::Invalid(msg) => {
+            state.message = Some(AgentsModalMessage::error(msg));
+            return;
+        }
+    };
+    let (result, name, applies) = match &target {
+        ModelEditTarget::Agent(name) => (
+            set_agent_model_pin(name, pin.as_deref()),
+            name.clone(),
+            "applies to the next spawn",
+        ),
+        ModelEditTarget::Persona {
+            name,
+            path,
+            applies_live,
+        } => (
+            set_persona_model_at(path, pin.as_deref()),
+            format!("persona {name}"),
+            if *applies_live {
+                "applies to the next spawn"
+            } else {
+                "applies in new sessions"
+            },
+        ),
+    };
+    match result {
+        Ok(()) => {
+            match &target {
+                ModelEditTarget::Agent(_) => state.model_pins = load_agent_model_pins(),
+                ModelEditTarget::Persona { name, .. } => match pin.as_deref() {
+                    Some(id) => {
+                        state.persona_models.insert(name.clone(), id.to_string());
+                    }
+                    None => {
+                        state.persona_models.remove(name);
+                    }
+                },
+            }
+            state.message = Some(AgentsModalMessage::success(format!(
+                "{name} {what} — {applies}"
+            )));
+            state.model_input = None;
+            state.model_edit_target = None;
+            state.model_picker_selected = 0;
+        }
+        Err(e) => {
+            state.message = Some(AgentsModalMessage::error(e));
+        }
     }
 }
 /// Handle key input specific to the Agents tab.
@@ -2177,6 +2857,22 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
             }
             AgentsModalOutcome::Changed
         }
+        KeyCode::Char('m') => {
+            if let Some(entry) = state.agents.get(state.selected) {
+                let name = entry.name.clone();
+                // Open with an empty filter so the full catalog is visible;
+                // land the highlight on the current pin when there is one.
+                state.model_picker_selected = state
+                    .model_pins
+                    .get(&name)
+                    .and_then(|pin| state.available_models.iter().position(|c| &c.id == pin))
+                    .map(|pos| pos + 1)
+                    .unwrap_or(0);
+                state.model_input = Some(LineEditor::default());
+                state.model_edit_target = Some(ModelEditTarget::Agent(name));
+            }
+            AgentsModalOutcome::Changed
+        }
         KeyCode::Char('t') => {
             if let Some(entry) = state.agents.get(state.selected) {
                 let new_enabled = !entry.enabled;
@@ -2257,6 +2953,39 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
         }
         KeyCode::Char('n') => {
             state.persona_input = Some(PersonaCreateInput::new());
+            AgentsModalOutcome::Changed
+        }
+        KeyCode::Char('m') => {
+            let Some(persona) = state.personas.get(state.persona_selected) else {
+                return AgentsModalOutcome::Unchanged;
+            };
+            if !persona_is_editable(persona) {
+                state.message = Some(AgentsModalMessage::error(
+                    "Bundled personas are read-only — copy to ~/.grok/personas to customize",
+                ));
+                return AgentsModalOutcome::Changed;
+            }
+            let Some(ref path_str) = persona.source_path else {
+                state.message = Some(AgentsModalMessage::error("Persona has no source file"));
+                return AgentsModalOutcome::Changed;
+            };
+            let name = persona.name.clone();
+            let path = PathBuf::from(path_str);
+            // Project-scope persona files are re-discovered at every spawn,
+            // so their edits apply live; user-scope load at session start.
+            let applies_live = path.starts_with(state.cwd.join(".grok"));
+            state.model_picker_selected = state
+                .persona_models
+                .get(&name)
+                .and_then(|model| state.available_models.iter().position(|c| &c.id == model))
+                .map(|pos| pos + 1)
+                .unwrap_or(0);
+            state.model_input = Some(LineEditor::default());
+            state.model_edit_target = Some(ModelEditTarget::Persona {
+                name,
+                path,
+                applies_live,
+            });
             AgentsModalOutcome::Changed
         }
         KeyCode::Char('d') => {
@@ -2744,6 +3473,12 @@ mod tests {
                 content_rect: None,
                 persona_input: None,
                 persona_confirm: None,
+                model_input: None,
+                model_edit_target: None,
+                model_picker_selected: 0,
+                model_pins: HashMap::new(),
+                persona_models: HashMap::new(),
+                available_models: Vec::new(),
                 message: None,
                 cwd: PathBuf::new(),
                 bundle: bundle.clone(),
@@ -2785,6 +3520,12 @@ mod tests {
             content_rect: None,
             persona_input: None,
             persona_confirm: None,
+            model_input: None,
+            model_edit_target: None,
+            model_picker_selected: 0,
+            model_pins: HashMap::new(),
+            persona_models: HashMap::new(),
+            available_models: Vec::new(),
             message: None,
             cwd: PathBuf::new(),
             bundle: BundleState::default(),
@@ -3314,5 +4055,238 @@ mod tests {
             .map(|x| inactive_buffer[(x, 4)].symbol())
             .collect::<String>();
         assert!(description_text.starts_with("1234567890"));
+    }
+    #[test]
+    fn parse_model_pins_extracts_string_entries() {
+        let root: toml::Value = toml::from_str(
+            r#"
+[subagents.models]
+explore = "kimi-code/kimi-for-coding"
+plan = "grok-4"
+ignored = 42
+"#,
+        )
+        .unwrap();
+        let pins = parse_model_pins(&root);
+        assert_eq!(pins.len(), 2);
+        assert_eq!(
+            pins.get("explore").map(String::as_str),
+            Some("kimi-code/kimi-for-coding")
+        );
+        assert_eq!(pins.get("plan").map(String::as_str), Some("grok-4"));
+    }
+    #[test]
+    fn parse_model_pins_missing_tables_yield_empty() {
+        let empty = toml::Value::Table(toml::map::Map::new());
+        assert!(parse_model_pins(&empty).is_empty());
+        let no_models: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
+        assert!(parse_model_pins(&no_models).is_empty());
+    }
+    #[test]
+    fn set_agent_model_pin_at_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n").expect("seed config");
+
+        set_agent_model_pin_at(&path, "explore", Some("kimi-code/kimi-for-coding")).unwrap();
+        set_agent_model_pin_at(&path, "plan", Some("grok-4")).unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            doc["subagents"]["models"]["explore"].as_str(),
+            Some("kimi-code/kimi-for-coding")
+        );
+        assert_eq!(doc["subagents"]["models"]["plan"].as_str(), Some("grok-4"));
+        assert_eq!(
+            doc["ui"]["theme"].as_str(),
+            Some("dark"),
+            "unrelated tables must survive pin edits"
+        );
+
+        set_agent_model_pin_at(&path, "explore", None).unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let models = doc["subagents"]["models"]
+            .as_table()
+            .expect("models table remains while plan is pinned");
+        assert!(models.get("explore").is_none());
+        assert_eq!(models["plan"].as_str(), Some("grok-4"));
+
+        // Clearing the last pin drops the now-empty `models` table.
+        set_agent_model_pin_at(&path, "plan", None).unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let subagents = doc["subagents"].as_table().expect("subagents table");
+        assert!(subagents.get("models").is_none());
+    }
+    #[test]
+    fn set_agent_model_pin_at_creates_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("config.toml");
+        set_agent_model_pin_at(&path, "explore", Some("grok-4")).unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            doc["subagents"]["models"]["explore"].as_str(),
+            Some("grok-4")
+        );
+    }
+    #[test]
+    fn resolve_pin_edit_empty_clears() {
+        assert_eq!(resolve_pin_edit("   ", &[]), PinEdit::Clear);
+        assert_eq!(
+            resolve_pin_edit("", &[choice("grok-4", "Grok 4")]),
+            PinEdit::Clear
+        );
+    }
+    #[test]
+    fn resolve_pin_edit_canonicalizes_catalog_case() {
+        let models = vec![choice("kimi-code/kimi-for-coding", "Kimi for Coding")];
+        assert_eq!(
+            resolve_pin_edit("Kimi-Code/Kimi-For-Coding", &models),
+            PinEdit::Set("kimi-code/kimi-for-coding".to_string())
+        );
+    }
+    #[test]
+    fn resolve_pin_edit_rejects_unknown_id() {
+        let models = vec![choice("grok-4", "Grok 4")];
+        match resolve_pin_edit("gpt-zero", &models) {
+            PinEdit::Invalid(msg) => assert!(msg.contains("gpt-zero")),
+            other => panic!("unknown id must be rejected, got {other:?}"),
+        }
+    }
+    #[test]
+    fn resolve_pin_edit_passes_through_without_catalog() {
+        assert_eq!(
+            resolve_pin_edit("future-provider/model", &[]),
+            PinEdit::Set("future-provider/model".to_string())
+        );
+    }
+    fn choice(id: &str, name: &str) -> ModelChoice {
+        ModelChoice {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+    #[test]
+    fn filtered_model_matches_empty_query_returns_all() {
+        let models = vec![choice("a/1", "One"), choice("b/2", "Two")];
+        assert_eq!(filtered_model_matches(" ", &models).len(), 2);
+    }
+    #[test]
+    fn filtered_model_matches_prefix_outranks_substring() {
+        let models = vec![
+            choice("zai-coding-cn/glm-5.2", "Zai Model"),
+            choice("glm-5.2-flash", "GLM-5.2 Flash"),
+            choice("other/model", "Other"),
+        ];
+        let hits = filtered_model_matches("glm", &models);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].id, "glm-5.2-flash",
+            "id prefix match ranks before substring match"
+        );
+        assert_eq!(hits[1].id, "zai-coding-cn/glm-5.2");
+    }
+    #[test]
+    fn filtered_model_matches_display_name() {
+        let models = vec![choice("openai/gpt-5.4", "GPT-5.4"), choice("xai/grok-4", "Grok 4")];
+        let hits = filtered_model_matches("gpt", &models);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "openai/gpt-5.4");
+    }
+    #[test]
+    fn picker_submit_inherit_row_clears() {
+        let models = vec![choice("grok-4", "Grok 4")];
+        assert_eq!(
+            resolve_picker_submit("", &models, 0),
+            PickerSubmit::Apply(PinEdit::Clear)
+        );
+    }
+    #[test]
+    fn picker_submit_selected_model_sets() {
+        let models = vec![choice("a/1", "One"), choice("b/2", "Two")];
+        assert_eq!(
+            resolve_picker_submit("", &models, 2),
+            PickerSubmit::Apply(PinEdit::Set("b/2".to_string()))
+        );
+    }
+    #[test]
+    fn picker_submit_unknown_query_is_not_a_clear() {
+        let models = vec![choice("grok-4", "Grok 4")];
+        match resolve_picker_submit("gpt-zero", &models, 0) {
+            PickerSubmit::NoMatch(msg) => assert!(msg.contains("gpt-zero")),
+            other => panic!("unknown query must not silently clear, got {other:?}"),
+        }
+    }
+    #[test]
+    fn picker_submit_stale_selection_falls_back_to_inherit() {
+        let models = vec![choice("grok-4", "Grok 4")];
+        assert_eq!(
+            resolve_picker_submit("grok", &models, 5),
+            PickerSubmit::Apply(PinEdit::Clear)
+        );
+    }
+    #[test]
+    fn persona_model_roundtrip_in_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reviewer.toml");
+        std::fs::write(
+            &path,
+            "instructions = \"review carefully\"\ndescription = \"d\"\n",
+        )
+        .expect("seed persona");
+        assert_eq!(read_persona_model(&path), None);
+
+        set_persona_model_at(&path, Some("kimi-code/kimi-for-coding")).unwrap();
+        assert_eq!(
+            read_persona_model(&path).as_deref(),
+            Some("kimi-code/kimi-for-coding")
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("instructions = \"review carefully\""),
+            "other persona fields must survive the model edit"
+        );
+
+        set_persona_model_at(&path, None).unwrap();
+        assert_eq!(read_persona_model(&path), None);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("instructions"));
+    }
+    #[test]
+    fn load_persona_models_reads_source_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.toml");
+        std::fs::write(&path, "model = \"grok-4\"\ninstructions = \"x\"\n").unwrap();
+        let personas = vec![
+            PersonaDetail {
+                name: "p".into(),
+                description: None,
+                has_inputs: false,
+                has_outputs: false,
+                source_path: Some(path.display().to_string()),
+                scope_label: Some("user".into()),
+            },
+            PersonaDetail {
+                name: "no-file".into(),
+                description: None,
+                has_inputs: false,
+                has_outputs: false,
+                source_path: None,
+                scope_label: None,
+            },
+        ];
+        let models = load_persona_models(&personas);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models.get("p").map(String::as_str), Some("grok-4"));
     }
 }

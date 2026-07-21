@@ -63,6 +63,12 @@ pub enum ConfigUpdate {
     /// The `[model.*]` entries in config.toml changed. Agent should re-resolve
     /// its model list (BYOK models added/removed, default or surprise changed).
     ModelsChanged,
+    /// The `[subagents.models]` pin table in config.toml changed (typically
+    /// from the TUI `/agents` modal's model-pin editor). The agent re-resolves
+    /// the pin map from disk so the next subagent spawn in a live session
+    /// picks it up. Deliberately scoped to `models`: `enabled`/`toggle` are
+    /// baked into the built toolset and only apply on session start.
+    SubagentModelsChanged,
     /// `~/.grok/models_cache.json` was rewritten on disk (possibly by another
     /// via `ModelsManager::reload_from_disk_cache`, which content-dedupes
     /// self-writes (`persist` / `renew_ttl`) before applying. No payload —
@@ -390,6 +396,20 @@ impl ConfigReloader {
         if old_model_table != new_model_table || old_models_table != new_models_table {
             info!("model config change detected");
             let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);
+        }
+
+        // Subagent model pins — compare the `[subagents.models]` sub-table.
+        // The handler re-reads config from disk, so no payload is needed.
+        let old_sa_models = self
+            .last_global_config
+            .get("subagents")
+            .and_then(|s| s.get("models"));
+        let new_sa_models = new_global.get("subagents").and_then(|s| s.get("models"));
+        if old_sa_models != new_sa_models {
+            info!("subagent model pins change detected");
+            let _ = self
+                .config_update_tx
+                .send(ConfigUpdate::SubagentModelsChanged);
         }
 
         // UI fields (theme, yolo, fork_secondary_model)
@@ -954,6 +974,27 @@ base_url = "https://api.example.com/v1"
         let a: toml::Value = toml::from_str("[models]\ndefault = \"grok-code-fast-1\"").unwrap();
         let b: toml::Value = toml::from_str("[models]\ndefault = \"grok-code-slow-1\"").unwrap();
         assert_ne!(a.get("models"), b.get("models"));
+    }
+
+    #[test]
+    fn subagent_models_changed_detects_pin_edit() {
+        let a = toml::Value::Table(toml::map::Map::new());
+        let b: toml::Value = toml::from_str("[subagents.models]\nexplore = \"grok-4\"").unwrap();
+        assert_ne!(
+            a.get("subagents").and_then(|s| s.get("models")),
+            b.get("subagents").and_then(|s| s.get("models"))
+        );
+    }
+
+    #[test]
+    fn subagent_models_unchanged_by_toggle_only_edit() {
+        let a: toml::Value = toml::from_str("[subagents.toggle]\nexplore = false").unwrap();
+        let b: toml::Value = toml::from_str("[subagents.toggle]\nexplore = true").unwrap();
+        assert_eq!(
+            a.get("subagents").and_then(|s| s.get("models")),
+            b.get("subagents").and_then(|s| s.get("models")),
+            "toggle-only edits must not trigger a model-pin reload"
+        );
     }
 
     #[test]

@@ -1580,6 +1580,21 @@ pub async fn run_leader(
                                 warn!(error = %e, "failed to inject model reload into ACP stream");
                             }
                         }
+                        ConfigUpdate::SubagentModelsChanged => {
+                            info!("Subagent model pins change detected — reloading live sessions");
+                            let line = internal_reload_request_line(
+                                "config-reload-subagent-models",
+                                "x.ai/internal/reload_subagent_models",
+                                serde_json::json!({}),
+                            );
+                            let mut tx = acp_tx_for_config.lock().await;
+                            if let Err(e) = tx.write_all(line.as_bytes()).await {
+                                warn!(
+                                    error = %e,
+                                    "failed to inject subagent-model reload into ACP stream"
+                                );
+                            }
+                        }
                         ConfigUpdate::ModelsCacheChanged => {
                             // External write to ~/.grok/models_cache.json
                             // (another grok process fetched a fresher /v1/models

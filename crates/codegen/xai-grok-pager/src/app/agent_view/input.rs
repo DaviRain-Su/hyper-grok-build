@@ -1541,6 +1541,7 @@ mod btw_focus_tests {
             &crate::app::bundle::BundleState::default(),
             None,
             None,
+            Vec::new(),
         ));
         agents.handle_minimal_input(&key(KeyCode::Esc), &reg);
         assert!(agents.agents_modal.is_none(), "agents modal handled Esc");

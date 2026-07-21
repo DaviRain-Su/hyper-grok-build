@@ -485,12 +485,25 @@ pub(super) fn dispatch_open_config_agents_modal(
         .and_then(model_agent_type_from_info);
     let session_id = agent.session.session_id.clone();
     let active_agent = agent.session_agent_name.clone();
+    // Catalog entries (id + display name) for the modal's model-pin picker
+    // (`m` on the Agents tab).
+    let available_models: Vec<crate::views::agents_modal::ModelChoice> = agent
+        .session
+        .models
+        .available
+        .iter()
+        .map(|(id, info)| crate::views::agents_modal::ModelChoice {
+            id: id.0.to_string(),
+            name: info.name.clone(),
+        })
+        .collect();
     let mut modal = AgentsModalState::new(
         &cwd,
         &toggle,
         &bundle,
         model_agent_type.as_deref(),
         active_agent,
+        available_models,
     );
     if let Some(tab) = initial_tab {
         modal.active_tab = tab;
