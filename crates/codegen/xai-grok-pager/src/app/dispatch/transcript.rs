@@ -485,18 +485,14 @@ pub(super) fn dispatch_open_config_agents_modal(
         .and_then(model_agent_type_from_info);
     let session_id = agent.session.session_id.clone();
     let active_agent = agent.session_agent_name.clone();
-    // Catalog entries (id + display name) for the modal's model-pin picker
-    // (`m` on the Agents tab).
-    let available_models: Vec<crate::views::agents_modal::ModelChoice> = agent
-        .session
-        .models
-        .available
-        .iter()
-        .map(|(id, info)| crate::views::agents_modal::ModelChoice {
-            id: id.0.to_string(),
-            name: info.name.clone(),
-        })
-        .collect();
+    // Usable catalog entries (id + display name) for the modal's model-pin
+    // picker (`m`). Credential-less (locked) platform models are excluded —
+    // pinning one would silently fall back to inherit at spawn.
+    let available_models: Vec<crate::views::agents_modal::ModelChoice> =
+        crate::acp::model_state::usable_model_choices(&agent.session.models)
+            .into_iter()
+            .map(|(id, name)| crate::views::agents_modal::ModelChoice { id, name })
+            .collect();
     let mut modal = AgentsModalState::new(
         &cwd,
         &toggle,

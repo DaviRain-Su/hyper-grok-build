@@ -15,6 +15,20 @@ pub(crate) fn platform_lock(info: &acp::ModelInfo) -> Option<PlatformLockMeta> {
     parse_platform_lock_meta(info.meta.as_ref())
 }
 
+/// `(id, display name)` pairs for every model that is usable right now —
+/// i.e. not locked behind missing platform credentials. Surfaces that let
+/// the user route work to a model (e.g. the `/agents` subagent-model picker)
+/// should offer only these; pinning an unconfigured model would silently
+/// fall back to inherit at spawn.
+pub(crate) fn usable_model_choices(models: &ModelState) -> Vec<(String, String)> {
+    models
+        .available
+        .iter()
+        .filter(|(_, info)| platform_lock(info).is_none())
+        .map(|(id, info)| (id.0.to_string(), info.name.clone()))
+        .collect()
+}
+
 /// Why an effort token could not be applied to a model. Shared by every effort
 /// surface (`/effort`, the CLI deferred switch, and headless) so they classify
 /// the same input identically and differ only in how they surface the error.
@@ -454,6 +468,38 @@ mod tests {
         state.current = Some(acp::ModelId::new(Arc::from("model-b")));
         let next = state.next_model().unwrap();
         assert_eq!(next.0.as_ref(), "model-a");
+    }
+
+    #[test]
+    fn usable_model_choices_excludes_locked_platform_models() {
+        let mut state = sample_models();
+        let locked_id = acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash"));
+        let meta = serde_json::json!({
+            "requiresApiKey": true,
+            "platform": "deepseek",
+            "platformName": "DeepSeek",
+            "apiKeyEnv": ["DEEPSEEK_API_KEY"],
+            "setupHint": "export DEEPSEEK_API_KEY=…",
+        })
+        .as_object()
+        .cloned();
+        state.available.insert(
+            locked_id,
+            acp::ModelInfo::new(
+                acp::ModelId::new(Arc::from("deepseek/deepseek-v4-flash")),
+                "DeepSeek V4 Flash".to_string(),
+            )
+            .meta(meta),
+        );
+        let choices = usable_model_choices(&state);
+        assert_eq!(choices.len(), 2);
+        assert!(
+            choices
+                .iter()
+                .all(|(id, _)| !id.starts_with("deepseek/")),
+            "credential-less platform models must not be offered"
+        );
+        assert!(choices.iter().any(|(id, name)| id == "model-a" && name == "Model A"));
     }
 
     #[test]

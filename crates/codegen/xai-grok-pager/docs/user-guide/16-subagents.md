@@ -87,9 +87,9 @@ Grok Build discovers file-based personas from these locations, in priority order
 
 Each file defines one persona, and the file name (without the extension) becomes the persona name. Inline `config.toml` personas take precedence over files. Only `.toml` files are discovered.
 
-Manage personas in the Personas tab of the agents modal (`/personas`). Bundled personas are read-only; personas you define are editable.
+Manage personas in the Personas tab of the agents modal (`/personas`). Personas you define (user or project files) are editable; bundled personas are read-only, but applying a model to one writes a customized copy to `~/.grok/personas/` that shadows the bundled definition.
 
-To set a persona's model from the TUI, select it in the Personas tab and press `m` — the same model picker as agent pins opens (type to filter, `↑`/`↓` to choose, Enter to apply, **inherit** to clear). The choice is written as the `model` key in the persona's `.toml` file. Project personas (`.grok/personas/`) are re-discovered at every spawn, so their model applies immediately; user personas (`~/.grok/personas/`) load at session start, so their model applies in new sessions.
+To set a persona's model from the TUI, select it in the Personas tab and press `m` — the same model picker as agent pins opens (type to filter, `↑`/`↓` to choose, Enter to apply, **inherit** to clear). Only models with configured credentials are offered. The choice is written as the `model` key in the persona's `.toml` file. Project personas (`.grok/personas/`) are re-discovered at every spawn, so their model applies immediately; user personas (`~/.grok/personas/`) load at session start, so their model applies in new sessions.
 
 > **Note:** Grok Build applies personas through subagent resolution and roles, not through a `spawn_subagent` parameter. The main agent does not pass a persona name when it spawns a child.
 
@@ -216,7 +216,7 @@ explore = "grok-build"               # route explore to a specific model
 
 Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
 
-You can also manage model pins from the TUI: open `/agents`, select an agent, and press `m`. A model picker opens — type to filter the catalog, choose with `↑`/`↓`, and press Enter to pin. Pick **inherit** (the first row) to clear the pin and follow the session model again. Pinned agents show `→ <model>` in the list and a `pinned — [subagents.models]` note in the expanded detail. Pins are written to `~/.grok/config.toml` and apply to the next subagent spawn — no restart needed.
+You can also manage model pins from the TUI: open `/agents`, select an agent, and press `m`. A model picker opens listing the models you have credentials for — type to filter, choose with `↑`/`↓`, and press Enter to pin. Pick **inherit** (the first row) to clear the pin and follow the session model again. Pinned agents show `→ <model>` in the list and a `pinned — [subagents.models]` note in the expanded detail. Pins are written to `~/.grok/config.toml` and apply to the next subagent spawn — no restart needed.
 
 ### Custom Roles and Personas
 

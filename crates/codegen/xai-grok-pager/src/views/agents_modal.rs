@@ -66,14 +66,18 @@ pub struct ModelChoice {
 enum ModelEditTarget {
     /// Agent type name; pin lives in `~/.grok/config.toml`.
     Agent(String),
-    /// Persona name + source file. `applies_live` is true for project-scope
-    /// files (re-discovered at every spawn); user-scope personas load at
-    /// session start, so their edits apply in new sessions.
+    /// Editable persona name + source file. `applies_live` is true for
+    /// project-scope files (re-discovered at every spawn); user-scope
+    /// personas load at session start, so their edits apply in new sessions.
     Persona {
         name: String,
         path: PathBuf,
         applies_live: bool,
     },
+    /// Read-only bundled persona: applying a model copies the definition
+    /// into `~/.grok/personas` with the edit, shadowing the bundled one
+    /// (user definitions win at spawn).
+    BundledPersona { name: String, source: PathBuf },
 }
 /// A single entry in the agents list.
 pub struct AgentListEntry {
@@ -522,16 +526,25 @@ fn personas_from_bundle(bundle: &BundleState) -> Vec<PersonaDetail> {
             .collect()
     }
 }
-/// Union bundled personas with local `~/.grok/personas` and `{cwd}/.grok/personas`.
+/// Union local `~/.grok/personas` / `{cwd}/.grok/personas` with bundled personas.
 ///
-/// Bundled names take precedence; local-only names are appended with scope tags.
+/// Local definitions shadow bundled ones with the same name — matching the
+/// shell's spawn-time precedence (inline config > project > user > bundled)
+/// and the user guide. Bundled-only names are appended after local ones.
 pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetail> {
-    let mut list = personas_from_bundle(bundle);
-    let mut names: std::collections::HashSet<String> =
-        list.iter().map(|p| p.name.clone()).collect();
+    let mut list: Vec<PersonaDetail> = Vec::new();
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let grok_home = xai_grok_config::grok_home();
+    let dirs = [
+        (ConfigFileScope::Project, cwd.join(".grok").join("personas")),
+        (ConfigFileScope::User, grok_home.join("personas")),
+    ];
+    for (scope, dir) in dirs {
+        append_local_personas_in_dir(&dir, scope, &mut list, &mut names);
+    }
+    let mut bundled = personas_from_bundle(bundle);
     let bundled_dir = grok_home.join("bundled").join("personas");
-    for persona in &mut list {
+    for persona in &mut bundled {
         if persona.source_path.is_none() {
             let path = bundled_dir.join(format!("{}.toml", persona.name));
             if path.exists() {
@@ -542,12 +555,10 @@ pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetai
             }
         }
     }
-    let dirs = [
-        (ConfigFileScope::Project, cwd.join(".grok").join("personas")),
-        (ConfigFileScope::User, grok_home.join("personas")),
-    ];
-    for (scope, dir) in dirs {
-        append_local_personas_in_dir(&dir, scope, &mut list, &mut names);
+    for persona in bundled {
+        if names.insert(persona.name.clone()) {
+            list.push(persona);
+        }
     }
     list
 }
@@ -939,12 +950,53 @@ fn set_persona_model_at(path: &Path, model_id: Option<&str>) -> Result<(), Strin
         .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
     Ok(())
 }
+/// Copy a read-only bundled persona into the user personas dir with the
+/// model edit applied. The copy shadows the bundled definition at spawn
+/// (user definitions win), which is how a bundled persona becomes
+/// customizable without touching the read-only bundle.
+///
+/// Returns the written path. Clearing (`None`) on a bundled persona that
+/// has no `model` of its own is a no-op returning `None` — there is nothing
+/// to override.
+fn customize_bundled_persona_at(
+    source: &Path,
+    user_dir: &Path,
+    name: &str,
+    model_id: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    let content = std::fs::read_to_string(source)
+        .map_err(|e| format!("Failed to read {}: {e}", source.display()))?;
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|_| format!("Could not parse {}", source.display()))?;
+    if model_id.is_none() && doc.get("model").is_none() {
+        return Ok(None);
+    }
+    match model_id {
+        Some(id) => {
+            doc["model"] = toml_edit::value(id);
+        }
+        None => {
+            doc.as_table_mut().remove("model");
+        }
+    }
+    if let Err(e) = std::fs::create_dir_all(user_dir) {
+        return Err(format!(
+            "Failed to create personas directory {}: {e}",
+            user_dir.display()
+        ));
+    }
+    let dest = user_dir.join(format!("{name}.toml"));
+    std::fs::write(&dest, doc.to_string())
+        .map_err(|e| format!("Failed to write {}: {e}", dest.display()))?;
+    Ok(Some(dest))
+}
 /// The model the picker target currently resolves to (for the `(current)`
 /// marker and preselecting the picker row).
 fn current_target_model(state: &AgentsModalState) -> Option<&str> {
     match state.model_edit_target.as_ref()? {
         ModelEditTarget::Agent(name) => state.model_pins.get(name).map(String::as_str),
-        ModelEditTarget::Persona { name, .. } => {
+        ModelEditTarget::Persona { name, .. } | ModelEditTarget::BundledPersona { name, .. } => {
             state.persona_models.get(name).map(String::as_str)
         }
     }
@@ -1504,7 +1556,9 @@ fn render_model_picker_block(
     };
     let prefix = match state.model_edit_target.as_ref() {
         Some(ModelEditTarget::Agent(name)) => format!("{name} model: "),
-        Some(ModelEditTarget::Persona { name, .. }) => format!("persona {name} model: "),
+        Some(ModelEditTarget::Persona { name, .. } | ModelEditTarget::BundledPersona { name, .. }) => {
+            format!("persona {name} model: ")
+        }
         None => "model: ".to_string(),
     };
     render_prefixed_input(
@@ -2710,6 +2764,31 @@ fn submit_model_input(state: &mut AgentsModalState) {
             return;
         }
     };
+    // Bundled personas are read-only: applying writes a customized copy
+    // into the user dir, which then shadows the bundled definition.
+    if let ModelEditTarget::BundledPersona { name, source } = &target {
+        let user_dir = xai_grok_config::grok_home().join("personas");
+        match customize_bundled_persona_at(source, &user_dir, name, pin.as_deref()) {
+            Ok(Some(_)) => {
+                state.refresh_personas();
+                state.message = Some(AgentsModalMessage::success(format!(
+                    "persona {name} {what} — customized copy in ~/.grok/personas, applies in new sessions"
+                )));
+            }
+            Ok(None) => {
+                state.message = Some(AgentsModalMessage::info(format!(
+                    "persona {name} already inherits — nothing to override"
+                )));
+            }
+            Err(e) => {
+                state.message = Some(AgentsModalMessage::error(e));
+            }
+        }
+        state.model_input = None;
+        state.model_edit_target = None;
+        state.model_picker_selected = 0;
+        return;
+    }
     let (result, name, applies) = match &target {
         ModelEditTarget::Agent(name) => (
             set_agent_model_pin(name, pin.as_deref()),
@@ -2729,6 +2808,9 @@ fn submit_model_input(state: &mut AgentsModalState) {
                 "applies in new sessions"
             },
         ),
+        ModelEditTarget::BundledPersona { .. } => {
+            unreachable!("bundled targets return before the common write path")
+        }
     };
     match result {
         Ok(()) => {
@@ -2742,6 +2824,9 @@ fn submit_model_input(state: &mut AgentsModalState) {
                         state.persona_models.remove(name);
                     }
                 },
+                ModelEditTarget::BundledPersona { .. } => {
+                    unreachable!("bundled targets return before the common write path")
+                }
             }
             state.message = Some(AgentsModalMessage::success(format!(
                 "{name} {what} — {applies}"
@@ -2959,21 +3044,30 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
             let Some(persona) = state.personas.get(state.persona_selected) else {
                 return AgentsModalOutcome::Unchanged;
             };
-            if !persona_is_editable(persona) {
-                state.message = Some(AgentsModalMessage::error(
-                    "Bundled personas are read-only — copy to ~/.grok/personas to customize",
-                ));
-                return AgentsModalOutcome::Changed;
-            }
             let Some(ref path_str) = persona.source_path else {
                 state.message = Some(AgentsModalMessage::error("Persona has no source file"));
                 return AgentsModalOutcome::Changed;
             };
             let name = persona.name.clone();
             let path = PathBuf::from(path_str);
-            // Project-scope persona files are re-discovered at every spawn,
-            // so their edits apply live; user-scope load at session start.
-            let applies_live = path.starts_with(state.cwd.join(".grok"));
+            let target = if persona_is_editable(persona) {
+                // Project-scope persona files are re-discovered at every
+                // spawn, so their edits apply live; user-scope load at
+                // session start.
+                let applies_live = path.starts_with(state.cwd.join(".grok"));
+                ModelEditTarget::Persona {
+                    name: name.clone(),
+                    path,
+                    applies_live,
+                }
+            } else {
+                // Bundled persona: applying copies it into the user dir
+                // with the chosen model (customize-on-apply).
+                ModelEditTarget::BundledPersona {
+                    name: name.clone(),
+                    source: path,
+                }
+            };
             state.model_picker_selected = state
                 .persona_models
                 .get(&name)
@@ -2981,11 +3075,7 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
                 .map(|pos| pos + 1)
                 .unwrap_or(0);
             state.model_input = Some(LineEditor::default());
-            state.model_edit_target = Some(ModelEditTarget::Persona {
-                name,
-                path,
-                applies_live,
-            });
+            state.model_edit_target = Some(target);
             AgentsModalOutcome::Changed
         }
         KeyCode::Char('d') => {
@@ -3353,10 +3443,42 @@ mod tests {
         };
         let list = merge_persona_lists(&bundle, dir.path());
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "bundled-one");
-        assert_eq!(list[1].name, "local-only");
-        assert_eq!(list[1].scope_label.as_deref(), Some("project"));
-        assert!(list[1].source_path.is_some());
+        assert_eq!(
+            list[0].name, "local-only",
+            "local personas list before bundled ones"
+        );
+        assert_eq!(list[0].scope_label.as_deref(), Some("project"));
+        assert!(list[0].source_path.is_some());
+        assert_eq!(list[1].name, "bundled-one");
+    }
+    #[test]
+    fn merge_persona_lists_local_shadows_same_name_bundled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let personas_dir = dir.path().join(".grok").join("personas");
+        std::fs::create_dir_all(&personas_dir).expect("mkdir");
+        std::fs::write(
+            personas_dir.join("reviewer.toml"),
+            "instructions = \"local review\"\n",
+        )
+        .expect("write");
+        let bundle = BundleState {
+            persona_details: vec![PersonaDetail {
+                name: "reviewer".to_string(),
+                description: Some("bundled review".to_string()),
+                has_inputs: false,
+                has_outputs: false,
+                source_path: None,
+                scope_label: None,
+            }],
+            ..Default::default()
+        };
+        let list = merge_persona_lists(&bundle, dir.path());
+        assert_eq!(list.len(), 1, "same-name bundled entry is shadowed");
+        assert_eq!(list[0].scope_label.as_deref(), Some("project"));
+        assert!(
+            list[0].source_path.is_some(),
+            "the surviving entry is the local file"
+        );
     }
     #[test]
     fn create_persona_template_project_scope_writes_toml() {
@@ -4288,5 +4410,52 @@ ignored = 42
         let models = load_persona_models(&personas);
         assert_eq!(models.len(), 1);
         assert_eq!(models.get("p").map(String::as_str), Some("grok-4"));
+    }
+    #[test]
+    fn customize_bundled_persona_copies_with_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("bundled").join("reviewer.toml");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            "instructions = \"review carefully\"\ndescription = \"d\"\n",
+        )
+        .unwrap();
+        let user_dir = dir.path().join("user-personas");
+
+        let written = customize_bundled_persona_at(&source, &user_dir, "reviewer", Some("grok-4"))
+            .unwrap()
+            .expect("a copy is written");
+        let content = std::fs::read_to_string(&written).unwrap();
+        assert!(content.contains("model = \"grok-4\""));
+        assert!(
+            content.contains("instructions = \"review carefully\""),
+            "the bundled definition is preserved in the copy"
+        );
+    }
+    #[test]
+    fn customize_bundled_persona_clear_without_model_is_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("reviewer.toml");
+        std::fs::write(&source, "instructions = \"x\"\n").unwrap();
+        let user_dir = dir.path().join("user-personas");
+
+        let result = customize_bundled_persona_at(&source, &user_dir, "reviewer", None).unwrap();
+        assert!(result.is_none(), "nothing to override → no copy written");
+        assert!(!user_dir.join("reviewer.toml").exists());
+    }
+    #[test]
+    fn customize_bundled_persona_clear_strips_bundled_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("reviewer.toml");
+        std::fs::write(&source, "model = \"grok-4\"\ninstructions = \"x\"\n").unwrap();
+        let user_dir = dir.path().join("user-personas");
+
+        let written = customize_bundled_persona_at(&source, &user_dir, "reviewer", None)
+            .unwrap()
+            .expect("an override copy strips the bundled model");
+        assert_eq!(read_persona_model(&written), None);
+        let content = std::fs::read_to_string(&written).unwrap();
+        assert!(content.contains("instructions"));
     }
 }
