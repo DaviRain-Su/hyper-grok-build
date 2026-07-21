@@ -777,6 +777,60 @@ fn responses_config(base_url: String, doom_loop: Option<DoomLoopRecoveryPolicy>)
     cfg
 }
 
+/// ChatGPT/Codex may inject a non-standard `response.metadata` frame into an
+/// otherwise valid Responses stream. It is side-band data, so the actor should
+/// skip it, preserve the surrounding output, and avoid a deterministic retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_metadata_frame_is_skipped_without_retry() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut events = sse::responses_api_reasoning_and_text_events(
+                    "some thought",
+                    "an answer",
+                    "test-model",
+                );
+                events.insert(
+                    1,
+                    SseEvent::data(
+                        json!({
+                            "type": "response.metadata",
+                            "sequence_number": 1,
+                            "metadata": { "request_id": "req_metadata" }
+                        })
+                        .to_string(),
+                    ),
+                );
+                let events = sse_events_to_axum(events);
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let result = handle
+        .submit_and_collect(RequestId::from("req-metadata"), user_request("hi"))
+        .await;
+    server.shutdown();
+
+    let (response, _metrics) = result.expect("metadata frame should not fail the turn");
+    assert_eq!(response.assistant_text(), "an answer");
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "must not retry");
+}
+
 /// Server-reported doom-loop triggers flow through the actor rung onto the
 /// completed response, without retries. The trigger is non-confident
 /// (`@response` channel), so the recovery — which resamples only confident

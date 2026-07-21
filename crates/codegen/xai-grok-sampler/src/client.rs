@@ -39,6 +39,43 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+const RESPONSES_AUXILIARY_EVENT_TYPES: [&str; 2] = ["keepalive", "response.metadata"];
+
+/// Return whether an SSE frame is an out-of-band Responses API event.
+///
+/// ChatGPT/Codex emits transport heartbeats (`keepalive`) and may emit
+/// side-band `response.metadata` frames. Neither carries model output or maps
+/// to async-openai's `ResponseStreamEvent`, so both must be filtered before
+/// typed deserialization. They can be identified by the SSE `event:` field or
+/// only by the JSON `type` discriminator in `data:`.
+///
+/// Matching stays exact: generated text containing one of these strings is not
+/// swallowed, and every other unknown semantic event still fails loudly.
+fn is_responses_auxiliary_event(event_name: &str, data: &str) -> bool {
+    if RESPONSES_AUXILIARY_EVENT_TYPES.contains(&event_name) {
+        return true;
+    }
+
+    // Avoid reparsing ordinary token deltas unless the payload could contain
+    // one of the auxiliary discriminators. The parsed discriminator below is
+    // still authoritative because generated text can contain either string.
+    if !RESPONSES_AUXILIARY_EVENT_TYPES
+        .iter()
+        .any(|event_type| data.contains(event_type))
+    {
+        return false;
+    }
+
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|event_type| RESPONSES_AUXILIARY_EVENT_TYPES.contains(&event_type))
+        })
+        .unwrap_or(false)
+}
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
@@ -127,6 +164,27 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     };
     apply_terminal_event_overrides(&mut event, data);
     Ok(event)
+}
+
+/// Decode one non-terminal-marker Responses SSE frame.
+///
+/// `None` means the frame is auxiliary and should be skipped without ending
+/// the stream. Every other frame remains strict: API errors are surfaced as
+/// `SamplingError`, and unknown semantic event types are left to typed
+/// deserialization instead of being silently discarded.
+fn decode_responses_sse_frame(
+    event_name: &str,
+    data: &str,
+) -> Option<Result<rs::ResponseStreamEvent>> {
+    if is_responses_auxiliary_event(event_name, data) {
+        return None;
+    }
+
+    if let Some(stream_error) = try_parse_stream_error(data) {
+        Some(Err(stream_error))
+    } else {
+        Some(deserialize_response_event(data))
+    }
 }
 
 /// On terminal Responses API events (`response.completed` /
@@ -1507,10 +1565,8 @@ impl SamplingClient {
                         };
                         if swallow {
                             Some(None)
-                        } else if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Some(Err(stream_error)))
                         } else {
-                            Some(Some(deserialize_response_event(data)))
+                            Some(decode_responses_sse_frame(&event.event, data))
                         }
                     }
                     Err(e) => {
@@ -2689,6 +2745,62 @@ mod tests {
         let client = SamplingClient::new(cfg).expect("client should build");
         // Must not panic.
         client.record_401_attribution(crate::attribution::SamplingConsumer::ChatCompletions);
+    }
+
+    #[test]
+    fn decode_responses_sse_frame_skips_known_auxiliary_events() {
+        for event_type in RESPONSES_AUXILIARY_EVENT_TYPES {
+            let named = decode_responses_sse_frame(event_type, r#"{"side_band":true}"#);
+            assert!(
+                named.is_none(),
+                "event: {event_type} should identify an auxiliary frame"
+            );
+
+            let payload = serde_json::json!({
+                "type": event_type,
+                "sequence_number": 7,
+                "metadata": { "request_id": "req_test" }
+            })
+            .to_string();
+            let data_only = decode_responses_sse_frame("", &payload);
+            assert!(
+                data_only.is_none(),
+                "type: {event_type} should identify an auxiliary frame"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_responses_sse_frame_does_not_swallow_auxiliary_name_in_output_text() {
+        let payload = serde_json::json!({
+            "type": "response.output_text.delta",
+            "sequence_number": 8,
+            "item_id": "item_test",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "literal response.metadata and keepalive text",
+            "logprobs": []
+        })
+        .to_string();
+
+        let Some(Ok(rs::ResponseStreamEvent::ResponseOutputTextDelta(event))) =
+            decode_responses_sse_frame("", &payload)
+        else {
+            panic!("a normal text delta containing auxiliary names must be preserved");
+        };
+        assert_eq!(event.delta, "literal response.metadata and keepalive text");
+    }
+
+    #[test]
+    fn decode_responses_sse_frame_keeps_other_unknown_events_strict() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.future_semantic_event","sequence_number":9}"#,
+        );
+        assert!(matches!(
+            decoded,
+            Some(Err(SamplingError::Serialization(_)))
+        ));
     }
 
     /// `response.completed` carrying

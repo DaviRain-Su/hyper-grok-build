@@ -3503,13 +3503,13 @@ fn apply_kimi_messages_request_rules(
                     thinking,
                     signature,
                 } = block
+                    && signature.trim().is_empty()
+                    && !thinking.trim().is_empty()
                 {
-                    if signature.trim().is_empty() && !thinking.trim().is_empty() {
-                        *block = ContentBlock::Text {
-                            text: std::mem::take(thinking),
-                            cache_control: None,
-                        };
-                    }
+                    *block = ContentBlock::Text {
+                        text: std::mem::take(thinking),
+                        cache_control: None,
+                    };
                 }
             }
         }
