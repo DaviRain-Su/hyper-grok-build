@@ -4,15 +4,16 @@ version = "0.2.106"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
-default-run = "xai-grok-pager"
+default-run = "hyper"
 
-# Composition-root binary for the Grok Build TUI. The artifact is still named
-# `xai-grok-pager`. This package exists so the binary can link both the pager
+# Composition-root binary for the Hyper / Grok Build TUI.
+# Community builds ship the artifact as `hyper` (coexists with the official
+# `grok` binary). This package exists so the binary can link both the pager
 # library and the optional `xai-grok-pager-minimal` render mode: `minimal`
 # depends on `xai-grok-pager`, so the pager library cannot depend back on it
 # (cargo cycle). The binary installs the minimal-mode IoC hooks at startup.
 [[bin]]
-name = "xai-grok-pager"
+name = "hyper"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,0 +1,186 @@
+name: Release
+
+# On tag push v*, build the single-file `hyper` binary for the five supported
+# targets, package per-target archives named
+# hyper-<version>-<target-triple>.{tar.gz|zip} (binary + LICENSE + NOTICE +
+# THIRD-PARTY-NOTICES), generate SHA256SUMS, and publish everything as a
+# GitHub Release. install.sh / install.ps1 resolve these exact asset names.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          # macos-14 runners are arm64; the x86_64 slice is a cross-compile
+          # against the same SDK (macos-13 Intel runners are deprecated).
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches VERSION file
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION file ($file_version)" >&2
+            exit 1
+          fi
+          echo "GROK_VERSION=$tag_version" >> "$GITHUB_ENV"
+
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Add build target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install dotslash (protoc launcher)
+        run: cargo install dotslash --locked
+
+      # Windows cannot exec the dotslash launcher directly (no shebang
+      # support → os error 193), and the build script's documented fallback
+      # is a protoc on PATH — install the same major line the monorepo pins.
+      - name: Install protoc (Windows PATH fallback)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile protoc.zip
+          Expand-Archive protoc.zip -DestinationPath "$env:USERPROFILE\protoc"
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\protoc\bin"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build hyper (release-dist)
+        env:
+          GROK_VERSION: ${{ env.GROK_VERSION }}
+        run: cargo build --profile release-dist -p xai-grok-pager-bin --locked --target ${{ matrix.target }}
+
+      - name: Package archive (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="hyper-${version}-${{ matrix.target }}.tar.gz"
+          staging="$(mktemp -d)"
+          # Cargo may emit either `hyper` (preferred) or the upstream
+          # `xai-grok-pager` name depending on the local [[bin]] entry —
+          # normalize to `hyper` for installers.
+          src=""
+          for cand in \
+            "target/${{ matrix.target }}/release-dist/hyper" \
+            "target/${{ matrix.target }}/release-dist/xai-grok-pager"
+          do
+            if [ -f "$cand" ]; then src="$cand"; break; fi
+          done
+          [ -n "$src" ] || { echo "release binary not found under release-dist/" >&2; ls -la "target/${{ matrix.target }}/release-dist/" >&2; exit 1; }
+          cp "$src" "$staging/hyper"
+          chmod 0755 "$staging/hyper"
+          cp LICENSE "$staging/"
+          [ -f NOTICE ] && cp NOTICE "$staging/"
+          for f in THIRD-PARTY-NOTICES THIRD-PARTY-NOTICES.md; do
+            [ -f "$f" ] && cp "$f" "$staging/"
+          done
+          tar -C "$staging" -czf "$archive" .
+          shasum -a 256 "$archive" || sha256sum "$archive"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Package archive (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $archive = "hyper-$version-${{ matrix.target }}.zip"
+          $staging = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "staging")
+          $candidates = @(
+            "target/${{ matrix.target }}/release-dist/hyper.exe",
+            "target/${{ matrix.target }}/release-dist/xai-grok-pager.exe"
+          )
+          $src = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $src) {
+            Get-ChildItem "target/${{ matrix.target }}/release-dist/" | Format-Table
+            throw "release binary not found under release-dist/"
+          }
+          Copy-Item $src (Join-Path $staging "hyper.exe")
+          Copy-Item LICENSE $staging
+          if (Test-Path NOTICE) { Copy-Item NOTICE $staging }
+          foreach ($f in @("THIRD-PARTY-NOTICES", "THIRD-PARTY-NOTICES.md")) {
+            if (Test-Path $f) { Copy-Item $f $staging }
+          }
+          Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $archive
+          Get-FileHash -Algorithm SHA256 $archive
+          Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum hyper-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Hyper `${{ github.ref_name }}`
+
+            Unofficial multi-provider community build of [Grok Build](https://github.com/xai-org/grok-build).
+
+            ### Install
+
+            ```sh
+            # macOS / Linux
+            curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+            ```
+
+            ```powershell
+            # Windows PowerShell
+            irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
+            ```
+
+            Pin a version: `bash install.sh --version ${{ github.ref_name }}`
