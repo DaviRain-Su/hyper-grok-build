@@ -29,6 +29,7 @@ use xai_grok_sampling_types::{
 };
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
+use crate::types::ResponsesStreamItem;
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_sampling_types::ApiBackend;
@@ -115,13 +116,83 @@ impl GrokRequestHeaders<'_> {
 /// so we only handle that form. HTTP-dates silently return `None` and
 /// the caller falls back to exponential backoff.
 /// Capped at 120s to prevent absurdly long sleeps from a misbehaving upstream.
+/// Every `type` discriminator async-openai's `rs::ResponseStreamEvent`
+/// deserializes. Frames carrying any other `type` are skipped as
+/// [`ResponsesStreamItem::Heartbeat`] instead of failing deserialization
+/// fatally — the same posture as codex-rs, whose `ResponsesStreamEvent.kind`
+/// is a plain `String` with a `_ => trace!` default arm. Without this, every
+/// event type OpenAI adds server-side surfaces here as a non-retryable
+/// `unknown variant` serialization error.
+const RESPONSES_KNOWN_EVENT_TYPES: [&str; 49] = [
+    "response.created",
+    "response.in_progress",
+    "response.completed",
+    "response.failed",
+    "response.incomplete",
+    "response.output_item.added",
+    "response.output_item.done",
+    "response.content_part.added",
+    "response.content_part.done",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.refusal.delta",
+    "response.refusal.done",
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done",
+    "response.file_search_call.in_progress",
+    "response.file_search_call.searching",
+    "response.file_search_call.completed",
+    "response.web_search_call.in_progress",
+    "response.web_search_call.searching",
+    "response.web_search_call.completed",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
+    "response.image_generation_call.completed",
+    "response.image_generation_call.generating",
+    "response.image_generation_call.in_progress",
+    "response.image_generation_call.partial_image",
+    "response.mcp_call_arguments.delta",
+    "response.mcp_call_arguments.done",
+    "response.mcp_call.completed",
+    "response.mcp_call.failed",
+    "response.mcp_call.in_progress",
+    "response.mcp_list_tools.completed",
+    "response.mcp_list_tools.failed",
+    "response.mcp_list_tools.in_progress",
+    "response.code_interpreter_call.in_progress",
+    "response.code_interpreter_call.interpreting",
+    "response.code_interpreter_call.completed",
+    "response.code_interpreter_call_code.delta",
+    "response.code_interpreter_call_code.done",
+    "response.output_text.annotation.added",
+    "response.queued",
+    "response.custom_tool_call_input.delta",
+    "response.custom_tool_call_input.done",
+    "error",
+];
+
 /// Deserialize a Responses API SSE event, with a fallback for xAI-specific
 /// tool types (e.g., `x_search`) that `async_openai` can't parse.
+///
+/// Returns `Ok(None)` when the frame is parseable JSON but should be skipped
+/// rather than surfaced:
+///
+/// * the `type` discriminator is unknown to this build (forward-compat: new
+///   OpenAI event types must never become fatal `unknown variant` errors), or
+/// * it is `response.output_item.done` / `.added` whose nested `item` is an
+///   `OutputItem` kind async-openai does not model — codex-rs likewise logs
+///   and skips unparseable output items; the deltas and the terminal event
+///   carry the usable content.
 ///
 /// The API echoes the request's `tools` array in `ResponseCompleted` and
 /// `ResponseCreated` events. If we sent `{"type": "x_search"}`, the response
 /// includes it, and `rs::Tool` deserialization fails. On failure, we strip
-/// unrecognized tools from the raw JSON and retry.
+/// unrecognized tools from the raw JSON and retry; terminal events get the
+/// same treatment for unrecognized `output` items.
 ///
 /// On `response.completed` / `response.incomplete`, this also rewrites
 /// `response.usage.total_tokens` in place to the live context length
@@ -133,58 +204,169 @@ impl GrokRequestHeaders<'_> {
 /// `ResponseUsage` unchanged so billing telemetry stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
-fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
-    let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
-        Ok(event) => event,
-        Err(first_err) => {
-            // Try sanitizing: parse as Value, strip unknown tools, retry.
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
-                // Strip tools that async_openai's rs::Tool can't deserialize
-                // (e.g., xAI-specific "x_search"). Instead of maintaining a
-                // hardcoded allowlist, try deserializing each tool entry —
-                // if it fails, drop it.
-                if let Some(tools) = value
-                    .pointer_mut("/response/tools")
-                    .and_then(|v| v.as_array_mut())
-                {
-                    tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
-                }
-                if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
-                    apply_terminal_event_overrides(&mut event, data);
-                    return Ok(event);
-                }
-            }
+fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
+    let first_err = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+        Ok(mut event) => {
+            apply_terminal_event_overrides(&mut event, data);
+            return Ok(Some(event));
+        }
+        Err(first_err) => first_err,
+    };
+
+    // Try sanitizing: parse as Value, drop what async-openai can't model, retry.
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) else {
+        tracing::error!(
+            error = %first_err,
+            raw_data = %data,
+            "Failed to deserialize ResponseStreamEvent from stream"
+        );
+        return Err(SamplingError::Serialization(first_err));
+    };
+
+    if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
+        // Forward-compat: unknown top-level event type — skip, never fatal.
+        if !RESPONSES_KNOWN_EVENT_TYPES.contains(&event_type) {
+            tracing::debug!(
+                event_type,
+                "skipping Responses API event of unknown type (forward-compat)"
+            );
+            return Ok(None);
+        }
+        // Known frame carrying an output item kind async-openai cannot model
+        // (e.g. a newly added OutputItem type): skip the frame rather than
+        // fail the stream — streamed deltas and the terminal event still
+        // carry the usable content.
+        if matches!(
+            event_type,
+            "response.output_item.done" | "response.output_item.added"
+        ) && value.get("item").is_some()
+            && serde_json::from_value::<rs::OutputItem>(value["item"].clone()).is_err()
+        {
+            tracing::debug!(
+                event_type,
+                "skipping Responses API event with unknown output item kind"
+            );
+            return Ok(None);
+        }
+    }
+
+    // Strip tools that async_openai's rs::Tool can't deserialize (e.g.,
+    // xAI-specific "x_search"). Instead of maintaining a hardcoded allowlist,
+    // try deserializing each tool entry — if it fails, drop it.
+    if let Some(tools) = value
+        .pointer_mut("/response/tools")
+        .and_then(|v| v.as_array_mut())
+    {
+        tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
+    }
+    // Same for terminal-event `output` items of a kind this build predates.
+    if let Some(output) = value
+        .pointer_mut("/response/output")
+        .and_then(|v| v.as_array_mut())
+    {
+        output.retain(|item| serde_json::from_value::<rs::OutputItem>(item.clone()).is_ok());
+    }
+    match serde_json::from_value::<rs::ResponseStreamEvent>(value) {
+        Ok(mut event) => {
+            apply_terminal_event_overrides(&mut event, data);
+            Ok(Some(event))
+        }
+        Err(_) => {
             tracing::error!(
                 error = %first_err,
                 raw_data = %data,
                 "Failed to deserialize ResponseStreamEvent from stream"
             );
-            return Err(SamplingError::Serialization(first_err));
+            Err(SamplingError::Serialization(first_err))
         }
-    };
-    apply_terminal_event_overrides(&mut event, data);
-    Ok(event)
+    }
 }
 
-/// Decode one non-terminal-marker Responses SSE frame.
+/// Decode one Responses SSE frame.
 ///
-/// `None` means the frame is auxiliary and should be skipped without ending
-/// the stream. Every other frame remains strict: API errors are surfaced as
-/// `SamplingError`, and unknown semantic event types are left to typed
-/// deserialization instead of being silently discarded.
+/// Auxiliary frames (transport heartbeats) and forward-compat skips both
+/// surface as [`ResponsesStreamItem::Heartbeat`] so the layer-2 idle detector
+/// sees server liveness instead of a starved stream. API errors are surfaced
+/// as `SamplingError`; malformed known events stay strict and fatal.
 fn decode_responses_sse_frame(
     event_name: &str,
     data: &str,
-) -> Option<Result<rs::ResponseStreamEvent>> {
+) -> std::result::Result<ResponsesStreamItem, SamplingError> {
     if is_responses_auxiliary_event(event_name, data) {
-        return None;
+        return Ok(ResponsesStreamItem::Heartbeat);
     }
 
     if let Some(stream_error) = try_parse_stream_error(data) {
-        Some(Err(stream_error))
+        Err(stream_error)
     } else {
-        Some(deserialize_response_event(data))
+        match deserialize_response_event(data) {
+            Ok(Some(event)) => Ok(ResponsesStreamItem::Event(event)),
+            Ok(None) => Ok(ResponsesStreamItem::Heartbeat),
+            Err(err) => Err(err),
+        }
     }
+}
+
+/// Every `type` discriminator [`messages::MessageStreamEvent`] deserializes.
+/// Frames carrying any other `type` are mapped to `Ping` (liveness-only)
+/// instead of failing deserialization fatally — same forward-compat posture
+/// as [`RESPONSES_KNOWN_EVENT_TYPES`].
+const MESSAGES_KNOWN_EVENT_TYPES: [&str; 8] = [
+    "message_start",
+    "message_delta",
+    "message_stop",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "ping",
+    "error",
+];
+
+/// Decode one Anthropic Messages SSE frame.
+///
+/// Forward-compat: frames whose `type` is unknown to this build (a newer
+/// Anthropic / provider event kind), and `content_block_start` /
+/// `content_block_delta` frames whose nested block / delta kind is unknown,
+/// are surfaced as `Ping` — the layer-2 liveness-only event — rather than a
+/// fatal `Serialization` error on a healthy stream. Malformed frames of a
+/// known type stay strict and fatal.
+fn decode_messages_sse_frame(data: &str) -> Result<messages::MessageStreamEvent> {
+    let first_err = match serde_json::from_str::<messages::MessageStreamEvent>(data) {
+        Ok(event) => return Ok(event),
+        Err(first_err) => first_err,
+    };
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+        && let Some(event_type) = value.get("type").and_then(|v| v.as_str())
+    {
+        let skip = if !MESSAGES_KNOWN_EVENT_TYPES.contains(&event_type) {
+            true
+        } else {
+            match event_type {
+                "content_block_start" => value
+                    .get("content_block")
+                    .is_some_and(|b| serde_json::from_value::<messages::ContentBlock>(b.clone()).is_err()),
+                "content_block_delta" => value
+                    .get("delta")
+                    .is_some_and(|d| serde_json::from_value::<messages::StreamDelta>(d.clone()).is_err()),
+                _ => false,
+            }
+        };
+        if skip {
+            tracing::debug!(
+                event_type,
+                "skipping Messages API frame with unknown type/block kind (forward-compat)"
+            );
+            return Ok(messages::MessageStreamEvent::Ping);
+        }
+    }
+
+    tracing::error!(
+        error = %first_err,
+        raw_data = %data,
+        "Failed to deserialize MessageStreamEvent from stream"
+    );
+    Err(SamplingError::Serialization(first_err))
 }
 
 /// On terminal Responses API events (`response.completed` /
@@ -525,6 +707,7 @@ struct ClientDefaults {
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     responses_codex_dialect: bool,
+    kimi_dialect: bool,
     /// Session reasoning effort. Needed for Codex wire rewrite: async-openai
     /// only types through `xhigh`, so Max/Ultra must be restored post-serialize.
     reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
@@ -741,6 +924,7 @@ impl SamplingClient {
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
             responses_codex_dialect: config.responses_codex_dialect,
+            kimi_dialect: config.kimi_dialect,
             reasoning_effort: config.reasoning_effort,
         };
 
@@ -1376,7 +1560,7 @@ impl SamplingClient {
         &self,
         mut request: CreateResponseWrapper,
     ) -> Result<(
-        BoxStream<'static, Result<rs::ResponseStreamEvent>>,
+        BoxStream<'static, Result<ResponsesStreamItem>>,
         Option<ResponseModelMetadata>,
         Option<crate::doom_loop::DoomLoopSignalCollector>,
     )> {
@@ -1531,9 +1715,10 @@ impl SamplingClient {
 
         let doom_loop_for_stream = doom_loop.clone();
 
-        // The scan item is an `Option`: `Some(None)` skips an absorbed
-        // doom-loop event without terminating the stream (`filter_map`
-        // below), while an outer `None` still ends it.
+        // Absorbed frames (doom-loop check events) and auxiliary frames both
+        // surface as heartbeats: they carry no model output but prove server
+        // liveness, which the layer-2 idle detector needs in order not to
+        // mistake a long heartbeat-only phase for a dead connection.
         let events = event_stream
             .scan(false, move |had_transport_error, event_res| {
                 if *had_transport_error {
@@ -1564,19 +1749,18 @@ impl SamplingClient {
                             None => is_check_event(&event.event, data),
                         };
                         if swallow {
-                            Some(None)
+                            Ok(ResponsesStreamItem::Heartbeat)
                         } else {
-                            Some(decode_responses_sse_frame(&event.event, data))
+                            decode_responses_sse_frame(&event.event, data)
                         }
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
+                        Err(SamplingError::EventStreamError(e.to_string()))
                     }
                 };
-                std::future::ready(item)
+                std::future::ready(Some(item))
             })
-            .filter_map(std::future::ready)
             .boxed();
 
         Ok((events, model_metadata, doom_loop))
@@ -1852,18 +2036,7 @@ impl SamplingClient {
                         if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Err(stream_error))
                         } else {
-                            Some(
-                                serde_json::from_str::<messages::MessageStreamEvent>(data).map_err(
-                                    |e| {
-                                        tracing::error!(
-                                            error = %e,
-                                            raw_data = %data,
-                                            "Failed to deserialize MessageStreamEvent from stream"
-                                        );
-                                        SamplingError::Serialization(e)
-                                    },
-                                ),
-                            )
+                            Some(decode_messages_sse_frame(data))
                         }
                     }
                     Err(e) => {
@@ -1899,6 +2072,10 @@ impl SamplingClient {
         if request.max_output_tokens.is_none() {
             request.max_output_tokens = self.defaults.max_completion_tokens;
         }
+
+        // Production always stamps dialect from SamplerConfig so bare
+        // model-name matching cannot reshape Ollama/OpenRouter payloads.
+        request.kimi_dialect = Some(self.defaults.kimi_dialect);
 
         Ok(())
     }
@@ -1954,7 +2131,7 @@ impl SamplingClient {
         &self,
         mut request: ConversationRequest,
     ) -> Result<(
-        BoxStream<'static, Result<rs::ResponseStreamEvent>>,
+        BoxStream<'static, Result<ResponsesStreamItem>>,
         Option<ResponseModelMetadata>,
         Option<crate::doom_loop::DoomLoopSignalCollector>,
     )> {
@@ -2164,6 +2341,7 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            kimi_dialect: false,
         }
     }
 
@@ -2748,12 +2926,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_responses_sse_frame_skips_known_auxiliary_events() {
+    fn decode_responses_sse_frame_maps_auxiliary_events_to_heartbeats() {
         for event_type in RESPONSES_AUXILIARY_EVENT_TYPES {
             let named = decode_responses_sse_frame(event_type, r#"{"side_band":true}"#);
             assert!(
-                named.is_none(),
-                "event: {event_type} should identify an auxiliary frame"
+                matches!(named, Ok(ResponsesStreamItem::Heartbeat)),
+                "event: {event_type} should surface as a heartbeat"
             );
 
             let payload = serde_json::json!({
@@ -2764,8 +2942,8 @@ mod tests {
             .to_string();
             let data_only = decode_responses_sse_frame("", &payload);
             assert!(
-                data_only.is_none(),
-                "type: {event_type} should identify an auxiliary frame"
+                matches!(data_only, Ok(ResponsesStreamItem::Heartbeat)),
+                "type: {event_type} should surface as a heartbeat"
             );
         }
     }
@@ -2783,8 +2961,9 @@ mod tests {
         })
         .to_string();
 
-        let Some(Ok(rs::ResponseStreamEvent::ResponseOutputTextDelta(event))) =
-            decode_responses_sse_frame("", &payload)
+        let Ok(ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseOutputTextDelta(
+            event,
+        ))) = decode_responses_sse_frame("", &payload)
         else {
             panic!("a normal text delta containing auxiliary names must be preserved");
         };
@@ -2792,14 +2971,99 @@ mod tests {
     }
 
     #[test]
-    fn decode_responses_sse_frame_keeps_other_unknown_events_strict() {
+    fn decode_responses_sse_frame_skips_unknown_event_types() {
+        // Forward-compat: an event type this build does not model is a
+        // heartbeat skip, not a fatal serialization error (codex-rs posture).
         let decoded = decode_responses_sse_frame(
             "",
             r#"{"type":"response.future_semantic_event","sequence_number":9}"#,
         );
+        assert!(matches!(decoded, Ok(ResponsesStreamItem::Heartbeat)));
+    }
+
+    #[test]
+    fn decode_responses_sse_frame_skips_unknown_output_item_kinds() {
+        // A known frame whose nested item is an OutputItem kind async-openai
+        // predates: skip the frame, keep the stream alive.
+        let payload = serde_json::json!({
+            "type": "response.output_item.done",
+            "sequence_number": 10,
+            "output_index": 0,
+            "item": { "type": "brand_new_item_kind", "id": "item_1" }
+        })
+        .to_string();
+        let decoded = decode_responses_sse_frame("", &payload);
+        assert!(matches!(decoded, Ok(ResponsesStreamItem::Heartbeat)));
+    }
+
+    #[test]
+    fn decode_responses_sse_frame_keeps_malformed_known_events_strict() {
+        // A known event type with a malformed payload stays a fatal
+        // serialization error — forward-compat leniency must not hide wire
+        // corruption on events we do model.
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.output_text.delta","sequence_number":9}"#,
+        );
         assert!(matches!(
             decoded,
-            Some(Err(SamplingError::Serialization(_)))
+            Err(SamplingError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn decode_messages_sse_frame_skips_unknown_event_types() {
+        // Forward-compat: a Messages event type this build does not model is
+        // a liveness Ping, not a fatal serialization error.
+        let decoded = decode_messages_sse_frame(r#"{"type":"citation","index":0}"#);
+        assert!(matches!(
+            decoded,
+            Ok(messages::MessageStreamEvent::Ping)
+        ));
+    }
+
+    #[test]
+    fn decode_messages_sse_frame_skips_unknown_content_block_kinds() {
+        let decoded = decode_messages_sse_frame(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"brand_new_block","id":"b1"}}"#,
+        );
+        assert!(matches!(
+            decoded,
+            Ok(messages::MessageStreamEvent::Ping)
+        ));
+
+        let decoded = decode_messages_sse_frame(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"brand_new_delta","x":"y"}}"#,
+        );
+        assert!(matches!(
+            decoded,
+            Ok(messages::MessageStreamEvent::Ping)
+        ));
+    }
+
+    #[test]
+    fn decode_messages_sse_frame_keeps_malformed_known_events_strict() {
+        // Missing required fields on a known type: still a fatal
+        // serialization error (wire corruption must not be hidden).
+        let decoded = decode_messages_sse_frame(r#"{"type":"content_block_stop"}"#);
+        assert!(matches!(
+            decoded,
+            Err(SamplingError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn decode_messages_sse_frame_parses_ping_and_text_delta() {
+        assert!(matches!(
+            decode_messages_sse_frame(r#"{"type":"ping"}"#),
+            Ok(messages::MessageStreamEvent::Ping)
+        ));
+        let decoded = decode_messages_sse_frame(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        );
+        assert!(matches!(
+            decoded,
+            Ok(messages::MessageStreamEvent::ContentBlockDelta { .. })
         ));
     }
 
@@ -2833,7 +3097,9 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse)
+            .expect("parse")
+            .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2871,7 +3137,9 @@ mod tests {
             )
         };
 
-        let event = deserialize_response_event(&make(78)).expect("parse");
+        let event = deserialize_response_event(&make(78))
+            .expect("parse")
+            .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2885,7 +3153,9 @@ mod tests {
         );
 
         // The REST mapper backfills 0 for unbilled requests: no stash.
-        let event = deserialize_response_event(&make(0)).expect("parse");
+        let event = deserialize_response_event(&make(0))
+            .expect("parse")
+            .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2915,7 +3185,9 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse)
+            .expect("parse")
+            .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2952,7 +3224,9 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = deserialize_response_event(sse)
+            .expect("parse")
+            .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2973,7 +3247,9 @@ mod tests {
             "delta": "hello",
             "logprobs": []
         }"#;
-        let event = deserialize_response_event(sse).expect("non-terminal event parses");
+        let event = deserialize_response_event(sse)
+            .expect("non-terminal event parses")
+            .expect("event present");
         assert!(matches!(
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)

@@ -528,6 +528,13 @@ pub(crate) async fn generate_session_compact(
                 }
                 match chunk_result {
                     Ok(chunk) => {
+                        // Heartbeats (keepalive / forward-compat skips) prove
+                        // liveness during long server-side phases; reset the
+                        // idle clock and wait for the next frame.
+                        let xai_grok_sampler::ResponsesStreamItem::Event(chunk) = chunk else {
+                            last_progress_at = std::time::Instant::now();
+                            continue;
+                        };
                         if !matches!(
                             &chunk,
                             ResponseStreamEvent::ResponseCreated(_)
@@ -1622,6 +1629,7 @@ mod reasoning_compaction_regression_tests {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            kimi_dialect: false,
         }
     }
     #[tokio::test]

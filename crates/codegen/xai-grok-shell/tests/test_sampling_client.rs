@@ -712,6 +712,11 @@ async fn test_responses_api_streaming_text() {
     let mut completed = false;
     while let Some(event_result) = stream.next().await {
         let event = event_result.unwrap();
+        // Heartbeat frames (keepalive / forward-compat skips) carry no
+        // model output — skip them in raw-frame assertions.
+        let xai_grok_sampler::ResponsesStreamItem::Event(event) = event else {
+            continue;
+        };
         use xai_grok_shell::sampling::rs::ResponseStreamEvent;
         match event {
             ResponseStreamEvent::ResponseOutputTextDelta(delta) => {
@@ -755,6 +760,11 @@ async fn test_responses_api_streaming_tool_call() {
     let mut function_call_found = false;
     while let Some(event_result) = stream.next().await {
         let event = event_result.unwrap();
+        // Heartbeat frames (keepalive / forward-compat skips) carry no
+        // model output — skip them in raw-frame assertions.
+        let xai_grok_sampler::ResponsesStreamItem::Event(event) = event else {
+            continue;
+        };
         use xai_grok_shell::sampling::rs::ResponseStreamEvent;
         if let ResponseStreamEvent::ResponseCompleted(completed) = event {
             for output in completed.response.output {
@@ -798,6 +808,11 @@ async fn test_responses_api_with_reasoning_and_encrypted_content() {
 
     while let Some(event_result) = stream.next().await {
         let event = event_result.unwrap();
+        // Heartbeat frames (keepalive / forward-compat skips) carry no
+        // model output — skip them in raw-frame assertions.
+        let xai_grok_sampler::ResponsesStreamItem::Event(event) = event else {
+            continue;
+        };
         use xai_grok_shell::sampling::rs::ResponseStreamEvent;
         if let ResponseStreamEvent::ResponseCompleted(completed) = event {
             for output in &completed.response.output {
@@ -861,6 +876,11 @@ async fn test_responses_api_reasoning_without_encrypted() {
     let mut found_reasoning = false;
     while let Some(event_result) = stream.next().await {
         let event = event_result.unwrap();
+        // Heartbeat frames (keepalive / forward-compat skips) carry no
+        // model output — skip them in raw-frame assertions.
+        let xai_grok_sampler::ResponsesStreamItem::Event(event) = event else {
+            continue;
+        };
         use xai_grok_shell::sampling::rs::ResponseStreamEvent;
         if let ResponseStreamEvent::ResponseCompleted(completed) = event {
             for output in &completed.response.output {
@@ -1208,7 +1228,12 @@ async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
     let mut completed = false;
     while let Some(event_result) = stream.next().await {
         let event = event_result.expect("absorbed check event must not fail the typed stream");
-        if matches!(event, rs::ResponseStreamEvent::ResponseCompleted(_)) {
+        if matches!(
+            event,
+            xai_grok_sampler::ResponsesStreamItem::Event(
+                rs::ResponseStreamEvent::ResponseCompleted(_)
+            )
+        ) {
             completed = true;
         }
     }
@@ -1249,7 +1274,12 @@ async fn test_doom_loop_check_disabled_sends_no_header_and_drops_check_frames() 
     let mut completed = false;
     while let Some(event_result) = stream.next().await {
         let event = event_result.expect("check frames must be dropped, not fail the stream");
-        if matches!(event, rs::ResponseStreamEvent::ResponseCompleted(_)) {
+        if matches!(
+            event,
+            xai_grok_sampler::ResponsesStreamItem::Event(
+                rs::ResponseStreamEvent::ResponseCompleted(_)
+            )
+        ) {
             completed = true;
         }
     }
@@ -1320,6 +1350,11 @@ async fn test_responses_api_multi_turn_with_tool_calls() {
     let mut completed = false;
     while let Some(event_result) = stream.next().await {
         let event = event_result.unwrap();
+        // Heartbeat frames (keepalive / forward-compat skips) carry no
+        // model output — skip them in raw-frame assertions.
+        let xai_grok_sampler::ResponsesStreamItem::Event(event) = event else {
+            continue;
+        };
         use xai_grok_shell::sampling::rs::ResponseStreamEvent;
         if let ResponseStreamEvent::ResponseCompleted(_) = event {
             completed = true;

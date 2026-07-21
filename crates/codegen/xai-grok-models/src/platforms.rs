@@ -24,6 +24,10 @@ pub const MOONSHOT_AI_BASE_URL_ENV: &str = "GROK_MOONSHOT_AI_BASE_URL";
 
 /// Env override for the Kimi Code subscription inference base.
 pub const KIMI_CODE_BASE_URL_ENV: &str = "GROK_KIMI_CODE_BASE_URL";
+/// Env override for the Kimi Code wire backend (`messages` default;
+/// `chat_completions` opts into the OpenAI-compatible endpoint while we
+/// validate parity — gray-release switch).
+pub const KIMI_CODE_API_BACKEND_ENV: &str = "GROK_KIMI_CODE_API_BACKEND";
 /// Env override for the Kimi Code OAuth host.
 pub const KIMI_CODE_OAUTH_HOST_ENV: &str = "GROK_KIMI_CODE_OAUTH_HOST";
 

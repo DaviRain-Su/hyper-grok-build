@@ -16,7 +16,7 @@ use xai_grok_sampling_types::{
 
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
-use crate::types::RequestId;
+use crate::types::{RequestId, ResponsesStreamItem};
 
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.
@@ -87,12 +87,18 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
 /// `SamplingError::Api { status: 500, .. }` so the actor's retry loop
 /// treats them as retryable.
 ///
+/// [`ResponsesStreamItem::Heartbeat`] frames (keepalive, unknown
+/// forward-compat event types) carry no model output but prove the server is
+/// alive: they reset the idle detector like codex-rs's frame-level timeout
+/// does. Without this, a long heartbeat-only phase (server-side tool
+/// execution on ChatGPT Codex) would be misclassified as an idle stall.
+///
 /// `doom_loop` is the collector returned alongside `raw_stream` by
 /// `SamplingClient::conversation_stream_responses`; any signals the SSE
 /// decoder recorded are drained onto the final `ConversationResponse`.
 /// `None` (check disabled) leaves the response untouched.
 pub fn stream_responses<'a>(
-    raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, SamplingError>>,
+    raw_stream: BoxStream<'a, Result<ResponsesStreamItem, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
     request_id: RequestId,
     idle_timeout: Duration,
@@ -184,6 +190,18 @@ pub fn stream_responses<'a>(
                 };
                 return;
             }
+
+            // Heartbeat / forward-compat skip frames carry no model output
+            // but prove the server is alive: refresh the content-stall timer
+            // and continue. codex-rs's idle timeout lives at the raw frame
+            // level and behaves the same way.
+            let event = match event {
+                ResponsesStreamItem::Event(event) => event,
+                ResponsesStreamItem::Heartbeat => {
+                    last_content_chunk_at = Instant::now();
+                    continue;
+                }
+            };
 
             let event_has_content = responses_event_has_meaningful_content(&event);
 
@@ -571,6 +589,14 @@ mod tests {
         RequestId::from("resp-test")
     }
 
+    /// Wrap typed rs events into the raw-stream item type the SSE decoder
+    /// emits in production.
+    fn raw_events(
+        events: Vec<Result<rs::ResponseStreamEvent, SamplingError>>,
+    ) -> BoxStream<'static, Result<ResponsesStreamItem, SamplingError>> {
+        stream::iter(events.into_iter().map(|r| r.map(ResponsesStreamItem::Event))).boxed()
+    }
+
     /// Build a minimal `rs_types::Response` for use in `ResponseCompleted`
     fn build_response(status: rs_types::Status) -> rs_types::Response {
         rs_types::Response {
@@ -660,13 +686,12 @@ mod tests {
     /// Must not classify as empty (would spin retries while UI already showed text).
     #[tokio::test]
     async fn codex_empty_completed_output_adopts_output_item_done() {
-        let raw = stream::iter(vec![
+        let raw = raw_events(vec![
             Ok(text_delta_event("Hi")),
             Ok(text_delta_event("!")),
             Ok(message_item_done("Hi!")),
             Ok(completed_event()),
-        ])
-        .boxed();
+        ]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -701,8 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_completed_event_yields_failed() {
-        let raw =
-            stream::iter(Vec::<Result<rs::ResponseStreamEvent, SamplingError>>::new()).boxed();
+        let raw = raw_events(Vec::new());
         let events = collect(stream_responses(
             raw,
             None,
@@ -723,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn text_delta_then_completed_yields_completed_with_stop() {
-        let raw = stream::iter(vec![Ok(text_delta_event("hello")), Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(text_delta_event("hello")), Ok(completed_event())]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -760,7 +784,7 @@ mod tests {
             response: failed_response_with_error("boom"),
             sequence_number: 0,
         });
-        let raw = stream::iter(vec![Ok(failed)]).boxed();
+        let raw = raw_events(vec![Ok(failed)]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -782,11 +806,10 @@ mod tests {
 
     #[tokio::test]
     async fn mid_stream_transport_error_yields_failed() {
-        let raw = stream::iter(vec![
+        let raw = raw_events(vec![
             Ok(text_delta_event("hi")),
             Err(SamplingError::EventStreamError("conn reset".into())),
-        ])
-        .boxed();
+        ]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -810,7 +833,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn idle_timeout_when_stream_stalls() {
-        let raw = stream::iter(vec![Ok(text_delta_event("hi"))])
+        let raw = raw_events(vec![Ok(text_delta_event("hi"))])
             .chain(stream::pending())
             .boxed();
         let events = collect(stream_responses(
@@ -830,9 +853,74 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_frames_keep_long_silent_phases_alive() {
+        // 300s of heartbeat-only streaming (well past the 60s idle timeout),
+        // then real content: the stream must complete, not fail with
+        // IdleTimeout. Heartbeat gaps stay under the timeout — a gap longer
+        // than idle_timeout still fails (dead connection).
+        let raw = async_stream::stream! {
+            for _ in 0..10 {
+                yield Ok(ResponsesStreamItem::Heartbeat);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            yield Ok(ResponsesStreamItem::Event(text_delta_event("hi")));
+            yield Ok(ResponsesStreamItem::Event(completed_event()));
+        }
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::Failed { .. })),
+            "heartbeat-kept-alive stream must not fail: {events:?}"
+        );
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_gap_beyond_idle_timeout_still_fails() {
+        // One heartbeat, then silence longer than idle_timeout: liveness is
+        // disproven, so the transport timeout must fire.
+        let raw = async_stream::stream! {
+            yield Ok(ResponsesStreamItem::Heartbeat);
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            yield Ok(ResponsesStreamItem::Event(completed_event()));
+        }
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(error.kind, crate::events::SamplingErrorKind::IdleTimeout);
+            }
+            other => panic!("expected Failed(IdleTimeout), got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn model_metadata_yielded_after_stream_started() {
-        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(completed_event())]);
         let metadata = ResponseModelMetadata {
             context_window: Some(8192),
             ..Default::default()
@@ -922,7 +1010,7 @@ mod tests {
             Ok(function_call_args_delta_event(0, "1}")),
             Ok(completed_event()),
         ];
-        let raw = stream::iter(events).boxed();
+        let raw = raw_events(events);
         let evs = collect(stream_responses(
             raw,
             None,
@@ -953,7 +1041,7 @@ mod tests {
             Ok(function_call_args_delta_event(7, "{\"oops\":1}")),
             Ok(completed_event()),
         ];
-        let raw = stream::iter(events).boxed();
+        let raw = raw_events(events);
         let evs = collect(stream_responses(
             raw,
             None,
@@ -974,7 +1062,7 @@ mod tests {
             Ok(function_call_args_delta_event(1, "b-args")),
             Ok(completed_event()),
         ];
-        let raw = stream::iter(events).boxed();
+        let raw = raw_events(events);
         let evs = collect(stream_responses(
             raw,
             None,
@@ -1003,7 +1091,7 @@ mod tests {
         };
         let collector = crate::doom_loop::DoomLoopSignalCollector::default();
         assert!(collector.absorb(DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA));
-        let raw = stream::iter(vec![Ok(text_delta_event("hello")), Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(text_delta_event("hello")), Ok(completed_event())]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -1034,7 +1122,7 @@ mod tests {
 
         let collector = crate::doom_loop::DoomLoopSignalCollector::default();
         assert!(collector.absorb("response.doom_loop_check", confident));
-        let raw = stream::iter(vec![Ok(text_delta_event("hi")), Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(text_delta_event("hi")), Ok(completed_event())]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -1066,7 +1154,7 @@ mod tests {
         let collector = crate::doom_loop::DoomLoopSignalCollector::default();
         assert!(collector.absorb("response.doom_loop_check", confident));
         collector.disarm_abort();
-        let raw = stream::iter(vec![Ok(text_delta_event("hi")), Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(text_delta_event("hi")), Ok(completed_event())]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -1085,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn doom_loop_signals_empty_without_collector_or_triggers() {
-        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(completed_event())]);
         let events = collect(stream_responses(
             raw,
             None,
@@ -1102,7 +1190,7 @@ mod tests {
         }
 
         // A collector that never saw a trigger also leaves the field empty.
-        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
+        let raw = raw_events(vec![Ok(completed_event())]);
         let events = collect(stream_responses(
             raw,
             None,

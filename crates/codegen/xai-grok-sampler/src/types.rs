@@ -4,6 +4,32 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use xai_grok_sampling_types::rs;
+
+/// One item on the raw Responses API SSE stream.
+///
+/// The ChatGPT Codex backend interleaves transport heartbeats (`keepalive`,
+/// `response.metadata`) with typed events, and OpenAI keeps adding event
+/// types async-openai's exhaustive `ResponseStreamEvent` enum does not know.
+/// Both are proof the server is alive, so instead of dropping them at the
+/// decoder (which starves the layer-2 idle detector) or failing fatally, the
+/// decoder surfaces them as [`ResponsesStreamItem::Heartbeat`].
+#[derive(Debug, Clone)]
+pub enum ResponsesStreamItem {
+    /// A typed Responses API event.
+    Event(rs::ResponseStreamEvent),
+    /// An out-of-band frame: known heartbeat, or a forward-compatible skip
+    /// of an event type this build does not model. Carries no model output;
+    /// layer 2 uses it only to refresh liveness timers.
+    Heartbeat,
+}
+
+impl From<rs::ResponseStreamEvent> for ResponsesStreamItem {
+    fn from(event: rs::ResponseStreamEvent) -> Self {
+        Self::Event(event)
+    }
+}
+
 /// Unique identifier for a sampling request.
 ///
 /// Wraps a `String` so callers can pass an externally-assigned ID

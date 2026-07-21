@@ -3652,18 +3652,47 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 builtin.platform.api_key_env_names().iter().copied(),
             ))
         };
-        let api_backend = match builtin.api_backend {
+        let catalog_backend = builtin.api_backend;
+        // Kimi For Coding gray-release switch: default Anthropic Messages,
+        // `GROK_KIMI_CODE_API_BACKEND=chat_completions` routes the same
+        // models over the OpenAI-compatible endpoint while we validate
+        // parity. Unset / unrecognized values keep the catalog backend.
+        let effective_backend = if builtin.platform == xai_grok_models::PlatformId::KimiCode {
+            std::env::var(xai_grok_models::KIMI_CODE_API_BACKEND_ENV)
+                .ok()
+                .and_then(|v| xai_grok_models::PlatformApiBackend::parse(v.trim()))
+                .unwrap_or(catalog_backend)
+        } else {
+            catalog_backend
+        };
+        let api_backend = match effective_backend {
             xai_grok_models::PlatformApiBackend::ChatCompletions => ApiBackend::ChatCompletions,
             xai_grok_models::PlatformApiBackend::Responses => ApiBackend::Responses,
             xai_grok_models::PlatformApiBackend::Messages => ApiBackend::Messages,
         };
-        let auth_scheme = if builtin.platform.uses_x_api_key() {
+        // Anthropic Messages API-key platforms (Anthropic direct, MiniMax
+        // `/anthropic`, etc.) expect `x-api-key`. OAuth platforms (Kimi Code)
+        // also use the Messages backend but send Bearer tokens — leave those
+        // on the default Bearer scheme.
+        let auth_scheme = if builtin.platform.uses_oauth() {
+            None
+        } else if builtin.platform.uses_x_api_key()
+            || matches!(
+                effective_backend,
+                xai_grok_models::PlatformApiBackend::Messages
+            )
+        {
             Some(AuthScheme::XApiKey)
         } else {
             None
         };
         let mut extra_headers = IndexMap::new();
-        if builtin.platform == xai_grok_models::PlatformId::Anthropic {
+        if builtin.platform == xai_grok_models::PlatformId::Anthropic
+            || (matches!(
+                effective_backend,
+                xai_grok_models::PlatformApiBackend::Messages
+            ) && !builtin.platform.uses_oauth())
+        {
             extra_headers.insert(
                 "anthropic-version".into(),
                 xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
@@ -3671,14 +3700,21 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         }
         // Official Pi kimi-coding: User-Agent KimiCLI + anthropic-version
         // (Messages API). Device identity headers are injected per-request.
+        // The anthropic-version header only applies on the Messages backend;
+        // the chat_completions gray switch must not send it.
         if builtin.platform == xai_grok_models::PlatformId::KimiCode {
             extra_headers
                 .entry("User-Agent".into())
                 .or_insert_with(|| "KimiCLI/1.5".into());
-            extra_headers.insert(
-                "anthropic-version".into(),
-                xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
-            );
+            if matches!(
+                effective_backend,
+                xai_grok_models::PlatformApiBackend::Messages
+            ) {
+                extra_headers.insert(
+                    "anthropic-version".into(),
+                    xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
+                );
+            }
         }
         // Prefer an explicit per-platform effort menu over the legacy
         // low/medium/high/xhigh fallback so GPT-5 / Kimi show their real tiers.
