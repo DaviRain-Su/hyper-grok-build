@@ -91,8 +91,9 @@ impl SlashCommand for LogoutCommand {
                 ));
             };
             if platform.uses_oauth() {
+                let (_, logout) = super::oauth_login_logout_hint(platform);
                 return CommandResult::Error(format!(
-                    "{} uses OAuth — run `grok logout --kimi` instead.",
+                    "{} uses OAuth — run `{logout}` instead.",
                     platform.display_name()
                 ));
             }
@@ -166,6 +167,59 @@ mod tests {
                 assert!(api_key.is_empty());
             }
             other => panic!("expected SetPlatformApiKey clear, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logout_provider_openai_codex_shows_openai_hint() {
+        let models = ModelState::default();
+        let mut c = ctx(&models);
+        match LogoutCommand.run(&mut c, "provider openai-codex") {
+            CommandResult::Error(msg) => {
+                assert!(
+                    msg.contains("grok logout --openai"),
+                    "Codex logout hint must point at --openai, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("--kimi"),
+                    "Codex logout hint must not mention --kimi, got: {msg}"
+                );
+            }
+            other => panic!("expected Error for OAuth platform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logout_provider_chatgpt_codex_alias_shows_openai_hint() {
+        let models = ModelState::default();
+        let mut c = ctx(&models);
+        match LogoutCommand.run(&mut c, "provider chatgpt-codex") {
+            CommandResult::Error(msg) => {
+                assert!(
+                    msg.contains("grok logout --openai"),
+                    "chatgpt-codex alias must also hint --openai, got: {msg}"
+                );
+            }
+            other => panic!("expected Error for OAuth platform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logout_provider_kimi_code_shows_kimi_hint() {
+        let models = ModelState::default();
+        let mut c = ctx(&models);
+        match LogoutCommand.run(&mut c, "provider kimi-code") {
+            CommandResult::Error(msg) => {
+                assert!(
+                    msg.contains("grok logout --kimi"),
+                    "Kimi logout hint must point at --kimi, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("--openai"),
+                    "Kimi logout hint must not mention --openai, got: {msg}"
+                );
+            }
+            other => panic!("expected Error for OAuth platform, got {other:?}"),
         }
     }
 }

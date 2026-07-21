@@ -62,6 +62,20 @@ pub fn auth_json_path() -> PathBuf {
         .unwrap_or_else(|_| xai_grok_config::grok_home().join("auth.json"))
 }
 
+/// Resolve the auth.json path for a storage helper that still takes `grok_home`.
+///
+/// When `GROK_AUTH_PATH` is set, use that exact path (including a non-default
+/// basename such as `scratch.json`). Otherwise fall back to
+/// `grok_home.join("auth.json")` so hermetic tests that pass a tempdir keep
+/// working without setting the env var.
+fn resolve_auth_json_path(grok_home: &Path) -> PathBuf {
+    if std::env::var_os("GROK_AUTH_PATH").is_some() {
+        auth_json_path()
+    } else {
+        grok_home.join("auth.json")
+    }
+}
+
 pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
     let mut file = File::open(auth_file)?;
     let mut contents = String::new();
@@ -369,7 +383,7 @@ fn restore_prior_bytes(auth_file: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Falls back to the legacy `https://accounts.x.ai/sign-in` scope key
 /// when the requested scope is not found (devbox auth.json migration).
 pub fn read_token_by_scope(grok_home: &Path, scope: &str) -> anyhow::Result<String> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     let store =
         read_auth_json(&path).map_err(|_| anyhow::anyhow!("Not logged in. Run `grok login`."))?;
     lookup_auth(&store, scope).map(|a| a.key).ok_or_else(|| {
@@ -379,7 +393,7 @@ pub fn read_token_by_scope(grok_home: &Path, scope: &str) -> anyhow::Result<Stri
 
 /// Read the API key from the `xai::api_key` scope in auth.json.
 pub fn read_api_key(grok_home: &Path) -> Option<String> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     let map = read_auth_json(&path).ok()?;
     map.get(API_KEY_SCOPE).map(|a| a.key.clone())
 }
@@ -388,38 +402,45 @@ pub fn read_api_key(grok_home: &Path) -> Option<String> {
 ///
 /// Uses the corrupt-recovery reader so a malformed auth.json (e.g. from a
 /// previous crash) can be healed when the user sets an API key.
+///
+/// Serializes through `auth.json.lock` so a concurrent OAuth/platform writer
+/// cannot be clobbered by a stale whole-map RMW.
 pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
-    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    map.insert(
-        API_KEY_SCOPE.to_owned(),
-        GrokAuth {
-            key: api_key.to_owned(),
-            auth_mode: AuthMode::ApiKey,
-            ..Default::default()
-        },
-    );
-    write_auth_json(&path, &map)
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        map.insert(
+            API_KEY_SCOPE.to_owned(),
+            GrokAuth {
+                key: api_key.to_owned(),
+                auth_mode: AuthMode::ApiKey,
+                ..Default::default()
+            },
+        );
+        write_auth_json(&path, &map)
+    })
 }
 
 /// Remove the `xai::api_key` scope from auth.json.
 pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
-    if let Ok(mut map) = read_auth_json(&path) {
-        map.remove(API_KEY_SCOPE);
-        if map.is_empty() {
-            let _ = std::fs::remove_file(&path);
-        } else {
-            write_auth_json(&path, &map)?;
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        if let Ok(mut map) = read_auth_json(&path) {
+            map.remove(API_KEY_SCOPE);
+            if map.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                write_auth_json(&path, &map)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Read the Kimi Code OAuth credential from `auth.json` (scope
 /// [`KIMI_CODE_OAUTH_SCOPE`]).
 pub fn read_kimi_code_auth(grok_home: &Path) -> Option<GrokAuth> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     let map = read_auth_json(&path).ok()?;
     let auth = map.get(KIMI_CODE_OAUTH_SCOPE)?.clone();
     (auth.auth_mode == AuthMode::KimiCode).then_some(auth)
@@ -431,7 +452,7 @@ pub fn read_kimi_code_auth(grok_home: &Path) -> Option<GrokAuth> {
 /// Serializes through `auth.json.lock` (same as Codex) so a concurrent
 /// whole-map RMW cannot drop sibling scopes.
 pub fn store_kimi_code_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
         let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
         let mut stored = auth.clone();
@@ -443,7 +464,7 @@ pub fn store_kimi_code_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Resul
 
 /// Remove the Kimi Code OAuth scope from auth.json.
 pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
         if let Ok(mut map) = read_auth_json(&path) {
             map.remove(KIMI_CODE_OAUTH_SCOPE);
@@ -459,7 +480,7 @@ pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
 
 /// Read the OpenAI Codex (ChatGPT) OAuth credential, if present and correctly scoped.
 pub fn read_openai_codex_auth(grok_home: &Path) -> Option<GrokAuth> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     let map = read_auth_json(&path).ok()?;
     let auth = map.get(OPENAI_CODEX_OAUTH_SCOPE)?.clone();
     (auth.auth_mode == AuthMode::OpenAiCodex).then_some(auth)
@@ -471,7 +492,7 @@ pub fn read_openai_codex_auth(grok_home: &Path) -> Option<GrokAuth> {
 /// Serializes through `auth.json.lock` and re-reads under the lock so a
 /// concurrent xAI/Kimi writer cannot be clobbered by a stale whole-map RMW.
 pub fn store_openai_codex_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
         let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
         let mut stored = auth.clone();
@@ -495,7 +516,7 @@ pub(crate) fn store_openai_codex_auth_after_refresh(
     candidate: &GrokAuth,
     spent_refresh: &str,
 ) -> std::io::Result<GrokAuth> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
         let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
         if let Some(existing) = map.get(OPENAI_CODEX_OAUTH_SCOPE).cloned()
@@ -525,7 +546,7 @@ pub(crate) fn store_openai_codex_auth_after_refresh(
 
 /// Remove the OpenAI Codex OAuth scope from auth.json.
 pub fn clear_openai_codex_auth(grok_home: &Path) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
         if let Ok(mut map) = read_auth_json(&path) {
             map.remove(OPENAI_CODEX_OAUTH_SCOPE);
@@ -594,7 +615,7 @@ fn write_scope_lock_holder_info(file: &mut File) -> std::io::Result<()> {
 ///
 /// Set by the TUI `/providers` flow. Never log the returned value.
 pub fn read_platform_api_key(grok_home: &Path, platform: &str) -> Option<String> {
-    let path = grok_home.join("auth.json");
+    let path = resolve_auth_json_path(grok_home);
     let map = read_auth_json(&path).ok()?;
     let auth = map.get(&platform_api_key_scope(platform))?;
     let key = auth.key.trim();
@@ -609,6 +630,9 @@ pub fn read_platform_api_key(grok_home: &Path, platform: &str) -> Option<String>
 ///
 /// Empty/`clear` removes the scope. Merges with existing scopes so xAI / Kimi
 /// OAuth sessions are preserved.
+///
+/// Serializes through `auth.json.lock` (same as Kimi/Codex) so a concurrent
+/// whole-map RMW cannot drop sibling scopes.
 pub fn store_platform_api_key(
     grok_home: &Path,
     platform: &str,
@@ -618,31 +642,35 @@ pub fn store_platform_api_key(
     if trimmed.is_empty() {
         return clear_platform_api_key(grok_home, platform);
     }
-    let path = grok_home.join("auth.json");
-    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    map.insert(
-        platform_api_key_scope(platform),
-        GrokAuth {
-            key: trimmed.to_owned(),
-            auth_mode: AuthMode::ApiKey,
-            ..Default::default()
-        },
-    );
-    write_auth_json(&path, &map)
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        map.insert(
+            platform_api_key_scope(platform),
+            GrokAuth {
+                key: trimmed.to_owned(),
+                auth_mode: AuthMode::ApiKey,
+                ..Default::default()
+            },
+        );
+        write_auth_json(&path, &map)
+    })
 }
 
 /// Remove a platform API key scope from auth.json.
 pub fn clear_platform_api_key(grok_home: &Path, platform: &str) -> std::io::Result<()> {
-    let path = grok_home.join("auth.json");
-    if let Ok(mut map) = read_auth_json(&path) {
-        map.remove(&platform_api_key_scope(platform));
-        if map.is_empty() {
-            let _ = std::fs::remove_file(&path);
-        } else {
-            write_auth_json(&path, &map)?;
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        if let Ok(mut map) = read_auth_json(&path) {
+            map.remove(&platform_api_key_scope(platform));
+            if map.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                write_auth_json(&path, &map)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -669,6 +697,68 @@ mod platform_api_key_tests {
         store_platform_api_key(home, "zai", "").unwrap();
         assert!(read_platform_api_key(home, "zai").is_none());
         assert_eq!(read_api_key(home).as_deref(), Some("xai-key"));
+    }
+}
+
+#[cfg(test)]
+mod grok_auth_path_tests {
+    use super::*;
+    use crate::auth::model::{AuthMode, GrokAuth};
+    use serial_test::serial;
+    use xai_grok_test_support::EnvGuard;
+
+    /// Login/store helpers must honor `GROK_AUTH_PATH` pointing at a non-default
+    /// basename (e.g. `scratch.json`), matching the refresh path that already
+    /// calls [`auth_json_path`].
+    #[test]
+    #[serial]
+    fn openai_codex_store_roundtrips_through_grok_auth_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_file = dir.path().join("scratch.json");
+        let _guard = EnvGuard::set("GROK_AUTH_PATH", auth_file.to_str().unwrap());
+
+        let path = auth_json_path();
+        assert_eq!(path, auth_file);
+        let home = path.parent().unwrap();
+
+        let auth = GrokAuth {
+            key: "codex-access-token".to_owned(),
+            refresh_token: Some("codex-refresh".to_owned()),
+            auth_mode: AuthMode::OpenAiCodex,
+            email: Some("user@example.com".to_owned()),
+            ..Default::default()
+        };
+        store_openai_codex_auth(home, &auth).unwrap();
+
+        let loaded = read_openai_codex_auth(home).expect("token should be on GROK_AUTH_PATH");
+        assert_eq!(loaded.key, "codex-access-token");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("codex-refresh"));
+        assert!(auth_file.is_file(), "credential written to GROK_AUTH_PATH");
+        // Default ~/.grok/auth.json must not have been touched by this write path.
+        // (We cannot assert absence of the real home file; only that our scratch exists.)
+    }
+
+    #[test]
+    #[serial]
+    fn kimi_store_roundtrips_through_grok_auth_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_file = dir.path().join("isolated-auth.json");
+        let _guard = EnvGuard::set("GROK_AUTH_PATH", auth_file.to_str().unwrap());
+
+        let path = auth_json_path();
+        let home = path.parent().unwrap();
+
+        let auth = GrokAuth {
+            key: "kimi-access".to_owned(),
+            refresh_token: Some("kimi-refresh".to_owned()),
+            auth_mode: AuthMode::KimiCode,
+            ..Default::default()
+        };
+        store_kimi_code_auth(home, &auth).unwrap();
+        let loaded = read_kimi_code_auth(home).expect("kimi token on GROK_AUTH_PATH");
+        assert_eq!(loaded.key, "kimi-access");
+        clear_kimi_code_auth(home).unwrap();
+        assert!(read_kimi_code_auth(home).is_none());
     }
 }
 

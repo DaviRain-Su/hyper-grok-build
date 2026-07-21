@@ -77,9 +77,11 @@ case "$OS" in
         ;;
     Linux)
         PLATFORM_OS="linux"
+        # Release publishes musl static binaries for portability (no glibc ABI
+        # floor; Alpine-native). Asset names use the musl triple.
         case "$ARCH" in
-            arm64|aarch64) TRIPLE="aarch64-unknown-linux-gnu"; PLATFORM_ARCH="aarch64" ;;
-            x86_64|amd64)  TRIPLE="x86_64-unknown-linux-gnu";  PLATFORM_ARCH="x86_64" ;;
+            arm64|aarch64) TRIPLE="aarch64-unknown-linux-musl"; PLATFORM_ARCH="aarch64" ;;
+            x86_64|amd64)  TRIPLE="x86_64-unknown-linux-musl";  PLATFORM_ARCH="x86_64" ;;
             *) err "unsupported Linux architecture: $ARCH" ;;
         esac
         ;;
@@ -171,17 +173,18 @@ DOWNLOADS_DIR="$HYPER_HOME/downloads"
 BIN_DIR="$HYPER_HOME/bin"
 mkdir -p "$DOWNLOADS_DIR" "$BIN_DIR"
 
-# Versioned binary + atomic symlink swap.
+# Versioned binary + smoke-test before touching the active link.
 VERSIONED="hyper-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}"
 mv -f "$TMP_DIR/hyper" "$DOWNLOADS_DIR/$VERSIONED"
+
+# Smoke-test the versioned download *before* swapping the managed symlink so a
+# bad binary (glibc / CPU incompatibility) never breaks a working install.
+"$DOWNLOADS_DIR/$VERSIONED" --version >/dev/null 2>&1 \
+    || err "downloaded binary failed smoke test; existing install left untouched"
 
 TMP_LINK="$BIN_DIR/hyper.install.$$"
 ln -s "../downloads/$VERSIONED" "$TMP_LINK"
 mv -f "$TMP_LINK" "$BIN_DIR/hyper"
-
-# Smoke-test the installed binary through the managed link.
-"$BIN_DIR/hyper" --version >/dev/null 2>&1 \
-    || err "installed binary failed to run; your PATH still has no working hyper"
 
 printf '\nhyper v%s installed to %s\n' "$RESOLVED_VERSION" "$BIN_DIR/hyper"
 

@@ -1033,9 +1033,11 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
 /// Clear only the Kimi Code subscription credential (`oauth/kimi-code`).
 /// Does not touch the xAI session or `XAI_API_KEY`.
 pub fn run_cli_logout_kimi() -> anyhow::Result<()> {
-    let home = grok_home::grok_home();
-    let had = crate::auth::read_kimi_code_auth(&home).is_some();
-    crate::auth::clear_kimi_code_auth(&home)
+    // Honor GROK_AUTH_PATH (same path login/store use), not only ~/.grok.
+    let auth_path = crate::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    let had = crate::auth::read_kimi_code_auth(home).is_some();
+    crate::auth::clear_kimi_code_auth(home)
         .map_err(|e| anyhow::anyhow!("Failed to clear Kimi Code auth: {e}"))?;
     if had {
         eprintln!("Logged out of Kimi Code (xAI session unchanged).");
@@ -1047,9 +1049,11 @@ pub fn run_cli_logout_kimi() -> anyhow::Result<()> {
 
 /// `grok logout --openai`: clear only the OpenAI Codex (ChatGPT) OAuth scope.
 pub fn run_cli_logout_openai_codex() -> anyhow::Result<()> {
-    let home = grok_home::grok_home();
-    let had = crate::auth::read_openai_codex_auth(&home).is_some();
-    crate::auth::clear_openai_codex_auth(&home)
+    // Honor GROK_AUTH_PATH (same path login/store use), not only ~/.grok.
+    let auth_path = crate::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    let had = crate::auth::read_openai_codex_auth(home).is_some();
+    crate::auth::clear_openai_codex_auth(home)
         .map_err(|e| anyhow::anyhow!("Failed to clear OpenAI Codex auth: {e}"))?;
     if had {
         eprintln!("Logged out of OpenAI Codex (xAI session unchanged).");

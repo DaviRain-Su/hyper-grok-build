@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 #[path = "manager/enrichment.rs"]
 mod enrichment;
 #[path = "manager/lock.rs"]
-mod lock;
+pub(crate) mod lock;
 #[path = "manager/sleep_gate.rs"]
 mod sleep_gate;
 

@@ -99,7 +99,8 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         doom_loop_recovery: None,
         header_injector: None,
         responses_codex_dialect: false,
-    }
+        kimi_dialect: false,
+        }
 }
 
 fn user_request(text: &str) -> ConversationRequest {

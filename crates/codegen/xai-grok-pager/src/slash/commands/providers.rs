@@ -151,11 +151,10 @@ fn clear_platform(platform_tok: &str) -> CommandResult {
 }
 
 /// Per-platform OAuth login/logout commands shown in error hints.
+///
+/// Defined in [`super::oauth_login_logout_hint`] and shared with `/logout`.
 fn oauth_login_logout_hint(platform: PlatformId) -> (&'static str, &'static str) {
-    match platform {
-        PlatformId::OpenAiCodex => ("/login openai", "grok logout --openai"),
-        _ => ("/login kimi", "grok logout --kimi"),
-    }
+    super::oauth_login_logout_hint(platform)
 }
 
 fn is_clear_verb(s: &str) -> bool {

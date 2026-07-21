@@ -20,7 +20,7 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     scenario: PathBuf,
 
-    /// Pager binary. Defaults to PAGER_BINARY, CARGO_BIN_EXE_xai-grok-pager,
+    /// Pager binary. Defaults to PAGER_BINARY, CARGO_BIN_EXE_hyper,
     /// or a locally-built debug binary.
     #[arg(long, value_name = "PATH")]
     binary: Option<PathBuf>,

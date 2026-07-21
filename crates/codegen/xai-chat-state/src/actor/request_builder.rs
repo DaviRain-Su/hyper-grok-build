@@ -144,6 +144,8 @@ impl ChatStateActor {
             trace,
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_schema: None,
+            // Set by SamplingClient from SamplerConfig.kimi_dialect before wire.
+            kimi_dialect: None,
         }
     }
 }

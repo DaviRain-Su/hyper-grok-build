@@ -386,6 +386,9 @@ impl SessionActor {
             crate::agent::config::openai_codex_bearer_resolver_for_base_url(&cfg.base_url);
         let responses_codex_dialect =
             xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
+        let kimi_dialect = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
+            || xai_grok_models::PlatformId::MoonshotCn.base_url_matches(&cfg.base_url)
+            || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url);
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
@@ -483,6 +486,7 @@ impl SessionActor {
                 codex_account: responses_codex_dialect,
             })),
             responses_codex_dialect,
+            kimi_dialect,
         }
     }
     /// Install auto-mode permission classifier with a live LLM side-query

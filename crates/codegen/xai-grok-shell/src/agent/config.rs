@@ -114,11 +114,21 @@ impl EnvKeys {
         &self,
         mut getenv: impl FnMut(&str) -> Option<String>,
     ) -> Option<String> {
+        self.resolve_value_with_source(getenv).map(|(v, _)| v)
+    }
+    /// Like [`Self::resolve_value_with`], but also returns the winning env var name.
+    ///
+    /// Callers that need per-source auth schemes (e.g. `ANTHROPIC_AUTH_TOKEN`
+    /// is Bearer while `ANTHROPIC_API_KEY` is `x-api-key`) use the source name.
+    pub fn resolve_value_with_source(
+        &self,
+        mut getenv: impl FnMut(&str) -> Option<String>,
+    ) -> Option<(String, String)> {
         for name in self.names() {
             if let Some(value) = getenv(name)
                 && !value.trim().is_empty()
             {
-                return Some(value);
+                return Some((value, name.to_owned()));
             }
         }
         None
@@ -3531,7 +3541,9 @@ fn platform_effort_option(
 /// Source of truth for GPT-5.6 Sol/Terra/Luna effort menus (includes `max` /
 /// `ultra` where the Codex CLI exposes them). Pi's thinkingLevelMap is a
 /// partial projection (has `max` for 5.6, not `ultra`); we prefer the Codex
-/// catalog so Sol/Terra users can pick Ultra for automatic task delegation.
+/// catalog so Sol/Terra users can pick Ultra. Note that `ultra` currently
+/// maps to the same wire value as `max`; automatic task delegation is a
+/// future capability and is not advertised in the option description.
 fn openai_codex_catalog_efforts(model: &str) -> Option<(ReasoningEffort, Vec<(ReasoningEffort, &'static str)>)> {
     use ReasoningEffort as E;
     // Descriptions copied from Codex models.json.
@@ -3546,12 +3558,15 @@ fn openai_codex_catalog_efforts(model: &str) -> Option<(ReasoningEffort, Vec<(Re
         "Extra high reasoning depth for complex problems",
     );
     const MAX: (E, &str) = (E::Max, "Maximum reasoning depth for the hardest problems");
-    // Codex CLI catalog description; wire still maps Ultra→max
-    // (openai/codex `reasoning_effort_for_request`). Delegation is client-side
-    // multi-agent policy when implemented, not a distinct API effort string.
+    // Codex CLI catalog exposes an `ultra` level for Sol/Terra. The wire value
+    // is currently identical to `max` (see `reasoning_effort_for_request`):
+    // there is no distinct API effort string, and automatic task delegation
+    // is a future client-side multi-agent policy, not a current capability.
+    // The label is kept to match the Codex CLI menu, but the description must
+    // not promise delegation that has not shipped.
     const ULTRA: (E, &str) = (
         E::Ultra,
-        "Maximum reasoning with automatic task delegation (wire: max)",
+        "Highest reasoning tier (wire: max; same payload as Max for now)",
     );
     // Base ladder shared by gpt-5.2 … gpt-5.5.
     let base = [LOW, MEDIUM, HIGH, XHIGH];
@@ -3734,7 +3749,10 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         let config = ModelEntryConfig {
             id: Some(key.clone()),
             model: builtin.model.clone(),
-            base_url: builtin.platform.base_url(),
+            base_url: builtin
+                .base_url_override
+                .clone()
+                .unwrap_or_else(|| builtin.platform.base_url()),
             api_base_url: None,
             name: Some(builtin.name.clone()),
             description: Some(builtin.description.clone()),
@@ -4975,78 +4993,104 @@ pub(crate) fn first_own_credential(
     api_key: Option<&str>,
     env_key: Option<&EnvKeys>,
 ) -> Option<String> {
-    api_key
-        .filter(|k| !k.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| env_key.and_then(EnvKeys::resolve_value))
+    first_own_credential_with_source(api_key, env_key).map(|(v, _)| v)
 }
+
+/// Like [`first_own_credential`], but also returns the winning env var name
+/// when the credential came from `env_key` (`None` source when from `api_key`).
+pub(crate) fn first_own_credential_with_source(
+    api_key: Option<&str>,
+    env_key: Option<&EnvKeys>,
+) -> Option<(String, Option<String>)> {
+    if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
+        return Some((key.to_owned(), None));
+    }
+    env_key
+        .and_then(|keys| keys.resolve_value_with_source(|name| std::env::var(name).ok()))
+        .map(|(v, name)| (v, Some(name)))
+}
+
+/// `ANTHROPIC_AUTH_TOKEN` is a bearer credential (Claude Code / Pi convention);
+/// the Anthropic API-key variables use `x-api-key`.
+fn auth_scheme_for_env_source(source: Option<&str>, platform_default: AuthScheme) -> AuthScheme {
+    match source {
+        Some(name) if name == xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV => AuthScheme::Bearer,
+        _ => platform_default,
+    }
+}
+
 /// Priority: model api_key/env_key > cached auth-provider token > session
 /// token > XAI_API_KEY.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
     let info = model.info();
-    let (api_key, mut base_url, auth_type) = if let Some(key) = model.own_credential() {
-        (
-            Some(key),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
-        )
-    } else if let Some(provider) = model.auth_provider.as_ref() {
-        debug_assert!(model.effective_auth_provider().is_some());
-        (
-            provider.cached_token(),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
-        )
-    } else if model.is_managed_platform_model() {
-        // Managed platform entry without its platform credential: do NOT fall
-        // through to the xAI session token / global key — that would send xAI
-        // credentials to a third-party base URL. These models are locked in
-        // the catalog projection and rejected at set_session_model; this arm
-        // is the defense-in-depth seam for residual paths (session restore,
-        // config races). The request fails unauthenticated instead.
-        tracing::warn!(
-            model = %info.model,
-            "managed platform model has no platform credential; \
-             refusing session/global key fallthrough"
-        );
-        (
-            None,
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
-        )
-    } else if let Some(key) = session_key {
-        (
-            Some(key.to_owned()),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::SessionToken,
-        )
-    } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
-        let url = model
-            .api_base_url
-            .clone()
-            .unwrap_or_else(|| info.base_url.clone());
-        (Some(key), url, xai_chat_state::AuthType::ApiKey)
-    } else {
-        if let Some(ref env_keys) = model.env_key
-            && !env_keys.is_empty()
+    let mut env_source: Option<String> = None;
+    let (api_key, mut base_url, auth_type) =
+        if let Some((key, source)) =
+            first_own_credential_with_source(model.api_key.as_deref(), model.env_key.as_ref())
         {
+            env_source = source;
+            (
+                Some(key),
+                info.base_url.clone(),
+                xai_chat_state::AuthType::ApiKey,
+            )
+        } else if let Some(provider) = model.auth_provider.as_ref() {
+            debug_assert!(model.effective_auth_provider().is_some());
+            (
+                provider.cached_token(),
+                info.base_url.clone(),
+                xai_chat_state::AuthType::ApiKey,
+            )
+        } else if model.is_managed_platform_model() {
+            // Managed platform entry without its platform credential: do NOT fall
+            // through to the xAI session token / global key — that would send xAI
+            // credentials to a third-party base URL. These models are locked in
+            // the catalog projection and rejected at set_session_model; this arm
+            // is the defense-in-depth seam for residual paths (session restore,
+            // config races). The request fails unauthenticated instead.
             tracing::warn!(
-                model = % info.model, env_key = % env_keys,
-                "model has env_key configured but none of the environment variables are set — \
-                 requests will have no API key",
+                model = %info.model,
+                "managed platform model has no platform credential; \
+                 refusing session/global key fallthrough"
             );
-        }
-        (
-            None,
-            info.base_url.clone(),
-            xai_chat_state::AuthType::ApiKey,
-        )
-    };
+            (
+                None,
+                info.base_url.clone(),
+                xai_chat_state::AuthType::ApiKey,
+            )
+        } else if let Some(key) = session_key {
+            (
+                Some(key.to_owned()),
+                info.base_url.clone(),
+                xai_chat_state::AuthType::SessionToken,
+            )
+        } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
+            let url = model
+                .api_base_url
+                .clone()
+                .unwrap_or_else(|| info.base_url.clone());
+            (Some(key), url, xai_chat_state::AuthType::ApiKey)
+        } else {
+            if let Some(ref env_keys) = model.env_key
+                && !env_keys.is_empty()
+            {
+                tracing::warn!(
+                    model = % info.model, env_key = % env_keys,
+                    "model has env_key configured but none of the environment variables are set — \
+                     requests will have no API key",
+                );
+            }
+            (
+                None,
+                info.base_url.clone(),
+                xai_chat_state::AuthType::ApiKey,
+            )
+        };
     // Pi-style `…/coding` base 404s as `…/coding/messages`; Grok needs `…/v1`.
     if xai_grok_models::PlatformId::KimiCode.base_url_matches(&base_url) {
         base_url = xai_grok_models::normalize_kimi_code_base_url(&base_url);
     }
-    let auth_scheme = info.auth_scheme;
+    let auth_scheme = auth_scheme_for_env_source(env_source.as_deref(), info.auth_scheme);
     tracing::debug!(
         model = % info.model, auth_type = ? auth_type, "resolved credentials"
     );
@@ -5375,6 +5419,7 @@ pub fn sampling_config_for_model(
     let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
         .or_else(|| openai_codex_bearer_resolver_for_model(model));
     let responses_codex_dialect = model_uses_openai_codex_oauth(model);
+    let kimi_dialect = model_uses_kimi_request_dialect(model);
     // Live-refresh chatgpt-account-id per request (same cadence as the bearer).
     let header_injector = if responses_codex_dialect {
         Some(std::sync::Arc::new(
@@ -5412,6 +5457,7 @@ pub fn sampling_config_for_model(
         doom_loop_recovery: None,
         header_injector,
         responses_codex_dialect,
+        kimi_dialect,
     }
 }
 
@@ -5428,6 +5474,26 @@ pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
         return true;
     }
     xai_grok_models::PlatformId::KimiCode.base_url_matches(&model.info.base_url)
+}
+
+/// Whether request bodies should use Moonshot/Kimi-specific shaping
+/// (`thinking` object, fixed-sampling strip, etc.).
+///
+/// True only for Kimi Code subscription and direct Moonshot open-platform
+/// entries. Ollama / OpenRouter / Together / Fireworks models that share
+/// the same bare slug must not trigger this dialect.
+pub fn model_uses_kimi_request_dialect(model: &ModelEntry) -> bool {
+    use xai_grok_models::PlatformId;
+    let catalog_id = model.info.id.as_deref().unwrap_or(model.info.model.as_str());
+    if let Some((platform, _)) = xai_grok_models::parse_managed_model_key(catalog_id) {
+        return matches!(
+            platform,
+            PlatformId::KimiCode | PlatformId::MoonshotCn | PlatformId::MoonshotAi
+        );
+    }
+    PlatformId::KimiCode.base_url_matches(&model.info.base_url)
+        || PlatformId::MoonshotCn.base_url_matches(&model.info.base_url)
+        || PlatformId::MoonshotAi.base_url_matches(&model.info.base_url)
 }
 
 /// Per-request bearer for Kimi Code models; `None` for everything else.
@@ -7423,6 +7489,75 @@ if field.as_deref() == Some("auth_provider"))
         let info = client.auth_info();
         assert_eq!(info.auth_type, "bearer");
     }
+
+    #[test]
+    #[serial]
+    fn anthropic_auth_token_env_resolves_to_bearer() {
+        use xai_grok_test_support::EnvGuard;
+        let _a = EnvGuard::unset(xai_grok_models::ANTHROPIC_API_KEY_ENV);
+        let _b = EnvGuard::unset(xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV);
+        let _c = EnvGuard::set(xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV, "sk-ant-bearer-token");
+
+        let mut model = test_model_entry(
+            "claude",
+            "https://api.anthropic.com/v1",
+            None,
+            None,
+            None,
+        );
+        model.env_key = Some(EnvKeys::new([
+            xai_grok_models::ANTHROPIC_API_KEY_ENV,
+            xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV,
+            xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV,
+        ]));
+        model.info.api_backend = ApiBackend::Messages;
+        model.info.auth_scheme = AuthScheme::XApiKey;
+
+        let creds = resolve_credentials(&model, None);
+        assert_eq!(creds.api_key.as_deref(), Some("sk-ant-bearer-token"));
+        assert_eq!(
+            creds.auth_scheme,
+            AuthScheme::Bearer,
+            "ANTHROPIC_AUTH_TOKEN must force Bearer, not x-api-key"
+        );
+        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(config.auth_scheme, AuthScheme::Bearer);
+        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+        assert_eq!(client.auth_info().auth_type, "bearer");
+    }
+
+    #[test]
+    #[serial]
+    fn anthropic_api_key_env_resolves_to_x_api_key() {
+        use xai_grok_test_support::EnvGuard;
+        let _a = EnvGuard::unset(xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV);
+        let _b = EnvGuard::unset(xai_grok_models::ANTHROPIC_API_KEY_ENV);
+        let _c = EnvGuard::set(xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV, "sk-ant-api-key");
+
+        let mut model = test_model_entry(
+            "claude",
+            "https://api.anthropic.com/v1",
+            None,
+            None,
+            None,
+        );
+        model.env_key = Some(EnvKeys::new([
+            xai_grok_models::ANTHROPIC_API_KEY_ENV,
+            xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV,
+            xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV,
+        ]));
+        model.info.api_backend = ApiBackend::Messages;
+        model.info.auth_scheme = AuthScheme::XApiKey;
+
+        let creds = resolve_credentials(&model, None);
+        assert_eq!(creds.api_key.as_deref(), Some("sk-ant-api-key"));
+        assert_eq!(creds.auth_scheme, AuthScheme::XApiKey);
+        let config = sampling_config_for_model(&model, creds, None, None, None, None);
+        assert_eq!(config.auth_scheme, AuthScheme::XApiKey);
+        let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
+        assert_eq!(client.auth_info().auth_type, "x-api-key");
+    }
+
     #[test]
     fn has_own_credentials_guards_session_vs_external_key() {
         let endpoints = EndpointsConfig::default();

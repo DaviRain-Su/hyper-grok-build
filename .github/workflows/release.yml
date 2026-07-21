@@ -29,10 +29,13 @@ jobs:
           # against the same SDK (macos-13 Intel runners are deprecated).
           - target: x86_64-apple-darwin
             os: macos-14
-          - target: x86_64-unknown-linux-gnu
+          # musl static binaries: portable across glibc versions and Alpine.
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
+            musl: true
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
+            musl: true
           - target: x86_64-pc-windows-msvc
             os: windows-2022
     runs-on: ${{ matrix.os }}
@@ -56,6 +59,12 @@ jobs:
       - name: Add build target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Install musl toolchain (Linux static)
+        if: matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
 
@@ -75,6 +84,33 @@ jobs:
           Add-Content $env:GITHUB_PATH (Join-Path $env:USERPROFILE "protoc\bin")
           Add-Content $env:GITHUB_ENV "PROTOC=$protoc"
 
+      # Bundle ripgrep into the Windows binary via existing build.rs override
+      # paths (Windows auto-download is skipped without these).
+      - name: Fetch pinned ripgrep for Windows bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          RG_VER=14.1.1
+          mkdir -p tmp/rg
+          curl -fsSL -o tmp/rg.zip \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VER}/ripgrep-${RG_VER}-x86_64-pc-windows-msvc.zip"
+          # zip layout: ripgrep-<ver>-.../rg.exe
+          python3 - <<'PY'
+          import zipfile, pathlib
+          z = zipfile.ZipFile("tmp/rg.zip")
+          for name in z.namelist():
+              if name.endswith("rg.exe"):
+                  pathlib.Path("tmp/rg").mkdir(parents=True, exist_ok=True)
+                  pathlib.Path("tmp/rg/rg.exe").write_bytes(z.read(name))
+                  print(f"extracted {name}")
+                  break
+          else:
+              raise SystemExit("rg.exe not found in zip")
+          PY
+          test -f tmp/rg/rg.exe
+          echo "GROK_TOOLS_BUNDLE_RG_PATH=${GITHUB_WORKSPACE}/tmp/rg/rg.exe" >> "$GITHUB_ENV"
+          echo "GROK_SHELL_BUNDLE_RG_PATH=${GITHUB_WORKSPACE}/tmp/rg/rg.exe" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -82,7 +118,7 @@ jobs:
       - name: Build hyper (release-dist)
         env:
           GROK_VERSION: ${{ env.GROK_VERSION }}
-        run: cargo build --profile release-dist -p xai-grok-pager-bin --locked --target ${{ matrix.target }}
+        run: cargo build --profile release-dist -p xai-grok-pager-bin --features community-build --locked --target ${{ matrix.target }}
 
       - name: Package archive (tar.gz)
         if: runner.os != 'Windows'

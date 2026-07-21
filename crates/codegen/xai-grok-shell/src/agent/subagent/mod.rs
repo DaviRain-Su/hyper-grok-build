@@ -991,6 +991,7 @@ async fn read_parent_sampling_config(
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
                 responses_codex_dialect,
+                kimi_dialect: ctx.sampling_config.kimi_dialect,
             };
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();

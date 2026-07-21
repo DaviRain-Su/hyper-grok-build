@@ -55,7 +55,10 @@ pub async fn run_openai_codex_login(
         CodexLoginMethod::Browser => browser_login(&host, channels).await?,
         CodexLoginMethod::DeviceCode => device_code_login(&host, channels).await?,
     };
-    store_openai_codex_auth(&xai_grok_config::grok_home(), &auth)?;
+    // Honor GROK_AUTH_PATH (same path refresh/read use), not only ~/.grok.
+    let auth_path = auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    store_openai_codex_auth(home, &auth)?;
     eprintln!("✓ Signed in to OpenAI Codex (ChatGPT)");
     if let Some(email) = auth.email.as_deref() {
         eprintln!("  Account: {email}");
@@ -524,8 +527,20 @@ pub async fn force_refresh_openai_codex_auth() -> Option<GrokAuth> {
     refresh_openai_codex_auth(true).await
 }
 
+/// How long to wait for the exclusive `auth.json.lock` before giving up and
+/// trying to adopt a sibling's write. Must exceed typical IdP latency so a
+/// follower waits for the leader instead of double-spending the RT.
+const CODEX_REFRESH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Brief pause after a lock timeout so the holder can finish writing.
+const CODEX_REFRESH_LOCK_TIMEOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// `force`: when true, always hit the token endpoint (401 recovery). When
 /// false, return the cached credential if it is still within its local TTL.
+///
+/// Cross-process single-flight: only one process spends a given refresh token.
+/// Mirrors the xAI [`crate::auth::manager::AuthManager`] refresh path —
+/// acquire `auth.json.lock` *before* the IdP call, re-validate liveness, then
+/// persist with compare/adopt so a sibling's newer family is never clobbered.
 async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
     let path = auth_json_path();
     let home = path.parent().unwrap_or(&path);
@@ -537,17 +552,91 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
     if refresh.is_empty() {
         return None;
     }
+
+    // 1. Exclusive flock (or wait + adopt sibling). Never fall through
+    // unguarded: that is the "same RT used twice" race that triggers IdP
+    // rotation reuse detection and can invalidate the whole token family.
+    let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
+        &path,
+        CODEX_REFRESH_LOCK_TIMEOUT,
+    )
+    .await
+    {
+        Some(lock) => lock,
+        None => {
+            tracing::warn!(
+                "auth: Codex refresh lock timed out; waiting for sibling then adopting if possible"
+            );
+            tokio::time::sleep(CODEX_REFRESH_LOCK_TIMEOUT_WAIT).await;
+            return try_adopt_sibling_codex_token(home, &refresh, force).or_else(|| {
+                tracing::warn!(
+                    "auth: Codex refresh could not acquire lock and no sibling token to adopt"
+                );
+                None
+            });
+        }
+    };
+
+    // 2. Re-read under the lock — a sibling may have already rotated.
+    if let Some(adopted) = try_adopt_sibling_codex_token(home, &refresh, force) {
+        return Some(adopted);
+    }
+
+    // 3. Re-validate that we still hold the *live* lock inode before the
+    // irreversible IdP call (sleep/stale-break can move the flock to a dead
+    // inode). If lost, re-acquire or adopt.
+    let file_lock = if file_lock.still_live(&path) {
+        file_lock
+    } else {
+        tracing::warn!("auth: Codex refresh lock lost before IdP; re-acquiring");
+        drop(file_lock);
+        match crate::auth::manager::lock::try_lock_auth_file_async(
+            &path,
+            CODEX_REFRESH_LOCK_TIMEOUT,
+        )
+        .await
+        {
+            Some(relock) => {
+                if let Some(adopted) = try_adopt_sibling_codex_token(home, &refresh, force) {
+                    return Some(adopted);
+                }
+                relock
+            }
+            None => {
+                return try_adopt_sibling_codex_token(home, &refresh, force);
+            }
+        }
+    };
+
     let host = xai_grok_models::PlatformId::OpenAiCodex.oauth_host()?;
-    // Network call outside the flock (do not hold auth.json.lock across I/O).
-    match oauth::refresh_access_token(&host, &refresh).await {
+    // 4. Network while holding the flock so only one process spends this RT.
+    // (Same posture as AuthManager::refresh_chain — the lock is held across
+    // the IdP call *and* the subsequent persist so a waiter cannot start a
+    // second spend of the same RT in the gap between response and write.)
+    let result = oauth::refresh_access_token(&host, &refresh).await;
+
+    // If the lock was broken mid-call (sleep/stale recovery), prefer a
+    // sibling write over clobbering — but still attempt compare/adopt persist.
+    if !file_lock.still_live(&path) {
+        tracing::warn!("auth: Codex refresh lock lost during IdP call");
+        if let Some(adopted) = try_adopt_sibling_codex_token(home, &refresh, force) {
+            // Sibling already committed a newer family while we were on the
+            // network; drop our response so we don't overwrite them.
+            drop(file_lock);
+            return Some(adopted);
+        }
+    }
+
+    let out = match result {
         Ok(token) => match oauth::credentials_from_token(token, Some(&refresh)) {
             Ok(mut new_auth) => {
                 // The refresh response has no id_token — carry the email over.
                 if new_auth.email.is_none() {
                     new_auth.email = auth.email.clone();
                 }
-                // Under lock: re-read and adopt a sibling's fresher write if one
-                // landed while we were on the network, else persist ours.
+                // Compare/adopt under the scope lock (nested flock is safe for
+                // the same process on Linux; the AuthFileLock still serializes
+                // other processes until we drop it below).
                 match store_openai_codex_auth_after_refresh(home, &new_auth, &refresh) {
                     Ok(on_disk) => Some(on_disk),
                     Err(e) => {
@@ -568,7 +657,49 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
             tracing::warn!(error = %e, "auth: Codex token refresh failed");
             None
         }
+    };
+    drop(file_lock);
+    out
+}
+
+/// After acquiring (or failing to acquire) the refresh lock, prefer a sibling's
+/// on-disk credential when it already supersedes the RT we were about to spend.
+///
+/// * RT changed → sibling rotated the family; always adopt when usable.
+/// * Same RT, not force, still valid → no network needed.
+/// * Same RT + force → do **not** adopt (401 recovery needs a new access token
+///   under the same RT; preferring the old access re-sends the rejected bearer).
+fn try_adopt_sibling_codex_token(
+    home: &std::path::Path,
+    spent_refresh: &str,
+    force: bool,
+) -> Option<GrokAuth> {
+    let existing = read_openai_codex_auth(home)?;
+    if existing.auth_mode != crate::auth::AuthMode::OpenAiCodex {
+        return None;
     }
+    let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
+    if existing_rt != spent_refresh {
+        // Sibling already rotated past the RT we held.
+        if !crate::auth::is_expired(&existing) {
+            tracing::info!("auth: Codex refresh adopted sibling token (RT rotated)");
+            return Some(existing);
+        }
+        // Sibling wrote an already-expired access under a new RT — still prefer
+        // their family over re-spending our dead RT.
+        if !existing_rt.is_empty() {
+            tracing::info!(
+                "auth: Codex refresh adopted sibling RT family (access expired; will re-refresh later)"
+            );
+            return Some(existing);
+        }
+        return None;
+    }
+    if !force && !crate::auth::is_expired(&existing) {
+        tracing::debug!("auth: Codex refresh adopted unexpired disk token under lock");
+        return Some(existing);
+    }
+    None
 }
 
 /// Sync-friendly wrapper around [`ensure_openai_codex_access_token`].
@@ -631,6 +762,19 @@ fn refresh_codex_token_on_side_thread() -> Option<GrokAuth> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthMode;
+    use chrono::{Duration, Utc};
+
+    fn sample_codex(rt: &str, access: &str, expires_in_secs: i64) -> GrokAuth {
+        GrokAuth {
+            key: access.to_owned(),
+            refresh_token: Some(rt.to_owned()),
+            auth_mode: AuthMode::OpenAiCodex,
+            expires_at: Some(Utc::now() + Duration::seconds(expires_in_secs)),
+            email: Some("user@example.com".to_owned()),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn parse_authorization_input_accepts_full_url() {
@@ -662,5 +806,48 @@ mod tests {
         assert_eq!(cb.code, "abc123");
         assert!(cb.state.is_none());
         assert!(parse_authorization_input("").is_none());
+    }
+
+    #[test]
+    fn adopt_sibling_when_rt_rotated() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_openai_codex_auth(home, &sample_codex("rt-new", "access-new", 3600)).unwrap();
+        let adopted = try_adopt_sibling_codex_token(home, "rt-old", false)
+            .expect("must adopt sibling with rotated RT");
+        assert_eq!(adopted.key, "access-new");
+        assert_eq!(adopted.refresh_token.as_deref(), Some("rt-new"));
+    }
+
+    #[test]
+    fn adopt_same_rt_when_unexpired_and_not_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_openai_codex_auth(home, &sample_codex("rt-same", "access-ok", 3600)).unwrap();
+        let adopted = try_adopt_sibling_codex_token(home, "rt-same", false)
+            .expect("unexpired same-RT token should be adopted without network");
+        assert_eq!(adopted.key, "access-ok");
+    }
+
+    #[test]
+    fn do_not_adopt_same_rt_when_force_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        // Still-valid access under the RT we are about to force-refresh after 401.
+        store_openai_codex_auth(home, &sample_codex("rt-same", "access-rejected", 3600)).unwrap();
+        assert!(
+            try_adopt_sibling_codex_token(home, "rt-same", true).is_none(),
+            "force refresh must not re-use the rejected access token under the same RT"
+        );
+    }
+
+    #[test]
+    fn adopt_sibling_rotated_rt_even_when_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_openai_codex_auth(home, &sample_codex("rt-new", "access-sibling", 3600)).unwrap();
+        let adopted = try_adopt_sibling_codex_token(home, "rt-old", true)
+            .expect("force path must still adopt a sibling's newer RT family");
+        assert_eq!(adopted.refresh_token.as_deref(), Some("rt-new"));
     }
 }

@@ -42,8 +42,9 @@ Short CLI, no clash with `grok`, and room to grow beyond a single provider
 
 ## Installation
 
-Prebuilt single-file binaries for macOS (arm64/x86_64), Linux (arm64/x86_64),
-and Windows (x86_64) are published on
+Prebuilt single-file binaries for macOS (arm64/x86_64), Linux (arm64/x86_64,
+statically linked musl — no glibc version floor; Alpine-native), and Windows
+(x86_64) are published on
 [GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases):
 
 ```sh
@@ -65,7 +66,7 @@ hyper                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL …/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.1.0
 ```
 
 The installer verifies every download against the release’s `SHA256SUMS`,
@@ -146,8 +147,8 @@ Artifacts:
 | ----- | ------- |
 | macOS arm64 | `hyper-0.1.0-aarch64-apple-darwin.tar.gz` |
 | macOS x86_64 | `hyper-0.1.0-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 | `hyper-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 | `hyper-0.1.0-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 (musl static) | `hyper-0.1.0-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 (musl static) | `hyper-0.1.0-aarch64-unknown-linux-musl.tar.gz` |
 | Windows x86_64 | `hyper-0.1.0-x86_64-pc-windows-msvc.zip` |
 | Checksums | `SHA256SUMS` |
 

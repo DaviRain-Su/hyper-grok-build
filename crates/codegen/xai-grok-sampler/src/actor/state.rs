@@ -109,6 +109,7 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            kimi_dialect: false,
         }
     }
 

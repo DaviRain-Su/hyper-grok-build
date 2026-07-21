@@ -109,9 +109,15 @@ try {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $Dest = Join-Path $BinDir "hyper.exe"
 
+    # Smoke-test the downloaded binary *before* replacing the active install.
+    & $Binary.FullName --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Fail "downloaded binary failed smoke test (exit $LASTEXITCODE); existing install left untouched"
+    }
+
     # A running hyper.exe blocks writes but allows renames — move it aside first.
+    $Aside = "$Dest.old"
     if (Test-Path $Dest) {
-        $Aside = "$Dest.old"
         Remove-Item -Path $Aside -Force -ErrorAction SilentlyContinue
         try {
             Move-Item -Path $Dest -Destination $Aside -Force
@@ -119,12 +125,23 @@ try {
             Fail "cannot replace $Dest (close all running hyper sessions and retry): $($_.Exception.Message)"
         }
     }
-    Move-Item -Path $Binary.FullName -Destination $Dest -Force
+    try {
+        Move-Item -Path $Binary.FullName -Destination $Dest -Force
+    } catch {
+        if (Test-Path $Aside) {
+            Move-Item -Path $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
+        }
+        Fail "cannot install to $Dest: $($_.Exception.Message)"
+    }
 
-    # Smoke-test the installed binary.
+    # Secondary smoke-test of the activated path; restore prior binary on failure.
     & $Dest --version *> $null
     if ($LASTEXITCODE -ne 0) {
-        Fail "installed binary failed to run (exit $LASTEXITCODE)"
+        if (Test-Path $Aside) {
+            Remove-Item -Path $Dest -Force -ErrorAction SilentlyContinue
+            Move-Item -Path $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
+        }
+        Fail "installed binary failed to run (exit $LASTEXITCODE); previous install restored if available"
     }
 
     Write-Host ""

@@ -26,7 +26,7 @@ fn target_dir() -> Result<PathBuf> {
 fn local_pager_binary_path() -> Result<PathBuf> {
     Ok(target_dir()?
         .join("debug")
-        .join(format!("xai-grok-pager{}", std::env::consts::EXE_SUFFIX)))
+        .join(format!("hyper{}", std::env::consts::EXE_SUFFIX)))
 }
 
 fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
@@ -42,18 +42,18 @@ fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
             "-p",
             "xai-grok-pager-bin",
             "--bin",
-            "xai-grok-pager",
+            "hyper",
         ])
         .stdin(Stdio::null())
         .envs(xai_tty_utils::pager_env());
     xai_tty_utils::detach_std_command(&mut cmd);
     let output = cmd
         .output()
-        .with_context(|| format!("failed to spawn {cargo} to build xai-grok-pager"))?;
+        .with_context(|| format!("failed to spawn {cargo} to build hyper"))?;
 
     if !output.status.success() {
         bail!(
-            "failed to build xai-grok-pager (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            "failed to build hyper (exit {:?})\nstdout:\n{}\nstderr:\n{}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
@@ -61,7 +61,7 @@ fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
     }
     if !binary.exists() {
         bail!(
-            "xai-grok-pager build completed but binary missing at {}",
+            "hyper build completed but binary missing at {}",
             binary.display()
         );
     }
@@ -72,9 +72,8 @@ fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
 ///
 /// Resolution order:
 /// 1. `PAGER_BINARY` env var (for CI / explicit override)
-/// 2. `CARGO_BIN_EXE_xai-grok-pager` (set by `cargo test`)
-/// 3. Build locally via `cargo build -p xai-grok-pager-bin` (the composition-
-///    root package that owns the `xai-grok-pager` binary)
+/// 2. `CARGO_BIN_EXE_hyper` (set by `cargo test`)
+/// 3. Build locally via `cargo build -p xai-grok-pager-bin --bin hyper`
 pub fn pager_binary() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("PAGER_BINARY") {
         let p = PathBuf::from(path);
@@ -87,7 +86,7 @@ pub fn pager_binary() -> Result<PathBuf> {
             .with_context(|| format!("failed to absolutize PAGER_BINARY: {}", p.display()));
     }
 
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_xai-grok-pager") {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_hyper") {
         let p = PathBuf::from(path);
         if p.exists() {
             return Ok(p);

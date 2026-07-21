@@ -88,6 +88,16 @@ struct OAuthErrorBody {
 pub(crate) enum DevicePollResult {
     Success(Box<GrokAuth>),
     Expired,
+    /// User rejected the authorization request — do not keep polling.
+    AccessDenied {
+        description: Option<String>,
+    },
+    /// Non-retryable OAuth error (malformed success, unknown 4xx, etc.).
+    Fatal {
+        error: String,
+        description: Option<String>,
+    },
+    /// Still waiting (`authorization_pending` / `slow_down` / similar).
     Pending {
         error: String,
         description: Option<String>,
@@ -198,20 +208,29 @@ pub(crate) async fn poll_device_token(
             tracing::info!("auth: Kimi device poll succeeded");
             return Ok(DevicePollResult::Success(Box::new(tokens.into_auth())));
         }
-        return Ok(DevicePollResult::Pending {
+        // 200 with unparseable body is a terminal protocol error, not pending.
+        return Ok(DevicePollResult::Fatal {
             error: "missing_access_token".to_owned(),
             description: None,
         });
     }
     let err: OAuthErrorBody = serde_json::from_slice(&body).unwrap_or_default();
     let error = err.error.unwrap_or_else(|| "unknown_error".to_owned());
-    if error == "expired_token" {
-        return Ok(DevicePollResult::Expired);
+    match error.as_str() {
+        "expired_token" => Ok(DevicePollResult::Expired),
+        "access_denied" => Ok(DevicePollResult::AccessDenied {
+            description: err.error_description,
+        }),
+        // RFC 8628: only these two are retryable pending states.
+        "authorization_pending" | "slow_down" => Ok(DevicePollResult::Pending {
+            error,
+            description: err.error_description,
+        }),
+        _ => Ok(DevicePollResult::Fatal {
+            error,
+            description: err.error_description,
+        }),
     }
-    Ok(DevicePollResult::Pending {
-        error,
-        description: err.error_description,
-    })
 }
 
 /// Refresh an access token with exponential backoff on retryable statuses.
@@ -287,5 +306,107 @@ impl TokenResponse {
     #[allow(dead_code)]
     fn _token_type(&self) -> Option<&str> {
         self.token_type.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod poll_error_mapping_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn spawn_token_server(responses: Vec<(u16, serde_json::Value)>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let responses = Arc::new(responses);
+        let app = axum::Router::new().route(
+            "/api/oauth/token",
+            axum::routing::post(move || {
+                let counter = counter.clone();
+                let responses = responses.clone();
+                async move {
+                    let idx = counter
+                        .fetch_add(1, Ordering::SeqCst)
+                        .min(responses.len().saturating_sub(1));
+                    let (status, body) = &responses[idx];
+                    (
+                        axum::http::StatusCode::from_u16(*status).unwrap(),
+                        axum::Json(body.clone()),
+                    )
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (host, handle)
+    }
+
+    #[tokio::test]
+    async fn poll_maps_access_denied_to_access_denied() {
+        let (host, server) = spawn_token_server(vec![(
+            400,
+            serde_json::json!({ "error": "access_denied", "error_description": "user said no" }),
+        )])
+        .await;
+        let result = poll_device_token(&host, "dc").await.unwrap();
+        server.abort();
+        match result {
+            DevicePollResult::AccessDenied { description } => {
+                assert_eq!(description.as_deref(), Some("user said no"));
+            }
+            other => panic!("expected AccessDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_maps_expired_token_to_expired() {
+        let (host, server) =
+            spawn_token_server(vec![(400, serde_json::json!({ "error": "expired_token" }))]).await;
+        let result = poll_device_token(&host, "dc").await.unwrap();
+        server.abort();
+        assert!(matches!(result, DevicePollResult::Expired));
+    }
+
+    #[tokio::test]
+    async fn poll_maps_authorization_pending_to_pending() {
+        let (host, server) = spawn_token_server(vec![(
+            400,
+            serde_json::json!({ "error": "authorization_pending" }),
+        )])
+        .await;
+        let result = poll_device_token(&host, "dc").await.unwrap();
+        server.abort();
+        match result {
+            DevicePollResult::Pending { error, .. } => {
+                assert_eq!(error, "authorization_pending");
+            }
+            other => panic!("expected Pending, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_maps_unknown_error_to_fatal() {
+        let (host, server) =
+            spawn_token_server(vec![(400, serde_json::json!({ "error": "invalid_grant" }))]).await;
+        let result = poll_device_token(&host, "dc").await.unwrap();
+        server.abort();
+        match result {
+            DevicePollResult::Fatal { error, .. } => assert_eq!(error, "invalid_grant"),
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_maps_malformed_success_to_fatal() {
+        let (host, server) =
+            spawn_token_server(vec![(200, serde_json::json!({ "not": "a token" }))]).await;
+        let result = poll_device_token(&host, "dc").await.unwrap();
+        server.abort();
+        match result {
+            DevicePollResult::Fatal { error, .. } => assert_eq!(error, "missing_access_token"),
+            other => panic!("expected Fatal for malformed success, got {other:?}"),
+        }
     }
 }

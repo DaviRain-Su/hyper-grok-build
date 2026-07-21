@@ -95,3 +95,7 @@ default-bazel = [
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 release-dist = ["xai-grok-pager/release-dist"]
+# Community Hyper builds: disable the upstream Grok updater (x.ai / ~/.grok/bin/grok)
+# so `hyper update` cannot overwrite a co-installed official grok binary.
+# Users upgrade by re-running install.sh.
+community-build = []

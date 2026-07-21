@@ -66,8 +66,10 @@ pub async fn rewrite_pager_args(codex: &CodexArgs, args: &mut PagerArgs) -> Resu
     }
 
     // Auto-guide login when unauthenticated (interactive terminals only).
-    let home = xai_grok_config::grok_home();
-    if xai_grok_shell::auth::read_openai_codex_auth(&home).is_none() {
+    // Honor GROK_AUTH_PATH (same path login/store use), not only ~/.grok.
+    let auth_path = xai_grok_shell::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    if xai_grok_shell::auth::read_openai_codex_auth(home).is_none() {
         use std::io::IsTerminal as _;
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             eprintln!("Not signed in to OpenAI Codex (ChatGPT) — starting login…");
@@ -101,8 +103,10 @@ pub async fn rewrite_pager_args(codex: &CodexArgs, args: &mut PagerArgs) -> Resu
 
 /// `grok codex --status`: subscription credential + catalog models.
 fn print_status() {
-    let home = xai_grok_config::grok_home();
-    match xai_grok_shell::auth::read_openai_codex_auth(&home) {
+    // Honor GROK_AUTH_PATH (same path login/store use), not only ~/.grok.
+    let auth_path = xai_grok_shell::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    match xai_grok_shell::auth::read_openai_codex_auth(home) {
         Some(auth) => {
             println!("OpenAI Codex (ChatGPT): signed in");
             if let Some(email) = auth.email.as_deref() {

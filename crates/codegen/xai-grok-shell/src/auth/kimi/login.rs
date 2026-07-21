@@ -30,7 +30,10 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
         match complete_device_code_login(&host, &device_auth).await? {
             PollLoopOutcome::Done(auth) => {
                 let auth = *auth;
-                store_kimi_code_auth(&xai_grok_config::grok_home(), &auth)?;
+                // Honor GROK_AUTH_PATH (same path refresh/read use), not only ~/.grok.
+                let auth_path = auth_json_path();
+                let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+                store_kimi_code_auth(home, &auth)?;
                 eprintln!("✓ Signed in to Kimi For Coding");
                 eprintln!(
                     "  Models:"
@@ -154,16 +157,54 @@ fn refresh_kimi_token_on_side_thread() -> Option<String> {
     }
 }
 
+/// Defensive upper bound when the server omits `expires_in` (seconds).
+const DEFAULT_DEVICE_CODE_TIMEOUT_SECS: u64 = 900;
+/// Hard ceiling so a misbehaving server cannot keep us polling for hours.
+const MAX_DEVICE_CODE_TIMEOUT_SECS: u64 = 1800;
+
 async fn complete_device_code_login(
     host: &str,
     device_auth: &DeviceAuthorization,
 ) -> anyhow::Result<PollLoopOutcome> {
+    let timeout_secs = device_auth
+        .expires_in
+        .map(|e| e.max(1) as u64)
+        .unwrap_or(DEFAULT_DEVICE_CODE_TIMEOUT_SECS)
+        .min(MAX_DEVICE_CODE_TIMEOUT_SECS);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut poll_interval = std::time::Duration::from_secs(device_auth.interval.max(1) as u64);
+
     loop {
-        tokio::time::sleep(poll_interval).await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!(
+                "Kimi device authorization timed out after {timeout_secs}s. \
+                 Request a new code with `grok login --kimi`."
+            );
+        }
+        tokio::time::sleep(remaining.min(poll_interval)).await;
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "Kimi device authorization timed out after {timeout_secs}s. \
+                 Request a new code with `grok login --kimi`."
+            );
+        }
+
         match poll_device_token(host, &device_auth.device_code).await? {
             DevicePollResult::Success(auth) => return Ok(PollLoopOutcome::Done(auth)),
             DevicePollResult::Expired => return Ok(PollLoopOutcome::Restart),
+            DevicePollResult::AccessDenied { description } => {
+                if let Some(desc) = description.filter(|d| !d.is_empty()) {
+                    anyhow::bail!("Kimi authorization denied: {desc}");
+                }
+                anyhow::bail!("Kimi authorization denied by the user");
+            }
+            DevicePollResult::Fatal { error, description } => {
+                if let Some(desc) = description.filter(|d| !d.is_empty()) {
+                    anyhow::bail!("Kimi device authorization failed ({error}): {desc}");
+                }
+                anyhow::bail!("Kimi device authorization failed ({error})");
+            }
             DevicePollResult::Pending { error, description } => {
                 if error == "slow_down" {
                     poll_interval += std::time::Duration::from_secs(SLOW_DOWN_INCREMENT_SECS);

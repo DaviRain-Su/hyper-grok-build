@@ -67,6 +67,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                kimi_dialect: false,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -365,6 +366,7 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                kimi_dialect: false,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -500,6 +502,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                kimi_dialect: false,
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -2007,7 +2010,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
-            };
+                kimi_dialect: false,
+        };
             let (sampler_event_tx, _sampler_event_rx) = tokio::sync::mpsc::unbounded_channel::<
                 xai_grok_sampler::SamplingEvent,
             >();

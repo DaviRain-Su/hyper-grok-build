@@ -43,10 +43,10 @@ export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENROUTER_API_KEY=sk-or-...
 
-./target/debug/xai-grok-pager models | head
-./target/debug/xai-grok-pager -m openai/gpt-5 -p "ping"
-./target/debug/xai-grok-pager -m anthropic/claude-sonnet-4-5 -p "ping"
-./target/debug/xai-grok-pager -m openrouter/openai/gpt-4o -p "ping"
+./target/debug/hyper models | head
+./target/debug/hyper -m openai/gpt-5 -p "ping"
+./target/debug/hyper -m anthropic/claude-sonnet-4-5 -p "ping"
+./target/debug/hyper -m openrouter/openai/gpt-4o -p "ping"
 ```
 
 ```toml

@@ -134,6 +134,13 @@ pub struct SamplerConfig {
     /// already unconditional sampler defaults.
     #[serde(default)]
     pub responses_codex_dialect: bool,
+
+    /// When true, apply Moonshot/Kimi request shaping (`thinking` object,
+    /// fixed-sampling strip, etc.). Must only be set for direct Moonshot /
+    /// Kimi Code platforms — not for Ollama/OpenRouter/Together/Fireworks
+    /// entries that happen to share the same bare model slug.
+    #[serde(default)]
+    pub kimi_dialect: bool,
 }
 
 impl Default for SamplerConfig {
@@ -169,6 +176,7 @@ impl Default for SamplerConfig {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            kimi_dialect: false,
         }
     }
 }

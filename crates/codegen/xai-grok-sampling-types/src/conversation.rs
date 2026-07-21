@@ -550,6 +550,12 @@ pub struct ConversationRequest {
     pub reasoning_effort: Option<crate::ReasoningEffort>,
     /// JSON Schema for structured output (strict mode).
     pub json_schema: Option<serde_json::Value>,
+    /// When `Some(true)`, apply Moonshot/Kimi request shaping. When
+    /// `Some(false)`, never reshape (e.g. Ollama/OpenRouter same-slug models).
+    /// When `None` (default), fall back to bare-model-name detection so unit
+    /// tests of Kimi shaping keep working without a dialect flag.
+    /// Production sets this from [`SamplerConfig::kimi_dialect`].
+    pub kimi_dialect: Option<bool>,
 }
 
 impl ConversationRequest {
@@ -2111,7 +2117,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             x_grok_user_id: req.x_grok_user_id,
             trace: None,
         };
-        apply_kimi_chat_request_rules(&mut chat, req.reasoning_effort);
+        apply_kimi_chat_request_rules(&mut chat, req.reasoning_effort, req.kimi_dialect);
         chat
     }
 }
@@ -2128,7 +2134,12 @@ impl From<ConversationRequest> for ChatCompletionRequest {
 fn apply_kimi_chat_request_rules(
     chat: &mut ChatCompletionRequest,
     effort: Option<crate::ReasoningEffort>,
+    kimi_dialect: Option<bool>,
 ) {
+    // Explicit false: never reshape (cross-provider same-slug models).
+    if kimi_dialect == Some(false) {
+        return;
+    }
     let Some(model) = chat.model.as_deref() else {
         return;
     };
@@ -3385,7 +3396,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         output_config,
         metadata: None,
     };
-    apply_kimi_messages_request_rules(&mut msgs, req.reasoning_effort);
+    apply_kimi_messages_request_rules(&mut msgs, req.reasoning_effort, req.kimi_dialect);
     msgs
 }
 
@@ -3409,6 +3420,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
 fn apply_kimi_messages_request_rules(
     msgs: &mut crate::messages::MessagesRequest,
     effort: Option<crate::ReasoningEffort>,
+    kimi_dialect: Option<bool>,
 ) {
     use crate::messages::{
         ContentBlock, MessageContent, OutputConfig, ThinkingConfig, ThinkingDisplay,
@@ -3418,6 +3430,10 @@ fn apply_kimi_messages_request_rules(
         KIMI_DEFAULT_MAX_TOKENS, KimiRequestProfile, kimi_allow_empty_thinking_signature,
         kimi_force_adaptive_thinking, kimi_request_profile, kimi_sampling_is_fixed,
     };
+
+    if kimi_dialect == Some(false) {
+        return;
+    }
 
     let Some(profile) = kimi_request_profile(&msgs.model) else {
         return;
@@ -5407,6 +5423,22 @@ if text == "Compare these images:");
         assert_eq!(t.type_, "enabled");
         assert_eq!(t.keep.as_deref(), Some("all"));
         assert!(chat_on.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn kimi_shaping_skipped_when_dialect_false() {
+        // Same bare slug as Moonshot, but dialect=false (Ollama/OpenRouter path).
+        let req = ConversationRequest {
+            model: Some("kimi-k2.6".into()),
+            reasoning_effort: Some(crate::ReasoningEffort::High),
+            temperature: Some(0.3),
+            kimi_dialect: Some(false),
+            ..ConversationRequest::default()
+        };
+        let chat: ChatCompletionRequest = req.into();
+        assert_eq!(chat.reasoning_effort, Some(crate::ReasoningEffort::High));
+        assert!(chat.thinking.is_none(), "must not inject Moonshot thinking");
+        assert_eq!(chat.temperature, Some(0.3));
     }
 
     #[test]

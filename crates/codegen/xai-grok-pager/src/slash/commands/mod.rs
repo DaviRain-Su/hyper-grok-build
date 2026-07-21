@@ -69,6 +69,20 @@ pub mod vim_mode;
 pub mod voice;
 use super::command::SlashCommand;
 use std::sync::Arc;
+
+/// Per-platform OAuth login/logout commands shown in error hints.
+///
+/// Shared by `/logout provider <platform>` and `/providers clear <platform>`
+/// so the two slash commands cannot drift on which CLI command to suggest.
+pub(crate) fn oauth_login_logout_hint(
+    platform: xai_grok_models::PlatformId,
+) -> (&'static str, &'static str) {
+    match platform {
+        xai_grok_models::PlatformId::OpenAiCodex => ("/login openai", "grok logout --openai"),
+        _ => ("/login kimi", "grok logout --kimi"),
+    }
+}
+
 /// All pager-local builtin commands, in display order.
 ///
 /// This is the single source of truth for the builtin command set.

@@ -44,7 +44,15 @@ use xai_grok_shell::leader::{
 use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
 };
-use xai_grok_update::{UpdateConfig, auto_update, enforce_minimum_version_or_exit};
+use xai_grok_update::{UpdateConfig, auto_update};
+
+/// Community builds skip the upstream min-version gate (it talks to x.ai).
+async fn enforce_minimum_version_or_exit(config: &UpdateConfig) {
+    if cfg!(feature = "community-build") {
+        return;
+    }
+    xai_grok_update::enforce_minimum_version_or_exit(config).await;
+}
 /// Apply headless args to an existing config, only overriding values that are
 /// explicitly set. This allows environment defaults to be preserved when
 /// specific args are not provided.
@@ -2147,6 +2155,10 @@ fn build_update_config() -> UpdateConfig {
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
+    // Community Hyper builds never touch the upstream Grok updater.
+    if cfg!(feature = "community-build") {
+        return false;
+    }
     if cfg!(debug_assertions) {
         return false;
     }
@@ -2205,6 +2217,16 @@ async fn run_update_command(
     channel_switch: Option<&str>,
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
+    if cfg!(feature = "community-build") {
+        // Upstream updater targets x.ai + ~/.grok/bin/grok — never run it for
+        // Hyper community builds. Users upgrade via install.sh / install.ps1.
+        eprintln!(
+            "Updates for Hyper are managed by the installer, not `hyper update`.\n\
+             Re-run install.sh (or install.ps1) to upgrade, e.g.:\n\
+               curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash"
+        );
+        return Ok(());
+    }
     if json && !check {
         anyhow::bail!("--json requires --check");
     }

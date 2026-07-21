@@ -504,6 +504,11 @@ pub struct BuiltinPlatformModel {
     /// coding thinking models).
     pub max_completion_tokens: Option<u32>,
     pub api_backend: PlatformApiBackend,
+    /// Per-row base URL from the catalog JSON (e.g. MiniMax Messages uses
+    /// `https://api.minimax.io/anthropic` rather than the platform default
+    /// `/v1` OpenAI-compatible root). When `None`, callers use
+    /// [`PlatformId::base_url`].
+    pub base_url_override: Option<String>,
 }
 
 impl BuiltinPlatformModel {
@@ -539,6 +544,9 @@ struct CatalogModelRow {
     max_completion_tokens: Option<u32>,
     api_backend: String,
     supports_reasoning_effort: bool,
+    /// Optional per-model base URL (e.g. MiniMax Anthropic-compatible path).
+    #[serde(default)]
+    base_url_override: Option<String>,
     // `supported_in_api` is intentionally ignored: all built-in platform
     // entries start hidden until the shell stamps credentials.
 }
@@ -566,6 +574,9 @@ fn load_pi_catalog_models() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 max_completion_tokens: row.max_completion_tokens,
                 api_backend,
+                base_url_override: row
+                    .base_url_override
+                    .filter(|u| !u.trim().is_empty()),
             })
         })
         .collect()
@@ -631,6 +642,7 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 max_completion_tokens: None,
                 api_backend: PlatformApiBackend::Responses,
+                base_url_override: None,
             }
         };
     }
@@ -690,6 +702,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 max_completion_tokens: $max_tok,
                 api_backend: PlatformApiBackend::Messages,
+                base_url_override: None,
             }
         };
     }
@@ -744,6 +757,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::ChatCompletions,
+                base_url_override: None,
             }
         };
     }
@@ -1309,6 +1323,29 @@ mod tests {
         let url = PlatformId::KimiCode.models_list_url();
         assert!(url.ends_with("/models"), "{url}");
         assert!(url.contains("kimi.com"), "{url}");
+    }
+
+    #[test]
+    fn minimax_catalog_row_carries_base_url_override() {
+        let models = platform_builtin_models();
+        let m = models
+            .iter()
+            .find(|m| m.catalog_key() == "minimax/MiniMax-M2.7")
+            .expect("minimax/MiniMax-M2.7 in catalog");
+        assert_eq!(
+            m.base_url_override.as_deref(),
+            Some("https://api.minimax.io/anthropic"),
+            "MiniMax Messages backend must keep the catalog base_url_override"
+        );
+        assert_eq!(m.api_backend, PlatformApiBackend::Messages);
+        let cn = models
+            .iter()
+            .find(|m| m.catalog_key() == "minimax-cn/MiniMax-M2.7")
+            .expect("minimax-cn/MiniMax-M2.7 in catalog");
+        assert_eq!(
+            cn.base_url_override.as_deref(),
+            Some("https://api.minimaxi.com/anthropic")
+        );
     }
 
     #[test]

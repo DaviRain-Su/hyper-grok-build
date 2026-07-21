@@ -84,11 +84,12 @@ Menus follow the official OpenAI Codex CLI catalog
 | `gpt-5.5` / `gpt-5.4` / mini | low · medium · high · xhigh | medium |
 
 - **max** — maximum single-agent reasoning depth (`reasoning.effort: "max"`)
-- **ultra** — UI level for max depth + automatic task delegation (Sol/Terra).
-  Official Codex maps **Ultra → Max on the wire**
+- **ultra** — UI tier matching the Codex CLI menu; the request body is
+  identical to **max**. Official Codex maps **Ultra → Max on the wire**
   (`reasoning_effort_for_request` in `codex-rs/core/src/client.rs`); the
-  ChatGPT backend does not accept `effort: "ultra"`. Multi-agent
-  “proactive” behaviour is a client policy when multi-agent v2 is enabled.
+  ChatGPT backend does not accept `effort: "ultra"`. Automatic task
+  delegation is a future client-side policy and is not yet implemented;
+  selecting Ultra today behaves like Max.
 
 Override with `/effort max`, `/effort ultra`, or `grok --effort ultra`
 (ultra is accepted; request body uses `max`).
