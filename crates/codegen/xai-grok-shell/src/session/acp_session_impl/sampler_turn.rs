@@ -873,17 +873,35 @@ impl SessionActor {
             && is_kimi_code
         {
             // Do not fall through to xAI AuthManager recovery (wrong credential).
-            // Kimi only refreshes on local TTL expiry today; surface the 401 so
-            // the user can `/login kimi` rather than looping a false recovery.
-            tracing::warn!(
-                session_id = % self.session_info.id.0,
-                "auth recovery: sampler 401 on kimi-code — not refreshable via xAI session"
-            );
-            xai_grok_telemetry::unified_log::warn(
-                "auth recovery: sampler 401 on kimi-code — not refreshable via xAI session",
-                Some(self.session_info.id.0.as_ref()),
-                None,
-            );
+            // Force a Kimi token refresh mirroring the openai-codex path; only
+            // when that fails do we surface the 401 so the user can
+            // `/login kimi` rather than looping a false recovery.
+            match crate::auth::kimi::force_refresh_kimi_code_auth().await {
+                Some(_) => {
+                    tracing::info!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, kimi-code re-mint, retrying"
+                    );
+                    xai_grok_telemetry::unified_log::info(
+                        "auth recovery: sampler 401, kimi-code re-mint, retrying",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                    self.prepare_sampler_for_turn().await;
+                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, kimi-code re-mint failed"
+                    );
+                    xai_grok_telemetry::unified_log::warn(
+                        "auth recovery: sampler 401, kimi-code re-mint failed",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                }
+            }
         } else if auth_recovery_eligible
             && crate::auth::devbox_login::is_devbox_environment()
             && let Some(ref am) = self.auth_manager

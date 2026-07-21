@@ -105,6 +105,11 @@ This clears the `oauth/kimi-code` scope only. Your xAI session (and
 # Pi-style `…/coding` (no /v1) is auto-normalized to `…/coding/v1`.
 export GROK_KIMI_CODE_BASE_URL="https://api.kimi.com/coding/v1"
 export GROK_KIMI_CODE_OAUTH_HOST="https://auth.kimi.com"
+
+# Wire backend: `messages` (Anthropic Messages, default) or
+# `chat_completions` (OpenAI-compatible, gray-release opt-in while parity
+# is validated). Unset / unrecognized values keep the default.
+export GROK_KIMI_CODE_API_BACKEND="chat_completions"
 ```
 
 ---
@@ -121,14 +126,20 @@ export GROK_KIMI_CODE_OAUTH_HOST="https://auth.kimi.com"
 
 ## Request parameters
 
-### Subscription path (OpenAI Chat Completions)
+### Subscription path (wire backends)
 
-Grok speaks the Kimi Code endpoint as OpenAI Chat Completions, using the
-same reasoning/thinking mapping as the Moonshot open platform:
+Kimi For Coding ships with two selectable wire backends, chosen by
+`GROK_KIMI_CODE_API_BACKEND`:
+
+- **`messages` (default)** — Anthropic Messages: `POST {base}/messages`
+  with `anthropic-version: 2023-06-01` and `User-Agent: KimiCLI/1.5`.
+- **`chat_completions` (opt-in)** — OpenAI Chat Completions:
+  `POST {base}/chat/completions` with `User-Agent: KimiCLI/1.5`
+  (no `anthropic-version` header), using the same reasoning/thinking
+  mapping as the Moonshot open platform.
 
 | Concern | Behavior in Grok |
 |---------|------------------|
-| Protocol | `POST {base}/chat/completions` with `User-Agent: KimiCLI/1.5` |
 | Base URL | `https://api.kimi.com/coding/v1` (env: `GROK_KIMI_CODE_BASE_URL`) |
 | Thinking | K3 / K2.7 Code / K2.7 Hyper Speed keep thinking enabled; reasoning effort is mapped to the model's thinking fields |
 | Temperature | Omitted for fixed-sampling models (K2.7 Code / K2.7 Hyper Speed) |
