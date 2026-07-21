@@ -424,17 +424,27 @@ pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
 /// Remove the `xai::api_key` scope from auth.json.
 pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     let path = resolve_auth_json_path(grok_home);
-    with_auth_json_scope_lock(&path, || {
-        if let Ok(mut map) = read_auth_json(&path) {
-            map.remove(API_KEY_SCOPE);
-            if map.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else {
-                write_auth_json(&path, &map)?;
-            }
+    with_auth_json_scope_lock(&path, || clear_scope_from_auth_json(&path, API_KEY_SCOPE))
+}
+
+/// Remove one scope under lock. Missing file is success; other read/write
+/// errors propagate (unlike the old `if let Ok` swallow).
+fn clear_scope_from_auth_json(path: &Path, scope: &str) -> std::io::Result<()> {
+    let mut map = match read_auth_json(path) {
+        Ok(map) => map,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    map.remove(scope);
+    if map.is_empty() {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
-        Ok(())
-    })
+    } else {
+        write_auth_json(path, &map)
+    }
 }
 
 /// Read the Kimi Code OAuth credential from `auth.json` (scope
@@ -462,20 +472,40 @@ pub fn store_kimi_code_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Resul
     })
 }
 
+/// Like [`store_kimi_code_auth`], but if a sibling already rotated past
+/// `spent_refresh`, adopt their on-disk entry instead of overwriting.
+pub(crate) fn store_kimi_code_auth_after_refresh(
+    grok_home: &Path,
+    candidate: &GrokAuth,
+    spent_refresh: &str,
+) -> std::io::Result<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        if let Some(existing) = map.get(KIMI_CODE_OAUTH_SCOPE).cloned()
+            && existing.auth_mode == AuthMode::KimiCode
+            && !super::model::is_expired(&existing)
+        {
+            let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
+            if existing_rt != spent_refresh {
+                return Ok(existing);
+            }
+            if existing.key == candidate.key {
+                return Ok(existing);
+            }
+        }
+        let mut stored = candidate.clone();
+        stored.auth_mode = AuthMode::KimiCode;
+        map.insert(KIMI_CODE_OAUTH_SCOPE.to_owned(), stored.clone());
+        write_auth_json(&path, &map)?;
+        Ok(stored)
+    })
+}
+
 /// Remove the Kimi Code OAuth scope from auth.json.
 pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = resolve_auth_json_path(grok_home);
-    with_auth_json_scope_lock(&path, || {
-        if let Ok(mut map) = read_auth_json(&path) {
-            map.remove(KIMI_CODE_OAUTH_SCOPE);
-            if map.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else {
-                write_auth_json(&path, &map)?;
-            }
-        }
-        Ok(())
-    })
+    with_auth_json_scope_lock(&path, || clear_scope_from_auth_json(&path, KIMI_CODE_OAUTH_SCOPE))
 }
 
 /// Read the OpenAI Codex (ChatGPT) OAuth credential, if present and correctly scoped.
@@ -548,15 +578,7 @@ pub(crate) fn store_openai_codex_auth_after_refresh(
 pub fn clear_openai_codex_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
-        if let Ok(mut map) = read_auth_json(&path) {
-            map.remove(OPENAI_CODEX_OAUTH_SCOPE);
-            if map.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else {
-                write_auth_json(&path, &map)?;
-            }
-        }
-        Ok(())
+        clear_scope_from_auth_json(&path, OPENAI_CODEX_OAUTH_SCOPE)
     })
 }
 
@@ -660,17 +682,8 @@ pub fn store_platform_api_key(
 /// Remove a platform API key scope from auth.json.
 pub fn clear_platform_api_key(grok_home: &Path, platform: &str) -> std::io::Result<()> {
     let path = resolve_auth_json_path(grok_home);
-    with_auth_json_scope_lock(&path, || {
-        if let Ok(mut map) = read_auth_json(&path) {
-            map.remove(&platform_api_key_scope(platform));
-            if map.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else {
-                write_auth_json(&path, &map)?;
-            }
-        }
-        Ok(())
-    })
+    let scope = platform_api_key_scope(platform);
+    with_auth_json_scope_lock(&path, || clear_scope_from_auth_json(&path, &scope))
 }
 
 #[cfg(test)]

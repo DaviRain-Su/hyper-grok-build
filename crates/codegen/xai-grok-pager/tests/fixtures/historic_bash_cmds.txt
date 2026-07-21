@@ -89,7 +89,7 @@ GROK_AUTO_COMPACT_THRESHOLD_PERCENT=1 /tmp/pager-under-test -p 'reply with exact
 cd /Users/alice/Documents/code/project-wt/fix-prompt-wheel-history && \\
 ### END
 ### CMD 27
-strings target/debug/xai-grok-pager | grep -c slash-mru-writer   # must print >=1\
+strings target/debug/hyper | grep -c slash-mru-writer   # must print >=1\
 ### END
 ### CMD 28
 SSH_CONNECTION='10.0.0.1 51234 10.0.0.2 22' \\

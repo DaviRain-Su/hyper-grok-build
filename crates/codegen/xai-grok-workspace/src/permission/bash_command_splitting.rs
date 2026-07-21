@@ -380,7 +380,7 @@ fn sh_split_simple(s: &str) -> Vec<String> {
 /// Given a bash *script string* like:
 ///
 /// ```bash
-/// XAI_API_KEY='xai-some-key' cargo run --bin xai-grok-pager
+/// XAI_API_KEY='xai-some-key' cargo run --bin hyper
 /// ```
 ///
 /// returns the first "important" command as a `BashCommandHighlights` where:
@@ -390,7 +390,7 @@ fn sh_split_simple(s: &str) -> Vec<String> {
 ///
 /// For the above example:
 ///   prefix: ["XAI_API_KEY=xai-some-key"]
-///   highlighted_words: ["cargo", "run", "--bin", "xai-grok-pager"]
+///   highlighted_words: ["cargo", "run", "--bin", "hyper"]
 ///   suffix: []
 pub fn primary_command_from_script(script: &str) -> Option<BashCommandHighlights> {
     let tree = try_parse_shell(script)?;
@@ -758,7 +758,7 @@ mod tests {
             })
         );
 
-        let environment_key_command = "XAI_API_KEY='xai-some-key' cargo run --bin xai-grok-pager";
+        let environment_key_command = "XAI_API_KEY='xai-some-key' cargo run --bin hyper";
         assert_eq!(
             primary_command_from_script(environment_key_command),
             Some(BashCommandHighlights {
@@ -767,7 +767,7 @@ mod tests {
                     "cargo".to_owned(),
                     "run".to_owned(),
                     "--bin".to_owned(),
-                    "xai-grok-pager".to_owned()
+                    "hyper".to_owned()
                 ],
                 suffix: vec![],
             })
@@ -796,7 +796,7 @@ mod tests {
             })
         );
 
-        let redirection_command = "cargo build --bin xai-grok-pager 2>&1";
+        let redirection_command = "cargo build --bin hyper 2>&1";
         assert_eq!(
             primary_command_from_script(redirection_command),
             Some(BashCommandHighlights {
@@ -805,7 +805,7 @@ mod tests {
                     "cargo".to_owned(),
                     "build".to_owned(),
                     "--bin".to_owned(),
-                    "xai-grok-pager".to_owned(),
+                    "hyper".to_owned(),
                 ],
                 suffix: vec!["2>&1".to_owned(),],
             })
