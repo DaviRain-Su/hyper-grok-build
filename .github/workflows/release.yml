@@ -59,17 +59,21 @@ jobs:
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
 
-      # Windows cannot exec the dotslash launcher directly (no shebang
-      # support → os error 193), and the build script's documented fallback
-      # is a protoc on PATH — install the same major line the monorepo pins.
-      - name: Install protoc (Windows PATH fallback)
+      # Windows cannot exec the Unix dotslash launcher at bin/protoc (os error
+      # 193). Install a real protoc.exe and point $PROTOC at it so
+      # xai-proto-build skips the wrapper entirely.
+      - name: Install protoc (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $url = "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip"
           Invoke-WebRequest -Uri $url -OutFile protoc.zip
-          Expand-Archive protoc.zip -DestinationPath "$env:USERPROFILE\protoc"
-          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\protoc\bin"
+          Expand-Archive protoc.zip -DestinationPath "$env:USERPROFILE\protoc" -Force
+          $protoc = Join-Path $env:USERPROFILE "protoc\bin\protoc.exe"
+          if (-not (Test-Path $protoc)) { throw "protoc.exe missing at $protoc" }
+          & $protoc --version
+          Add-Content $env:GITHUB_PATH (Join-Path $env:USERPROFILE "protoc\bin")
+          Add-Content $env:GITHUB_ENV "PROTOC=$protoc"
 
       - uses: Swatinem/rust-cache@v2
         with:
