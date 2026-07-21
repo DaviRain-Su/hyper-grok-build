@@ -91,12 +91,30 @@ case "$OS" in
 esac
 
 # ── Downloader ───────────────────────────────────────────────────────────────
+# Optional: set GITHUB_TOKEN to authenticate GitHub API + asset requests and
+# avoid the unauthenticated rate limit (60 req/hr per IP). A fine-grained PAT
+# with public-repo read access raises it to 5000 req/hr.
+AUTH_HDR=""
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    AUTH_HDR="Authorization: Bearer $GITHUB_TOKEN"
+fi
+
 if command -v curl >/dev/null 2>&1; then
-    fetch()        { curl -fsSL -o "$2" "$1"; }
-    fetch_stdout() { curl -fsSL "$1"; }
+    if [ -n "$AUTH_HDR" ]; then
+        fetch()        { curl -fsSL -H "$AUTH_HDR" -o "$2" "$1"; }
+        fetch_stdout() { curl -fsSL -H "$AUTH_HDR" "$1"; }
+    else
+        fetch()        { curl -fsSL -o "$2" "$1"; }
+        fetch_stdout() { curl -fsSL "$1"; }
+    fi
 elif command -v wget >/dev/null 2>&1; then
-    fetch()        { wget -q -O "$2" "$1"; }
-    fetch_stdout() { wget -q -O - "$1"; }
+    if [ -n "$AUTH_HDR" ]; then
+        fetch()        { wget -q --header="$AUTH_HDR" -O "$2" "$1"; }
+        fetch_stdout() { wget -q --header="$AUTH_HDR" -O - "$1"; }
+    else
+        fetch()        { wget -q -O "$2" "$1"; }
+        fetch_stdout() { wget -q -O - "$1"; }
+    fi
 else
     err "either curl or wget is required"
 fi
@@ -121,7 +139,8 @@ else
 fi
 printf 'Resolving release from %s\n' "$RELEASE_URL"
 RELEASE_JSON="$(fetch_stdout "$RELEASE_URL")" \
-    || err "could not fetch release metadata from $RELEASE_URL"
+    || err "could not fetch release metadata from $RELEASE_URL
+         (GitHub may be rate-limiting this IP; set GITHUB_TOKEN to authenticate)"
 
 TAG="$(printf '%s' "$RELEASE_JSON" \
     | tr ',' '\n' \
