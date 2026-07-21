@@ -121,6 +121,10 @@ pub fn stream_responses<'a>(
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut reasoning_acc = String::new();
+        // Visible assistant text streamed via `output_text.delta`. Used when
+        // ChatGPT Codex leaves `response.completed.output` empty (content only
+        // appears on `response.output_item.done` / deltas).
+        let mut text_acc = String::new();
         let mut last_content_chunk_at = Instant::now();
 
         // Maps Responses API `output_index` to our tool-only `tool_index`.
@@ -129,6 +133,12 @@ pub fn stream_responses<'a>(
         // look up `output_index` here to find the matching `tool_index`.
         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
         let mut next_tool_index: u32 = 0;
+        // Completed output items from `response.output_item.done`. ChatGPT
+        // Codex's terminal `response.completed` often has `output: []` even
+        // after full message items were streamed here — without this, we
+        // mis-classify as empty_response and retry forever while the UI
+        // already showed ChannelToken text.
+        let mut completed_output_items: Vec<rs::OutputItem> = Vec::new();
 
         let mut stream = raw_stream;
         loop {
@@ -194,6 +204,7 @@ pub fn stream_responses<'a>(
                         chunk_timestamps.push(Instant::now());
                         chunk_index += 1;
                         message_chunk_count += 1;
+                        text_acc.push_str(&delta);
                         yield SamplingEvent::ChannelToken {
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Text,
@@ -343,9 +354,11 @@ pub fn stream_responses<'a>(
                 ResponseStreamEvent::ResponseWebSearchCallCompleted(_)
                 | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {}
 
-                // OutputItemDone carries the full result for backend tools.
-                // For WebSearchCall this includes the query and source URLs.
-                // For CustomToolCall this includes x_search results.
+                // OutputItemDone carries the full result for backend tools
+                // and (on ChatGPT Codex) the completed assistant message /
+                // function_call items. Codex often leaves
+                // `response.completed.output` empty, so we also stash items
+                // for the final ConversationResponse.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
                     match &done_event.item {
                         rs::OutputItem::WebSearchCall(ws) => {
@@ -373,6 +386,7 @@ pub fn stream_responses<'a>(
                         }
                         _ => {}
                     }
+                    completed_output_items.push(done_event.item);
                 }
 
                 // CustomToolCallInputDelta is x_search in-progress streaming.
@@ -428,6 +442,37 @@ pub fn stream_responses<'a>(
                 return;
             }
         };
+
+        // ChatGPT Codex (`chatgpt.com/backend-api/codex`): terminal
+        // `response.completed` frequently has `output: []` while the full
+        // message/function items already arrived on `output_item.done`.
+        // Without splicing them in we treat a successful stream as empty
+        // and retry forever (UI already showed the streamed text).
+        if response.output.is_empty() && !completed_output_items.is_empty() {
+            tracing::debug!(
+                request_id = %request_id,
+                n_items = completed_output_items.len(),
+                "Codex completed with empty output[]; adopting output_item.done items"
+            );
+            response.output = completed_output_items;
+        } else if response.output.is_empty() && !text_acc.is_empty() {
+            // Fallback: only deltas were usable (no done items).
+            tracing::debug!(
+                request_id = %request_id,
+                text_len = text_acc.len(),
+                "Codex completed with empty output[]; synthesizing message from text deltas"
+            );
+            response.output = vec![rs::OutputItem::Message(rs::OutputMessage {
+                id: format!("msg_stream_{request_id}"),
+                role: rs::AssistantRole::Assistant,
+                status: rs::OutputStatus::Completed,
+                content: vec![rs::OutputMessageContent::OutputText(rs::OutputTextContent {
+                    text: text_acc.clone(),
+                    annotations: vec![],
+                    logprobs: None,
+                })],
+            })];
+        }
 
         // Billing fields (`prompt_tokens`, `completion_tokens`,
         // `cached_prompt_tokens`, `reasoning_tokens`) are the cumulative
@@ -592,6 +637,57 @@ mod tests {
             response: empty_completed_response(),
             sequence_number: 0,
         })
+    }
+
+    fn message_item_done(text: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+            sequence_number: 0,
+            output_index: 0,
+            item: rs::OutputItem::Message(rs::OutputMessage {
+                id: "msg_1".into(),
+                role: rs::AssistantRole::Assistant,
+                status: rs::OutputStatus::Completed,
+                content: vec![rs::OutputMessageContent::OutputText(rs::OutputTextContent {
+                    text: text.into(),
+                    annotations: vec![],
+                    logprobs: None,
+                })],
+            }),
+        })
+    }
+
+    /// ChatGPT Codex: deltas + output_item.done with text, but completed.output=[].
+    /// Must not classify as empty (would spin retries while UI already showed text).
+    #[tokio::test]
+    async fn codex_empty_completed_output_adopts_output_item_done() {
+        let raw = stream::iter(vec![
+            Ok(text_delta_event("Hi")),
+            Ok(text_delta_event("!")),
+            Ok(message_item_done("Hi!")),
+            Ok(completed_event()),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+        let completed = events
+            .iter()
+            .find_map(|e| match e {
+                SamplingEvent::Completed { response, .. } => Some(response.as_ref()),
+                _ => None,
+            })
+            .expect("Completed event");
+        assert!(
+            completed.empty_reason().is_none(),
+            "must not be empty: {:?}",
+            completed.empty_reason()
+        );
+        assert_eq!(completed.assistant_text(), "Hi!");
     }
 
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {

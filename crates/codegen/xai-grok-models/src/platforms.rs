@@ -611,8 +611,10 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
 /// API with `store: false` + encrypted reasoning; GPT-5 family window is
 /// 400k with 128k max output.
 fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
+    // Context window is for local budget UI only. Do **not** stamp
+    // max_completion_tokens: ChatGPT Codex rejects `max_output_tokens`
+    // (`{"detail":"Unsupported parameter: max_output_tokens"}`).
     const CTX_400K: u64 = 400_000;
-    const MAX_TOK_128K: Option<u32> = Some(131_072);
     macro_rules! codex {
         ($id:literal, $name:literal, $desc:literal) => {
             BuiltinPlatformModel {
@@ -623,7 +625,7 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 context_window: CTX_400K,
                 supports_reasoning_effort: true,
                 supported_in_api: false,
-                max_completion_tokens: MAX_TOK_128K,
+                max_completion_tokens: None,
                 api_backend: PlatformApiBackend::Responses,
             }
         };

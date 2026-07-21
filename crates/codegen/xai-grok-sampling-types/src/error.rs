@@ -327,6 +327,12 @@ struct FlatErrorResponse {
     code: Option<String>,
 }
 
+/// FastAPI / ChatGPT Codex backend: `{"detail":"Stream must be set to true"}`.
+#[derive(Debug, Deserialize)]
+struct DetailErrorResponse {
+    detail: String,
+}
+
 /// Extract `(error_type, message)` from either error format.
 fn try_parse_error(data: &str) -> Option<(String, String)> {
     if let Ok(resp) = serde_json::from_str::<ErrorResponse>(data) {
@@ -342,6 +348,13 @@ fn try_parse_error(data: &str) -> Option<(String, String)> {
             flat.code.unwrap_or_else(|| "server_error".to_string()),
             flat.error,
         ));
+    }
+    // ChatGPT Codex backend (and some FastAPI gateways) return a bare detail string.
+    if let Ok(detail) = serde_json::from_str::<DetailErrorResponse>(data) {
+        let msg = detail.detail.trim();
+        if !msg.is_empty() {
+            return Some(("invalid_request".to_string(), msg.to_owned()));
+        }
     }
     None
 }
@@ -622,6 +635,14 @@ mod tests {
         let bytes = br#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#;
         let msg = user_facing_api_error_message(StatusCode::TOO_MANY_REQUESTS, bytes);
         assert_eq!(msg, "rate_limit_error: rate limit exceeded");
+    }
+
+    /// ChatGPT Codex returns FastAPI-style `{"detail":"..."}` (not OpenAI envelopes).
+    #[test]
+    fn user_facing_parses_fastapi_detail_error() {
+        let bytes = br#"{"detail":"Stream must be set to true"}"#;
+        let msg = user_facing_api_error_message(StatusCode::BAD_REQUEST, bytes);
+        assert_eq!(msg, "invalid_request: Stream must be set to true");
     }
 
     #[test]

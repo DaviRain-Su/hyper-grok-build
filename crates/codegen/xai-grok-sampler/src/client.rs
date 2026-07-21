@@ -223,6 +223,8 @@ fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
         request.inner.prompt_cache_key = Some(clamped);
     }
     if request.inner.text.is_none() {
+        // Pi: `text: { verbosity: "low" }`. Format defaults to text when omitted;
+        // typed Text serializes as `{ "type": "text" }` which the backend accepts.
         request.inner.text = Some(rs::ResponseTextParam {
             format: rs::TextResponseFormatConfiguration::Text,
             verbosity: Some(rs::Verbosity::Low),
@@ -231,6 +233,38 @@ fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
     // Pi sends `reasoning.summary: "auto"` (the shared default is `concise`).
     if let Some(reasoning) = request.inner.reasoning.as_mut() {
         reasoning.summary = Some(rs::ReasoningSummary::Auto);
+    }
+    // ChatGPT Codex backend rejects parameters the public Responses API allows
+    // (verified live against chatgpt.com/backend-api/codex/responses):
+    //   Unsupported parameter: max_output_tokens | temperature | top_p | …
+    // Official Pi never sends these on openai-codex-responses. Our catalog
+    // stamps max_completion_tokens=128k on Codex models, which becomes
+    // max_output_tokens here and 400s every turn.
+    request.inner.max_output_tokens = None;
+    request.inner.temperature = None;
+    request.inner.top_p = None;
+    request.inner.max_tool_calls = None;
+}
+
+/// Strip fields ChatGPT Codex rejects after JSON serialize (defense in depth
+/// if typed defaults re-introduce them).
+fn strip_codex_unsupported_body_fields(body: &mut serde_json::Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "max_tool_calls",
+        "background",
+        "truncation",
+        "top_logprobs",
+        "prompt_cache_retention",
+    ] {
+        obj.remove(key);
     }
 }
 
@@ -1190,6 +1224,10 @@ impl SamplingClient {
         // old raw_output machinery.
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
         if self.defaults.responses_codex_dialect {
+            // ChatGPT Codex backend rejects non-stream requests:
+            // `{"detail":"Stream must be set to true"}`.
+            request_body["stream"] = serde_json::json!(true);
+            strip_codex_unsupported_body_fields(&mut request_body);
             patch_codex_reasoning_effort_wire(
                 &mut request_body,
                 self.defaults.reasoning_effort,
@@ -1331,7 +1369,13 @@ impl SamplingClient {
             }
         }
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        // Always force stream on the wire for Responses streaming calls.
+        // ChatGPT Codex (`chatgpt.com/backend-api/codex/responses`) hard-requires
+        // `stream: true` and returns FastAPI `{"detail":"Stream must be set to true"}`
+        // otherwise — which our error parser used to collapse to a generic 400.
+        request_body["stream"] = serde_json::json!(true);
         if self.defaults.responses_codex_dialect {
+            strip_codex_unsupported_body_fields(&mut request_body);
             patch_codex_reasoning_effort_wire(
                 &mut request_body,
                 self.defaults.reasoning_effort,
@@ -2841,5 +2885,26 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "xhigh");
         patch_codex_reasoning_effort_wire(&mut body, Some(E::None));
         assert!(body.get("reasoning").is_none());
+    }
+
+    /// Codex backend 400s on max_output_tokens/temperature/top_p — strip them.
+    #[test]
+    fn strip_codex_unsupported_body_fields_removes_sampling_knobs() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "max_output_tokens": 131072,
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "max_tool_calls": 8,
+            "instructions": "hi",
+        });
+        strip_codex_unsupported_body_fields(&mut body);
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("max_tool_calls").is_none());
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["model"], "gpt-5.5");
     }
 }
