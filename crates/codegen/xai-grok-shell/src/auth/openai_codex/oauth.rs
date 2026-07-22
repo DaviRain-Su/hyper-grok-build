@@ -202,17 +202,31 @@ pub(crate) async fn exchange_device_authorization_code(
 }
 
 /// Refresh an access token (`grant_type=refresh_token`).
+///
+/// The POST is bounded by `tokio::time::timeout` (not reqwest's `.timeout()`,
+/// which does not reliably abort an in-flight request against a stalled
+/// peer). The refresh holds `auth.json.lock` for its whole duration, so a
+/// reliable bound prevents one hung request from wedging subsequent
+/// launches on the 45s lock timeout.
 pub(crate) async fn refresh_access_token(host: &str, refresh: &str) -> anyhow::Result<CodexToken> {
-    let response = crate::http::shared_client()
+    let request = crate::http::shared_client()
         .post(format!("{}{TOKEN_PATH}", host_trim(host)))
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh),
             ("client_id", OPENAI_CODEX_CLIENT_ID),
-        ])
-        .timeout(std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS))
-        .send()
-        .await?;
+        ]);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS),
+        request.send(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "token refresh timed out after {}s (network path stalled)",
+            REFRESH_REQUEST_TIMEOUT_SECS
+        )
+    })??;
     read_token_response(response, "refresh").await
 }
 

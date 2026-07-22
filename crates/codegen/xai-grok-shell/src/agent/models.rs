@@ -1612,7 +1612,7 @@ fn resolve_prefetch_env_from_parts(
 /// for a live platform catalog fetch. Used to arm startup prefetch without
 /// an xAI session.
 fn has_any_platform_credentials() -> bool {
-    if crate::auth::kimi::ensure_kimi_code_access_token_blocking().is_some() {
+    if crate::auth::kimi::kimi_code_access_token_cached().is_some() {
         return true;
     }
     if crate::auth::openai_codex::ensure_openai_codex_access_token_blocking().is_some() {

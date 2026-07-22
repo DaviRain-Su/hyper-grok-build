@@ -29,6 +29,7 @@ pub mod inspect;
 pub mod instrumentation;
 pub mod leader;
 pub mod managed_config;
+pub mod main_runtime;
 pub mod mcp_doctor;
 pub use xai_grok_models as models;
 pub mod plugin;

@@ -16,6 +16,12 @@ const SLOW_DOWN_INCREMENT_SECS: u64 = 5;
 /// Match Codex / AuthManager: wait long enough for a sibling IdP call.
 const KIMI_REFRESH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 const KIMI_REFRESH_LOCK_TIMEOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Total bound for the whole blocking refresh operation when run on the main
+/// runtime (lock acquire + IdP POST + persist). The per-request POST is
+/// separately bounded to 15s inside [`oauth::refresh_token`]; this outer
+/// bound guards against lock contention and guarantees the caller thread is
+/// not blocked long enough to wedge startup.
+const KIMI_REFRESH_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 enum PollLoopOutcome {
     Done(Box<GrokAuth>),
@@ -82,6 +88,28 @@ impl xai_grok_sampler::BearerResolver for KimiCodeBearerResolver {
 /// same RT concurrently.
 pub async fn ensure_kimi_code_access_token() -> Option<String> {
     refresh_kimi_code_auth(false).await.map(|a| a.key)
+}
+
+/// Read the cached Kimi access token **without any network refresh**.
+///
+/// For startup best-effort checks (platform credential probing / model
+/// catalog fetch) where blocking the caller on a token refresh would wedge
+/// startup — e.g. when the access token has expired and the OAuth refresh
+/// POST is unreachable (stalled proxy). Returns `Some` only when the cached
+/// token is still valid; returns `None` when it is expired or absent so the
+/// caller treats Kimi as simply "unavailable" and degrades gracefully. The
+/// lazy per-request bearer resolver ([`KimiCodeBearerResolver`]) still
+/// performs a real refresh on demand when a `kimi-code/*` model is actually
+/// used, so no functionality is lost — only the eager startup fetch is
+/// skipped when Kimi auth is not already healthy.
+pub fn kimi_code_access_token_cached() -> Option<String> {
+    let path = auth_json_path();
+    let home = path.parent().unwrap_or(&path);
+    let auth = read_kimi_code_auth(home)?;
+    if crate::auth::is_expired(&auth) {
+        return None;
+    }
+    Some(auth.key)
 }
 
 /// Force a network refresh of the Kimi access token even when the local TTL
@@ -211,7 +239,12 @@ fn try_adopt_sibling_kimi_token(
 /// - **current-thread** runtimes (ACP agent worker) — never uses
 ///   `block_in_place` there (it panics: "can call blocking only when running
 ///   on the multi-threaded runtime"); refreshes on a side thread instead
-/// - no runtime (config load / tests) — side-thread refresh when needed
+/// - no runtime (config load / tests / plain std threads such as the bearer
+///   resolver invoked from the TUI) — runs the refresh on the **main**
+///   runtime via the process-wide handle recorded at startup, so it shares
+///   the reactor with the warmed shared `reqwest` client and
+///   `tokio::time::timeout` therefore fires. Falls back to a side-thread
+///   runtime only if the main handle was never set.
 ///
 /// Always prefers an unexpired disk cache with **no** network / runtime hop.
 pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
@@ -232,9 +265,33 @@ pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
         {
             tokio::task::block_in_place(|| handle.block_on(ensure_kimi_code_access_token()))
         }
-        // Current-thread (ACP `acp-agent-worker`) or no runtime: never
-        // `block_in_place` / nested `block_on` on the caller's runtime.
-        Ok(_) | Err(_) => refresh_kimi_token_on_side_thread(),
+        // Current-thread runtime (ACP `acp-agent-worker`): never `block_in_place`
+        // / nested `block_on` on the caller's runtime.
+        Ok(_) => refresh_kimi_token_on_side_thread(),
+        // No runtime context (plain std thread, e.g. the TUI's bearer
+        // resolver): run the refresh on the **main** runtime so it shares the
+        // reactor with the shared reqwest client and `tokio::time::timeout`
+        // fires. `Handle::block_on` from a non-runtime thread is the intended,
+        // safe use. Bounds the whole op so a stalled proxy / lock contention
+        // cannot block the caller long enough to wedge startup; on timeout we
+        // give up the bearer (the next request retries naturally).
+        Err(_) => {
+            if let Some(main) = crate::main_runtime::main_runtime_handle() {
+                let result = main.block_on(async {
+                    tokio::time::timeout(
+                        KIMI_REFRESH_OP_TIMEOUT,
+                        ensure_kimi_code_access_token(),
+                    )
+                    .await
+                });
+                return match result {
+                    Ok(Some(token)) => Some(token),
+                    Ok(None) | Err(_) => None,
+                };
+            }
+            // Main handle not set (very early init / tests): side-thread fallback.
+            refresh_kimi_token_on_side_thread()
+        }
     }
 }
 

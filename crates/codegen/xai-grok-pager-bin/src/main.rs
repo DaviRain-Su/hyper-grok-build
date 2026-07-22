@@ -1723,6 +1723,11 @@ fn main() {
     }
 }
 async fn async_main(args: PagerArgs) -> Result<()> {
+    // Record the main runtime handle so sync call sites with no runtime
+    // context (e.g. the Kimi bearer resolver on a plain std thread) can run
+    // their async work on the main runtime, where the shared reqwest client
+    // lives and `tokio::time::timeout` therefore fires.
+    xai_grok_shell::main_runtime::set_main_runtime_handle(&tokio::runtime::Handle::current());
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut args = args.apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {

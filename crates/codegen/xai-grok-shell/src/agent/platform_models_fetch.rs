@@ -103,7 +103,7 @@ pub(crate) fn fetch_enabled_platform_models_blocking(
 fn fetch_enabled_platform_models_inner(
     platforms: &PlatformsConfig,
 ) -> Option<IndexMap<String, ModelEntry>> {
-    let kimi_bearer = crate::auth::kimi::ensure_kimi_code_access_token_blocking();
+    let kimi_bearer = crate::auth::kimi::kimi_code_access_token_cached();
     let enabled = enabled_platforms(kimi_bearer.is_some(), platforms);
     if enabled.is_empty() {
         tracing::debug!("platform models fetch skipped: no platform credentials");

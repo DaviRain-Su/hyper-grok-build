@@ -16,12 +16,18 @@ const REFRESH_GRANT_TYPE: &str = "refresh_token";
 const MAX_REFRESH_RETRIES: u32 = 3;
 const RETRYABLE_REFRESH_STATUSES: [u16; 5] = [429, 500, 502, 503, 504];
 
-/// Per-attempt total timeout (connect + response + body) for token-refresh
-/// POSTs. Bounds a stalled network path (e.g. a fake-ip proxy that accepts
-/// the TCP handshake then never responds) so the refresh — and the
-/// `auth.json.lock` it holds — can never block subsequent launches indefinitely.
-/// Matches the 15s budget the xAI OIDC refresh path already uses.
+/// Per-attempt total timeout (connect + response) for token-refresh POSTs.
+/// Bounds a stalled network path (e.g. a fake-ip proxy that accepts the TCP
+/// handshake then never responds) so the refresh — and the `auth.json.lock`
+/// it holds — can never block subsequent launches indefinitely. Driven by
+/// `tokio::time::timeout` (not reqwest's `.timeout()`, which does not reliably
+/// abort an in-flight request against a stalled peer).
 const REFRESH_REQUEST_TIMEOUT_SECS: u64 = 15;
+
+/// Convenience accessor for the per-attempt refresh timeout as a `Duration`.
+fn refresh_request_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS)
+}
 
 /// Result of `POST /api/oauth/device_authorization`.
 #[derive(Debug, Clone)]
@@ -252,32 +258,55 @@ pub(crate) async fn refresh_token(
             let backoff = std::time::Duration::from_secs(1 << (attempt - 1));
             tokio::time::sleep(backoff).await;
         }
-        // Bound the whole request (connect + headers + body) so a stalled
+        // Bound the whole request (connect + response headers) so a stalled
         // proxy (e.g. fake-ip TUN that accepts the TCP handshake then never
-        // responds) cannot wedge the refresh. Without this, the refresh holds
-        // `auth.json.lock` for the unbounded duration of a hung connection,
-        // which blocks every subsequent launch on the 45s lock timeout and
-        // makes the TUI appear permanently stuck. Mirrors the per-request
-        // timeout the xAI OIDC refresh path already sets.
-        let send_result = with_device_headers(crate::http::shared_client().post(&url))?
+        // responds) cannot wedge the refresh. reqwest's per-request `.timeout()`
+        // does not reliably abort an in-flight request against a stalled peer
+        // in practice, so drive the deadline with `tokio::time::timeout` instead.
+        // The refresh holds `auth.json.lock` for its whole duration; without a
+        // reliable bound one hung request blocks every subsequent launch on
+        // the 45s lock timeout and makes the TUI appear permanently stuck.
+        let request = with_device_headers(crate::http::shared_client().post(&url))?
             .form(&[
                 ("client_id", KIMI_CODE_CLIENT_ID),
                 ("grant_type", REFRESH_GRANT_TYPE),
                 ("refresh_token", refresh_token),
-            ])
-            .timeout(std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS))
-            .send()
-            .await;
+            ]);
+        let send_result =
+            tokio::time::timeout(refresh_request_timeout(), request.send()).await;
 
+        // A timeout means the network path is stalled. Treat it as terminal
+        // (do NOT retry): retrying would hold `auth.json.lock` for up to
+        // 3 × timeout and wedge any concurrent refresh — and TUI startup —
+        // behind it. Fail fast so the lock is released; the next request that
+        // needs a Kimi bearer re-invokes the refresh and retries naturally.
         let resp = match send_result {
-            Ok(resp) => resp,
-            Err(e) => {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
                 last_error = format!("network error: {e}");
                 continue;
             }
+            Err(_elapsed) => {
+                xai_grok_telemetry::unified_log::warn(
+                    "auth.kimi.refresh_token.timeout_fired",
+                    None,
+                    Some(serde_json::json!({ "timeout_secs": REFRESH_REQUEST_TIMEOUT_SECS })),
+                );
+                return Err(RefreshError::Fatal {
+                    status: 0,
+                    description: format!(
+                        "token refresh timed out after {}s (network path stalled)",
+                        REFRESH_REQUEST_TIMEOUT_SECS
+                    ),
+                });
+            }
         };
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.unwrap_or_default();
+        let body =
+            match tokio::time::timeout(refresh_request_timeout(), resp.bytes()).await {
+                Ok(Ok(b)) => b,
+                Ok(Err(_)) | Err(_) => Default::default(),
+            };
         if status == 401 || status == 403 {
             let err: OAuthErrorBody = serde_json::from_slice(&body).unwrap_or_default();
             return Err(RefreshError::Unauthorized {

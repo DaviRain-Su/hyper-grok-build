@@ -3935,7 +3935,7 @@ fn apply_platform_credentials(
     resolved: &mut IndexMap<String, ModelEntry>,
     platforms: &PlatformsConfig,
 ) {
-    let kimi_bearer = crate::auth::kimi::ensure_kimi_code_access_token_blocking();
+    let kimi_bearer = crate::auth::kimi::kimi_code_access_token_cached();
     let codex_bearer = crate::auth::openai_codex::ensure_openai_codex_access_token_blocking();
     apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer, codex_bearer);
 }
