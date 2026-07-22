@@ -19,6 +19,8 @@ Agent Client Protocol (ACP).
 [Coexistence with official <code>grok</code>](#coexistence-with-official-grok) ·
 [License](#license)
 
+**中文文档: [README.zh-CN.md](README.zh-CN.md)**
+
 </div>
 
 ---
