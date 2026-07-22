@@ -1326,6 +1326,23 @@ mod tests {
             PagerArgs::try_parse_from(["grok", "logout", "--all", "--kimi"]).is_err(),
             "--all conflicts with --kimi"
         );
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--all", "--openai"]).is_err(),
+            "--all conflicts with --openai"
+        );
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--kimi", "--openai"]).is_err(),
+            "--kimi conflicts with --openai"
+        );
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--openai"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: false,
+                openai: true,
+                all: false,
+            })
+        ));
         assert!(args.prompt.is_none());
     }
 

@@ -1009,6 +1009,14 @@ pub fn perform_logout(
 /// and formats the result to stderr. Third-party OAuth scopes (Kimi / Codex)
 /// are reported when still present so users know how to clear them.
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
+    clear_xai_session_cli(config)?;
+    print_remaining_third_party_scopes_hint();
+    Ok(())
+}
+
+/// Clear the xAI session and print xAI-only messaging (no third-party hint).
+/// Shared by bare logout and `logout --all`.
+fn clear_xai_session_cli(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     let grok_home = grok_home::grok_home();
     let auth_manager = AuthManager::new(&grok_home, config.grok_com_config.clone());
     let result = perform_logout(&auth_manager, None)
@@ -1018,7 +1026,6 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
         if result.api_key_still_set {
             eprintln!("You are authenticated via XAI_API_KEY (environment variable).");
         }
-        print_remaining_third_party_scopes_hint();
         return Ok(());
     }
     if let Some(email) = result.email {
@@ -1029,7 +1036,6 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
     if result.api_key_still_set {
         eprintln!("XAI_API_KEY is still set and will be used for authentication.");
     }
-    print_remaining_third_party_scopes_hint();
     Ok(())
 }
 
@@ -1037,15 +1043,31 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
 ///
 /// Does **not** remove BYOK platform API keys stored under `platform/*` scopes
 /// or environment variables — those use `/logout provider <id>` / unset env.
+///
+/// Attempts both third-party clears even if one fails; returns an aggregated
+/// error if either fails so the caller does not claim a full wipe on I/O error.
 pub fn run_cli_logout_all(config: &crate::agent::config::Config) -> anyhow::Result<()> {
-    run_cli_logout(config)?;
-    // Always attempt third-party clears (idempotent when absent).
-    let _ = run_cli_logout_kimi();
-    let _ = run_cli_logout_openai_codex();
+    // Do not call `run_cli_logout` here: it prints the "run logout --all" hint
+    // while third-party scopes are still present, which confuses users already
+    // on the `--all` path.
+    clear_xai_session_cli(config)?;
+    let mut errors: Vec<String> = Vec::new();
+    if let Err(e) = run_cli_logout_kimi() {
+        errors.push(format!("Kimi Code: {e}"));
+    }
+    if let Err(e) = run_cli_logout_openai_codex() {
+        errors.push(format!("OpenAI Codex: {e}"));
+    }
     eprintln!(
         "Note: BYOK platform API keys (if any) were not removed. \
          Use `/logout provider <platform>` or `/providers clear` in the TUI."
     );
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "Failed to clear one or more third-party OAuth scopes: {}",
+            errors.join("; ")
+        );
+    }
     Ok(())
 }
 
