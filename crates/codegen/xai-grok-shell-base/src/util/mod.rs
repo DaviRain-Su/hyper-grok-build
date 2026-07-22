@@ -190,14 +190,22 @@ pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
         terminate.map_err(|e| std::io::Error::other(format!("TerminateProcess({pid}): {e}")))
     }
 }
-/// True if `pid` is a grok process; pairs with [`kill_process_by_pid`] to avoid killing a recycled PID.
-/// Best-effort on macOS/BSD (liveness-only via `kill -0`), exact on Linux (/proc cmdline) and Windows (image path).
+/// True if `pid` is a Grok Build / Hyper product process.
+///
+/// Pairs with [`kill_process_by_pid`] so leader cleanup does not treat a recycled
+/// PID as "stale" and delete live lock/socket files. Recognizes:
+/// - shipped binaries `grok` and `hyper` (exact basename)
+/// - in-tree test/dev binaries named `xai-grok-*`
+/// - managed install roots `~/.grok/bin/` and `~/.hyper/bin/`
+///
+/// Best-effort on macOS/BSD (liveness-only via `kill -0`), exact on Linux
+/// (`/proc` cmdline) and Windows (image path).
 pub fn is_grok_process(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         let cmdline_path = format!("/proc/{pid}/cmdline");
         match std::fs::read(&cmdline_path) {
-            Ok(data) => String::from_utf8_lossy(&data).contains("grok"),
+            Ok(data) => process_image_looks_like_product(&String::from_utf8_lossy(&data)),
             Err(_) => false,
         }
     }
@@ -227,9 +235,8 @@ pub fn is_grok_process(pid: u32) -> bool {
         if result.is_err() {
             return false;
         }
-        String::from_utf16_lossy(&buf[..size as usize])
-            .to_ascii_lowercase()
-            .contains("grok")
+        let path = String::from_utf16_lossy(&buf[..size as usize]).to_ascii_lowercase();
+        process_image_looks_like_product(&path)
     }
     #[cfg(all(not(target_os = "linux"), not(windows)))]
     {
@@ -241,6 +248,46 @@ pub fn is_grok_process(pid: u32) -> bool {
         xai_tty_utils::detach_std_command(&mut cmd);
         cmd.status().is_ok_and(|s| s.success())
     }
+}
+
+/// Whether a process image path / Linux cmdline identifies a product binary.
+///
+/// Linux `/proc/<pid>/cmdline` is NUL-separated argv; Windows paths use `\\`.
+/// Matching is basename-first so random substrings (e.g. a workspace folder
+/// named `hyper-grok-build`) do not count unless the executable basename itself
+/// is a product name.
+pub(crate) fn process_image_looks_like_product(image: &str) -> bool {
+    let image = image.trim();
+    if image.is_empty() {
+        return false;
+    }
+    // Linux cmdline: argv0\0argv1\0…; also tolerate spaces for Windows-style dumps.
+    for part in image.split(|c: char| c == '\0' || c.is_ascii_whitespace()) {
+        if part.is_empty() {
+            continue;
+        }
+        let base = part
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(part)
+            .trim_end_matches(".exe");
+        let base_lower = base.to_ascii_lowercase();
+        if base_lower == "grok" || base_lower == "hyper" {
+            return true;
+        }
+        // Cargo test / example binaries: package names use hyphens in Cargo.toml
+        // (`xai-grok-shell-base`) but the built test artifact uses underscores
+        // (`xai_grok_shell_base-<hash>`).
+        if base_lower.starts_with("xai-grok-") || base_lower.starts_with("xai_grok_") {
+            return true;
+        }
+    }
+    // Managed install roots (path may appear when basename parsing is odd).
+    let lower = image.to_ascii_lowercase();
+    lower.contains("/.hyper/bin/")
+        || lower.contains("/.grok/bin/")
+        || lower.contains("\\.hyper\\bin\\")
+        || lower.contains("\\.grok\\bin\\")
 }
 #[cfg(test)]
 mod tests {
@@ -344,5 +391,30 @@ mod tests {
     fn is_grok_process_self_true_impossible_pid_false() {
         assert!(is_grok_process(std::process::id()));
         assert!(!is_grok_process(u32::MAX));
+    }
+
+    #[test]
+    fn process_image_recognizes_hyper_and_grok_basenames() {
+        assert!(process_image_looks_like_product("/home/u/.hyper/bin/hyper"));
+        assert!(process_image_looks_like_product(
+            r"C:\Users\u\.hyper\bin\hyper.exe"
+        ));
+        assert!(process_image_looks_like_product("/home/u/.grok/bin/grok"));
+        assert!(process_image_looks_like_product(
+            "/tmp/xai-grok-shell-base-abc123"
+        ));
+        assert!(process_image_looks_like_product(
+            "/tmp/xai_grok_shell_base-abc123"
+        ));
+        // Linux-style cmdline: path + NUL + args
+        assert!(process_image_looks_like_product(
+            "/home/u/.hyper/bin/hyper\0leader\0kill"
+        ));
+        // Workspace path alone must not match without a product basename
+        assert!(!process_image_looks_like_product(
+            "/home/u/hyper-grok-build-new-feature/target/debug/deps/some_other_test-xyz"
+        ));
+        assert!(!process_image_looks_like_product("/usr/bin/sleep"));
+        assert!(!process_image_looks_like_product(""));
     }
 }

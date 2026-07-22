@@ -108,6 +108,21 @@ fn normalize_anthropic_sdk_base_url(url: &str) -> String {
     if trimmed.is_empty() {
         return ANTHROPIC_BASE_URL_DEFAULT.to_string();
     }
+    normalize_messages_sdk_base_url(trimmed)
+}
+
+/// Normalize any Anthropic-compatible Messages gateway root so Grok can append
+/// `/messages` (producing `…/v1/messages`).
+///
+/// Used for catalog `base_url_override` values such as MiniMax
+/// (`…/anthropic`) and Fireworks (`…/inference`) as well as Anthropic SDK
+/// roots. Already-versioned bases and full `/v1/messages` endpoints are left
+/// in the Grok shape (`…/v1`).
+pub fn normalize_messages_sdk_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
     if let Some(base) = trimmed.strip_suffix("/messages")
         && base.ends_with("/v1")
     {
@@ -566,19 +581,26 @@ impl BuiltinPlatformModel {
 
     /// Base URL in Grok's `{base}/{backend-endpoint}` convention.
     ///
-    /// Pi's Anthropic rows carry the SDK root (`https://api.anthropic.com`),
-    /// where the SDK itself appends `/v1/messages`. Grok appends only
-    /// `/messages`, so those rows must go through [`PlatformId::base_url`] to
-    /// gain `/v1` and honor both Grok and Claude Code environment overrides.
-    /// Other row overrides are already Grok-shaped provider-specific paths
-    /// (for example MiniMax's `/anthropic`) and remain unchanged.
+    /// The sampler joins `{base}/messages` (not `/v1/messages`). Anthropic-SDK
+    /// style roots therefore need a trailing `/v1`:
+    /// - Anthropic platform rows go through [`PlatformId::base_url`] so env
+    ///   overrides (`GROK_ANTHROPIC_BASE_URL` / `ANTHROPIC_BASE_URL`) apply.
+    /// - Other **Messages** backends with a catalog `base_url_override`
+    ///   (MiniMax `/anthropic`, Fireworks `/inference`, …) are normalized the
+    ///   same way via [`normalize_messages_sdk_base_url`].
+    /// - Chat Completions / Responses overrides are returned as-is.
     pub fn resolved_base_url(&self) -> String {
         if self.platform == PlatformId::Anthropic {
-            self.platform.base_url()
+            return self.platform.base_url();
+        }
+        let raw = self
+            .base_url_override
+            .clone()
+            .unwrap_or_else(|| self.platform.base_url());
+        if self.api_backend == PlatformApiBackend::Messages {
+            normalize_messages_sdk_base_url(&raw)
         } else {
-            self.base_url_override
-                .clone()
-                .unwrap_or_else(|| self.platform.base_url())
+            raw
         }
     }
 
@@ -1458,7 +1480,11 @@ mod tests {
             "MiniMax Messages backend must keep the catalog base_url_override"
         );
         assert_eq!(m.api_backend, PlatformApiBackend::Messages);
-        assert_eq!(m.resolved_base_url(), "https://api.minimax.io/anthropic");
+        // Grok joins `{base}/messages`; SDK-style `/anthropic` roots need `/v1`.
+        assert_eq!(
+            m.resolved_base_url(),
+            "https://api.minimax.io/anthropic/v1"
+        );
         let cn = models
             .iter()
             .find(|m| m.catalog_key() == "minimax-cn/MiniMax-M2.7")
@@ -1469,7 +1495,43 @@ mod tests {
         );
         assert_eq!(
             cn.resolved_base_url(),
-            "https://api.minimaxi.com/anthropic"
+            "https://api.minimaxi.com/anthropic/v1"
+        );
+    }
+
+    #[test]
+    fn fireworks_messages_rows_resolve_to_v1_base() {
+        let models = platform_builtin_models();
+        let m = models
+            .iter()
+            .find(|m| {
+                m.platform == PlatformId::Fireworks
+                    && m.api_backend == PlatformApiBackend::Messages
+            })
+            .expect("at least one Fireworks Messages catalog row");
+        assert_eq!(
+            m.base_url_override.as_deref(),
+            Some("https://api.fireworks.ai/inference")
+        );
+        assert_eq!(
+            m.resolved_base_url(),
+            "https://api.fireworks.ai/inference/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_messages_sdk_base_url_covers_sdk_and_versioned_forms() {
+        assert_eq!(
+            normalize_messages_sdk_base_url("https://api.minimax.io/anthropic"),
+            "https://api.minimax.io/anthropic/v1"
+        );
+        assert_eq!(
+            normalize_messages_sdk_base_url("https://api.fireworks.ai/inference/v1"),
+            "https://api.fireworks.ai/inference/v1"
+        );
+        assert_eq!(
+            normalize_messages_sdk_base_url("https://api.fireworks.ai/inference/v1/messages"),
+            "https://api.fireworks.ai/inference/v1"
         );
     }
 

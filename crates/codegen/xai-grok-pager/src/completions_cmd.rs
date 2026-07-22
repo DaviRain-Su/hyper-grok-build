@@ -1,4 +1,5 @@
-//! `grok completions <shell>` — generate shell completion scripts.
+//! `hyper completions <shell>` / `grok completions <shell>` — generate shell
+//! completion scripts.
 //!
 //! Used by the installers and npm postinstall; must stay side-effect free
 //! (no network, auth, tracing, or tokio).
@@ -8,20 +9,31 @@ use clap_complete::{Shell, generate};
 
 use crate::app::PagerArgs;
 
+/// Public CLI name embedded in completion scripts.
+///
+/// Community Hyper builds (`community-build` feature) emit `hyper`; upstream-
+/// style builds keep the historical `grok` name.
+fn cli_bin_name() -> &'static str {
+    if cfg!(feature = "community-build") {
+        "hyper"
+    } else {
+        "grok"
+    }
+}
+
 /// Generate and print the completion script for the given shell.
 pub fn run(shell: Shell) {
-    // Ensure the script always uses the public "grok" name (matches historical
-    // behavior and what the installers + docs expect).
-    let mut cmd = PagerArgs::command().name("grok");
+    let bin = cli_bin_name();
+    let mut cmd = PagerArgs::command().name(bin);
     if shell != Shell::Zsh {
-        generate(shell, &mut cmd, "grok", &mut std::io::stdout());
+        generate(shell, &mut cmd, bin, &mut std::io::stdout());
         return;
     }
     // zsh needs post-processing (see fix_zsh_root_prompt_positional).
     let mut buf = Vec::new();
-    generate(shell, &mut cmd, "grok", &mut buf);
+    generate(shell, &mut cmd, bin, &mut buf);
     match String::from_utf8(buf) {
-        Ok(script) => print!("{}", fix_zsh_root_prompt_positional(&script)),
+        Ok(script) => print!("{}", fix_zsh_root_prompt_positional(&script, bin)),
         // clap_complete output is generated from Rust strings, so this arm is
         // unreachable in practice — but the installers run this command, so
         // emit the unmodified script rather than panic.
@@ -39,7 +51,7 @@ pub fn run(shell: Shell) {
 /// The generated root `_arguments` spec emits a `'::prompt …'` slot before
 /// the subcommand slot but dispatches subcommands with `case $line[2]`. zsh
 /// assigns the typed subcommand to the *prompt* slot (`$line[1]`), leaves
-/// `$line[2]` empty, and the dispatch falls through — so `grok worktree <TAB>`
+/// `$line[2]` empty, and the dispatch falls through — so `hyper worktree <TAB>`
 /// re-offers every top-level command. (`hide = true` on the positional does
 /// not change the generated script.)
 ///
@@ -48,7 +60,10 @@ pub fn run(shell: Shell) {
 /// blocks already use `$line[1]` and are untouched; the three rewritten
 /// patterns are unique to the root block (pinned by the test below — delete
 /// this whole workaround once upstream fixes the generator).
-fn fix_zsh_root_prompt_positional(script: &str) -> String {
+///
+/// `bin` is the public CLI name (`hyper` or `grok`) embedded by clap_complete
+/// in curcontext paths such as `:hyper-command-$line[2]:`.
+fn fix_zsh_root_prompt_positional(script: &str, bin: &str) -> String {
     let mut out = String::with_capacity(script.len());
     script
         .lines()
@@ -58,15 +73,18 @@ fn fix_zsh_root_prompt_positional(script: &str) -> String {
             out.push_str(line);
             out.push('\n');
         });
+    // clap_complete emits `:bin-command-$line[N]:` inside a zsh `${…}` expansion.
+    // Escape `{`/`}` for `format!` so only `{bin}` is interpolated.
+    let from_ctx =
+        format!(r#"curcontext="${{curcontext%:*:*}}:{bin}-command-$line[2]:""#);
+    let to_ctx =
+        format!(r#"curcontext="${{curcontext%:*:*}}:{bin}-command-$line[1]:""#);
     for (from, to) in [
         (
             r#"words=($line[2] "${words[@]}")"#,
             r#"words=($line[1] "${words[@]}")"#,
         ),
-        (
-            r#"curcontext="${curcontext%:*:*}:grok-command-$line[2]:""#,
-            r#"curcontext="${curcontext%:*:*}:grok-command-$line[1]:""#,
-        ),
+        (from_ctx.as_str(), to_ctx.as_str()),
         (r#"case $line[2] in"#, r#"case $line[1] in"#),
     ] {
         out = out.replacen(from, to, 1);
@@ -80,6 +98,8 @@ mod tests {
 
     /// Generate the zsh completion script exactly like `run` does.
     fn zsh_script() -> String {
+        // Always exercise the historical "grok" shape so the clap_complete
+        // positional workaround stays pinned regardless of community branding.
         let mut cmd = PagerArgs::command().name("grok");
         let mut buf = Vec::new();
         generate(Shell::Zsh, &mut cmd, "grok", &mut buf);
@@ -102,7 +122,7 @@ mod tests {
             "raw root dispatch on $line[2]"
         );
 
-        let fixed = fix_zsh_root_prompt_positional(&raw);
+        let fixed = fix_zsh_root_prompt_positional(&raw, "grok");
         assert!(
             !fixed.contains("::prompt"),
             "prompt positional must not appear in the emitted zsh script"
@@ -122,5 +142,14 @@ mod tests {
         );
         // The subcommand list itself must still be offered at the root.
         assert!(fixed.contains("_grok_commands"), "root command list intact");
+    }
+
+    #[test]
+    fn cli_bin_name_matches_community_feature() {
+        if cfg!(feature = "community-build") {
+            assert_eq!(cli_bin_name(), "hyper");
+        } else {
+            assert_eq!(cli_bin_name(), "grok");
+        }
     }
 }

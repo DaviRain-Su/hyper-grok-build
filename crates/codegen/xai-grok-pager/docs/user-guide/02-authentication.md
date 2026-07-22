@@ -37,7 +37,20 @@ Running `grok login` starts the sign-in flow again, replacing your cached sessio
 | `--oauth` | Sign in through SpaceXAI OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
 | `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
 
-To sign out, run `grok logout`. It takes no flags and clears your cached credentials.
+To sign out of the **xAI** session, run `hyper logout` (or `grok logout` on
+the official binary). That clears the primary xAI session scope only.
+
+Third-party subscriptions and BYOK keys are separate:
+
+| Command | Clears |
+|---------|--------|
+| `hyper logout` | xAI session (interactive OAuth / cached session) |
+| `hyper logout --kimi` | Kimi Code OAuth only |
+| `hyper logout --openai` | OpenAI Codex (ChatGPT) OAuth only |
+| `/logout provider <platform>` | A stored BYOK API key for that platform (same as `/providers clear`) |
+
+`XAI_API_KEY` and other env-based keys are never removed by logout — unset the
+environment variable yourself.
 
 ---
 
@@ -50,7 +63,7 @@ export XAI_API_KEY="xai-..."
 grok
 ```
 
-Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `grok logout` or delete `~/.grok/auth.json`.
+Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `hyper logout` (xAI session only) or delete the relevant scopes in `~/.grok/auth.json`.
 
 ---
 

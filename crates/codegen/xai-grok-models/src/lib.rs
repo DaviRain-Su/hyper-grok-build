@@ -20,8 +20,8 @@ pub use platforms::{
     PlatformApiBackend, PlatformId, WireModel, WireModelsResponse, WireThinkEfforts,
     derive_capabilities, filter_allowed_models, kimi_allow_empty_thinking_signature,
     kimi_force_adaptive_thinking, kimi_request_profile, kimi_sampling_is_fixed,
-    moonshot_builtin_models, normalize_kimi_code_base_url, parse_managed_model_key,
-    platform_builtin_models,
+    moonshot_builtin_models, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
+    parse_managed_model_key, platform_builtin_models,
 };
 
 use std::sync::LazyLock;

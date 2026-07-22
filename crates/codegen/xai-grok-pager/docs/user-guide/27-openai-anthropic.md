@@ -20,8 +20,8 @@ gateway process — each platform talks to the vendor API with Grok’s existing
 | `deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com` | |
 | `groq` | `GROQ_API_KEY` | `api.groq.com/openai/v1` | |
 | `openrouter` | `OPENROUTER_API_KEY` | `openrouter.ai/api/v1` | Large catalog |
-| `together` / `fireworks` / `cerebras` / `nvidia` | matching `*_API_KEY` | vendor URLs | |
-| `minimax` / `minimax-cn` | `MINIMAX_API_KEY` | | |
+| `together` / `fireworks` / `cerebras` / `nvidia` | matching `*_API_KEY` | vendor URLs | Fireworks **Messages** rows use `…/inference/v1` (SDK root is normalized for Grok’s `/messages` join) |
+| `minimax` / `minimax-cn` | `MINIMAX_API_KEY` | `…/anthropic/v1` for Messages models | Catalog override is `…/anthropic`; runtime resolves `…/anthropic/v1` so requests hit `…/v1/messages` |
 | `zai` | `ZAI_API_KEY` / `GROK_ZAI_API_KEY` | `api.z.ai/api/paas/v4` | General PaaS |
 | `zai-coding` | `ZAI_API_KEY` / `GROK_ZAI_CODING_API_KEY` | `api.z.ai/api/coding/paas/v4` | International Coding Plan |
 | `zai-coding-cn` | `ZAI_API_KEY` / `GROK_ZAI_CODING_CN_API_KEY` | `open.bigmodel.cn/api/coding/paas/v4` | CN Coding Plan |

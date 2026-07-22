@@ -160,17 +160,44 @@ The tag must match `VERSION` exactly (`v0.1.0` ↔ `0.1.0`) or the build fails.
 
 Hyper is **not** affiliated with xAI / SpaceXAI. On the same machine:
 
-- different binary name (`hyper` vs `grok`)
-- different install root (`~/.hyper` vs `~/.grok` for the managed binary)
-- **shared** runtime config/auth under `~/.grok` (upstream path layout)
+| Surface | Official `grok` | Hyper |
+|---------|-----------------|-------|
+| Binary | `grok` | `hyper` |
+| Managed install root | `~/.grok/bin` | `~/.hyper/bin` |
+| Config / auth / sessions | `~/.grok` | **same** `~/.grok` |
+| Leader IPC (`leader*.sock` / `.lock`) | under `~/.grok` | **same** namespace |
+
+Implications:
+
+- Sessions, API keys, and OAuth scopes are shared — log in once, both CLIs can see them.
+- Leader list/kill can see both products’ leaders. Prefer killing only leaders you started.
+- Community builds disable the upstream self-updater so `hyper update` cannot overwrite `~/.grok/bin/grok`. Upgrade Hyper by re-running `install.sh` / `install.ps1`.
 
 Nothing in the official installer is rewritten by Hyper’s install script.
 
 ---
 
+## Building notes (this fork)
+
+```sh
+# Defaults enable community-build (Hyper branding + no upstream updater).
+cargo run -p xai-grok-pager-bin
+
+# Explicit release-style local binary
+cargo build -p xai-grok-pager-bin --profile release-dist --features community-build
+```
+
+Amp-style **agent modes** (low / medium / high / ultra slots) are **design-only** —
+see [`docs/design-modes.md`](docs/design-modes.md). They are not shipped yet.
+
+Known issues and remaining work: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
+
+---
+
 ## Documentation
 
-In-tree user guide:
+In-tree user guide (examples may still say `grok`; the Hyper binary name is
+`hyper`, paths remain under `~/.grok`):
 
 [`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
 

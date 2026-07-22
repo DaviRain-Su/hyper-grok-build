@@ -87,6 +87,8 @@ clap = { workspace = true, features = ["derive"] }
 default = [
     "jemalloc",
     "sandbox-enforce",
+    # This fork ships as Hyper; enable community branding + updater guards by default.
+    "community-build",
     ]
 default-bazel = [
     "jemalloc",
@@ -97,5 +99,6 @@ sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 release-dist = ["xai-grok-pager/release-dist"]
 # Community Hyper builds: disable the upstream Grok updater (x.ai / ~/.grok/bin/grok)
 # so `hyper update` cannot overwrite a co-installed official grok binary.
-# Users upgrade by re-running install.sh.
-community-build = []
+# Users upgrade by re-running install.sh. Also brands `--version` / completions
+# as `hyper` and is forwarded into the pager library.
+community-build = ["xai-grok-pager/community-build"]

@@ -297,6 +297,10 @@ default-bazel = [
 jemalloc = []
 sandbox-enforce = ["xai-grok-sandbox/enforce"]
 release-dist = []
+# Community Hyper branding (CLI name for completions / help strings). Empty
+# feature — gated with `cfg!(feature = "community-build")` in this crate.
+# Forwarded from `xai-grok-pager-bin` when that binary is a Hyper build.
+community-build = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.

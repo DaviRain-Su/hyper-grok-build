@@ -1613,8 +1613,15 @@ fn install_heap_profile_hooks() {
     });
 }
 fn version_text(channel_label: &str) -> String {
+    // Community Hyper builds ship the `hyper` binary; keep the official
+    // product name only when this crate is built without `community-build`.
+    let product = if cfg!(feature = "community-build") {
+        "hyper"
+    } else {
+        "grok"
+    };
     format!(
-        "grok {}\n",
+        "{product} {}\n",
         xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
     )
 }
