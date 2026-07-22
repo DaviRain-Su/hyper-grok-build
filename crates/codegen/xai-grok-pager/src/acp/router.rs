@@ -42,6 +42,16 @@ impl ProviderRouterAgent {
         let _ = client;
         Self { grok }
     }
+
+    /// Forward disk skill-watcher reloads to the inner [`MvpAgent`].
+    pub(crate) fn reload_skills_all_sessions(&self) -> usize {
+        self.grok.reload_skills_all_sessions()
+    }
+
+    /// Forward workflow/command re-advertisement to the inner [`MvpAgent`].
+    pub(crate) fn advertise_commands_all_sessions(&self) -> usize {
+        self.grok.advertise_commands_all_sessions()
+    }
 }
 
 #[async_trait::async_trait(?Send)]

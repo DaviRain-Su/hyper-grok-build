@@ -131,7 +131,7 @@ pub fn stream_responses<'a>(
 }
 
 pub(crate) fn stream_responses_tracked<'a>(
-    raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, SamplingError>>,
+    raw_stream: BoxStream<'a, Result<ResponsesStreamItem, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
     request_id: RequestId,
     idle_timeout: Duration,
@@ -197,14 +197,26 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
             };
 
-            let event = match event_result {
-                Ok(event) => event,
+            let item = match event_result {
+                Ok(item) => item,
                 Err(err) => {
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
                     };
                     return;
+                }
+            };
+
+            // Heartbeat / forward-compat skip frames carry no model output
+            // but prove the server is alive: refresh the content-stall timer
+            // and continue. codex-rs's idle timeout lives at the raw frame
+            // level and behaves the same way.
+            let event = match item {
+                ResponsesStreamItem::Event(event) => event,
+                ResponsesStreamItem::Heartbeat => {
+                    last_content_chunk_at = Instant::now();
+                    continue;
                 }
             };
 
@@ -228,18 +240,6 @@ pub(crate) fn stream_responses_tracked<'a>(
                 };
                 return;
             }
-
-            // Heartbeat / forward-compat skip frames carry no model output
-            // but prove the server is alive: refresh the content-stall timer
-            // and continue. codex-rs's idle timeout lives at the raw frame
-            // level and behaves the same way.
-            let event = match event {
-                ResponsesStreamItem::Event(event) => event,
-                ResponsesStreamItem::Heartbeat => {
-                    last_content_chunk_at = Instant::now();
-                    continue;
-                }
-            };
 
             let event_has_content = responses_event_has_meaningful_content(&event);
 
