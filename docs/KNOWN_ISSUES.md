@@ -3,14 +3,14 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-07-22 (post S2: macOS process ID + logout --all).
+Last reviewed: 2026-07-22 (v0.1.0 release prep — no new product features).
 
-## Open
+## Open (accepted for v0.1.0)
 
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
-| Modes | design-only | Amp-style low–ultra agent modes | See [design-modes.md](./design-modes.md) — **not implemented**. |
-| Non-Darwin Unix process ID | low | BSD without libproc | `is_grok_process` falls back to liveness-only on non-Linux non-macOS Unix. |
+| Modes | design-only | Amp-style low–ultra agent modes | See [design-modes.md](./design-modes.md) — **not shipped**. Deferred; not a release blocker. |
+| Non-Darwin Unix process ID | low | BSD without libproc | `is_grok_process` falls back to liveness-only on non-Linux non-macOS Unix. Rare for Hyper targets (we ship Linux/macOS/Windows). |
 
 ## Fixed in tree
 

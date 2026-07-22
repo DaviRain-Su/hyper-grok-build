@@ -127,10 +127,17 @@ layout); the **shipped binary name** is `hyper`.
 
 ---
 
+## Changelog
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for release notes. Known limitations:
+[`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md).
+
+---
+
 ## Releasing
 
 1. Bump the root [`VERSION`](VERSION) file (e.g. `0.1.0`).
-2. Commit on `dev` (or your release branch).
+2. Commit on `dev` (or your release branch); update `CHANGELOG.md`.
 3. Tag and push — CI builds five targets and publishes a GitHub Release:
 
 ```sh
