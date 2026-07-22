@@ -30,11 +30,23 @@ impl crate::auth::refresh::TokenRefresher for AlwaysSucceedRefresher {
 /// `(tempdir, manager)` with an expired OIDC token loaded so
 /// `unauthorized_recovery()` actually dispatches to the refresher.
 /// Tempdir must outlive the manager (auth.json path).
+///
+/// `AuthManager::new` reads `GROK_AUTH` / `GROK_AUTH_PATH` from the process
+/// env before honoring `grok_home`. A concurrent `#[serial]` test that sets
+/// either (cli_models::resolve_oauth_session sets `GROK_AUTH`, the BYOK
+/// isolation tests set `GROK_AUTH_PATH`) can otherwise hijack this manager's
+/// auth.json path and load the wrong credential, breaking the refresher
+/// invocation these tests assert. Unset both for the duration of
+/// `AuthManager::new` so the manager points at the tempdir's auth.json.
 fn auth_manager_with_refresher(
     refresher: Arc<dyn crate::auth::refresh::TokenRefresher>,
 ) -> (tempfile::TempDir, Arc<AuthManager>) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let _no_grok_auth = xai_grok_test_support::EnvGuard::unset("GROK_AUTH");
+    let _no_grok_auth_path = xai_grok_test_support::EnvGuard::unset("GROK_AUTH_PATH");
     let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    drop(_no_grok_auth);
+    drop(_no_grok_auth_path);
     am.hot_swap(GrokAuth {
         key: "initial-test-key".into(),
         auth_mode: AuthMode::Oidc,
@@ -119,9 +131,16 @@ async fn make_actor_with_method_and_credentials(
 
 /// `(tempdir, manager)` holding a valid OIDC token (so `get_valid_token()` is a
 /// cache hit). The tempdir must outlive the manager (auth.json path).
+///
+/// See [`auth_manager_with_refresher`] for why `GROK_AUTH` / `GROK_AUTH_PATH`
+/// are unset during `AuthManager::new` (concurrent-serial env pollution).
 fn auth_manager_with_valid_token(key: &str) -> (tempfile::TempDir, Arc<AuthManager>) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let _no_grok_auth = xai_grok_test_support::EnvGuard::unset("GROK_AUTH");
+    let _no_grok_auth_path = xai_grok_test_support::EnvGuard::unset("GROK_AUTH_PATH");
     let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    drop(_no_grok_auth);
+    drop(_no_grok_auth_path);
     am.hot_swap(GrokAuth {
         key: key.into(),
         auth_mode: AuthMode::Oidc,
@@ -327,8 +346,21 @@ async fn pre_flight_refreshes_hard_expired_session_token() {
 /// Hard-expired + failed refresh: do not fall through to JWT/config.toml;
 /// leave credentials unchanged so 401 recovery remains the safety net.
 #[tokio::test(flavor = "current_thread")]
-#[serial_test::serial(attribution_emit_count)]
+#[serial_test::serial]
 async fn pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough() {
+    // Unset BYOK platform API-key env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+    // …): `model_auth_facts` consults the live catalog, whose built-in
+    // platform entries carry `env_key` for the platform's API-key name. A
+    // developer shell with one of these set flips the model's BYOK status to
+    // `Byok`, deactivating the `SessionTokenAuthGate` and steering
+    // `refresh_token_if_expired` away from `get_valid_token` (the path that
+    // invokes the refresher this test asserts against). Without this guard
+    // the pre-flight never calls the refresher and `call_count` stays at 0.
+    //
+    // `#[serial]` (default group) so this env mutation is ordered against the
+    // cli_models / enterprise_byok / mvp_agent / config tests that set
+    // GROK_AUTH / GROK_AUTH_PATH and would otherwise race this test's reads.
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -736,6 +768,7 @@ fn session_token_auth_gate_truth_table() {
 /// Pre-fix, the gate read `auth_type` and skipped recovery here, 401'ing every
 /// turn until restart.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers() {
     let local = tokio::task::LocalSet::new();
     local
@@ -770,6 +803,7 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
 
 /// Same regression via the `oidc` method id (the other session-based variant).
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
     let local = tokio::task::LocalSet::new();
     local

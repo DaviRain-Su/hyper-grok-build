@@ -531,6 +531,10 @@ pub async fn force_refresh_openai_codex_auth() -> Option<GrokAuth> {
 /// trying to adopt a sibling's write. Must exceed typical IdP latency so a
 /// follower waits for the leader instead of double-spending the RT.
 const CODEX_REFRESH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Bound blocking resolver calls so a stalled sibling/network path cannot
+/// wedge the caller. Intentionally shorter than the lock budget: the next
+/// request can retry or adopt the sibling's eventual write.
+const CODEX_REFRESH_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// Brief pause after a lock timeout so the holder can finish writing.
 const CODEX_REFRESH_LOCK_TIMEOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -702,11 +706,26 @@ fn try_adopt_sibling_codex_token(
     None
 }
 
+async fn ensure_openai_codex_auth_with_op_timeout() -> Option<GrokAuth> {
+    match tokio::time::timeout(CODEX_REFRESH_OP_TIMEOUT, ensure_openai_codex_auth()).await {
+        Ok(auth) => auth,
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = CODEX_REFRESH_OP_TIMEOUT.as_secs(),
+                "auth: Codex blocking refresh operation timed out"
+            );
+            None
+        }
+    }
+}
+
 /// Sync-friendly wrapper around [`ensure_openai_codex_access_token`].
 ///
 /// Mirrors the Kimi resolver: safe on multi-thread workers (`block_in_place`),
-/// current-thread runtimes and outside any runtime (side-thread refresh);
-/// always prefers an unexpired disk cache with no runtime hop.
+/// current-thread runtimes and outside any runtime. Non-multithreaded callers
+/// drive refresh on the process-wide main runtime when available; an isolated
+/// side-thread runtime is only an early-init/test fallback. Always prefers an
+/// unexpired disk cache with no runtime hop.
 pub fn ensure_openai_codex_access_token_blocking() -> Option<String> {
     ensure_openai_codex_auth_blocking().map(|auth| auth.key)
 }
@@ -724,26 +743,39 @@ pub fn ensure_openai_codex_auth_blocking() -> Option<GrokAuth> {
     }
 
     match tokio::runtime::Handle::try_current() {
-        Ok(handle)
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-        {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| handle.block_on(ensure_openai_codex_auth()))
         }
-        Ok(_) | Err(_) => refresh_codex_token_on_side_thread(),
+        // A current-thread runtime cannot be blocked or nested. Hop to a plain
+        // thread, which drives the future on the process-wide main runtime.
+        Ok(_) => refresh_codex_token_on_side_thread(),
+        // From a plain thread, drive the operation directly on the main runtime
+        // so the shared reqwest client and timeout use the same reactor.
+        Err(_) => {
+            if let Some(main) = crate::main_runtime::main_runtime_handle() {
+                return main.block_on(ensure_openai_codex_auth_with_op_timeout());
+            }
+            refresh_codex_token_on_side_thread()
+        }
     }
 }
 
-/// Run the async refresh on a dedicated OS thread with its own current-thread
-/// runtime. Isolates blocking from the caller's Tokio context.
+/// Run the async refresh from a dedicated OS thread. When startup has recorded
+/// the process-wide main runtime, the side thread drives the future there;
+/// only very-early init and tests build a private current-thread runtime.
 fn refresh_codex_token_on_side_thread() -> Option<GrokAuth> {
+    let main = crate::main_runtime::main_runtime_handle();
     match std::thread::Builder::new()
         .name("codex-token-refresh".into())
-        .spawn(|| {
+        .spawn(move || {
+            if let Some(main) = main {
+                return main.block_on(ensure_openai_codex_auth_with_op_timeout());
+            }
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .ok()?;
-            rt.block_on(ensure_openai_codex_auth())
+            rt.block_on(ensure_openai_codex_auth_with_op_timeout())
         }) {
         Ok(join) => match join.join() {
             Ok(auth) => auth,

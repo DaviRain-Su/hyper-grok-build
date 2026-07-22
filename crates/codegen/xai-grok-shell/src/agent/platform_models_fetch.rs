@@ -367,7 +367,12 @@ mod tests {
     use xai_grok_models::WireThinkEfforts;
 
     #[test]
-    fn think_efforts_maps_max_to_xhigh() {
+    fn think_efforts_maps_max_token_to_max_variant() {
+        // Note: the wire token `"max"` parses to `ReasoningEffort::Max`
+        // directly (see `ReasoningEffort::from_str` in xai-grok-sampling-types).
+        // Historically `"max"` was the wire alias for `Xhigh`; once `Max`
+        // became a first-class variant the parse became identity. This test
+        // pins the current mapping so a silent revert is caught.
         let think = WireThinkEfforts {
             support: true,
             valid_efforts: vec!["low".into(), "high".into(), "max".into()],
@@ -377,7 +382,7 @@ mod tests {
         assert_eq!(opts.len(), 3);
         assert_eq!(opts[0].value, ReasoningEffort::Low);
         assert_eq!(opts[1].value, ReasoningEffort::High);
-        assert_eq!(opts[2].value, ReasoningEffort::Xhigh);
+        assert_eq!(opts[2].value, ReasoningEffort::Max);
         assert_eq!(opts[2].id, "max");
         assert_eq!(opts[2].label, "Max");
         assert!(opts[2].default);
@@ -410,7 +415,7 @@ mod tests {
         assert_eq!(entry.name.as_deref(), Some("K3"));
         assert_eq!(entry.context_window.get(), 1_048_576);
         assert!(entry.supports_reasoning_effort);
-        assert_eq!(entry.reasoning_effort, Some(ReasoningEffort::Xhigh));
+        assert_eq!(entry.reasoning_effort, Some(ReasoningEffort::Max));
         assert_eq!(entry.reasoning_efforts.len(), 3);
         assert!(!entry.supported_in_api, "OAuth-gated until stamp");
         assert_eq!(

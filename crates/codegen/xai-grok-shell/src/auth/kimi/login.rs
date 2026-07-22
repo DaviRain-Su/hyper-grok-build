@@ -16,11 +16,12 @@ const SLOW_DOWN_INCREMENT_SECS: u64 = 5;
 /// Match Codex / AuthManager: wait long enough for a sibling IdP call.
 const KIMI_REFRESH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 const KIMI_REFRESH_LOCK_TIMEOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-/// Total bound for the whole blocking refresh operation when run on the main
-/// runtime (lock acquire + IdP POST + persist). The per-request POST is
-/// separately bounded to 15s inside [`oauth::refresh_token`]; this outer
-/// bound guards against lock contention and guarantees the caller thread is
-/// not blocked long enough to wedge startup.
+/// Total bound for a blocking refresh operation driven on the main runtime
+/// (lock acquire + IdP POST + persist). The per-request POST is separately
+/// bounded to 15s inside [`oauth::refresh_token`]. This is intentionally
+/// shorter than the 45s cross-process lock budget: an interactive request
+/// degrades without a bearer after 20s rather than wedging its caller behind a
+/// stalled sibling; the next request retries, and the timeout is logged.
 const KIMI_REFRESH_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 enum PollLoopOutcome {
@@ -92,21 +93,51 @@ pub async fn ensure_kimi_code_access_token() -> Option<String> {
 
 /// Read the cached Kimi access token **without any network refresh**.
 ///
-/// For startup best-effort checks (platform credential probing / model
-/// catalog fetch) where blocking the caller on a token refresh would wedge
-/// startup — e.g. when the access token has expired and the OAuth refresh
-/// POST is unreachable (stalled proxy). Returns `Some` only when the cached
-/// token is still valid; returns `None` when it is expired or absent so the
-/// caller treats Kimi as simply "unavailable" and degrades gracefully. The
-/// lazy per-request bearer resolver ([`KimiCodeBearerResolver`]) still
-/// performs a real refresh on demand when a `kimi-code/*` model is actually
-/// used, so no functionality is lost — only the eager startup fetch is
-/// skipped when Kimi auth is not already healthy.
+/// For startup best-effort network work (especially the live `/models` fetch)
+/// where blocking on a token refresh would wedge startup when a proxy stalls.
+/// Returns `Some` only when the cached token is currently safe to put on the
+/// wire. Catalog visibility is handled separately by
+/// [`kimi_code_catalog_access_token_cached`], so an expired but refreshable
+/// login still exposes `kimi-code/*`; its lazy [`KimiCodeBearerResolver`]
+/// refreshes only when the model is actually used.
 pub fn kimi_code_access_token_cached() -> Option<String> {
     let path = auth_json_path();
     let home = path.parent().unwrap_or(&path);
     let auth = read_kimi_code_auth(home)?;
     if crate::auth::is_expired(&auth) {
+        return None;
+    }
+    Some(auth.key)
+}
+
+/// Return the persisted Kimi access token for catalog/auth-method gating.
+///
+/// Unlike [`kimi_code_access_token_cached`], this deliberately keeps an
+/// expired access token when a refresh token is present. Kimi access tokens
+/// last only about 15 minutes; treating expiry as "not logged in" hides every
+/// `kimi-code/*` model on the next launch and sends the user through device
+/// login again before the per-request bearer resolver gets a chance to refresh.
+///
+/// The returned value is an in-memory catalog marker, not a network-ready
+/// bearer. Every Kimi sampler has [`KimiCodeBearerResolver`] installed, and
+/// the sampler removes the catalog-stamped header unless that resolver returns
+/// a current token. Startup therefore remains network-free without ever
+/// falling back to this expired value on the wire.
+pub fn kimi_code_catalog_access_token_cached() -> Option<String> {
+    let path = auth_json_path();
+    let home = path.parent().unwrap_or(&path);
+    catalog_access_token(read_kimi_code_auth(home)?)
+}
+
+fn catalog_access_token(auth: GrokAuth) -> Option<String> {
+    if auth.key.trim().is_empty() {
+        return None;
+    }
+    let can_refresh = auth
+        .refresh_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    if crate::auth::is_expired(&auth) && !can_refresh {
         return None;
     }
     Some(auth.key)
@@ -232,16 +263,37 @@ fn try_adopt_sibling_kimi_token(
     None
 }
 
+async fn ensure_kimi_code_access_token_with_op_timeout() -> Option<String> {
+    match tokio::time::timeout(KIMI_REFRESH_OP_TIMEOUT, ensure_kimi_code_access_token()).await {
+        Ok(token) => token,
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = KIMI_REFRESH_OP_TIMEOUT.as_secs(),
+                "auth: Kimi blocking refresh operation timed out"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth.kimi.refresh_operation.timeout_fired",
+                None,
+                Some(serde_json::json!({
+                    "timeout_secs": KIMI_REFRESH_OP_TIMEOUT.as_secs(),
+                })),
+            );
+            None
+        }
+    }
+}
+
 /// Sync-friendly wrapper around [`ensure_kimi_code_access_token`].
 ///
 /// Safe to call from:
 /// - multi-thread Tokio workers (`block_in_place` + `block_on`)
 /// - **current-thread** runtimes (ACP agent worker) — never uses
 ///   `block_in_place` there (it panics: "can call blocking only when running
-///   on the multi-threaded runtime"); refreshes on a side thread instead
-/// - no runtime (config load / tests / plain std threads such as the bearer
-///   resolver invoked from the TUI) — runs the refresh on the **main**
-///   runtime via the process-wide handle recorded at startup, so it shares
+///   on the multi-threaded runtime"); a plain side thread drives the work on
+///   the process-wide main runtime instead
+/// - no runtime (synchronous config/catalog resolution, early init, or tests)
+///   — runs the refresh on the **main** runtime via the process-wide handle
+///   recorded at startup, so it shares
 ///   the reactor with the warmed shared `reqwest` client and
 ///   `tokio::time::timeout` therefore fires. Falls back to a side-thread
 ///   runtime only if the main handle was never set.
@@ -260,16 +312,14 @@ pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
     }
 
     match tokio::runtime::Handle::try_current() {
-        Ok(handle)
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-        {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| handle.block_on(ensure_kimi_code_access_token()))
         }
         // Current-thread runtime (ACP `acp-agent-worker`): never `block_in_place`
         // / nested `block_on` on the caller's runtime.
         Ok(_) => refresh_kimi_token_on_side_thread(),
-        // No runtime context (plain std thread, e.g. the TUI's bearer
-        // resolver): run the refresh on the **main** runtime so it shares the
+        // No runtime context (synchronous config/catalog resolution or early
+        // init): run the refresh on the **main** runtime so it shares the
         // reactor with the shared reqwest client and `tokio::time::timeout`
         // fires. `Handle::block_on` from a non-runtime thread is the intended,
         // safe use. Bounds the whole op so a stalled proxy / lock contention
@@ -277,17 +327,7 @@ pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
         // give up the bearer (the next request retries naturally).
         Err(_) => {
             if let Some(main) = crate::main_runtime::main_runtime_handle() {
-                let result = main.block_on(async {
-                    tokio::time::timeout(
-                        KIMI_REFRESH_OP_TIMEOUT,
-                        ensure_kimi_code_access_token(),
-                    )
-                    .await
-                });
-                return match result {
-                    Ok(Some(token)) => Some(token),
-                    Ok(None) | Err(_) => None,
-                };
+                return main.block_on(ensure_kimi_code_access_token_with_op_timeout());
             }
             // Main handle not set (very early init / tests): side-thread fallback.
             refresh_kimi_token_on_side_thread()
@@ -295,25 +335,27 @@ pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
     }
 }
 
-/// Run the async refresh on a dedicated OS thread with its own current-thread
-/// runtime. Isolates blocking from the caller's Tokio context.
+/// Run the async refresh from a dedicated OS thread. When startup has recorded
+/// the process-wide main runtime, the side thread drives the future there;
+/// only very-early init and tests build a private current-thread runtime.
 fn refresh_kimi_token_on_side_thread() -> Option<String> {
+    let main = crate::main_runtime::main_runtime_handle();
     match std::thread::Builder::new()
         .name("kimi-token-refresh".into())
-        .spawn(|| {
+        .spawn(move || {
+            if let Some(main) = main {
+                return main.block_on(ensure_kimi_code_access_token_with_op_timeout());
+            }
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .ok()?;
-            rt.block_on(ensure_kimi_code_access_token())
+            rt.block_on(ensure_kimi_code_access_token_with_op_timeout())
         }) {
         Ok(join) => match join.join() {
             Ok(token) => token,
             Err(panic) => {
-                tracing::warn!(
-                    ?panic,
-                    "auth: Kimi token refresh thread panicked"
-                );
+                tracing::warn!(?panic, "auth: Kimi token refresh thread panicked");
                 None
             }
         },
@@ -425,5 +467,40 @@ async fn open_browser_detached(url: &str) -> bool {
             tracing::info!(error = %e, "kimi auth: browser-open task failed");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+
+    use super::*;
+
+    fn cached_auth(expires_in: Duration, refresh_token: Option<&str>) -> GrokAuth {
+        GrokAuth {
+            key: "persisted-access".into(),
+            auth_mode: crate::auth::AuthMode::KimiCode,
+            expires_at: Some(Utc::now() + expires_in),
+            refresh_token: refresh_token.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn expired_access_with_refresh_token_remains_a_catalog_credential() {
+        let token = catalog_access_token(cached_auth(Duration::hours(-1), Some("refresh")));
+        assert_eq!(token.as_deref(), Some("persisted-access"));
+    }
+
+    #[test]
+    fn expired_access_without_refresh_token_is_not_a_catalog_credential() {
+        assert!(catalog_access_token(cached_auth(Duration::hours(-1), None)).is_none());
+        assert!(catalog_access_token(cached_auth(Duration::hours(-1), Some("  "))).is_none());
+    }
+
+    #[test]
+    fn unexpired_access_is_a_catalog_credential_without_refresh_token() {
+        let token = catalog_access_token(cached_auth(Duration::hours(1), None));
+        assert_eq!(token.as_deref(), Some("persisted-access"));
     }
 }

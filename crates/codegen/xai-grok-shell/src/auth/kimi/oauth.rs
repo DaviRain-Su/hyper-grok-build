@@ -251,6 +251,14 @@ pub(crate) async fn refresh_token(
     host: &str,
     refresh_token: &str,
 ) -> Result<GrokAuth, RefreshError> {
+    refresh_token_with_timeout(host, refresh_token, refresh_request_timeout()).await
+}
+
+async fn refresh_token_with_timeout(
+    host: &str,
+    refresh_token: &str,
+    request_timeout: std::time::Duration,
+) -> Result<GrokAuth, RefreshError> {
     let url = oauth_url(host, "/api/oauth/token");
     let mut last_error = String::from("no attempt made");
     for attempt in 0..MAX_REFRESH_RETRIES {
@@ -266,14 +274,12 @@ pub(crate) async fn refresh_token(
         // The refresh holds `auth.json.lock` for its whole duration; without a
         // reliable bound one hung request blocks every subsequent launch on
         // the 45s lock timeout and makes the TUI appear permanently stuck.
-        let request = with_device_headers(crate::http::shared_client().post(&url))?
-            .form(&[
-                ("client_id", KIMI_CODE_CLIENT_ID),
-                ("grant_type", REFRESH_GRANT_TYPE),
-                ("refresh_token", refresh_token),
-            ]);
-        let send_result =
-            tokio::time::timeout(refresh_request_timeout(), request.send()).await;
+        let request = with_device_headers(crate::http::shared_client().post(&url))?.form(&[
+            ("client_id", KIMI_CODE_CLIENT_ID),
+            ("grant_type", REFRESH_GRANT_TYPE),
+            ("refresh_token", refresh_token),
+        ]);
+        let send_result = tokio::time::timeout(request_timeout, request.send()).await;
 
         // A timeout means the network path is stalled. Treat it as terminal
         // (do NOT retry): retrying would hold `auth.json.lock` for up to
@@ -290,23 +296,23 @@ pub(crate) async fn refresh_token(
                 xai_grok_telemetry::unified_log::warn(
                     "auth.kimi.refresh_token.timeout_fired",
                     None,
-                    Some(serde_json::json!({ "timeout_secs": REFRESH_REQUEST_TIMEOUT_SECS })),
+                    Some(serde_json::json!({
+                        "timeout_millis": request_timeout.as_millis(),
+                    })),
                 );
                 return Err(RefreshError::Fatal {
                     status: 0,
                     description: format!(
-                        "token refresh timed out after {}s (network path stalled)",
-                        REFRESH_REQUEST_TIMEOUT_SECS
+                        "token refresh timed out after {request_timeout:?} (network path stalled)"
                     ),
                 });
             }
         };
         let status = resp.status().as_u16();
-        let body =
-            match tokio::time::timeout(refresh_request_timeout(), resp.bytes()).await {
-                Ok(Ok(b)) => b,
-                Ok(Err(_)) | Err(_) => Default::default(),
-            };
+        let body = match tokio::time::timeout(request_timeout, resp.bytes()).await {
+            Ok(Ok(b)) => b,
+            Ok(Err(_)) | Err(_) => Default::default(),
+        };
         if status == 401 || status == 403 {
             let err: OAuthErrorBody = serde_json::from_slice(&body).unwrap_or_default();
             return Err(RefreshError::Unauthorized {
@@ -359,7 +365,9 @@ mod poll_error_mapping_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn spawn_token_server(responses: Vec<(u16, serde_json::Value)>) -> (String, tokio::task::JoinHandle<()>) {
+    async fn spawn_token_server(
+        responses: Vec<(u16, serde_json::Value)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host = format!("http://{}", listener.local_addr().unwrap());
         let counter = Arc::new(AtomicUsize::new(0));
@@ -385,6 +393,31 @@ mod poll_error_mapping_tests {
             let _ = axum::serve(listener, app).await;
         });
         (host, handle)
+    }
+
+    async fn spawn_stalled_token_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/api/oauth/token",
+            axum::routing::post({
+                let hits = hits.clone();
+                move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<()>().await;
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (host, hits, handle)
     }
 
     #[tokio::test]
@@ -452,5 +485,27 @@ mod poll_error_mapping_tests {
             DevicePollResult::Fatal { error, .. } => assert_eq!(error, "missing_access_token"),
             other => panic!("expected Fatal for malformed success, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_stalled_peer_times_out_without_retrying() {
+        let (host, hits, server) = spawn_stalled_token_server().await;
+        let result =
+            refresh_token_with_timeout(&host, "refresh", std::time::Duration::from_millis(150))
+                .await;
+        server.abort();
+
+        match result {
+            Err(RefreshError::Fatal {
+                status: 0,
+                description,
+            }) => assert!(description.contains("timed out"), "{description}"),
+            other => panic!("expected terminal timeout, got {other:?}"),
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a stalled network path must not be retried while auth.json.lock is held"
+        );
     }
 }

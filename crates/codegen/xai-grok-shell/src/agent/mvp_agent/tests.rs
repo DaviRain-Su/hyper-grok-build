@@ -2456,10 +2456,24 @@ async fn cached_token_fallthrough_falls_to_grok_com_without_credentials() {
     use crate::agent::auth_method::{
         GROK_COM_METHOD_ID, LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR,
     };
-    use xai_grok_test_support::EnvGuard;
+    use xai_grok_test_support::{EnvGuard, unset_all_byok_platform_api_key_envs};
     let _lockdown = EnvGuard::unset("GROK_DISABLE_API_KEY_AUTH");
     let _new = EnvGuard::unset(XAI_API_KEY_ENV_VAR);
     let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+    // Unset BYOK platform API-key env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+    // …): the built-in platform catalog entries resolve `env_key` against the
+    // process env, so a developer shell with one set advertises `xai.api_key`,
+    // masking the "no credentials -> grok.com" fallthrough this test exercises.
+    let _byok = unset_all_byok_platform_api_key_envs();
+    // Redirect auth.json to an empty file so `apply_platform_credentials`
+    // can't stamp OAuth bearer tokens (kimi/codex) from the developer's real
+    // ~/.grok/auth.json onto `kimi-code/*` / `openai-codex/*` entries — those
+    // would also advertise `xai.api_key` and break the grok.com fallthrough.
+    let _dir = tempfile::tempdir().unwrap();
+    let _auth_path = EnvGuard::set(
+        "GROK_AUTH_PATH",
+        _dir.path().join("no-auth.json").to_str().unwrap(),
+    );
     let agent = build_minimal_agent_for_tests();
     assert_eq!(
         agent

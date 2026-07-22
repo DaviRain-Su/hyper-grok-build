@@ -1,6 +1,6 @@
 //! Layer-2 stream transform for the OpenAI Responses API.
 //!
-//! Consumes a raw `rs::ResponseStreamEvent` stream and produces
+//! Consumes a raw [`ResponsesStreamItem`] stream and produces
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
 use std::collections::BTreeMap;
@@ -1044,7 +1044,11 @@ mod tests {
                 content_index: 0,
                 delta: "no".into(),
             });
-        let raw = stream::iter(vec![Ok(refusal), Ok(completed_event())]).boxed();
+        let raw = stream::iter(vec![
+            Ok(ResponsesStreamItem::Event(refusal)),
+            Ok(ResponsesStreamItem::Event(completed_event())),
+        ])
+        .boxed();
         let _ = collect(stream_responses_tracked(
             raw,
             None,

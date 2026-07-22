@@ -13812,6 +13812,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xai-acp-lib",
+ "xai-grok-models",
 ]
 
 [[package]]

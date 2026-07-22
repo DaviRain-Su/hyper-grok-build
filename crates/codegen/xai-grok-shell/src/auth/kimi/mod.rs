@@ -11,6 +11,7 @@ mod oauth;
 pub use device::device_headers;
 pub use login::{
     KimiCodeBearerResolver, ensure_kimi_code_access_token, ensure_kimi_code_access_token_blocking,
-    force_refresh_kimi_code_auth, kimi_code_access_token_cached, run_kimi_code_login,
+    force_refresh_kimi_code_auth, kimi_code_access_token_cached,
+    kimi_code_catalog_access_token_cached, run_kimi_code_login,
 };
 pub use crate::auth::model::KIMI_CODE_OAUTH_SCOPE;

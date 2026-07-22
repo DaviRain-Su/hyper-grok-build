@@ -947,20 +947,23 @@ impl SamplingClient {
     /// POST with default headers. Overrides auth from resolver if wired.
     fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
         let mut headers = self.default_headers.clone();
-        if let Some(resolver) = &self.bearer_resolver
-            && let Some(fresh) = resolver.current_bearer()
-        {
-            match self.defaults.auth_scheme {
-                AuthScheme::XApiKey => {
-                    headers.remove(AUTHORIZATION);
-                    if let Ok(v) = HeaderValue::from_str(&fresh) {
-                        headers.insert(HeaderName::from_static("x-api-key"), v);
+        if let Some(resolver) = &self.bearer_resolver {
+            // A resolver is authoritative. Remove construction-time auth even
+            // when refresh returns `None`; otherwise an expired catalog stamp
+            // is silently sent after a failed refresh.
+            headers.remove(AUTHORIZATION);
+            headers.remove(HeaderName::from_static("x-api-key"));
+            if let Some(fresh) = resolver.current_bearer() {
+                match self.defaults.auth_scheme {
+                    AuthScheme::XApiKey => {
+                        if let Ok(v) = HeaderValue::from_str(&fresh) {
+                            headers.insert(HeaderName::from_static("x-api-key"), v);
+                        }
                     }
-                }
-                AuthScheme::Bearer => {
-                    headers.remove(HeaderName::from_static("x-api-key"));
-                    if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
-                        headers.insert(AUTHORIZATION, v);
+                    AuthScheme::Bearer => {
+                        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
+                            headers.insert(AUTHORIZATION, v);
+                        }
                     }
                 }
             }
@@ -994,16 +997,18 @@ impl SamplingClient {
         self.http.post(url).headers(headers)
     }
 
-    /// Bearer prefix for 401 attribution. Prefers live resolver, falls back to default_headers.
+    /// Bearer prefix for 401 attribution. A wired resolver is authoritative:
+    /// when it returns `None`, [`Self::post`] sends no auth header rather than
+    /// falling back to the construction-time token.
     fn current_sent_bearer_prefix(&self) -> Option<String> {
-        self.bearer_resolver
-            .as_ref()
-            .and_then(|r| r.current_bearer())
-            .or_else(|| self.extract_sent_bearer())
-            .map(|mut s| {
-                s.truncate(crate::attribution::SENT_BEARER_PREFIX_LEN.min(s.len()));
-                s
-            })
+        let bearer = match &self.bearer_resolver {
+            Some(resolver) => resolver.current_bearer(),
+            None => self.extract_sent_bearer(),
+        };
+        bearer.map(|mut s| {
+            s.truncate(crate::attribution::SENT_BEARER_PREFIX_LEN.min(s.len()));
+            s
+        })
     }
 
     /// Extract the bearer from `default_headers`, truncated to prefix length.
@@ -2674,6 +2679,15 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct MissingBearerResolver;
+
+    impl crate::config::BearerResolver for MissingBearerResolver {
+        fn current_bearer(&self) -> Option<String> {
+            None
+        }
+    }
+
     impl crate::attribution::Auth401AttributionCallback for CountingCallback {
         fn record_401(
             &self,
@@ -2759,6 +2773,28 @@ mod tests {
             .and_then(|v| v.to_str().ok());
         assert_eq!(auth, Some("Bearer fresh-bearer"));
         assert!(request.headers().get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn missing_live_bearer_does_not_fall_back_to_stale_catalog_token() {
+        let cfg = SamplerConfig {
+            api_key: Some("expired-catalog-token".to_string()),
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::Bearer,
+            bearer_resolver: Some(std::sync::Arc::new(MissingBearerResolver)),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let request = client
+            .post("https://example.test/v1/messages")
+            .build()
+            .expect("request should build");
+        assert!(
+            request.headers().get(AUTHORIZATION).is_none(),
+            "failed refresh must not send the expired construction-time bearer"
+        );
+        assert!(request.headers().get("x-api-key").is_none());
+        assert!(client.current_sent_bearer_prefix().is_none());
     }
 
     /// Regression: when `api_key` (which seeds `default_headers` with an

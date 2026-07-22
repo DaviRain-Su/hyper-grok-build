@@ -96,24 +96,33 @@ mod tests {
     use crate::agent::config::Config;
     use crate::auth::{AuthMode, GrokAuth};
     use serial_test::serial;
-    use xai_grok_test_support::EnvGuard;
+    use xai_grok_test_support::{EnvGuard, unset_all_byok_platform_api_key_envs};
 
     /// Isolate process-global auth sources that `AuthStatus::resolve` consults.
     ///
     /// Uses `GROK_AUTH_PATH` (not `GROK_HOME`) so a OnceLock-cached real home
     /// with `auth.json` cannot leak into these tests.
-    fn isolate_auth_sources() -> (tempfile::TempDir, [EnvGuard; 7]) {
+    ///
+    /// Also unsets every BYOK platform API-key env var (ANTHROPIC_API_KEY,
+    /// OPENAI_API_KEY, MOONSHOT_API_KEY, …). `AuthStatus::resolve` walks the
+    /// full resolved catalog via `resolve_model_list`, which injects the
+    /// built-in `platform_builtin_models()` — those entries carry `env_key`
+    /// pointing at the platform's API-key env name, so a developer shell
+    /// with (say) `ANTHROPIC_API_KEY` set makes every `anthropic/*` entry
+    /// `has_own_credentials() == true`, masking the user `[model.*]` BYOK
+    /// case these tests actually exercise. The BYOK guards restore on drop.
+    fn isolate_auth_sources() -> (tempfile::TempDir, Vec<EnvGuard>) {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("no-auth.json");
-        let guards = [
-            EnvGuard::unset(XAI_API_KEY_ENV_VAR),
-            EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR),
-            EnvGuard::unset("GROK_AUTH"),
-            EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap()),
-            EnvGuard::unset("GROK_DEPLOYMENT_KEY"),
-            EnvGuard::unset("GROK_WS_ORIGIN"),
-            EnvGuard::unset("GROK_DISABLE_API_KEY_AUTH"),
-        ];
+        let mut guards = Vec::new();
+        guards.push(EnvGuard::unset(XAI_API_KEY_ENV_VAR));
+        guards.push(EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR));
+        guards.push(EnvGuard::unset("GROK_AUTH"));
+        guards.push(EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap()));
+        guards.push(EnvGuard::unset("GROK_DEPLOYMENT_KEY"));
+        guards.push(EnvGuard::unset("GROK_WS_ORIGIN"));
+        guards.push(EnvGuard::unset("GROK_DISABLE_API_KEY_AUTH"));
+        guards.extend(unset_all_byok_platform_api_key_envs());
         (dir, guards)
     }
 

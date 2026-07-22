@@ -25,7 +25,9 @@ use tokio::runtime::Handle;
 static MAIN_HANDLE: OnceLock<Handle> = OnceLock::new();
 
 /// Record the main runtime handle. Called once at startup from `async_main`,
-/// which runs on the main runtime, so `Handle::current()` is valid.
+/// which runs on the main runtime, so `Handle::current()` is valid. A later
+/// call is intentionally ignored: auth resolvers must stay pinned to the
+/// process runtime that owns the shared HTTP clients.
 pub fn set_main_runtime_handle(handle: &Handle) {
     let _ = MAIN_HANDLE.set(handle.clone());
 }

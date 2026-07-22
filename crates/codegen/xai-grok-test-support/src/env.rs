@@ -121,6 +121,36 @@ pub fn grok_binary() -> PathBuf {
     binary
 }
 
+/// Unset every BYOK platform API-key env var that the built-in platform
+/// catalog (`inject_moonshot_builtin_models` / `platform_builtin_models`)
+/// stamps onto catalog entries' `env_key`. Returns one [`EnvGuard`] per var
+/// so the caller can hold them for the test's lifetime.
+///
+/// Why: `ModelEntry::has_own_credentials()` resolves `env_key` against the
+/// process environment. A developer shell with `ANTHROPIC_API_KEY` (etc.)
+/// set makes every `anthropic/*` catalog entry "have credentials",
+/// leaking into tests that only intend to exercise a user-supplied
+/// `[model.*]` BYOK entry. Callers MUST be `#[serial]` (the underlying
+/// [`EnvGuard`] mutates the process-global environment).
+///
+/// Note: KimiCode / OpenAiCodex use OAuth and expose no API-key env names,
+/// so they contribute nothing here — that's intentional.
+pub fn unset_all_byok_platform_api_key_envs() -> Vec<EnvGuard> {
+    let mut guards = Vec::new();
+    // Collect first to deduplicate (MOONSHOT_API_KEY / ZAI_API_KEY / MINIMAX_API_KEY
+    // are shared across platforms) so we don't double-unset and clobber the
+    // restored value mid-iteration.
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    for platform in xai_grok_models::PlatformId::ALL {
+        for &name in platform.api_key_env_names() {
+            if seen.insert(name) {
+                guards.push(EnvGuard::unset(name));
+            }
+        }
+    }
+    guards
+}
+
 /// Temp dir with a git repo + one committed file.
 /// Forces libgit2 to fully init (the codepath that breaks with bad OpenSSL linking).
 pub fn git_workdir() -> TempDir {

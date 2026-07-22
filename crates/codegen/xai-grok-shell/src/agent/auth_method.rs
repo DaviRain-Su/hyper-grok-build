@@ -595,7 +595,7 @@ mod tests {
         )));
     }
 
-    use xai_grok_test_support::EnvGuard;
+    use xai_grok_test_support::{EnvGuard, unset_all_byok_platform_api_key_envs};
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -825,6 +825,22 @@ mod tests {
         // Make sure no global key is masking the per-model path we're trying
         // to exercise. Held until end-of-scope so we restore on panic too.
         let _global = EnvGuard::unset(XAI_API_KEY_ENV_VAR);
+        // Also unset every BYOK platform API-key env var (ANTHROPIC_API_KEY,
+        // OPENAI_API_KEY, MOONSHOT_API_KEY, …): `resolve_model_list` injects
+        // the built-in platform catalog, whose entries carry `env_key` for
+        // the platform's API-key name. A developer shell with one of these
+        // set makes those catalog entries `has_own_credentials() == true`,
+        // leaking into `should_advertise_xai_api_key` and masking the
+        // per-model enterprise `env_key` path this test exercises.
+        let _byok = unset_all_byok_platform_api_key_envs();
+        // Redirect auth.json to an empty file so `apply_platform_credentials`
+        // can't stamp OAuth bearer tokens (kimi/codex) from the developer's
+        // real ~/.grok/auth.json onto `kimi-code/*` / `openai-codex/*` entries
+        // — those would also flip `has_own_credentials` and advertise
+        // `xai.api_key`, masking the "no external key" branch below.
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("no-auth.json");
+        let _auth_path = EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
 
         let dm = crate::models::default_model();
         let toml: toml::Value = toml::from_str(&format!(

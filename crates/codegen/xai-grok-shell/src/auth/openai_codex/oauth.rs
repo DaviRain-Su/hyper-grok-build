@@ -23,6 +23,11 @@ const TOKEN_PATH: &str = "/oauth/token";
 /// `auth.json.lock` it holds — can never block subsequent launches
 /// indefinitely. Matches the 15s budget the xAI OIDC refresh path uses.
 const REFRESH_REQUEST_TIMEOUT_SECS: u64 = 15;
+
+fn refresh_request_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS)
+}
+
 const DEVICE_USER_CODE_PATH: &str = "/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_PATH: &str = "/api/accounts/deviceauth/token";
 
@@ -209,6 +214,14 @@ pub(crate) async fn exchange_device_authorization_code(
 /// reliable bound prevents one hung request from wedging subsequent
 /// launches on the 45s lock timeout.
 pub(crate) async fn refresh_access_token(host: &str, refresh: &str) -> anyhow::Result<CodexToken> {
+    refresh_access_token_with_timeout(host, refresh, refresh_request_timeout()).await
+}
+
+async fn refresh_access_token_with_timeout(
+    host: &str,
+    refresh: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<CodexToken> {
     let request = crate::http::shared_client()
         .post(format!("{}{TOKEN_PATH}", host_trim(host)))
         .form(&[
@@ -216,18 +229,18 @@ pub(crate) async fn refresh_access_token(host: &str, refresh: &str) -> anyhow::R
             ("refresh_token", refresh),
             ("client_id", OPENAI_CODEX_CLIENT_ID),
         ]);
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS),
-        request.send(),
-    )
+
+    // One deadline covers connection, response headers, and the complete body.
+    // Timing only `send()` leaves `response.json()` able to hold auth.json.lock
+    // forever after a peer sends headers and then stalls the body.
+    tokio::time::timeout(timeout, async {
+        let response = request.send().await?;
+        read_token_response(response, "refresh").await
+    })
     .await
     .map_err(|_| {
-        anyhow::anyhow!(
-            "token refresh timed out after {}s (network path stalled)",
-            REFRESH_REQUEST_TIMEOUT_SECS
-        )
-    })??;
-    read_token_response(response, "refresh").await
+        anyhow::anyhow!("token refresh timed out after {timeout:?} (network path stalled)")
+    })?
 }
 
 // =============================================================================
@@ -428,12 +441,38 @@ pub(crate) fn slow_down_increment() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn jwt_with_claim(claim_json: &str) -> String {
         let payload = URL_SAFE_NO_PAD.encode(
             format!(r#"{{"{JWT_CLAIM_PATH}": {claim_json}, "sub": "user-1"}}"#).as_bytes(),
         );
         format!("header.{payload}.sig")
+    }
+
+    async fn spawn_stalled_token_body_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 512\r\nConnection: close\r\n\r\n{\"access_token\":\"partial",
+                )
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        (host, task)
     }
 
     #[test]
@@ -565,6 +604,23 @@ mod tests {
                 id_token: None,
             })
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_timeout_covers_stalled_response_body() {
+        let (host, server) = spawn_stalled_token_body_server().await;
+        let timeout = std::time::Duration::from_millis(150);
+        let started = tokio::time::Instant::now();
+        let error = refresh_access_token_with_timeout(&host, "refresh", timeout)
+            .await
+            .expect_err("partial response body must time out");
+        server.abort();
+
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "body read exceeded the bounded refresh budget"
         );
     }
 

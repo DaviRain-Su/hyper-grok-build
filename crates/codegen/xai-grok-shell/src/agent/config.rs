@@ -3935,7 +3935,12 @@ fn apply_platform_credentials(
     resolved: &mut IndexMap<String, ModelEntry>,
     platforms: &PlatformsConfig,
 ) {
-    let kimi_bearer = crate::auth::kimi::kimi_code_access_token_cached();
+    // Keep a persisted, refreshable Kimi session visible even after its
+    // short-lived access token expires. The stamped value is only a catalog
+    // marker: `KimiCodeBearerResolver` replaces it per request, and the sampler
+    // removes it entirely when refresh fails. Live `/models` fetches continue
+    // to use `kimi_code_access_token_cached()` and therefore never send it.
+    let kimi_bearer = crate::auth::kimi::kimi_code_catalog_access_token_cached();
     let codex_bearer = crate::auth::openai_codex::ensure_openai_codex_access_token_blocking();
     apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer, codex_bearer);
 }
@@ -5353,6 +5358,27 @@ enum ModelLookup<'a> {
 /// keeping "config unavailable" distinct from "model absent" so callers can
 /// stay conservative on a transient config failure.
 fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T {
+    with_resolved_model_loader(
+        model_id,
+        || {
+            let raw = crate::config::load_effective_config()
+                .map_err(|e| tracing::warn!(error = %e, "config load failed for model auth lookup"))
+                .ok()?;
+            Config::new_from_toml_cfg(&raw)
+                .map_err(
+                    |e| tracing::warn!(error = %e, "config parse failed for model auth lookup"),
+                )
+                .ok()
+        },
+        f,
+    )
+}
+
+fn with_resolved_model_loader<T>(
+    model_id: &str,
+    load: impl FnOnce() -> Option<Config> + Send,
+    f: impl FnOnce(ModelLookup) -> T,
+) -> T {
     // Load + parse the effective config on a dedicated, enlarged-stack thread.
     // `Config` is a very large struct, and its serde-derived `Deserialize`
     // (wrapped by `serde_ignored` and driven by `toml`) allocates large stack
@@ -5361,17 +5387,10 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
     // thread, overflowing it (observed as a stack overflow in the session
     // tests; a latent risk on any 2 MB production worker). Parsing on an
     // 8 MB-stack scoped thread keeps that cost off the caller's stack limit.
-    let cfg: Option<Config> = std::thread::scope(|s| {
+    let cfg = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
-            .spawn_scoped(s, || {
-                let raw = crate::config::load_effective_config()
-                    .map_err(|e| tracing::warn!(error = %e, "config load failed for model auth lookup"))
-                    .ok()?;
-                Config::new_from_toml_cfg(&raw)
-                    .map_err(|e| tracing::warn!(error = %e, "config parse failed for model auth lookup"))
-                    .ok()
-            })
+            .spawn_scoped(s, load)
             .expect("spawn scoped config-parse thread")
             .join()
             .expect("config-parse thread panicked")
@@ -7799,6 +7818,28 @@ if n == name && f.as_deref() == field
             ModelByok::NotByok,
         );
     }
+
+    #[test]
+    fn scoped_config_parse_failure_stays_config_unavailable() {
+        let malformed: toml::Value = toml::from_str(
+            r#"
+[models]
+default = 42
+"#,
+        )
+        .unwrap();
+        let byok = with_resolved_model_loader(
+            "grok-4.5",
+            move || Config::new_from_toml_cfg(&malformed).ok(),
+            |lookup| byok_from_lookup(&lookup),
+        );
+        assert_eq!(
+            byok,
+            ModelByok::Unknown,
+            "a parse failure on the enlarged-stack thread must not look like a missing/session model"
+        );
+    }
+
     #[test]
     fn resolve_model_auth_facts_empty_model_id_is_unknown() {
         assert_eq!(
@@ -12911,7 +12952,30 @@ default = "grok-4.5"
         assert!(no_p.contains_key(dm));
     }
     #[test]
+    #[serial_test::serial]
     fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
+        // Isolate every process-global auth source `resolve_model_list`
+        // consults, because this test asserts an exact visible-count (`== 1`):
+        //
+        // 1. BYOK platform API-key env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+        //    OLLAMA_API_KEY, …): `inject_moonshot_builtin_models` stamps each
+        //    catalog entry with the platform's `env_key`, so a set env var
+        //    makes that entry `has_own_credentials() == true` and visible.
+        // 2. `GROK_AUTH_PATH` → an empty auth.json so
+        //    `apply_platform_credentials` can't stamp OAuth bearer tokens
+        //    (kimi/codex) from the developer's real ~/.grok/auth.json onto
+        //    `kimi-code/*` / `openai-codex/*` entries — those would likewise
+        //    become `has_own_credentials() == true` and inflate the count.
+        // 3. `XAI_API_KEY` / `GROK_AUTH` so the session path can't supply a key.
+        let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("no-auth.json");
+        let _auth_path = xai_grok_test_support::EnvGuard::set(
+            "GROK_AUTH_PATH",
+            auth_path.to_str().unwrap(),
+        );
+        let _xai_key = xai_grok_test_support::EnvGuard::unset("XAI_API_KEY");
+        let _grok_auth = xai_grok_test_support::EnvGuard::unset("GROK_AUTH");
         let cfg = Config::default();
         let dm = crate::models::default_model();
         let mut defs = default_model_entries(&EndpointsConfig::default());
@@ -13480,6 +13544,51 @@ default = "grok-4.5"
         assert_eq!(codex_entry.api_key.as_deref(), Some("fake-codex-token"));
         // …and never leaks onto the Kimi entry.
         assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
+    }
+
+    #[test]
+    #[serial]
+    fn expired_refreshable_kimi_session_skips_relogin_on_restart() {
+        let (dir, _guards) = isolated_auth_home();
+        crate::auth::store_kimi_code_auth(
+            dir.path(),
+            &crate::auth::GrokAuth {
+                key: "expired-kimi-access".into(),
+                auth_mode: crate::auth::AuthMode::KimiCode,
+                create_time: chrono::Utc::now() - chrono::Duration::hours(2),
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+                refresh_token: Some("persisted-refresh".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("kimi-code/k2p7")
+            .expect("Kimi builtin must remain in the catalog");
+
+        assert_eq!(entry.api_key.as_deref(), Some("expired-kimi-access"));
+        assert!(entry.info.supported_in_api);
+        assert!(entry.visible_for_auth(false));
+        assert!(
+            crate::agent::auth_method::should_advertise_xai_api_key(false, models.values()),
+            "a persisted refreshable Kimi session must select a non-interactive startup auth path"
+        );
+
+        let sampler = sampling_config_for_model(
+            entry,
+            resolve_credentials(entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            sampler.bearer_resolver.is_some(),
+            "the expired catalog marker must be replaced by the live Kimi resolver"
+        );
     }
 
     #[test]
