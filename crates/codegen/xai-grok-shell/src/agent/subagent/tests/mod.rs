@@ -2522,7 +2522,7 @@ fn validate_subagent_type_returns_unknown_for_invented_type() {
     let outcome = validate_subagent_type("totally-invented-agent-name", &ctx);
     match outcome {
         SubagentValidateTypeOutcome::Unknown { available } => {
-            for expected in ["general-purpose", "explore", "plan"] {
+            for expected in ["general-purpose", "explore", "plan", "oracle", "xdotcom"] {
                 assert!(
                     available.iter().any(| n | n == expected),
                     "available list must include built-in {expected:?}: {available:?}",

@@ -21,9 +21,9 @@ pub struct TaskToolInput {
     pub description: String,
 
     /// Name of the subagent type to launch. Built-in types: "general-purpose",
-    /// "explore", "plan", "oracle". Additional user-defined types may also be available.
+    /// "explore", "plan", "oracle", "xdotcom". Additional user-defined types may also be available.
     #[schemars(
-        description = "Name of the subagent type to launch. Built-in types: \"general-purpose\", \"explore\", \"plan\", \"oracle\". Additional user-defined types may also be available."
+        description = "Name of the subagent type to launch. Built-in types: \"general-purpose\", \"explore\", \"plan\", \"oracle\", \"xdotcom\". Additional user-defined types may also be available."
     )]
     #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
@@ -934,12 +934,57 @@ pub const ORACLE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: ORACLE_PROMPT,
 };
 
+/// Prompt body for the **xdotcom** subagent.
+///
+/// An X.com (Twitter) content and engagement specialist with full tool access.
+pub const XDOTCOM_PROMPT: &str = "\
+You are an X.com (Twitter) content and engagement specialist. You help with drafting, optimizing, \
+and managing X/Twitter presence.
+
+Strengths:
+- Drafting and optimizing posts, threads, and replies for maximum engagement
+- Analyzing X/Twitter trends, hashtags, and conversation patterns
+- Researching topics and finding relevant content to share
+- Managing X/Twitter content strategy and scheduling
+- Understanding X.com platform dynamics, algorithm, and best practices
+
+Guidelines:\
+${%- if tools.by_kind.web_search and tools.by_kind.web_fetch %}
+- Use ${{ tools.by_kind.web_search }} and ${{ tools.by_kind.web_fetch }} to research trends, \
+news, and relevant context before creating content.\
+${%- endif %}
+${%- if tools.by_kind.search and tools.by_kind.list %}
+- Use ${{ tools.by_kind.search }} or ${{ tools.by_kind.list }} to find existing content and \
+reference materials in the workspace.\
+${%- endif %}
+${%- if tools.by_kind.edit %}
+- Create and edit files to store drafts, content calendars, and research notes.\
+${%- endif %}
+- Always consider the audience, tone, and platform context when crafting content.
+- Optimize for readability: short paragraphs, clear hooks, and compelling calls to action.
+- Respect character limits and X.com's content policies.
+
+Workspace boundary:
+- Default scope is the workspace in <user_info>. Stay within it unless told otherwise.";
+
+/// The **xdotcom** built-in subagent.
+pub const XDOTCOM_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
+    name: "xdotcom",
+    description: "X.com (Twitter) content and engagement specialist \u{2014} draft posts, analyze trends, research topics.",
+    tools_template: "Has access to all tools: \
+         ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, \
+         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, ${{ tools.by_kind.web_search }}, \
+         and ${{ tools.by_kind.plan }}.",
+    prompt_template: XDOTCOM_PROMPT,
+};
+
 /// The built-in subagent types advertised to the model, in display order.
-pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 4] = [
+pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 5] = [
     GENERAL_PURPOSE_SUBAGENT,
     EXPLORE_SUBAGENT,
     PLAN_SUBAGENT,
     ORACLE_SUBAGENT,
+    XDOTCOM_SUBAGENT,
 ];
 
 /// Look up a built-in subagent by its `subagent_type` name
@@ -1383,7 +1428,7 @@ mod tests {
     fn builtin_subagent_catalog_names_and_descriptor_conversion() {
         assert_eq!(
             BUILTIN_SUBAGENTS.map(|b| b.name),
-            ["general-purpose", "explore", "plan", "oracle"]
+            ["general-purpose", "explore", "plan", "oracle", "xdotcom"]
         );
 
         let desc = EXPLORE_SUBAGENT.to_descriptor(&plain_tool_naming());

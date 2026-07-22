@@ -686,6 +686,7 @@ pub enum BuiltinAgentName {
     Plan,
     Oracle,
     BrowserUse,
+    Xdotcom,
     #[strum(serialize = "grok-build-orchestrator")]
     GrokBuildOrchestrator,
 }
@@ -716,12 +717,13 @@ impl BuiltinAgentName {
             Self::Plan => AgentDefinition::plan(),
             Self::Oracle => AgentDefinition::oracle(),
             Self::BrowserUse => AgentDefinition::browser_use(),
+            Self::Xdotcom => AgentDefinition::xdotcom(),
             Self::GrokBuildOrchestrator => AgentDefinition::grok_build_orchestrator(),
         }
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan, Self::Oracle]
+        &[Self::GeneralPurpose, Self::Explore, Self::Plan, Self::Oracle, Self::Xdotcom]
     }
 }
 /// Portable agent identity — parsed from .grok/agents/*.md.
@@ -1657,6 +1659,18 @@ impl AgentDefinition {
             )
         }
     }
+    /// X.com (Twitter) subagent definition.
+    ///
+    /// A content and engagement specialist with full tool access.
+    /// Uses the general-purpose toolset (full GrokBuild tools).
+    pub fn xdotcom() -> Self {
+        use crate::prompt::subagent_prompts;
+        Self {
+            description: xai_tool_types::XDOTCOM_SUBAGENT.description.to_string(),
+            prompt_body: Some(subagent_prompts::XDOTCOM_PROMPT.to_string()),
+            ..Self::base(BuiltinAgentName::Xdotcom, "")
+        }
+    }
     /// Grok Build Orchestrator — GBL model with full GrokBuild tools
     /// (skills, MCPs, plan mode) that delegates coding/exploration to
     /// subagents.
@@ -1854,18 +1868,20 @@ mod tests {
     /// until classified.
     fn expected_strict_harness(name: BuiltinAgentName) -> bool {
         match name {
-            BuiltinAgentName::Codex | BuiltinAgentName::GrokBuildOrchestrator => true,
+            BuiltinAgentName::Codex
+            | BuiltinAgentName::GrokBuildOrchestrator
+            | BuiltinAgentName::Explore
+            | BuiltinAgentName::Oracle => true,
             BuiltinAgentName::GrokBuild
             | BuiltinAgentName::GrokBuildConcise
             | BuiltinAgentName::GrokBuildPlan
             | BuiltinAgentName::GrokBuildPlanNoSubagents
             | BuiltinAgentName::GrokBuildAskUser
             | BuiltinAgentName::GeneralPurpose
-            | BuiltinAgentName::Explore
             | BuiltinAgentName::Plan
-            | BuiltinAgentName::Oracle
             | BuiltinAgentName::Opencode
-            | BuiltinAgentName::BrowserUse => false,
+            | BuiltinAgentName::BrowserUse
+            | BuiltinAgentName::Xdotcom => false,
         }
     }
     /// Invariant: structural `is_strict_harness()` must match the
@@ -1886,7 +1902,7 @@ mod tests {
     }
     #[test]
     fn is_strict_harness_agent_type_classifies_by_name() {
-        for strict in ["codex", "grok-build-orchestrator"] {
+        for strict in ["codex", "grok-build-orchestrator", "explore", "oracle"] {
             assert!(
                 is_strict_harness_agent_type(strict),
                 "{strict} should be strict"
@@ -1899,6 +1915,7 @@ mod tests {
             "grok-build-ask-user",
             "opencode",
             "browser-use",
+            "xdotcom",
             "custom-user-agent",
             "",
             "grok-build-totally-made-up",
@@ -2618,11 +2635,12 @@ description: Test default tool config
     #[test]
     fn test_builtin_agent_name_subagent_variants() {
         let variants = BuiltinAgentName::subagent_variants();
-        assert_eq!(variants.len(), 4);
+        assert_eq!(variants.len(), 5);
         assert!(variants.contains(&BuiltinAgentName::GeneralPurpose));
         assert!(variants.contains(&BuiltinAgentName::Explore));
         assert!(variants.contains(&BuiltinAgentName::Plan));
         assert!(variants.contains(&BuiltinAgentName::Oracle));
+        assert!(variants.contains(&BuiltinAgentName::Xdotcom));
     }
     #[test]
     fn test_all_builtins_have_inherit_model() {
