@@ -38,15 +38,17 @@ Running `grok login` starts the sign-in flow again, replacing your cached sessio
 | `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
 
 To sign out of the **xAI** session, run `hyper logout` (or `grok logout` on
-the official binary). That clears the primary xAI session scope only.
+the official binary). That clears the primary xAI session scope only; if Kimi
+or Codex sessions remain, the CLI prints how to clear them.
 
 Third-party subscriptions and BYOK keys are separate:
 
 | Command | Clears |
 |---------|--------|
-| `hyper logout` | xAI session (interactive OAuth / cached session) |
+| `hyper logout` | xAI session (interactive OAuth / cached session); hints if Kimi/Codex remain |
 | `hyper logout --kimi` | Kimi Code OAuth only |
 | `hyper logout --openai` | OpenAI Codex (ChatGPT) OAuth only |
+| `hyper logout --all` | xAI + Kimi + Codex OAuth (not BYOK platform keys) |
 | `/logout provider <platform>` | A stored BYOK API key for that platform (same as `/providers clear`) |
 
 `XAI_API_KEY` and other env-based keys are never removed by logout — unset the

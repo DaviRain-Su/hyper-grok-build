@@ -3,15 +3,14 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-07-22 (post S1 review follow-ups).
+Last reviewed: 2026-07-22 (post S2: macOS process ID + logout --all).
 
 ## Open
 
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
-| F-8 | low (UX) | Bare logout is xAI-only | `hyper logout` clears the xAI session; Kimi/Codex need `hyper logout --kimi` / `--openai` or `/logout provider …`. Documented; optional `--all` not implemented. |
-| F-1-mac | medium | macOS/BSD `is_grok_process` | Still liveness-only (`kill -0`); Linux/Windows use argv0/image path. Wrong-PID kill risk remains on macOS until `proc_pidpath` lands. |
 | Modes | design-only | Amp-style low–ultra agent modes | See [design-modes.md](./design-modes.md) — **not implemented**. |
+| Non-Darwin Unix process ID | low | BSD without libproc | `is_grok_process` falls back to liveness-only on non-Linux non-macOS Unix. |
 
 ## Fixed in tree
 
@@ -33,6 +32,13 @@ Last reviewed: 2026-07-22 (post S1 review follow-ups).
 | F-7 | Child Task tool text omitted `oracle` | Nested `CHILD_TASK_DESCRIPTION` and `TaskToolInput` schema list `oracle`. |
 | F-1-linux | Leader argv false positives | Linux classification uses **argv0 only** (not later args like `sleep hyper`). |
 
+### S2 — macOS process identity + logout UX
+
+| ID | Topic | Fix |
+|----|--------|-----|
+| F-1-mac | macOS/BSD liveness-only process check | macOS/iOS uses `proc_pidpath` + the same basename/path rules as Linux/Windows. |
+| F-8 | Bare logout only cleared xAI | Bare logout prints remaining Kimi/Codex scopes; `hyper logout --all` clears xAI + Kimi + Codex (not BYOK keys). |
+
 ## Intentional / accepted
 
 | Topic | Behavior |
@@ -41,10 +47,11 @@ Last reviewed: 2026-07-22 (post S1 review follow-ups).
 | Shared Kimi + Codex proxy | Catalog id (`kimi-code/*` vs `openai-codex/*`) selects credentials; ambiguous URL alone does not guess a family. |
 | Hyper Modes | Design doc only until implemented. |
 | Sticky refresh cache | In-process only (not shared across processes); multi-process still uses flock + compare/adopt. |
+| Logout `--all` vs BYOK | Platform API keys under `platform/*` scopes stay until `/logout provider` / `/providers clear`. |
 
 ## Coexistence with official `grok`
 
 - Different binaries: `hyper` vs `grok`.
 - Shared runtime state under `~/.grok` (including `leader*.sock` / `leader*.lock`).
-- Prefer `hyper leader kill` / `grok leader kill` only against leaders you own; both binaries recognize the other product process by name when cleaning locks.
+- Prefer `hyper leader kill` / `grok leader kill` only against leaders you own; both binaries recognize the other product process by name when cleaning locks (Linux argv0, Windows image path, macOS `proc_pidpath`).
 - Community builds never run the upstream self-updater that targets `~/.grok/bin/grok`.

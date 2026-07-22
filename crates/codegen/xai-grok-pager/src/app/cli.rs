@@ -24,11 +24,16 @@ pub enum Command {
     /// Sign out and clear cached credentials
     Logout {
         /// Clear only the Kimi Code subscription credential (leave xAI alone).
-        #[arg(long = "kimi")]
+        #[arg(long = "kimi", conflicts_with = "all")]
         kimi: bool,
         /// Clear only the OpenAI Codex (ChatGPT) subscription credential.
-        #[arg(long = "openai", conflicts_with = "kimi")]
+        #[arg(long = "openai", conflicts_with_all = ["kimi", "all"])]
         openai: bool,
+        /// Clear xAI session **and** Kimi Code + OpenAI Codex OAuth scopes.
+        /// Does not remove BYOK platform API keys or env vars (use
+        /// `/logout provider <id>` / unset env for those).
+        #[arg(long = "all", conflicts_with_all = ["kimi", "openai"])]
+        all: bool,
     },
     /// Sign in to Grok
     Login {
@@ -1295,7 +1300,8 @@ mod tests {
             args.command,
             Some(Command::Logout {
                 kimi: false,
-                openai: false
+                openai: false,
+                all: false,
             })
         ));
         let args = PagerArgs::try_parse_from(["grok", "logout", "--kimi"]).expect("parses");
@@ -1303,9 +1309,23 @@ mod tests {
             args.command,
             Some(Command::Logout {
                 kimi: true,
-                openai: false
+                openai: false,
+                all: false,
             })
         ));
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--all"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout {
+                kimi: false,
+                openai: false,
+                all: true,
+            })
+        ));
+        assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--all", "--kimi"]).is_err(),
+            "--all conflicts with --kimi"
+        );
         assert!(args.prompt.is_none());
     }
 

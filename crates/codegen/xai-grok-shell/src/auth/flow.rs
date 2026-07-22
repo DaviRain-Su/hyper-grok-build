@@ -1005,29 +1005,69 @@ pub fn perform_logout(
     })
 }
 
-/// `grok logout` CLI handler. Calls [`perform_logout`] and formats
-/// the result to stderr.
+/// `grok logout` / `hyper logout` CLI handler. Clears the **xAI** session only
+/// and formats the result to stderr. Third-party OAuth scopes (Kimi / Codex)
+/// are reported when still present so users know how to clear them.
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     let grok_home = grok_home::grok_home();
     let auth_manager = AuthManager::new(&grok_home, config.grok_com_config.clone());
     let result = perform_logout(&auth_manager, None)
         .map_err(|e| anyhow::anyhow!("Failed to clear auth: {e}"))?;
     if !result.was_logged_in {
-        eprintln!("No cached session to log out of.");
+        eprintln!("No cached xAI session to log out of.");
         if result.api_key_still_set {
             eprintln!("You are authenticated via XAI_API_KEY (environment variable).");
         }
+        print_remaining_third_party_scopes_hint();
         return Ok(());
     }
     if let Some(email) = result.email {
-        eprintln!("Logged out (was signed in as {email})");
+        eprintln!("Logged out of xAI (was signed in as {email})");
     } else {
-        eprintln!("Logged out");
+        eprintln!("Logged out of xAI");
     }
     if result.api_key_still_set {
         eprintln!("XAI_API_KEY is still set and will be used for authentication.");
     }
+    print_remaining_third_party_scopes_hint();
     Ok(())
+}
+
+/// Clear xAI session **and** Kimi Code + OpenAI Codex OAuth scopes.
+///
+/// Does **not** remove BYOK platform API keys stored under `platform/*` scopes
+/// or environment variables — those use `/logout provider <id>` / unset env.
+pub fn run_cli_logout_all(config: &crate::agent::config::Config) -> anyhow::Result<()> {
+    run_cli_logout(config)?;
+    // Always attempt third-party clears (idempotent when absent).
+    let _ = run_cli_logout_kimi();
+    let _ = run_cli_logout_openai_codex();
+    eprintln!(
+        "Note: BYOK platform API keys (if any) were not removed. \
+         Use `/logout provider <platform>` or `/providers clear` in the TUI."
+    );
+    Ok(())
+}
+
+/// When Kimi/Codex scopes remain after a bare xAI logout, tell the user how
+/// to clear them (avoids the false impression that "logout" wiped everything).
+fn print_remaining_third_party_scopes_hint() {
+    let auth_path = crate::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    let kimi = crate::auth::read_kimi_code_auth(home).is_some();
+    let codex = crate::auth::read_openai_codex_auth(home).is_some();
+    if !kimi && !codex {
+        return;
+    }
+    eprintln!();
+    eprintln!("Still signed in to third-party subscriptions:");
+    if kimi {
+        eprintln!("  • Kimi Code  — run: hyper logout --kimi");
+    }
+    if codex {
+        eprintln!("  • OpenAI Codex — run: hyper logout --openai");
+    }
+    eprintln!("  Or clear both (plus xAI): hyper logout --all");
 }
 
 /// Clear only the Kimi Code subscription credential (`oauth/kimi-code`).

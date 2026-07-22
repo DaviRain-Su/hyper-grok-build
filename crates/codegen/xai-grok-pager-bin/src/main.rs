@@ -1991,9 +1991,15 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout { kimi, openai } => {
+            Command::Logout { kimi, openai, all } => {
                 init_tracing_simple("cli");
-                if kimi {
+                if all {
+                    let config = xai_grok_shell::config::load_effective_config_disk_only()
+                        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+                    let config = AgentConfig::new_from_toml_cfg(&config)
+                        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                    xai_grok_shell::auth::run_cli_logout_all(&config)?;
+                } else if kimi {
                     xai_grok_shell::auth::run_cli_logout_kimi()?;
                 } else if openai {
                     xai_grok_shell::auth::run_cli_logout_openai_codex()?;

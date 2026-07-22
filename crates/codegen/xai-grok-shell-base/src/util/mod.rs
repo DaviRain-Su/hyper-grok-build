@@ -198,8 +198,8 @@ pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
 /// - in-tree test/dev binaries named `xai-grok-*`
 /// - managed install roots `~/.grok/bin/` and `~/.hyper/bin/`
 ///
-/// Best-effort on macOS/BSD (liveness-only via `kill -0`), exact on Linux
-/// (`/proc` cmdline) and Windows (image path).
+/// Exact on Linux (`/proc` cmdline argv0), Windows (image path), and macOS
+/// (`proc_pidpath`). Other Unix falls back to liveness-only (`kill -0`).
 pub fn is_grok_process(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -238,15 +238,68 @@ pub fn is_grok_process(pid: u32) -> bool {
         let path = String::from_utf16_lossy(&buf[..size as usize]).to_ascii_lowercase();
         process_image_looks_like_product(&path)
     }
-    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        let mut cmd = std::process::Command::new("kill");
-        cmd.args(["-0", &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        xai_tty_utils::detach_std_command(&mut cmd);
-        cmd.status().is_ok_and(|s| s.success())
+        // Prefer executable path identity (same basename rules as Linux/Windows).
+        // Fall back to liveness-only only when the path cannot be resolved.
+        match macos_process_image_path(pid) {
+            Some(path) => process_image_looks_like_product(&path),
+            None => process_is_alive_kill0(pid),
+        }
+    }
+    #[cfg(all(
+        not(target_os = "linux"),
+        not(windows),
+        not(target_os = "macos"),
+        not(target_os = "ios")
+    ))]
+    {
+        // Other Unix (e.g. BSD without libproc): liveness-only best effort.
+        process_is_alive_kill0(pid)
+    }
+}
+
+/// `kill -0` liveness probe (no signal delivered). Used as a last-resort
+/// fallback when the OS path of a process cannot be resolved.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_alive_kill0(pid: u32) -> bool {
+    let mut cmd = std::process::Command::new("kill");
+    cmd.args(["-0", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    xai_tty_utils::detach_std_command(&mut cmd);
+    cmd.status().is_ok_and(|s| s.success())
+}
+
+/// Resolve the full executable path for `pid` on macOS/iOS via `proc_pidpath`.
+///
+/// Returns `None` when the call fails (permissions, dead PID, buffer issues).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn macos_process_image_path(pid: u32) -> Option<String> {
+    // PROC_PIDPATHINFO_MAXSIZE is 4 * MAXPATHLEN (1024) on Darwin.
+    const PROC_PIDPATHINFO_MAXSIZE: usize = 4 * 1024;
+    let mut buf = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    // SAFETY: `proc_pidpath` writes at most `buf.len()` bytes into `buf` and
+    // returns the number of bytes written (excluding the trailing NUL) on
+    // success, or 0 / negative on failure. We only read the returned prefix.
+    let n = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buf.as_mut_ptr().cast::<libc::c_void>(),
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    let n = n as usize;
+    let end = buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
+    let path = std::str::from_utf8(&buf[..end]).ok()?.to_owned();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
     }
 }
 
