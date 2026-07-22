@@ -62,8 +62,15 @@ The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the c
 | `general-purpose` | Default type. Full-capability agent for any task.    |
 | `explore`         | Research agent. Searches, reads, greps, and runs shell commands, but does not edit files. Use it for codebase investigation. |
 | `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
+| `oracle`          | Deep-analysis advisor. Read-only; the working agent consults it when stuck, debugging a complex issue, or weighing approaches, then acts on its recommendation. Pin it to a stronger model for best effect. |
 
 Project- or user-defined agents can add new types or shadow these built-ins by name.
+
+### Consulting the Oracle
+
+The oracle pattern pairs a fast working model with a stronger analysis model: the main agent keeps working on its own model, and when it hits a problem that needs deeper reasoning it spawns the `oracle` subagent, reads its recommendation, and continues. The oracle is read-only at the toolset level, so it can inspect the repo but never edits it.
+
+Pin the oracle to your strongest configured model with `/agents` → select `oracle` → `m` (or `[subagents.models] oracle = "..."` in `config.toml`). Without a pin it inherits the session model, which defeats the purpose.
 
 ---
 

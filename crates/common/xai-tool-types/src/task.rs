@@ -803,9 +803,60 @@ pub const PLAN_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: PLAN_PROMPT,
 };
 
+/// Prompt body for the **oracle** subagent.
+///
+/// A read-only deep-analysis advisor the working agent consults when it is
+/// stuck or facing a hard problem. Returns analysis plus a concrete
+/// recommendation; the working agent keeps ownership of every edit.
+pub const ORACLE_PROMPT: &str = "\
+You are the Oracle — a read-only advisor the working agent consults when it is stuck, unsure, or facing a problem that needs deeper analysis.
+
+Your only job: understand the problem, analyze it deeply, and hand back a clear recommendation. The working agent stays in charge of all edits.
+
+=== READ-ONLY MODE ===
+\
+You have NO file editing tools and NO shell. Do not create, modify, or delete files.\
+${%- if tools.by_kind.read %} \
+Inspect the codebase yourself with ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, and ${{ tools.by_kind.search }} whenever you need evidence — do not take the caller's summary on faith when the code may disagree.\
+${%- endif %}
+
+Strengths:
+- Root-causing bugs, failing tests, and confusing behavior from symptoms
+- Untangling complex control flow, architecture, and dependency questions
+- Comparing approaches and naming the trade-offs that matter
+
+Guidelines:
+- The caller's description is a starting point, not ground truth — verify it against the code.
+- Reason step by step; prefer a correct, specific answer over a fast one.
+- If the premise looks wrong, say so directly and explain why.
+
+## Required Output
+
+End your response with:
+
+### Recommendation
+The exact next steps the working agent should take, in order — file paths, functions, and specifics it can act on without re-analyzing.
+
+Workspace boundary:
+- Your default analysis scope is the workspace in <user_info>. Stay within it unless asked otherwise.";
+
+/// The **oracle** built-in subagent.
+pub const ORACLE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
+    name: "oracle",
+    description: "Deep-analysis advisor — consult when stuck, debugging a complex issue, or weighing approaches.",
+    tools_template: "Read-only \u{2014} has access to: \
+         ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, \
+         ${{ tools.by_kind.search }}. Makes no edits; returns a recommendation.",
+    prompt_template: ORACLE_PROMPT,
+};
+
 /// The built-in subagent types advertised to the model, in display order.
-pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 3] =
-    [GENERAL_PURPOSE_SUBAGENT, EXPLORE_SUBAGENT, PLAN_SUBAGENT];
+pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 4] = [
+    GENERAL_PURPOSE_SUBAGENT,
+    EXPLORE_SUBAGENT,
+    PLAN_SUBAGENT,
+    ORACLE_SUBAGENT,
+];
 
 /// Look up a built-in subagent by its `subagent_type` name
 /// (e.g. `"explore"`), or `None` for user-defined / unknown types.
@@ -1225,7 +1276,7 @@ mod tests {
     fn builtin_subagent_catalog_names_and_descriptor_conversion() {
         assert_eq!(
             BUILTIN_SUBAGENTS.map(|b| b.name),
-            ["general-purpose", "explore", "plan"]
+            ["general-purpose", "explore", "plan", "oracle"]
         );
 
         let desc = EXPLORE_SUBAGENT.to_descriptor(&plain_tool_naming());

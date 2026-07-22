@@ -647,8 +647,8 @@ where
 /// are defined in exactly one place. The enum covers all built-in
 /// agents for centralized name management and `by_name()` dispatch.
 ///
-/// `subagent_variants()` returns only the 3 that are exposed to the LLM
-/// via the `TaskTool` description. The remaining 6 are top-level agent
+/// `subagent_variants()` returns the built-ins exposed to the LLM via the
+/// `TaskTool` description. The remaining variants are top-level agent
 /// profiles resolvable by name but not advertised as subagent types.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
@@ -665,6 +665,7 @@ pub enum BuiltinAgentName {
     GeneralPurpose,
     Explore,
     Plan,
+    Oracle,
     BrowserUse,
     #[strum(serialize = "grok-build-orchestrator")]
     GrokBuildOrchestrator,
@@ -694,13 +695,14 @@ impl BuiltinAgentName {
             Self::GeneralPurpose => AgentDefinition::general_purpose(),
             Self::Explore => AgentDefinition::explore(),
             Self::Plan => AgentDefinition::plan(),
+            Self::Oracle => AgentDefinition::oracle(),
             Self::BrowserUse => AgentDefinition::browser_use(),
             Self::GrokBuildOrchestrator => AgentDefinition::grok_build_orchestrator(),
         }
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan]
+        &[Self::GeneralPurpose, Self::Explore, Self::Plan, Self::Oracle]
     }
 }
 /// Portable agent identity — parsed from .grok/agents/*.md.
@@ -1556,6 +1558,23 @@ impl AgentDefinition {
             ..Self::base(BuiltinAgentName::Plan, "")
         }
     }
+    /// Oracle subagent — read-only deep-analysis advisor the working agent
+    /// consults when stuck. Read-only at the toolset (same tools as
+    /// explore); the working agent keeps ownership of every edit.
+    ///
+    /// Pairs with a stronger pinned model: `/agents` → `m`, or
+    /// `[subagents.models] oracle = "..."` in config.toml.
+    pub fn oracle() -> Self {
+        use crate::prompt::subagent_prompts;
+        Self {
+            description: xai_tool_types::ORACLE_SUBAGENT.description.to_string(),
+            tool_config: explore_toolset(),
+            permission_mode: PermissionMode::Plan,
+            prompt_body: Some(subagent_prompts::ORACLE_PROMPT.to_string()),
+            inherit_skills: false,
+            ..Self::base(BuiltinAgentName::Oracle, "")
+        }
+    }
     /// Browser Use agent definition.
     pub fn browser_use() -> Self {
         Self {
@@ -1779,6 +1798,7 @@ mod tests {
             | BuiltinAgentName::GeneralPurpose
             | BuiltinAgentName::Explore
             | BuiltinAgentName::Plan
+            | BuiltinAgentName::Oracle
             | BuiltinAgentName::Opencode
             | BuiltinAgentName::BrowserUse => false,
         }
@@ -2426,6 +2446,7 @@ description: Test default tool config
             ("general-purpose", BuiltinAgentName::GeneralPurpose),
             ("explore", BuiltinAgentName::Explore),
             ("plan", BuiltinAgentName::Plan),
+            ("oracle", BuiltinAgentName::Oracle),
             ("browser-use", BuiltinAgentName::BrowserUse),
         ] {
             let parsed = BuiltinAgentName::from_str(s).unwrap();
@@ -2455,10 +2476,11 @@ description: Test default tool config
     #[test]
     fn test_builtin_agent_name_subagent_variants() {
         let variants = BuiltinAgentName::subagent_variants();
-        assert_eq!(variants.len(), 3);
+        assert_eq!(variants.len(), 4);
         assert!(variants.contains(&BuiltinAgentName::GeneralPurpose));
         assert!(variants.contains(&BuiltinAgentName::Explore));
         assert!(variants.contains(&BuiltinAgentName::Plan));
+        assert!(variants.contains(&BuiltinAgentName::Oracle));
     }
     #[test]
     fn test_all_builtins_have_inherit_model() {

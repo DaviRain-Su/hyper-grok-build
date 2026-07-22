@@ -23,4 +23,4 @@
 //!   Bash       → `${{ tools.by_kind.execute }}`
 //!   WebSearch  → `${{ tools.by_kind.web_search }}`
 
-pub use xai_tool_types::{EXPLORE_PROMPT, GENERAL_PURPOSE_PROMPT, PLAN_PROMPT};
+pub use xai_tool_types::{EXPLORE_PROMPT, GENERAL_PURPOSE_PROMPT, ORACLE_PROMPT, PLAN_PROMPT};

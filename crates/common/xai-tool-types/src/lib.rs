@@ -13,7 +13,8 @@ pub use serde_lenient::{
 pub use task::{
     BUILTIN_SUBAGENTS, BuiltinSubagent, EXPLORE_PROMPT, EXPLORE_SUBAGENT, GENERAL_PURPOSE_PROMPT,
     GENERAL_PURPOSE_SUBAGENT, KillTaskOutput, KillTaskResult, KillTaskToolInput,
-    KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MultiTaskOutputResult, PLAN_PROMPT, PLAN_SUBAGENT,
+    KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MultiTaskOutputResult, ORACLE_PROMPT, ORACLE_SUBAGENT,
+    PLAN_PROMPT, PLAN_SUBAGENT,
     SubagentCapabilityMode, SubagentCompletedOutput, SubagentDescriptor, SubagentIsolationMode,
     SubagentToolNaming, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
     TaskOutputToolNaming, TaskToolInput, TaskToolNaming, WaitMode, WaitTasksToolInput,
