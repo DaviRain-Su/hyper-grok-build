@@ -2550,6 +2550,78 @@ async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only()
     assert_eq!(model_id.0.as_ref(), "auto");
 }
 #[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_wires_kimi_code_bearer_resolver() {
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    let mut models = indexmap::IndexMap::new();
+    let mut kimi = test_model_entry("kimi-for-coding");
+    kimi.info.id = Some("kimi-code/kimi-for-coding".to_string());
+    models.insert("auto".to_string(), kimi);
+    let mut ctx = ctx_with_parent_chat_state("auto", "kimi-for-coding", "auto", models);
+    ctx.parent_chat_state = Some(spawn_test_parent_chat_state_at(
+        "kimi-for-coding",
+        "https://api.kimi.com/coding/v1",
+    ));
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(model_id.0.as_ref(), "auto");
+    let resolver = config
+        .bearer_resolver
+        .expect("a Kimi Code subagent must refresh the short-lived parent bearer");
+    assert!(
+        format!("{resolver:?}").contains("KimiCodeBearerResolver"),
+        "the parent catalog platform must select the Kimi resolver: {resolver:?}"
+    );
+    assert!(config.api_key.is_none());
+    assert!(config.kimi_dialect);
+    assert!(!config.responses_codex_dialect);
+    assert!(!config.extra_headers.contains_key("OpenAI-Beta"));
+    assert!(!config.extra_headers.contains_key("originator"));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_uses_catalog_platform_on_shared_oauth_proxy() {
+    let proxy = "https://oauth-proxy.example.test/v1";
+    let _kimi_base = xai_grok_test_support::EnvGuard::set(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+        proxy,
+    );
+    let _codex_base =
+        xai_grok_test_support::EnvGuard::set("GROK_OPENAI_CODEX_BASE_URL", proxy);
+
+    let mut codex = test_model_entry("gpt-5.1-codex");
+    codex.info.id = Some("openai-codex/gpt-5.1-codex".to_string());
+    codex.info.base_url = proxy.to_string();
+    let mut models = indexmap::IndexMap::new();
+    models.insert("auto".to_string(), codex);
+    let mut ctx = ctx_with_parent_chat_state("auto", "gpt-5.1-codex", "auto", models);
+    let parent = spawn_test_parent_chat_state_at("gpt-5.1-codex", proxy);
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("stale-catalog-token".to_string()),
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    let resolver = config
+        .bearer_resolver
+        .expect("Codex parent must retain its live resolver");
+    assert!(
+        format!("{resolver:?}").contains("OpenAiCodexBearerResolver"),
+        "shared origin must not select the Kimi resolver: {resolver:?}"
+    );
+    assert!(config.api_key.is_none());
+    assert!(config.responses_codex_dialect);
+    assert!(!config.kimi_dialect);
+    assert!(config.extra_headers.contains_key("OpenAI-Beta"));
+    assert!(config.extra_headers.contains_key("originator"));
+    assert!(!config.extra_headers.contains_key("anthropic-version"));
+    assert!(!config.extra_headers.contains_key("X-Msh-Device-Id"));
+}
+
+#[tokio::test]
 async fn read_parent_sampling_config_fallback_uses_session_model_id() {
     let mut models = indexmap::IndexMap::new();
     models.insert("composer-2-fast".to_string(), test_model_entry("composer-2-fast"));

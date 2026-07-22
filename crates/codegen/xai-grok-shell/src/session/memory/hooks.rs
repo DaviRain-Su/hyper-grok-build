@@ -227,6 +227,7 @@ mod tests {
             content: text.into(),
             tool_calls: vec![],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })

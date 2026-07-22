@@ -2041,8 +2041,8 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
         ConversationItem::assistant("a1"), ConversationItem::user("q2"),
         ConversationItem::Assistant(AssistantItem { content : String::new().into(),
         tool_calls : vec![ToolCall { id : "tc1".into(), name : "bash".into(), arguments :
-        "{}".into(), }], model_id : None, model_fingerprint : None, reasoning_effort :
-        None, }),
+        "{}".into(), }], model_id : None, reasoning_model_identity : None, model_fingerprint : None,
+        reasoning_effort : None, }),
     ];
     let ctx = verbatim_or_normalize_fork(items, 256_000);
     assert_eq!(ctx.source, InitialContextSource::Forked);
@@ -3621,12 +3621,20 @@ fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingCo
     }
 }
 fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHandle {
+    spawn_test_parent_chat_state_at(model_slug, "https://api.test/v1")
+}
+fn spawn_test_parent_chat_state_at(
+    model_slug: &str,
+    base_url: &str,
+) -> xai_chat_state::ChatStateHandle {
     let (mock, _persistence_rx) = xai_chat_state::MockChatPersistence::new();
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let token = tokio_util::sync::CancellationToken::new();
+    let mut sampling_config = test_sampling_config(model_slug);
+    sampling_config.base_url = base_url.to_owned();
     xai_chat_state::ChatStateActor::spawn(
         vec![],
-        test_sampling_config(model_slug),
+        sampling_config,
         Box::new(mock),
         event_tx,
         token,

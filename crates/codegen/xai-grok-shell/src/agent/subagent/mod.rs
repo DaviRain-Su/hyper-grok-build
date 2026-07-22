@@ -973,23 +973,74 @@ async fn read_parent_sampling_config(
     if let Some(ref chat_state) = ctx.parent_chat_state {
         if let Some(cfg) = chat_state.get_sampling_config().await {
             let creds = chat_state.get_credentials().await;
+            // OAuth subagent sessions keep the live bearer resolver, headers,
+            // and dialect of the parent's catalog platform (stamped api_key
+            // alone goes stale). Never choose from origin alone: Kimi and
+            // Codex may share a user-configured reverse proxy.
+            let catalog = ctx.models_manager.models();
+            let parent_model =
+                crate::agent::config::find_model_by_id(&catalog, ctx.model_id.0.as_ref());
+            let oauth_platform = match parent_model {
+                Some(model) => crate::agent::config::oauth_platform_for_model(model),
+                None => crate::agent::config::oauth_platform_for_base_url(&cfg.base_url),
+            };
+            let oauth_origin = xai_grok_models::PlatformId::KimiCode
+                .base_url_matches(&cfg.base_url)
+                || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
+            let same_baseline_route = ctx.sampling_config.model == cfg.model
+                && ctx.sampling_config.base_url.trim_end_matches('/')
+                    == cfg.base_url.trim_end_matches('/');
+            let (bearer_resolver, responses_codex_dialect, kimi_dialect) = match parent_model {
+                Some(model) => (
+                    crate::agent::config::kimi_code_bearer_resolver_for_model(model).or_else(
+                        || crate::agent::config::openai_codex_bearer_resolver_for_model(model),
+                    ),
+                    crate::agent::config::model_uses_openai_codex_oauth(model),
+                    crate::agent::config::model_uses_kimi_request_dialect(model),
+                ),
+                None => (
+                    match oauth_platform {
+                        Some(xai_grok_models::PlatformId::KimiCode) => {
+                            crate::agent::config::kimi_code_bearer_resolver_for_base_url(
+                                &cfg.base_url,
+                            )
+                        }
+                        Some(xai_grok_models::PlatformId::OpenAiCodex) => {
+                            crate::agent::config::openai_codex_bearer_resolver_for_base_url(
+                                &cfg.base_url,
+                            )
+                        }
+                        _ if !oauth_origin && same_baseline_route => {
+                            ctx.sampling_config.bearer_resolver.clone()
+                        }
+                        _ => None,
+                    },
+                    oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex),
+                    oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+                        || xai_grok_models::PlatformId::MoonshotCn.base_url_matches(&cfg.base_url)
+                        || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url),
+                ),
+            };
+            let auth_scheme = parent_model
+                .map(|model| model.info().auth_scheme)
+                .or_else(|| {
+                    crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
+                        .map(|resolved| resolved.auth_scheme)
+                })
+                .unwrap_or_default();
             let mut extra_headers = cfg.extra_headers;
             crate::agent::config::inject_url_derived_headers(
                 &mut extra_headers,
                 creds.alpha_test_key.as_deref(),
                 &cfg.base_url,
             );
-            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
-                .map(|r| r.auth_scheme)
-                .unwrap_or_default();
-            // Codex subagent sessions keep the live bearer resolver + dialect
-            // of the parent's platform (stamped api_key alone goes stale).
-            let codex_bearer_resolver =
-                crate::agent::config::openai_codex_bearer_resolver_for_base_url(&cfg.base_url);
-            let responses_codex_dialect =
-                xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
+            crate::agent::config::align_oauth_headers_with_platform(
+                &mut extra_headers,
+                oauth_platform,
+                &cfg.base_url,
+            );
             let inherited = xai_grok_sampler::SamplerConfig {
-                api_key: creds.api_key,
+                api_key: if oauth_origin { None } else { creds.api_key },
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
                 max_completion_tokens: cfg.max_completion_tokens,
@@ -1010,7 +1061,7 @@ async fn read_parent_sampling_config(
                 user_id: ctx.sampling_config.user_id.clone(),
                 origin_client: ctx.sampling_config.origin_client.clone(),
                 attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver: codex_bearer_resolver,
+                bearer_resolver,
                 supports_backend_search: ctx
                     .models_manager
                     .model_supports_backend_search(ctx.model_id.0.as_ref()),
@@ -1023,7 +1074,7 @@ async fn read_parent_sampling_config(
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
                 responses_codex_dialect,
-                kimi_dialect: ctx.sampling_config.kimi_dialect,
+                kimi_dialect,
             };
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();

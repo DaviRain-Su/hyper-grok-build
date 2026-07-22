@@ -181,9 +181,41 @@ impl Default for SamplerConfig {
     }
 }
 
+/// One authoritative per-request auth resolution.
+///
+/// `headers` are inserted after `remove_headers` are cleared, allowing an
+/// OAuth resolver to atomically align provider-specific headers with the
+/// bearer it just refreshed. This avoids a second credential lookup and also
+/// removes stale construction-time headers when live resolution fails.
+#[derive(Debug, Clone, Default)]
+pub struct BearerResolution {
+    /// Current live token, or `None` when auth cannot be resolved.
+    pub bearer: Option<String>,
+    /// Companion headers derived from the exact same credential.
+    pub headers: reqwest::header::HeaderMap,
+    /// Construction-time headers that must be cleared before applying `headers`.
+    pub remove_headers: Vec<reqwest::header::HeaderName>,
+}
+
+impl BearerResolution {
+    /// Build a token-only resolution for providers without companion headers.
+    pub fn from_bearer(bearer: Option<String>) -> Self {
+        Self {
+            bearer,
+            ..Self::default()
+        }
+    }
+}
+
 /// Cheap sync read of the current bearer for [`SamplerConfig::bearer_resolver`].
 pub trait BearerResolver: Send + Sync + std::fmt::Debug {
     fn current_bearer(&self) -> Option<String>;
+
+    /// Resolve the bearer and any provider-specific companion headers once.
+    /// Implementors that only provide a token inherit the legacy behavior.
+    fn resolve_bearer(&self) -> BearerResolution {
+        BearerResolution::from_bearer(self.current_bearer())
+    }
 }
 
 pub type SharedBearerResolver = std::sync::Arc<dyn BearerResolver>;

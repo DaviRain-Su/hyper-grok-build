@@ -272,6 +272,7 @@ pub fn stream_chat_completions<'a>(
                 content: std::sync::Arc::<str>::from(content_acc),
                 tool_calls,
                 model_id: Some(model),
+                reasoning_model_identity: None,
                 model_fingerprint,
                 // Chat Completions does not echo the applied reasoning effort.
                 reasoning_effort: None,

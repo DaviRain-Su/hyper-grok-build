@@ -1,9 +1,8 @@
 //! Compacts the current conversation and generates a summary of the conversation which
 //! gets passed to the next turn of the model
 use crate::sampling::{
-    ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
-    ConversationItem, ConversationRequest, ConversationToolChoice, HostedTool, SamplingError,
-    ToolChoice, ToolDefinition, ToolSpec, conversation_to_chat_messages,
+    ApiBackend, Client as OaiCompatClient, ConversationItem, ConversationRequest,
+    ConversationToolChoice, HostedTool, SamplingError, ToolSpec,
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
@@ -357,41 +356,32 @@ pub(crate) async fn generate_session_compact(
     tool_choice: crate::util::config::CompactionToolChoice,
 ) -> Result<CompactOutput, CompactFailure> {
     let num_messages = chat_history.len();
-    let wire_tool_choice = match tool_choice {
-        crate::util::config::CompactionToolChoice::Auto => ToolChoice::auto(),
-        crate::util::config::CompactionToolChoice::None => ToolChoice::none(),
-    };
     let conversation_tool_choice = match tool_choice {
         crate::util::config::CompactionToolChoice::Auto => ConversationToolChoice::Auto,
         crate::util::config::CompactionToolChoice::None => ConversationToolChoice::None,
     };
     let output = match sampling_config.api_backend {
         ApiBackend::ChatCompletions => {
-            let chat_messages: Vec<ChatRequestMessage> =
-                conversation_to_chat_messages(chat_history);
-            let mut message =
-                ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages)
-                    .with_temperature(1.0);
-            if !tools.is_empty() {
-                message = message
-                    .with_tools(
-                        tools
-                            .into_iter()
-                            .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
-                            .collect(),
-                    )
-                    .with_tool_choice(wire_tool_choice);
-            }
-            let sid = session_id.to_string();
-            message.x_grok_conv_id = Some(sid.clone());
-            message.x_grok_req_id = Some(format!("xai-compact-{}", uuid::Uuid::new_v4()));
-            message.x_grok_session_id = Some(sid);
-            message.x_grok_agent_id = Some(xai_grok_telemetry::id::agent_id());
+            let request = ConversationRequest {
+                items: chat_history,
+                tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
+                tools,
+                hosted_tools,
+                model: Some(sampling_config.model.to_owned()),
+                temperature: Some(1.0),
+                x_grok_conv_id: Some(session_id.to_string()),
+                x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
+                x_grok_session_id: Some(session_id.to_string()),
+                x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                ..Default::default()
+            };
             tracing::info!(
                 compact_model = % sampling_config.model, num_messages = num_messages,
                 "Sending compact request (streaming)"
             );
-            let stream_result = client.chat_completion_stream(message).await;
+            // Route through SamplingClient's unified conversation path so the
+            // actual client backend and endpoint govern opaque reasoning replay.
+            let stream_result = client.conversation_stream(request).await;
             let mut stream = match stream_result {
                 Ok((s, _metadata)) => s,
                 Err(e) => return Err(classify_sampling_error(e)),
@@ -990,6 +980,7 @@ mod compacted_history_shape_tests {
                     arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -1001,6 +992,7 @@ mod compacted_history_shape_tests {
             r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#
             .into(), }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -1166,6 +1158,7 @@ mod compacted_history_shape_tests {
                     arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -1512,7 +1505,7 @@ mod compacted_history_shape_tests {
 #[cfg(test)]
 mod reasoning_compaction_regression_tests {
     use super::*;
-    use crate::sampling::{Client, SamplerConfig, rs};
+    use crate::sampling::{Client, ReasoningModelIdentity, SamplerConfig, rs};
     use axum::Router;
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::routing::post;
@@ -1697,6 +1690,98 @@ mod reasoning_compaction_regression_tests {
         assert_eq!(output.content, "<summary>ok</summary>");
         let _ = shutdown_tx.send(());
     }
+
+    #[tokio::test]
+    async fn verbatim_chat_compaction_strips_reasoning_after_endpoint_switch() {
+        use std::sync::{Arc, Mutex};
+
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let cap = Arc::clone(&cap);
+                async move {
+                    cap.lock().unwrap().push(body.0);
+                    let stream = stream::iter(
+                        summary_stream()
+                            .into_iter()
+                            .map(Ok::<_, std::convert::Infallible>),
+                    );
+                    Sse::new(stream).keep_alive(KeepAlive::default())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let base_url = format!("http://{addr}/v1");
+        let config = test_config(&base_url);
+        let client = Client::new(config.clone()).unwrap();
+        let chat_history = vec![
+            ConversationItem::system("You are a helpful assistant."),
+            ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "r1".to_string(),
+                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                    text: "provider-owned thought".to_string(),
+                })],
+                content: None,
+                encrypted_content: None,
+                status: None,
+            }),
+            ConversationItem::assistant_with_model("I fixed it.", "test-model")
+                .with_reasoning_model_identity(ReasoningModelIdentity::new(
+                    "test-model",
+                    ApiBackend::ChatCompletions,
+                    "https://old-provider.example/v1",
+                )),
+            ConversationItem::user("Summarize the conversation so far."),
+        ];
+
+        generate_session_compact(
+            chat_history,
+            vec![],
+            vec![],
+            client,
+            acp::SessionId::new("test-session"),
+            &config,
+            std::time::Duration::from_secs(30),
+            0,
+            crate::util::config::CompactionToolChoice::Auto,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("compaction must succeed after an endpoint switch"));
+
+        let bodies = captured.lock().unwrap();
+        let messages = bodies[0]
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .expect("chat request contains messages");
+        let assistant = messages
+            .iter()
+            .find(|message| message.get("content") == Some(&json!("I fixed it.")))
+            .expect("portable assistant text remains in the compaction request");
+        assert!(
+            assistant.get("reasoning_content").is_none()
+                || assistant
+                    .get("reasoning_content")
+                    .is_some_and(serde_json::Value::is_null),
+            "provider-owned reasoning must not cross endpoints: {assistant}"
+        );
+        drop(bodies);
+        let _ = shutdown_tx.send(());
+    }
+
     #[tokio::test]
     async fn chat_completions_compaction_attaches_tools_with_tool_choice_auto() {
         use std::sync::{Arc, Mutex};

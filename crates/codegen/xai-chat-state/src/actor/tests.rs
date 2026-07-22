@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use xai_grok_sampling_types::{ConversationItem, SamplingConfig};
+use xai_grok_sampling_types::{ConversationItem, ReasoningModelIdentity, SamplingConfig};
 
 use crate::StrictAppendAck;
 use crate::actor::ChatStateActor;
@@ -1413,6 +1413,15 @@ async fn build_request_includes_all_messages() {
     assert_eq!(request.items.len(), 2);
     assert_eq!(request.x_grok_conv_id, Some("conv-1".to_string()));
     assert_eq!(request.x_grok_req_id, Some("req-1".to_string()));
+    assert_eq!(
+        request.reasoning_model_identity,
+        Some(ReasoningModelIdentity::new(
+            "test-model",
+            Default::default(),
+            "https://api.example.com",
+        )),
+        "production requests must carry exact routing provenance"
+    );
 }
 
 #[tokio::test]
@@ -1742,6 +1751,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
                 },
             ],
             model_id: Some("grok-3".to_string()),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         });
@@ -2028,6 +2038,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
                 },
             ],
             model_id: Some("grok-3".to_string()),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -3660,6 +3671,7 @@ async fn get_last_model_metadata_returns_both_fields() {
             content: "hello".into(),
             tool_calls: vec![],
             model_id: Some("grok-4.5".into()),
+            reasoning_model_identity: None,
             model_fingerprint: Some("fp_abc123".into()),
             reasoning_effort: None,
         }),
@@ -3709,6 +3721,7 @@ async fn sampling_config_survives_compaction_replacement() {
                 content: "I'll fix it.".into(),
                 tool_calls: vec![],
                 model_id: Some("grok-4.5".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: Some("fp_abc123".into()),
                 reasoning_effort: None,
             }),
@@ -3792,6 +3805,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 content: "done".into(),
                 tool_calls: vec![],
                 model_id: Some("grok-4.5".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
             }),
@@ -3827,6 +3841,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 content: "working on it".into(),
                 tool_calls: vec![],
                 model_id: Some("grok-4.5".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
             },

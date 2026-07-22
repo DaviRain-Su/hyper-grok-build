@@ -5307,6 +5307,8 @@ pub fn try_resolve_model_credentials(
 pub struct ModelAuthFacts {
     pub byok: ModelByok,
     pub auth_scheme: AuthScheme,
+    /// Stable catalog platform for OAuth resolver/header/recovery selection.
+    pub oauth_platform: Option<xai_grok_models::PlatformId>,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -5322,6 +5324,7 @@ pub fn resolve_model_auth_facts_and_provider(
             ModelAuthFacts {
                 byok: ModelByok::Unknown,
                 auth_scheme: AuthScheme::default(),
+                oauth_platform: None,
             },
             None,
         );
@@ -5332,6 +5335,10 @@ pub fn resolve_model_auth_facts_and_provider(
             auth_scheme: match lookup {
                 ModelLookup::Loaded(Some(e)) => e.info().auth_scheme,
                 _ => AuthScheme::default(),
+            },
+            oauth_platform: match lookup {
+                ModelLookup::Loaded(Some(e)) => oauth_platform_for_model(e),
+                _ => None,
             },
         };
         let provider = match lookup {
@@ -5580,6 +5587,11 @@ pub fn sampling_config_for_model(
         alpha_test_key.as_deref(),
         &credentials.base_url,
     );
+    align_oauth_headers_with_platform(
+        &mut extra_headers,
+        oauth_platform_for_model(model),
+        &credentials.base_url,
+    );
     let api_backend = info.api_backend.clone();
     // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
     // so a catalog stamp from login is never sent after expiry.
@@ -5587,14 +5599,8 @@ pub fn sampling_config_for_model(
         .or_else(|| openai_codex_bearer_resolver_for_model(model));
     let responses_codex_dialect = model_uses_openai_codex_oauth(model);
     let kimi_dialect = model_uses_kimi_request_dialect(model);
-    // Live-refresh chatgpt-account-id per request (same cadence as the bearer).
-    let header_injector = if responses_codex_dialect {
-        Some(std::sync::Arc::new(
-            crate::auth::openai_codex::OpenAiCodexAccountHeaderInjector,
-        ) as xai_grok_sampler::SharedHeaderInjector)
-    } else {
-        None
-    };
+    // The Codex bearer resolver returns `chatgpt-account-id` from the same
+    // live credential resolution; no second per-request header lookup is needed.
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5622,25 +5628,48 @@ pub fn sampling_config_for_model(
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
-        header_injector,
+        header_injector: None,
         responses_codex_dialect,
         kimi_dialect,
     }
 }
 
-/// Whether this catalog entry routes through Kimi Code OAuth (subscription).
+/// Resolve the OAuth platform from stable catalog identity first.
 ///
-/// Must match Kimi explicitly — not every OAuth platform. `PlatformId::uses_oauth()`
-/// also covers OpenAI Codex; treating Codex as Kimi would install the wrong
-/// bearer resolver ahead of [`openai_codex_bearer_resolver_for_model`].
-pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
-    let catalog_id = model.info.id.as_deref().unwrap_or(model.info.model.as_str());
-    if xai_grok_models::parse_managed_model_key(catalog_id)
-        .is_some_and(|(p, _)| p == xai_grok_models::PlatformId::KimiCode)
-    {
-        return true;
+/// URL matching is only a fallback for legacy unqualified entries, and is
+/// rejected when Kimi and Codex share one configured reverse-proxy origin.
+pub(crate) fn oauth_platform_for_model(model: &ModelEntry) -> Option<xai_grok_models::PlatformId> {
+    let catalog_id = model
+        .info
+        .id
+        .as_deref()
+        .unwrap_or(model.info.model.as_str());
+    if let Some((platform, _)) = xai_grok_models::parse_managed_model_key(catalog_id) {
+        return platform.uses_oauth().then_some(platform);
     }
-    xai_grok_models::PlatformId::KimiCode.base_url_matches(&model.info.base_url)
+
+    oauth_platform_for_base_url(&model.info.base_url)
+}
+
+/// Resolve an OAuth platform from a URL only when exactly one provider owns it.
+/// Shared user-configured proxies deliberately return `None` rather than
+/// guessing which credential family to send.
+pub(crate) fn oauth_platform_for_base_url(base_url: &str) -> Option<xai_grok_models::PlatformId> {
+    use xai_grok_models::PlatformId;
+
+    match (
+        PlatformId::KimiCode.base_url_matches(base_url),
+        PlatformId::OpenAiCodex.base_url_matches(base_url),
+    ) {
+        (true, false) => Some(PlatformId::KimiCode),
+        (false, true) => Some(PlatformId::OpenAiCodex),
+        _ => None,
+    }
+}
+
+/// Whether this catalog entry routes through Kimi Code OAuth (subscription).
+pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
+    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::KimiCode)
 }
 
 /// Whether request bodies should use Moonshot/Kimi-specific shaping
@@ -5674,7 +5703,7 @@ pub fn kimi_code_bearer_resolver_for_model(model: &ModelEntry) -> Option<SharedB
 /// Same as [`kimi_code_bearer_resolver_for_model`] but from a bare routing
 /// slug + base URL (session reconstruct path may not have the full entry).
 pub fn kimi_code_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBearerResolver> {
-    if !xai_grok_models::PlatformId::KimiCode.base_url_matches(base_url) {
+    if oauth_platform_for_base_url(base_url) != Some(xai_grok_models::PlatformId::KimiCode) {
         return None;
     }
     Some(Arc::new(crate::auth::kimi::KimiCodeBearerResolver) as SharedBearerResolver)
@@ -5682,13 +5711,7 @@ pub fn kimi_code_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBe
 
 /// Whether this catalog entry routes through OpenAI Codex (ChatGPT) OAuth.
 pub fn model_uses_openai_codex_oauth(model: &ModelEntry) -> bool {
-    let catalog_id = model.info.id.as_deref().unwrap_or(model.info.model.as_str());
-    if xai_grok_models::parse_managed_model_key(catalog_id)
-        .is_some_and(|(p, _)| p == xai_grok_models::PlatformId::OpenAiCodex)
-    {
-        return true;
-    }
-    xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&model.info.base_url)
+    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::OpenAiCodex)
 }
 
 /// Per-request bearer for OpenAI Codex models; `None` for everything else.
@@ -5701,7 +5724,7 @@ pub fn openai_codex_bearer_resolver_for_model(model: &ModelEntry) -> Option<Shar
 
 /// Same as [`openai_codex_bearer_resolver_for_model`] but from a bare base URL.
 pub fn openai_codex_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBearerResolver> {
-    if !xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(base_url) {
+    if oauth_platform_for_base_url(base_url) != Some(xai_grok_models::PlatformId::OpenAiCodex) {
         return None;
     }
     Some(Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver) as SharedBearerResolver)
@@ -5780,15 +5803,10 @@ pub fn inject_url_derived_headers(
             }
         }
     }
-    // ChatGPT Codex backend requires the Responses-beta flag, an originator
-    // tag, and the per-account header (Pi `buildBaseCodexHeaders`). The
-    // account id comes from the stored OAuth credential; skip silently when
-    // signed out (the request will 401 and surface the login hint).
-    //
-    // Always overwrite `chatgpt-account-id` (do not `or_insert`): session
-    // sampling configs carry `extra_headers` across turns, so a sticky first
-    // value would pair a re-login bearer with a stale account after
-    // `/login openai` as a different ChatGPT account.
+    // ChatGPT Codex requires the Responses-beta and originator headers. The
+    // live bearer resolver adds `chatgpt-account-id` from the exact same auth
+    // resolution as the token; remove any carried value here so a stale account
+    // can never survive when live auth fails.
     if xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(base_url) {
         headers
             .entry("OpenAI-Beta".to_string())
@@ -5796,25 +5814,51 @@ pub fn inject_url_derived_headers(
         headers
             .entry("originator".to_string())
             .or_insert_with(|| "grok-build".to_string());
-        // Honor `GROK_AUTH_PATH` (same path login/store use), not only `~/.grok`.
-        let account_id = {
-            let auth_path = crate::auth::auth_json_path();
-            let home = auth_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            crate::auth::read_openai_codex_auth(home).and_then(|auth| auth.account_id)
-        };
-        match account_id {
-            Some(account_id) => {
-                headers.insert("chatgpt-account-id".to_string(), account_id);
-            }
-            None => {
-                headers.shift_remove("chatgpt-account-id");
-            }
-        }
+        headers.shift_remove("chatgpt-account-id");
     }
     let _ = (alpha_test_key, base_url);
 }
+
+/// Remove OAuth-provider headers that do not belong to the selected catalog
+/// platform. This is required when Kimi and Codex share a configured proxy:
+/// URL-derived injection alone would otherwise combine both credential
+/// families on one request.
+pub(crate) fn align_oauth_headers_with_platform(
+    headers: &mut IndexMap<String, String>,
+    platform: Option<xai_grok_models::PlatformId>,
+    base_url: &str,
+) {
+    use xai_grok_models::PlatformId;
+
+    let is_oauth_origin = PlatformId::KimiCode.base_url_matches(base_url)
+        || PlatformId::OpenAiCodex.base_url_matches(base_url);
+    if !is_oauth_origin {
+        return;
+    }
+
+    if platform != Some(PlatformId::KimiCode) {
+        const KIMI_HEADERS: [&str; 4] = [
+            "anthropic-version",
+            "x-msh-device-name",
+            "x-msh-device-model",
+            "x-msh-device-id",
+        ];
+        headers.retain(|name, _| {
+            !KIMI_HEADERS
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        });
+    }
+    if platform != Some(PlatformId::OpenAiCodex) {
+        const CODEX_HEADERS: [&str; 3] = ["openai-beta", "originator", "chatgpt-account-id"];
+        headers.retain(|name, _| {
+            !CODEX_HEADERS
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        });
+    }
+}
+
 pub fn resolve_model_to_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -6218,36 +6262,14 @@ reasoning_effort = "low"
             );
         }
     }
-    /// Stale `chatgpt-account-id` in carried session headers must be overwritten
-    /// from the current on-disk Codex credential (not `or_insert`).
+    /// Static config must never carry an account id independently from the
+    /// live bearer resolution that owns it.
     #[test]
-    #[serial]
-    fn inject_url_derived_headers_overwrites_codex_account_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let auth_path = dir.path().join("auth.json");
-        let _guard = xai_grok_test_support::EnvGuard::set(
-            "GROK_AUTH_PATH",
-            auth_path.to_str().unwrap(),
-        );
-        let auth = crate::auth::GrokAuth {
-            key: "access".into(),
-            auth_mode: crate::auth::AuthMode::OpenAiCodex,
-            account_id: Some("acct-new".into()),
-            ..Default::default()
-        };
-        crate::auth::store_openai_codex_auth(dir.path(), &auth).unwrap();
-
+    fn inject_url_derived_headers_removes_stale_codex_account_id() {
         let mut headers = IndexMap::new();
         headers.insert("chatgpt-account-id".to_string(), "acct-stale".to_string());
-        inject_url_derived_headers(
-            &mut headers,
-            None,
-            "https://chatgpt.com/backend-api/codex",
-        );
-        assert_eq!(
-            headers.get("chatgpt-account-id").map(String::as_str),
-            Some("acct-new")
-        );
+        inject_url_derived_headers(&mut headers, None, "https://chatgpt.com/backend-api/codex");
+        assert!(headers.get("chatgpt-account-id").is_none());
         assert_eq!(
             headers.get("OpenAI-Beta").map(String::as_str),
             Some("responses=experimental")
@@ -7071,7 +7093,13 @@ if n == name && f.as_deref() == field
     /// Regression: `model_uses_kimi_code_oauth` used to match any `uses_oauth()`
     /// platform and installed `KimiCodeBearerResolver` on `openai-codex/*`.
     #[test]
+    #[serial]
     fn oauth_platform_helpers_distinguish_kimi_and_codex() {
+        let proxy = "https://oauth-proxy.example.test/v1";
+        let _kimi_base =
+            xai_grok_test_support::EnvGuard::set(xai_grok_models::KIMI_CODE_BASE_URL_ENV, proxy);
+        let _codex_base = xai_grok_test_support::EnvGuard::set("GROK_OPENAI_CODEX_BASE_URL", proxy);
+
         let mut kimi = test_model_entry(
             "kimi-for-coding",
             "https://api.kimi.com/coding/v1",
@@ -7080,6 +7108,7 @@ if n == name && f.as_deref() == field
             None,
         );
         kimi.info.id = Some("kimi-code/kimi-for-coding".into());
+        kimi.info.base_url = proxy.to_string();
 
         let mut codex = test_model_entry(
             "gpt-5.1-codex",
@@ -7089,6 +7118,7 @@ if n == name && f.as_deref() == field
             None,
         );
         codex.info.id = Some("openai-codex/gpt-5.1-codex".into());
+        codex.info.base_url = proxy.to_string();
 
         assert!(model_uses_kimi_code_oauth(&kimi));
         assert!(!model_uses_openai_codex_oauth(&kimi));
@@ -7099,6 +7129,46 @@ if n == name && f.as_deref() == field
         assert!(model_uses_openai_codex_oauth(&codex));
         assert!(kimi_code_bearer_resolver_for_model(&codex).is_none());
         assert!(openai_codex_bearer_resolver_for_model(&codex).is_some());
+        assert!(
+            oauth_platform_for_base_url(proxy).is_none(),
+            "an ambiguous origin must never choose a credential family"
+        );
+
+        let all_provider_headers = || {
+            IndexMap::from([
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                ("X-Msh-Device-Id".to_string(), "device".to_string()),
+                (
+                    "OpenAI-Beta".to_string(),
+                    "responses=experimental".to_string(),
+                ),
+                ("originator".to_string(), "grok-build".to_string()),
+                ("chatgpt-account-id".to_string(), "acct".to_string()),
+            ])
+        };
+        let mut kimi_headers = all_provider_headers();
+        align_oauth_headers_with_platform(
+            &mut kimi_headers,
+            Some(xai_grok_models::PlatformId::KimiCode),
+            proxy,
+        );
+        assert!(kimi_headers.contains_key("anthropic-version"));
+        assert!(kimi_headers.contains_key("X-Msh-Device-Id"));
+        assert!(!kimi_headers.contains_key("OpenAI-Beta"));
+        assert!(!kimi_headers.contains_key("originator"));
+        assert!(!kimi_headers.contains_key("chatgpt-account-id"));
+
+        let mut codex_headers = all_provider_headers();
+        align_oauth_headers_with_platform(
+            &mut codex_headers,
+            Some(xai_grok_models::PlatformId::OpenAiCodex),
+            proxy,
+        );
+        assert!(!codex_headers.contains_key("anthropic-version"));
+        assert!(!codex_headers.contains_key("X-Msh-Device-Id"));
+        assert!(codex_headers.contains_key("OpenAI-Beta"));
+        assert!(codex_headers.contains_key("originator"));
+        assert!(codex_headers.contains_key("chatgpt-account-id"));
     }
 
     /// Pi stores Anthropic's SDK root (`api.anthropic.com`) on every catalog

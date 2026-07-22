@@ -195,6 +195,7 @@ impl SessionActor {
                 ModelByok::NotByok
             },
             auth_scheme: entry.info().auth_scheme,
+            oauth_platform: crate::agent::config::oauth_platform_for_model(entry),
         };
         let provider = entry.effective_auth_provider().cloned();
         Some((facts, provider))
@@ -362,20 +363,13 @@ impl SessionActor {
     pub(super) async fn reconstruct_full_config(&self) -> SamplingConfig {
         #[allow(clippy::items_after_statements)]
         #[derive(Debug)]
-        struct SessionHeaderInjector {
-            /// When true, refresh `chatgpt-account-id` from the live Codex
-            /// credential so re-login mid-session cannot stick a stale account.
-            codex_account: bool,
-        }
+        struct SessionHeaderInjector;
         impl xai_grok_sampler::HeaderInjector for SessionHeaderInjector {
             fn inject(&self, headers: &mut reqwest::header::HeaderMap) {
                 if let Some(tp) = xai_file_utils::trace_context::current_traceparent()
                     && let Ok(v) = reqwest::header::HeaderValue::from_str(&tp)
                 {
                     headers.insert("traceparent", v);
-                }
-                if self.codex_account {
-                    crate::auth::openai_codex::OpenAiCodexAccountHeaderInjector::apply(headers);
                 }
             }
         }
@@ -409,6 +403,11 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
+        let oauth_platform = model_facts
+            .oauth_platform
+            .or_else(|| crate::agent::config::oauth_platform_for_base_url(&cfg.base_url));
+        let oauth_origin = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
+            || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
@@ -423,20 +422,32 @@ impl SessionActor {
         let use_bearer_resolver = gate.active() && open_platform.is_none();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         let auth_scheme = model_facts.auth_scheme;
-        // Capture before `cfg` fields are moved into `SamplingConfig`.
-        let kimi_bearer_resolver =
-            crate::agent::config::kimi_code_bearer_resolver_for_base_url(&cfg.base_url);
-        let codex_bearer_resolver =
-            crate::agent::config::openai_codex_bearer_resolver_for_base_url(&cfg.base_url);
+        // Capture before `cfg` fields are moved into `SamplingConfig`. Catalog
+        // identity wins; URL fallback above is accepted only when unambiguous.
+        let kimi_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
+            (oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)).then(|| {
+                std::sync::Arc::new(crate::auth::kimi::KimiCodeBearerResolver)
+                    as xai_grok_sampler::SharedBearerResolver
+            });
+        let codex_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
+            (oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex)).then(|| {
+                std::sync::Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver)
+                    as xai_grok_sampler::SharedBearerResolver
+            });
         let responses_codex_dialect =
-            xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
-        let kimi_dialect = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
+            oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
+        let kimi_dialect = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
             || xai_grok_models::PlatformId::MoonshotCn.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url);
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
             creds.alpha_test_key.as_deref(),
+            &cfg.base_url,
+        );
+        crate::agent::config::align_oauth_headers_with_platform(
+            &mut extra_headers,
+            oauth_platform,
             &cfg.base_url,
         );
         let compaction_at_tokens = self.compaction_at_tokens.get();
@@ -471,15 +482,18 @@ impl SessionActor {
         // chatgpt.com → 401 "Could not parse your authentication token" while
         // recovery "succeeded" by refreshing the *wrong* token.
         let (api_key, bearer_resolver) = if responses_codex_dialect {
-            (
-                crate::auth::openai_codex::ensure_openai_codex_access_token_blocking(),
-                codex_bearer_resolver,
-            )
+            // The resolver is authoritative and performs the sole auth lookup
+            // for each HTTP attempt, including the companion account header.
+            (None, codex_bearer_resolver)
         } else if let Some(kimi) = kimi_bearer_resolver {
-            (
-                crate::auth::kimi::ensure_kimi_code_access_token_blocking(),
-                Some(kimi),
-            )
+            // Kimi access tokens are likewise resolved only when the request
+            // is built, avoiding an eager refresh followed by a second lookup.
+            (None, Some(kimi))
+        } else if oauth_origin {
+            // Both OAuth providers may share one user proxy. Without catalog
+            // identity, fail closed rather than send Kimi, Codex, or xAI auth
+            // to a route whose credential family is ambiguous.
+            (None, None)
         } else if use_bearer_resolver {
             (
                 creds.api_key,
@@ -526,9 +540,7 @@ impl SessionActor {
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
-            header_injector: Some(std::sync::Arc::new(SessionHeaderInjector {
-                codex_account: responses_codex_dialect,
-            })),
+            header_injector: Some(std::sync::Arc::new(SessionHeaderInjector)),
             responses_codex_dialect,
             kimi_dialect,
         }
@@ -909,10 +921,16 @@ impl SessionActor {
         // Third-party OAuth platforms must never recover via xAI AuthManager —
         // that refreshes the wrong credential and reports "recovery succeeded"
         // while chatgpt.com/kimi still 401.
+        let failed_oauth_platform = self
+            .model_auth_facts(&failed_model_id)
+            .oauth_platform
+            .or_else(|| crate::agent::config::oauth_platform_for_base_url(&failed_base_url));
         let is_openai_codex =
-            xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&failed_base_url);
-        let is_kimi_code =
-            xai_grok_models::PlatformId::KimiCode.base_url_matches(&failed_base_url);
+            failed_oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
+        let is_kimi_code = failed_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode);
+        let ambiguous_oauth_origin = failed_oauth_platform.is_none()
+            && (xai_grok_models::PlatformId::KimiCode.base_url_matches(&failed_base_url)
+                || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&failed_base_url));
         if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && is_openai_codex
         {
@@ -976,6 +994,21 @@ impl SessionActor {
                     );
                 }
             }
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && ambiguous_oauth_origin
+        {
+            tracing::warn!(
+                session_id = % self.session_info.id.0,
+                "auth recovery: ambiguous OAuth proxy has no catalog platform; refusing credential refresh"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth recovery: ambiguous OAuth proxy; credential family unknown",
+                Some(self.session_info.id.0.as_ref()),
+                None,
+            );
+            detailed_message = format!(
+                "{detailed_message}\n\nThe OAuth proxy matches both Kimi Code and OpenAI Codex, but the selected catalog platform could not be recovered. Reselect the model and retry."
+            );
         } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && let Some(platform) = crate::agent::config::open_platform_endpoint(&failed_base_url)
         {

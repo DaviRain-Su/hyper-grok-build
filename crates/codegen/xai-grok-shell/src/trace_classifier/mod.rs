@@ -1369,6 +1369,7 @@ mod tests {
             content: String::new().into(),
             tool_calls,
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -1933,6 +1934,7 @@ mod tests {
                 content: format!("a{i}").into(),
                 tool_calls: vec![],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }));
@@ -2530,6 +2532,7 @@ mod tests {
                 content: format!("a{i}").into(),
                 tool_calls: vec![],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }));

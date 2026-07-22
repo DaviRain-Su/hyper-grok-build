@@ -491,6 +491,7 @@ pub fn stream_messages<'a>(
             content: std::sync::Arc::<str>::from(assistant_text),
             tool_calls: assistant_tool_calls,
             model_id: Some(model_id),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             // The Messages API does not echo the applied reasoning effort.
             reasoning_effort: None,

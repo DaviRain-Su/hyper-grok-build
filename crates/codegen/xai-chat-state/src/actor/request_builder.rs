@@ -1,7 +1,8 @@
 //! ConversationRequest assembly — image compaction, pruning, repair, memory injection.
 
 use xai_grok_sampling_types::{
-    ContentPart, ConversationItem, ConversationRequest, ToolSpec, TraceContext,
+    ContentPart, ConversationItem, ConversationRequest, ReasoningModelIdentity, ToolSpec,
+    TraceContext,
 };
 
 use super::ChatStateActor;
@@ -131,6 +132,11 @@ impl ChatStateActor {
             hosted_tools: vec![],
             tool_choice: None,
             model: Some(self.state.sampling_config.model.clone()),
+            reasoning_model_identity: Some(ReasoningModelIdentity::new(
+                self.state.sampling_config.model.clone(),
+                self.state.sampling_config.api_backend.clone(),
+                &self.state.sampling_config.base_url,
+            )),
             temperature: self.state.sampling_config.temperature,
             max_output_tokens: self.state.sampling_config.max_completion_tokens,
             top_p: self.state.sampling_config.top_p,

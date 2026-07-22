@@ -29,6 +29,7 @@ fn assistant_text(text: &str) -> ConversationItem {
         content: text.into(),
         tool_calls: vec![],
         model_id: None,
+        reasoning_model_identity: None,
         model_fingerprint: None,
         reasoning_effort: None,
     })
@@ -43,6 +44,7 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
             arguments: args.into(),
         }],
         model_id: None,
+        reasoning_model_identity: None,
         model_fingerprint: None,
         reasoning_effort: None,
     })
@@ -84,6 +86,7 @@ fn assistant_with_reasoning_items(
         content: content.into(),
         tool_calls,
         model_id: None,
+        reasoning_model_identity: None,
         model_fingerprint: None,
         reasoning_effort: None,
     }));
@@ -203,6 +206,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
             content: "ok".into(),
             tool_calls: vec![],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -235,6 +239,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
             content: "ok".into(),
             tool_calls: vec![],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -540,6 +545,7 @@ fn window_assistant_text_pin_skips_empty_assistant_turns() {
             arguments: "{}".into(),
         }],
         model_id: None,
+        reasoning_model_identity: None,
         model_fingerprint: None,
         reasoning_effort: None,
     });

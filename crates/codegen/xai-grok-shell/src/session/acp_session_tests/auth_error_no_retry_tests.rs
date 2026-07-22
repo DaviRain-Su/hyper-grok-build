@@ -885,10 +885,10 @@ async fn reconstruct_full_config_prefers_codex_resolver_over_session_auth_manage
                 "openai-codex base_url must install a live bearer resolver"
             );
             assert!(
-                cfg.api_key.as_deref() == Some(access.as_str()),
-                "must use the Codex access token, not the xAI session JWT"
+                cfg.api_key.is_none(),
+                "resolver-backed Codex auth must not stamp an eager access token"
             );
-            // Live resolver must also surface the Codex bearer (not AuthManager).
+            // The live resolver must surface the Codex bearer (not AuthManager).
             // Keep this as a boolean assertion so a parallel-test regression
             // can never print a developer credential into the test log.
             let live = cfg
@@ -903,6 +903,81 @@ async fn reconstruct_full_config_prefers_codex_resolver_over_session_auth_manage
                 cfg.responses_codex_dialect,
                 "Codex dialect flag must be set for the chatgpt backend"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_uses_catalog_platform_on_shared_oauth_proxy() {
+    let proxy = "https://oauth-proxy.example.test/v1";
+    let _kimi_base =
+        xai_grok_test_support::EnvGuard::set(xai_grok_models::KIMI_CODE_BASE_URL_ENV, proxy);
+    let _codex_base = xai_grok_test_support::EnvGuard::set("GROK_OPENAI_CODEX_BASE_URL", proxy);
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for (platform, model, resolver_name) in [
+                (
+                    xai_grok_models::PlatformId::KimiCode,
+                    "kimi-for-coding",
+                    "KimiCodeBearerResolver",
+                ),
+                (
+                    xai_grok_models::PlatformId::OpenAiCodex,
+                    "gpt-5.1-codex",
+                    "OpenAiCodexBearerResolver",
+                ),
+            ] {
+                let (actor, _rx) = make_actor_with_method_and_credentials(
+                    None,
+                    "cached_token",
+                    xai_chat_state::AuthType::SessionToken,
+                    "stale-catalog-token".to_string(),
+                )
+                .await;
+                if let Some(mut sampling) = actor.chat_state_handle.get_sampling_config().await {
+                    sampling.base_url = proxy.to_string();
+                    sampling.model = model.to_string();
+                    actor.chat_state_handle.update_sampling_config(sampling);
+                }
+                actor
+                    .model_auth_memo
+                    .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                        model_id: model.to_string(),
+                        facts: crate::agent::config::ModelAuthFacts {
+                            byok: crate::agent::auth_method::ModelByok::NotByok,
+                            auth_scheme: Default::default(),
+                            oauth_platform: Some(platform),
+                        },
+                        provider: None,
+                    }));
+
+                let config = actor.reconstruct_full_config().await;
+                let resolver = config
+                    .bearer_resolver
+                    .as_ref()
+                    .expect("catalog OAuth platform must install its live resolver");
+                assert!(format!("{resolver:?}").contains(resolver_name));
+                assert!(config.api_key.is_none());
+                assert_eq!(
+                    config.responses_codex_dialect,
+                    platform == xai_grok_models::PlatformId::OpenAiCodex
+                );
+                assert_eq!(
+                    config.kimi_dialect,
+                    platform == xai_grok_models::PlatformId::KimiCode
+                );
+                if platform == xai_grok_models::PlatformId::KimiCode {
+                    assert!(!config.extra_headers.contains_key("OpenAI-Beta"));
+                    assert!(!config.extra_headers.contains_key("originator"));
+                } else {
+                    assert!(config.extra_headers.contains_key("OpenAI-Beta"));
+                    assert!(config.extra_headers.contains_key("originator"));
+                    assert!(!config.extra_headers.contains_key("anthropic-version"));
+                    assert!(!config.extra_headers.contains_key("X-Msh-Device-Id"));
+                }
+            }
         })
         .await;
 }
@@ -1185,6 +1260,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                     facts: ModelAuthFacts {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
+                        oauth_platform: None,
                     },
                     provider: None,
                 }));
@@ -1229,6 +1305,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                     facts: ModelAuthFacts {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
+                        oauth_platform: None,
                     },
                     provider: None,
                 }));
@@ -1277,6 +1354,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                     facts: ModelAuthFacts {
                         byok: ModelByok::NotByok,
                         auth_scheme: Default::default(),
+                        oauth_platform: None,
                     },
                     provider: None,
                 }));
@@ -1345,6 +1423,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
             facts: crate::agent::config::ModelAuthFacts {
                 byok: crate::agent::auth_method::ModelByok::Byok,
                 auth_scheme: Default::default(),
+                oauth_platform: None,
             },
             provider: Some(provider),
         }));

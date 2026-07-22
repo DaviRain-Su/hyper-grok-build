@@ -24,7 +24,7 @@ use crate::auth::flow::AuthChannels;
 use crate::auth::model::GrokAuth;
 use crate::auth::storage::{
     auth_json_path, read_openai_codex_auth, store_openai_codex_auth,
-    store_openai_codex_auth_after_refresh,
+    store_openai_codex_auth_after_refresh_locked,
 };
 
 /// How the user wants to authenticate (Pi `Select OpenAI Codex login method`).
@@ -475,37 +475,30 @@ impl xai_grok_sampler::BearerResolver for OpenAiCodexBearerResolver {
     fn current_bearer(&self) -> Option<String> {
         ensure_openai_codex_access_token_blocking()
     }
-}
 
-/// Per-request `chatgpt-account-id` aligned with the live Codex credential.
-///
-/// Bearer tokens refresh via [`OpenAiCodexBearerResolver`]; without this
-/// injector the account header would stick from the first
-/// `inject_url_derived_headers` stamp and break after re-login as a different
-/// ChatGPT account mid-session.
-#[derive(Debug, Default)]
-pub struct OpenAiCodexAccountHeaderInjector;
-
-impl OpenAiCodexAccountHeaderInjector {
-    /// Apply the current account id (or remove the header when signed out).
-    pub fn apply(headers: &mut reqwest::header::HeaderMap) {
-        match ensure_openai_codex_auth_blocking().and_then(|a| a.account_id) {
-            Some(account_id) => {
-                if let Ok(v) = reqwest::header::HeaderValue::from_str(&account_id) {
-                    headers.insert("chatgpt-account-id", v);
-                }
-            }
-            None => {
-                headers.remove("chatgpt-account-id");
-            }
-        }
+    fn resolve_bearer(&self) -> xai_grok_sampler::BearerResolution {
+        codex_bearer_resolution(ensure_openai_codex_auth_blocking())
     }
 }
 
-impl xai_grok_sampler::HeaderInjector for OpenAiCodexAccountHeaderInjector {
-    fn inject(&self, headers: &mut reqwest::header::HeaderMap) {
-        Self::apply(headers);
+/// Build one atomic Codex auth result so the account header always comes from
+/// the same credential lookup/refresh as the bearer. The explicit removal
+/// clears any construction-time account id after logout or failed refresh.
+fn codex_bearer_resolution(auth: Option<GrokAuth>) -> xai_grok_sampler::BearerResolution {
+    let account_header = reqwest::header::HeaderName::from_static("chatgpt-account-id");
+    let mut resolution = xai_grok_sampler::BearerResolution::default();
+    resolution.remove_headers.push(account_header.clone());
+    let Some(auth) = auth else {
+        return resolution;
+    };
+
+    resolution.bearer = Some(auth.key);
+    if let Some(account_id) = auth.account_id
+        && let Ok(value) = reqwest::header::HeaderValue::from_str(&account_id)
+    {
+        resolution.headers.insert(account_header, value);
     }
+    resolution
 }
 
 /// Load a usable OpenAI Codex access token: cached if still valid, otherwise
@@ -646,17 +639,44 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
     // second spend of the same RT in the gap between response and write.)
     let result = oauth::refresh_access_token(&host, &refresh).await;
 
-    // If the lock was broken mid-call (sleep/stale recovery), prefer a
-    // sibling write over clobbering — but still attempt compare/adopt persist.
-    if !file_lock.still_live(&path) {
+    // If stale-lock recovery replaced the inode mid-call, our old guard no
+    // longer protects auth.json. Re-acquire the live lock before compare/write;
+    // if that fails, report refresh failure so retry logic cannot reload and
+    // resend the stale on-disk credential under a false success signal.
+    let file_lock = if file_lock.still_live(&path) {
+        Some(file_lock)
+    } else {
         tracing::warn!("auth: Codex refresh lock lost during IdP call");
+        drop(file_lock);
         if let Some(adopted) = try_adopt_sibling_codex_token(home, &refresh, force) {
-            // Sibling already committed a newer family while we were on the
-            // network; drop our response so we don't overwrite them.
-            drop(file_lock);
             return Some(adopted);
         }
-    }
+        if result.is_err() {
+            None
+        } else {
+            tracing::warn!(
+                "auth: re-acquiring the live Codex lock to persist refreshed credentials"
+            );
+            match crate::auth::manager::lock::try_lock_auth_file_async(
+                &path,
+                CODEX_REFRESH_LOCK_TIMEOUT,
+            )
+            .await
+            {
+                Some(relock) => Some(relock),
+                None => {
+                    tokio::time::sleep(CODEX_REFRESH_LOCK_TIMEOUT_WAIT).await;
+                    if let Some(adopted) = try_adopt_sibling_codex_token(home, &refresh, force) {
+                        return Some(adopted);
+                    }
+                    tracing::warn!(
+                        "auth: Codex refresh could not re-acquire the live lock; token will not be persisted"
+                    );
+                    None
+                }
+            }
+        }
+    };
 
     let out = match result {
         Ok(token) => match oauth::credentials_from_token(token, Some(&refresh)) {
@@ -665,18 +685,22 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
                 if new_auth.email.is_none() {
                     new_auth.email = auth.email.clone();
                 }
-                // Compare/adopt under the scope lock (nested flock is safe for
-                // the same process on Linux; the AuthFileLock still serializes
-                // other processes until we drop it below).
-                match store_openai_codex_auth_after_refresh(home, &new_auth, &refresh) {
-                    Ok(on_disk) => Some(on_disk),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "auth: failed to persist refreshed Codex token"
-                        );
-                        Some(new_auth)
-                    }
+                // Compare/adopt while reusing the refresh guard. Opening a
+                // second flock here can self-block on non-reentrant platforms.
+                match file_lock.as_ref() {
+                    Some(file_lock) => match store_openai_codex_auth_after_refresh_locked(
+                        home, &new_auth, &refresh, file_lock,
+                    ) {
+                        Ok(on_disk) => Some(on_disk),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "auth: failed to persist refreshed Codex token"
+                            );
+                            None
+                        }
+                    },
+                    None => None,
                 }
             }
             Err(e) => {
@@ -851,6 +875,39 @@ mod tests {
     #[test]
     fn catalog_credential_rejects_an_empty_access_token() {
         assert!(catalog_access_token(sample_codex("refresh", "  ", 3_600)).is_none());
+    }
+
+    #[test]
+    fn bearer_resolution_aligns_account_header_without_second_auth_lookup() {
+        let mut auth = sample_codex("refresh", "live-access", 3_600);
+        auth.account_id = Some("acct-123".to_string());
+        let resolution = codex_bearer_resolution(Some(auth));
+
+        assert_eq!(resolution.bearer.as_deref(), Some("live-access"));
+        assert!(
+            resolution
+                .remove_headers
+                .iter()
+                .any(|name| name.as_str() == "chatgpt-account-id")
+        );
+        assert_eq!(
+            resolution
+                .headers
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acct-123")
+        );
+
+        let signed_out = codex_bearer_resolution(None);
+        assert!(signed_out.bearer.is_none());
+        assert!(signed_out.headers.get("chatgpt-account-id").is_none());
+        assert!(
+            signed_out
+                .remove_headers
+                .iter()
+                .any(|name| name.as_str() == "chatgpt-account-id"),
+            "failed live auth must remove a stale account header"
+        );
     }
 
     #[test]

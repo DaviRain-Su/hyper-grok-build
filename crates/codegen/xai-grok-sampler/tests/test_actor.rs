@@ -6,14 +6,14 @@
 //! payloads come from `xai_grok_test_support::sse`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::Router;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::routing::post;
+use axum::{Json, Router};
 use futures_util::stream::{self, StreamExt};
 use indexmap::IndexMap;
 use serde_json::json;
@@ -25,7 +25,8 @@ use xai_grok_sampler::{
     SamplingErrorKind, SamplingEvent,
 };
 use xai_grok_sampling_types::{
-    ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, UserItem,
+    BackendToolCallItem, BackendToolKind, ConversationItem, ConversationRequest,
+    DoomLoopRecoveryPolicy, ReasoningModelIdentity, UserItem,
 };
 use xai_grok_test_support::{SseEvent, sse};
 
@@ -100,7 +101,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         header_injector: None,
         responses_codex_dialect: false,
         kimi_dialect: false,
-        }
+    }
 }
 
 fn user_request(text: &str) -> ConversationRequest {
@@ -853,7 +854,140 @@ async fn responses_auxiliary_frames_are_skipped_without_retry() {
 
     let (response, _metrics) = result.expect("auxiliary frames should not fail the turn");
     assert_eq!(response.assistant_text(), "an answer");
+    assert!(
+        response
+            .assistant()
+            .and_then(|assistant| assistant.reasoning_model_identity.as_ref())
+            .is_some(),
+        "actor completion must retain the sampler-authoritative route identity"
+    );
     assert_eq!(counter.load(Ordering::SeqCst), 1, "must not retry");
+}
+
+/// A production actor response must carry enough provenance for its opaque
+/// Responses siblings to survive a second turn on the exact same route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_actor_two_turn_same_route_replays_all_opaque_siblings() {
+    let bodies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let bodies_handler = Arc::clone(&bodies);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let bodies = Arc::clone(&bodies_handler);
+            async move {
+                bodies.lock().unwrap().push(body);
+                let events = sse_events_to_axum(sse::responses_api_reasoning_and_text_events(
+                    "private thought",
+                    "portable answer",
+                    // Deliberately not an alias of the submitted model. The
+                    // second turn can replay reasoning only via route provenance,
+                    // never through the legacy model-name fallback.
+                    "provider-canonical-model",
+                ));
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let expected_identity =
+        ReasoningModelIdentity::new("test-model", ApiBackend::Responses, &server.base_url());
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let first_request_id = RequestId::from("req-route-first");
+    let (mut first_response, _) = handle
+        .submit_and_collect(first_request_id.clone(), user_request("first"))
+        .await
+        .expect("first turn completes");
+    assert_eq!(
+        first_response
+            .assistant()
+            .and_then(|assistant| assistant.model_id.as_deref()),
+        Some("provider-canonical-model"),
+        "fixture must not accidentally exercise the legacy model fallback"
+    );
+    assert_eq!(
+        first_response
+            .assistant()
+            .and_then(|assistant| assistant.reasoning_model_identity.as_ref()),
+        Some(&expected_identity),
+        "submit_and_collect must return the exact sampler-authoritative route"
+    );
+
+    let completed = await_event_matching(
+        &mut event_rx,
+        |event| {
+            matches!(
+                event,
+                SamplingEvent::Completed { request_id, .. }
+                    if request_id == &first_request_id
+            )
+        },
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("first turn emits a Completed event");
+    let SamplingEvent::Completed { response, .. } = completed else {
+        unreachable!("matching predicate only accepts Completed events")
+    };
+    assert_eq!(
+        response
+            .assistant()
+            .and_then(|assistant| assistant.reasoning_model_identity.as_ref()),
+        Some(&expected_identity),
+        "Completed event must carry the same exact route identity"
+    );
+
+    let web_search = serde_json::from_value(json!({
+        "action": {"type": "search", "query": "opaque state"},
+        "id": "ws_same_route",
+        "status": "completed"
+    }))
+    .expect("valid web-search fixture");
+    let assistant_index = first_response
+        .items
+        .iter()
+        .position(|item| matches!(item, ConversationItem::Assistant(_)))
+        .expect("first response has an assistant owner");
+    first_response.items.insert(
+        assistant_index,
+        ConversationItem::BackendToolCall(BackendToolCallItem {
+            kind: BackendToolKind::WebSearch(web_search),
+        }),
+    );
+    first_response
+        .items
+        .push(ConversationItem::user("follow-up"));
+
+    handle
+        .submit_and_collect(
+            RequestId::from("req-route-second"),
+            ConversationRequest::from_items(first_response.items),
+        )
+        .await
+        .expect("second turn completes");
+    server.shutdown();
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "both turns must reach the same route once");
+    let second_input = bodies[1]
+        .get("input")
+        .and_then(serde_json::Value::as_array)
+        .expect("second request has item input");
+    assert!(
+        second_input.iter().any(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning")
+        })
+    );
+    assert!(second_input.iter().any(|item| {
+        item.get("type").and_then(serde_json::Value::as_str) == Some("web_search_call")
+    }));
 }
 
 /// Server-reported doom-loop triggers flow through the actor rung onto the

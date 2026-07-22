@@ -10,12 +10,13 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::rs;
 use crate::types::{
-    ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage, FinishReason,
-    ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition, TraceContext,
-    Usage,
+    ApiBackend, ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage,
+    FinishReason, ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition,
+    TraceContext, Usage,
 };
 
 // ============================================================================
@@ -232,6 +233,44 @@ pub struct UserItem {
     pub prompt_index: Option<usize>,
 }
 
+/// Stable outbound identity for opaque provider continuation state.
+///
+/// The server may echo a canonical snapshot name that differs from the model
+/// token sent by the client. Persist the submitted model plus API shape and a
+/// SHA-256 fingerprint of the effective endpoint, so later turns can verify
+/// exact routing provenance without writing credential-bearing URLs to disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningModelIdentity {
+    model: String,
+    api_backend: ApiBackend,
+    endpoint_sha256: String,
+}
+
+impl ReasoningModelIdentity {
+    /// Build an identity while hashing (rather than persisting) the endpoint.
+    pub fn new(model: impl Into<String>, api_backend: ApiBackend, base_url: &str) -> Self {
+        let normalized_base = base_url.trim().trim_end_matches('/');
+        let endpoint_sha256 = format!("{:x}", Sha256::digest(normalized_base.as_bytes()));
+        Self {
+            model: model.into(),
+            api_backend,
+            endpoint_sha256,
+        }
+    }
+}
+
+/// Treat malformed or future-version provenance as absent so a downgrade can
+/// still recover the assistant's portable text and tool calls.
+fn deserialize_reasoning_model_identity_lossy<'de, D>(
+    deserializer: D,
+) -> Result<Option<ReasoningModelIdentity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 /// Assistant response with tool calls.
 ///
 /// Reasoning items, when present, sit beside this item as
@@ -248,9 +287,17 @@ pub struct AssistantItem {
     /// Tool calls made by the assistant (client must execute these locally)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
-    /// The model that generated this response
+    /// The model that generated this response (the server's raw echo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// Outbound model/backend/endpoint identity that produced any preceding
+    /// opaque reasoning siblings. Missing on legacy and synthetic history.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_reasoning_model_identity_lossy"
+    )]
+    pub reasoning_model_identity: Option<ReasoningModelIdentity>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -537,6 +584,10 @@ pub struct ConversationRequest {
     pub tool_choice: Option<ConversationToolChoice>,
     /// Model to use (if not using client default)
     pub model: Option<String>,
+    /// Exact outbound routing identity used to decide whether persisted opaque
+    /// reasoning is safe to replay. This field is internal and never serialized
+    /// into provider request bodies.
+    pub reasoning_model_identity: Option<ReasoningModelIdentity>,
     /// Sampling temperature
     pub temperature: Option<f32>,
     /// Maximum output tokens
@@ -1145,6 +1196,7 @@ impl ConversationItem {
             content: Arc::<str>::from(content.into()),
             tool_calls: Vec::new(),
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -1160,6 +1212,7 @@ impl ConversationItem {
             content: Arc::<str>::from(content.into()),
             tool_calls: Vec::new(),
             model_id: Some(model_id.into()),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -1171,6 +1224,7 @@ impl ConversationItem {
             content: Arc::<str>::from(""),
             tool_calls,
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -1599,6 +1653,12 @@ impl AssistantItem {
         self.model_id = Some(model_id.into());
         self
     }
+
+    /// Attach the outbound route identity that produced sibling reasoning.
+    pub fn with_reasoning_model_identity(mut self, identity: ReasoningModelIdentity) -> Self {
+        self.reasoning_model_identity = Some(identity);
+        self
+    }
 }
 
 impl ConversationItem {
@@ -1606,6 +1666,15 @@ impl ConversationItem {
     pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
         if let Self::Assistant(ref mut a) = self {
             a.model_id = Some(model_id.into());
+        }
+        self
+    }
+
+    /// Set the outbound reasoning identity on an assistant item. No-op for
+    /// other item variants.
+    pub fn with_reasoning_model_identity(mut self, identity: ReasoningModelIdentity) -> Self {
+        if let Self::Assistant(ref mut assistant) = self {
+            assistant.reasoning_model_identity = Some(identity);
         }
         self
     }
@@ -1684,6 +1753,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                     content: Arc::<str>::from(content),
                     tool_calls,
                     model_id,
+                    reasoning_model_identity: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
                 })
@@ -1917,15 +1987,16 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 /// turn (there is intentionally no public single-item conversion, since a
 /// lone `Reasoning` item has no chat-completions equivalent).
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
-    conversation_to_chat_messages_for_model(items, None)
+    conversation_to_chat_messages_for_route(items, None, None)
 }
 
-/// Model-aware Chat Completions conversion used by production requests.
+/// Route-aware Chat Completions conversion used by production requests.
 /// `reasoning_content` is provider-owned continuation state: retain it for
-/// same-model turns, but never carry it across a model switch. The assistant's
-/// visible text and tool history remain portable.
-fn conversation_to_chat_messages_for_model(
+/// same-route turns, but never carry it across a model, backend, or endpoint
+/// switch. The assistant's visible text and tool history remain portable.
+fn conversation_to_chat_messages_for_route(
     items: Vec<ConversationItem>,
+    target_identity: Option<&ReasoningModelIdentity>,
     target_model: Option<&str>,
 ) -> Vec<ChatRequestMessage> {
     let reasoning_is_replayable: Vec<bool> = items
@@ -1933,7 +2004,7 @@ fn conversation_to_chat_messages_for_model(
         .enumerate()
         .map(|(index, item)| {
             !matches!(item, ConversationItem::Reasoning(_))
-                || opaque_item_matches_target_model(&items, index, target_model)
+                || opaque_item_matches_target_route(&items, index, target_identity, target_model)
         })
         .collect();
     let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
@@ -2011,6 +2082,7 @@ impl From<ChatResponseMessage> for ConversationItem {
             content: Arc::<str>::from(content),
             tool_calls,
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -2126,6 +2198,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         content: Arc::<str>::from(content),
         tool_calls,
         model_id: Some(model_id),
+        reasoning_model_identity: None,
         model_fingerprint,
         reasoning_effort,
     }));
@@ -2141,11 +2214,15 @@ const STRUCTURED_OUTPUT_SCHEMA_NAME: &str = "structured_output";
 
 impl From<ConversationRequest> for ChatCompletionRequest {
     fn from(req: ConversationRequest) -> Self {
-        // Uses the model-aware helper so native `reasoning_content` remains
-        // available on same-model turns but is stripped on a model switch.
+        // Uses the route-aware helper so native `reasoning_content` remains
+        // available on same-route turns but is stripped on a route switch.
         let target_model = req.model.clone();
-        let messages: Vec<ChatRequestMessage> =
-            conversation_to_chat_messages_for_model(req.items, target_model.as_deref());
+        let target_identity = req.reasoning_model_identity.clone();
+        let messages: Vec<ChatRequestMessage> = conversation_to_chat_messages_for_route(
+            req.items,
+            target_identity.as_ref(),
+            target_model.as_deref(),
+        );
 
         let tools_is_empty = req.tools.is_empty();
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
@@ -2391,6 +2468,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// visible assistant message still carries the portable cross-model context.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let target_model = req.model.as_deref();
+    let target_identity = req.reasoning_model_identity.as_ref();
     let items: Vec<rs::InputItem> = req
         .items
         .iter()
@@ -2399,7 +2477,7 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
             !matches!(
                 item,
                 ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
-            ) || opaque_item_matches_target_model(&req.items, *index, target_model)
+            ) || opaque_item_matches_target_route(&req.items, *index, target_identity, target_model)
         })
         .flat_map(|(_, item)| conversation_item_to_input_items(item))
         .collect();
@@ -2450,26 +2528,51 @@ fn valid_responses_item_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-/// Return whether model-bound continuation state belongs to the target model.
+/// Treat a dated provider snapshot as the corresponding undated model alias.
 ///
-/// `Reasoning` and native backend-tool calls have no model field of their own.
-/// They sit before the `Assistant` they belong to, so the following assistant's
-/// `model_id` is their source provenance. A user/system/tool-result boundary
-/// makes the item orphaned.
+/// The comparison is intentionally narrow: encrypted reasoning is opaque and
+/// replaying it to a genuinely different model is worse than dropping it. We
+/// therefore accept only exact equality or a trailing `-YYYY-MM-DD` on the
+/// server-echoed source; the requested target is never broadened. Arbitrary
+/// prefixes (for example `gpt-4` vs `gpt-4o`) never match.
+fn model_ids_match_for_replay(source: &str, target: &str) -> bool {
+    source == target || strip_model_snapshot_date(source) == Some(target)
+}
+
+fn strip_model_snapshot_date(model: &str) -> Option<&str> {
+    const SUFFIX_LEN: usize = "-YYYY-MM-DD".len();
+    let split = model.len().checked_sub(SUFFIX_LEN)?;
+    let suffix = model.as_bytes().get(split..)?;
+    let is_date = suffix.first() == Some(&b'-')
+        && suffix.get(5) == Some(&b'-')
+        && suffix.get(8) == Some(&b'-')
+        && suffix
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 0 | 5 | 8) || byte.is_ascii_digit());
+    is_date
+        .then(|| &model[..split])
+        .filter(|base| !base.is_empty())
+}
+
+/// Return whether model-bound provider continuation state belongs to the
+/// target route.
 ///
-/// Direct conversion helpers sometimes build requests without a model; retain
-/// their legacy behavior in that case. Production requests have a target model
-/// stamped before conversion. If old persisted history lacks assistant model
-/// metadata, dropping opaque state is safer than deterministically poisoning
-/// every later turn.
-fn opaque_item_matches_target_model(
+/// `Reasoning` and native backend-tool calls have no provenance field of their
+/// own. They sit before the `Assistant` they belong to, so the following
+/// assistant owns their route identity. New production history must match that
+/// identity byte-for-byte. Legacy history without a route stamp falls back to
+/// the conservative server-model comparison above. A user/system/tool-result
+/// boundary makes the item orphaned.
+fn opaque_item_matches_target_route(
     items: &[ConversationItem],
     opaque_index: usize,
+    target_identity: Option<&ReasoningModelIdentity>,
     target_model: Option<&str>,
 ) -> bool {
-    let Some(target_model) = target_model else {
+    if target_identity.is_none() && target_model.is_none() {
         return true;
-    };
+    }
     let Some(tail) = items.get(opaque_index.saturating_add(1)..) else {
         return false;
     };
@@ -2478,7 +2581,16 @@ fn opaque_item_matches_target_model(
         match item {
             ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
             ConversationItem::Assistant(assistant) => {
-                return assistant.model_id.as_deref() == Some(target_model);
+                if let Some(source_identity) = assistant.reasoning_model_identity.as_ref()
+                    && let Some(target_identity) = target_identity
+                {
+                    return source_identity == target_identity;
+                }
+                return assistant.model_id.as_deref().zip(target_model).is_some_and(
+                    |(source_model, target_model)| {
+                        model_ids_match_for_replay(source_model, target_model)
+                    },
+                );
             }
             ConversationItem::System(_)
             | ConversationItem::User(_)
@@ -2729,6 +2841,12 @@ impl ConversationRequest {
     /// Set the model
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    /// Set the non-wire routing identity used for safe reasoning replay.
+    pub fn with_reasoning_model_identity(mut self, identity: ReasoningModelIdentity) -> Self {
+        self.reasoning_model_identity = Some(identity);
         self
     }
 
@@ -3445,7 +3563,12 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
             // needs same-model provenance and normally a provider signature;
             // only profiles that explicitly allow empty signatures retain one.
             ConversationItem::Reasoning(r) => {
-                if !opaque_item_matches_target_model(&req.items, index, req.model.as_deref()) {
+                if !opaque_item_matches_target_route(
+                    &req.items,
+                    index,
+                    req.reasoning_model_identity.as_ref(),
+                    req.model.as_deref(),
+                ) {
                     continue;
                 }
                 let signature = r.encrypted_content.as_deref().unwrap_or_default();
@@ -3632,10 +3755,7 @@ fn apply_kimi_messages_request_rules(
         msgs.thinking = Some(ThinkingConfig::Adaptive {
             display: Some(ThinkingDisplay::Summarized),
         });
-        let format = msgs
-            .output_config
-            .as_ref()
-            .and_then(|c| c.format.clone());
+        let format = msgs.output_config.as_ref().and_then(|c| c.format.clone());
         msgs.output_config = Some(OutputConfig {
             effort: Some(e.to_string()),
             format,
@@ -3735,6 +3855,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
             content: Arc::<str>::from(content),
             tool_calls,
             model_id: Some(resp.model),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -4143,20 +4264,20 @@ mod tests {
         };
         assert_eq!(u.content.len(), 2);
         assert_matches!(
-            &u.content[1],
-            ContentPart::Image { url }
-if url.as_ref() == "https://example.com/image.png"
-        );
+                    &u.content[1],
+                    ContentPart::Image { url }
+        if url.as_ref() == "https://example.com/image.png"
+                );
 
         // Convert to chat request and verify
         let chat_msg = conversation_item_to_chat_message(user);
         let blocks = chat_msg.content.blocks();
         assert_eq!(blocks.len(), 2);
         assert_matches!(
-            &blocks[1],
-            ChatContentBlock::ImageUrl { image_url }
-if image_url.url == "https://example.com/image.png"
-        );
+                    &blocks[1],
+                    ChatContentBlock::ImageUrl { image_url }
+        if image_url.url == "https://example.com/image.png"
+                );
     }
 
     #[test]
@@ -4491,6 +4612,7 @@ if image_url.url == "https://example.com/image.png"
                 arguments: r#"{"path": "/test.txt"}"#.into(),
             }],
             model_id: Some("grok-3".to_string()),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         };
@@ -4946,6 +5068,7 @@ if image_url.url == "https://example.com/image.png"
             content: "The answer is 42.".into(),
             tool_calls: vec![],
             model_id: Some("grok-3".to_string()),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         });
@@ -4978,6 +5101,7 @@ if image_url.url == "https://example.com/image.png"
                 content: "The answer is 4.".into(),
                 tool_calls: vec![],
                 model_id: Some("grok-3".to_string()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -5039,6 +5163,7 @@ if image_url.url == "https://example.com/image.png"
                 content: "Hi!".into(),
                 tool_calls: vec![],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -5090,9 +5215,15 @@ if image_url.url == "https://example.com/image.png"
             ConversationItem::Reasoning(synthesized_reasoning_item("messages thinking")),
         ];
         history.extend(
-            ["invalid id", "invalid.id", "invalid/id", "invalid:id", "无效"]
-                .into_iter()
-                .map(reasoning),
+            [
+                "invalid id",
+                "invalid.id",
+                "invalid/id",
+                "invalid:id",
+                "无效",
+            ]
+            .into_iter()
+            .map(reasoning),
         );
         history.extend([
             ConversationItem::Reasoning(rs::ReasoningItem {
@@ -5223,6 +5354,22 @@ if image_url.url == "https://example.com/image.png"
         ]
     }
 
+    fn model_bound_history_for_route(
+        model: &str,
+        identity: ReasoningModelIdentity,
+    ) -> Vec<ConversationItem> {
+        let mut history = model_bound_history(model);
+        let assistant = history
+            .iter_mut()
+            .find_map(|item| match item {
+                ConversationItem::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("fixture has an assistant owner");
+        assistant.reasoning_model_identity = Some(identity);
+        history
+    }
+
     #[test]
     fn model_switch_compatibility_matrix_strips_foreign_opaque_state() {
         let source_model = "source-model";
@@ -5344,6 +5491,110 @@ if image_url.url == "https://example.com/image.png"
     }
 
     #[test]
+    fn legacy_chat_and_messages_allow_same_model_route_fallback() {
+        let model = "same-model";
+        let chat: ChatCompletionRequest =
+            ConversationRequest::from_items(model_bound_history(model))
+                .with_model(model)
+                .with_reasoning_model_identity(ReasoningModelIdentity::new(
+                    model,
+                    ApiBackend::ChatCompletions,
+                    "https://chat.example/v1",
+                ))
+                .into();
+        let historical_assistant = chat
+            .messages
+            .iter()
+            .find(|message| message.model_id.as_deref() == Some(model))
+            .expect("portable Chat assistant retained");
+        assert_eq!(
+            historical_assistant.reasoning_content.as_deref(),
+            Some("private continuation")
+        );
+
+        let messages = build_messages_request(
+            &ConversationRequest::from_items(model_bound_history(model))
+                .with_model(model)
+                .with_reasoning_model_identity(ReasoningModelIdentity::new(
+                    model,
+                    ApiBackend::Messages,
+                    "https://messages.example/v1",
+                )),
+        );
+        assert!(
+            messages
+                .messages
+                .iter()
+                .any(|message| match &message.content {
+                    crate::messages::MessageContent::Text(_) => false,
+                    crate::messages::MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                        matches!(block, crate::messages::ContentBlock::Thinking { signature, .. }
+                    if signature == "provider-signature")
+                    }),
+                })
+        );
+    }
+
+    #[test]
+    fn chat_completions_drops_reasoning_when_backend_route_changes() {
+        let model = "same-model";
+        let endpoint = "https://shared-proxy.example/v1";
+        let history = model_bound_history_for_route(
+            model,
+            ReasoningModelIdentity::new(model, ApiBackend::Messages, endpoint),
+        );
+        let chat: ChatCompletionRequest = ConversationRequest::from_items(history)
+            .with_model(model)
+            .with_reasoning_model_identity(ReasoningModelIdentity::new(
+                model,
+                ApiBackend::ChatCompletions,
+                endpoint,
+            ))
+            .into();
+
+        let historical_assistant = chat
+            .messages
+            .iter()
+            .find(|message| message.model_id.as_deref() == Some(model))
+            .expect("portable Chat assistant retained");
+        assert!(
+            historical_assistant.reasoning_content.is_none(),
+            "same-slug reasoning from another API backend must fail closed"
+        );
+    }
+
+    #[test]
+    fn messages_drops_thinking_when_endpoint_route_changes() {
+        let model = "same-model";
+        let history = model_bound_history_for_route(
+            model,
+            ReasoningModelIdentity::new(
+                model,
+                ApiBackend::Messages,
+                "https://provider-a.example/v1",
+            ),
+        );
+        let messages = build_messages_request(
+            &ConversationRequest::from_items(history)
+                .with_model(model)
+                .with_reasoning_model_identity(ReasoningModelIdentity::new(
+                    model,
+                    ApiBackend::Messages,
+                    "https://provider-b.example/v1",
+                )),
+        );
+
+        assert!(messages.messages.iter().all(|message| {
+            match &message.content {
+                crate::messages::MessageContent::Text(_) => true,
+                crate::messages::MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .all(|block| !matches!(block, crate::messages::ContentBlock::Thinking { .. })),
+            }
+        }));
+    }
+
+    #[test]
     fn strip_model_bound_state_keeps_portable_transcript() {
         let mut req = ConversationRequest::from_items(model_bound_history("source-model"));
         assert_eq!(req.strip_model_bound_state(), 2);
@@ -5355,6 +5606,229 @@ if image_url.url == "https://example.com/image.png"
             item,
             ConversationItem::Assistant(assistant) if assistant.content.as_ref() == "portable answer"
         )));
+    }
+
+    #[test]
+    fn responses_model_identity_accepts_only_exact_or_dated_aliases() {
+        assert!(model_ids_match_for_replay("gpt-4o", "gpt-4o"));
+        assert!(model_ids_match_for_replay("gpt-4o-2024-08-06", "gpt-4o"));
+        assert!(!model_ids_match_for_replay("gpt-4o", "gpt-4o-2024-08-06"));
+        assert!(!model_ids_match_for_replay(
+            "gpt-4o-2024-08-06",
+            "gpt-4o-2024-11-20"
+        ));
+        assert!(!model_ids_match_for_replay("gpt-4o-mini", "gpt-4o"));
+        assert!(!model_ids_match_for_replay(
+            "gpt-4o-release-08-06",
+            "gpt-4o"
+        ));
+
+        let openai = ReasoningModelIdentity::new(
+            "gpt-4o",
+            ApiBackend::Responses,
+            "https://api.openai.com/v1/",
+        );
+        assert_eq!(
+            openai,
+            ReasoningModelIdentity::new(
+                "gpt-4o",
+                ApiBackend::Responses,
+                "https://api.openai.com/v1",
+            ),
+            "cosmetic trailing slashes must not change route identity"
+        );
+        assert_ne!(
+            openai,
+            ReasoningModelIdentity::new(
+                "gpt-4o",
+                ApiBackend::Responses,
+                "https://openrouter.ai/api/v1",
+            ),
+            "the same bare slug on another endpoint is not the same reasoning route"
+        );
+        let persisted = serde_json::to_string(&openai).unwrap();
+        assert!(
+            !persisted.contains("api.openai.com"),
+            "persisted provenance must not expose endpoint URLs"
+        );
+    }
+
+    #[test]
+    fn assistant_unknown_reasoning_backend_preserves_portable_content() {
+        let mut value = serde_json::to_value(ConversationItem::assistant_with_model(
+            "portable answer",
+            "future-model",
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().insert(
+            "reasoning_model_identity".to_string(),
+            serde_json::json!({
+                "model": "future-model",
+                "api_backend": "future_backend",
+                "endpoint_sha256": "future-digest"
+            }),
+        );
+
+        let restored: ConversationItem = serde_json::from_value(value).unwrap();
+        let ConversationItem::Assistant(assistant) = restored else {
+            panic!("assistant row must survive unknown provenance");
+        };
+        assert_eq!(assistant.content.as_ref(), "portable answer");
+        assert_eq!(assistant.model_id.as_deref(), Some("future-model"));
+        assert!(assistant.reasoning_model_identity.is_none());
+    }
+
+    #[test]
+    fn responses_input_keeps_reasoning_for_dated_model_alias() {
+        let identity = ReasoningModelIdentity::new(
+            "gpt-4o",
+            ApiBackend::Responses,
+            "https://api.openai.com/v1",
+        );
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_same_model_snapshot".to_string(),
+                summary: vec![],
+                content: None,
+                encrypted_content: Some("same-model-encrypted-content".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            ConversationItem::assistant_with_model("answer", "gpt-4o-2024-08-06")
+                .with_reasoning_model_identity(identity.clone()),
+            ConversationItem::user("follow-up"),
+        ])
+        .with_model("gpt-4o")
+        .with_reasoning_model_identity(identity);
+
+        let responses_req: rs::CreateResponse = (&req).into();
+        let rs::InputParam::Items(items) = responses_req.input else {
+            panic!("Expected Items input");
+        };
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, rs::InputItem::Item(rs::Item::Reasoning(_)))),
+            "a dated response snapshot must match its undated request alias"
+        );
+    }
+
+    #[test]
+    fn responses_input_drops_reasoning_when_outbound_identity_changes() {
+        let source_identity = ReasoningModelIdentity::new(
+            "gpt-4o-2024-08-06",
+            ApiBackend::Responses,
+            "https://api.openai.com/v1",
+        );
+        let target_identity = ReasoningModelIdentity::new(
+            "gpt-4o",
+            ApiBackend::Responses,
+            "https://api.openai.com/v1",
+        );
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_explicit_snapshot".to_string(),
+                summary: vec![],
+                content: None,
+                encrypted_content: Some("snapshot-encrypted-content".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            ConversationItem::assistant_with_model("answer", "gpt-4o-2024-08-06")
+                .with_reasoning_model_identity(source_identity),
+            ConversationItem::user("follow-up"),
+        ])
+        .with_model("gpt-4o")
+        .with_reasoning_model_identity(target_identity);
+
+        let responses_req: rs::CreateResponse = (&req).into();
+        let rs::InputParam::Items(items) = responses_req.input else {
+            panic!("Expected Items input");
+        };
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, rs::InputItem::Item(rs::Item::Reasoning(_)))),
+            "explicit snapshot -> moving alias must fail closed despite the echoed name matching"
+        );
+    }
+
+    #[test]
+    fn responses_input_drops_all_opaque_siblings_when_route_changes() {
+        let source_identity = ReasoningModelIdentity::new(
+            "same-model",
+            ApiBackend::Responses,
+            "https://proxy-a.example/v1",
+        );
+        let target_identity = ReasoningModelIdentity::new(
+            "same-model",
+            ApiBackend::Responses,
+            "https://proxy-b.example/v1",
+        );
+        let mut history = model_bound_history("same-model");
+        let assistant = history
+            .iter_mut()
+            .find_map(|item| match item {
+                ConversationItem::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("fixture has an assistant owner");
+        assistant.reasoning_model_identity = Some(source_identity);
+
+        let req = ConversationRequest::from_items(history)
+            .with_model("same-model")
+            .with_reasoning_model_identity(target_identity);
+        let responses_req: rs::CreateResponse = (&req).into();
+        let rs::InputParam::Items(items) = responses_req.input else {
+            panic!("Expected Items input");
+        };
+
+        assert!(
+            !items.iter().any(|item| matches!(
+                item,
+                rs::InputItem::Item(rs::Item::Reasoning(_))
+                    | rs::InputItem::Item(rs::Item::WebSearchCall(_))
+            )),
+            "reasoning and native backend-tool state must both fail closed across endpoints"
+        );
+        assert!(items.iter().any(|item| matches!(
+            item,
+            rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                role: rs::Role::Assistant,
+                content: rs::EasyInputContent::Text(text),
+                ..
+            }) if text == "portable answer"
+        )));
+    }
+
+    #[test]
+    fn responses_input_keeps_legacy_reasoning_for_matching_model_fallback() {
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_legacy_no_route".to_string(),
+                summary: vec![],
+                content: None,
+                encrypted_content: Some("legacy-encrypted-content".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            ConversationItem::assistant_with_model("answer", "gpt-4o"),
+            ConversationItem::user("follow-up"),
+        ])
+        .with_model("gpt-4o")
+        .with_reasoning_model_identity(ReasoningModelIdentity::new(
+            "gpt-4o",
+            ApiBackend::Responses,
+            "https://api.openai.com/v1",
+        ));
+
+        let responses_req: rs::CreateResponse = (&req).into();
+        let rs::InputParam::Items(items) = responses_req.input else {
+            panic!("Expected Items input");
+        };
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, rs::InputItem::Item(rs::Item::Reasoning(_)))),
+            "legacy same-model history must remain replayable after provenance is introduced"
+        );
     }
 
     #[test]
@@ -5837,7 +6311,10 @@ if image_url.url == "https://example.com/image.png"
         assert!(chat.temperature.is_none(), "fixed sampling must omit temp");
         assert!(chat.top_p.is_none());
         assert!(chat.thinking.is_none(), "K2.7 must not send thinking");
-        assert!(chat.reasoning_effort.is_none(), "K2.7 has no reasoning_effort");
+        assert!(
+            chat.reasoning_effort.is_none(),
+            "K2.7 has no reasoning_effort"
+        );
         let json = serde_json::to_value(&chat).unwrap();
         assert!(json.get("thinking").is_none());
         assert!(json.get("temperature").is_none());
@@ -5927,7 +6404,8 @@ if image_url.url == "https://example.com/image.png"
             Some("summarized")
         );
         assert_eq!(
-            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            json.pointer("/output_config/effort")
+                .and_then(|v| v.as_str()),
             Some("medium")
         );
         assert!(
@@ -5954,7 +6432,8 @@ if image_url.url == "https://example.com/image.png"
             Some("adaptive")
         );
         assert_eq!(
-            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            json.pointer("/output_config/effort")
+                .and_then(|v| v.as_str()),
             Some("max")
         );
 
@@ -5972,7 +6451,8 @@ if image_url.url == "https://example.com/image.png"
             Some("adaptive")
         );
         assert_eq!(
-            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            json.pointer("/output_config/effort")
+                .and_then(|v| v.as_str()),
             Some("medium")
         );
     }
@@ -5993,7 +6473,8 @@ if image_url.url == "https://example.com/image.png"
             Some("adaptive")
         );
         assert_eq!(
-            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            json.pointer("/output_config/effort")
+                .and_then(|v| v.as_str()),
             Some("max")
         );
         assert_eq!(msgs.max_tokens, 32_768);
@@ -6007,7 +6488,8 @@ if image_url.url == "https://example.com/image.png"
         let msgs = build_messages_request(&req);
         let json = serde_json::to_value(&msgs).unwrap();
         assert_eq!(
-            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            json.pointer("/output_config/effort")
+                .and_then(|v| v.as_str()),
             Some("high")
         );
     }
@@ -6048,7 +6530,8 @@ if image_url.url == "https://example.com/image.png"
             Some("adaptive")
         );
         assert_eq!(
-            json.pointer("/output_config/effort").and_then(|v| v.as_str()),
+            json.pointer("/output_config/effort")
+                .and_then(|v| v.as_str()),
             Some("low"),
             "Pi mapThinkingLevelToEffort: minimal → low"
         );
@@ -6198,6 +6681,7 @@ if image_url.url == "https://example.com/image.png"
             content: "Here is the answer.".into(),
             tool_calls: vec![],
             model_id: Some("messages-compatible-model".into()),
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         });
@@ -6394,6 +6878,7 @@ if image_url.url == "https://example.com/image.png"
                 content: "I'll look at the code.".into(),
                 tool_calls: vec![],
                 model_id: Some("messages-compatible-model".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -6406,6 +6891,7 @@ if image_url.url == "https://example.com/image.png"
                     arguments: r#"{"path":"src/main.rs"}"#.into(),
                 }],
                 model_id: Some("messages-compatible-model".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -6414,6 +6900,7 @@ if image_url.url == "https://example.com/image.png"
                 content: "I see the issue.".into(),
                 tool_calls: vec![],
                 model_id: Some("messages-compatible-model".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -6426,6 +6913,7 @@ if image_url.url == "https://example.com/image.png"
                     arguments: "{}".into(),
                 }],
                 model_id: Some("messages-compatible-model".into()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -7161,6 +7649,7 @@ if image_url.url == "https://example.com/image.png"
                 },
             ],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })];
@@ -7227,6 +7716,7 @@ if image_url.url == "https://example.com/image.png"
                 content: format!("I edited {worktree}/src/main.rs").into(),
                 tool_calls: vec![],
                 model_id: Some("grok-3".to_string()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -7284,6 +7774,7 @@ if image_url.url == "https://example.com/image.png"
                     ).into(),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -7335,6 +7826,7 @@ if image_url.url == "https://example.com/image.png"
                     arguments: format!(r#"{{"target_file":"{root}/src/main.rs"}}"#).into(),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -7443,6 +7935,7 @@ if image_url.url == "https://example.com/image.png"
                 arguments: r#"{"command":"echo hello"}"#.into(),
             }],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })];
@@ -7558,6 +8051,7 @@ if image_url.url == "https://example.com/image.png"
                 content: String::new().into(),
                 tool_calls: vec![],
                 model_id: Some("test-model".to_string()),
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             })],
@@ -7579,6 +8073,7 @@ if image_url.url == "https://example.com/image.png"
                 content: "Here is my answer.".into(),
                 tool_calls: vec![],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             })],
@@ -7604,6 +8099,7 @@ if image_url.url == "https://example.com/image.png"
                     arguments: "{}".into(),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             })],
@@ -7801,6 +8297,7 @@ if image_url.url == "https://example.com/image.png"
             content: "Hello".into(),
             tool_calls: vec![],
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }
@@ -7890,6 +8387,7 @@ if image_url.url == "https://example.com/image.png"
                 })
                 .collect(),
             model_id: None,
+            reasoning_model_identity: None,
             model_fingerprint: None,
             reasoning_effort: None,
         })
@@ -8592,6 +9090,7 @@ if image_url.url == "https://example.com/image.png"
                     arguments: "{}".into(),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
@@ -9126,6 +9625,7 @@ if image_url.url == "https://example.com/image.png"
                     content: String::new().into(),
                     tool_calls: Vec::new(),
                     model_id: None,
+                    reasoning_model_identity: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
                 }),
@@ -10359,6 +10859,7 @@ if image_url.url == "https://example.com/image.png"
                     arguments: Arc::<str>::from("{}"),
                 }],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),

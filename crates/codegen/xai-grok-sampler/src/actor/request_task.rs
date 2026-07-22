@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_sampling_types::{
-    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
-    error::Result as SamplingResult,
+    ConversationItem, ConversationRequest, ConversationResponse, EmptyResponseContext,
+    ReasoningModelIdentity, SamplingError, error::Result as SamplingResult,
 };
 
 use crate::client::{ApiBackend, SamplingClient};
@@ -496,7 +496,7 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
 #[allow(clippy::too_many_arguments)]
 async fn run_one_attempt(
     client: &SamplingClient,
-    request: ConversationRequest,
+    mut request: ConversationRequest,
     request_id: RequestId,
     idle_timeout: Duration,
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
@@ -504,6 +504,11 @@ async fn run_one_attempt(
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
+    if let Err(error) = client.apply_conversation_defaults(&mut request) {
+        return AttemptOutcome::InitFailed { error };
+    }
+    let reasoning_model_identity = request.reasoning_model_identity.clone();
+
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {
@@ -518,6 +523,7 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
+                reasoning_model_identity,
                 None,
                 output_observed,
             )
@@ -549,6 +555,7 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
+                reasoning_model_identity,
                 doom_check,
                 output_observed,
             )
@@ -567,6 +574,7 @@ async fn run_one_attempt(
                 event_tx,
                 cancel_token,
                 captured,
+                reasoning_model_identity,
                 None,
                 output_observed,
             )
@@ -617,6 +625,7 @@ async fn drive_l2(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: &CancellationToken,
     captured: ErrorCell,
+    reasoning_model_identity: Option<ReasoningModelIdentity>,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
@@ -628,7 +637,12 @@ async fn drive_l2(
                 return AttemptOutcome::Cancelled;
             }
             next = l2.next() => match next {
-                Some(SamplingEvent::Completed { response, metrics, .. }) => {
+                Some(SamplingEvent::Completed { mut response, metrics, .. }) => {
+                    for item in &mut response.items {
+                        if let ConversationItem::Assistant(assistant) = item {
+                            assistant.reasoning_model_identity = reasoning_model_identity.clone();
+                        }
+                    }
                     output_observed.store(true, Ordering::Relaxed);
                     // Doom outranks the truncation/empty classes: a confident
                     // loop poisons the attempt whatever else it looks like.

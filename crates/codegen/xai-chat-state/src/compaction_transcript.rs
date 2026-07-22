@@ -777,6 +777,7 @@ mod tests {
                     tc("grep", r#"{"pattern":"x","path":"src/"}"#),
                 ],
                 model_id: None,
+                reasoning_model_identity: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
