@@ -245,8 +245,14 @@ fn try_adopt_sibling_kimi_token(
     }
     let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
     if existing_rt != spent_refresh {
-        if !crate::auth::is_expired(&existing) || !existing_rt.is_empty() {
+        if !crate::auth::is_expired(&existing) {
             tracing::info!("auth: Kimi refresh adopted sibling token (RT rotated)");
+            return Some(existing);
+        }
+        if !existing_rt.is_empty() {
+            tracing::info!(
+                "auth: Kimi refresh adopted sibling RT family (access expired; will re-refresh later)"
+            );
             return Some(existing);
         }
         return None;
@@ -502,5 +508,16 @@ mod tests {
     fn unexpired_access_is_a_catalog_credential_without_refresh_token() {
         let token = catalog_access_token(cached_auth(Duration::hours(1), None));
         assert_eq!(token.as_deref(), Some("persisted-access"));
+    }
+
+    #[test]
+    fn adopts_rotated_refresh_family_even_when_sibling_access_is_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = cached_auth(Duration::hours(-1), Some("refresh-new"));
+        store_kimi_code_auth(dir.path(), &auth).unwrap();
+
+        let adopted = try_adopt_sibling_kimi_token(dir.path(), "refresh-old", false)
+            .expect("a rotated refresh family must supersede the spent token");
+        assert_eq!(adopted.refresh_token.as_deref(), Some("refresh-new"));
     }
 }

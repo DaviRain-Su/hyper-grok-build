@@ -31,22 +31,17 @@ impl crate::auth::refresh::TokenRefresher for AlwaysSucceedRefresher {
 /// `unauthorized_recovery()` actually dispatches to the refresher.
 /// Tempdir must outlive the manager (auth.json path).
 ///
-/// `AuthManager::new` reads `GROK_AUTH` / `GROK_AUTH_PATH` from the process
-/// env before honoring `grok_home`. A concurrent `#[serial]` test that sets
-/// either (cli_models::resolve_oauth_session sets `GROK_AUTH`, the BYOK
-/// isolation tests set `GROK_AUTH_PATH`) can otherwise hijack this manager's
-/// auth.json path and load the wrong credential, breaking the refresher
-/// invocation these tests assert. Unset both for the duration of
-/// `AuthManager::new` so the manager points at the tempdir's auth.json.
+/// Use the env-independent test constructor: temporarily unsetting
+/// `GROK_AUTH` / `GROK_AUTH_PATH` here would clobber another parallel test's
+/// fixture and could make it read the developer's real credential file.
 fn auth_manager_with_refresher(
     refresher: Arc<dyn crate::auth::refresh::TokenRefresher>,
 ) -> (tempfile::TempDir, Arc<AuthManager>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let _no_grok_auth = xai_grok_test_support::EnvGuard::unset("GROK_AUTH");
-    let _no_grok_auth_path = xai_grok_test_support::EnvGuard::unset("GROK_AUTH_PATH");
-    let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    drop(_no_grok_auth);
-    drop(_no_grok_auth_path);
+    let am = Arc::new(AuthManager::new_test_isolated(
+        dir.path(),
+        GrokComConfig::default(),
+    ));
     am.hot_swap(GrokAuth {
         key: "initial-test-key".into(),
         auth_mode: AuthMode::Oidc,
@@ -132,15 +127,14 @@ async fn make_actor_with_method_and_credentials(
 /// `(tempdir, manager)` holding a valid OIDC token (so `get_valid_token()` is a
 /// cache hit). The tempdir must outlive the manager (auth.json path).
 ///
-/// See [`auth_manager_with_refresher`] for why `GROK_AUTH` / `GROK_AUTH_PATH`
-/// are unset during `AuthManager::new` (concurrent-serial env pollution).
+/// See [`auth_manager_with_refresher`] for why this bypasses process-global
+/// auth environment variables.
 fn auth_manager_with_valid_token(key: &str) -> (tempfile::TempDir, Arc<AuthManager>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let _no_grok_auth = xai_grok_test_support::EnvGuard::unset("GROK_AUTH");
-    let _no_grok_auth_path = xai_grok_test_support::EnvGuard::unset("GROK_AUTH_PATH");
-    let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    drop(_no_grok_auth);
-    drop(_no_grok_auth_path);
+    let am = Arc::new(AuthManager::new_test_isolated(
+        dir.path(),
+        GrokComConfig::default(),
+    ));
     am.hot_swap(GrokAuth {
         key: key.into(),
         auth_mode: AuthMode::Oidc,
@@ -890,17 +884,21 @@ async fn reconstruct_full_config_prefers_codex_resolver_over_session_auth_manage
                 cfg.bearer_resolver.is_some(),
                 "openai-codex base_url must install a live bearer resolver"
             );
-            assert_eq!(
-                cfg.api_key.as_deref(),
-                Some(access.as_str()),
+            assert!(
+                cfg.api_key.as_deref() == Some(access.as_str()),
                 "must use the Codex access token, not the xAI session JWT"
             );
             // Live resolver must also surface the Codex bearer (not AuthManager).
+            // Keep this as a boolean assertion so a parallel-test regression
+            // can never print a developer credential into the test log.
             let live = cfg
                 .bearer_resolver
                 .as_ref()
                 .and_then(|r| r.current_bearer());
-            assert_eq!(live.as_deref(), Some(access.as_str()));
+            assert!(
+                live.as_deref() == Some(access.as_str()),
+                "live resolver returned the wrong credential source"
+            );
             assert!(
                 cfg.responses_codex_dialect,
                 "Codex dialect flag must be set for the chatgpt backend"

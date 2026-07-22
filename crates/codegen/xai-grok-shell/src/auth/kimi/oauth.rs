@@ -16,7 +16,7 @@ const REFRESH_GRANT_TYPE: &str = "refresh_token";
 const MAX_REFRESH_RETRIES: u32 = 3;
 const RETRYABLE_REFRESH_STATUSES: [u16; 5] = [429, 500, 502, 503, 504];
 
-/// Per-attempt total timeout (connect + response) for token-refresh POSTs.
+/// Per-attempt total timeout (connect + headers + body) for token-refresh POSTs.
 /// Bounds a stalled network path (e.g. a fake-ip proxy that accepts the TCP
 /// handshake then never responds) so the refresh — and the `auth.json.lock`
 /// it holds — can never block subsequent launches indefinitely. Driven by
@@ -266,28 +266,36 @@ async fn refresh_token_with_timeout(
             let backoff = std::time::Duration::from_secs(1 << (attempt - 1));
             tokio::time::sleep(backoff).await;
         }
-        // Bound the whole request (connect + response headers) so a stalled
-        // proxy (e.g. fake-ip TUN that accepts the TCP handshake then never
-        // responds) cannot wedge the refresh. reqwest's per-request `.timeout()`
-        // does not reliably abort an in-flight request against a stalled peer
-        // in practice, so drive the deadline with `tokio::time::timeout` instead.
-        // The refresh holds `auth.json.lock` for its whole duration; without a
-        // reliable bound one hung request blocks every subsequent launch on
-        // the 45s lock timeout and makes the TUI appear permanently stuck.
+        // Bound one complete attempt — connect, response headers, and full
+        // response body — with a single deadline. Separate send/body timeouts
+        // would allow one attempt to hold `auth.json.lock` for roughly twice
+        // the advertised limit when headers arrive just before the first
+        // deadline and the body then stalls.
         let request = with_device_headers(crate::http::shared_client().post(&url))?.form(&[
             ("client_id", KIMI_CODE_CLIENT_ID),
             ("grant_type", REFRESH_GRANT_TYPE),
             ("refresh_token", refresh_token),
         ]);
-        let send_result = tokio::time::timeout(request_timeout, request.send()).await;
+        let attempt_result = tokio::time::timeout(request_timeout, async {
+            let resp = request.send().await?;
+            let status = resp.status().as_u16();
+            // Preserve the prior response-body error semantics: an immediate
+            // read failure becomes an empty payload and is classified from the
+            // known HTTP status below. Only a stalled read consumes the shared
+            // deadline. In particular, do not retry a 200 after the server may
+            // already have rotated the refresh-token family.
+            let body = resp.bytes().await.unwrap_or_default();
+            Ok::<_, reqwest::Error>((status, body))
+        })
+        .await;
 
         // A timeout means the network path is stalled. Treat it as terminal
         // (do NOT retry): retrying would hold `auth.json.lock` for up to
         // 3 × timeout and wedge any concurrent refresh — and TUI startup —
         // behind it. Fail fast so the lock is released; the next request that
         // needs a Kimi bearer re-invokes the refresh and retries naturally.
-        let resp = match send_result {
-            Ok(Ok(resp)) => resp,
+        let (status, body) = match attempt_result {
+            Ok(Ok(response)) => response,
             Ok(Err(e)) => {
                 last_error = format!("network error: {e}");
                 continue;
@@ -307,11 +315,6 @@ async fn refresh_token_with_timeout(
                     ),
                 });
             }
-        };
-        let status = resp.status().as_u16();
-        let body = match tokio::time::timeout(request_timeout, resp.bytes()).await {
-            Ok(Ok(b)) => b,
-            Ok(Err(_)) | Err(_) => Default::default(),
         };
         if status == 401 || status == 403 {
             let err: OAuthErrorBody = serde_json::from_slice(&body).unwrap_or_default();
@@ -420,6 +423,37 @@ mod poll_error_mapping_tests {
         (host, hits, handle)
     }
 
+    async fn spawn_delayed_headers_stalled_body_server(
+        header_delay: std::time::Duration,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/api/oauth/token",
+            axum::routing::post({
+                let hits = hits.clone();
+                move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(header_delay).await;
+                        axum::response::Response::builder()
+                            .status(axum::http::StatusCode::OK)
+                            .body(axum::body::Body::from_stream(
+                                futures::stream::pending::<Result<String, std::io::Error>>(),
+                            ))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (host, hits, handle)
+    }
+
     #[tokio::test]
     async fn poll_maps_access_denied_to_access_denied() {
         let (host, server) = spawn_token_server(vec![(
@@ -506,6 +540,39 @@ mod poll_error_mapping_tests {
             hits.load(Ordering::SeqCst),
             1,
             "a stalled network path must not be retried while auth.json.lock is held"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_headers_and_body_share_one_attempt_deadline() {
+        let request_timeout = std::time::Duration::from_secs(1);
+        let (host, hits, server) = spawn_delayed_headers_stalled_body_server(
+            std::time::Duration::from_millis(700),
+        )
+        .await;
+
+        // A split send/body budget would take about 1.7s here. The outer
+        // guard leaves scheduling slack while proving the refresh returns on
+        // the single 1s attempt deadline.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(1_400),
+            refresh_token_with_timeout(&host, "refresh", request_timeout),
+        )
+        .await
+        .expect("refresh exceeded one shared send/body deadline");
+        server.abort();
+
+        match result {
+            Err(RefreshError::Fatal {
+                status: 0,
+                description,
+            }) => assert!(description.contains("timed out"), "{description}"),
+            other => panic!("expected terminal body timeout, got {other:?}"),
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a stalled response body must not trigger another refresh-token spend"
         );
     }
 }

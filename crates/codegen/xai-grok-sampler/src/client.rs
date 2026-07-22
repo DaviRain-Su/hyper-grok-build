@@ -2797,6 +2797,28 @@ mod tests {
         assert!(client.current_sent_bearer_prefix().is_none());
     }
 
+    #[test]
+    fn missing_live_x_api_key_does_not_fall_back_to_stale_catalog_key() {
+        let cfg = SamplerConfig {
+            api_key: Some("expired-catalog-key".to_string()),
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            bearer_resolver: Some(std::sync::Arc::new(MissingBearerResolver)),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let request = client
+            .post("https://example.test/v1/messages")
+            .build()
+            .expect("request should build");
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+        assert!(
+            request.headers().get("x-api-key").is_none(),
+            "failed live resolution must not send a stale construction-time x-api-key"
+        );
+        assert!(client.current_sent_bearer_prefix().is_none());
+    }
+
     /// Regression: when `api_key` (which seeds `default_headers` with an
     /// `Authorization: Bearer ...`) AND a `bearer_resolver` are both set,
     /// `post()` must produce **exactly one** `Authorization` header on the

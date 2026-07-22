@@ -51,10 +51,12 @@ GROK_AUTH_PATH  // 自定义 auth.json 路径，覆盖 $GROK_HOME/auth.json
 并发的另一个测试构造 `AuthManager::new(tempdir, …)` 就会读到那条内联 JSON，
 而不是测试自己的 tempdir。
 
-**隔离方式**：测试构造 `AuthManager` 之前 `EnvGuard::unset("GROK_AUTH")` +
-`EnvGuard::unset("GROK_AUTH_PATH")`，让 `grok_home` 参数真正生效。或者
-显式 `EnvGuard::set("GROK_AUTH_PATH", <temp auth.json>)` 指向 scratch 文件
-（`cli_models` 用的就是这个，避开 `OnceLock`-cached 真实 home，见 §2.3）。
+**隔离方式**：只需注入内存凭据的 crate 单元测试优先使用
+`AuthManager::new_test_isolated(tempdir, …)`；它完全不读 `GROK_AUTH` /
+`GROK_AUTH_PATH`，也不需要临时 unset 进程环境。确实要覆盖环境变量解析或
+`auth.json` 读写的测试，必须加默认组 `#[serial]`，再用 `EnvGuard` 显式设置
+scratch 路径（`cli_models` 用的就是这个，避开 `OnceLock`-cached 真实 home，见
+§2.3）。不要在非 serial helper 中临时 unset：它会清掉另一个并行测试的 fixture。
 
 ### 2.3 `GROK_HOME` 与 `xai_grok_config::grok_home()` 的 `OnceLock`
 
@@ -69,8 +71,8 @@ GROK_AUTH_PATH  // 自定义 auth.json 路径，覆盖 $GROK_HOME/auth.json
 带上凭据。
 
 **隔离方式**：不要依赖 `GROK_HOME`（会被 `OnceLock` 锁死）。改用 `GROK_AUTH_PATH`
-指 scratch `auth.json`，`ensure_openai_codex_access_token_blocking` 与
-`kimi_code_access_token_cached` 都 honor `GROK_AUTH_PATH`。`load_effective_config()`
+指 scratch `auth.json`，`openai_codex_catalog_access_token_cached` 与
+`kimi_code_catalog_access_token_cached` 都 honor `GROK_AUTH_PATH`。`load_effective_config()`
 仍然会读 `~/.grok/config.toml`——这一点目前**无法**在测试里隔离，是遗留债务（§4）。
 
 ### 2.4 `attribution_emit_count` 进程全局计数器
@@ -88,8 +90,8 @@ GROK_AUTH_PATH  // 自定义 auth.json 路径，覆盖 $GROK_HOME/auth.json
    这条链路的**，必须：
    - `#[serial_test::serial]`（默认组）；
    - `let _byok = unset_all_byok_platform_api_key_envs();` 持有到测试结束；
-   - 若构造 `AuthManager`：`EnvGuard::unset("GROK_AUTH")` +
-     `EnvGuard::unset("GROK_AUTH_PATH")`（或显式 set `GROK_AUTH_PATH` 到 temp）。
+   - 若只需内存凭据：用 `AuthManager::new_test_isolated(tempdir, …)`；若必须测试
+     环境/磁盘解析，则显式 set `GROK_AUTH_PATH` 到 temp，并保持默认组 `#[serial]`。
 
 2. **`EnvGuard` 的 `set`/`unset` 是 `unsafe` 的进程全局 mutation**，caller 必须是
    `#[serial]`，否则与并发测试互相踩 env。默认组 `#[serial]` 与
@@ -127,5 +129,5 @@ GROK_AUTH_PATH  // 自定义 auth.json 路径，覆盖 $GROK_HOME/auth.json
 | `agent::platform_models_fetch::tests::think_efforts_maps_max_token_to_max_variant` | 断言过期：`"max"` 现解析为 `ReasoningEffort::Max`，而非旧的 `Xhigh` | 改断言为 `Max`，重命名测试 |
 | `agent::platform_models_fetch::tests::wire_k3_entry_gets_catalog_key_and_efforts` | 同上 | 同上 |
 | `session::acp_session::auth_error_no_retry_tests::pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough` | BYOK env 使 `model_auth_facts` 判 `Byok`，gate 关闭 | `#[serial]` + `_byok` |
-| `session::acp_session::auth_error_no_retry_tests::sampler_401_{session,oidc}_method_with_stale_api_key_auth_type_still_recovers` | `GROK_AUTH`/`GROK_AUTH_PATH` 并发污染 `AuthManager::new` | `#[serial]` + `auth_manager_with_*` 在 `AuthManager::new` 前 unset `GROK_AUTH`/`GROK_AUTH_PATH` |
+| `session::acp_session::auth_error_no_retry_tests::*` 的 `auth_manager_with_*` callers | helper 临时 unset `GROK_AUTH`/`GROK_AUTH_PATH`，会清掉并行 Codex fixture | helper 改用 `AuthManager::new_test_isolated`，不再 mutation 进程 env |
 | `session::storage::jsonl::tests::workflow_restore_rejects_symlinks_and_caps_run_count` | `read_dir` 顺序不确定 + 截断在 sort 前，symlink 抢占合法 run 槽位 | 生产代码：sort 前移到 truncate 前（`jsonl/mod.rs`） |

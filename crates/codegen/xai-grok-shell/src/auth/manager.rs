@@ -377,6 +377,27 @@ impl AuthManager {
         manager
     }
 
+    /// Construct an empty manager at `grok_home/auth.json` without consulting
+    /// process-global `GROK_AUTH` or `GROK_AUTH_PATH`.
+    ///
+    /// Unit tests that inject credentials with [`Self::hot_swap`] use this
+    /// instead of temporarily mutating environment variables, which would race
+    /// unrelated tests running in the same process.
+    #[cfg(test)]
+    pub(crate) fn new_test_isolated(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
+        let scope = grok_com_config.auth_scope();
+        let proxy_base_url =
+            crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
+        Self::assemble(
+            None,
+            grok_home.join("auth.json"),
+            scope,
+            grok_com_config,
+            proxy_base_url,
+            None,
+        )
+    }
+
     /// Single field-assembly point for [`Self::new`]'s two construction paths
     /// (inline `GROK_AUTH` vs. on-disk `auth.json`), which differ only in the
     /// threaded fields. One literal means a newly added field can't be silently

@@ -520,6 +520,33 @@ pub async fn ensure_openai_codex_auth() -> Option<GrokAuth> {
     refresh_openai_codex_auth(false).await
 }
 
+/// Return the persisted Codex access token for catalog/startup gating without
+/// performing a network refresh.
+///
+/// An expired access token remains a valid login marker when a non-empty
+/// refresh token is persisted. It is never trusted directly on the wire:
+/// [`OpenAiCodexBearerResolver`] replaces the catalog stamp per request, and
+/// the sampler removes the stamp entirely when live resolution fails.
+pub fn openai_codex_catalog_access_token_cached() -> Option<String> {
+    let path = auth_json_path();
+    let home = path.parent().unwrap_or(&path);
+    catalog_access_token(read_openai_codex_auth(home)?)
+}
+
+fn catalog_access_token(auth: GrokAuth) -> Option<String> {
+    if auth.key.trim().is_empty() {
+        return None;
+    }
+    let can_refresh = auth
+        .refresh_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    if crate::auth::is_expired(&auth) && !can_refresh {
+        return None;
+    }
+    Some(auth.key)
+}
+
 /// Force a network refresh of the Codex access token even when the local TTL
 /// still looks valid. Used on 401 from `chatgpt.com/backend-api` so recovery
 /// does not no-op on a still-cached rejected bearer.
@@ -806,6 +833,27 @@ mod tests {
             email: Some("user@example.com".to_owned()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn expired_access_with_refresh_token_remains_a_catalog_credential() {
+        let token = catalog_access_token(sample_codex("refresh", "persisted-access", -3_600));
+        assert_eq!(token.as_deref(), Some("persisted-access"));
+    }
+
+    #[test]
+    fn expired_access_without_refresh_token_is_not_a_catalog_credential() {
+        let mut auth = sample_codex("refresh", "persisted-access", -3_600);
+        auth.refresh_token = None;
+        assert!(catalog_access_token(auth).is_none());
+
+        let auth = sample_codex("   ", "persisted-access", -3_600);
+        assert!(catalog_access_token(auth).is_none());
+    }
+
+    #[test]
+    fn catalog_credential_rejects_an_empty_access_token() {
+        assert!(catalog_access_token(sample_codex("refresh", "  ", 3_600)).is_none());
     }
 
     #[test]

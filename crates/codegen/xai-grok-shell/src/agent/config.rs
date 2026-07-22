@@ -3935,13 +3935,15 @@ fn apply_platform_credentials(
     resolved: &mut IndexMap<String, ModelEntry>,
     platforms: &PlatformsConfig,
 ) {
-    // Keep a persisted, refreshable Kimi session visible even after its
-    // short-lived access token expires. The stamped value is only a catalog
-    // marker: `KimiCodeBearerResolver` replaces it per request, and the sampler
-    // removes it entirely when refresh fails. Live `/models` fetches continue
-    // to use `kimi_code_access_token_cached()` and therefore never send it.
+    // Keep persisted, refreshable OAuth sessions visible after their access
+    // tokens expire without doing network I/O during catalog resolution. These
+    // values are catalog markers only: each platform's live bearer resolver
+    // replaces the stamp per request, and the sampler removes it entirely when
+    // refresh fails. Kimi live `/models` fetches separately require the
+    // currently wire-safe `kimi_code_access_token_cached()` value.
     let kimi_bearer = crate::auth::kimi::kimi_code_catalog_access_token_cached();
-    let codex_bearer = crate::auth::openai_codex::ensure_openai_codex_access_token_blocking();
+    let codex_bearer =
+        crate::auth::openai_codex::openai_codex_catalog_access_token_cached();
     apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer, codex_bearer);
 }
 
@@ -13589,6 +13591,46 @@ default = "grok-4.5"
             sampler.bearer_resolver.is_some(),
             "the expired catalog marker must be replaced by the live Kimi resolver"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn expired_refreshable_codex_session_stays_visible_without_startup_refresh() {
+        let (dir, _guards) = isolated_auth_home();
+        crate::auth::store_openai_codex_auth(
+            dir.path(),
+            &crate::auth::GrokAuth {
+                key: "expired-codex-access".into(),
+                auth_mode: crate::auth::AuthMode::OpenAiCodex,
+                create_time: chrono::Utc::now() - chrono::Duration::hours(2),
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+                refresh_token: Some("persisted-refresh".into()),
+                account_id: Some("acct-test".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("openai-codex/gpt-5.6-sol")
+            .expect("Codex builtin must remain in the catalog");
+
+        assert_eq!(entry.api_key.as_deref(), Some("expired-codex-access"));
+        assert!(entry.info.supported_in_api);
+        assert!(entry.visible_for_auth(false));
+
+        let sampler = sampling_config_for_model(
+            entry,
+            resolve_credentials(entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(sampler.bearer_resolver.is_some());
+        assert!(sampler.responses_codex_dialect);
     }
 
     #[test]
