@@ -2343,17 +2343,28 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// Build the [`rs::InputParam`] for a Responses API request.
 ///
 /// Each [`ConversationItem`] becomes its natural Responses-API input shape via
-/// [`conversation_item_to_input_items`]. Responses-replayable reasoning items
-/// are top-level siblings (not bundled into the assistant), so they appear
-/// inline in the same order the model emitted — which is what lets the
-/// server-side prefix KV-cache hit on repeat turns. Synthetic reasoning from
-/// Messages or Chat Completions has no valid Responses item ID and is omitted;
-/// the following assistant message still carries the cross-provider context.
+/// [`conversation_item_to_input_items`]. Replayable reasoning items are
+/// top-level siblings (not bundled into the assistant), so they appear inline
+/// in the same order the model emitted — which is what lets the server-side
+/// prefix KV-cache hit on repeat turns.
+///
+/// Reasoning is model-bound opaque state, not portable conversation text.
+/// Synthetic reasoning from Messages or Chat Completions has no valid
+/// Responses item ID, while encrypted Responses reasoning can only be replayed
+/// to the model that produced the following assistant turn. Invalid items and
+/// items owned by another model are omitted; the visible assistant message
+/// still carries the portable cross-model context.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
+    let target_model = req.model.as_deref();
     let items: Vec<rs::InputItem> = req
         .items
         .iter()
-        .flat_map(conversation_item_to_input_items)
+        .enumerate()
+        .filter(|(index, item)| {
+            !matches!(item, ConversationItem::Reasoning(_))
+                || reasoning_matches_target_model(&req.items, *index, target_model)
+        })
+        .flat_map(|(_, item)| conversation_item_to_input_items(item))
         .collect();
     rs::InputParam::Items(items)
 }
@@ -2400,6 +2411,44 @@ fn valid_responses_item_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+/// Return whether a model-bound reasoning sibling belongs to the target model.
+///
+/// `Reasoning` has no model field of its own. Responses place it immediately
+/// before the `Assistant` it belongs to, with optional `BackendToolCall`
+/// siblings in between, so the following assistant's `model_id` is its source
+/// provenance. A user/system/tool-result boundary makes the item orphaned.
+///
+/// Direct conversion helpers sometimes build requests without a model; retain
+/// their legacy behavior in that case. Production requests have a target model
+/// stamped before conversion. If old persisted history lacks assistant model
+/// metadata, dropping opaque reasoning is safer than sending an unverifiable
+/// encrypted blob and deterministically poisoning every later turn.
+fn reasoning_matches_target_model(
+    items: &[ConversationItem],
+    reasoning_index: usize,
+    target_model: Option<&str>,
+) -> bool {
+    let Some(target_model) = target_model else {
+        return true;
+    };
+    let Some(tail) = items.get(reasoning_index.saturating_add(1)..) else {
+        return false;
+    };
+
+    for item in tail {
+        match item {
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::Assistant(assistant) => {
+                return assistant.model_id.as_deref() == Some(target_model);
+            }
+            ConversationItem::System(_)
+            | ConversationItem::User(_)
+            | ConversationItem::ToolResult(_) => return false,
+        }
+    }
+    false
 }
 
 /// Convert a ConversationItem to Responses API InputItem(s).
@@ -4892,7 +4941,8 @@ if image_url.url == "https://example.com/image.png"
             }),
             // New user message
             ConversationItem::user("Now what is 3+3?"),
-        ]);
+        ])
+        .with_model("grok-3");
 
         let responses_req: rs::CreateResponse = (&req).into();
 
@@ -5056,6 +5106,51 @@ if image_url.url == "https://example.com/image.png"
                     content: rs::EasyInputContent::Text(text),
                     ..
                 }) if text == "answer preserved across providers"
+            )
+        }));
+    }
+
+    #[test]
+    fn responses_input_drops_valid_encrypted_reasoning_from_previous_model() {
+        // Regression from a real Codex -> Grok switch. Both providers use the
+        // Responses API and Codex emits a syntactically valid `rs_*` ID, but
+        // Grok cannot decrypt Codex's opaque encrypted_content. The ID syntax
+        // check alone therefore cannot make a cross-model replay safe.
+        let req = ConversationRequest::from_items(vec![
+            ConversationItem::user("question for Codex"),
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_02525dd4246acc36016a605d3".to_string(),
+                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                    text: "Codex reasoning summary".to_string(),
+                })],
+                content: None,
+                encrypted_content: Some("codex-encrypted-content".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            ConversationItem::assistant_with_model("Codex answer", "gpt-5.6-sol"),
+            ConversationItem::user("next question for Grok"),
+        ])
+        .with_model("grok-4.5");
+
+        let responses_req: rs::CreateResponse = (&req).into();
+        let rs::InputParam::Items(items) = responses_req.input else {
+            panic!("Expected Items input");
+        };
+
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, rs::InputItem::Item(rs::Item::Reasoning(_)))),
+            "valid-but-foreign encrypted reasoning must not be replayed to the new model"
+        );
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                    role: rs::Role::Assistant,
+                    content: rs::EasyInputContent::Text(text),
+                    ..
+                }) if text == "Codex answer"
             )
         }));
     }
