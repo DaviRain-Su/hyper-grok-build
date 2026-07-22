@@ -5353,16 +5353,30 @@ enum ModelLookup<'a> {
 /// keeping "config unavailable" distinct from "model absent" so callers can
 /// stay conservative on a transient config failure.
 fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T {
-    let Some(raw) = crate::config::load_effective_config()
-        .map_err(|e| tracing::warn!(error = % e, "config load failed for model auth lookup"))
-        .ok()
-    else {
-        return f(ModelLookup::ConfigUnavailable);
-    };
-    let Some(cfg) = Config::new_from_toml_cfg(&raw)
-        .map_err(|e| tracing::warn!(error = % e, "config parse failed for model auth lookup"))
-        .ok()
-    else {
+    // Load + parse the effective config on a dedicated, enlarged-stack thread.
+    // `Config` is a very large struct, and its serde-derived `Deserialize`
+    // (wrapped by `serde_ignored` and driven by `toml`) allocates large stack
+    // frames per nesting level — deserializing the full effective config
+    // consumes well over the 2 MB stack of a default tokio worker / test
+    // thread, overflowing it (observed as a stack overflow in the session
+    // tests; a latent risk on any 2 MB production worker). Parsing on an
+    // 8 MB-stack scoped thread keeps that cost off the caller's stack limit.
+    let cfg: Option<Config> = std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(s, || {
+                let raw = crate::config::load_effective_config()
+                    .map_err(|e| tracing::warn!(error = %e, "config load failed for model auth lookup"))
+                    .ok()?;
+                Config::new_from_toml_cfg(&raw)
+                    .map_err(|e| tracing::warn!(error = %e, "config parse failed for model auth lookup"))
+                    .ok()
+            })
+            .expect("spawn scoped config-parse thread")
+            .join()
+            .expect("config-parse thread panicked")
+    });
+    let Some(cfg) = cfg else {
         return f(ModelLookup::ConfigUnavailable);
     };
     let models = resolve_model_list(&cfg, None);
