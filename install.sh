@@ -66,6 +66,7 @@ fi
 # ── Platform detection ───────────────────────────────────────────────────────
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+TRIPLE_FALLBACK=""
 case "$OS" in
     Darwin)
         PLATFORM_OS="macos"
@@ -77,11 +78,20 @@ case "$OS" in
         ;;
     Linux)
         PLATFORM_OS="linux"
-        # Release publishes musl static binaries for portability (no glibc ABI
-        # floor; Alpine-native). Asset names use the musl triple.
+        # Prefer musl static binaries (portable across glibc floors + Alpine).
+        # Fall back to gnu when an older release only published glibc assets
+        # (or a musl build is missing for this arch).
         case "$ARCH" in
-            arm64|aarch64) TRIPLE="aarch64-unknown-linux-musl"; PLATFORM_ARCH="aarch64" ;;
-            x86_64|amd64)  TRIPLE="x86_64-unknown-linux-musl";  PLATFORM_ARCH="x86_64" ;;
+            arm64|aarch64)
+                TRIPLE="aarch64-unknown-linux-musl"
+                TRIPLE_FALLBACK="aarch64-unknown-linux-gnu"
+                PLATFORM_ARCH="aarch64"
+                ;;
+            x86_64|amd64)
+                TRIPLE="x86_64-unknown-linux-musl"
+                TRIPLE_FALLBACK="x86_64-unknown-linux-gnu"
+                PLATFORM_ARCH="x86_64"
+                ;;
             *) err "unsupported Linux architecture: $ARCH" ;;
         esac
         ;;
@@ -152,16 +162,35 @@ if [ -n "$VERSION" ] && [ "$RESOLVED_VERSION" != "$VERSION" ]; then
     err "requested version $VERSION but release tag is $TAG"
 fi
 
-ASSET="hyper-${RESOLVED_VERSION}-${TRIPLE}.tar.gz"
-
 # Pull every browser_download_url out of the JSON, then select by asset name.
 URLS="$(printf '%s' "$RELEASE_JSON" \
     | tr ',' '\n' \
     | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-ARCHIVE_URL="$(printf '%s\n' "$URLS" | grep -F "/$ASSET" | head -n 1 || true)"
 SUMS_URL="$(printf '%s\n' "$URLS" | grep -F "/SHA256SUMS" | head -n 1 || true)"
-[ -n "$ARCHIVE_URL" ] || err "release $TAG has no asset $ASSET (this platform may not be published yet)"
 [ -n "$SUMS_URL" ] || err "release $TAG has no SHA256SUMS asset; refusing to install unverified binaries"
+
+# Resolve archive: preferred triple, then Linux gnu fallback when present.
+ASSET=""
+ARCHIVE_URL=""
+for cand in "$TRIPLE" ${TRIPLE_FALLBACK:-}; do
+    [ -n "$cand" ] || continue
+    trial="hyper-${RESOLVED_VERSION}-${cand}.tar.gz"
+    found="$(printf '%s\n' "$URLS" | grep -F "/$trial" | head -n 1 || true)"
+    if [ -n "$found" ]; then
+        ASSET="$trial"
+        ARCHIVE_URL="$found"
+        TRIPLE="$cand"
+        break
+    fi
+done
+if [ -z "$ARCHIVE_URL" ]; then
+    available="$(printf '%s\n' "$URLS" \
+        | sed -n 's|.*/\(hyper-[^/"]*\)|\1|p' \
+        | grep -v '^$' \
+        | sort -u \
+        | tr '\n' ' ')"
+    err "release $TAG has no asset for this platform (tried musl${TRIPLE_FALLBACK:+ and gnu}). Available: ${available:-none}"
+fi
 
 # ── Download + verify ────────────────────────────────────────────────────────
 printf 'Downloading hyper v%s (%s)...\n' "$RESOLVED_VERSION" "$TRIPLE"

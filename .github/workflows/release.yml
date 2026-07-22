@@ -40,7 +40,8 @@ jobs:
             os: windows-2022
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      # Node 24 majors: silence "Node.js 20 is deprecated" runner warnings.
+      - uses: actions/checkout@v5
 
       - name: Check tag matches VERSION file
         shell: bash
@@ -118,6 +119,10 @@ jobs:
       - name: Build hyper (release-dist)
         env:
           GROK_VERSION: ${{ env.GROK_VERSION }}
+          # Belt-and-suspenders for sqlite-vec on musl (also set in .cargo/config.toml).
+          # BSD u_int*_t aliases are missing on musl; map them to stdint types.
+          CFLAGS_x86_64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
+          CFLAGS_aarch64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
         run: cargo build --profile release-dist -p xai-grok-pager-bin --features community-build --locked --target ${{ matrix.target }}
 
       - name: Package archive (tar.gz)
@@ -176,7 +181,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ env.ARCHIVE }}
@@ -187,7 +192,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -199,10 +204,14 @@ jobs:
           sha256sum hyper-* > SHA256SUMS
           cat SHA256SUMS
 
+      # v3 = Node 24. draft:false publishes (reuses/updates an existing draft if
+      # present so a failed previous run cannot leave an untagged draft forever).
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          draft: false
+          make_latest: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
