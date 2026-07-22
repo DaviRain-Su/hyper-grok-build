@@ -795,14 +795,11 @@ fn refresh_codex_token_on_side_thread() -> Option<GrokAuth> {
     match std::thread::Builder::new()
         .name("codex-token-refresh".into())
         .spawn(move || {
-            if let Some(main) = main {
-                return main.block_on(ensure_openai_codex_auth_with_op_timeout());
-            }
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            rt.block_on(ensure_openai_codex_auth_with_op_timeout())
+            crate::main_runtime::block_on_main_or_new_current_thread(
+                main,
+                ensure_openai_codex_auth_with_op_timeout(),
+            )
+            .flatten()
         }) {
         Ok(join) => match join.join() {
             Ok(auth) => auth,

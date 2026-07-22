@@ -37,6 +37,8 @@ pub(super) enum OidcError {
     TokenExchangeHttp { status: u16, body: String },
     #[error("OIDC token refresh failed: HTTP {status} — {body}")]
     TokenRefreshHttp { status: u16, body: String },
+    #[error("OIDC token refresh timed out after {timeout:?}")]
+    TokenRefreshTimeout { timeout: StdDuration },
     #[error("OIDC authentication failed: state mismatch")]
     StateMismatch,
     #[error("OIDC id_token uses unsupported algorithm: {0}")]
@@ -435,11 +437,20 @@ pub(super) async fn exchange_code(
     }
     Ok(resp.json().await?)
 }
-/// Retry gate for `refresh_tokens`. Defers to `classify_terminal` (the single
-/// source of truth): only a recognized terminal code (`invalid_grant`,
-/// `invalid_client`) stops retries. Everything else (5xx, 429, bare 4xx, or an
-/// unrecognized/RFC-transient code) is retried.
+const REFRESH_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+
+/// Retry gate for `refresh_tokens`. Defers OAuth error classification to
+/// `classify_terminal` (the single source of truth). A total-request timeout is
+/// deliberately not retried: the IdP may already have rotated the refresh-token
+/// family before its response body stalled, so immediately spending the same RT
+/// again can trigger reuse detection. A later user request retries naturally.
 fn is_transient_refresh_error(err: &anyhow::Error) -> bool {
+    if matches!(
+        err.downcast_ref::<OidcError>(),
+        Some(OidcError::TokenRefreshTimeout { .. })
+    ) {
+        return false;
+    }
     let Some(OidcError::TokenRefreshHttp { status, body }) = err.downcast_ref::<OidcError>() else {
         return true;
     };
@@ -471,33 +482,55 @@ pub(super) async fn refresh_tokens(
     principal_type: Option<&str>,
     principal_id: Option<&str>,
 ) -> anyhow::Result<TokenResponse> {
+    refresh_tokens_with_timeout(
+        token_endpoint,
+        refresh_token,
+        client_id,
+        principal_type,
+        principal_id,
+        REFRESH_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+async fn refresh_tokens_with_timeout(
+    token_endpoint: &str,
+    refresh_token: &str,
+    client_id: &str,
+    principal_type: Option<&str>,
+    principal_id: Option<&str>,
+    request_timeout: StdDuration,
+) -> anyhow::Result<TokenResponse> {
     use backon::Retryable;
     tracing::debug!(
         token_endpoint = % token_endpoint, principal_type = ? principal_type,
         principal_id = ? principal_id, "OIDC: refreshing token"
     );
     (|| {
-        refresh_tokens_once(
+        refresh_tokens_once_with_timeout(
             token_endpoint,
             refresh_token,
             client_id,
             principal_type,
             principal_id,
+            request_timeout,
         )
     })
     .retry(refresh_retry_policy())
     .when(is_transient_refresh_error)
     .await
 }
-/// One unretried POST to `token_endpoint`. Errors carry the typed
-/// `OidcError::TokenRefreshHttp` so the retry classifier can read the
-/// status code and OAuth2 `error` field without re-parsing.
-async fn refresh_tokens_once(
+/// One unretried POST to `token_endpoint`. One deadline covers connect,
+/// response headers, and the complete body. Errors carry typed OIDC variants
+/// so the retry classifier can distinguish HTTP responses from an ambiguous
+/// timeout that may have spent a rotating refresh token.
+async fn refresh_tokens_once_with_timeout(
     token_endpoint: &str,
     refresh_token: &str,
     client_id: &str,
     principal_type: Option<&str>,
     principal_id: Option<&str>,
+    request_timeout: StdDuration,
 ) -> anyhow::Result<TokenResponse> {
     let mut params = vec![
         ("grant_type", "refresh_token"),
@@ -510,18 +543,32 @@ async fn refresh_tokens_once(
     if let Some(pid) = principal_id {
         params.push(("principal_id", pid));
     }
-    let resp = with_alpha_test_key(
+    let request = with_alpha_test_key(
         crate::http::shared_client()
             .post(token_endpoint)
-            .form(&params)
-            .timeout(StdDuration::from_secs(15)),
+            .form(&params),
         token_endpoint,
-    )
-    .send()
-    .await?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
+    );
+    let attempt = tokio::time::timeout(request_timeout, async {
+        let response = request.send().await?;
+        let status = response.status();
+        // Preserve status-based classification if the body fails immediately;
+        // a body that merely stalls is still bounded by the outer deadline.
+        let body = response.bytes().await.unwrap_or_default();
+        Ok::<_, reqwest::Error>((status, body))
+    })
+    .await;
+    let (status, body) = match attempt {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(anyhow::Error::new(OidcError::TokenRefreshTimeout {
+                timeout: request_timeout,
+            }));
+        }
+    };
+    if !status.is_success() {
+        let status = status.as_u16();
+        let body = String::from_utf8_lossy(&body).into_owned();
         let error_code = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("error")?.as_str().map(str::to_owned));
@@ -535,7 +582,7 @@ async fn refresh_tokens_once(
             body,
         }));
     }
-    Ok(resp.json().await?)
+    Ok(serde_json::from_slice(&body)?)
 }
 #[derive(Debug, Deserialize)]
 pub(super) struct IdTokenClaims {
@@ -1132,6 +1179,76 @@ mod tests {
         );
         server.abort();
     }
+    /// One refresh deadline covers delayed headers plus the complete response
+    /// body. A timeout is not immediately retried because a 200 response may
+    /// already have rotated the refresh-token family before its body stalled.
+    #[tokio::test]
+    async fn refresh_timeout_covers_headers_and_body_without_retrying() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        let hits = std::sync::Arc::new(AtomicU32::new(0));
+        let hits_for_handler = hits.clone();
+        let body_polled = std::sync::Arc::new(AtomicBool::new(false));
+        let body_polled_for_handler = body_polled.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let hits = hits_for_handler.clone();
+                let body_polled = body_polled_for_handler.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(StdDuration::from_millis(25)).await;
+                    axum::response::Response::builder()
+                        .status(axum::http::StatusCode::OK)
+                        .body(axum::body::Body::from_stream(futures::stream::poll_fn(
+                            move |_cx| {
+                                body_polled.store(true, Ordering::SeqCst);
+                                std::task::Poll::<Option<Result<String, std::io::Error>>>::Pending
+                            },
+                        )))
+                        .unwrap()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let token_endpoint = format!("http://127.0.0.1:{port}/token");
+
+        let err = tokio::time::timeout(
+            StdDuration::from_secs(2),
+            refresh_tokens_with_timeout(
+                &token_endpoint,
+                "rt",
+                "client",
+                None,
+                None,
+                StdDuration::from_millis(500),
+            ),
+        )
+        .await
+        .expect("OIDC refresh exceeded one request deadline")
+        .expect_err("stalled response body must time out");
+        server.abort();
+
+        assert!(matches!(
+            err.downcast_ref::<OidcError>(),
+            Some(OidcError::TokenRefreshTimeout { .. })
+        ));
+        assert!(
+            body_polled.load(Ordering::SeqCst),
+            "test server response body was not polled before the deadline"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "an ambiguous timeout must not spend the same rotating refresh token twice"
+        );
+    }
+
     /// `refresh_tokens` retries on a transient 503 and succeeds on the
     /// next attempt. Without backon, a single IdP blip during refresh
     /// surfaces to the user as a chat failure.

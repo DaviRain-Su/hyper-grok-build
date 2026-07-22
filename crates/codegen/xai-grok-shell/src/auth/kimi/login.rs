@@ -349,14 +349,11 @@ fn refresh_kimi_token_on_side_thread() -> Option<String> {
     match std::thread::Builder::new()
         .name("kimi-token-refresh".into())
         .spawn(move || {
-            if let Some(main) = main {
-                return main.block_on(ensure_kimi_code_access_token_with_op_timeout());
-            }
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            rt.block_on(ensure_kimi_code_access_token_with_op_timeout())
+            crate::main_runtime::block_on_main_or_new_current_thread(
+                main,
+                ensure_kimi_code_access_token_with_op_timeout(),
+            )
+            .flatten()
         }) {
         Ok(join) => match join.join() {
             Ok(token) => token,
