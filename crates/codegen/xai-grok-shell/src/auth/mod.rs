@@ -14,6 +14,7 @@ pub(crate) mod manager;
 mod model;
 pub mod oidc;
 pub mod openai_codex;
+pub(crate) mod platform_refresh_sticky;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub(crate) mod single_flight;

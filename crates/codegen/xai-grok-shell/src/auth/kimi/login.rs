@@ -47,6 +47,9 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
                 let auth_path = auth_json_path();
                 let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
                 store_kimi_code_auth(home, &auth)?;
+                crate::auth::platform_refresh_sticky::clear_sticky_family(
+                    crate::auth::platform_refresh_sticky::PlatformRefreshFamily::KimiCode,
+                );
                 eprintln!("✓ Signed in to Kimi For Coding");
                 eprintln!(
                     "  Models:"
@@ -153,6 +156,11 @@ pub async fn force_refresh_kimi_code_auth() -> Option<GrokAuth> {
 }
 
 async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
+    use crate::auth::platform_refresh_sticky::{
+        PlatformRefreshFamily, clear_sticky_for_refresh_token, kimi_refresh_error_is_permanent,
+        record_sticky_permanent_failure, sticky_permanent_failure,
+    };
+
     let path = auth_json_path();
     let home = path.parent().unwrap_or(&path);
     let auth = read_kimi_code_auth(home)?;
@@ -161,6 +169,19 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
     }
     let refresh = auth.refresh_token.as_deref()?.to_owned();
     if refresh.is_empty() {
+        return None;
+    }
+
+    // Permanent failure (revoked RT / invalid_grant): do not re-hit the IdP
+    // every turn. Cleared on successful refresh under a new RT or logout.
+    if let Some(reason) =
+        sticky_permanent_failure(PlatformRefreshFamily::KimiCode, &refresh)
+    {
+        tracing::warn!(
+            %reason,
+            "auth: Kimi refresh short-circuited by sticky permanent failure \
+             (run `hyper login --kimi` or `hyper logout --kimi` then re-login)"
+        );
         return None;
     }
 
@@ -244,20 +265,35 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
     };
 
     let out = match result {
-        Ok(new_auth) => match file_lock.as_ref() {
-            Some(file_lock) => match store_kimi_code_auth_after_refresh_locked(
-                home, &new_auth, &refresh, file_lock,
-            ) {
-                Ok(on_disk) => Some(on_disk),
-                Err(e) => {
-                    tracing::warn!(error = %e, "auth: failed to persist refreshed Kimi token");
-                    None
-                }
-            },
-            None => None,
-        },
+        Ok(new_auth) => {
+            // Success under any RT family clears the spent RT's sticky verdict
+            // (and the new RT if it differs, so a re-login path is clean).
+            clear_sticky_for_refresh_token(PlatformRefreshFamily::KimiCode, &refresh);
+            if let Some(new_rt) = new_auth.refresh_token.as_deref() {
+                clear_sticky_for_refresh_token(PlatformRefreshFamily::KimiCode, new_rt);
+            }
+            match file_lock.as_ref() {
+                Some(file_lock) => match store_kimi_code_auth_after_refresh_locked(
+                    home, &new_auth, &refresh, file_lock,
+                ) {
+                    Ok(on_disk) => Some(on_disk),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "auth: failed to persist refreshed Kimi token");
+                        None
+                    }
+                },
+                None => None,
+            }
+        }
         Err(e) => {
             tracing::warn!(error = %e, "auth: Kimi token refresh failed");
+            if kimi_refresh_error_is_permanent(&e) {
+                record_sticky_permanent_failure(
+                    PlatformRefreshFamily::KimiCode,
+                    &refresh,
+                    e.to_string(),
+                );
+            }
             None
         }
     };

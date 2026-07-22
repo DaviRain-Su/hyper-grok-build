@@ -24,6 +24,11 @@ const RETRYABLE_REFRESH_STATUSES: [u16; 5] = [429, 500, 502, 503, 504];
 /// abort an in-flight request against a stalled peer).
 const REFRESH_REQUEST_TIMEOUT_SECS: u64 = 15;
 
+/// Hard cap for the entire lock-held refresh loop (all attempts + backoff).
+/// Must stay **below** the cross-process flock wait (45s in `login.rs`) so a
+/// follower can still adopt a sibling write instead of timing out mid-retry.
+pub(crate) const REFRESH_TOTAL_BUDGET_SECS: u64 = 40;
+
 /// Convenience accessor for the per-attempt refresh timeout as a `Duration`.
 fn refresh_request_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS)
@@ -261,10 +266,25 @@ async fn refresh_token_with_timeout(
 ) -> Result<GrokAuth, RefreshError> {
     let url = oauth_url(host, "/api/oauth/token");
     let mut last_error = String::from("no attempt made");
+    let total_deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(REFRESH_TOTAL_BUDGET_SECS);
     for attempt in 0..MAX_REFRESH_RETRIES {
+        if tokio::time::Instant::now() >= total_deadline {
+            return Err(RefreshError::Exhausted(format!(
+                "token refresh total budget of {REFRESH_TOTAL_BUDGET_SECS}s exhausted \
+                 (last error: {last_error})"
+            )));
+        }
         if attempt > 0 {
             let backoff = std::time::Duration::from_secs(1 << (attempt - 1));
-            tokio::time::sleep(backoff).await;
+            let remaining = total_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(RefreshError::Exhausted(format!(
+                    "token refresh total budget of {REFRESH_TOTAL_BUDGET_SECS}s exhausted \
+                     before retry (last error: {last_error})"
+                )));
+            }
+            tokio::time::sleep(backoff.min(remaining)).await;
         }
         // Bound one complete attempt — connect, response headers, and full
         // response body — with a single deadline. Separate send/body timeouts

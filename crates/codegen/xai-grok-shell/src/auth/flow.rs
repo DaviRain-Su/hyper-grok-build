@@ -1039,6 +1039,9 @@ pub fn run_cli_logout_kimi() -> anyhow::Result<()> {
     let had = crate::auth::read_kimi_code_auth(home).is_some();
     crate::auth::clear_kimi_code_auth(home)
         .map_err(|e| anyhow::anyhow!("Failed to clear Kimi Code auth: {e}"))?;
+    crate::auth::platform_refresh_sticky::clear_sticky_family(
+        crate::auth::platform_refresh_sticky::PlatformRefreshFamily::KimiCode,
+    );
     if had {
         eprintln!("Logged out of Kimi Code (xAI session unchanged).");
     } else {
@@ -1055,6 +1058,9 @@ pub fn run_cli_logout_openai_codex() -> anyhow::Result<()> {
     let had = crate::auth::read_openai_codex_auth(home).is_some();
     crate::auth::clear_openai_codex_auth(home)
         .map_err(|e| anyhow::anyhow!("Failed to clear OpenAI Codex auth: {e}"))?;
+    crate::auth::platform_refresh_sticky::clear_sticky_family(
+        crate::auth::platform_refresh_sticky::PlatformRefreshFamily::OpenAiCodex,
+    );
     if had {
         eprintln!("Logged out of OpenAI Codex (xAI session unchanged).");
     } else {

@@ -6,7 +6,7 @@
 
 mod device;
 mod login;
-mod oauth;
+pub(crate) mod oauth;
 
 pub use device::device_headers;
 pub use login::{

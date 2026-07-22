@@ -59,6 +59,9 @@ pub async fn run_openai_codex_login(
     let auth_path = auth_json_path();
     let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
     store_openai_codex_auth(home, &auth)?;
+    crate::auth::platform_refresh_sticky::clear_sticky_family(
+        crate::auth::platform_refresh_sticky::PlatformRefreshFamily::OpenAiCodex,
+    );
     eprintln!("✓ Signed in to OpenAI Codex (ChatGPT)");
     if let Some(email) = auth.email.as_deref() {
         eprintln!("  Account: {email}");
@@ -566,6 +569,11 @@ const CODEX_REFRESH_LOCK_TIMEOUT_WAIT: std::time::Duration = std::time::Duration
 /// acquire `auth.json.lock` *before* the IdP call, re-validate liveness, then
 /// persist with compare/adopt so a sibling's newer family is never clobbered.
 async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
+    use crate::auth::platform_refresh_sticky::{
+        PlatformRefreshFamily, clear_sticky_for_refresh_token, codex_refresh_error_is_permanent,
+        record_sticky_permanent_failure, sticky_permanent_failure,
+    };
+
     let path = auth_json_path();
     let home = path.parent().unwrap_or(&path);
     let auth = read_openai_codex_auth(home)?;
@@ -574,6 +582,17 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
     }
     let refresh = auth.refresh_token.as_deref()?.to_owned();
     if refresh.is_empty() {
+        return None;
+    }
+
+    if let Some(reason) =
+        sticky_permanent_failure(PlatformRefreshFamily::OpenAiCodex, &refresh)
+    {
+        tracing::warn!(
+            %reason,
+            "auth: Codex refresh short-circuited by sticky permanent failure \
+             (run `hyper login --openai` or `hyper logout --openai` then re-login)"
+        );
         return None;
     }
 
@@ -685,6 +704,10 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
                 if new_auth.email.is_none() {
                     new_auth.email = auth.email.clone();
                 }
+                clear_sticky_for_refresh_token(PlatformRefreshFamily::OpenAiCodex, &refresh);
+                if let Some(new_rt) = new_auth.refresh_token.as_deref() {
+                    clear_sticky_for_refresh_token(PlatformRefreshFamily::OpenAiCodex, new_rt);
+                }
                 // Compare/adopt while reusing the refresh guard. Opening a
                 // second flock here can self-block on non-reentrant platforms.
                 match file_lock.as_ref() {
@@ -710,6 +733,13 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
         },
         Err(e) => {
             tracing::warn!(error = %e, "auth: Codex token refresh failed");
+            if codex_refresh_error_is_permanent(&e) {
+                record_sticky_permanent_failure(
+                    PlatformRefreshFamily::OpenAiCodex,
+                    &refresh,
+                    format!("{e:#}"),
+                );
+            }
             None
         }
     };
