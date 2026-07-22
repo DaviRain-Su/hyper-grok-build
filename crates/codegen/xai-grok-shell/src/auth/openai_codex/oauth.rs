@@ -18,6 +18,11 @@ pub(crate) const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 const AUTHORIZE_PATH: &str = "/oauth/authorize";
 const TOKEN_PATH: &str = "/oauth/token";
+/// Per-attempt total timeout (connect + response + body) for token-refresh
+/// POSTs. Bounds a stalled network path so the refresh — and the
+/// `auth.json.lock` it holds — can never block subsequent launches
+/// indefinitely. Matches the 15s budget the xAI OIDC refresh path uses.
+const REFRESH_REQUEST_TIMEOUT_SECS: u64 = 15;
 const DEVICE_USER_CODE_PATH: &str = "/api/accounts/deviceauth/usercode";
 const DEVICE_TOKEN_PATH: &str = "/api/accounts/deviceauth/token";
 
@@ -205,6 +210,7 @@ pub(crate) async fn refresh_access_token(host: &str, refresh: &str) -> anyhow::R
             ("refresh_token", refresh),
             ("client_id", OPENAI_CODEX_CLIENT_ID),
         ])
+        .timeout(std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS))
         .send()
         .await?;
     read_token_response(response, "refresh").await

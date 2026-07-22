@@ -16,6 +16,13 @@ const REFRESH_GRANT_TYPE: &str = "refresh_token";
 const MAX_REFRESH_RETRIES: u32 = 3;
 const RETRYABLE_REFRESH_STATUSES: [u16; 5] = [429, 500, 502, 503, 504];
 
+/// Per-attempt total timeout (connect + response + body) for token-refresh
+/// POSTs. Bounds a stalled network path (e.g. a fake-ip proxy that accepts
+/// the TCP handshake then never responds) so the refresh — and the
+/// `auth.json.lock` it holds — can never block subsequent launches indefinitely.
+/// Matches the 15s budget the xAI OIDC refresh path already uses.
+const REFRESH_REQUEST_TIMEOUT_SECS: u64 = 15;
+
 /// Result of `POST /api/oauth/device_authorization`.
 #[derive(Debug, Clone)]
 pub struct DeviceAuthorization {
@@ -245,12 +252,20 @@ pub(crate) async fn refresh_token(
             let backoff = std::time::Duration::from_secs(1 << (attempt - 1));
             tokio::time::sleep(backoff).await;
         }
+        // Bound the whole request (connect + headers + body) so a stalled
+        // proxy (e.g. fake-ip TUN that accepts the TCP handshake then never
+        // responds) cannot wedge the refresh. Without this, the refresh holds
+        // `auth.json.lock` for the unbounded duration of a hung connection,
+        // which blocks every subsequent launch on the 45s lock timeout and
+        // makes the TUI appear permanently stuck. Mirrors the per-request
+        // timeout the xAI OIDC refresh path already sets.
         let send_result = with_device_headers(crate::http::shared_client().post(&url))?
             .form(&[
                 ("client_id", KIMI_CODE_CLIENT_ID),
                 ("grant_type", REFRESH_GRANT_TYPE),
                 ("refresh_token", refresh_token),
             ])
+            .timeout(std::time::Duration::from_secs(REFRESH_REQUEST_TIMEOUT_SECS))
             .send()
             .await;
 
