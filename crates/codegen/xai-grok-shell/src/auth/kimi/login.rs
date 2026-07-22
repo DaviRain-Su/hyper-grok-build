@@ -388,7 +388,12 @@ pub fn ensure_kimi_code_access_token_blocking() -> Option<String> {
 
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(ensure_kimi_code_access_token()))
+            // Same 20s outer bound as the no-runtime path — without it a
+            // multi-thread bearer resolve can block for flock wait (45s) +
+            // IdP budget (40s) on a single request thread.
+            tokio::task::block_in_place(|| {
+                handle.block_on(ensure_kimi_code_access_token_with_op_timeout())
+            })
         }
         // Current-thread runtime (ACP `acp-agent-worker`): never `block_in_place`
         // / nested `block_on` on the caller's runtime.

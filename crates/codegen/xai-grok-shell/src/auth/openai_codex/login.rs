@@ -825,7 +825,10 @@ pub fn ensure_openai_codex_auth_blocking() -> Option<GrokAuth> {
 
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(ensure_openai_codex_auth()))
+            // Same 20s outer bound as the no-runtime path (see Kimi resolver).
+            tokio::task::block_in_place(|| {
+                handle.block_on(ensure_openai_codex_auth_with_op_timeout())
+            })
         }
         // A current-thread runtime cannot be blocked or nested. Hop to a plain
         // thread, which drives the future on the process-wide main runtime.

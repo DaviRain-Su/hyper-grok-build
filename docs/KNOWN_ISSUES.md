@@ -3,13 +3,14 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-07-22 (post S1: sticky OAuth refresh + child oracle text).
+Last reviewed: 2026-07-22 (post S1 review follow-ups).
 
 ## Open
 
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
 | F-8 | low (UX) | Bare logout is xAI-only | `hyper logout` clears the xAI session; Kimi/Codex need `hyper logout --kimi` / `--openai` or `/logout provider …`. Documented; optional `--all` not implemented. |
+| F-1-mac | medium | macOS/BSD `is_grok_process` | Still liveness-only (`kill -0`); Linux/Windows use argv0/image path. Wrong-PID kill risk remains on macOS until `proc_pidpath` lands. |
 | Modes | design-only | Amp-style low–ultra agent modes | See [design-modes.md](./design-modes.md) — **not implemented**. |
 
 ## Fixed in tree
@@ -27,9 +28,10 @@ Last reviewed: 2026-07-22 (post S1: sticky OAuth refresh + child oracle text).
 
 | ID | Topic | Fix |
 |----|--------|-----|
-| F-4 | Kimi lock-held refresh vs 45s follower | Entire Kimi refresh retry loop is capped at **40s** (`REFRESH_TOTAL_BUDGET_SECS`), below the 45s flock wait. |
-| F-5 | Kimi/Codex sticky permanent-failure | Process-local sticky cache keyed by RT fingerprint; 401/`invalid_grant` short-circuits force-refresh for 5 minutes; cleared on login/logout/successful refresh. |
+| F-4 | Kimi lock-held refresh vs 45s follower | Entire Kimi refresh retry loop is capped at **40s** (`REFRESH_TOTAL_BUDGET_SECS`), below the 45s flock wait. Blocking multi-thread resolvers also use the **20s** op timeout. |
+| F-5 | Kimi/Codex sticky permanent-failure | Process-local sticky cache keyed by RT fingerprint (char-safe); 401/`invalid_grant` short-circuits force-refresh for 5 minutes; 5xx bodies are not sticky; cleared on login/logout/successful refresh. |
 | F-7 | Child Task tool text omitted `oracle` | Nested `CHILD_TASK_DESCRIPTION` and `TaskToolInput` schema list `oracle`. |
+| F-1-linux | Leader argv false positives | Linux classification uses **argv0 only** (not later args like `sleep hyper`). |
 
 ## Intentional / accepted
 

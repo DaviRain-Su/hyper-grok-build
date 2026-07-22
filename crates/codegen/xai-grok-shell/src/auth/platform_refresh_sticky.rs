@@ -35,9 +35,9 @@ static STICKY: LazyLock<Mutex<HashMap<(PlatformRefreshFamily, String), StickyVer
 fn fingerprint_refresh_token(refresh_token: &str) -> String {
     // Full RT must never be stored; a short prefix is enough to scope the
     // verdict and for log correlation (mirrors sampler 401 attribution).
-    let trimmed = refresh_token.trim();
-    let take = trimmed.len().min(16);
-    trimmed[..take].to_string()
+    // Slice by *chars*, not bytes — a multi-byte UTF-8 boundary at index 16
+    // would panic on `str` indexing.
+    refresh_token.trim().chars().take(16).collect()
 }
 
 /// Return the cached permanent-failure reason for this RT, if still within TTL.
@@ -97,27 +97,46 @@ pub(crate) fn kimi_refresh_error_is_permanent(err: &super::kimi::oauth::RefreshE
     match err {
         RefreshError::Unauthorized { .. } => true,
         RefreshError::Fatal { status, description } => {
-            *status == 400
-                && (description.contains("invalid_grant")
-                    || description.to_ascii_lowercase().contains("invalid_grant"))
+            // Only 4xx invalid_grant-style fatals stick; 5xx/Exhausted do not.
+            (*status == 400 || *status == 401 || *status == 403)
+                && description.to_ascii_lowercase().contains("invalid_grant")
         }
         RefreshError::Exhausted(_) | RefreshError::Other(_) => false,
     }
 }
 
 /// Whether a Codex refresh `anyhow` error should stick.
+///
+/// Prefer structured status from the error message prefix
+/// (`… failed (HTTP {status}): …`) so a 5xx body that happens to contain
+/// "unauthorized" is never sticky. Timeouts remain transient.
 pub(crate) fn codex_refresh_error_is_permanent(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}").to_ascii_lowercase();
-    // Timeouts and network stalls are transient.
-    if msg.contains("timed out") || msg.contains("timeout") || msg.contains("network") {
+    let msg = format!("{err:#}");
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
         return false;
     }
-    msg.contains("invalid_grant")
-        || msg.contains("unauthorized")
-        || msg.contains(" 401")
-        || msg.contains(" 403")
-        || msg.contains("status 401")
-        || msg.contains("status 403")
+    // Structured path: "OpenAI Codex token refresh failed (HTTP NNN): …"
+    if let Some(status) = parse_http_status_from_codex_error(&msg) {
+        if status == 401 || status == 403 {
+            return true;
+        }
+        if status == 400 && lower.contains("invalid_grant") {
+            return true;
+        }
+        // 5xx and other statuses: never sticky, even if the body mentions 401.
+        return false;
+    }
+    // Fallback when status is missing from the error string.
+    lower.contains("invalid_grant")
+}
+
+fn parse_http_status_from_codex_error(msg: &str) -> Option<u16> {
+    // Match "(HTTP 401)" / "(HTTP 403)" style prefixes from read_token_response.
+    let marker = "(HTTP ";
+    let start = msg.find(marker)? + marker.len();
+    let end = msg[start..].find(')')? + start;
+    msg[start..end].trim().parse().ok()
 }
 
 #[cfg(test)]
@@ -193,10 +212,14 @@ mod tests {
     #[test]
     fn codex_permanent_classifier() {
         assert!(codex_refresh_error_is_permanent(&anyhow::anyhow!(
-            "token refresh failed: invalid_grant"
+            "OpenAI Codex token refresh failed (HTTP 401): expired"
         )));
         assert!(codex_refresh_error_is_permanent(&anyhow::anyhow!(
-            "HTTP 401 unauthorized"
+            "OpenAI Codex token refresh failed (HTTP 400): invalid_grant"
+        )));
+        // 5xx body mentioning "unauthorized" must NOT stick.
+        assert!(!codex_refresh_error_is_permanent(&anyhow::anyhow!(
+            "OpenAI Codex token refresh failed (HTTP 500): unauthorized_internal"
         )));
         assert!(!codex_refresh_error_is_permanent(&anyhow::anyhow!(
             "token refresh timed out after 15s"
@@ -204,5 +227,19 @@ mod tests {
         assert!(!codex_refresh_error_is_permanent(&anyhow::anyhow!(
             "connection reset by peer"
         )));
+        // Fallback when status is absent: invalid_grant alone still sticks.
+        assert!(codex_refresh_error_is_permanent(&anyhow::anyhow!(
+            "token refresh failed: invalid_grant"
+        )));
+    }
+
+    #[test]
+    fn fingerprint_handles_short_and_multibyte() {
+        assert_eq!(fingerprint_refresh_token("short"), "short");
+        assert_eq!(fingerprint_refresh_token(""), "");
+        // Multi-byte chars must not panic on the 16-char cut.
+        let wide = "αβγδεζηθικλμνξοπρστυ"; // >16 chars
+        let fp = fingerprint_refresh_token(wide);
+        assert_eq!(fp.chars().count(), 16);
     }
 }

@@ -252,42 +252,46 @@ pub fn is_grok_process(pid: u32) -> bool {
 
 /// Whether a process image path / Linux cmdline identifies a product binary.
 ///
-/// Linux `/proc/<pid>/cmdline` is NUL-separated argv; Windows paths use `\\`.
-/// Matching is basename-first so random substrings (e.g. a workspace folder
-/// named `hyper-grok-build`) do not count unless the executable basename itself
-/// is a product name.
+/// Linux `/proc/<pid>/cmdline` is NUL-separated argv. We only inspect **argv0**
+/// (the executable path / invocation name), never later arguments — so
+/// `sleep hyper` or `cat /.hyper/bin/foo` does not match. Windows image paths
+/// are a single path string (no argv split).
 pub(crate) fn process_image_looks_like_product(image: &str) -> bool {
     let image = image.trim();
     if image.is_empty() {
         return false;
     }
-    // Linux cmdline: argv0\0argv1\0…; also tolerate spaces for Windows-style dumps.
-    for part in image.split(|c: char| c == '\0' || c.is_ascii_whitespace()) {
-        if part.is_empty() {
-            continue;
-        }
-        let base = part
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(part)
-            .trim_end_matches(".exe");
-        let base_lower = base.to_ascii_lowercase();
-        if base_lower == "grok" || base_lower == "hyper" {
-            return true;
-        }
-        // Cargo test / example binaries: package names use hyphens in Cargo.toml
-        // (`xai-grok-shell-base`) but the built test artifact uses underscores
-        // (`xai_grok_shell_base-<hash>`).
-        if base_lower.starts_with("xai-grok-") || base_lower.starts_with("xai_grok_") {
-            return true;
-        }
+    // Linux cmdline: only argv0 (before the first NUL). Fall back to the whole
+    // string for Windows full image paths and bare basenames.
+    let argv0 = image
+        .split_once('\0')
+        .map(|(head, _)| head)
+        .unwrap_or(image)
+        .trim();
+    if argv0.is_empty() {
+        return false;
     }
-    // Managed install roots (path may appear when basename parsing is odd).
-    let lower = image.to_ascii_lowercase();
-    lower.contains("/.hyper/bin/")
-        || lower.contains("/.grok/bin/")
-        || lower.contains("\\.hyper\\bin\\")
-        || lower.contains("\\.grok\\bin\\")
+    let base = argv0
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(argv0)
+        .trim_end_matches(".exe");
+    let base_lower = base.to_ascii_lowercase();
+    if base_lower == "grok" || base_lower == "hyper" {
+        return true;
+    }
+    // Cargo test / example binaries: package names use hyphens in Cargo.toml
+    // (`xai-grok-shell-base`) but the built test artifact uses underscores
+    // (`xai_grok_shell_base-<hash>`).
+    if base_lower.starts_with("xai-grok-") || base_lower.starts_with("xai_grok_") {
+        return true;
+    }
+    // Managed install roots on argv0 only (full path of the executable).
+    let argv0_lower = argv0.to_ascii_lowercase();
+    argv0_lower.contains("/.hyper/bin/")
+        || argv0_lower.contains("/.grok/bin/")
+        || argv0_lower.contains("\\.hyper\\bin\\")
+        || argv0_lower.contains("\\.grok\\bin\\")
 }
 #[cfg(test)]
 mod tests {
@@ -406,9 +410,16 @@ mod tests {
         assert!(process_image_looks_like_product(
             "/tmp/xai_grok_shell_base-abc123"
         ));
-        // Linux-style cmdline: path + NUL + args
+        // Linux-style cmdline: argv0 + NUL + args
         assert!(process_image_looks_like_product(
             "/home/u/.hyper/bin/hyper\0leader\0kill"
+        ));
+        // Later argv tokens must NOT match (false-positive vector).
+        assert!(!process_image_looks_like_product(
+            "/usr/bin/sleep\0hyper"
+        ));
+        assert!(!process_image_looks_like_product(
+            "/bin/cat\0/home/u/.hyper/bin/secret"
         ));
         // Workspace path alone must not match without a product basename
         assert!(!process_image_looks_like_product(
