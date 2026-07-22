@@ -598,7 +598,7 @@ pub(crate) mod tests {
     /// jsonwebtoken needs a process-level CryptoProvider; tests that encode
     /// JWTs can't rely on another test having installed it first.
     fn ensure_crypto_provider() {
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
     }
 
     #[test]

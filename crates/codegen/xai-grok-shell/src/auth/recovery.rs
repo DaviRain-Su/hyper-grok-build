@@ -1081,7 +1081,7 @@ mod tests {
     // -- force_login_team_uuid pin enforced on the 401-recovery path -------
 
     fn ensure_crypto_provider() {
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
     }
 
     fn team_jwt(principal_id: &str) -> String {

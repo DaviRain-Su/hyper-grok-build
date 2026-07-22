@@ -109,7 +109,15 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# Use `aws_lc_rs` (not `rust_crypto`) so feature unification with gcloud-storage
+# (which enables jsonwebtoken's `aws_lc_rs` via gcloud-auth `jwt-aws-lc-rs`)
+# leaves exactly one crypto feature active. With both `rust_crypto` and
+# `aws_lc_rs` enabled, jsonwebtoken's `CryptoProvider::from_crate_features`
+# cannot auto-select and returns a panic-instance that permanently poisons the
+# process-global OnceLock (after which even `install_default` can't recover),
+# panicking any JWT encode/decode. Matching gcloud-storage's backend keeps a
+# single feature active so auto-detection resolves to aws-lc-rs.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 sha2 = { workspace = true }
 rand = { workspace = true }
 shlex = { workspace = true }

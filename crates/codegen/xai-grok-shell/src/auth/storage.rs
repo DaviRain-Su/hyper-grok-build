@@ -689,8 +689,17 @@ pub fn clear_platform_api_key(grok_home: &Path, platform: &str) -> std::io::Resu
 #[cfg(test)]
 mod platform_api_key_tests {
     use super::*;
+    use serial_test::serial;
 
+    // `store_platform_api_key` resolves its path via `resolve_auth_json_path`,
+    // which honors the process-global `GROK_AUTH_PATH` env var over the passed
+    // `grok_home`. Other tests in this file set `GROK_AUTH_PATH` (under
+    // `#[serial]`); without serialization this test can run concurrently with
+    // one of those and have its writes redirected to the sibling's scratch
+    // file, flaking the round-trip assertions. Run serially with the
+    // `GROK_AUTH_PATH`-setting tests.
     #[test]
+    #[serial]
     fn platform_api_key_roundtrips_and_clears() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();

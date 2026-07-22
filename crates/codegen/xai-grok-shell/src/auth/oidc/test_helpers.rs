@@ -14,7 +14,7 @@ pub(super) const TEST_NONCE: &str = "test-nonce-value";
 pub(super) const TEST_CLIENT_ID: &str = "test-client-id";
 pub(super) fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
 }
 pub(super) fn generate_test_rsa_key() -> (String, String, String) {
     use rsa::pkcs8::EncodePrivateKey;

@@ -378,7 +378,7 @@ pub async fn run_login_flow_with_config(
 
     // Ensure jsonwebtoken CryptoProvider is installed (required for JWT validation).
     jsonwebtoken::crypto::CryptoProvider::install_default(
-        &jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER,
+        &jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER,
     )
     .ok();
 
