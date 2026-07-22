@@ -243,6 +243,8 @@ mod tests {
 
     fn ctx_with_running_subagents() -> CompactionStateContext {
         CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             running_subagents: vec![RunningSubagentSummary {
                 subagent_id: "sub-1".into(),
                 subagent_type: "explore".into(),
@@ -279,6 +281,8 @@ mod tests {
     #[test]
     fn system_reminder_includes_mcp_server_section() {
         let ctx = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             connected_mcp_servers: vec![
                 CompactionServerSummary {
                     name: "grafana".into(),
@@ -316,6 +320,8 @@ mod tests {
     #[test]
     fn running_task_ids_render_verbatim() {
         let ctx = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             running_tasks: vec![BackgroundTaskSummary {
                 task_id: "019ea7f0-cb66-7aa2-9a09-488a3a795795".into(),
                 command: "cargo test".into(),
@@ -355,6 +361,8 @@ mod tests {
 
     fn ctx_with_todos(todos: Vec<TodoSummary>) -> CompactionStateContext {
         CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             todos,
             recent_messages: vec![],
             last_user_query: None,

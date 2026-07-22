@@ -943,6 +943,31 @@ pub(in crate::app::dispatch) fn set_page_flip_on_send(app: &mut AppView, new: bo
     }]
 }
 
+pub(super) fn set_combine_queued_prompts_inner(app: &mut AppView, new: bool) {
+    app.current_ui.combine_queued_prompts = Some(new);
+    crate::appearance::cache::set_combine_queued_prompts(new);
+}
+
+/// SHARED: cache + `[ui].combine_queued_prompts` via `Effect::PersistSetting`.
+pub(in crate::app::dispatch) fn set_combine_queued_prompts(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev = crate::appearance::cache::load_combine_queued_prompts();
+    if prev == new {
+        return vec![];
+    }
+    set_combine_queued_prompts_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "combine_queued_prompts", value = new, "setting changed");
+    app.show_toast(&save_success_toast("Combine queued prompts", new));
+    vec![Effect::PersistSetting {
+        key: "combine_queued_prompts",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev),
+    }]
+}
+
 /// State-only mutation for `simple_mode`.
 ///
 /// Propagates to every agent's `input_mode` so the toggle takes

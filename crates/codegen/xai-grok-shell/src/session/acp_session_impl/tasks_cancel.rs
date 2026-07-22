@@ -396,7 +396,7 @@ impl SessionActor {
             //   is no point starting the next prompt and draining resolves every
             //   queued input's `respond_to` cleanly.
             // * normal cancel: remove the running turn; only Ctrl+C also removes
-            //   queued terminal task-completion wakes. Preserve real user prompts
+            //   queued task/workflow completion wakes. Preserve real user prompts
             //   and unrelated synthetic entries so `maybe_start_running_task` can
             //   promote the next genuine user turn.
             //   The cancelling client does not pull any prompt back into its
@@ -432,7 +432,11 @@ impl SessionActor {
                     if is_running_turn {
                         cancelled.push_back(item);
                     } else if suppress_task_wakes
-                        && matches!(&item.origin, super::PromptOrigin::TaskCompleted { .. })
+                        && matches!(
+                            &item.origin,
+                            super::PromptOrigin::TaskCompleted { .. }
+                                | super::PromptOrigin::WorkflowCompleted { .. }
+                        )
                     {
                         if let Some(fallback) = item.task_wake_fallback {
                             Self::push_task_wake_fallback(&mut state, fallback);
@@ -543,12 +547,7 @@ impl SessionActor {
         // The aborted turn's `BlockingWaitGuard`s drop asynchronously (they
         // live in tool futures owned by the drainer task / subagent spawn
         // task). Until they do, `queue_input` would read a stale depth > 0 and
-        // auto-send-now-cancel the NEXT turn — dropping its user prompt. Zero
-        // the window here; late guard drops saturate at 0 (see the guard's
-        // `Drop`).
-        self.tool_context
-            .blocking_wait_depth
-            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.tool_context.blocking_wait_depth.reset();
         self.flush_pending_skill_reminders().await;
 
         // No multi-second drain here (actor loop would block RecordSubagentUsage).
@@ -559,8 +558,10 @@ impl SessionActor {
                 let outcome =
                     super::turn::UsageDrainOutcome::from_outstanding_reply(reply.as_ref());
                 self.finalize_usage_from_outcome(prompt_id, outcome).await
-            } else {
+            } else if !pending_inputs.is_empty() {
                 self.snapshot_prompt_usage().await
+            } else {
+                None
             }
         } else {
             None

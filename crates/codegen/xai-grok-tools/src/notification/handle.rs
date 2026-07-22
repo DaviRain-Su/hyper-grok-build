@@ -40,11 +40,9 @@ pub enum NotificationAcknowledgementError {
 #[must_use = "acknowledged notification receipts must be awaited"]
 pub struct NotificationAcknowledgementBatch {
     receipts: Vec<tokio::sync::oneshot::Receiver<Result<(), String>>>,
-    durable_targets: usize,
     dispatch_closed: usize,
 }
 
-/// Whether an acknowledged send has configured durable notification targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurableNotificationTargets {
     None,
@@ -52,15 +50,6 @@ pub enum DurableNotificationTargets {
 }
 
 impl NotificationAcknowledgementBatch {
-    /// Whether any target was configured for durable acknowledgement.
-    pub fn durable_targets(&self) -> DurableNotificationTargets {
-        if self.durable_targets == 0 {
-            DurableNotificationTargets::None
-        } else {
-            DurableNotificationTargets::Present
-        }
-    }
-
     /// Wait for every live durable target and report all observed failure classes.
     pub async fn wait(self) -> Result<(), NotificationAcknowledgementError> {
         let mut acknowledgements_dropped = 0;
@@ -167,6 +156,16 @@ impl ToolNotificationHandle {
         }
     }
 
+    pub(crate) fn durable_targets(&self) -> DurableNotificationTargets {
+        if self.targets.iter().any(|target| {
+            matches!(target, ToolNotificationTarget::Acknowledged(sender) if !sender.is_closed())
+        }) {
+            DurableNotificationTargets::Present
+        } else {
+            DurableNotificationTargets::None
+        }
+    }
+
     pub fn send(&self, notification: ToolNotification) {
         let last = self.targets.len().saturating_sub(1);
         let mut notification = Some(notification);
@@ -204,7 +203,6 @@ impl ToolNotificationHandle {
         let notification = ToolNotification::ScheduledTaskRemoved(removed);
         let mut batch = NotificationAcknowledgementBatch {
             receipts: Vec::new(),
-            durable_targets: 0,
             dispatch_closed: 0,
         };
         for target in self.targets.iter() {
@@ -213,7 +211,6 @@ impl ToolNotificationHandle {
                     let _ = target.send(notification.clone());
                 }
                 ToolNotificationTarget::Acknowledged(target) => {
-                    batch.durable_targets += 1;
                     let (acknowledgement, receipt) = tokio::sync::oneshot::channel();
                     if target
                         .send(AcknowledgedToolNotification {

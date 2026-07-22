@@ -1,6 +1,6 @@
 //! PTY: a re-parked wait (new parent output between parks) pushes a fresh
 //! parked marker for the new park episode, so the transcript keeps a
-//! boundary where each park began, while the persistent "watching · …"
+//! boundary where each park began, while the persistent "… still running"
 //! status row explains the still-running background work.
 //!
 //! Wire journey, flag-file driven like `endline_park_two_static_markers`:
@@ -46,22 +46,8 @@ async fn reparked_wait_repushes_buried_marker() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_repark_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_repark_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
+    let _background_turn =
+        expect_tool_turn(&content, "call_repark_bg", "run_terminal_command", bg_args);
 
     // Tool call 2: the flag-gated foreground hold for id extraction.
     let id_hold_args = json!({
@@ -69,21 +55,11 @@ async fn reparked_wait_repushes_buried_marker() {
         "description": "hold for id extraction"
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_repark_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_repark_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
+    let _id_hold_turn = expect_tool_turn(
+        &content,
+        "call_repark_id_hold",
+        "run_terminal_command",
+        id_hold_args,
     );
 
     // Fallback for the post-wait continuation once park #2's wait returns.
@@ -130,21 +106,11 @@ async fn reparked_wait_repushes_buried_marker() {
         "timeout_ms": 4_000
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_repark_wait1",
-            "get_command_or_subagent_output",
-            &short_wait_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_repark_wait1",
-            "get_command_or_subagent_output",
-            &short_wait_args,
-        )),
+    let _short_wait_turn = expect_tool_turn(
+        &content,
+        "call_repark_wait1",
+        "get_command_or_subagent_output",
+        short_wait_args,
     );
 
     // Tool call 4: foreground work between the parks (`MIDWORK` is the
@@ -154,21 +120,11 @@ async fn reparked_wait_repushes_buried_marker() {
         "description": MIDWORK
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_repark_midwork",
-            "run_terminal_command",
-            &midwork_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_repark_midwork",
-            "run_terminal_command",
-            &midwork_args,
-        )),
+    let _midwork_turn = expect_tool_turn(
+        &content,
+        "call_repark_midwork",
+        "run_terminal_command",
+        midwork_args,
     );
 
     // Tool call 5 — park #2: the long wait on the same still-running task.
@@ -177,21 +133,11 @@ async fn reparked_wait_repushes_buried_marker() {
         "timeout_ms": 600_000
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_repark_wait2",
-            "get_command_or_subagent_output",
-            &long_wait_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_repark_wait2",
-            "get_command_or_subagent_output",
-            &long_wait_args,
-        )),
+    let _long_wait_turn = expect_tool_turn(
+        &content,
+        "call_repark_wait2",
+        "get_command_or_subagent_output",
+        long_wait_args,
     );
 
     // Everything downstream is scripted — release the id-extraction hold.
@@ -209,7 +155,7 @@ async fn reparked_wait_repushes_buried_marker() {
         });
     // The parked status row carries the still-running story instead.
     harness
-        .wait_for_text("watching · 1 command", Duration::from_secs(30))
+        .wait_for_text("1 command still running", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "parked watching cue never appeared; screen:\n{}",
@@ -262,14 +208,19 @@ async fn reparked_wait_repushes_buried_marker() {
         first_marker < midwork_at && midwork_at < second_marker,
         "expected marker, content, then the re-pushed marker in order; screen:\n{screen}"
     );
-    // The still-running story lives in the status row, not the transcript.
+    // The still-running story lives in the status row, not the transcript:
+    // no "Worked for" line carries the suffix (line-scoped like the sibling
+    // suites — other surfaces may legitimately use the phrase).
     assert!(
-        !screen.contains("still running"),
-        "no still-running suffix anywhere in the transcript; screen:\n{screen}"
+        screen
+            .lines()
+            .filter(|l| l.contains("Worked for"))
+            .all(|l| !l.contains("still running")),
+        "no marker line may carry the still-running suffix; screen:\n{screen}"
     );
     assert!(
-        screen.contains("watching · 1 command"),
-        "the parked status row keeps the watching cue during park #2; screen:\n{screen}"
+        screen.contains("1 command still running"),
+        "the parked status row keeps the still-running cue during park #2; screen:\n{screen}"
     );
     // The parked look still hides spinner and chrome.
     let below_midwork = &screen[midwork_at..];

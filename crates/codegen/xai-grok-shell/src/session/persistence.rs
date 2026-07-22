@@ -288,6 +288,12 @@ pub enum PersistenceMsg {
     },
     ContentChunk(PersistenceContentChunk),
     Chat(ConversationItem),
+    AppendCwdSwitchAndAck {
+        item: ConversationItem,
+        respond_to: tokio::sync::oneshot::Sender<
+            Result<xai_chat_state::StrictAppendAck, xai_chat_state::StrictAppendError>,
+        >,
+    },
     /// Replace the entire chat history (used for compaction)
     ReplaceChatHistory(Vec<ConversationItem>),
     CurrentModel {
@@ -328,6 +334,15 @@ pub enum PersistenceMsg {
     AnnouncementState(crate::session::announcement_state::AnnouncementState),
     /// Persist goal mode orchestration state.
     GoalModeState(crate::session::goal_tracker::GoalOrchestration),
+    DeleteGoalModeState {
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
+    WorkflowRunState(crate::session::workflow::store::WorkflowRunManifest),
+    WorkflowRunStateAndAck {
+        manifest: crate::session::workflow::store::WorkflowRunManifest,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
+    DeleteWorkflowRunState(String),
     /// Persist a local feedback entry (user feedback)
     Feedback(LocalFeedbackEntry),
     /// Persist a /btw side question entry
@@ -763,9 +778,36 @@ pub fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf {
     prompts_dir.join(format!("prompt_{}.txt", prompt_index))
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingCwdSwitchReminder {
+    pub cwd_generation: u64,
+    pub previous_cwd: String,
+    #[serde(alias = "cwd")]
+    pub destination_cwd: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_project_instructions: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     pub info: Info,
+    /// Monotonic generation of the authoritative cwd in `info.cwd`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cwd_generation: u64,
+    /// Cwd immediately preceding the current generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_cwd: Option<String>,
+    /// Reminder staged for exactly-once append during relocation completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_cwd_switch_reminder: Option<PendingCwdSwitchReminder>,
+    /// Latest switch generation reflected in `num_chat_messages` bookkeeping.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cwd_switch_bookkeeping_generation: u64,
     pub session_summary: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -891,6 +933,10 @@ impl Summary {
             );
         Ok(Self {
             info: info.clone(),
+            cwd_generation: 0,
+            previous_cwd: None,
+            pending_cwd_switch_reminder: None,
+            cwd_switch_bookkeeping_generation: 0,
             session_summary: String::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1077,6 +1123,83 @@ mod head_fields_tests {
         let summary: Summary = serde_json::from_str(json).unwrap();
         assert!(summary.head_commit.is_none());
         assert!(summary.head_branch.is_none());
+    }
+
+    #[test]
+    fn summary_relocation_metadata_is_backward_compatible() {
+        let json = r#"{
+            "info": { "id": "old-session", "cwd": "/tmp" },
+            "session_summary": "",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "num_messages": 0,
+            "num_chat_messages": 0,
+            "current_model_id": "test-model"
+        }"#;
+        let summary: Summary = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.cwd_generation, 0);
+        assert!(summary.previous_cwd.is_none());
+        assert!(summary.pending_cwd_switch_reminder.is_none());
+        assert_eq!(summary.cwd_switch_bookkeeping_generation, 0);
+
+        let serialized = serde_json::to_value(summary).unwrap();
+        for field in [
+            "cwd_generation",
+            "previous_cwd",
+            "pending_cwd_switch_reminder",
+            "cwd_switch_bookkeeping_generation",
+        ] {
+            assert!(serialized.get(field).is_none());
+        }
+    }
+
+    #[test]
+    fn summary_relocation_metadata_round_trips() {
+        let mut summary = Summary::new(
+            &Info {
+                id: acp::SessionId::new("test"),
+                cwd: "/new".into(),
+            },
+            default_model_id(),
+        )
+        .unwrap();
+        summary.cwd_generation = 2;
+        summary.previous_cwd = Some("/old".into());
+        summary.pending_cwd_switch_reminder = Some(PendingCwdSwitchReminder {
+            cwd_generation: 2,
+            previous_cwd: "/old".into(),
+            destination_cwd: "/new".into(),
+            content: "moved".into(),
+            destination_project_instructions: Some("target rules".into()),
+        });
+
+        let serialized = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            serialized["pending_cwd_switch_reminder"]["destination_cwd"],
+            "/new"
+        );
+        assert!(
+            serialized["pending_cwd_switch_reminder"]
+                .get("cwd")
+                .is_none()
+        );
+        let back: Summary = serde_json::from_value(serialized).unwrap();
+        assert_eq!(back.cwd_generation, 2);
+        assert_eq!(back.previous_cwd.as_deref(), Some("/old"));
+        assert_eq!(
+            back.pending_cwd_switch_reminder,
+            summary.pending_cwd_switch_reminder
+        );
+        assert_eq!(back.info.cwd, "/new");
+
+        let pending: PendingCwdSwitchReminder = serde_json::from_value(serde_json::json!({
+            "cwd_generation": 2,
+            "previous_cwd": "/old",
+            "cwd": "/new",
+            "content": "moved"
+        }))
+        .unwrap();
+        assert_eq!(pending.destination_cwd, "/new");
     }
 
     #[test]
@@ -1343,6 +1466,7 @@ mod generated_title_tests {
     }
 }
 
+#[derive(Clone)]
 pub struct PersistenceHandle {
     pub tx: mpsc::UnboundedSender<PersistenceMsg>,
     noop: bool,
@@ -1378,6 +1502,11 @@ impl From<crate::session::storage::AppendUpdateError> for DurableAppendError {
 }
 
 impl PersistenceHandle {
+    #[cfg(test)]
+    pub(crate) fn from_sender_for_test(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
+        Self { tx, noop: false }
+    }
+
     pub fn noop() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
         Self { tx, noop: true }
@@ -1698,6 +1827,25 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write chat message");
                     }
                 }
+                PersistenceMsg::AppendCwdSwitchAndAck { item, respond_to } => {
+                    let result = self
+                        .storage
+                        .append_cwd_switch_commit_aware(&self.info, &item)
+                        .await
+                        .map_err(|error| match error {
+                            crate::session::storage::AppendCwdSwitchError::NotCommitted(error) => {
+                                xai_chat_state::StrictAppendError::NotCommitted(error)
+                            }
+                            crate::session::storage::AppendCwdSwitchError::Committed {
+                                acknowledgement,
+                                source,
+                            } => xai_chat_state::StrictAppendError::Committed {
+                                acknowledgement,
+                                source,
+                            },
+                        });
+                    let _ = respond_to.send(result);
+                }
                 PersistenceMsg::ReplaceChatHistory(messages) => {
                     tracing::info!(
                         num_messages = messages.len(),
@@ -1745,6 +1893,44 @@ impl SessionPersistence {
                 PersistenceMsg::GoalModeState(state) => {
                     if let Err(e) = self.storage.write_goal_mode_state(&self.info, &state).await {
                         tracing::warn!(?e, "failed to write goal mode state");
+                    }
+                }
+                PersistenceMsg::DeleteGoalModeState { respond_to } => {
+                    let result = self.storage.delete_goal_mode_state(&self.info).await;
+                    if let Err(e) = &result {
+                        tracing::warn!(?e, "failed to delete goal mode state");
+                    }
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::WorkflowRunState(manifest) => {
+                    if let Err(error) = self
+                        .storage
+                        .write_workflow_run_state(&self.info, &manifest)
+                        .await
+                    {
+                        tracing::warn!(run_id = %manifest.state.run_id, ?error, "failed to write workflow run state");
+                    }
+                }
+                PersistenceMsg::WorkflowRunStateAndAck {
+                    manifest,
+                    respond_to,
+                } => {
+                    let result = self
+                        .storage
+                        .write_workflow_run_state(&self.info, &manifest)
+                        .await;
+                    if let Err(error) = &result {
+                        tracing::warn!(run_id = %manifest.state.run_id, ?error, "failed to write acknowledged workflow run state");
+                    }
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::DeleteWorkflowRunState(run_id) => {
+                    if let Err(e) = self
+                        .storage
+                        .delete_workflow_run_state(&self.info, &run_id)
+                        .await
+                    {
+                        tracing::warn!(%run_id, ?e, "failed to delete workflow run state");
                     }
                 }
                 PersistenceMsg::ContentChunk(content_chunks) => {
@@ -2305,6 +2491,7 @@ pub struct PersistedInfo {
     pub rewind_points: Vec<RewindPoint>,
     /// Persisted session signals (None for old sessions without signals file)
     pub signals: Option<SessionSignals>,
+    pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
 /// Same as PersistedInfo but without updates - for memory efficiency when streaming
@@ -2325,6 +2512,7 @@ pub struct PersistedInfoLight {
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
 /// On NotFound, try pulling from backend. Returns pulled info or the original error.
@@ -2375,6 +2563,7 @@ pub(crate) async fn load(
         plan_state: persisted.plan_state,
         rewind_points: persisted.rewind_points,
         signals: persisted.signals,
+        workflow_runs: persisted.workflow_runs,
     };
 
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -2460,6 +2649,7 @@ pub(crate) async fn load_light(
         signals: persisted.signals,
         announcement_state: persisted.announcement_state,
         goal_mode_state: persisted.goal_mode_state,
+        workflow_runs: persisted.workflow_runs,
     };
 
     let (tx, rx) = mpsc::unbounded_channel::<PersistenceMsg>();

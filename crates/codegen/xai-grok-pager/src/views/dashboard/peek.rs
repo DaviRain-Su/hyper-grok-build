@@ -1021,6 +1021,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
                 }
             }
             RenderBlock::Subagent(_) => return "Subagent".to_string(),
+            RenderBlock::Workflow(_) => return "Workflow".to_string(),
             RenderBlock::BgTask(_) => return "Task".to_string(),
             RenderBlock::Btw(_) => return "Btw".to_string(),
             RenderBlock::ContextInfo(_) => return "Context".to_string(),
@@ -1150,6 +1151,7 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::ToolCall(_) => Some("(tool call)".to_string()),
         RenderBlock::BgTask(_) => Some("(background task)".to_string()),
         RenderBlock::Subagent(_) => Some("(subagent)".to_string()),
+        RenderBlock::Workflow(_) => Some("(workflow)".to_string()),
         RenderBlock::Btw(_) => Some("(btw)".to_string()),
         RenderBlock::ContextInfo(_) => Some("(context info)".to_string()),
         RenderBlock::CreditLimit(_) => Some("(credit limit)".to_string()),

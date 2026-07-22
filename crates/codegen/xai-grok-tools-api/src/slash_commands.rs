@@ -138,6 +138,8 @@ After assembly, mention the final output path.
 
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 
+pub const WORKFLOW_TOOL_NAME: &str = "workflow";
+
 pub const GOAL_COMMAND_NAME: &str = "goal";
 
 /// Bare subcommand tokens reserved for goal lifecycle control rather than

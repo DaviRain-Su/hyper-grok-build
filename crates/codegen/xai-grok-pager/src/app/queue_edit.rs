@@ -282,7 +282,7 @@ impl AgentView {
             self.prompt_mode = PromptMode::EditingQueued {
                 id,
                 original: text,
-                server_id,
+                server_id: server_id.clone(),
                 kind,
             };
             self.prompt_input_mode = if kind == QueueEntryKind::BashCommand {
@@ -291,6 +291,13 @@ impl AgentView {
                 PromptInputMode::Normal
             };
             self.set_active_pane(AgentPane::Prompt, false);
+            if let (Some(sid), Some(session_id)) = (server_id, self.session.session_id.clone()) {
+                self.pending_effects
+                    .push(crate::app::actions::Effect::QueueHoldEdit {
+                        session_id,
+                        id: sid,
+                    });
+            }
         }
     }
 
@@ -498,6 +505,18 @@ impl AgentView {
         // a second take() of the spent stash would wipe the composer.
         if !matches!(self.prompt_mode, PromptMode::EditingQueued { .. }) {
             return;
+        }
+        if let PromptMode::EditingQueued {
+            server_id: Some(sid),
+            ..
+        } = &self.prompt_mode
+            && let Some(session_id) = self.session.session_id.clone()
+        {
+            self.pending_effects
+                .push(crate::app::actions::Effect::QueueReleaseEdit {
+                    session_id,
+                    id: sid.clone(),
+                });
         }
         let stash = self.stashed_prompt.take().unwrap_or_default();
         self.prompt.restore(stash);
@@ -1156,7 +1175,10 @@ mod tests {
         // early-return) is what leaves the palette alone.
         agent.prompt_mode = editing_lone_local();
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(agent.sharing_enabled),
+            entries: crate::views::modal::default_palette_entries(
+                agent.sharing_enabled,
+                agent.prompt.slash_controller.screen_mode(),
+            ),
             state: crate::views::picker::PickerState::input_active(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });

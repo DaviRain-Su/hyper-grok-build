@@ -25,14 +25,18 @@ async fn verb_group_streaming_fold_pty() {
         std::fs::write(&path, "hello verb group\n").expect("write fixture file");
         paths.push(dunce::canonicalize(&path).unwrap_or(path));
     }
-    for (i, p) in paths.iter().enumerate() {
-        enqueue_tool_turn(
-            &content,
-            &format!("call_s{i}"),
-            "read_file",
-            json!({ "target_file": p.to_string_lossy() }).to_string(),
-        );
-    }
+    let _tool_turns: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            expect_tool_turn(
+                &content,
+                &format!("call_s{i}"),
+                "read_file",
+                json!({ "target_file": p.to_string_lossy() }).to_string(),
+            )
+        })
+        .collect();
     content.set_response(DONE_SENTINEL);
     // Hold each scripted turn open (4 SSE events x 350ms ≈ 1.4s) so the
     // mid-flight window is pollable; cleared after capture so the tail

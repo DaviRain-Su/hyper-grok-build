@@ -2480,8 +2480,7 @@ mod tests {
         let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
         assert_eq!(entries.len(), 1);
         assert!(
-            matches!(&entries[0], AllowedMcpServer::Name { name }
-if name == "internal-only"),
+            matches!(&entries[0], AllowedMcpServer::Name { name } if name == "internal-only"),
             "expected a Name entry, got {entries:?}"
         );
         assert!(

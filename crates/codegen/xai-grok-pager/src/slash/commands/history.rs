@@ -46,6 +46,7 @@ mod tests {
             session_id: None,
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         }
     }

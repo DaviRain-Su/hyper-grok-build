@@ -17,7 +17,7 @@ async fn minimal_lookup_commits_one_line_summary() {
     let fixture = content.home().join("haystack.txt");
     std::fs::write(&fixture, format!("{BODY_SENTINEL} body line\n")).expect("write fixture");
 
-    enqueue_tool_turn(
+    let _read_turn = expect_tool_turn(
         &content,
         "call_read",
         "read_file",

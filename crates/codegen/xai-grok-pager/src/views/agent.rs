@@ -1198,8 +1198,11 @@ pub fn build_hints(
     {
         hints.push(def.hint());
     }
-    if can_demote {
-        hints.push(HintItem::new(crate::key!('g', CONTROL), "send to bg"));
+    if can_demote
+        && !is_subagent_view
+        && let Some(key) = registry.key_for(ActionId::SendToBackground)
+    {
+        hints.push(HintItem::new(key, "send to bg"));
     }
     hints
 }
@@ -1265,6 +1268,40 @@ mod tests {
     }
     fn first_two_labels(hints: &[HintItem]) -> Vec<&str> {
         hints.iter().take(2).map(|h| h.label.as_ref()).collect()
+    }
+    #[test]
+    fn demotion_hint_uses_registered_ctrl_b_binding() {
+        let registry = ActionRegistry::defaults();
+        let hints = build_hints(
+            ActivePane::Scrollback,
+            &PromptWidget::default(),
+            &registry,
+            false,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        let hint = hints
+            .iter()
+            .find(|hint| hint.label == "send to bg")
+            .expect("running Execute should advertise demotion");
+        assert_eq!(hint.keys, vec![crate::key!('b', CONTROL)]);
     }
     #[test]
     fn group_header_shows_enter_toggle_hint_instead_of_open_and_fold() {

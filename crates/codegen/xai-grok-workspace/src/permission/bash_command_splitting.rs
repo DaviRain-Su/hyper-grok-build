@@ -170,39 +170,296 @@ fn is_env_assignment(tok: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Scan a leading `env`'s options/assignments → its `-C`/`--chdir` target (last
-/// wins) and the index where the inner command starts. `env` permutes options
-/// with `NAME=VALUE`, so both are scanned until the first plain word or `--`.
-fn env_scan(cmd: &[String]) -> (Option<&str>, usize) {
-    let mut chdir = None;
-    let mut i = 1usize;
-    while let Some(tok) = cmd.get(i).map(String::as_str) {
-        if tok == "--" {
-            i += 1;
-            break;
-        }
-        if tok != "-" && tok.starts_with('-') {
-            if tok == "-C" || tok == "--chdir" {
-                chdir = cmd.get(i + 1).map(String::as_str);
-                i += 2;
-            } else if let Some(dir) = tok.strip_prefix("--chdir=") {
-                chdir = Some(dir);
-                i += 1;
-            } else if let Some(dir) = tok.strip_prefix("-C").filter(|d| !d.is_empty()) {
-                chdir = Some(dir);
-                i += 1;
-            } else if matches!(tok, "-u" | "--unset" | "-S" | "--split-string") {
-                i += 2;
-            } else {
-                i += 1;
-            }
-        } else if is_env_assignment(tok) {
-            i += 1;
-        } else {
-            break;
+struct EnvScan<'a> {
+    chdir: Option<&'a str>,
+    /// GNU/BSD `env -S`/`--split-string` rewrites argv; never peel past it.
+    has_split_string: bool,
+    /// Unknown/value-taking option arity not modeled — refuse peel + Ask.
+    options_uncertain: bool,
+    /// High-confidence literal packed script for Bash deny recursion only.
+    split_string_script: Option<String>,
+    command_start: usize,
+}
+
+/// Decode expansion-free word/string/concatenation *source spelling* under shell
+/// quote rules. For raw tree-sitter concatenations that still contain `'`/`"`.
+/// Already-dequoted plain argv words must not use this (env-S metasyntax like
+/// `\t` would be corrupted into shell escapes).
+pub(crate) fn decode_shell_literal_spelling(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\'' | '"') => quote = Some(ch),
+            (Some(open), close) if open == close => quote = None,
+            (None, '\\') => out.push(chars.next()?),
+            (Some('"'), '\\') => match chars.next()? {
+                n @ ('$' | '`' | '"' | '\\' | '\n') => out.push(n),
+                n => {
+                    out.push('\\');
+                    out.push(n);
+                }
+            },
+            // Single-quoted text is literal, including backslashes.
+            _ => out.push(ch),
         }
     }
-    (chdir, i)
+    quote.is_none().then_some(out)
+}
+
+/// Option-token spelling only: shell-decode when quote chars remain (glued/equal
+/// concatenations like `-S'cmd'` / `--split-string='cmd'`). Never fold bare
+/// backslashes without quotes — those are env-S metasyntax on the payload side.
+fn decode_env_option_token(raw: &str) -> std::borrow::Cow<'_, str> {
+    if !raw.contains(['\'', '"']) {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    match decode_shell_literal_spelling(raw) {
+        Some(decoded) => std::borrow::Cow::Owned(decoded),
+        // Unclosed quotes: keep raw so flag detection can still Ask.
+        None => std::borrow::Cow::Borrowed(raw),
+    }
+}
+
+/// Safe subset for recursing a packed `env -S` operand as a Bash script: no
+/// env-S quotes/escapes/comments/expansions that could diverge under reparse.
+/// Includes bare `\` so `\t`/`\n`/… stay non-extractable (Ask floor only).
+fn is_high_confidence_env_s_payload(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains('\0')
+        && !s
+            .chars()
+            .any(|c| matches!(c, '\'' | '"' | '\\' | '#' | '`' | '$' | '\n' | '\r'))
+}
+
+/// Safe-subset check + own. Callers must pass already-literal text (separate
+/// argv word, or payload carved after option-token quote removal) — never raw
+/// shell-escape sequences meant for env-S.
+fn take_high_confidence_payload(raw: &str) -> Option<String> {
+    is_high_confidence_env_s_payload(raw).then(|| raw.to_owned())
+}
+
+/// Classification of one short-option token for GNU/BSD `env` (minimal table).
+enum EnvShort<'a> {
+    SplitStringNext,
+    SplitStringGlued(&'a str),
+    /// Cluster `S` after modeled no-arg shorts: detect only.
+    SplitStringDetect,
+    NoArg,
+    ArgNeedNext(char),
+    /// Glued arg-taking short; `kind` is `u`/`C`/`P`/`a` (operand is rest of token).
+    ArgGlued {
+        kind: char,
+    },
+    Uncertain,
+}
+
+/// Walk one short-option token. Arg-taking `u`/`C`/`P`/`a` absorb the rest of
+/// the token as their operand (do not treat `S` inside that operand as `-S`).
+fn classify_env_short(tok: &str) -> EnvShort<'_> {
+    if !tok.starts_with('-') || tok.starts_with("--") || tok == "-" {
+        return EnvShort::Uncertain;
+    }
+    let body = &tok[1..];
+    if body.is_empty() {
+        return EnvShort::Uncertain;
+    }
+    if let Some(rest) = body.strip_prefix('S') {
+        return if rest.is_empty() {
+            EnvShort::SplitStringNext
+        } else {
+            EnvShort::SplitStringGlued(rest)
+        };
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        match chars[idx] {
+            'i' | 'v' | '0' => idx += 1,
+            'S' => return EnvShort::SplitStringDetect,
+            kind @ ('u' | 'C' | 'P' | 'a') => {
+                let has_glued = body.char_indices().nth(idx + 1).is_some();
+                return if has_glued {
+                    EnvShort::ArgGlued { kind }
+                } else {
+                    EnvShort::ArgNeedNext(kind)
+                };
+            }
+            _ => return EnvShort::Uncertain,
+        }
+    }
+    EnvShort::NoArg
+}
+
+/// Consume a required option operand; missing → uncertain.
+fn take_option_operand<'a>(cmd: &'a [String], i: &mut usize) -> Option<&'a str> {
+    match cmd.get(*i + 1).map(String::as_str) {
+        Some(v) => {
+            *i += 2;
+            Some(v)
+        }
+        None => None,
+    }
+}
+
+/// Scan a leading `env`'s options/assignments → its `-C`/`--chdir` target (last
+/// wins), whether a split-string rewrite is present, an optional high-confidence
+/// packed script, and the index where the inner command starts. `env` permutes
+/// options with `NAME=VALUE`. Minimal GNU/BSD table — unknown arity fails closed.
+fn env_scan(cmd: &[String]) -> EnvScan<'_> {
+    let mut chdir = None;
+    let mut has_split_string = false;
+    let mut options_uncertain = false;
+    let mut split_string_script = None;
+    let mut i = 1usize;
+    while let Some(tok_raw) = cmd.get(i).map(String::as_str) {
+        if tok_raw == "--" {
+            i += 1;
+            break;
+        }
+        // GNU: bare `-` is a synonym for `-i` (still an option, not the command).
+        if tok_raw == "-" {
+            i += 1;
+            continue;
+        }
+        if !tok_raw.starts_with('-') {
+            if is_env_assignment(tok_raw) {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+
+        if tok_raw.starts_with("--") {
+            if tok_raw == "--chdir" {
+                match take_option_operand(cmd, &mut i) {
+                    Some(dir) => chdir = Some(dir),
+                    None => {
+                        options_uncertain = true;
+                        break;
+                    }
+                }
+                continue;
+            }
+            if let Some(dir) = tok_raw.strip_prefix("--chdir=") {
+                chdir = Some(dir);
+                i += 1;
+                continue;
+            }
+            // `--path` pairs with BSD-style `-P`; unmodeled longs (e.g. `--prefix`) uncertain.
+            if tok_raw == "--unset" || tok_raw == "--path" || tok_raw == "--argv0" {
+                if take_option_operand(cmd, &mut i).is_none() {
+                    options_uncertain = true;
+                    break;
+                }
+                continue;
+            }
+            if tok_raw.starts_with("--unset=")
+                || tok_raw.starts_with("--path=")
+                || tok_raw.starts_with("--argv0=")
+            {
+                i += 1;
+                continue;
+            }
+            if matches!(
+                tok_raw,
+                "--ignore-environment" | "--null" | "--debug" | "--version" | "--help"
+            ) {
+                i += 1;
+                continue;
+            }
+            if tok_raw == "--split-string" {
+                // WHY: `-S` re-tokenizes a packed string; do not peel past it.
+                has_split_string = true;
+                if let Some(raw) = cmd.get(i + 1).map(String::as_str) {
+                    split_string_script = take_high_confidence_payload(raw);
+                }
+                break;
+            }
+            if let Some(payload) = tok_raw.strip_prefix("--split-string=") {
+                let decoded = decode_env_option_token(tok_raw);
+                let payload = decoded
+                    .as_ref()
+                    .strip_prefix("--split-string=")
+                    .unwrap_or(payload);
+                has_split_string = true;
+                split_string_script = take_high_confidence_payload(payload);
+                break;
+            }
+            // WHY: unknown long may take a value and hide a later `-S`.
+            options_uncertain = true;
+            break;
+        }
+
+        let tok_decoded = decode_env_option_token(tok_raw);
+        let tok = tok_decoded.as_ref();
+        match classify_env_short(tok) {
+            EnvShort::SplitStringNext => {
+                has_split_string = true;
+                if let Some(raw) = cmd.get(i + 1).map(String::as_str) {
+                    split_string_script = take_high_confidence_payload(raw);
+                }
+                break;
+            }
+            EnvShort::SplitStringGlued(payload) => {
+                has_split_string = true;
+                split_string_script = take_high_confidence_payload(payload);
+                break;
+            }
+            EnvShort::SplitStringDetect => {
+                has_split_string = true;
+                break;
+            }
+            EnvShort::NoArg => i += 1,
+            EnvShort::ArgNeedNext(kind) => match take_option_operand(cmd, &mut i) {
+                Some(operand) => {
+                    if kind == 'C' {
+                        chdir = Some(operand);
+                    }
+                }
+                None => {
+                    options_uncertain = true;
+                    break;
+                }
+            },
+            EnvShort::ArgGlued { kind } => {
+                if kind == 'C' {
+                    chdir = Some(
+                        tok_raw
+                            .strip_prefix("-C")
+                            .filter(|d| !d.is_empty())
+                            .unwrap_or(""),
+                    );
+                }
+                i += 1;
+            }
+            EnvShort::Uncertain => {
+                options_uncertain = true;
+                break;
+            }
+        }
+    }
+    EnvScan {
+        chdir,
+        has_split_string,
+        options_uncertain,
+        split_string_script,
+        command_start: i,
+    }
+}
+
+/// High-confidence packed `env -S`/`--split-string` operand when `words` is an
+/// env invocation stopped on a recoverable literal form. Bash deny only.
+pub(crate) fn env_split_string_script(words: &[String]) -> Option<String> {
+    if words.first()?.rsplit(['/', '\\']).next()? != "env" {
+        return None;
+    }
+    let scan = env_scan(words);
+    if !scan.has_split_string {
+        return None;
+    }
+    scan.split_string_script
 }
 
 /// Strip a leading wrapper (`timeout`/`env`/`nice`/`stdbuf`/`ionice`/`chrt`) and
@@ -281,7 +538,14 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
             }
         }
         // `env [OPTIONS]/[NAME=VALUE] (interspersed) [COMMAND] [ARGS]`
-        "env" => i = env_scan(cmd).1,
+        "env" => {
+            let scan = env_scan(cmd);
+            // WHY: split-string rewrites argv; uncertain option arity can hide it.
+            if scan.has_split_string || scan.options_uncertain {
+                return None;
+            }
+            i = scan.command_start;
+        }
         _ => return None,
     }
     let inner = cmd.get(i..)?;
@@ -302,37 +566,277 @@ pub(crate) fn is_wrapper_command(words: &[String]) -> bool {
     )
 }
 
+pub(crate) const MAX_WRAPPER_DEPTH: usize = 8;
+/// Independent budget for `shell -c` recursion (not wrapper peel layers).
+pub(crate) const MAX_INLINE_SHELL_DEPTH: usize = 8;
+
+pub(crate) struct CheckedWrapperPeel<'a> {
+    pub(crate) words: &'a [String],
+    pub(crate) has_chdir: bool,
+    /// `env -S`/`--split-string` rewrite was seen; callers must Ask (floor).
+    pub(crate) has_split_string: bool,
+    /// Unmodeled env option arity; callers must Ask and must not peel.
+    pub(crate) env_options_uncertain: bool,
+    pub(crate) exhausted: bool,
+}
+
+/// Peel canonical wrappers while retaining cwd, split-string, and exhaustion facts.
+pub(crate) fn unwrap_wrappers_checked(words: &[String]) -> CheckedWrapperPeel<'_> {
+    let mut current = words;
+    let mut has_chdir = false;
+    let mut has_split_string = false;
+    let mut env_options_uncertain = false;
+    for _ in 0..MAX_WRAPPER_DEPTH {
+        if current.first().and_then(|w| w.rsplit(['/', '\\']).next()) == Some("env") {
+            let scan = env_scan(current);
+            has_chdir |= scan.chdir.is_some();
+            has_split_string |= scan.has_split_string;
+            env_options_uncertain |= scan.options_uncertain;
+        }
+        match strip_wrapper_command(current) {
+            Some(inner) => current = inner,
+            None => {
+                return CheckedWrapperPeel {
+                    words: current,
+                    has_chdir,
+                    has_split_string,
+                    env_options_uncertain,
+                    exhausted: false,
+                };
+            }
+        }
+    }
+    CheckedWrapperPeel {
+        words: current,
+        has_chdir,
+        has_split_string,
+        env_options_uncertain,
+        exhausted: is_wrapper_command(current) && strip_wrapper_command(current).is_some(),
+    }
+}
+
 /// Repeatedly strip wrapper commands (e.g. `timeout 30 nice -n 10 rm -rf /`).
 /// Bounded to avoid pathological loops. Returns the original slice if no
 /// wrapper is present.
 pub(crate) fn unwrap_wrappers(words: &[String]) -> &[String] {
-    let mut current = words;
-    for _ in 0..8 {
-        match strip_wrapper_command(current) {
-            Some(inner) => current = inner,
-            None => break,
-        }
-    }
-    current
+    unwrap_wrappers_checked(words).words
 }
 
-/// Whether the command runs under an `env -C`/`--chdir` (possibly path-qualified,
-/// behind other wrappers). Only presence is reported — the caller treats such an
-/// invocation's relative operands as unpinnable rather than resolving the dir.
-pub(crate) fn wrapper_has_chdir(words: &[String]) -> bool {
+/// Result of peeling shell-transparent prefixes (`exec` / `command` / `builtin`).
+/// Not part of the canonical wrapper set — used only by security gates.
+pub(crate) enum TransparentPrefixPeel<'a> {
+    Ready(&'a [String]),
+    Ambiguous,
+}
+
+pub(crate) const MAX_TRANSPARENT_PREFIX_DEPTH: usize = 8;
+/// Bound on alternating wrapper ↔ transparent normalize rounds.
+pub(crate) const MAX_NORMALIZE_ROUNDS: usize = MAX_WRAPPER_DEPTH + MAX_TRANSPARENT_PREFIX_DEPTH;
+
+/// Peel `exec`/`command`/`builtin` after canonical wrappers. Unknown options and
+/// depth exhaustion (a ninth peelable transparent prefix remains) Ask.
+pub(crate) fn peel_transparent_prefixes(words: &[String]) -> TransparentPrefixPeel<'_> {
     let mut current = words;
-    for _ in 0..8 {
-        if current.first().and_then(|w| w.rsplit(['/', '\\']).next()) == Some("env")
-            && env_scan(current).0.is_some()
-        {
-            return true;
-        }
-        match strip_wrapper_command(current) {
-            Some(inner) => current = inner,
-            None => break,
+    for _ in 0..MAX_TRANSPARENT_PREFIX_DEPTH {
+        match strip_transparent_prefix(current) {
+            TransparentStrip::NotPrefix => return TransparentPrefixPeel::Ready(current),
+            TransparentStrip::Peeled(inner) => current = inner,
+            TransparentStrip::Ambiguous => return TransparentPrefixPeel::Ambiguous,
         }
     }
-    false
+    // WHY: mirror wrapper exhaustion — a remaining peelable prefix is unmodeled.
+    match strip_transparent_prefix(current) {
+        TransparentStrip::NotPrefix => TransparentPrefixPeel::Ready(current),
+        TransparentStrip::Peeled(_) | TransparentStrip::Ambiguous => {
+            TransparentPrefixPeel::Ambiguous
+        }
+    }
+}
+
+/// Normalized argv after bounded alternation of wrapper and transparent peels.
+pub(crate) struct NormalizedCommandPeel<'a> {
+    pub(crate) words: &'a [String],
+    pub(crate) has_chdir: bool,
+    pub(crate) has_split_string: bool,
+    pub(crate) env_options_uncertain: bool,
+    pub(crate) exhausted: bool,
+    pub(crate) ambiguous: bool,
+}
+
+/// Alternate canonical wrappers and transparent prefixes to a bounded fixed
+/// point so shapes like `command timeout command env -S …` surface the pack.
+/// Ambiguity, depth exhaustion, chdir, split-string, and uncertain env options
+/// all fail closed (callers Ask).
+pub(crate) fn normalize_command_words(words: &[String]) -> NormalizedCommandPeel<'_> {
+    let mut current = words;
+    let mut has_chdir = false;
+    let mut has_split_string = false;
+    let mut env_options_uncertain = false;
+    let mut exhausted = false;
+    let mut ambiguous = false;
+
+    for _ in 0..MAX_NORMALIZE_ROUNDS {
+        let start_len = current.len();
+        let start_ptr = current.as_ptr();
+
+        let wrapped = unwrap_wrappers_checked(current);
+        has_chdir |= wrapped.has_chdir;
+        has_split_string |= wrapped.has_split_string;
+        env_options_uncertain |= wrapped.env_options_uncertain;
+        exhausted |= wrapped.exhausted;
+        current = wrapped.words;
+
+        // Opaque pack / uncertain env options: do not peel further.
+        if has_split_string || env_options_uncertain {
+            break;
+        }
+
+        match peel_transparent_prefixes(current) {
+            TransparentPrefixPeel::Ready(inner) => current = inner,
+            TransparentPrefixPeel::Ambiguous => {
+                ambiguous = true;
+                break;
+            }
+        }
+
+        if current.len() == start_len && std::ptr::eq(current.as_ptr(), start_ptr) {
+            break;
+        }
+    }
+
+    if !ambiguous && !has_split_string && !env_options_uncertain {
+        // Remaining peelable head after the budget is unmodeled → fail closed.
+        let still_wrapper = is_wrapper_command(current) && strip_wrapper_command(current).is_some();
+        let still_transparent = !matches!(
+            strip_transparent_prefix(current),
+            TransparentStrip::NotPrefix
+        );
+        if still_wrapper || still_transparent {
+            exhausted = true;
+        }
+    }
+
+    NormalizedCommandPeel {
+        words: current,
+        has_chdir,
+        has_split_string,
+        env_options_uncertain,
+        exhausted,
+        ambiguous,
+    }
+}
+
+enum TransparentStrip<'a> {
+    NotPrefix,
+    Peeled(&'a [String]),
+    Ambiguous,
+}
+
+fn strip_transparent_prefix(cmd: &[String]) -> TransparentStrip<'_> {
+    let head = match cmd.first().map(String::as_str) {
+        Some(h) if !h.is_empty() && h != "\0" => h.rsplit(['/', '\\']).next().unwrap_or(h),
+        _ => return TransparentStrip::NotPrefix,
+    };
+    match head {
+        "exec" => strip_exec_prefix(cmd),
+        "command" => strip_command_prefix(cmd),
+        "builtin" => strip_builtin_prefix(cmd),
+        _ => TransparentStrip::NotPrefix,
+    }
+}
+
+/// `exec [-cl] [-a name] [command [arguments]]`
+fn strip_exec_prefix(cmd: &[String]) -> TransparentStrip<'_> {
+    let mut i = 1usize;
+    while let Some(tok) = cmd.get(i).map(String::as_str) {
+        if tok == "--" {
+            i += 1;
+            break;
+        }
+        if tok == "-" || !tok.starts_with('-') {
+            break;
+        }
+        if matches!(tok, "-c" | "-l" | "-cl" | "-lc") {
+            i += 1;
+            continue;
+        }
+        if tok == "-a" {
+            match cmd.get(i + 1).map(String::as_str) {
+                Some(v) if v != "\0" && !v.is_empty() => i += 2,
+                _ => return TransparentStrip::Ambiguous,
+            }
+            continue;
+        }
+        if let Some(rest) = tok.strip_prefix("-a").filter(|r| !r.is_empty()) {
+            if rest == "\0" {
+                return TransparentStrip::Ambiguous;
+            }
+            i += 1;
+            continue;
+        }
+        // Combined shorts that include only c/l plus optional glued -a are rare;
+        // anything else is unmodeled.
+        if tok.starts_with('-')
+            && !tok.starts_with("--")
+            && tok.chars().skip(1).all(|c| matches!(c, 'c' | 'l'))
+        {
+            i += 1;
+            continue;
+        }
+        return TransparentStrip::Ambiguous;
+    }
+    match cmd.get(i..) {
+        Some(inner) if !inner.is_empty() => TransparentStrip::Peeled(inner),
+        // Redirect-only `exec` has no command word; leave it for the AST redirect path.
+        _ => TransparentStrip::NotPrefix,
+    }
+}
+
+/// `command [-p] command [arguments]` — do not peel display forms `-v`/`-V`.
+fn strip_command_prefix(cmd: &[String]) -> TransparentStrip<'_> {
+    let mut i = 1usize;
+    while let Some(tok) = cmd.get(i).map(String::as_str) {
+        if tok == "--" {
+            i += 1;
+            break;
+        }
+        if tok == "-" || !tok.starts_with('-') {
+            break;
+        }
+        if matches!(tok, "-v" | "-V" | "--help" | "--version")
+            || (tok.starts_with('-')
+                && !tok.starts_with("--")
+                && tok.chars().skip(1).any(|c| c == 'v' || c == 'V'))
+        {
+            // Display/query mode is not an execute peel.
+            return TransparentStrip::NotPrefix;
+        }
+        if tok == "-p"
+            || (tok.starts_with('-')
+                && !tok.starts_with("--")
+                && tok.chars().skip(1).all(|c| c == 'p'))
+        {
+            i += 1;
+            continue;
+        }
+        return TransparentStrip::Ambiguous;
+    }
+    match cmd.get(i..) {
+        Some(inner) if !inner.is_empty() => TransparentStrip::Peeled(inner),
+        _ => TransparentStrip::NotPrefix,
+    }
+}
+
+/// `builtin [shell-builtin [arguments]]` — no options modeled.
+fn strip_builtin_prefix(cmd: &[String]) -> TransparentStrip<'_> {
+    match cmd.get(1).map(String::as_str) {
+        None => TransparentStrip::NotPrefix,
+        Some(tok) if tok.starts_with('-') && tok != "-" => TransparentStrip::Ambiguous,
+        Some(_) => match cmd.get(1..) {
+            Some(inner) if !inner.is_empty() => TransparentStrip::Peeled(inner),
+            _ => TransparentStrip::NotPrefix,
+        },
+    }
 }
 
 /// Simple shell-like splitter that:
@@ -741,10 +1245,146 @@ pub fn soft_break_chunks(script: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BashCommandHighlights, heredoc_payload_byte_ranges, primary_command_from_script,
+        BashCommandHighlights, all_commands_from_script, env_split_string_script,
+        heredoc_payload_byte_ranges, normalize_command_words, primary_command_from_script,
         range_fully_inside, soft_break_chunks, soft_break_offsets_after_operators,
-        split_physical_line_at_soft_breaks, try_parse_shell,
+        split_physical_line_at_soft_breaks, try_parse_shell, unwrap_wrappers_checked,
     };
+
+    #[test]
+    fn env_split_string_scan_contract() {
+        let words = |script: &str| {
+            all_commands_from_script(script)
+                .expect(script)
+                .into_iter()
+                .next()
+                .expect(script)
+                .words()
+                .to_vec()
+        };
+        for script in [
+            "env -S 'rm -rf x'",
+            "env --split-string 'rm -rf x'",
+            "env --split-string='rm -rf x'",
+            "env -S'rm -rf x'",
+        ] {
+            let w = words(script);
+            let peeled = unwrap_wrappers_checked(&w);
+            assert!(peeled.has_split_string, "{script}");
+            assert_eq!(
+                env_split_string_script(&w).as_deref(),
+                Some("rm -rf x"),
+                "{script}"
+            );
+            assert_eq!(
+                peeled.words.first().map(String::as_str),
+                Some("env"),
+                "{script}"
+            );
+        }
+        for script in [
+            "env -iS 'rm -rf x'",
+            "env -vS 'rm -rf x'",
+            "env -0S 'rm -rf x'",
+        ] {
+            let w = words(script);
+            let peeled = unwrap_wrappers_checked(&w);
+            assert!(peeled.has_split_string, "{script}");
+            assert!(env_split_string_script(&w).is_none(), "{script}");
+        }
+        let unknown_cluster = words("env -xS 'rm -rf x'");
+        let peeled = unwrap_wrappers_checked(&unknown_cluster);
+        assert!(peeled.env_options_uncertain);
+        assert!(!peeled.has_split_string);
+        assert!(env_split_string_script(&unknown_cluster).is_none());
+        for script in [
+            "env -uS rm -rf x",
+            "env -CS rm -rf x",
+            "env -PSfoo rm -rf x",
+        ] {
+            let w = words(script);
+            let peeled = unwrap_wrappers_checked(&w);
+            assert!(!peeled.has_split_string, "{script}");
+            assert!(env_split_string_script(&w).is_none(), "{script}");
+        }
+        for script in [
+            "env -P /usr/bin -S 'rm -rf x'",
+            "env --path /usr/bin -S 'rm -rf x'",
+            "env --path=/usr/bin -S 'rm -rf x'",
+            "env -a name -S 'rm -rf x'",
+            "env -u NAME -S 'rm -rf x'",
+            "env -C /tmp -S 'rm -rf x'",
+            "env - -S 'rm -rf x'",
+            "env -iv -S 'rm -rf x'",
+        ] {
+            let w = words(script);
+            let peeled = unwrap_wrappers_checked(&w);
+            assert!(peeled.has_split_string, "{script}");
+            assert_eq!(
+                env_split_string_script(&w).as_deref(),
+                Some("rm -rf x"),
+                "{script}"
+            );
+            assert_eq!(
+                peeled.words.first().map(String::as_str),
+                Some("env"),
+                "{script}"
+            );
+        }
+        for script in [
+            r"env -S '\trm -rf x'",
+            r"env -S '\nrm -rf x'",
+            "env -S 'echo $HOME'",
+            "env -S 'rm #x'",
+            "env -S",
+        ] {
+            let w = words(script);
+            let peeled = unwrap_wrappers_checked(&w);
+            assert!(peeled.has_split_string, "{script}");
+            assert!(env_split_string_script(&w).is_none(), "{script}");
+        }
+        let tabbed = words("env -S 'rm\t-rf x'");
+        assert!(unwrap_wrappers_checked(&tabbed).has_split_string);
+        assert_eq!(
+            env_split_string_script(&tabbed).as_deref(),
+            Some("rm\t-rf x")
+        );
+        let dashed = words("env -- -S 'rm -rf x'");
+        let peeled = unwrap_wrappers_checked(&dashed);
+        assert!(!peeled.has_split_string);
+        assert!(env_split_string_script(&dashed).is_none());
+        for script in [
+            "env --block-signal SEGV -S 'rm -rf x'",
+            "env -x foo -S 'rm -rf x'",
+            "env --prefix /usr/bin -S 'rm -rf x'",
+        ] {
+            let w = words(script);
+            let peeled = unwrap_wrappers_checked(&w);
+            assert!(peeled.env_options_uncertain, "{script}");
+            assert!(!peeled.has_split_string, "{script}");
+        }
+        let ordinary = words("env FOO=1 rm -rf x");
+        let peeled = unwrap_wrappers_checked(&ordinary);
+        assert!(!peeled.has_split_string);
+        assert_eq!(
+            peeled.words.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["rm", "-rf", "x"]
+        );
+        let prefix = words("env -P /usr/bin rm -rf x");
+        let peeled = unwrap_wrappers_checked(&prefix);
+        assert!(!peeled.has_split_string && !peeled.env_options_uncertain);
+        assert_eq!(
+            peeled.words.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["rm", "-rf", "x"]
+        );
+        let deep = words("command timeout 5 command env -S 'rm -rf x'");
+        let norm = normalize_command_words(&deep);
+        assert!(norm.has_split_string);
+        assert_eq!(
+            env_split_string_script(norm.words).as_deref(),
+            Some("rm -rf x")
+        );
+    }
 
     #[test]
     fn test_parse_plain_commands_from_script() {

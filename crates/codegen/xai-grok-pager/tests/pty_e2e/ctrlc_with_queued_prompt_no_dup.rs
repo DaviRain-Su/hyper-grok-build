@@ -15,11 +15,12 @@ async fn ctrlc_with_queued_prompt_no_dup() {
     let content = ContentController::start().await.expect("start content");
     // Gate turn A's terminal event so the queue + Ctrl+C provably land
     // mid-turn (the cancel abort beats the held completion).
-    content.hold_agent_completions();
-    content.set_turns([
-        slow_turn_text("ALPHARESP"),
-        "BRAVORESP promoted after cancel.".to_owned(),
-    ]);
+    let mut turn_a = content
+        .expect_agent_turn_blocked("running turn A before cancel", slow_turn_text("ALPHARESP"));
+    let _turn_b = content.expect_agent_turn(
+        "queued turn B promoted after cancel",
+        "BRAVORESP promoted after cancel.",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =
@@ -35,6 +36,9 @@ async fn ctrlc_with_queued_prompt_no_dup() {
     harness
         .wait_for_text("ALPHARESP", Duration::from_secs(45))
         .expect("A streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_a.wait_blocked())
+        .await
+        .expect("turn A reached completion barrier");
 
     harness
         .inject_keys(format!("{PROMPT_B}\r").as_bytes())
@@ -44,7 +48,7 @@ async fn ctrlc_with_queued_prompt_no_dup() {
         .expect("B visible as a queued row");
 
     harness.inject_keys(keys::CTRL_C).expect("Ctrl+C cancel A");
-    content.release_agent_completions();
+    turn_a.release();
 
     // Standard cancel (queued prompts skip the rewind): A is cancelled and B
     // promotes as the next turn. The "Turn cancelled by user" marker and the

@@ -28,12 +28,30 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 struct RewindSessionRequest {
     #[serde(alias = "sessionId")]
     session_id: String,
-    #[serde(alias = "targetPromptIndex")]
-    target_prompt_index: usize,
+    #[serde(default, alias = "targetPromptIndex")]
+    target_prompt_index: Option<usize>,
+    #[serde(default, alias = "targetResponseId")]
+    target_response_id: Option<String>,
     #[serde(default)]
     force: bool,
     #[serde(default)]
     mode: Option<RewindMode>,
+}
+impl RewindSessionRequest {
+    fn prompt_index_for_local(&self) -> Result<usize, acp::Error> {
+        if let Some(idx) = self.target_prompt_index {
+            return Ok(idx);
+        }
+        if response_id_from_req(self).is_some() {
+            return Err(
+                acp::Error::invalid_params()
+                    .data(
+                        "targetResponseId rewind requires a chat/bridge session (use targetPromptIndex for local)",
+                    ),
+            );
+        }
+        Err(acp::Error::invalid_params().data("targetPromptIndex or targetResponseId is required"))
+    }
 }
 #[derive(Deserialize)]
 struct RewindPointsRequest {
@@ -52,13 +70,14 @@ fn lookup_session(agent: &MvpAgent, session_id: String) -> Result<SessionHandle,
 }
 async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let request: RewindSessionRequest = parse_params(args)?;
+    let target_prompt_index = request.prompt_index_for_local()?;
     let handle = lookup_session(agent, request.session_id)?;
     let (tx, rx) = oneshot::channel();
     handle
         .cmd_tx
         .send(SessionCommand::Rewind {
             request: RewindRequest {
-                target_prompt_index: request.target_prompt_index,
+                target_prompt_index,
                 force: request.force,
                 mode: request.mode.unwrap_or(RewindMode::All),
             },
@@ -83,4 +102,10 @@ async fn handle_points(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .await
         .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?;
     to_raw_response(&result)
+}
+fn response_id_from_req(req: &RewindSessionRequest) -> Option<&str> {
+    req.target_response_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }

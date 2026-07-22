@@ -343,9 +343,9 @@ impl VoiceState {
     /// it). `/voice` and toggle-style starts leave this false.
     pub(crate) fn hold(&self) -> bool {
         matches!(
-                    self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
-        if * hold
-                )
+            self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
+if * hold
+        )
     }
 }
 /// Entry in the session picker list on the welcome screen.
@@ -694,8 +694,8 @@ pub struct AppView {
     /// Whether the plugin marketplace CTA is enabled. Env `GROK_PLUGIN_CTA`
     /// overrides `RemoteSettings.plugin_cta` (remote settings); defaults to `false`.
     pub plugin_cta_enabled: bool,
-    /// Whether the `/usage` slash command is available. Hidden for team
-    /// (`team_name.is_some()`) and API-key auth.
+    /// Consumer billing surface (credit fetches / warnings). False for team
+    /// and API-key auth. `/usage` itself stays available for session token/cost.
     pub usage_visible: bool,
     /// Slash commands denied for the current subscription tier
     /// ([`TIER_RESTRICTED_COMMANDS`] when the user is on the free / X Basic
@@ -778,13 +778,10 @@ pub struct AppView {
     pub welcome_tip_typing_dismissed: bool,
     /// Effects queued by notification handlers (drained by the event loop).
     pub pending_effects: Vec<crate::app::actions::Effect>,
-    /// Path to open in `$EDITOR` after the current event cycle completes.
-    /// Set by `Action::SuspendForEditor`; consumed by the event loop which
-    /// leaves the alternate screen, disables raw mode, spawns the editor,
-    /// waits for it to exit, then restores the TUI.
-    pub pending_editor_path: Option<std::path::PathBuf>,
-    /// After `$EDITOR` exits, refresh the agents modal tab list if still open.
-    pub pending_agents_modal_refresh: Option<crate::views::agents_modal::AgentsTab>,
+    /// Typed `$EDITOR` work consumed by the event loop after the current cycle.
+    /// Both configuration-file and prompt-draft edits share the existing
+    /// leave-raw-mode / child / restore handoff.
+    pub(crate) pending_editor: Option<crate::app::external_editor::PendingEditorRequest>,
     /// Path to open in `$PAGER` (default `less`) after the current event cycle.
     /// Set by `Action::OpenTranscriptPager` (`/transcript`); consumed by the
     /// event loop which suspends the inline TUI, spawns the pager, then restores
@@ -863,6 +860,9 @@ pub struct AppView {
     pub session_picker_state: crate::views::picker::PickerState,
     /// Source filter for the welcome-screen session picker.
     pub session_picker_source_filter: crate::views::session_picker::SourceFilter,
+    /// Directory whose relaxed-scope notice has fired, keyed by the browse cwd
+    /// (`app.cwd`); a cwd-scoped browse clears it so a later relax re-notifies.
+    pub session_picker_relaxed_notified_for: Option<std::path::PathBuf>,
     /// Content-based (deep search) results from ACP session search.
     pub session_picker_content_results:
         Option<Vec<xai_grok_shell::extensions::session_search::SearchSessionHit>>,
@@ -1199,6 +1199,7 @@ impl AppView {
                 .as_deref()
                 .is_some_and(is_api_key_label);
         self.usage_visible = meta.team_name.is_none() && !self.is_api_key_auth;
+        self.sync_billing_surface_to_agents();
         self.apply_tier_restrictions();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
@@ -1209,6 +1210,25 @@ impl AppView {
         }
         if let Some(show) = meta.show_resolved_model {
             self.show_resolved_model = show;
+        }
+    }
+    /// Mirror [`Self::usage_visible`] onto every slash surface that can run
+    /// `/usage` (agents, welcome, dashboard dispatch / peek-reply).
+    pub(crate) fn sync_billing_surface_to_agents(&mut self) {
+        let visible = self.usage_visible;
+        for agent in self.agents.values_mut() {
+            agent.set_billing_surface_visible(visible);
+        }
+        self.welcome_prompt
+            .slash_controller
+            .set_billing_surface_visible(visible);
+        if let Some(dash) = self.dashboard.as_mut() {
+            dash.dispatch
+                .slash_controller
+                .set_billing_surface_visible(visible);
+            dash.peek_reply
+                .slash_controller
+                .set_billing_surface_visible(visible);
         }
     }
     /// Force voice on for API-key sessions when only a remote rule left it off.
@@ -1274,8 +1294,7 @@ impl AppView {
             welcome_prompt_focused: true,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
-            pending_editor_path: None,
-            pending_agents_modal_refresh: None,
+            pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
@@ -1305,6 +1324,7 @@ impl AppView {
                 crate::views::picker::PickerMode::FullScreen,
             ),
             session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
+            session_picker_relaxed_notified_for: None,
             session_picker_content_results: None,
             session_picker_content_loading: false,
             session_picker_deep_search_seq: 0,
@@ -1816,6 +1836,9 @@ impl AppView {
             session_id,
             mut entries,
             running_prompt_id,
+            running_text: _,
+            running_kind: _,
+            running_combined_texts: _,
         } = changed;
         let mut rekeyed_echo_ids: Vec<(String, String)> = Vec::new();
         let running_row: Option<(String, String)> = running_prompt_id.as_ref().and_then(|pid| {
@@ -1886,6 +1909,7 @@ impl AppView {
             last_editor: None,
             kind: kind.to_string(),
             text: text.to_string(),
+            combined_texts: None,
             position: 0,
         };
         let opt = self
@@ -2430,34 +2454,38 @@ impl AppView {
                     return outcome;
                 }
                 let prompt_paging = !overlay_active && !self.screen_mode.is_minimal();
-                if self.screen_mode.is_minimal() {
-                    match self.agents.get_mut(&id) {
-                        Some(agent) => {
-                            let outcome = agent.handle_minimal_input(ev, &self.registry);
-                            if let Event::Key(key) = ev {
-                                agent.record_input(key, &outcome);
-                            }
-                            self.pending_effects.append(&mut agent.pending_effects);
-                            outcome
+                let outcome = match self.agents.get_mut(&id) {
+                    Some(agent) => {
+                        let transcript_before = agent.active_subagent.clone();
+                        let workflows_before = agent.show_workflows;
+                        let outcome = if self.screen_mode.is_minimal() {
+                            agent.handle_minimal_input(ev, &self.registry)
+                        } else if prompt_paging {
+                            agent.handle_input_with_prompt_paging(ev, &self.registry)
+                        } else {
+                            agent.handle_input(ev, &self.registry)
+                        };
+                        let transcript_opened =
+                            transcript_before.is_none() && agent.active_subagent.is_some();
+                        let workflows_opened = !workflows_before && agent.show_workflows;
+                        if let Event::Key(key) = ev {
+                            agent.record_input(key, &outcome);
                         }
-                        None => InputOutcome::Unchanged,
+                        self.pending_effects.append(&mut agent.pending_effects);
+                        if transcript_opened || workflows_opened {
+                            self.scroll_state.cancel_stream();
+                            self.last_scroll_pos = None;
+                        }
+                        outcome
                     }
+                    None => InputOutcome::Unchanged,
+                };
+                if self.pending_editor.is_some()
+                    && matches!(outcome, InputOutcome::Action(Action::EditPromptExternal))
+                {
+                    InputOutcome::Unchanged
                 } else {
-                    match self.agents.get_mut(&id) {
-                        Some(agent) => {
-                            let outcome = if prompt_paging {
-                                agent.handle_input_with_prompt_paging(ev, &self.registry)
-                            } else {
-                                agent.handle_input(ev, &self.registry)
-                            };
-                            if let Event::Key(key) = ev {
-                                agent.record_input(key, &outcome);
-                            }
-                            self.pending_effects.append(&mut agent.pending_effects);
-                            outcome
-                        }
-                        None => InputOutcome::Unchanged,
-                    }
+                    outcome
                 }
             }
             ActiveView::AgentDashboard => {
@@ -2552,11 +2580,20 @@ impl AppView {
                     }
                     match self.agents.get_mut(&agent_id) {
                         Some(agent) => {
+                            let transcript_before = agent.active_subagent.clone();
+                            let workflows_before = agent.show_workflows;
                             let outcome = agent.handle_input(ev, &self.registry);
+                            let transcript_opened =
+                                transcript_before.is_none() && agent.active_subagent.is_some();
+                            let workflows_opened = !workflows_before && agent.show_workflows;
                             if let Event::Key(key) = ev {
                                 agent.record_input(key, &outcome);
                             }
                             self.pending_effects.append(&mut agent.pending_effects);
+                            if transcript_opened || workflows_opened {
+                                self.scroll_state.cancel_stream();
+                                self.last_scroll_pos = None;
+                            }
                             if matches!(outcome, InputOutcome::Action(Action::ExitSession)) {
                                 if let Some(d) = self.dashboard.as_mut() {
                                     d.close_popup();
@@ -3153,10 +3190,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             PickerOutcome::Unchanged => {
                 if let Event::Key(key) = ev
                     && key.kind == KeyEventKind::Press
+                    && key!('/', CONTROL).matches(key)
+                    && !ctx.sp_state.query().trim().is_empty()
                 {
-                    if key!('/', CONTROL).matches(key) && !ctx.sp_state.query().trim().is_empty() {
-                        return InputOutcome::Action(Action::ForceDeepSearch);
-                    }
+                    return InputOutcome::Action(Action::ForceDeepSearch);
                 }
                 return InputOutcome::Unchanged;
             }
@@ -4554,7 +4591,7 @@ impl AppView {
             let ctx = crate::terminal::terminal_context();
             crate::diagnostics::ssh_wrap_hint(
                 ctx.is_ssh,
-                crate::clipboard::osc52_sink_active(),
+                crate::diagnostics::probes::osc52_sink_active(),
                 ctx.is_official_vscode_remote,
             )
             .is_some()
@@ -4744,6 +4781,14 @@ impl AppView {
                 Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
             ) && spinner_frame_tick;
             needs_redraw |= agent.drain_blocked();
+            agent.prompt.slash_controller.set_workflows_available(
+                agent
+                    .session
+                    .available_commands
+                    .iter()
+                    .any(|c| c.name == "workflow")
+                    || !agent.workflow_runs.is_empty(),
+            );
             if agent.acp_synced_generation != agent.session.available_commands_generation {
                 agent.prompt.sync_acp_commands(
                     &agent.session.available_commands,
@@ -5080,7 +5125,11 @@ impl AppView {
                     !agent.session.state.is_idle()
                         || !agent.permission_queue.is_empty()
                         || agent.session.loading_replay
-                        || agent.subagent_sessions.values().any(|info| !info.finished)
+                        || agent
+                            .subagent_sessions
+                            .values()
+                            .any(|info| !info.finished && info.workflow_run_id.is_none())
+                        || agent.workflow_runs.iter().any(|run| run.is_active())
                 });
                 let dash_search = self.dashboard.as_ref().is_some_and(|d| {
                     d.dispatch.file_search.context().is_some()
@@ -5353,6 +5402,7 @@ pub(crate) mod tests {
                 crate::views::picker::PickerMode::FullScreen,
             ),
             session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
+            session_picker_relaxed_notified_for: None,
             session_picker_content_results: None,
             session_picker_content_loading: false,
             session_picker_deep_search_seq: 0,
@@ -5377,8 +5427,7 @@ pub(crate) mod tests {
             welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),
-            pending_editor_path: None,
-            pending_agents_modal_refresh: None,
+            pending_editor: None,
             pending_pager_path: None,
             pending_pager_ansi: false,
             minimal_state: crate::minimal_api::MinimalState::default(),
@@ -5652,7 +5701,7 @@ pub(crate) mod tests {
     /// Build a registry pinned to the non-VSCode bindings so tests are
     /// deterministic regardless of the host terminal.
     fn pin_non_vscode_registry(app: &mut AppView) {
-        let mut actions = crate::actions::default_actions(false);
+        let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen, false);
         for def in actions.iter_mut() {
             if def.id == ActionId::Quit {
                 def.default_key = key!('q', CONTROL);
@@ -6501,7 +6550,7 @@ pub(crate) mod tests {
         assert_eq!(counts.get("t_seen"), Some(&2));
     }
     #[test]
-    fn apply_auth_meta_hides_usage_for_team_users() {
+    fn apply_auth_meta_disables_billing_surface_for_team_users() {
         let mut app = test_app();
         assert!(app.usage_visible);
         let meta = xai_grok_shell::auth::AuthMeta {
@@ -6512,9 +6561,14 @@ pub(crate) mod tests {
         app.apply_auth_meta(&meta);
         assert!(!app.usage_visible);
         assert_eq!(app.team_id.as_deref(), Some("team-uuid"));
+        assert!(
+            !app.welcome_prompt
+                .slash_controller
+                .billing_surface_visible()
+        );
     }
     #[test]
-    fn apply_auth_meta_shows_usage_for_personal_users() {
+    fn apply_auth_meta_enables_billing_surface_for_personal_users() {
         let mut app = test_app();
         app.usage_visible = false;
         let meta = xai_grok_shell::auth::AuthMeta::default();
@@ -6522,7 +6576,7 @@ pub(crate) mod tests {
         assert!(app.usage_visible);
     }
     #[test]
-    fn apply_auth_meta_clears_api_key_flag_and_shows_usage_on_personal_login() {
+    fn apply_auth_meta_clears_api_key_flag_and_restores_billing_on_personal_login() {
         let mut app = test_app();
         app.is_api_key_auth = true;
         app.usage_visible = false;
@@ -6783,6 +6837,90 @@ pub(crate) mod tests {
         ));
     }
     #[test]
+    fn minimal_ctrl_g_edits_prompt_while_full_tui_keeps_tasks() {
+        let event = key_event(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        let mut minimal = test_app_with_agent();
+        minimal.screen_mode = ScreenMode::Minimal;
+        minimal.registry = ActionRegistry::defaults_for(ScreenMode::Minimal);
+        let id = super::super::agent::AgentId(0);
+        minimal
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_screen_mode(ScreenMode::Minimal);
+        minimal
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .set_input_mode(crate::views::agent::InputMode::Vim);
+        assert_eq!(
+            minimal.agents[&id].active_pane,
+            crate::views::agent::ActivePane::Scrollback,
+            "Vim startup leaves the legacy pane field on Scrollback"
+        );
+        let out = minimal.handle_input(&event);
+        assert!(matches!(
+            out,
+            InputOutcome::Action(Action::EditPromptExternal)
+        ));
+        assert!(!minimal.agents[&id].tasks.overlay.visible);
+        assert!(!minimal.agents[&id].tasks.overlay.focused);
+        minimal.pending_editor = Some(
+            crate::app::external_editor::PendingEditorRequest::PromptDraft {
+                agent_id: id,
+                original_text: "already pending".to_owned(),
+            },
+        );
+        assert!(matches!(
+            minimal.handle_input(&event),
+            InputOutcome::Unchanged
+        ));
+        let mut owned = test_app_with_agent();
+        owned.screen_mode = ScreenMode::Minimal;
+        owned.registry = ActionRegistry::defaults_for(ScreenMode::Minimal);
+        owned
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .suggestions
+            .dropdown
+            .open = true;
+        assert!(matches!(owned.handle_input(&event), InputOutcome::Changed));
+        assert!(owned.pending_editor.is_none());
+        assert!(!owned.agents[&id].tasks.overlay.visible);
+        assert!(!owned.agents[&id].tasks.overlay.focused);
+        let mut full = test_app_with_agent();
+        full.screen_mode = ScreenMode::Fullscreen;
+        let out = full.handle_input(&event);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert!(full.agents[&id].tasks.overlay.visible);
+        assert!(full.agents[&id].tasks.overlay.focused);
+        assert!(full.pending_editor.is_none());
+    }
+    #[test]
+    fn minimal_ctrl_backslash_is_inert_while_full_modes_open_dashboard() {
+        let event = key_event(KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        let mut minimal = test_app_with_agent();
+        minimal.screen_mode = ScreenMode::Minimal;
+        minimal.registry = ActionRegistry::defaults_for(ScreenMode::Minimal);
+        assert!(matches!(
+            minimal.handle_input(&event),
+            InputOutcome::Unchanged
+        ));
+        assert!(minimal.dashboard.is_none());
+        for mode in [ScreenMode::Fullscreen, ScreenMode::Inline] {
+            let mut app = test_app_with_agent();
+            app.screen_mode = mode;
+            app.registry = ActionRegistry::defaults_for(mode);
+            assert!(matches!(
+                app.handle_input(&event),
+                InputOutcome::Action(Action::OpenDashboard)
+            ));
+        }
+    }
+    #[test]
     fn minimal_ctrl_t_toggles_todo_panel() {
         let mut app = test_app_with_agent();
         app.screen_mode = ScreenMode::Minimal;
@@ -6820,12 +6958,12 @@ pub(crate) mod tests {
     #[test]
     fn minimal_ctrl_o_transcript_predicate_tracks_interject_binding() {
         let mut app = test_app_with_agent();
-        app.registry = ActionRegistry::non_vscode_for_test();
+        app.registry = ActionRegistry::non_vscode_for_mode_for_test(ScreenMode::Minimal);
         assert!(
             crate::minimal_api::minimal_ctrl_o_opens_transcript(&app),
             "Ctrl+O opens the transcript when interject doesn't own the chord"
         );
-        app.registry = ActionRegistry::apple_terminal_for_test();
+        app.registry = ActionRegistry::apple_terminal_for_mode_for_test(ScreenMode::Minimal);
         assert!(
             crate::minimal_api::minimal_ctrl_o_opens_transcript(&app),
             "idle + empty composer: Ctrl+O must open the transcript, not no-op"
@@ -6878,7 +7016,7 @@ pub(crate) mod tests {
     fn minimal_ctrl_o_opens_transcript_pager() {
         let mut app = test_app_with_agent();
         app.screen_mode = ScreenMode::Minimal;
-        app.registry = ActionRegistry::non_vscode_for_test();
+        app.registry = ActionRegistry::non_vscode_for_mode_for_test(ScreenMode::Minimal);
         let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
             matches!(out, InputOutcome::Action(Action::OpenTranscriptPager)),
@@ -6895,7 +7033,7 @@ pub(crate) mod tests {
     fn minimal_ctrl_o_on_apple_terminal_transcript_at_idle_interject_with_payload() {
         let mut app = test_app_with_agent();
         app.screen_mode = ScreenMode::Minimal;
-        app.registry = ActionRegistry::apple_terminal_for_test();
+        app.registry = ActionRegistry::apple_terminal_for_mode_for_test(ScreenMode::Minimal);
         let out = app.handle_input(&key_event(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
             matches!(out, InputOutcome::Action(Action::OpenTranscriptPager)),
@@ -6929,15 +7067,56 @@ pub(crate) mod tests {
             "queued row must be consumed by prompt-path send-now"
         );
     }
-    /// In minimal mode the `ToggleQueue` chord (Ctrl+; here) must commit the
-    /// read-only `/queue` snapshot instead of toggling the full-TUI queue
-    /// pane: that pane never renders in minimal, so the old routing focused an
-    /// invisible pane that swallowed every subsequent keystroke.
+    fn assert_background_routing_for_mode(
+        mode: ScreenMode,
+        pane: crate::app::agent_view::AgentPane,
+        event: Event,
+    ) {
+        let mut app = test_app_with_agent();
+        app.screen_mode = mode;
+        app.registry = ActionRegistry::defaults_for(mode);
+        let ActiveView::Agent(id) = app.active_view else {
+            panic!("test app must start on an agent");
+        };
+        app.agents.get_mut(&id).unwrap().set_active_pane(pane, true);
+        let out = app.handle_input(&event);
+        assert!(matches!(out, InputOutcome::Changed));
+        assert_eq!(app.agents[&id].active_pane, pane);
+        assert!(!app.agents[&id].tasks.overlay.visible);
+        assert!(!app.agents[&id].tasks.overlay.focused);
+        crate::app::agent_view::test_fixtures::add_running_execute(
+            app.agents.get_mut(&id).unwrap(),
+        );
+        let out = app.handle_input(&event);
+        assert!(matches!(
+            out,
+            InputOutcome::Action(Action::DemoteToBackground)
+        ));
+        assert_eq!(app.agents[&id].active_pane, pane);
+        assert!(!app.agents[&id].tasks.overlay.visible);
+        assert!(!app.agents[&id].tasks.overlay.focused);
+    }
+    #[test]
+    fn raw_ctrl_b_routes_like_canonical_in_full_and_minimal_modes() {
+        for mode in [ScreenMode::Fullscreen, ScreenMode::Minimal] {
+            for pane in [
+                crate::app::agent_view::AgentPane::Prompt,
+                crate::app::agent_view::AgentPane::Scrollback,
+            ] {
+                assert_background_routing_for_mode(
+                    mode,
+                    pane,
+                    crate::app::agent_view::test_fixtures::raw_ctrl_b_event(),
+                );
+            }
+        }
+    }
+    /// Minimal maps the full-TUI queue chord to `/queue` because the pane is absent.
     #[test]
     fn minimal_toggle_queue_chord_shows_queue_block() {
         let mut app = test_app_with_agent();
         app.screen_mode = ScreenMode::Minimal;
-        app.registry = ActionRegistry::non_vscode_for_test();
+        app.registry = ActionRegistry::non_vscode_for_mode_for_test(ScreenMode::Minimal);
         let out = app.handle_input(&key_event(KeyCode::Char(';'), KeyModifiers::CONTROL));
         assert!(
             matches!(out, InputOutcome::Action(Action::ShowQueue)),
@@ -7374,7 +7553,7 @@ pub(crate) mod tests {
     #[test]
     fn ctrl_d_in_vscode_quits_from_scrollback() {
         let mut app = test_app_with_agent();
-        let mut actions = crate::actions::default_actions(false);
+        let mut actions = crate::actions::default_actions(ScreenMode::Fullscreen, false);
         for def in actions.iter_mut() {
             if def.id == ActionId::Quit {
                 def.default_key = key!('d', CONTROL);
@@ -8246,16 +8425,29 @@ pub(crate) mod tests {
         assert!(app.agents[&id].session.state.is_turn_running());
     }
     #[test]
-    fn tab_from_prompt_still_focuses_scrollback() {
-        let mut app = test_app_with_agent();
+    fn tab_from_prompt_follows_screen_mode_registry() {
         let id = super::super::agent::AgentId(0);
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.active_pane = crate::views::agent::ActivePane::Prompt;
-        let outcome = app.handle_input(&key_event(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(matches!(
-            outcome,
-            InputOutcome::Action(Action::FocusScrollback)
-        ));
+        for mode in [ScreenMode::Fullscreen, ScreenMode::Inline] {
+            let mut app = test_app_with_agent();
+            app.screen_mode = mode;
+            app.registry = ActionRegistry::defaults_for(mode);
+            app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+            let outcome = app.handle_input(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+            assert!(matches!(
+                outcome,
+                InputOutcome::Action(Action::FocusScrollback)
+            ));
+        }
+        let mut minimal = test_app_with_agent();
+        minimal.screen_mode = ScreenMode::Minimal;
+        minimal.registry = ActionRegistry::defaults_for(ScreenMode::Minimal);
+        minimal.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        let outcome = minimal.handle_input(&key_event(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(outcome, InputOutcome::Unchanged));
+        assert_eq!(
+            minimal.agents[&id].active_pane,
+            crate::views::agent::ActivePane::Prompt
+        );
     }
     #[test]
     fn prompt_focused_printable_chars_still_go_to_textarea() {
@@ -9141,6 +9333,60 @@ pub(crate) mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         })
+    }
+    #[test]
+    fn opening_workflow_transcript_cancels_pending_scroll_stream() {
+        use crate::input::mouse::{ScrollConfig, ScrollDirection};
+        let mut app = test_app_with_agent();
+        let ActiveView::Agent(id) = app.active_view else {
+            panic!("test app must start on an agent");
+        };
+        let child_sid = "workflow-child";
+        let child = idle_child_view(&app, 1, child_sid);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.subagent_views.insert(child_sid.to_owned(), child);
+        agent
+            .workflow_runs
+            .push(crate::views::workflows::WorkflowRunSnapshot {
+                run_id: "wf_run".to_owned(),
+                name: "deep-research".to_owned(),
+                objective: "obj".to_owned(),
+                status: "active".to_owned(),
+                management_available: true,
+                builtin: false,
+                phases: vec![("Research".to_owned(), "active".to_owned())],
+                current_phase: Some("Research".to_owned()),
+                agents: vec![crate::views::workflows::WorkflowAgentRowView {
+                    agent_id: child_sid.to_owned(),
+                    label: "researcher".to_owned(),
+                    phase: Some("Research".to_owned()),
+                    model: None,
+                    state: "running".to_owned(),
+                    tokens_used: 0,
+                }],
+                agent_budget: None,
+                agents_used: 0,
+                agents_reserved: 0,
+                agents_remaining: None,
+                agent_usage_incomplete: false,
+                active_agents: 1,
+                elapsed_ms: 0,
+                received_at: std::time::Instant::now(),
+                pause_message: None,
+                result_summary: None,
+            });
+        agent.show_workflows = true;
+        agent.workflows_view.detail_run_id = Some("wf_run".to_owned());
+        let _ = app
+            .scroll_state
+            .on_scroll_event(ScrollDirection::Up, ScrollConfig::default());
+        app.last_scroll_pos = Some((30, 12));
+        assert!(app.scroll_state.has_active_stream());
+        let out = app.handle_input(&key_event(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(out, InputOutcome::Changed));
+        assert_eq!(app.agents[&id].active_subagent.as_deref(), Some(child_sid));
+        assert!(!app.scroll_state.has_active_stream());
+        assert_eq!(app.last_scroll_pos, None);
     }
     #[test]
     fn scroll_event_stashes_origin_for_residual_flush() {

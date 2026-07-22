@@ -241,31 +241,42 @@ fn internal_reload_request_line(id: &str, method: &str, params: serde_json::Valu
 /// Start a skills file watcher and wire it to inject `x.ai/internal/reload_skills`
 /// messages into the shared ACP incoming stream when SKILL.md files change on disk.
 ///
-/// Returns the watcher guard (must be kept alive for the lifetime of the session)
 /// or `None` if no directories could be watched.
 fn spawn_skills_file_watcher<W>(
     acp_incoming_tx: &Arc<TokioMutex<W>>,
     skills_paths: &[String],
-) -> Option<crate::config::watcher::SkillsFileWatcher>
+) -> Option<tokio::task::JoinHandle<()>>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let cwd = std::env::current_dir().unwrap_or_default();
     let workspace_user_dir = xai_grok_agent::prompt::workspace_user::optional_workspace_user_dir();
-    let (watcher, mut skills_rx) = crate::config::watcher::SkillsFileWatcher::start(
+    let (mut watcher, mut skills_rx) = crate::config::watcher::SkillsFileWatcher::start(
         Some(cwd.as_path()),
         workspace_user_dir.as_deref(),
         skills_paths,
     )?;
     let skills_tx = acp_incoming_tx.clone();
-    tokio::spawn(async move {
-        while skills_rx.recv().await.is_some() {
-            info!("Skill directory changed on disk, reloading skills for all sessions");
-            let line = internal_reload_request_line(
-                "skills-reload",
-                "x.ai/internal/reload_skills",
-                serde_json::json!({}),
-            );
+    let task = tokio::spawn(async move {
+        while let Some(change) = skills_rx.recv().await {
+            let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+            let (id, method) = match change {
+                crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
+                    info!("Skill directory changed on disk, reloading skills for all sessions");
+                    ("skills-reload", "x.ai/internal/reload_skills")
+                }
+                crate::config::watcher::DiscoveryChange::Skills => {
+                    info!("Discovery directory created on disk, reloading skills and workflows");
+                    ("skills-reload", "x.ai/internal/reload_skills")
+                }
+                crate::config::watcher::DiscoveryChange::Workflows => {
+                    info!(
+                        "Workflow directory changed on disk, re-advertising commands for all sessions"
+                    );
+                    ("workflows-reload", "x.ai/internal/reload_workflows")
+                }
+            };
+            let line = internal_reload_request_line(id, method, serde_json::json!({}));
             let mut tx = skills_tx.lock().await;
             if let Err(e) = tx.write_all(line.as_bytes()).await {
                 warn!(
@@ -275,7 +286,7 @@ where
             }
         }
     });
-    Some(watcher)
+    Some(task)
 }
 
 /// Register the process-lifetime runtime so shared filesystem watchers

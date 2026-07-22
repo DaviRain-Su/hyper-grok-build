@@ -3,7 +3,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 use super::interval::{interval_to_human, parse_interval};
-use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle};
+use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle, scheduler_tool_error};
 
 // Canonical /loop wording lives in the light API crate so other consumers can
 // link it without the tools implementation crate; re-exported to keep paths stable.
@@ -200,7 +200,7 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
                         "Scheduler actor dropped reply",
                     )
                 })?
-                .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))
+                .map_err(scheduler_tool_error)
         };
 
         if let Some(task_id) = input.task_id {
@@ -294,9 +294,14 @@ mod tests {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let actor = SchedulerActor {
             resources: shared.clone(),
+            resources_persistence: std::sync::Arc::new(
+                crate::persistence::ResourcesPersistence::noop(),
+            ),
             notification_handle: notif_handle,
             cmd_rx,
             cancel_token: cancel_token.clone(),
+            clock: Default::default(),
+            pending_removal: None,
         };
         tokio::spawn(actor.run());
         (shared, cancel_token)

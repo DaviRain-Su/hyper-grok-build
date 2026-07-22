@@ -218,10 +218,10 @@ fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
         &mut app,
     );
     assert!(matches!(
-            &app.agents[&id].plugin_cta.phase,
-            CtaPhase::Matched { name, .. }
-    if name == "zzctaplugin"
-        ));
+        &app.agents[&id].plugin_cta.phase,
+        CtaPhase::Matched { name, .. }
+if name == "zzctaplugin"
+    ));
 }
 
 #[test]

@@ -16,7 +16,7 @@ use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
 use crate::upload::trace::{
     GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
+    local_sandbox_telemetry, upload_metadata, upload_session_state,
     upload_subagent_metadata, upload_turn_result,
 };
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
@@ -38,6 +38,7 @@ impl SubagentCoordinator {
             running_gauge: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             block_wait_slots: HashMap::new(),
             subagent_usage_not_applied_prompts: std::collections::HashSet::new(),
+            loop_owned: HashMap::new(),
         }
     }
     pub fn mark_subagent_usage_not_applied(&mut self, prompt_id: &str) {
@@ -76,14 +77,6 @@ impl SubagentCoordinator {
                 std::sync::atomic::Ordering::Relaxed,
             );
     }
-    /// Returns a handle to the completion [`Notify`].
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used from tests only; remove expect when wired in production"
-        )
-    )]
     pub fn completion_notify(&self) -> Arc<Notify> {
         Arc::clone(&self.completion_notify)
     }
@@ -236,6 +229,7 @@ impl SubagentCoordinator {
             description: pending.description,
             parent_prompt_id: pending.parent_prompt_id,
             parent_session_id: pending.parent_session_id,
+            owner: pending.owner,
             persona: pending.persona,
             started_at: pending.started_at,
             error,
@@ -261,6 +255,7 @@ impl SubagentCoordinator {
         description: String,
         parent_prompt_id: Option<String>,
         parent_session_id: String,
+        owner: SubagentOwner,
         error: &str,
         surface_completion: bool,
     ) {
@@ -270,6 +265,7 @@ impl SubagentCoordinator {
             description,
             parent_prompt_id,
             parent_session_id,
+            owner,
             persona: None,
             started_at: std::time::Instant::now(),
             error,
@@ -281,6 +277,7 @@ impl SubagentCoordinator {
     /// Clears any stale pending entry for the same id.
     fn record_failure_completion(&mut self, c: FailureCompletion<'_>) {
         self.pending.remove(&c.subagent_id);
+        self.loop_owned.remove(&c.subagent_id);
         self.sync_running_gauge();
         let FailureCompletion {
             subagent_id,
@@ -288,6 +285,7 @@ impl SubagentCoordinator {
             description,
             parent_prompt_id,
             parent_session_id,
+            owner,
             persona,
             started_at,
             error,
@@ -309,6 +307,7 @@ impl SubagentCoordinator {
                     subagent_id: subagent_id.clone(),
                     parent_session_id,
                     parent_prompt_id,
+                    owner,
                     child_session_id: String::new(),
                     description: description.clone(),
                     subagent_type: subagent_type.clone(),
@@ -359,6 +358,7 @@ impl SubagentCoordinator {
         persisted_output_dir: Option<PathBuf>,
     ) -> Option<SubagentTracker> {
         let tracker = self.active.remove(id);
+        self.loop_owned.remove(id);
         self.sync_running_gauge();
         let started_at = tracker
             .as_ref()
@@ -373,6 +373,7 @@ impl SubagentCoordinator {
             .map(|t| t.child_session_id.0.to_string())
             .unwrap_or_default();
         let parent_prompt_id = tracker.as_ref().and_then(|t| t.parent_prompt_id.clone());
+        let owner = tracker.as_ref().map(|t| t.owner.clone()).unwrap_or_default();
         let persona = tracker.as_ref().and_then(|t| t.persona.clone());
         let child_cwd = tracker
             .as_ref()
@@ -394,6 +395,7 @@ impl SubagentCoordinator {
             subagent_id: id.to_string(),
             parent_session_id,
             parent_prompt_id,
+            owner,
             child_session_id,
             description,
             subagent_type,
@@ -480,6 +482,31 @@ impl SubagentCoordinator {
                 pending.cancel_token.cancel();
             }
         }
+    }
+    pub fn cancel_workflow_children(&mut self, run_id: &str) -> usize {
+        for tracker in self.active.values() {
+            if tracker.owner.workflow_run_id() == Some(run_id) {
+                Self::cancel_tracker(tracker);
+            }
+        }
+        for pending in self.pending.values() {
+            if pending.owner.workflow_run_id() == Some(run_id) {
+                pending.cancel_token.cancel();
+            }
+        }
+        self.outstanding_for_workflow(run_id)
+    }
+    pub fn outstanding_for_workflow(&self, run_id: &str) -> usize {
+        self
+            .pending
+            .values()
+            .filter(|entry| entry.owner.workflow_run_id() == Some(run_id))
+            .count()
+            + self
+                .active
+                .values()
+                .filter(|entry| entry.owner.workflow_run_id() == Some(run_id))
+                .count()
     }
     /// Attempt to cancel a subagent. Returns a typed outcome covering all cases:
     /// - Active → cancel it, return Cancelled

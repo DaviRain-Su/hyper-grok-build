@@ -1,4 +1,7 @@
 use crate::agent::auth_method::ModelByok;
+use crate::agent::model_providers::{
+    ModelProviderConfig, auth_config_issues, model_provider_auth_name, parse_model_providers,
+};
 use crate::auth::{AuthManager, GrokComConfig, OidcAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::{config::StorageMode, sampling::ApiBackend, tools::config::ShellToolsetConfig};
@@ -957,7 +960,30 @@ impl PluginsConfig {
 /// Feedback submission configuration (`[feedback]` in config.toml).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct FeedbackConfig {}
+pub struct FeedbackConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<FeedbackUserConfig>,
+}
+/// Self-reported feedback author identity (never used for authorization).
+/// Merged only from trusted config tiers, so a cloned repo can't inject the
+/// `command` escape hatch.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeedbackUserConfig {
+    /// Sources tried in order for the name. `os_user` yields the OS user name;
+    /// any other entry is a literal (`$VAR` expanded at load).
+    pub name: Vec<String>,
+    /// Sources tried in order for the email. `git_email` yields the global git
+    /// email; any other entry is a literal (`$VAR` expanded at load) needing `@`.
+    pub email: Vec<String>,
+    /// Fallback domain for `<name>@<domain>` when no `email` source resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_domain: Option<String>,
+    /// Optional `sh -c` script printing `{"name","email"}` JSON; its fields win
+    /// over the lists above, with per-field fallback. Trusted config tiers only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CompactionConfig {
@@ -1131,6 +1157,13 @@ pub struct WorktreePoolConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<usize>,
 }
+/// `[worktree]` section from config.toml (auto-GC policy lives under `auto_gc`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorktreeConfigSection {
+    #[serde(default)]
+    pub auto_gc: crate::util::config::WorktreeAutoGcSettings,
+}
 /// `[sandbox]` section from config.toml.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1298,19 +1331,22 @@ pub struct Config {
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
+    #[serde(default)]
+    pub workflows: WorkflowsConfig,
     /// `[doom_loop_recovery]` section: the shared settings struct — ONE type
     /// serves this TOML table and the remote remote settings `doom_loop_recovery`
     /// object. See [`crate::util::config::DoomLoopRecoverySettings`].
     #[serde(default)]
     pub doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings,
+    /// `[worktree]` section (currently `[worktree.auto_gc]` only).
+    #[serde(default)]
+    pub worktree: WorktreeConfigSection,
     /// `[auto_mode]` section: Auto permission-mode configuration. See [`AutoModeConfig`].
     #[serde(default)]
     pub auto_mode: AutoModeConfig,
     /// `[model.*]` overrides from config.toml. Resolve via `resolve_model_list()`.
     #[serde(skip)]
     pub config_models: IndexMap<String, ConfigModelOverride>,
-    /// Warnings from `[model.*]` and `[auth_provider.*]` parsing; surfaced by
-    /// `grok inspect`.
     #[serde(skip)]
     pub config_warnings: Vec<super::config_model_override_parse::ConfigWarning>,
     pub grok_com_config: GrokComConfig,
@@ -1318,6 +1354,8 @@ pub struct Config {
     /// [`parse_auth_providers`] from trusted config layers only.
     #[serde(skip)]
     pub auth_providers: IndexMap<String, crate::auth::AuthProviderConfig>,
+    #[serde(skip)]
+    pub model_providers: IndexMap<String, ModelProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<toml::Value>,
     /// Written by the client via `config_toml_edit`; absorbed so it isn't
@@ -1743,12 +1781,15 @@ impl Default for Config {
         let mut cfg = Self {
             features: Features::default(),
             goal: GoalConfig::default(),
+            workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
+            worktree: WorktreeConfigSection::default(),
             auto_mode: AutoModeConfig::default(),
             config_models: IndexMap::new(),
             config_warnings: Vec::new(),
             grok_com_config: GrokComConfig::default(),
             auth_providers: IndexMap::new(),
+            model_providers: IndexMap::new(),
             shortcuts: None,
             hints: None,
             ui: UiConfig::default(),
@@ -1873,41 +1914,12 @@ fn parse_auth_providers(
                         "unrecognized key; field ignored".to_owned(),
                     ));
                 }
-                if !provider.is_usable() {
+                for (field, kind, reason) in auth_config_issues(&provider) {
                     warnings.push(ConfigWarning::auth_provider(
                         name,
-                        Some("command"),
-                        ConfigWarningKind::InvalidValue,
-                        "missing or empty command; referencing models resolve \
-                         with no credential"
-                            .to_owned(),
-                    ));
-                }
-                let skew = crate::auth::PROVIDER_TOKEN_EXPIRY_SKEW_SECS;
-                if provider.token_ttl_secs.is_some_and(|ttl| ttl <= skew) {
-                    warnings.push(ConfigWarning::auth_provider(
-                        name,
-                        Some("token_ttl_secs"),
-                        ConfigWarningKind::InvalidValue,
-                        format!(
-                            "at or below the {skew}s refresh margin; the command will \
-                             run before every turn"
-                        ),
-                    ));
-                }
-                if let Some(timeout) = provider.timeout_secs
-                    && !(1..=crate::auth::PROVIDER_TIMEOUT_CEILING_SECS).contains(&timeout)
-                {
-                    let ceiling = crate::auth::PROVIDER_TIMEOUT_CEILING_SECS;
-                    warnings.push(ConfigWarning::auth_provider(
-                        name,
-                        Some("timeout_secs"),
-                        ConfigWarningKind::InvalidValue,
-                        if timeout == 0 {
-                            "below the 1 second minimum; clamped to 1".to_owned()
-                        } else {
-                            format!("above the {ceiling}s maximum; clamped to {ceiling}")
-                        },
+                        Some(field),
+                        kind,
+                        reason,
                     ));
                 }
                 providers.insert(name.clone(), provider);
@@ -1984,7 +1996,29 @@ impl Config {
             models: config_models,
             warnings: config_warnings,
         } = super::config_model_override_parse::parse_model_overrides(raw_config);
-        let (auth_providers, auth_provider_warnings) = parse_auth_providers(raw_config);
+        let (mut auth_providers, auth_provider_warnings) = parse_auth_providers(raw_config);
+        let (model_providers, mut model_provider_warnings) = parse_model_providers(raw_config);
+        for (id, provider) in &model_providers {
+            if let Some(auth) = &provider.auth {
+                let synthetic = model_provider_auth_name(id);
+                if auth_providers.contains_key(&synthetic) {
+                    model_provider_warnings
+                        .push(
+                            super::config_model_override_parse::ConfigWarning::model_provider(
+                                id,
+                                Some("auth"),
+                                super::config_model_override_parse::ConfigWarningKind::ConflictingFields,
+                                format!(
+                                    "inline auth overwrites a hand-written \
+                                 [auth_provider.\"{synthetic}\"]; the `model_provider:` prefix is \
+                                 a reserved namespace"
+                                ),
+                            ),
+                        );
+                }
+                auth_providers.insert(synthetic, auth.clone());
+            }
+        }
         let mut base = toml::Value::try_from(Self::default()).map_err(|e| e.to_string())?;
         if let toml::Value::Table(ref mut t) = base {
             t.remove("model");
@@ -1993,6 +2027,7 @@ impl Config {
         if let toml::Value::Table(ref mut t) = raw_without_model_sections {
             t.remove("model");
             t.remove("auth_provider");
+            t.remove("model_providers");
         }
         crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
         let (mut config, user_unused) =
@@ -2006,9 +2041,16 @@ impl Config {
         config.config_models = config_models;
         config.config_warnings = config_warnings;
         config.auth_providers = auth_providers;
+        config.model_providers = model_providers;
         config.config_warnings.extend(auth_provider_warnings);
+        config.config_warnings.extend(model_provider_warnings);
         let declared_provider_names: std::collections::HashSet<&str> = raw_config
             .get("auth_provider")
+            .and_then(toml::Value::as_table)
+            .map(|t| t.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let declared_model_provider_names: std::collections::HashSet<&str> = raw_config
+            .get("model_providers")
             .and_then(toml::Value::as_table)
             .map(|t| t.keys().map(String::as_str).collect())
             .unwrap_or_default();
@@ -2025,6 +2067,41 @@ impl Config {
                         format!(
                             "references [auth_provider.{name}], which is not defined; \
                              the model resolves with no provider credential"
+                        ),
+                    ),
+                );
+            }
+            if let Some(ref id) = model.model_provider
+                && !config.model_providers.contains_key(id)
+                && !declared_model_provider_names.contains(id.as_str())
+            {
+                config.config_warnings.push(
+                    super::config_model_override_parse::ConfigWarning::model(
+                        model_key,
+                        Some("model_provider"),
+                        super::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                        format!(
+                            "references [model_providers.{id}], which is not defined; \
+                             provider defaults are not applied — the model uses its own \
+                             credential if set, otherwise fails closed on a custom endpoint"
+                        ),
+                    ),
+                );
+            }
+        }
+        for (id, provider) in &config.model_providers {
+            if let Some(ref name) = provider.auth_provider
+                && !config.auth_providers.contains_key(name)
+                && !declared_provider_names.contains(name.as_str())
+            {
+                config.config_warnings.push(
+                    super::config_model_override_parse::ConfigWarning::model_provider(
+                        id,
+                        Some("auth_provider"),
+                        super::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                        format!(
+                            "references [auth_provider.{name}], which is not defined; \
+                             inheriting models fail closed with no provider credential"
                         ),
                     ),
                 );
@@ -2361,6 +2438,18 @@ impl Config {
                 .map_or(Policy::DEFAULT_MAX_RETRIES, Policy::clamp_max_retries),
         })
     }
+    /// Automatic worktree GC policy. Precedence: env kill/dry-run >
+    /// `[worktree.auto_gc]` TOML > remote `worktree_auto_gc` > defaults.
+    /// Platform age-expiry (non-Linux dead-only) is enforced inside
+    /// `xai_fast_worktree::maybe_auto_gc`, not here.
+    pub fn resolve_worktree_auto_gc(&self) -> xai_fast_worktree::ResolvedWorktreeAutoGc {
+        crate::util::config::resolve_worktree_auto_gc_from_settings(
+            Some(&self.worktree.auto_gc),
+            self.remote_settings
+                .as_ref()
+                .and_then(|s| s.worktree_auto_gc.as_ref()),
+        )
+    }
     /// Gate first-run auto-registration of the official xAI marketplace source.
     /// Precedence: env `GROK_OFFICIAL_MARKETPLACE_AUTO_REGISTER` > remote settings >
     /// default off (so only remote settings-targeted teams get it pre-public). No
@@ -2490,14 +2579,29 @@ impl Config {
     /// reach cli-chat-proxy `/v1/settings` (custom `models_base_url`, external
     /// `auth_provider_command`, air-gapped proxies) never receive the
     /// remote settings `goal_enabled` flag, so the default must not carve them out.
-    /// Env, `[goal] enabled`, and the remote flag (`Some(false)` kill-switch)
-    /// all still override.
     pub(crate) fn resolve_goal(&self) -> Resolved<bool> {
         let ff = self.remote_settings.as_ref().and_then(|s| s.goal_enabled);
+        if ff == Some(false) {
+            return Resolved::new(false, ConfigSource::Remote);
+        }
         BoolFlag::env("GROK_GOAL")
             .config(self.goal.enabled)
             .feature_flag(ff)
             .default(true)
+            .resolve()
+    }
+    pub(crate) fn resolve_workflows(&self) -> Resolved<bool> {
+        let ff = self
+            .remote_settings
+            .as_ref()
+            .and_then(|s| s.workflows_enabled);
+        if ff == Some(false) {
+            return Resolved::new(false, ConfigSource::Remote);
+        }
+        BoolFlag::env("GROK_WORKFLOWS")
+            .config(self.workflows.enabled)
+            .feature_flag(ff)
+            .default(false)
             .resolve()
     }
     /// Classifier, planner, and summary all default to goal mode itself: when
@@ -3364,22 +3468,46 @@ pub fn resolve_model_list(
                 );
             }
         }
-        let entry = model_override.apply(key, base, &cfg.endpoints);
+        let with_provider = model_override.model_provider.as_deref().map(|pid| {
+            match cfg.model_providers.get(pid) {
+                Some(provider) => model_override.with_provider_defaults(provider, pid),
+                None => model_override.with_missing_provider(),
+            }
+        });
+        let effective = with_provider.as_ref().unwrap_or(model_override);
+        let mut entry = effective.apply(key, base, &cfg.endpoints);
+        let session_bearer_unsafe = !crate::util::is_xai_api_bearer_url(&entry.info.base_url)
+            || entry
+                .api_base_url
+                .as_deref()
+                .is_some_and(|url| !crate::util::is_xai_api_bearer_url(url));
+        if let Some(pid) = model_override.model_provider.as_deref()
+            && entry.auth_provider.is_none()
+            && session_bearer_unsafe
+        {
+            entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(format!(
+                "model_provider:{pid} (fail-closed)"
+            )));
+        }
         tracing::debug!(
             model_key = % key, base_url = % entry.info.base_url, has_api_key = entry
             .api_key.is_some(), env_key = ? entry.env_key, auth_provider = entry
-            .auth_provider.as_ref().map(| p | p.name.as_str()), had_base,
+            .auth_provider.as_ref().map(| p | p.name.as_str()), model_provider =
+            model_override.model_provider.as_deref(), had_base,
             "config model override applied"
         );
         resolved.insert(key.clone(), entry);
     }
     for (key, entry) in resolved.iter_mut() {
         if let Some(ref mut provider) = entry.auth_provider {
+            if provider.is_fail_closed() {
+                continue;
+            }
             let config = cfg.auth_providers.get(&provider.name);
             if config.is_none() {
                 tracing::debug!(
                     model_key = % key, provider = % provider.name,
-                    "model references an undefined [auth_provider.*] table"
+                    "provider ref has no trusted config; failing closed with an empty command"
                 );
             }
             provider.attach_trusted_config(config);
@@ -4211,6 +4339,7 @@ pub struct ConfigModelOverride {
     /// this model's bearer token. Static `api_key` / `env_key` win when both
     /// are set.
     pub auth_provider: Option<String>,
+    pub model_provider: Option<String>,
     pub api_base_url: Option<String>,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -4774,6 +4903,12 @@ pub struct GoalConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub skeptic_models: Vec<crate::util::config::GoalRoleModel>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 /// `[auto_mode]` section: server-side configuration for Auto permission mode.
 /// ONE struct serves both the local `[auto_mode]` TOML table and the remote
@@ -6567,8 +6702,7 @@ if n == name && f.as_deref() == field
             cfg.config_warnings.iter().any(|w| {
                 w.kind == ConfigWarningKind::InvalidValue
                     && matches!(& w.target, WarningTarget::Model
-            { field, .. }
-if field.as_deref() == Some("auth_provider"))
+            { field, .. } if field.as_deref() == Some("auth_provider"))
             }),
             "undefined reference warns at parse time: {:?}",
             cfg.config_warnings
@@ -6827,6 +6961,32 @@ if field.as_deref() == Some("auth_provider"))
         let resolved = resolve_model_list(&cfg, Some(prefetched));
         let provider = resolved["cached-model"].auth_provider.as_ref().unwrap();
         assert_eq!(provider.config.command, "printf local");
+    }
+    #[test]
+    fn provider_model_fails_closed_on_prefetched_custom_base_url() {
+        let mut cfg = Config::default();
+        cfg.model_providers.insert(
+            "gw".to_string(),
+            crate::agent::model_providers::ModelProviderConfig::default(),
+        );
+        cfg.config_models.insert(
+            "m".to_string(),
+            ConfigModelOverride {
+                model_provider: Some("gw".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut prefetched = IndexMap::new();
+        prefetched.insert(
+            "m".to_string(),
+            test_model_entry("m", "https://evil.example/v1", None, None, None),
+        );
+        let resolved = resolve_model_list(&cfg, Some(prefetched));
+        assert_eq!(
+            resolve_credentials(&resolved["m"], Some("session-jwt")).api_key,
+            None,
+            "a prefetched custom base_url must fail closed, not leak the session token",
+        );
     }
     fn test_model_entry(
         model: &str,
@@ -9719,6 +9879,47 @@ if field.as_deref() == Some("auth_provider"))
         assert_eq!(p.max_threshold, 12);
         assert_eq!(p.max_retries, 1);
     }
+    /// `[worktree.auto_gc]` deserializes through Config and resolve honors it.
+    #[test]
+    #[serial]
+    fn worktree_auto_gc_section_parses_from_toml() {
+        unsafe {
+            std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC);
+            std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC_DRY_RUN);
+            std::env::remove_var(xai_fast_worktree::ENV_AUTO_GC_MAX_AGE);
+        }
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [worktree.auto_gc]
+            enabled = true
+            max_age_secs = 7200
+            min_interval_secs = 120
+            dry_run = true
+            [worktree.auto_gc.max_age_by_kind]
+            subagent = 3600
+            manual = "never"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        assert_eq!(cfg.worktree.auto_gc.enabled, Some(true));
+        assert_eq!(cfg.worktree.auto_gc.max_age_secs, Some(7200));
+        let p = cfg.resolve_worktree_auto_gc();
+        assert!(p.enabled);
+        assert_eq!(p.max_age_secs, 7200);
+        assert_eq!(p.min_interval_secs, 120);
+        assert!(p.dry_run);
+        assert_eq!(
+            p.max_age_by_kind
+                .get(&xai_fast_worktree::WorktreeKind::Subagent),
+            Some(&Some(3600))
+        );
+        assert_eq!(
+            p.max_age_by_kind
+                .get(&xai_fast_worktree::WorktreeKind::Manual),
+            Some(&None)
+        );
+    }
     /// Out-of-range tunables clamp instead of being honored or dropped.
     #[test]
     #[serial]
@@ -9876,14 +10077,10 @@ if field.as_deref() == Some("auth_provider"))
     }
     #[test]
     #[serial]
-    fn resolve_goal_env_overrides_config() {
+    fn resolve_goal_env_overrides_config_without_remote_kill_switch() {
         unsafe { std::env::set_var("GROK_GOAL", "1") };
         let mut cfg = Config::default();
         cfg.goal.enabled = Some(false);
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            goal_enabled: Some(false),
-            ..Default::default()
-        });
         let r = cfg.resolve_goal();
         assert_eq!(r.source, ConfigSource::Env);
         assert!(r.value);
@@ -9891,8 +10088,8 @@ if field.as_deref() == Some("auth_provider"))
     }
     #[test]
     #[serial]
-    fn resolve_goal_config_overrides_remote_settings() {
-        unsafe { std::env::remove_var("GROK_GOAL") };
+    fn resolve_goal_remote_false_kills_local_opt_in() {
+        unsafe { std::env::set_var("GROK_GOAL", "1") };
         let mut cfg = Config::default();
         cfg.goal.enabled = Some(true);
         cfg.remote_settings = Some(crate::util::config::RemoteSettings {
@@ -9900,8 +10097,9 @@ if field.as_deref() == Some("auth_provider"))
             ..Default::default()
         });
         let r = cfg.resolve_goal();
-        assert_eq!(r.source, ConfigSource::Config);
-        assert!(r.value);
+        assert_eq!(r.source, ConfigSource::Remote);
+        assert!(!r.value);
+        unsafe { std::env::remove_var("GROK_GOAL") };
     }
     #[test]
     #[serial]
@@ -9934,6 +10132,54 @@ if field.as_deref() == Some("auth_provider"))
         let r = cfg.resolve_goal();
         assert_eq!(r.source, ConfigSource::Remote);
         assert!(!r.value);
+    }
+    #[test]
+    #[serial]
+    fn background_workflows_default_off_without_affecting_goal() {
+        unsafe { std::env::remove_var("GROK_WORKFLOWS") };
+        let cfg = Config::default();
+        assert!(!cfg.resolve_workflows().value);
+        assert!(cfg.resolve_goal().value);
+    }
+    #[test]
+    #[serial]
+    fn resolve_workflows_remote_settings_opt_in() {
+        unsafe { std::env::remove_var("GROK_WORKFLOWS") };
+        let cfg = Config {
+            remote_settings: Some(crate::util::config::RemoteSettings {
+                workflows_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = cfg.resolve_workflows();
+        assert_eq!(r.source, ConfigSource::Remote);
+        assert!(r.value);
+    }
+    #[test]
+    #[serial]
+    fn resolve_workflows_remote_false_kills_local_opt_in() {
+        unsafe { std::env::set_var("GROK_WORKFLOWS", "1") };
+        let mut cfg = Config::default();
+        cfg.workflows.enabled = Some(true);
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+            workflows_enabled: Some(false),
+            ..Default::default()
+        });
+        let r = cfg.resolve_workflows();
+        assert_eq!(r.source, ConfigSource::Remote);
+        assert!(!r.value);
+        unsafe { std::env::remove_var("GROK_WORKFLOWS") };
+    }
+    #[test]
+    #[serial]
+    fn resolve_workflows_env_wins() {
+        unsafe { std::env::set_var("GROK_WORKFLOWS", "1") };
+        let cfg = Config::default();
+        let r = cfg.resolve_workflows();
+        assert_eq!(r.source, ConfigSource::Env);
+        assert!(r.value);
+        unsafe { std::env::remove_var("GROK_WORKFLOWS") };
     }
     #[test]
     #[serial]
@@ -10891,6 +11137,11 @@ agent_type = "cursor"
             enabled = true
             [harness]
             block_for_upload = true
+            [feedback.user]
+            name = ["os_user"]
+            email = ["git_email", "team@example.com"]
+            email_domain = "example.com"
+            command = "/opt/bin/grok-identity"
             [repo_changes_dedup]
             enabled = false
             [relay]

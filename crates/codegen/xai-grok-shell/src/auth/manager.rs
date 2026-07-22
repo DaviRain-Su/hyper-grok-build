@@ -61,10 +61,9 @@ pub(crate) enum RefreshReason {
 /// `recovery.rs`.
 pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
-/// Longer timeout for `refresh_chain` — the critical path that must
-/// hold the file lock across the IdP call to prevent refresh-token
-/// reuse.  Must exceed `EXTERNAL_REFRESH_TIMEOUT` (30 s) so followers
-/// wait for the leader to finish rather than timing out and retrying.
+/// Lock timeout for `refresh_chain`, held across the IdP call to prevent
+/// refresh-token reuse. Must exceed the external-auth refresh timeout
+/// (`EXTERNAL_AUTH_REFRESH_TIMEOUT`, 5 s) so followers wait rather than retry.
 const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(45);
 
 /// Long poll interval used by the proactive refresh task when no
@@ -957,9 +956,9 @@ impl AuthManager {
 
     /// Run the external auth command and parse its output. Pure: no
     /// state mutation, no logging (refresher logs once on its arm).
-    pub(crate) fn run_external_refresh_command(&self, command: &str) -> Option<GrokAuth> {
+    pub(crate) async fn run_external_refresh_command(&self, command: &str) -> Option<GrokAuth> {
         let prev = self.inner_auth_or_external_default();
-        crate::auth::refresh_with_command(command, &prev)
+        crate::auth::refresh_with_command(command, &prev).await
     }
 
     /// Hot-swap credentials (called by config watcher). Does NOT write to disk.

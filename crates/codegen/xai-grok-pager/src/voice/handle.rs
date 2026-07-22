@@ -78,11 +78,22 @@ pub fn handle_voice_event(app: &mut AppView, event: VoiceEvent) -> bool {
             }
             true
         }
-        VoiceEvent::Error { message } => {
-            // Tear down the session; `voice_reset` releases the mic when recording
-            // (the pipeline reader usually has already on error).
+        VoiceEvent::Error { message, hint } => {
+            let target = app.voice_recording_target();
             app.voice_reset();
             app.show_toast(&format!("Voice: {message}"));
+            // Long fix steps: agent/peek scrollback only (toast is one line;
+            // dashboard dispatch has no scrollback).
+            if let Some(hint) = hint
+                && let Some(VoiceTarget::Agent(id) | VoiceTarget::DashboardPeekReply(id)) = target
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                        "Voice: {message}. {hint}"
+                    )));
+            }
             true
         }
     }

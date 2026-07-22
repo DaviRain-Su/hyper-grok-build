@@ -22,8 +22,19 @@ use xai_grok_pager_pty_harness::scroll_matrix::{
 /// across awaits; no poisoning, so one failed cell doesn't cascade).
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Per-cell captures land here. Prefer Bazel's `TEST_TMPDIR` (unique and
+/// isolated per test action) over the shared system temp dir: this target is
+/// `tags = ["local"]`, so concurrent executions on a CI host would otherwise
+/// share a stable `/tmp/scroll-matrix-curated/<cell_id>.jsonl` path — a
+/// second run's stale-capture `remove_file` (and its pager's `GROK_SCROLL_LOG`
+/// writer) then corrupts the first run's in-flight capture, surfacing as a
+/// `parse capture: No such file or directory` or a mid-record parse error.
+/// Falls back to the system temp dir for plain `cargo test`.
 fn artifacts_dir() -> PathBuf {
-    std::env::temp_dir().join("scroll-matrix-curated")
+    std::env::var_os("TEST_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("scroll-matrix-curated")
 }
 
 /// Run one curated cell by id and return its report (panics on unknown ids

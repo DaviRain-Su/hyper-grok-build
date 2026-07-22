@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::*;
 /// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
 /// (the field is now a shared live handle, not an owned id).
@@ -168,6 +169,7 @@ pub(crate) async fn create_test_actor_ex(
     let state = TokioMutex::new(State {
         running_task: None,
         pending_inputs: VecDeque::new(),
+        combine_edit_holds: std::collections::HashSet::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
@@ -195,7 +197,6 @@ pub(crate) async fn create_test_actor_ex(
         tokio_util::sync::CancellationToken::new(),
     );
     chat_state_handle.record_token_usage(total_tokens);
-    let (goal_update_tx, goal_update_rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = SessionActor {
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
@@ -217,6 +218,7 @@ pub(crate) async fn create_test_actor_ex(
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp_strategy: McpInitStrategy::Blocking,
         chat_state_handle,
+        unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
@@ -299,6 +301,7 @@ pub(crate) async fn create_test_actor_ex(
             )),
         )),
         goal_enabled: false,
+        background_workflows_enabled: false,
         goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
         goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
         goal_tracker: Arc::new(parking_lot::Mutex::new(
@@ -309,8 +312,10 @@ pub(crate) async fn create_test_actor_ex(
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
-        goal_update_rx: std::cell::RefCell::new(Some(goal_update_rx)),
-        goal_update_tx,
+        goal_update_rx: std::cell::RefCell::new(None),
+        goal_update_tx: tokio::sync::mpsc::unbounded_channel().0,
+        workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
+        workflow_launch_tx: tokio::sync::mpsc::unbounded_channel().0,
         goal_classifier_enabled: false,
         goal_planner_enabled: false,
         goal_summary_enabled: false,
@@ -321,7 +326,7 @@ pub(crate) async fn create_test_actor_ex(
         goal_strategist_every: 5,
         goal_reverify_after: crate::session::acp_session::GOAL_REVERIFY_AFTER_DEFAULT,
         goal_plan_reconciled: std::sync::atomic::AtomicBool::new(false),
-        pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
+        pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
         managed_mcp_expires_at: std::sync::Mutex::new(None),
@@ -431,6 +436,7 @@ pub(crate) fn user_item_with_rx(
             last_editor: None,
             kind: "prompt".to_string(),
             text,
+            combined_texts: None,
         }),
         send_now: false,
     };
@@ -515,14 +521,6 @@ pub(crate) fn set_goal_harness_for_tests(actor: &SessionActor) {
     actor
         .goal_harness_enabled
         .store(true, std::sync::atomic::Ordering::Relaxed);
-}
-#[cfg(test)]
-pub(crate) fn goal_tool_names_for_test(todo: &str) -> GoalToolNames {
-    GoalToolNames {
-        goal: "update_goal".into(),
-        task: "task".into(),
-        todo: todo.into(),
-    }
 }
 #[cfg(test)]
 pub(crate) fn assert_goal_discipline_in_reminder(reminder: &str, site: &str) {

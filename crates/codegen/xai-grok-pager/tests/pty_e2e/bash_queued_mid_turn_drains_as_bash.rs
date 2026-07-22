@@ -19,7 +19,7 @@ async fn bash_queued_mid_turn_drains_as_bash() {
         }
         s
     };
-    content.set_turns([step_one]);
+    let _turn_one = content.expect_agent_turn("running turn before queued bash send-now", step_one);
 
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");

@@ -7,6 +7,8 @@
 
 #[cfg(feature = "audio")]
 use std::collections::VecDeque;
+#[cfg(feature = "audio")]
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -119,6 +121,7 @@ async fn open_session(
             let _ = event_tx
                 .send(VoiceEvent::Error {
                     message: e.to_string(),
+                    hint: None,
                 })
                 .await;
             None
@@ -190,6 +193,32 @@ async fn forward_pcm(
     }
 }
 
+/// Silence → short toast (+ long OS hint); non-silence → "try again".
+/// Toast may be the only surface (dashboard / `--minimal`), so on macOS it
+/// includes grant + restart — the long hint has the full Settings path.
+#[cfg(feature = "audio")]
+fn silence_guard_error(peak: u16) -> (String, Option<String>) {
+    if crate::pcm::is_silence(peak) {
+        let message = if cfg!(target_os = "macos") {
+            "microphone delivered only silence — allow terminal mic access, then restart it"
+        } else {
+            "microphone delivered only silence — check mic permission"
+        };
+        (
+            message.to_string(),
+            Some(format!(
+                "To fix voice dictation, {}",
+                crate::probe::mic_silence_help()
+            )),
+        )
+    } else {
+        (
+            "heard audio but no speech was detected — try again".to_string(),
+            None,
+        )
+    }
+}
+
 #[cfg(feature = "audio")]
 async fn start_capture_session(
     config: &VoiceConfig,
@@ -205,10 +234,8 @@ async fn start_capture_session(
     let capture_task =
         tokio::task::spawn_blocking(move || crate::audio::spawn_pcm_capture(sample_rate, mic_tx));
 
-    // Start draining the mic *now* — before connect resolves — so the capture
-    // chain never backpressures (and cpal never drops chunks) while the socket
-    // comes up. `forward_pcm` buffers until the STT sender arrives, then flushes
-    // and streams live.
+    // Drain mic before connect resolves so capture never backpressures while
+    // the socket comes up.
     let (audio_tx_tx, audio_tx_rx) = tokio::sync::oneshot::channel::<mpsc::Sender<Vec<u8>>>();
     tokio::spawn(forward_pcm(mic_rx, audio_tx_rx));
 
@@ -229,6 +256,7 @@ async fn start_capture_session(
             )));
         }
     };
+    let peak = capture.peak_meter();
     let mut stt = connect_res?;
 
     // Hand the live sender to the forwarder; it flushes the backlog then streams.
@@ -250,12 +278,7 @@ async fn start_capture_session(
                 handle.stop();
             }
         };
-        // Surface a hint if nothing is transcribed within the first 10s of a
-        // session — the usual sign of a denied mic permission, a muted mic, or
-        // the wrong input device (on macOS a "healthy" stream still delivers
-        // silence until access is granted). The check applies only before the
-        // first transcript: once the user starts talking, pauses can be as long
-        // as they like.
+        // No transcript in first 10s → diagnose from peak. Disarmed after speech.
         let silence_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut silence_check = true;
         // Chunk-final (`is_final && !speech_final`) text is locked: the server
@@ -279,18 +302,11 @@ async fn start_capture_session(
                     }
                 }
                 _ = tokio::time::sleep_until(silence_deadline), if silence_check => {
-                    // Give up on this turn: stop the mic and flush `audio.done`
-                    // so the session tears down instead of streaming silence
-                    // until the pager sends stop (toggle off).
+                    // Tear down rather than streaming silence until the user stops.
                     stop_capture(&mut capture);
                     stt.finish_audio();
-                    let _ = out
-                        .send(VoiceEvent::Error {
-                            message: "no audio detected in 10s: check that your \
-                                      terminal has microphone permission"
-                                .into(),
-                        })
-                        .await;
+                    let (message, hint) = silence_guard_error(peak.load(Ordering::Relaxed));
+                    let _ = out.send(VoiceEvent::Error { message, hint }).await;
                     return;
                 }
                 ev = stt.recv() => {
@@ -337,7 +353,7 @@ async fn start_capture_session(
                             }
                         }
                         Some(StreamingSttEvent::Error { message }) => {
-                            let _ = out.send(VoiceEvent::Error { message }).await;
+                            let _ = out.send(VoiceEvent::Error { message, hint: None }).await;
                             return;
                         }
                         Some(StreamingSttEvent::Ready) | None => return,
@@ -403,5 +419,19 @@ mod tests {
         mic_tx.send(vec![1]).await.unwrap();
         drop(tx_tx);
         task.await.unwrap();
+    }
+
+    #[test]
+    fn silence_guard_error_matches_metered_level() {
+        let (message, hint) = silence_guard_error(0);
+        assert!(message.contains("only silence"));
+        if cfg!(target_os = "macos") {
+            assert!(message.contains("restart"), "{message}");
+        }
+        assert!(hint.is_some_and(|h| h.contains(crate::probe::mic_silence_help())));
+
+        let (message, hint) = silence_guard_error(2_000);
+        assert!(message.contains("no speech was detected"));
+        assert!(hint.is_none());
     }
 }

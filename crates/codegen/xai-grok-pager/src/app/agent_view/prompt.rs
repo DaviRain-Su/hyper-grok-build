@@ -679,7 +679,7 @@ impl AgentView {
             let cancel_with_draft =
                 matches!(action_id, ActionId::CancelTurn) && !self.prompt.text().is_empty();
             if !cancel_with_draft {
-                let outcome = self.handle_agent_action(action_id);
+                let outcome = self.handle_agent_action_with_registry(action_id, registry);
                 // Only consume the key if the agent action actually did
                 // something. When idle, runtime-guarded actions like
                 // CancelTurn return Unchanged so the key can fall through
@@ -736,10 +736,15 @@ impl AgentView {
             }
         }
 
-        // 4. Structural keys that aren't in the registry. Tab leaves prompt;
-        //    Esc is owned by try_handle_esc_policy (above), not focus.
+        // 4. Structural keys declined by the widget. Tab leaves the prompt only
+        //    when this registry exposes the scrollback surface; minimal omits
+        //    FocusScrollback, so an otherwise-unclaimed Tab stays with its
+        //    logical composer. Dropdown/completion Tab paths already consumed
+        //    their presses above. Esc remains owned by try_handle_esc_policy.
         match key.code {
-            KeyCode::Tab => InputOutcome::Action(Action::FocusScrollback),
+            KeyCode::Tab if registry.find(ActionId::FocusScrollback).is_some() => {
+                InputOutcome::Action(Action::FocusScrollback)
+            }
             _ => InputOutcome::Unchanged,
         }
     }
@@ -1034,14 +1039,45 @@ mod shift_tab_cycle_mode_tests {
     }
 
     #[test]
-    fn plain_tab_does_not_cycle_mode() {
+    fn plain_tab_follows_focus_scrollback_registration() {
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        for mode in [
+            crate::app::ScreenMode::Fullscreen,
+            crate::app::ScreenMode::Inline,
+        ] {
+            let mut agent = super::test_fixtures::make_agent();
+            let registry = ActionRegistry::defaults_for(mode);
+            let outcome = agent.handle_prompt_key_with_registry_for_test(&tab, &registry);
+            assert!(
+                matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
+                "{mode:?} plain Tab must focus scrollback, got {outcome:?}",
+            );
+        }
+
+        let mut minimal = super::test_fixtures::make_agent();
+        let registry = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal);
+        let outcome = minimal.handle_prompt_key_with_registry_for_test(&tab, &registry);
+        assert!(matches!(outcome, InputOutcome::Unchanged));
+        assert_eq!(minimal.active_pane, AgentPane::Prompt);
+    }
+
+    #[test]
+    fn minimal_slash_dropdown_still_consumes_tab() {
         let mut agent = super::test_fixtures::make_agent();
-        let outcome =
-            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        agent.prompt.set_text("/");
+        agent.prompt.refresh_slash(&agent.session.models);
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
-            "plain Tab must focus scrollback, got {outcome:?}",
+            agent.prompt.slash_open(),
+            "precondition: slash dropdown open"
         );
+
+        let registry = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal);
+        let outcome = agent.handle_prompt_key_with_registry_for_test(
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &registry,
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(agent.active_pane, super::AgentPane::Prompt);
     }
 }
 

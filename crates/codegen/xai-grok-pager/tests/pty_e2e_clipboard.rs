@@ -34,7 +34,7 @@ mod paste_ctrl_v_text_echoes_fast_windows;
 use common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "PTY e2e; exercises real copy output and /terminal-setup"]
+#[ignore = "PTY e2e; exercises real copy output and /doctor"]
 async fn unknown_ssh_clipboard_delivery_is_unverified() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!(
@@ -92,9 +92,7 @@ async fn unknown_ssh_clipboard_delivery_is_unverified() {
     assert!(!harness.contains_text("Copy failed"));
     assert!(!harness.contains_text("Copied!"));
 
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("status       unverified", Duration::from_secs(10))
         .expect("unverified clipboard status");

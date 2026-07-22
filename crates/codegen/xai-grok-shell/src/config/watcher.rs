@@ -399,27 +399,43 @@ fn log_watch_error(err: &notify::Error, msg: &str) {
     }
 }
 
-/// Watches skill directories (`~/.grok/skills/`, `<repo>/.grok/skills/`, etc.)
-/// for new, modified, or removed `SKILL.md` files.
-///
-/// When a change is detected the receiver gets a `()` signal. The caller is
-/// responsible for triggering a skill re-advertisement to connected clients.
 pub struct SkillsFileWatcher {
-    _debouncer: Debouncer<AccessFilteredWatcher>,
+    debouncer: Debouncer<AccessFilteredWatcher>,
+    refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
+    refreshed_dirs: HashSet<PathBuf>,
 }
 
 const SKILLS_DEBOUNCE: Duration = Duration::from_secs(2);
 
-/// True if an event path is a skill/command change worth reloading: a
-/// `SKILL.md`, anything under `skills/`, or a `*.md` inside `commands/`.
-/// Mirrors discovery (`find_skill_paths`/`find_command_paths`).
-fn is_skill_change_path(p: &Path) -> bool {
-    p.file_name().is_some_and(|n| n == "SKILL.md")
-        || p.ancestors()
-            .any(|a| a.file_name().is_some_and(|n| n == "skills"))
-        || (p.extension().is_some_and(|e| e == "md")
-            && p.parent()
-                .is_some_and(|par| par.file_name().is_some_and(|n| n == "commands")))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryChange {
+    Skills,
+    Workflows,
+}
+
+fn discovery_change_for_path(path: &Path) -> Option<DiscoveryChange> {
+    if path.file_name().is_some_and(|name| name == ".grok") {
+        return Some(DiscoveryChange::Skills);
+    }
+    if path.file_name().is_some_and(|name| name == "workflows")
+        || path
+            .ancestors()
+            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "workflows"))
+    {
+        return Some(DiscoveryChange::Workflows);
+    }
+    if path.file_name().is_some_and(|name| name == "SKILL.md")
+        || path
+            .ancestors()
+            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "skills"))
+        || (path.extension().is_some_and(|extension| extension == "md")
+            && path
+                .parent()
+                .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "commands")))
+    {
+        return Some(DiscoveryChange::Skills);
+    }
+    None
 }
 
 /// True for a global/home-level config dir that must never be watched
@@ -460,33 +476,134 @@ fn is_global_config_dir_impl(dir: &Path, grok_home: &Path, home: Option<&Path>) 
         .is_some_and(|n| HOME_VENDOR_DIRS.contains(&n))
 }
 
-/// Watch only a config dir's skill subtrees — `<dir>/skills` recursively and
-/// `<dir>/commands` flat — never the dir root (see [`is_global_config_dir`]).
-/// Returns the number of watches registered; a missing subdir is skipped (for
-/// `~/.grok` these exist at startup; later creation is caught on restart).
 fn watch_skill_subdirs(
     debouncer: &mut Debouncer<AccessFilteredWatcher>,
     config_dir: &Path,
 ) -> usize {
     let mut watched = 0;
+    match debouncer
+        .watcher()
+        .watch(config_dir, RecursiveMode::NonRecursive)
+    {
+        Ok(()) => watched += 1,
+        Err(error) => log_watch_error(&error, "failed to watch config dir root"),
+    }
     for (subdir, mode) in [
         ("skills", RecursiveMode::Recursive),
         ("commands", RecursiveMode::NonRecursive),
+        ("workflows", RecursiveMode::NonRecursive),
     ] {
         let dir = config_dir.join(subdir);
         if dir.is_dir() {
             match debouncer.watcher().watch(&dir, mode) {
                 Ok(()) => watched += 1,
-                Err(e) => log_watch_error(&e, "failed to watch skill subdir"),
+                Err(error) => log_watch_error(&error, "failed to watch discovery subdir"),
             }
         }
     }
     watched
 }
 
+pub struct ProjectDiscoveryWatcher {
+    debouncer: Debouncer<AccessFilteredWatcher>,
+    refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
+    refreshed_dirs: HashSet<PathBuf>,
+}
+
+impl ProjectDiscoveryWatcher {
+    pub fn start(cwd: &Path) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
+        let project_root = crate::session::workflow::registry::project_root(cwd);
+        let project_grok = project_root.join(".grok");
+        let workflows = project_grok.join("workflows");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let project_grok_for_events = project_grok.clone();
+        let mut debouncer =
+            new_filtered_debouncer(SKILLS_DEBOUNCE, move |res: DebounceEventResult| {
+                let Ok(events) = res else { return };
+                let mut change = None;
+                for event in events
+                    .iter()
+                    .filter(|event| event.path.starts_with(&project_grok_for_events))
+                {
+                    let next = discovery_change_for_path(&event.path)
+                        .unwrap_or(DiscoveryChange::Workflows);
+                    if next == DiscoveryChange::Skills {
+                        change = Some(next);
+                        break;
+                    }
+                    change = Some(next);
+                }
+                if let Some(change) = change {
+                    let _ = tx.send(change);
+                }
+            })
+            .map_err(|error| tracing::warn!(%error, "failed to create project workflow watcher"))
+            .ok()?;
+
+        let initial = if project_grok.is_dir() {
+            project_grok.clone()
+        } else {
+            project_root.clone()
+        };
+        if let Err(error) = debouncer
+            .watcher()
+            .watch(&initial, RecursiveMode::NonRecursive)
+        {
+            log_watch_error(&error, "failed to watch project workflow parent");
+            return None;
+        }
+        let refresh_dirs = vec![
+            (project_grok, RecursiveMode::NonRecursive),
+            (
+                project_root.join(".grok").join("skills"),
+                RecursiveMode::Recursive,
+            ),
+            (
+                project_root.join(".grok").join("commands"),
+                RecursiveMode::NonRecursive,
+            ),
+            (workflows, RecursiveMode::NonRecursive),
+        ];
+        let mut refreshed_dirs = HashSet::from([initial]);
+        for (dir, mode) in &refresh_dirs {
+            if refreshed_dirs.contains(dir) || !dir.is_dir() {
+                continue;
+            }
+            match debouncer.watcher().watch(dir, *mode) {
+                Ok(()) => {
+                    refreshed_dirs.insert(dir.clone());
+                }
+                Err(error) => log_watch_error(&error, "failed to watch project discovery dir"),
+            }
+        }
+        Some((
+            Self {
+                debouncer,
+                refresh_dirs,
+                refreshed_dirs,
+            },
+            rx,
+        ))
+    }
+
+    pub fn refresh_new_dirs(&mut self) {
+        for (dir, mode) in &self.refresh_dirs {
+            if self.refreshed_dirs.contains(dir) || !dir.is_dir() {
+                continue;
+            }
+            match self.debouncer.watcher().watch(dir, *mode) {
+                Ok(()) => {
+                    self.refreshed_dirs.insert(dir.clone());
+                }
+                Err(error) => {
+                    log_watch_error(&error, "failed to watch newly-created project workflow dir")
+                }
+            }
+        }
+    }
+}
+
 impl SkillsFileWatcher {
-    /// Start watching skill directories. Returns `None` if the OS watcher
-    /// fails to initialize or no directories exist to watch.
     ///
     /// Uses [`collect_skill_config_dirs`](xai_grok_agent::prompt::skills::collect_skill_config_dirs)
     /// as the canonical directory source so the watcher covers the same
@@ -495,14 +612,25 @@ impl SkillsFileWatcher {
         cwd: Option<&Path>,
         monorepo_user_dir: Option<&Path>,
         config_paths: &[String],
-    ) -> Option<(Self, mpsc::UnboundedReceiver<()>)> {
+    ) -> Option<(Self, mpsc::UnboundedReceiver<DiscoveryChange>)> {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let mut debouncer =
             new_filtered_debouncer(SKILLS_DEBOUNCE, move |res: DebounceEventResult| {
                 let Ok(events) = res else { return };
-                if events.iter().any(|e| is_skill_change_path(&e.path)) {
-                    let _ = tx.send(());
+                let mut change = None;
+                for next in events
+                    .iter()
+                    .filter_map(|event| discovery_change_for_path(&event.path))
+                {
+                    if next == DiscoveryChange::Skills {
+                        change = Some(next);
+                        break;
+                    }
+                    change = Some(next);
+                }
+                if let Some(change) = change {
+                    let _ = tx.send(change);
                 }
             })
             .map_err(|e| tracing::warn!(error = %e, "failed to create skills file watcher"))
@@ -521,12 +649,9 @@ impl SkillsFileWatcher {
             config_paths,
             xai_grok_tools::types::compat::CompatConfig::default(),
         );
-
         let mut watched = 0;
         for dir in &dirs_to_watch {
             if is_global_config_dir(dir, &grok_home) {
-                // Home dir: watch skill subtrees only, never the root
-                // (worktrees/, sessions/, logs/ — see `is_global_config_dir`).
                 watched += watch_skill_subdirs(&mut debouncer, dir);
             } else {
                 // Project/repo dir: bounded, so recurse to catch new `skills/`
@@ -545,12 +670,62 @@ impl SkillsFileWatcher {
 
         tracing::info!(dirs = watched, "skills file watcher started");
 
+        let mut refresh_dirs = vec![(grok_home.join("workflows"), RecursiveMode::NonRecursive)];
+        if let Some(cwd) = cwd {
+            let project_root = crate::session::workflow::registry::project_root(cwd);
+            let project_grok = project_root.join(".grok");
+            let parent_watch = if project_grok.is_dir() {
+                project_grok.clone()
+            } else {
+                project_root
+            };
+            if !dirs_to_watch.iter().any(|dir| dir == &parent_watch) {
+                match debouncer
+                    .watcher()
+                    .watch(&parent_watch, RecursiveMode::NonRecursive)
+                {
+                    Ok(()) => {}
+                    Err(error) => log_watch_error(
+                        &error,
+                        "failed to watch workflow discovery parent directory",
+                    ),
+                }
+            }
+            refresh_dirs.push((project_grok.clone(), RecursiveMode::NonRecursive));
+            refresh_dirs.push((project_grok.join("workflows"), RecursiveMode::NonRecursive));
+        }
+        let refreshed_dirs = refresh_dirs
+            .iter()
+            .filter(|(dir, _)| dir.is_dir())
+            .map(|(dir, _)| dir.clone())
+            .collect();
         Some((
             Self {
-                _debouncer: debouncer,
+                debouncer,
+                refresh_dirs,
+                refreshed_dirs,
             },
             rx,
         ))
+    }
+
+    pub fn refresh_new_discovery_dirs(&mut self) -> bool {
+        let mut changed = false;
+        for (dir, mode) in &self.refresh_dirs {
+            if self.refreshed_dirs.contains(dir) || !dir.is_dir() {
+                continue;
+            }
+            match self.debouncer.watcher().watch(dir, *mode) {
+                Ok(()) => {
+                    self.refreshed_dirs.insert(dir.clone());
+                    changed = true;
+                }
+                Err(error) => {
+                    log_watch_error(&error, "failed to watch newly-created discovery directory")
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -603,7 +778,6 @@ mod tests {
         fs::create_dir_all(&alpha).unwrap();
         fs::write(alpha.join("SKILL.md"), "# alpha").unwrap();
 
-        // A SKILL.md buried in a worktree checkout under the (unwatched) root.
         let wt_skill = global
             .join("worktrees")
             .join("wt1")
@@ -618,7 +792,10 @@ mod tests {
             Duration::from_millis(50),
             move |res: DebounceEventResult| {
                 let Ok(events) = res else { return };
-                if events.iter().any(|e| is_skill_change_path(&e.path)) {
+                if events
+                    .iter()
+                    .any(|event| discovery_change_for_path(&event.path).is_some())
+                {
                     let _ = tx.send(());
                 }
             },
@@ -635,8 +812,8 @@ mod tests {
         wait_ms(250);
         assert!(
             rx.try_recv().is_err(),
-            "changes under an unwatched sibling subtree (worktrees/) must not \
-             trigger a skills reload — proves the dir root is not watched"
+            "changes below an unwatched sibling subtree (worktrees/) must not \
+             trigger a skills reload — proves the dir root is non-recursive"
         );
 
         // Editing the real skill under <dir>/skills must still fire.
@@ -646,6 +823,67 @@ mod tests {
             rx.try_recv().is_ok(),
             "changes under <dir>/skills must trigger a skills reload"
         );
+    }
+
+    #[test]
+    fn workflow_change_classifies_missing_directory_creation() {
+        let grok = Path::new("/tmp/project/.grok");
+        assert_eq!(
+            discovery_change_for_path(grok),
+            Some(DiscoveryChange::Skills),
+            "first .grok creation must take the broader skills reload path"
+        );
+        assert_eq!(
+            discovery_change_for_path(&grok.join("workflows")),
+            Some(DiscoveryChange::Workflows)
+        );
+        assert_eq!(
+            discovery_change_for_path(&grok.join("workflows/review.rhai")),
+            Some(DiscoveryChange::Workflows)
+        );
+        assert_eq!(
+            discovery_change_for_path(&grok.join("skills/review/SKILL.md")),
+            Some(DiscoveryChange::Skills)
+        );
+    }
+
+    #[test]
+    fn refresh_new_discovery_dirs_attaches_first_created_workflows_dir() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let root_for_handler = root.to_path_buf();
+        let mut debouncer = new_filtered_debouncer(
+            Duration::from_millis(50),
+            move |result: DebounceEventResult| {
+                let Ok(events) = result else { return };
+                if events
+                    .iter()
+                    .any(|event| event.path.starts_with(&root_for_handler))
+                {
+                    let _ = tx.send(());
+                }
+            },
+        )
+        .unwrap();
+        debouncer
+            .watcher()
+            .watch(root, RecursiveMode::NonRecursive)
+            .unwrap();
+        let workflows = root.join("workflows");
+        let mut watcher = SkillsFileWatcher {
+            debouncer,
+            refresh_dirs: vec![(workflows.clone(), RecursiveMode::NonRecursive)],
+            refreshed_dirs: HashSet::new(),
+        };
+        fs::create_dir(&workflows).unwrap();
+        wait_ms(150);
+        assert!(
+            rx.try_recv().is_ok(),
+            "parent watch sees first directory creation"
+        );
+        assert!(watcher.refresh_new_discovery_dirs());
+        assert!(watcher.refreshed_dirs.contains(&workflows));
     }
 
     #[test]

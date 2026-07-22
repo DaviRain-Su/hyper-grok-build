@@ -32,7 +32,7 @@ async fn edit_collapsed_oneliner_pty() {
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
 
     // One deleted line, two inserted lines => a `+2/-1` diffstat.
-    enqueue_tool_turn(
+    let _tool_turn = expect_tool_turn(
         &content,
         "call_collapsed",
         "search_replace",

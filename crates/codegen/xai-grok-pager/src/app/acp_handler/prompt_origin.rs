@@ -33,6 +33,7 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
         xai_grok_shell::session::PromptOrigin::from_prompt_id(prompt_id),
         xai_grok_shell::session::PromptOrigin::TaskCompleted { .. }
             | xai_grok_shell::session::PromptOrigin::SubagentCompleted { .. }
+            | xai_grok_shell::session::PromptOrigin::WorkflowCompleted { .. }
             | xai_grok_shell::session::PromptOrigin::NotificationDrain
     )
 }

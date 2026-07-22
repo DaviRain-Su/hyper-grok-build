@@ -175,6 +175,8 @@ fn goal_phase_label(goal: &GoalDisplayState) -> String {
         | GoalDisplayStatus::NoProgressPaused
         | GoalDisplayStatus::InfraPaused
         | GoalDisplayStatus::Blocked => goal.status.pause_label().into(),
+        GoalDisplayStatus::Failed => "Failed".into(),
+        GoalDisplayStatus::Interrupted => "Interrupted".into(),
         GoalDisplayStatus::BudgetLimited => "Budget".into(),
         GoalDisplayStatus::Complete => "Done".into(),
         GoalDisplayStatus::Active => active_phase_label(goal),
@@ -254,6 +256,11 @@ pub fn goal_status_line(
     // visually matches the modal's `theme.warning` status row.
     let mut label_style = if goal.status.is_paused() {
         Style::default().fg(theme.bg_base).bg(theme.warning)
+    } else if matches!(
+        goal.status,
+        GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+    ) {
+        Style::default().fg(theme.bg_base).bg(theme.accent_error)
     } else {
         Style::default().fg(theme.accent_plan).bg(theme.bg_base)
     };
@@ -266,12 +273,13 @@ pub fn goal_status_line(
 
     let is_active = matches!(goal.status, GoalDisplayStatus::Active);
 
+    let chip_name = "Goal";
     let goal_text = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
         let frame = frames[(tick / 4) % frames.len()];
-        format!("{frame} Goal: {label}")
+        format!("{frame} {chip_name}: {label}")
     } else {
-        format!("Goal: {label}")
+        format!("{chip_name}: {label}")
     };
 
     Line::from(vec![
@@ -686,6 +694,18 @@ mod tests {
             .expect("label span with `Goal:` prefix");
         assert_eq!(label_span.style.bg, Some(t.bg_base));
         assert_ne!(label_span.style.bg, Some(t.warning));
+    }
+
+    #[test]
+    fn phase_label_failed() {
+        let g = make_goal(
+            GoalDisplayStatus::Failed,
+            GoalDisplayPhase::Idle,
+            None,
+            0,
+            0,
+        );
+        assert_eq!(goal_phase_label(&g), "Failed");
     }
 
     #[test]

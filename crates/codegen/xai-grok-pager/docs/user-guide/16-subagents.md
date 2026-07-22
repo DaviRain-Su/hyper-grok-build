@@ -253,7 +253,7 @@ Grok Build also discovers roles from `.grok/roles/*.toml` and personas from `.gr
 
 Grok Build shows running and finished work in side panes on the agent screen:
 
-- Press `Ctrl+B` to toggle the tasks pane, which lists active and completed subagents and background commands with their status.
+- Press `Ctrl+G` to toggle the tasks pane, which lists active and completed subagents and background commands with their status.
 - Press `Ctrl+T` to toggle the separate todo pane.
 
 To view the available agent types and personas, open the command palette with `Ctrl+P` and choose **Manage Agents** (`/config-agents`).
@@ -279,7 +279,7 @@ Press **Enter** (or Ctrl-F) on the block to open the subagent's full transcript.
 
 For blocking subagents the single entry updates its bullet color when the child finishes. For background ones, a follow-up `Subagent completed/failed/cancelled in Xs: "..."` block is appended.
 
-### Tasks pane (Ctrl+B)
+### Tasks pane (Ctrl+G)
 
 As noted above — grouped under "Subagents", with spinners, elapsed times, and quick access to kill or inspect.
 

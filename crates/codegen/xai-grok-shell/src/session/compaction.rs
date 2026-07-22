@@ -1345,6 +1345,7 @@ impl SessionActor {
                             agent_edited_paths: edited_paths.clone(),
                             connected_mcp_servers,
                             todos,
+                            ..Default::default()
                         },
                     )
                     .await
@@ -2168,6 +2169,7 @@ mod inline_auto_compact_flow_tests {
         let state = TokioMutex::new(State {
             running_task: None,
             pending_inputs: VecDeque::new(),
+            combine_edit_holds: std::collections::HashSet::new(),
             pending_notifications: Vec::new(),
             notifications_suppressed: false,
             rewindable: false,
@@ -2197,6 +2199,7 @@ mod inline_auto_compact_flow_tests {
         );
         chat_state_handle.record_token_usage(total_tokens);
         SessionActor {
+            unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
             session_info: SessionInfo {
                 id: acp::SessionId::new("test-auto-compact"),
                 cwd: cwd.as_str().to_string(),
@@ -2301,6 +2304,7 @@ mod inline_auto_compact_flow_tests {
                 )),
             )),
             goal_enabled: false,
+            background_workflows_enabled: false,
             goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
             goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
             goal_tracker: Arc::new(parking_lot::Mutex::new(
@@ -2311,8 +2315,10 @@ mod inline_auto_compact_flow_tests {
             goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
             goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
             goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
-            goal_update_rx: std::cell::RefCell::new(Some(tokio::sync::mpsc::unbounded_channel().1)),
+            goal_update_rx: std::cell::RefCell::new(None),
             goal_update_tx: tokio::sync::mpsc::unbounded_channel().0,
+            workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
+            workflow_launch_tx: tokio::sync::mpsc::unbounded_channel().0,
             goal_classifier_enabled: false,
             goal_planner_enabled: false,
             goal_summary_enabled: false,

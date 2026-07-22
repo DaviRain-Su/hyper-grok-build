@@ -68,6 +68,7 @@ impl ToolKind {
             ToolKind::UseTool => "Use Tool",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
+            ToolKind::Workflow => "Workflow",
             ToolKind::Other => "Tool",
         }
     }
@@ -109,6 +110,7 @@ impl ToolKind {
             | ToolKind::UseTool
             | ToolKind::Monitor
             | ToolKind::GoalUpdate
+            | ToolKind::Workflow
             | ToolKind::Other => false,
         }
     }

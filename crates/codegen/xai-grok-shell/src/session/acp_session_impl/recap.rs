@@ -243,15 +243,19 @@ impl SessionActor {
         // Clone the exact request items for the on-disk artifact (recap never
         // mutates conversation state, so this file is the only durable record).
         let chat_history_for_artifact = items.clone();
+        // Main-turn tool specs: tools serialize into the cached token prefix.
+        let tool_defs = self.prepare_tool_definitions().await;
+        let tools = self.turn_base_tool_specs(&tool_defs);
         let request = ConversationRequest {
             items,
-            tools: vec![],
+            tools,
             model: Some(model.clone()),
             temperature: None,
             x_grok_conv_id: Some(x_grok_conv_id.clone()),
             x_grok_req_id: Some(x_grok_req_id.clone()),
             x_grok_session_id: Some(self.session_info.id.to_string()),
             x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+            prompt_cache_key: Some(self.session_info.id.to_string()),
             ..Default::default()
         };
 

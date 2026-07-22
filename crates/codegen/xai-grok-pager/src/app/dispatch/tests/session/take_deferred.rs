@@ -183,17 +183,17 @@ fn stashed_model_keeps_model_when_unsupported() {
 }
 
 #[test]
-fn effort_only_accepts_max_as_xhigh() {
+fn effort_only_rejects_max_when_model_does_not_offer_it() {
     let models = models_with_current(true);
     let out = take_deferred_model_switch(None, &models, Some("max"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((
-                models.current.clone().unwrap(),
-                Some(ReasoningEffort::Xhigh)
-            )),
-            effort_error: None,
+            switch: None,
+            effort_error: Some(EffortTokenError::UnknownToken {
+                token: "max".into(),
+                offered: vec!["deep".into(), "high".into()],
+            }),
         }
     );
 }

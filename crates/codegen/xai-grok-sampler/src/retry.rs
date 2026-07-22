@@ -156,6 +156,9 @@ pub fn classify_error(
     if err.is_encrypted_content_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
+    if max_retries == 0 {
+        return RetryDecision::Fatal(clone_error(err));
+    }
 
     // 413 Payload Too Large: strip inline images and try once. The
     // caller checks if there are images left after the strip; if not,
@@ -209,6 +212,9 @@ pub fn classify_error(
     if err.is_rate_limited() {
         let next_attempt = retry_count + 1;
         let effective_cap = max_retries.min(rate_limit_threshold);
+        if effective_cap == 0 {
+            return RetryDecision::Fatal(clone_error(err));
+        }
         if next_attempt >= effective_cap {
             return RetryDecision::Fatal(clone_error(err));
         }
@@ -227,7 +233,7 @@ pub fn classify_error(
     // later retries just back off.
     if err.is_retryable() {
         let next_attempt = retry_count + 1;
-        if next_attempt >= max_retries {
+        if max_retries == 0 || next_attempt >= max_retries {
             return RetryDecision::Fatal(clone_error(err));
         }
         let backoff = err
@@ -616,6 +622,34 @@ mod tests {
                 assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
             }
             other => panic!("expected Fatal at threshold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_retry_budget_never_reuses_a_model_output_cap() {
+        for err in [
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+            api_err(StatusCode::PAYLOAD_TOO_LARGE, "too big"),
+            api_err(StatusCode::BAD_REQUEST, "Could not process image"),
+            SamplingError::EmptyResponse {
+                context: xai_grok_sampling_types::EmptyResponseContext {
+                    reason: xai_grok_sampling_types::EmptyReason::NoVisibleContent,
+                    had_reasoning: false,
+                    content_len: 0,
+                    tool_call_count: 0,
+                    finish_reason: Some("stop".into()),
+                    completion_tokens: Some(1),
+                    reasoning_tokens: Some(0),
+                    prompt_tokens: Some(10),
+                    model: "m".into(),
+                    first_choice_seen: true,
+                },
+            },
+        ] {
+            assert!(matches!(
+                classify_error(&err, 0, 0, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::Fatal(_)
+            ));
         }
     }
 

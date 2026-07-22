@@ -374,12 +374,6 @@ impl CommandRegistry {
         self.set_command_visible("share", visible);
     }
 
-    /// Show or hide the /usage command.
-    /// When hidden, it won't appear in the dropdown or be executable.
-    pub fn set_usage_visible(&mut self, visible: bool) {
-        self.set_command_visible("usage", visible);
-    }
-
     /// Show or hide the `/dashboard` command (feature-flag gating).
     ///
     /// The command is hidden by default (see [`Self::new`]) and revealed here
@@ -757,35 +751,6 @@ mod tests {
     }
 
     #[test]
-    fn set_usage_visible_hides_and_restores_usage_command() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
-            aliases: &[],
-        });
-        let other: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "exit",
-            aliases: &[],
-        });
-        let mut registry = CommandRegistry::new(vec![usage, other]);
-
-        // Default: /usage is visible.
-        assert!(registry.get("usage").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "usage"));
-
-        // Hiding /usage removes it from lookup and triggers.
-        registry.set_usage_visible(false);
-        assert!(registry.get("usage").is_none());
-        assert!(!registry.triggers().iter().any(|t| t.canonical == "usage"));
-        // Other commands are unaffected.
-        assert!(registry.get("exit").is_some());
-
-        // Re-enabling restores it.
-        registry.set_usage_visible(true);
-        assert!(registry.get("usage").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "usage"));
-    }
-
-    #[test]
     fn restricted_commands_hide_and_restore() {
         let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
             name: "usage",
@@ -870,17 +835,17 @@ mod tests {
 
     #[test]
     fn restricted_wins_over_visible_setters() {
-        let usage: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "usage",
+        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "share",
             aliases: &[],
         });
-        let mut registry = CommandRegistry::new(vec![usage]);
+        let mut registry = CommandRegistry::new(vec![share]);
 
-        registry.set_restricted_commands(&["usage".to_string()]);
-        // A later `set_usage_visible(true)` (auth-meta path) must NOT
-        // resurrect a restricted command.
-        registry.set_usage_visible(true);
-        assert!(registry.get("usage").is_none());
+        registry.set_restricted_commands(&["share".to_string()]);
+        // A later `set_share_visible(true)` must NOT resurrect a
+        // restricted command — deny wins over every visibility gate.
+        registry.set_share_visible(true);
+        assert!(registry.get("share").is_none());
     }
 
     #[test]

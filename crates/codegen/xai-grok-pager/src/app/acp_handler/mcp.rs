@@ -157,10 +157,10 @@ pub(super) fn handle_mcp_tools_changed(notif: &acp::ExtNotification, app: &mut A
 pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> bool {
     app.pending_effects.iter().any(|e| {
         matches!(
-                    e,
-                    Effect::FetchMcpsList { agent_id: a, .. }
-        if *a == agent_id
-                )
+            e,
+            Effect::FetchMcpsList { agent_id: a, .. }
+if *a == agent_id
+        )
     })
 }
 

@@ -1,4 +1,7 @@
-use crate::permission::bash_command_splitting::{all_commands_from_script, unwrap_wrappers};
+use crate::permission::bash_command_splitting::{
+    MAX_INLINE_SHELL_DEPTH, all_commands_from_script, env_split_string_script,
+    normalize_command_words,
+};
 use crate::permission::shell_access::combine_decisions;
 use crate::permission::types::{
     AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
@@ -70,15 +73,14 @@ impl CompiledPolicy {
         if !self.has_bash_command_restrictions {
             return None;
         }
-        self.evaluate_bash_command_segments(cmd, 0)
+        self.evaluate_bash_command_segments(cmd, MAX_INLINE_SHELL_DEPTH)
     }
 
-    fn evaluate_bash_command_segments(&self, cmd: &str, depth: usize) -> Option<Decision> {
-        // Far deeper than legitimate `bash -c` nesting; fail closed rather than
-        // let an over-nested script run unevaluated.
-        if depth >= 8 {
-            return Some(Decision::Ask);
-        }
+    fn evaluate_bash_command_segments(
+        &self,
+        cmd: &str,
+        inline_depth_remaining: usize,
+    ) -> Option<Decision> {
         let Some(segments) = all_commands_from_script(cmd) else {
             return Some(Decision::Ask);
         };
@@ -89,18 +91,48 @@ impl CompiledPolicy {
         let mut decision = None;
         for parsed in &segments {
             let raw_words = parsed.words();
-            let unwrapped = unwrap_wrappers(raw_words);
-            // Rules may target the wrapper or the wrapped program, so both forms
-            // are checked — but only once when nothing was peeled.
+            let norm = normalize_command_words(raw_words);
+            decision = combine_decisions(decision, norm.exhausted.then_some(Decision::Ask));
+            decision = combine_decisions(decision, norm.ambiguous.then_some(Decision::Ask));
+            decision = combine_decisions(
+                decision,
+                norm.env_options_uncertain.then_some(Decision::Ask),
+            );
+            // WHY: every split-string shape keeps an Ask floor (Reject may still win).
+            decision = combine_decisions(decision, norm.has_split_string.then_some(Decision::Ask));
+            let inner_words = norm.words;
             let forms = std::iter::once(raw_words)
-                .chain((unwrapped.len() != raw_words.len()).then_some(unwrapped));
+                .chain((inner_words.len() != raw_words.len()).then_some(inner_words));
             for words in forms {
                 decision = combine_decisions(decision, escalate(&words.join(" ")));
-                if let Some(inner) = shell_dash_c_script(words) {
+            }
+            let shell_words: Vec<ShellWord<'_>> = inner_words.iter().map(ShellWord::from).collect();
+            match shell_dash_c_script(&shell_words) {
+                InlineShellScript::Literal(index) if inline_depth_remaining > 0 => {
                     decision = combine_decisions(
                         decision,
-                        self.evaluate_bash_command_segments(inner, depth + 1),
+                        self.evaluate_bash_command_segments(
+                            inner_words[index].as_str(),
+                            inline_depth_remaining - 1,
+                        ),
                     );
+                }
+                InlineShellScript::Literal(_)
+                | InlineShellScript::Untrusted
+                | InlineShellScript::Unrecognized => {
+                    decision = combine_decisions(decision, Some(Decision::Ask));
+                }
+                InlineShellScript::NotInline => {}
+            }
+            // High-confidence env -S: shared inline budget; Reject beats Ask floor.
+            if let Some(script) = env_split_string_script(inner_words) {
+                if inline_depth_remaining > 0 {
+                    decision = combine_decisions(
+                        decision,
+                        self.evaluate_bash_command_segments(&script, inline_depth_remaining - 1),
+                    );
+                } else {
+                    decision = combine_decisions(decision, Some(Decision::Ask));
                 }
             }
         }
@@ -164,32 +196,162 @@ impl From<PermissionConfig> for CompiledPolicy {
     }
 }
 
-/// The inner script string of a `bash -c "<script>"` invocation (also `sh`,
-/// `dash`, `zsh`, `ksh`); `None` if the words are not such an invocation.
-/// Known residuals: option arguments (`-o pipefail`) and `+`-option words can
-/// mis-take the operand — escalation-only so a miss never allows; skipping `+…` would add a dodge.
-pub(crate) fn shell_dash_c_script(words: &[String]) -> Option<&str> {
-    let program = words.first()?.rsplit(['/', '\\']).next()?;
-    if !matches!(program, "bash" | "sh" | "dash" | "zsh" | "ksh") {
-        return None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShellWord<'a> {
+    Literal(&'a str),
+    Untrusted,
+}
+
+impl<'a> From<&'a String> for ShellWord<'a> {
+    fn from(word: &'a String) -> Self {
+        Self::Literal(word.as_str())
     }
-    let flag = words
-        .iter()
-        .skip(1)
-        .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))?;
-    // The script is the first operand after the `-c` cluster, not necessarily
-    // the next word: more options may sit in between (`bash -c -x 'id'`), and
-    // `--` / a lone `-` end option parsing with the operand following.
-    let mut rest = words.get(flag + 2..)?.iter();
-    while let Some(word) = rest.next() {
-        if matches!(word.as_str(), "--" | "-") {
-            return rest.next().map(String::as_str);
-        }
-        if !word.starts_with('-') {
-            return Some(word.as_str());
-        }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InlineShellScript {
+    /// Not a supported-shell inline `-c` shape (and no unmodeled option ambiguity).
+    NotInline,
+    /// Trusted literal `-c` script at this word index.
+    Literal(usize),
+    /// Confirmed or potential `-c` shape whose script cannot be trusted for recursion
+    /// (dynamic head/operand, missing script, ambiguous options after `-c`).
+    Untrusted,
+    /// Unmodeled/ambiguous options without evidence of `-c` string reinterpretation
+    /// (e.g. `bash --version`). Security gates still Ask; auto-mode opaque-shell
+    /// floor does not — only `Literal` / `Untrusted` re-interpret a command string.
+    Unrecognized,
+}
+
+impl InlineShellScript {
+    /// Auto-mode opaque-shell floor: true only for (potential) `-c` reinterpretation.
+    pub(crate) fn is_potential_inline(self) -> bool {
+        matches!(self, Self::Literal(_) | Self::Untrusted)
     }
-    None
+}
+
+/// Classify a supported shell's inline `-c` script without guessing option operands.
+/// An untrusted program head that still matches a `-c` shape is `Untrusted` (Ask),
+/// not a global Ask for every dynamic command. Unmodeled long options without `-c`
+/// are `Unrecognized` (security Ask, not opaque-shell).
+pub(crate) fn shell_dash_c_script(words: &[ShellWord<'_>]) -> InlineShellScript {
+    let dynamic_head = match words.first() {
+        Some(ShellWord::Literal(program)) => {
+            let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
+            if !matches!(program, "bash" | "sh" | "dash" | "zsh" | "ksh") {
+                return InlineShellScript::NotInline;
+            }
+            false
+        }
+        Some(ShellWord::Untrusted) => true,
+        None => return InlineShellScript::NotInline,
+    };
+
+    let mut i = 1usize;
+    let mut saw_c = false;
+    let mut unrecognized = false;
+    // After `-c`, fail closed as Untrusted; before `-c`, Unrecognized (security Ask
+    // without claiming string reinterpretation for the opaque-shell floor).
+    let ambiguous = |saw_c: bool| {
+        if saw_c {
+            InlineShellScript::Untrusted
+        } else {
+            InlineShellScript::Unrecognized
+        }
+    };
+    let finish_literal = |index: usize| {
+        if dynamic_head {
+            InlineShellScript::Untrusted
+        } else {
+            InlineShellScript::Literal(index)
+        }
+    };
+    while let Some(word) = words.get(i) {
+        let ShellWord::Literal(word) = word else {
+            return ambiguous(saw_c);
+        };
+        let word = *word;
+        if word == "--" || word == "-" {
+            if !saw_c {
+                return if unrecognized {
+                    InlineShellScript::Unrecognized
+                } else {
+                    InlineShellScript::NotInline
+                };
+            }
+            return match words.get(i + 1) {
+                Some(ShellWord::Literal(_)) => finish_literal(i + 1),
+                Some(ShellWord::Untrusted) | None => InlineShellScript::Untrusted,
+            };
+        }
+        if !word.starts_with('-') && !word.starts_with('+') {
+            return if saw_c {
+                finish_literal(i)
+            } else if unrecognized {
+                InlineShellScript::Unrecognized
+            } else {
+                InlineShellScript::NotInline
+            };
+        }
+        if word == "--init-file" || word == "--rcfile" {
+            match words.get(i + 1) {
+                Some(ShellWord::Literal(_)) => i += 2,
+                Some(ShellWord::Untrusted) | None => return ambiguous(saw_c),
+            }
+            continue;
+        }
+        if word.starts_with("--") {
+            if matches!(word, "--noprofile" | "--norc" | "--posix") {
+                i += 1;
+                continue;
+            }
+            // Unmodeled long option: keep scanning for a later `-c` so
+            // `bash --verbose -c '…'` stays potential-inline, while bare
+            // `bash --version` / `bash --help` become Unrecognized (not opaque).
+            if saw_c {
+                return InlineShellScript::Untrusted;
+            }
+            unrecognized = true;
+            i += 1;
+            continue;
+        }
+        if matches!(word, "-o" | "+o" | "-O" | "+O") {
+            match words.get(i + 1) {
+                Some(ShellWord::Literal(value)) if !value.starts_with('-') => i += 2,
+                Some(ShellWord::Literal(_)) => return ambiguous(saw_c),
+                Some(ShellWord::Untrusted) | None => return ambiguous(saw_c),
+            }
+            continue;
+        }
+        if word.starts_with("-O") && word.len() > 2 {
+            i += 1;
+            continue;
+        }
+        if (word.starts_with("+O") || word.starts_with("+o")) && word.len() > 2 {
+            i += 1;
+            continue;
+        }
+        if word.starts_with("-o") && word.len() > 2 {
+            return ambiguous(saw_c);
+        }
+        if word.starts_with('+') {
+            i += 1;
+            continue;
+        }
+        let flags = &word[1..];
+        if flags.contains('o') || flags.contains('O') {
+            return ambiguous(saw_c);
+        }
+        saw_c |= flags.contains('c');
+        i += 1;
+    }
+    if saw_c {
+        InlineShellScript::Untrusted
+    } else if unrecognized {
+        InlineShellScript::Unrecognized
+    } else {
+        InlineShellScript::NotInline
+    }
 }
 
 fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
@@ -702,6 +864,12 @@ mod tests {
             "bash -c \"id > M.txt\"",
             "bash -c -x \"id > M.txt\"",
             "bash -c -- \"id > M.txt\"",
+            "bash -c -o pipefail \"id > M.txt\"",
+            "bash -c -O extglob \"id > M.txt\"",
+            "bash -c -Oextglob \"id > M.txt\"",
+            "exec id",
+            "command id",
+            "exec bash -c \"id > M.txt\"",
         ] {
             assert!(
                 matches!(
@@ -709,6 +877,63 @@ mod tests {
                     Some(Decision::Reject(_))
                 ),
                 "denied command in a non-leading position must be rejected: {cmd}"
+            );
+        }
+        // High-confidence env -S packed denials hard-Reject; uncertain shapes Ask.
+        for cmd in ["env -S 'id'", "env -S 'bash -c id'"] {
+            assert!(
+                matches!(
+                    policy.evaluate_bash_command_policy(cmd),
+                    Some(Decision::Reject(_))
+                ),
+                "high-confidence env -S must reject denied payload: {cmd}"
+            );
+        }
+        // Transparent-prefix depth: eight peels reach the command; a ninth Asks.
+        use crate::permission::bash_command_splitting::MAX_TRANSPARENT_PREFIX_DEPTH;
+        let nested_exec = |depth: usize| format!("{}id", "exec ".repeat(depth));
+        assert!(
+            matches!(
+                policy.evaluate_bash_command_policy(&nested_exec(MAX_TRANSPARENT_PREFIX_DEPTH)),
+                Some(Decision::Reject(_))
+            ),
+            "maximum transparent prefix depth must still reach the denied command"
+        );
+        assert!(
+            matches!(
+                policy.evaluate_bash_command_policy(&nested_exec(MAX_TRANSPARENT_PREFIX_DEPTH + 1)),
+                Some(Decision::Ask)
+            ),
+            "one extra transparent prefix must fail closed under bash command policy"
+        );
+        let exhausted_then_deny = format!(
+            "{}; id",
+            nested_exec(MAX_TRANSPARENT_PREFIX_DEPTH + 1).replace("id", "echo hi")
+        );
+        assert!(
+            matches!(
+                policy.evaluate_bash_command_policy(&exhausted_then_deny),
+                Some(Decision::Reject(_))
+            ),
+            "a later denied command must beat transparent exhaustion Ask"
+        );
+        for cmd in [
+            "bash -c +O extglob id",
+            "bash -c +Oextglob id",
+            "bash -c +o pipefail id",
+        ] {
+            assert!(matches!(
+                policy.evaluate_bash_command_policy(cmd),
+                Some(Decision::Reject(_))
+            ));
+        }
+        for cmd in ["bash -- -c id", "bash script.sh -c id"] {
+            assert!(
+                !matches!(
+                    policy.evaluate_bash_command_policy(cmd),
+                    Some(Decision::Reject(_))
+                ),
+                "non-inline shell form must not recurse into `id`: {cmd}"
             );
         }
         // Scripts that cannot be decomposed must fail closed (prompt), not allow.
@@ -721,6 +946,15 @@ mod tests {
                 "an undecomposable script must escalate, not fall through to allow: {cmd}"
             );
         }
+        // Alternating normalization still reaches the denied command through pure `env` wrappers.
+        let wrapped = format!("{}bash -c 'id'", "env ".repeat(9));
+        assert!(
+            matches!(
+                policy.evaluate_bash_command_policy(&wrapped),
+                Some(Decision::Reject(_))
+            ),
+            "bounded alternating normalize must still reach denied `id` under env wrappers"
+        );
         // A clean compound with no denied segment is not escalated.
         assert!(
             policy
@@ -735,6 +969,140 @@ mod tests {
         assert!(
             no_restrictions
                 .evaluate_bash_command_policy("echo SAFE && id")
+                .is_none()
+        );
+    }
+
+    /// Managed Bash deny fidelity for `env -S`/`--split-string`: high-confidence
+    /// packed payloads hard-Reject; every split-string shape keeps an Ask floor.
+    #[test]
+    fn env_split_string_bash_deny_fidelity() {
+        use crate::permission::bash_command_splitting::{MAX_NORMALIZE_ROUNDS, MAX_WRAPPER_DEPTH};
+
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![
+            bash_rule(RuleAction::Allow, "*"),
+            bash_rule(RuleAction::Deny, "rm*"),
+        ]));
+        let must_reject = |cmd: &str| {
+            assert!(
+                matches!(
+                    policy.evaluate_bash_command_policy(cmd),
+                    Some(Decision::Reject(_))
+                ),
+                "must Reject: {cmd}"
+            );
+        };
+        let must_ask = |cmd: &str| {
+            assert!(
+                matches!(
+                    policy.evaluate_bash_command_policy(cmd),
+                    Some(Decision::Ask)
+                ),
+                "must Ask (not fail open): {cmd}"
+            );
+        };
+
+        // High-confidence Reject (incl. wrappers, later -S after known options).
+        for cmd in [
+            "env -S 'rm -rf /tmp/victim'",
+            "env --split-string 'rm -rf /tmp/victim'",
+            "env --split-string='rm -rf /tmp/victim'",
+            "env -S'rm -rf /tmp/victim'",
+            "/usr/bin/env -S 'rm -rf /tmp/victim'",
+            "timeout 5 env -S 'rm -rf /tmp/victim'",
+            "env FOO=1 -i -S 'rm -rf /tmp/victim'",
+            "command env -S 'rm -rf /tmp/victim'",
+            "command timeout 5 command env -S 'rm -rf /tmp/victim'",
+            "bash -c \"env -S 'rm -rf /tmp/victim'\"",
+            "env -S 'env -S rm'",
+            "env FOO=1 rm -rf /tmp/victim",
+            "env -P /usr/bin -S 'rm -rf /tmp/victim'",
+            "env --path /usr/bin -S 'rm -rf /tmp/victim'",
+            "env --path=/usr/bin -S 'rm -rf /tmp/victim'",
+            "env -a name -S 'rm -rf /tmp/victim'",
+            "env - -S 'rm -rf /tmp/victim'",
+            "env -iv -S 'rm -rf /tmp/victim'",
+            "env -C /tmp -S 'rm -rf /tmp/victim'",
+            "env -uS rm -rf /tmp/victim",
+            "env -PSfoo rm -rf /tmp/victim",
+        ] {
+            must_reject(cmd);
+        }
+
+        // Ask rule on outer form still prompts (Reject does not apply).
+        let ask_policy = CompiledPolicy::new(PermissionConfig::new(vec![
+            bash_rule(RuleAction::Allow, "*"),
+            bash_rule(RuleAction::Ask, "env*"),
+        ]));
+        assert!(matches!(
+            ask_policy.evaluate_bash_command_policy("env -S 'rm -rf /tmp/victim'"),
+            Some(Decision::Ask)
+        ));
+
+        // Clusters / metasyntax / unknown options / missing operand → Ask floor.
+        for cmd in [
+            "env -iS 'rm -rf /tmp/victim'",
+            "env -vS 'rm -rf /tmp/victim'",
+            "env -0S 'rm -rf /tmp/victim'",
+            "env -xS 'rm -rf /tmp/victim'",
+            "env -S",
+            "env --split-string",
+            "env -S $CMD",
+            "env -S 'echo $HOME'",
+            "env -S 'rm -rf x #x'",
+            r"env -S '\trm -rf /tmp/victim'",
+            r"env -S '\nrm -rf /tmp/victim'",
+            "env --block-signal SEGV -S 'rm -rf /tmp/victim'",
+            "env -x foo -S 'rm -rf /tmp/victim'",
+            "env -P",
+            "env --prefix /usr/bin -S 'rm -rf /tmp/victim'",
+        ] {
+            must_ask(cmd);
+        }
+
+        // `--` ends options: following `-S` is command text, not split-string.
+        assert!(
+            !matches!(
+                policy.evaluate_bash_command_policy("env -- -S 'rm -rf /tmp/victim'"),
+                Some(Decision::Reject(_))
+            ),
+            "env -- -S must not be treated as split-string"
+        );
+
+        let nested_alt = |depth: usize| {
+            let mut s = "env -S 'rm -rf /tmp/victim'".to_string();
+            for i in 0..depth {
+                s = if i % 2 == 0 {
+                    format!("command {s}")
+                } else {
+                    format!("timeout 1 {s}")
+                };
+            }
+            s
+        };
+        must_reject(&nested_alt(4));
+        assert!(
+            matches!(
+                policy.evaluate_bash_command_policy(&nested_alt(MAX_NORMALIZE_ROUNDS + 2)),
+                Some(Decision::Ask) | Some(Decision::Reject(_))
+            ),
+            "over-budget normalize must not fail open"
+        );
+        let wrapped = format!(
+            "{}env -S 'rm -rf /tmp/victim'",
+            "env ".repeat(MAX_WRAPPER_DEPTH + 1)
+        );
+        assert!(
+            matches!(
+                policy.evaluate_bash_command_policy(&wrapped),
+                Some(Decision::Ask) | Some(Decision::Reject(_))
+            ),
+            "wrapper-exhausted env -S must not fail open"
+        );
+
+        assert!(
+            policy
+                .evaluate_bash_command_policy("env FOO=1 echo hi")
                 .is_none()
         );
     }

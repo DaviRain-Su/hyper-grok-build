@@ -52,14 +52,16 @@ impl AuthSnapshot for AuthManager {
 /// Capability to run the operator's external auth binary. Split out of
 /// [`AuthSnapshot`] so OIDC refreshers (read-only) physically cannot reach it
 /// (interface segregation); only [`ExternalBinaryRefresher`] depends on it.
+#[async_trait::async_trait]
 pub(crate) trait ExternalCommandRunner: Send + Sync {
     /// Run the external auth binary and return the parsed output.
-    fn run_external_command(&self, command: &str) -> Option<GrokAuth>;
+    async fn run_external_command(&self, command: &str) -> Option<GrokAuth>;
 }
 
+#[async_trait::async_trait]
 impl ExternalCommandRunner for AuthManager {
-    fn run_external_command(&self, command: &str) -> Option<GrokAuth> {
-        self.run_external_refresh_command(command)
+    async fn run_external_command(&self, command: &str) -> Option<GrokAuth> {
+        self.run_external_refresh_command(command).await
     }
 }
 

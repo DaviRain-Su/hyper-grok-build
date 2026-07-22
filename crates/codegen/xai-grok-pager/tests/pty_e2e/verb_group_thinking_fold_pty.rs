@@ -41,8 +41,8 @@ async fn verb_group_thinking_fold_pty() {
     // Turn 1 thinks and calls the first read: the tool call finishes the
     // thought, which auto-collapses and folds into the forming run.
     let args0 = json!({ "target_file": paths[0].to_string_lossy() }).to_string();
-    content.enqueue_response(
-        "/v1/responses",
+    let _thinking_turn = content.expect_agent_turn_with_responses(
+        "thinking then first read",
         ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
             &reasoning,
             "call_t0",
@@ -50,9 +50,6 @@ async fn verb_group_thinking_fold_pty() {
             &args0,
             "test-model",
         )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
         ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
             &reasoning,
             "call_t0",
@@ -63,18 +60,7 @@ async fn verb_group_thinking_fold_pty() {
     );
     // Turn 2: a plain second read grows the already-folded run to two tools.
     let args1 = json!({ "target_file": paths[1].to_string_lossy() }).to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_t1",
-            "read_file",
-            &args1,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events("read_file", &args1)),
-    );
+    let _second_read_turn = expect_tool_turn(&content, "call_t1", "read_file", args1);
     content.set_response(DONE_SENTINEL);
     // Pace the scripted SSE so the streaming-thinking window is pollable;
     // cleared after capture so the tail settles fast.

@@ -19,8 +19,13 @@ fn tall_first_response() -> String {
 }
 
 /// Welcome → tall turn 1 → submit turn 2 while holding turn 2 open.
-async fn drive_to_second_send(content: &ContentController) -> PtyHarness {
-    content.set_response(tall_first_response());
+async fn drive_to_second_send(content: &ContentController) -> (PtyHarness, AgentTurnExpectation) {
+    let mut first_turn =
+        content.expect_agent_turn("page-flip tall first turn", tall_first_response());
+    let mut second_turn = content.expect_agent_turn_blocked(
+        "page-flip held second turn",
+        format!("{MOCK_RESPONSE_SENTINEL} second turn."),
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =
@@ -35,24 +40,28 @@ async fn drive_to_second_send(content: &ContentController) -> PtyHarness {
     harness
         .wait_for_text(TAIL_SENTINEL, Duration::from_secs(30))
         .expect("turn 1 tail visible");
+    tokio::time::timeout(Duration::from_secs(10), first_turn.wait_satisfied())
+        .await
+        .expect("first turn completes before second send");
 
-    content.hold_agent_completions();
-    content.set_response(format!("{MOCK_RESPONSE_SENTINEL} second turn."));
     harness
         .inject_keys(format!("{SECOND_PROMPT}\r").as_bytes())
         .expect("submit second prompt");
     harness
         .wait_for_text(SECOND_PROMPT, Duration::from_secs(15))
         .expect("second prompt rendered");
+    tokio::time::timeout(Duration::from_secs(10), second_turn.wait_blocked())
+        .await
+        .expect("second turn reaches completion barrier");
     harness.update(Duration::from_millis(600));
-    harness
+    (harness, second_turn)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn send_page_flips_by_default() {
     let content = ContentController::start().await.expect("start content");
-    let mut harness = drive_to_second_send(&content).await;
+    let (mut harness, second_turn) = drive_to_second_send(&content).await;
 
     assert!(
         !harness.contains_text(TAIL_SENTINEL),
@@ -69,7 +78,7 @@ async fn send_page_flips_by_default() {
         "flipped prompt should be in the top half (row {prompt_row})\nscreen:\n{screen}"
     );
 
-    content.release_agent_completions();
+    second_turn.release();
     harness.quit().expect("clean quit");
 }
 
@@ -78,7 +87,7 @@ async fn send_page_flips_by_default() {
 async fn send_keeps_viewport_when_page_flip_disabled() {
     let content = ContentController::start().await.expect("start content");
     seed_ui_config(&content, "page_flip_on_send = false");
-    let mut harness = drive_to_second_send(&content).await;
+    let (mut harness, second_turn) = drive_to_second_send(&content).await;
 
     assert!(
         harness.contains_text(TAIL_SENTINEL),
@@ -86,6 +95,6 @@ async fn send_keeps_viewport_when_page_flip_disabled() {
         harness.screen_contents()
     );
 
-    content.release_agent_completions();
+    second_turn.release();
     harness.quit().expect("clean quit");
 }

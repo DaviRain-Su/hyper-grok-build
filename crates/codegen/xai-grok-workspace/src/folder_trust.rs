@@ -246,11 +246,11 @@ pub fn repo_configs_present(cwd: &Path) -> bool {
 
 /// Display-only: which repo-local trust-sensitive config KINDS are present for
 /// `cwd` (`mcp`, `plugins`, `lsp`, `envrc`, `claude`, `hooks`, `agents`, `roles`,
-/// `personas`), deduped in cheap→expensive marker order. Single source with
-/// [`repo_configs_present`] (which is `!repo_config_kinds(cwd).is_empty()`), so a
-/// folder that the gate fired on always has a non-empty, accurate kind list — no
-/// `[plugins].paths` / `.claude` / `.grok/agents` / subdir-launch gaps. NOT
-/// itself the trust gate.
+/// `personas`, `workflows`), deduped in cheap→expensive marker order. Single
+/// source with [`repo_configs_present`] (which is
+/// `!repo_config_kinds(cwd).is_empty()`), so a folder that the gate fired on
+/// always has a non-empty, accurate kind list — no `[plugins].paths` / `.claude`
+/// / `.grok/agents` / subdir-launch gaps. NOT itself the trust gate.
 pub fn repo_config_kinds(cwd: &Path) -> Vec<&'static str> {
     collect_repo_config_kinds(cwd, false)
 }
@@ -392,6 +392,9 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     }
     if directory_present_or_uncertain(&grok.join("personas")) {
         hit!("personas");
+    }
+    if directory_present_or_uncertain(&hook_root.join(".grok").join("workflows")) {
+        hit!("workflows");
     }
     // `~/.claude.json` `projects.<cwd>.mcpServers`.
     if claude_project_mcp_present(cwd) {
@@ -668,6 +671,16 @@ mod tests {
         std::fs::create_dir_all(&grok).unwrap();
         std::os::unix::fs::symlink("missing", grok.join("personas")).unwrap();
         assert!(!repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_workflows_from_subdir() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".grok").join("workflows")).unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(repo_configs_present(&subdir));
+        assert!(repo_config_kinds(&subdir).contains(&"workflows"));
     }
 
     #[test]

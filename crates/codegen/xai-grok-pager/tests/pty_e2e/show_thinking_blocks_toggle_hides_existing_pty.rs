@@ -279,16 +279,13 @@ async fn show_thinking_blocks_toggle_hides_existing_pty() {
         format!("{THINKING_SENTINEL} reason carefully about the user prompt and list every step");
     let response_body = format!("{MOCK_RESPONSE_SENTINEL} after thinking.");
 
-    content.enqueue_response(
-        "/v1/responses",
+    let _thinking_turn = content.expect_agent_turn_with_responses(
+        "thinking turn before visibility toggle",
         ScriptedResponse::sse(responses_api_with_reasoning_stream(
             &reasoning,
             &response_body,
             model,
         )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
         ScriptedResponse::sse(chat_completion_with_reasoning_stream(
             &reasoning,
             &response_body,

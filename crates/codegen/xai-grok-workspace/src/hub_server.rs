@@ -274,6 +274,7 @@ async fn tasks_snapshot(toolset: &FinalizedToolset) -> TasksSnapshotResponse {
             let _ = handle.0.send(SchedulerCommand::List { reply: reply_tx });
             reply_rx
                 .await
+                .map(|snapshot| snapshot.tasks)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|t| ScheduledTaskSnapshotWire {
@@ -1126,7 +1127,10 @@ mod tests {
     use super::*;
     use crate::capability::CapabilityMode;
     use crate::handle::tests::{background_capable_cfg, make_handle, start_background_sleep};
-    use xai_grok_tools::implementations::grok_build::scheduler::types::ScheduledTask;
+    use xai_grok_tools::implementations::grok_build::scheduler::types::{
+        ScheduledTask, SchedulerState,
+    };
+    use xai_grok_tools::types::resources::State;
     use xai_tool_protocol::turn_hook;
     /// Helper: consume the first item from a ToolStream.
     async fn next_item(
@@ -1411,18 +1415,12 @@ mod tests {
             snap.background_tasks
         );
         {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::spawn(async move {
-                while let Some(cmd) = rx.recv().await {
-                    if let SchedulerCommand::List { reply } = cmd {
-                        let mut task = ScheduledTask::new(300, "check CI".into(), true, false);
-                        task.id = "loop-1".into();
-                        let _ = reply.send(vec![task]);
-                    }
-                }
-            });
             let toolset = session.toolset();
-            toolset.resources.lock().await.insert(SchedulerHandle(tx));
+            let mut resources = toolset.resources.lock().await;
+            let state = resources.get_or_default::<State<SchedulerState>>();
+            let mut task = ScheduledTask::new(300, "check CI".into(), true, false);
+            task.id = "loop-1".into();
+            state.tasks.push(task);
         }
         let snap = snapshot(&handler).await;
         assert_eq!(snap.scheduled_tasks.len(), 1);

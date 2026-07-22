@@ -27,10 +27,14 @@ async fn drag_select_autoscroll_full_scrollout_copy_pty() {
     let content = ContentController::start().await.expect("start content");
     // Turn 1: a three-row anchor message (markdown hard breaks keep one row
     // per source line). Turn 2: filler tall enough to scroll it fully out.
-    content.set_turns([
+    let _anchor_turn = content.expect_agent_turn(
+        "selection anchor turn",
         format!("{ANCHOR_FIRST} anchor first line  \nmiddle filler line  \n{ANCHOR_LAST} anchor last line"),
+    );
+    let _filler_turn = content.expect_agent_turn(
+        "selection autoscroll filler turn",
         marker_response(MOCK_RESPONSE_SENTINEL, FILLER_ROWS),
-    ]);
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut env = content.env_for_pager();

@@ -22,8 +22,8 @@ use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
 use crate::upload::trace::{
     GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
+    local_sandbox_telemetry, upload_metadata, upload_session_state, upload_subagent_metadata,
+    upload_turn_result,
 };
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use agent_client_protocol as acp;
@@ -59,6 +59,7 @@ pub(crate) struct SubagentTracker {
     pub subagent_id: String,
     pub parent_session_id: String,
     pub parent_prompt_id: Option<String>,
+    pub owner: SubagentOwner,
     pub child_session_id: acp::SessionId,
     pub subagent_type: String,
     pub persona: Option<String>,
@@ -227,6 +228,7 @@ pub(crate) struct SubagentSpawnContext {
     pub write_file_enabled: bool,
     /// Whether goal mode (`/goal`) is enabled.
     pub goal_enabled: bool,
+    pub background_workflows_enabled: bool,
     /// Whether the `ask_user_question` tool is exposed to this subagent,
     /// inherited from the parent session (see `build_subagent_spawn_context`).
     pub ask_user_question_enabled: bool,
@@ -363,7 +365,7 @@ pub(crate) struct SubagentSpawnContext {
     /// Parent's `blocking_wait_depth` (same `Arc`). A foreground spawn holds a
     /// `BlockingWaitGuard` on it for the blocking await so `queue_input` routes
     /// a prompt sent during the wait onto send-now; never for background spawns.
-    pub parent_blocking_wait_depth: Arc<std::sync::atomic::AtomicUsize>,
+    pub parent_blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
 }
 impl SubagentSpawnContext {
     /// Check if a subagent is enabled via the toggle config.
@@ -478,6 +480,7 @@ pub(crate) struct CompletedSubagent {
     pub subagent_id: String,
     pub parent_session_id: String,
     pub parent_prompt_id: Option<String>,
+    pub owner: SubagentOwner,
     pub child_session_id: String,
     pub description: String,
     pub subagent_type: String,
@@ -539,6 +542,7 @@ pub(crate) struct PendingSubagent {
     pub persona: Option<String>,
     pub parent_prompt_id: Option<String>,
     pub parent_session_id: String,
+    pub owner: SubagentOwner,
     pub started_at: std::time::Instant,
     pub run_in_background: bool,
     /// Mirrors `SubagentRequest::surface_completion`.
@@ -559,6 +563,7 @@ struct FailureCompletion<'a> {
     description: String,
     parent_prompt_id: Option<String>,
     parent_session_id: String,
+    owner: SubagentOwner,
     persona: Option<String>,
     started_at: std::time::Instant,
     error: &'a str,
@@ -618,6 +623,7 @@ pub(crate) struct SubagentCoordinator {
     /// marks ledgers by itself (a true apply-miss marks them at fold time).
     /// Cleared on freeze/cancel. See AGENTS.md rule 3 for the completeness model.
     subagent_usage_not_applied_prompts: std::collections::HashSet<String>,
+    loop_owned: HashMap<String, String>,
 }
 /// Cap on the completed map (entries are small: identity, counts, and an
 /// error string; successful output text lives in `output.json`).
@@ -767,6 +773,9 @@ pub(crate) struct SubagentProvenance {
     pub(crate) fork_parent_prompt_id: Option<String>,
     /// ID of the source subagent this session was resumed from.
     pub(crate) resumed_from: Option<String>,
+}
+fn subagent_blocks_parent_turn(request: &SubagentRequest) -> bool {
+    !request.run_in_background && !request.owner.is_workflow()
 }
 /// Convert a `std::time::Instant` to approximate epoch milliseconds.
 ///
@@ -2118,6 +2127,15 @@ pub(crate) fn send_failure(request: SubagentRequest, error: &str) {
         ..Default::default()
     });
 }
+fn send_pre_spawn_cancelled(request: SubagentRequest, error: &str) {
+    let _ = request.result_tx.send(SubagentResult {
+        success: false,
+        cancelled: true,
+        error: Some(error.to_string()),
+        subagent_id: request.id,
+        ..Default::default()
+    });
+}
 /// Fail BEFORE `insert_pending`. Sends via oneshot; for background-mode
 /// requests also records a synthetic `CompletedSubagent` + emits a
 /// `SubagentFinished` notification (persisted + live).
@@ -2133,6 +2151,7 @@ fn send_pre_spawn_failure(
         subagent_type,
         description,
         parent_prompt_id,
+        owner,
         result_tx,
         run_in_background,
         surface_completion,
@@ -2146,6 +2165,7 @@ fn send_pre_spawn_failure(
             description,
             parent_prompt_id,
             ctx.parent_session_id.clone(),
+            owner,
             error,
             surface_completion,
         );

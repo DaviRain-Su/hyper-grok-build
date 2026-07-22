@@ -509,25 +509,25 @@ where
         let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
         loop {
             tokio::select! {
-                            _ = cancel_write.cancelled() => break, msg_opt = from_agent_rx.recv() =>
-                            { match msg_opt { Some(msg) => { if
-                            tracing::enabled!(tracing::Level::DEBUG) { if let Ok(json_val) =
-                            serde_json::from_str::< serde_json::Value > (& msg) { let method =
-                            json_val.get("method").and_then(| m | m.as_str()); let line_to_print =
-                            match method { Some("session/update") => { let params = json_val
-                            .get("params").unwrap_or(& serde_json::Value::Null);
-                            format!("acp_outbound::session/update::{params}") } Some(m) =>
-                            format!("acp_outbound::{m}"), None => "acp_outbound::response"
-                            .to_string(), }; debug!("{line_to_print}"); } else {
-                            debug!("acp_outbound::response"); } }
-            if ! msg.is_empty() && let Err(e) =
-                            ws_outbound.send(Message::Text(Utf8Bytes::from(msg))). await {
-                            warn!(error = ? e, "failed to send to WS"); break; } } None => {
-                            info!("Agent outbound channel closed"); break; } } } _ = keepalive.tick()
-                            => { tprintln!("ws::keep_alive_tick"); if let Err(e) = ws_outbound
-                            .send(Message::Ping(Vec::new().into())). await {
-                            tprintln!("ws::keep_alive::error::{:?}", & e); break; } }
-                        }
+                _ = cancel_write.cancelled() => break, msg_opt = from_agent_rx.recv() =>
+                { match msg_opt { Some(msg) => { if
+                tracing::enabled!(tracing::Level::DEBUG) { if let Ok(json_val) =
+                serde_json::from_str::< serde_json::Value > (& msg) { let method =
+                json_val.get("method").and_then(| m | m.as_str()); let line_to_print =
+                match method { Some("session/update") => { let params = json_val
+                .get("params").unwrap_or(& serde_json::Value::Null);
+                format!("acp_outbound::session/update::{params}") } Some(m) =>
+                format!("acp_outbound::{m}"), None => "acp_outbound::response"
+                .to_string(), }; debug!("{line_to_print}"); } else {
+                debug!("acp_outbound::response"); } }
+if ! msg.is_empty() && let Err(e) =
+                ws_outbound.send(Message::Text(Utf8Bytes::from(msg))). await {
+                warn!(error = ? e, "failed to send to WS"); break; } } None => {
+                info!("Agent outbound channel closed"); break; } } } _ = keepalive.tick()
+                => { tprintln!("ws::keep_alive_tick"); if let Err(e) = ws_outbound
+                .send(Message::Ping(Vec::new().into())). await {
+                tprintln!("ws::keep_alive::error::{:?}", & e); break; } }
+            }
         }
         anyhow::Ok(())
     };

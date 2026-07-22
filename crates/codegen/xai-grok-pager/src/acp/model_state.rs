@@ -251,9 +251,6 @@ impl ModelState {
         {
             return Some(option.value);
         }
-        // Canonical level (e.g. "high", "max"→xhigh) only if the model menu
-        // actually offers that value — not free-form power-user aliases that
-        // would 400 on the server (e.g. `none` on grok-4.5).
         let parsed = token.parse::<ReasoningEffort>().ok()?;
         options
             .iter()

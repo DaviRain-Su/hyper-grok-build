@@ -75,8 +75,6 @@ pub enum GoalStatus {
     /// Infrastructure turn failure (`PromptTurnResult::Err`). The
     /// human-readable reason is stashed in [`GoalOrchestration::pause_message`].
     InfraPaused,
-    /// Blocked via `update_goal(blocked_reason: "...")` after 3
-    /// consecutive blocked attempts. The human-readable reason is
     /// stashed in [`GoalOrchestration::pause_message`].
     Blocked,
     #[serde(alias = "BudgetLimited")]
@@ -140,10 +138,6 @@ pub enum GoalPauseReason {
     /// Maps to [`GoalStatus::NoProgressPaused`] — same resumable paused
     /// family as the cap, surfaced distinctly in the UI / telemetry.
     NoProgress,
-    /// Goal determined unachievable in this environment — either via
-    /// `update_goal(blocked_reason: ...)` after meeting the 3-turn
-    /// threshold, or because every verifier refuter classified its gap
-    /// as a contradiction / unverifiable blocker. Maps to
     /// [`GoalStatus::Blocked`]; pairs with a human-readable message on
     /// [`GoalOrchestration::pause_message`].
     Verification,
@@ -477,6 +471,10 @@ pub struct GoalOrchestration {
     /// [`GoalTracker::budget_limit`] all reset it to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator_blocker_key: Option<String>,
+    #[serde(default)]
+    pub evaluator_blocked_streak: u32,
 
     /// Short opaque identifier used to scope per-goal artifact paths
     /// owned by the harness. Today's consumers:
@@ -687,6 +685,11 @@ impl GoalOrchestration {
         self.last_gap_fingerprint = None;
         self.classifier_stall_count = 0;
     }
+
+    fn reset_evaluator_blocker_fields(&mut self) {
+        self.evaluator_blocker_key = None;
+        self.evaluator_blocked_streak = 0;
+    }
 }
 
 // GoalTracker (pure state machine)
@@ -716,16 +719,13 @@ impl GoalTracker {
     /// so `pause_message` and pause cause stay aligned. Clear
     /// `current_subagent_id`.
     pub fn from_snapshot(session_dir: PathBuf, mut snapshot: GoalOrchestration) -> Self {
-        match snapshot.phase {
-            GoalPhase::Planning | GoalPhase::Executing => {
-                snapshot.phase = GoalPhase::Idle;
-                if snapshot.status == GoalStatus::Active {
-                    snapshot.status = GoalStatus::UserPaused;
-                }
-                snapshot.current_subagent_id = None;
-                snapshot.current_subagent_role = None;
-            }
-            GoalPhase::Idle => {}
+        if matches!(snapshot.phase, GoalPhase::Planning | GoalPhase::Executing) {
+            snapshot.phase = GoalPhase::Idle;
+            snapshot.current_subagent_id = None;
+            snapshot.current_subagent_role = None;
+        }
+        if snapshot.status == GoalStatus::Active {
+            snapshot.status = GoalStatus::UserPaused;
         }
         // `planning_in_flight` / `verifying_in_flight` are `#[serde(skip)]` but
         // in-memory-clone callers bypass that; reset explicitly.
@@ -959,6 +959,8 @@ impl GoalTracker {
             last_session_tokens_seen: Some(token_baseline),
             history: Vec::new(),
             pause_message: None,
+            evaluator_blocker_key: None,
+            evaluator_blocked_streak: 0,
             verifier_id,
             classifier_runs_attempted: 0,
             rounds_since_verify: 0,
@@ -1067,6 +1069,7 @@ impl GoalTracker {
             o.rounds_since_verify = 0;
             o.reset_strategist_fields();
             o.reset_classifier_stall_fields();
+            o.reset_evaluator_blocker_fields();
             self.active_since = Some(Instant::now());
             self.record_event(GoalEvent::GoalResumed, None);
             return true;
@@ -1102,6 +1105,7 @@ impl GoalTracker {
             // Terminal transition: reset all strategist state so a
             // recreated/reactivated goal never inherits a stale count or note.
             o.reset_strategist_fields();
+            o.reset_evaluator_blocker_fields();
             // The achieved ack points the user at the details file, so it
             // must outlive the scratch-root removal below.
             self.rescue_classifier_details();
@@ -1135,6 +1139,7 @@ impl GoalTracker {
             o.skeptic_model_assignment.clear();
             o.plan_baseline_file = None;
             o.reset_strategist_fields();
+            o.reset_evaluator_blocker_fields();
             // Symmetric with `complete`.
             self.rescue_classifier_details();
             self.remove_scratch_root();
@@ -1226,6 +1231,25 @@ impl GoalTracker {
             GOAL_CLASSIFIER_STALL_THRESHOLD
         };
         o.classifier_stall_count >= threshold
+    }
+
+    pub fn record_evaluator_blocker(&mut self, blocker_key: &str) -> u32 {
+        let Some(o) = self.orchestration.as_mut() else {
+            return 0;
+        };
+        if o.evaluator_blocker_key.as_deref() == Some(blocker_key) {
+            o.evaluator_blocked_streak = o.evaluator_blocked_streak.saturating_add(1);
+        } else {
+            o.evaluator_blocker_key = Some(blocker_key.to_owned());
+            o.evaluator_blocked_streak = 1;
+        }
+        o.evaluator_blocked_streak
+    }
+
+    pub fn reset_evaluator_blocker(&mut self) {
+        if let Some(o) = self.orchestration.as_mut() {
+            o.reset_evaluator_blocker_fields();
+        }
     }
 
     /// Undo the most recent attempt-slot reservation. Used when a
@@ -1356,6 +1380,8 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
         last_session_tokens_seen: Some(0),
         history: Vec::new(),
         pause_message: None,
+        evaluator_blocker_key: None,
+        evaluator_blocked_streak: 0,
         verifier_id: generate_verifier_id(),
         classifier_runs_attempted: 0,
         rounds_since_verify: 0,
@@ -1764,6 +1790,35 @@ mod tests {
             t.record_classifier_stall("fp-b"),
             "the new fingerprint then trips on its own second occurrence"
         );
+    }
+
+    #[test]
+    fn evaluator_blocker_streak_requires_one_stable_key() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        assert_eq!(t.record_evaluator_blocker("missing_github_access"), 1);
+        assert_eq!(t.record_evaluator_blocker("missing_github_access"), 2);
+        assert_eq!(t.record_evaluator_blocker("missing_slack_access"), 1);
+        assert_eq!(t.record_evaluator_blocker("missing_slack_access"), 2);
+        assert_eq!(t.record_evaluator_blocker("missing_slack_access"), 3);
+    }
+
+    #[test]
+    fn evaluator_blocker_streak_is_persisted_and_resettable() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        t.record_evaluator_blocker("missing_access");
+        t.record_evaluator_blocker("missing_access");
+        let encoded = serde_json::to_string(t.snapshot().unwrap()).unwrap();
+        let restored: GoalOrchestration = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            restored.evaluator_blocker_key.as_deref(),
+            Some("missing_access")
+        );
+        assert_eq!(restored.evaluator_blocked_streak, 2);
+        t.reset_evaluator_blocker();
+        assert!(t.snapshot().unwrap().evaluator_blocker_key.is_none());
+        assert_eq!(t.snapshot().unwrap().evaluator_blocked_streak, 0);
     }
 
     #[test]
@@ -2810,11 +2865,11 @@ mod tests {
     }
 
     #[test]
-    fn from_snapshot_idle_active_sets_active_since() {
+    fn from_snapshot_idle_active_restores_paused() {
         let orchestration = make_base_orchestration(); // Idle + Active
         let t = GoalTracker::from_snapshot(PathBuf::from("/tmp"), orchestration);
-        assert_eq!(t.snapshot().unwrap().status, GoalStatus::Active);
-        assert!(t.active_since.is_some());
+        assert_eq!(t.snapshot().unwrap().status, GoalStatus::UserPaused);
+        assert!(t.active_since.is_none());
     }
 
     #[test]

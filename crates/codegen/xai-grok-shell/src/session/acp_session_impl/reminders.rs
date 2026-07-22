@@ -178,6 +178,293 @@ pub(crate) fn date_rollover_reminder(
 /// Wrapped in grok's `<system-reminder>` shape by [`SessionActor::push_system_reminder`].
 /// See [`SessionActor::maybe_inject_interrupt_reminder`].
 pub(crate) const INTERRUPT_REMINDER: &str = "[Request interrupted by user]";
+const WORKFLOW_RESULT_SUMMARY_REMINDER_CAP: usize = 4 * 1024;
+const WORKFLOW_OBJECTIVE_REMINDER_CAP: usize = 256;
+fn workflow_completion_detail(detail: &str) -> std::borrow::Cow<'_, str> {
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized == detail {
+        xai_grok_tools::util::truncate_str_with_marker(detail, WORKFLOW_RESULT_SUMMARY_REMINDER_CAP)
+    } else {
+        std::borrow::Cow::Owned(
+            xai_grok_tools::util::truncate_str_with_marker(
+                &normalized,
+                WORKFLOW_RESULT_SUMMARY_REMINDER_CAP,
+            )
+            .into_owned(),
+        )
+    }
+}
+impl SessionActor {
+    pub(super) fn push_workflow_launch_reminder(
+        &self,
+        display_name: &str,
+        run_id: &str,
+        objective: &str,
+        command_line: &str,
+        resumed: bool,
+    ) {
+        let verb = if resumed { "resumed" } else { "launched" };
+        let command_line = command_line
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut body = format!(
+            "The user {verb} background workflow '{display_name}' (run id {run_id}) with the \
+             slash command: {}\nThis was handled host-side; no tool call was involved.",
+            xai_grok_tools::util::truncate_str(&command_line, WORKFLOW_OBJECTIVE_REMINDER_CAP)
+        );
+        let objective = objective.split_whitespace().collect::<Vec<_>>().join(" ");
+        let objective_redundant = !objective.is_empty()
+            && (objective == command_line || command_line.ends_with(&format!(" {objective}")));
+        if !objective.is_empty() && !objective_redundant {
+            body.push_str(&format!(
+                "\nObjective: {}",
+                xai_grok_tools::util::truncate_str(&objective, WORKFLOW_OBJECTIVE_REMINDER_CAP)
+            ));
+        }
+        body.push_str(&format!(
+            "\nIt runs in the background: status snapshots and the final result arrive as \
+             reminders at turn starts, and the user can watch it in /workflows. If it pauses, \
+             it can be resumed by calling the workflow tool with resume_from_run_id: \
+             \"{run_id}\". Keep run ids internal — the user knows runs by display name. No \
+             action needed unless the user asks."
+        ));
+        self.push_system_reminder(&body);
+    }
+    pub(super) async fn inject_workflow_status_reminder(&self) {
+        if self.goal_loop_active() {
+            return;
+        }
+        let tracker = self.workflow_tracker().await;
+        let report = tracker.lock().take_status_report();
+        if report.is_empty() {
+            return;
+        }
+        self.push_system_reminder(&format_workflow_status_reminder(&report));
+    }
+}
+fn format_workflow_status_reminder(
+    runs: &[crate::session::workflow::tracker::WorkflowRunState],
+) -> String {
+    use std::fmt::Write as _;
+    let n = runs.len();
+    let noun = if n == 1 {
+        "background workflow run"
+    } else {
+        "background workflow runs"
+    };
+    let mut buf = format!("Status of {n} {noun} in this session:\n");
+    for run in runs {
+        let _ = write!(
+            buf,
+            "\n- Workflow '{}' (run id {}) — status: {}",
+            run.name,
+            run.run_id,
+            run.status.as_str()
+        );
+        let objective = run
+            .objective
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !objective.is_empty() {
+            let _ = write!(
+                buf,
+                "\n  Objective: {}",
+                xai_grok_tools::util::truncate_str(&objective, WORKFLOW_OBJECTIVE_REMINDER_CAP)
+            );
+        }
+        if let Some(cur) = run.current_phase.as_deref() {
+            match run.phases.iter().position(|p| p.title == cur) {
+                Some(pos) => {
+                    let _ = write!(buf, "\n  Phase: {} ({}/{})", cur, pos + 1, run.phases.len());
+                }
+                None => {
+                    let _ = write!(buf, "\n  Phase: {cur}");
+                }
+            }
+        }
+        if !run.agents.is_empty() {
+            let done = run.agents.iter().filter(|a| a.state == "done").count();
+            let running = run.agents.iter().filter(|a| a.state == "running").count();
+            let failed = run.agents.iter().filter(|a| a.state == "failed").count();
+            let mut parts = vec![format!("{done} done")];
+            if running > 0 {
+                parts.push(format!("{running} running"));
+            }
+            if failed > 0 {
+                parts.push(format!("{failed} failed"));
+            }
+            let _ = write!(buf, "\n  Agents: {}", parts.join(", "));
+        }
+        match run.agent_budget {
+            Some(budget) => {
+                let _ = write!(buf, "\n  Agents: {} of {} budget", run.agents_used, budget);
+            }
+            None if run.agents_used > 0 => {
+                let _ = write!(buf, "\n  Agents: {}", run.agents_used);
+            }
+            None => {}
+        }
+        if run.agent_usage_incomplete {
+            let _ = write!(
+                buf,
+                "\n  Agent accounting incomplete: this run predates logical-agent \
+                 budgeting or contains legacy unresolved reservations"
+            );
+        }
+        let _ = write!(
+            buf,
+            "\n  Elapsed: {}",
+            format_workflow_elapsed(run.elapsed_ms_floor)
+        );
+        if run.status.is_paused() {
+            if let Some(msg) = run.pause_message.as_deref() {
+                let _ = write!(
+                    buf,
+                    "\n  Paused: {}",
+                    xai_grok_tools::util::truncate_str(msg, WORKFLOW_RESULT_SUMMARY_REMINDER_CAP)
+                );
+            }
+            let max_budget_exhausted = run.status
+                == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited
+                && run.agents_used >= xai_workflow::MAX_AGENT_BUDGET;
+            if max_budget_exhausted {
+                let _ = write!(buf, "\n  Not resumable: start a new workflow run.");
+            } else {
+                let budget_suffix = if run.status
+                    == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited
+                {
+                    " and a raised agent_budget (the resume is rejected while usage \
+                     is at or over the cap)"
+                } else {
+                    ""
+                };
+                let _ = write!(
+                    buf,
+                    "\n  Resumable: call the workflow tool with resume_from_run_id: \"{}\"{}.",
+                    run.run_id, budget_suffix
+                );
+            }
+        }
+    }
+    buf.push_str(
+        "\nThese run in the background — do not poll task tools for them; updates arrive as \
+         reminders. Keep run ids internal (the user knows runs by display name).",
+    );
+    buf
+}
+fn format_workflow_elapsed(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+fn format_workflow_completion_reminder(
+    runs: &[crate::session::workflow::tracker::WorkflowRunState],
+    session_dir: &std::path::Path,
+    before_resume: bool,
+    read_tool_name: Option<&str>,
+) -> String {
+    use std::fmt::Write as _;
+    let n = runs.len();
+    let noun = if n == 1 {
+        "background workflow run"
+    } else {
+        "background workflow runs"
+    };
+    let verb = if runs.iter().any(|r| !r.status.is_terminal()) {
+        "stopped (finished or paused)"
+    } else {
+        "finished"
+    };
+    let mut buf = if before_resume {
+        format!("This session was resumed. {n} {noun} {verb} before the resume:\n")
+    } else {
+        format!("While you were idle, {n} {noun} {verb}:\n")
+    };
+    for run in runs {
+        let _ = write!(
+            buf,
+            "\n- Workflow '{}' (run id {}) — status: {}",
+            run.name,
+            run.run_id,
+            run.status.as_str()
+        );
+        let objective = run
+            .objective
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !objective.is_empty() {
+            let _ = write!(
+                buf,
+                "\n  Objective: {}",
+                xai_grok_tools::util::truncate_str(&objective, WORKFLOW_OBJECTIVE_REMINDER_CAP)
+            );
+        }
+        let _ = write!(
+            buf,
+            "\n  Elapsed: {}",
+            format_workflow_elapsed(run.elapsed_ms_floor)
+        );
+        if let Some(summary) = run.result_summary.as_deref() {
+            let capped =
+                xai_grok_tools::util::truncate_str(summary, WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);
+            buf.push_str("\n  Result:\n");
+            for line in capped.lines() {
+                let _ = writeln!(buf, "    {line}");
+            }
+            if capped.len() < summary.len() {
+                let _ = writeln!(
+                    buf,
+                    "    [... result truncated ({} bytes total)]",
+                    summary.len()
+                );
+            }
+        } else if let Some(detail) = run.pause_message.as_deref() {
+            let detail = workflow_completion_detail(detail);
+            let _ = write!(buf, "\n  Detail: {detail}\n");
+        } else {
+            buf.push('\n');
+        }
+        if run.status == crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited {
+            if run.agents_used >= xai_workflow::MAX_AGENT_BUDGET {
+                let _ = writeln!(
+                    buf,
+                    "  Not resumable: this run reached the maximum agent budget; start a new \
+                     workflow run."
+                );
+            } else {
+                let _ = writeln!(
+                    buf,
+                    "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" \
+                     and a raised agent_budget (the resume is rejected while usage is at \
+                     or over the cap).",
+                    run.run_id
+                );
+            }
+        }
+        let report_path = session_dir
+            .join("workflows")
+            .join(&run.run_id)
+            .join("scratch")
+            .join("report.md");
+        if report_path.is_file() {
+            let _ = writeln!(
+                buf,
+                "  Full report: {} (use {} on that path to view it)",
+                report_path.display(),
+                read_tool_name.unwrap_or("Read"),
+            );
+        }
+    }
+    buf
+}
 /// TodoGate when enabled and the prompt carries `<task_completion_discipline>`
 /// (`{DISCIPLINE_BLOCK}`), but NOT while the goal loop is active — the
 /// continuation directive drives the loop there (see the body).
@@ -243,6 +530,7 @@ impl SessionActor {
     }
     /// Push a `<{tag}>`-wrapped user message.
     pub(super) fn push_system_reminder_with_tag(&self, content: &str, tag: &str) {
+        let content = content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
         let message = ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"));
         self.chat_state_handle.push_user_message(message);
     }
@@ -266,20 +554,6 @@ impl SessionActor {
             reported.mark_reported(id);
         }
     }
-    /// Drain background completions (bash tasks + subagents) that arrived
-    /// while the model was idle and inject them as system-reminders so the
-    /// model sees them at turn start.
-    ///
-    /// While the goal loop is active the completions are DROPPED instead:
-    /// the continuation directive is the sole driver, and an async "task /
-    /// subagent completed" reminder can derail a weak model (e.g.
-    /// relaunching a killed server). They are still drained (consumed) and
-    /// marked reported so nothing accumulates to surface on a later turn.
-    ///
-    /// Surfacing (the `push_system_reminder` calls) is suppressed when the
-    /// active template handles this elsewhere, but the goal-loop drain is not:
-    /// with the goal loop active, completions are still consumed and marked
-    /// reported so nothing surfaces later.
     pub(super) async fn drain_between_turn_completions(&self) {
         let goal_loop_active = self.goal_loop_active();
         let bridge = self.agent.borrow().tool_bridge().clone();
@@ -322,6 +596,8 @@ impl SessionActor {
                 self.push_system_reminder(&reminder);
             }
         }
+        self.drain_between_turn_workflow_completions(goal_loop_active)
+            .await;
         let Some(tx) = &self.tool_context.subagent_event_tx else {
             return;
         };
@@ -370,6 +646,46 @@ impl SessionActor {
             )
             .await;
         self.push_system_reminder(&reminder);
+    }
+    pub(super) async fn drain_between_turn_workflow_completions(&self, goal_loop_active: bool) {
+        if goal_loop_active {
+            return;
+        }
+        let (restored, fresh) = {
+            let tracker = self.workflow_tracker().await;
+            let mut tracker = tracker.lock();
+            tracker.take_unreported_terminal_runs()
+        };
+        if restored.is_empty() && fresh.is_empty() {
+            return;
+        }
+        let names = |runs: &[crate::session::workflow::tracker::WorkflowRunState]| {
+            runs.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+        };
+        tracing::info!(
+            restored = ? names(& restored), fresh = ? names(& fresh),
+            "draining between-turn workflow completions"
+        );
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let bridge = self.tool_bridge_handle();
+        let read_tool_name =
+            xai_grok_tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
+        if !restored.is_empty() {
+            self.push_system_reminder(&format_workflow_completion_reminder(
+                &restored,
+                &session_dir,
+                true,
+                read_tool_name.as_deref(),
+            ));
+        }
+        if !fresh.is_empty() {
+            self.push_system_reminder(&format_workflow_completion_reminder(
+                &fresh,
+                &session_dir,
+                false,
+                read_tool_name.as_deref(),
+            ));
+        }
     }
     /// Persist a manifest of running background tasks to the session directory.
     ///
@@ -485,5 +801,48 @@ impl SessionActor {
             todos,
             backing_task_count,
         }
+    }
+}
+#[cfg(test)]
+mod workflow_reminder_tests {
+    use super::*;
+    use crate::session::workflow::tracker::{WorkflowRunState, WorkflowRunStatus};
+    fn failed_run(detail: String) -> WorkflowRunState {
+        WorkflowRunState {
+            run_id: "wf_1".to_owned(),
+            revision: 2,
+            name: "demo".to_owned(),
+            objective: "exercise formatter".to_owned(),
+            status: WorkflowRunStatus::Failed,
+            phases: Vec::new(),
+            current_phase: None,
+            agent_budget: None,
+            agents_used: 0,
+            token_leases: Vec::new(),
+            agent_usage_incomplete: false,
+            elapsed_ms_floor: 1_000,
+            pause_message: Some(detail),
+            history: Vec::new(),
+            journal_path: None,
+            result_summary: None,
+            agents: Vec::new(),
+        }
+    }
+    #[test]
+    fn completion_detail_is_normalized_and_utf8_safely_capped_with_marker() {
+        let detail = format!(
+            "first\n\tsecond   {} tail",
+            "😀".repeat(WORKFLOW_RESULT_SUMMARY_REMINDER_CAP)
+        );
+        let run = failed_run(detail);
+        let session_dir = tempfile::tempdir().unwrap();
+        let reminder = format_workflow_completion_reminder(&[run], session_dir.path(), false, None);
+        let rendered_detail = reminder.split_once("  Detail: ").unwrap().1.trim_end();
+        assert!(rendered_detail.starts_with("first second "));
+        assert!(rendered_detail.ends_with('…'));
+        assert!(rendered_detail.len() <= WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);
+        assert!(!rendered_detail.contains('\n'));
+        assert!(!rendered_detail.contains('\t'));
+        assert!(!rendered_detail.contains("  "));
     }
 }

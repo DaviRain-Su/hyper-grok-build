@@ -33,6 +33,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
+    "combine_queued_prompts",
     "simple_mode",
     "vim_mode",
     "remember_tool_approvals",
@@ -148,10 +149,7 @@ fn row_idx_for(state: &SettingsModalState, target: &str) -> usize {
     state
         .rows
         .iter()
-        .position(|r| {
-            matches!(r, RowEntry::Setting { key, .. }
-if *key == target)
-        })
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == target))
         .unwrap_or_else(|| panic!("setting `{target}` not present in modal rows"))
 }
 
@@ -215,6 +213,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("page_flip_on_send", Action::SetPageFlipOnSend(b)) => {
             assert_eq!(b, expected, "SetPageFlipOnSend value differs from expected")
+        }
+        ("combine_queued_prompts", Action::SetCombineQueuedPrompts(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetCombineQueuedPrompts value differs from expected"
+            )
         }
         ("simple_mode", Action::SetSimpleMode(b)) => {
             assert_eq!(b, expected, "SetSimpleMode value differs from expected")
@@ -384,6 +388,15 @@ fn space_on_page_flip_on_send_dispatches_typed_setter() {
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn space_on_combine_queued_prompts_dispatches_typed_setter() {
+    let mut s = make_state();
+    navigate_to(&mut s, "combine_queued_prompts");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    let default_on = UiConfig::default().combine_queued_prompts.unwrap_or(false);
+    assert_set_bool_action(outcome, "combine_queued_prompts", !default_on);
 }
 
 #[test]
@@ -633,6 +646,21 @@ fn mouse_click_on_page_flip_on_send_indicator_toggles_in_one_click() {
     );
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn mouse_click_on_combine_queued_prompts_indicator_toggles_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "combine_queued_prompts") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    let default_on = UiConfig::default().combine_queued_prompts.unwrap_or(false);
+    assert_set_bool_action(outcome, "combine_queued_prompts", !default_on);
 }
 
 /// Value-column click toggles `remember_tool_approvals` in one click.
@@ -1762,6 +1790,7 @@ fn registry_kind_membership_through_pr_14() {
             "show_timeline",
             "show_timestamps",
             "page_flip_on_send",
+            "combine_queued_prompts",
             "simple_mode",
             "vim_mode",
             "remember_tool_approvals",
@@ -1894,6 +1923,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_prompt_suggestions(true);
     xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
     xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
+    xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
     xai_grok_pager::appearance::cache::set_scroll_mode(
         xai_grok_pager::appearance::ScrollMode::Auto,
     );
@@ -1909,6 +1939,7 @@ fn defaults_round_trip_through_registry() {
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
+            "combine_queued_prompts" => SettingValue::Bool(false),
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
             "remember_tool_approvals" => SettingValue::Bool(false),
@@ -2007,6 +2038,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
+            | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))
             | SettingsKeyOutcome::Action(Action::SetMultilineMode(_))
             | SettingsKeyOutcome::Action(Action::SetVimMode(_))
@@ -2149,10 +2181,10 @@ fn d_key_emits_open_reset_confirm_for_every_setting() {
         // without key-release reporting, which tests run without). Skip settings
         // with no visible row; their reset path is covered by the dispatch
         // round-trip tests.
-        let has_row = s.rows.iter().any(|r| {
-            matches!(r, RowEntry::Setting { key, .. }
-if *key == meta.key)
-        });
+        let has_row = s
+            .rows
+            .iter()
+            .any(|r| matches!(r, RowEntry::Setting { key, .. } if *key == meta.key));
         if !has_row {
             continue;
         }
@@ -3034,8 +3066,7 @@ fn pr6_permission_mode_picker_enter_dispatches_set_permission_mode_commit() {
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
 
     assert!(
-        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. }
-if key == "permission_mode"),
+        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "permission_mode"),
         "Enter on permission_mode row must open the picker, got {:?}",
         s.mode(),
     );
@@ -3316,8 +3347,7 @@ fn pr11_picker_commit_for_default_dispatches_set_permission_mode_default() {
     navigate_to(&mut s, "permission_mode");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert!(
-        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. }
-if key == "permission_mode"),
+        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "permission_mode"),
         "Enter on permission_mode row must open the picker, got {:?}",
         s.mode(),
     );
@@ -3362,8 +3392,7 @@ fn pr11_picker_commit_for_ask_dispatches_set_permission_mode_ask() {
     navigate_to(&mut s, "permission_mode");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert!(
-        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. }
-if key == "permission_mode"),
+        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "permission_mode"),
         "Enter on permission_mode row must open the picker, got {:?}",
         s.mode(),
     );
@@ -4227,8 +4256,7 @@ fn pr14_default_model_picker_commits_resolved_model_id() {
         "Enter on DynamicEnum row must transition to PickingEnum, got {outcome:?}"
     );
     assert!(
-        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. }
-if key == "default_model"),
+        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "default_model"),
         "Enter must transition to PickingEnum for default_model"
     );
 
@@ -4343,8 +4371,7 @@ fn pr14_mouse_click_on_dynamic_enum_row_opens_picker() {
         "second click on DynamicEnum row must open picker, got {outcome:?}",
     );
     assert!(
-        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. }
-if key == "default_model"),
+        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "default_model"),
         "second click on DynamicEnum row must transition to PickingEnum, got {:?}",
         s.mode(),
     );
@@ -4388,8 +4415,7 @@ fn pr8_mouse_click_on_int_row_opens_editor() {
         "second click on Int row must be Changed, got {outcome:?}",
     );
     assert!(
-        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. }
-if key == "max_thoughts_width"),
+        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. } if key == "max_thoughts_width"),
         "second click on Int row must transition to EditingValue, got {:?}",
         s.mode(),
     );
@@ -6889,8 +6915,7 @@ fn scroll_speed_mouse_click_opens_editor() {
         "second click on focused Int row must enter the editor, got {outcome:?}"
     );
     assert!(
-        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. }
-if key == "scroll_speed"),
+        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. } if key == "scroll_speed"),
         "mode must be EditingValue(scroll_speed) after Enter-equivalent click, got {:?}",
         s.mode(),
     );
@@ -7080,8 +7105,7 @@ fn scroll_lines_mouse_click_opens_editor() {
         "second click on focused Int row must enter the editor, got {outcome:?}"
     );
     assert!(
-        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. }
-if key == "scroll_lines"),
+        matches!(s.mode(), SettingsModalMode::EditingValue { key, .. } if key == "scroll_lines"),
         "mode must be EditingValue(scroll_lines), got {:?}",
         s.mode(),
     );

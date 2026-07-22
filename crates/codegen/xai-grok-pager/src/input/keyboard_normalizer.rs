@@ -60,8 +60,14 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
     }
 
     /// Upgrade a [`KeyEvent`] when a modifier is held but absent from the
-    /// event. Returns `Some` only if a modifier was added.
+    /// event. Returns `Some` only if the delivered event changed.
     pub fn rescue_key(&self, key: KeyEvent) -> Option<KeyEvent> {
+        if key.code == KeyCode::Char('\u{0002}') && key.modifiers.is_empty() {
+            let mut out = key;
+            out.code = KeyCode::Char('b');
+            out.modifiers = KeyModifiers::CONTROL;
+            return Some(out);
+        }
         if !self.delivery.benefits_from_rescue() {
             return None;
         }
@@ -139,6 +145,18 @@ mod tests {
 
     fn bare(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn raw_ctrl_b_canonicalizes_without_modifier_probe() {
+        let native = ModifierDelivery::new_for_test(ModifierFate::Native, ModifierFate::Native);
+        let n = make(ModifierState::default(), native);
+        let raw = KeyEvent::new(KeyCode::Char('\u{0002}'), KeyModifiers::NONE);
+        let out = n.rescue_key(raw).expect("raw Ctrl+B must canonicalize");
+        assert_eq!(out.code, KeyCode::Char('b'));
+        assert_eq!(out.modifiers, KeyModifiers::CONTROL);
+        assert!(!crate::input::key::is_text_input_key(&out));
+        assert!(crate::key!('b', CONTROL).matches(&out));
     }
 
     #[test]

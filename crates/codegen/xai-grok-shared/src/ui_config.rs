@@ -160,6 +160,9 @@ pub struct UiConfig {
     /// only appears once a user toggles a tip.
     #[serde(default, skip_serializing_if = "ContextualHints::is_default")]
     pub contextual_hints: ContextualHints,
+    /// Combine consecutive queued follow-ups into one turn. `None` = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combine_queued_prompts: Option<bool>,
     /// Display-refresh probe + auto-cadence (`[ui.display_refresh]`). Per-field
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
@@ -273,6 +276,7 @@ impl Default for UiConfig {
             screen_mode: None,
             double_click_action: None,
             contextual_hints: ContextualHints::default(),
+            combine_queued_prompts: None,
             display_refresh: DisplayRefreshSettings::default(),
         }
     }

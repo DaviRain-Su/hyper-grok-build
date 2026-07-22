@@ -47,7 +47,10 @@ pub fn messages_api_events(text: &str, model: &str, stop_reason: &str) -> Vec<Ev
 /// (whitespace-collapsing; use [`chat_completion_events_exact`] when the
 /// receiver must reconstruct `text` byte-for-byte).
 pub fn chat_completion_events(text: &str, model: &str) -> Vec<Event> {
-    chat_completion_events_from_deltas(&space_prefixed_deltas(text.split_whitespace()), model)
+    scripted_to_axum(chat_completion_script_from_deltas(
+        &space_prefixed_deltas(text.split_whitespace()),
+        model,
+    ))
 }
 
 /// Like [`chat_completion_events`] but byte-exact: concatenating the deltas
@@ -55,7 +58,12 @@ pub fn chat_completion_events(text: &str, model: &str) -> Vec<Event> {
 /// Fenced code blocks (mermaid etc.) need their newlines to parse as a block,
 /// which `split_whitespace` would destroy.
 pub fn chat_completion_events_exact(text: &str, model: &str) -> Vec<Event> {
-    chat_completion_events_from_deltas(&chat_completion_deltas(text), model)
+    scripted_to_axum(chat_completion_script_exact(text, model))
+}
+
+/// Byte-exact Chat Completions events for a [`crate::ScriptedResponse`].
+pub fn chat_completion_script_exact(text: &str, model: &str) -> Vec<SseEvent> {
+    chat_completion_script_from_deltas(&chat_completion_deltas(text), model)
 }
 
 /// Split `text` into deltas that reconstruct it byte-for-byte: the first
@@ -80,7 +88,7 @@ fn space_prefixed_deltas<'a>(words: impl Iterator<Item = &'a str>) -> Vec<String
         .collect()
 }
 
-fn chat_completion_events_from_deltas(deltas: &[String], model: &str) -> Vec<Event> {
+fn chat_completion_script_from_deltas(deltas: &[String], model: &str) -> Vec<SseEvent> {
     let n = deltas.len();
     let mut events = Vec::new();
 
@@ -116,28 +124,25 @@ fn chat_completion_events_from_deltas(deltas: &[String], model: &str) -> Vec<Eve
                 }]
             })
         };
-        events.push(Event::default().data(chunk.to_string()));
+        events.push(SseEvent::data(chunk.to_string()));
     }
 
-    // Usage chunk
-    events.push(
-        Event::default().data(
-            json!({
-                "id": "chatcmpl-test",
-                "object": "chat.completion.chunk",
-                "created": 1234567890,
-                "model": model,
-                "choices": [],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": n,
-                    "total_tokens": 10 + n
-                }
-            })
-            .to_string(),
-        ),
-    );
-    events.push(Event::default().data("[DONE]"));
+    events.push(SseEvent::data(
+        json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": n,
+                "total_tokens": 10 + n
+            }
+        })
+        .to_string(),
+    ));
+    events.push(SseEvent::data("[DONE]"));
     events
 }
 
@@ -149,13 +154,18 @@ pub fn responses_api_events(text: &str, model: &str) -> Vec<Event> {
         .split_whitespace()
         .map(|word| format!("{word} "))
         .collect();
-    responses_api_events_from_deltas(&deltas, text, model)
+    scripted_to_axum(responses_api_script_from_deltas(&deltas, text, model))
 }
 
 /// Like [`responses_api_events`] but byte-exact: concatenating the deltas
 /// reproduces `text` byte-for-byte (newlines and whitespace runs preserved).
 pub fn responses_api_events_exact(text: &str, model: &str) -> Vec<Event> {
-    responses_api_events_from_deltas(&responses_api_deltas(text), text, model)
+    scripted_to_axum(responses_api_script_exact(text, model))
+}
+
+/// Byte-exact Responses API events for a [`crate::ScriptedResponse`].
+pub fn responses_api_script_exact(text: &str, model: &str) -> Vec<SseEvent> {
+    responses_api_script_from_deltas(&responses_api_deltas(text), text, model)
 }
 
 /// `split_inclusive(' ')` keeps each chunk's trailing space, so concatenating
@@ -166,85 +176,89 @@ fn responses_api_deltas(text: &str) -> Vec<String> {
 
 // `deltas` and `text` deliberately disagree in echo mode: collapsed deltas, uncollapsed
 // `response.completed` text — inherited load-bearing shell behavior, do not unify.
-fn responses_api_events_from_deltas(deltas: &[String], text: &str, model: &str) -> Vec<Event> {
+fn responses_api_script_from_deltas(deltas: &[String], text: &str, model: &str) -> Vec<SseEvent> {
     let mut events = Vec::new();
     let mut seq = 0;
 
-    // response.created
-    events.push(
-        Event::default().data(
-            json!({
-                "type": "response.created",
-                "sequence_number": seq,
-                "response": {
-                    "id": "resp_test",
-                    "object": "response",
-                    "created_at": 1234567890,
-                    "model": model,
-                    "status": "in_progress",
-                    "output": []
-                }
-            })
-            .to_string(),
-        ),
-    );
+    events.push(SseEvent::data(
+        json!({
+            "type": "response.created",
+            "sequence_number": seq,
+            "response": {
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": model,
+                "status": "in_progress",
+                "output": []
+            }
+        })
+        .to_string(),
+    ));
     seq += 1;
 
-    // Text deltas
     for chunk in deltas {
-        events.push(
-            Event::default().data(
-                json!({
-                    "type": "response.output_text.delta",
-                    "sequence_number": seq,
-                    "item_id": "item_test",
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": chunk
-                })
-                .to_string(),
-            ),
-        );
+        events.push(SseEvent::data(
+            json!({
+                "type": "response.output_text.delta",
+                "sequence_number": seq,
+                "item_id": "item_test",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": chunk
+            })
+            .to_string(),
+        ));
         seq += 1;
     }
 
-    // response.completed
-    events.push(
-        Event::default().data(
-            json!({
-                "type": "response.completed",
-                "sequence_number": seq,
-                "response": {
-                    "id": "resp_test",
-                    "object": "response",
-                    "created_at": 1234567890,
-                    "model": model,
+    events.push(SseEvent::data(
+        json!({
+            "type": "response.completed",
+            "sequence_number": seq,
+            "response": {
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": model,
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
                     "status": "completed",
-                    "output": [{
-                        "type": "message",
-                        "id": "msg_test",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [{
-                            "type": "output_text",
-                            "text": text,
-                            "annotations": []
-                        }]
-                    }],
-                    "usage": {
-                        "input_tokens": 10,
-                        "output_tokens": 5,
-                        "total_tokens": 15,
-                        "input_tokens_details": { "cached_tokens": 0 },
-                        "output_tokens_details": { "reasoning_tokens": 0 }
-                    }
+                    "content": [{
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": []
+                    }]
+                }],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                    "output_tokens_details": { "reasoning_tokens": 0 }
                 }
-            })
-            .to_string(),
-        ),
-    );
-    events.push(Event::default().data("[DONE]"));
+            }
+        })
+        .to_string(),
+    ));
+    events.push(SseEvent::data("[DONE]"));
     events
+}
+
+fn scripted_to_axum(events: Vec<SseEvent>) -> Vec<Event> {
+    events
+        .into_iter()
+        .map(|scripted| {
+            let event = Event::default().data(scripted.data);
+            match scripted.event {
+                Some(name) => event.event(name),
+                None => event,
+            }
+        })
+        .collect()
 }
 
 /// Generate Responses API SSE events for a reasoning-only completion: the

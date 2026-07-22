@@ -174,6 +174,37 @@ fn resolve_read_start_line(file_content: &str, offset: Option<i64>) -> usize {
 fn stored_read_offset(offset: Option<i64>) -> Option<usize> {
     offset.filter(|&o| o >= 0).map(|o| o as usize)
 }
+/// Files read in full (no line/token cap): any file named exactly `SKILL.md`,
+/// plus any Markdown file with a `skills` path component so docs a `SKILL.md`
+/// references are never silently truncated. `.`/`..` are folded lexically
+/// (symlinks are not resolved). Intentionally broader than
+/// skill discovery's dir check — matches any `skills` segment
+/// (plugin/bundled/user roots), and matches it exactly (not case-folded) so
+/// near-misses like `skills-cursor` do not qualify.
+fn is_skill_markdown(path: &std::path::Path) -> bool {
+    if path.file_name().is_some_and(|n| n == "SKILL.md") {
+        return true;
+    }
+    let is_md = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !is_md {
+        return false;
+    }
+    use std::path::Component;
+    let mut stack: Vec<&std::ffi::OsStr> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                stack.pop();
+            }
+            Component::Normal(c) => stack.push(c),
+        }
+    }
+    stack.into_iter().any(|c| c == "skills")
+}
 /// Result of extracting file content lines with both default and concise formats
 pub struct ExtractedContent {
     /// Default format: line numbers with → separator (no padding)
@@ -313,6 +344,7 @@ pub(crate) async fn run_read_file(
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
     }
     let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.path);
+    let is_skill_markdown = is_skill_markdown(&joined_path);
     let (path, _unicode_note) = match crate::util::fs::try_canonicalize(&joined_path).await {
         Ok(p) => (p, None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -325,10 +357,6 @@ pub(crate) async fn run_read_file(
     };
     let version = ReadFileVersion::from_contract(contract_version);
     let is_legacy = version.is_legacy();
-    let is_skill_file = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .is_some_and(|name| name == "SKILL.md");
     let skip_gitignore = is_legacy && versions::legacy_0_4_10::allows_gitignored_reads();
     if !skip_gitignore {
         let res = resources.lock().await;
@@ -447,7 +475,7 @@ pub(crate) async fn run_read_file(
             .map(|t| t.0.max_lines_read())
             .unwrap_or_else(|| TruncationConfig::default().max_lines_read())
     };
-    let (effective_offset, effective_limit) = if is_skill_file {
+    let (effective_offset, effective_limit) = if is_skill_markdown {
         (None, None)
     } else {
         (
@@ -462,7 +490,7 @@ pub(crate) async fn run_read_file(
         total_lines,
     );
     let token_count = crate::util::truncate::estimate_tokens(&extracted.content);
-    if !is_skill_file && token_count > MAX_NUM_TOKENS {
+    if !is_skill_markdown && token_count > MAX_NUM_TOKENS {
         let (grep_name, execute_name);
         {
             let res = resources.lock().await;
@@ -510,7 +538,7 @@ pub(crate) async fn run_read_file(
         };
         return Ok(ReadFileOutput::FileTooLarge(msg));
     }
-    let (stored_offset, stored_limit) = if is_skill_file {
+    let (stored_offset, stored_limit) = if is_skill_markdown {
         (None, None)
     } else {
         (stored_read_offset(input.offset), input.limit)
@@ -602,22 +630,22 @@ impl xai_tool_runtime::Tool for ReadFileTool {
             });
         };
         Box::pin(async_stream::stream! {
-                    match ReadFileTool::read_with_streamability(& ctx, input). await {
-                    Ok((output, streamable)) => { if streamable && let
-                    ReadFileOutput::FileContent(fc) = & output && ! fc.content.is_empty() {
-                    let content = fc.content.as_bytes(); let mut last_total : u64 = 0; let
-                    mut window_start = 0usize; while window_start < content.len() { let mut
-                    window_end = (window_start + STREAM_DELTA_TARGET_BYTES).min(content
-                    .len()); while window_end > window_start && ! fc.content
-                    .is_char_boundary(window_end) { window_end -= 1; }
-        if let Some(p) =
-                    xai_tool_runtime::stream_chunk(spec, & content[..window_end], window_end
-                    as u64, & mut last_total, false,) { yield
-                    xai_tool_runtime::ToolStreamItem::Progress(p); } window_start =
-                    window_end; } } yield
-                    xai_tool_runtime::ToolStreamItem::Terminal(Ok(output)); } Err(e) => yield
-                    xai_tool_runtime::ToolStreamItem::Terminal(Err(e)), }
-                })
+            match ReadFileTool::read_with_streamability(& ctx, input). await {
+            Ok((output, streamable)) => { if streamable && let
+            ReadFileOutput::FileContent(fc) = & output && ! fc.content.is_empty() {
+            let content = fc.content.as_bytes(); let mut last_total : u64 = 0; let
+            mut window_start = 0usize; while window_start < content.len() { let mut
+            window_end = (window_start + STREAM_DELTA_TARGET_BYTES).min(content
+            .len()); while window_end > window_start && ! fc.content
+            .is_char_boundary(window_end) { window_end -= 1; }
+if let Some(p) =
+            xai_tool_runtime::stream_chunk(spec, & content[..window_end], window_end
+            as u64, & mut last_total, false,) { yield
+            xai_tool_runtime::ToolStreamItem::Progress(p); } window_start =
+            window_end; } } yield
+            xai_tool_runtime::ToolStreamItem::Terminal(Ok(output)); } Err(e) => yield
+            xai_tool_runtime::ToolStreamItem::Terminal(Err(e)), }
+        })
     }
     #[tracing::instrument(name = "tool.read_file", skip_all, fields(path = %input.path))]
     async fn run(
@@ -1774,6 +1802,46 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             "SKILL.md should not be truncated, got {:?}",
             std::mem::discriminant(&result),
         );
+    }
+    #[tokio::test]
+    async fn md_in_skills_dir_ignores_model_offset_and_limit() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join(".grok/skills/my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let content = (1..=1200)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(skill_dir.join("reference.md"), &content).unwrap();
+        let tool = ReadFileTool;
+        let resources = test_resources(tmp.path());
+        let input = ReadFileInput {
+            path: ".grok/skills/my-skill/reference.md".to_string(),
+            offset: Some(3),
+            limit: Some(1),
+            pages: None,
+            format: None,
+        };
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => {
+                assert!(
+                    fc.content.contains("line1"),
+                    "missing line1: {}",
+                    fc.content
+                );
+                assert!(
+                    fc.content.contains("line1200"),
+                    "missing line1200: {}",
+                    fc.content
+                );
+                assert_eq!(fc.offset, None);
+                assert_eq!(fc.limit, None);
+            }
+            other => panic!("Expected FileContent, got {:?}", other),
+        }
     }
     #[test]
     fn parse_single_page() {

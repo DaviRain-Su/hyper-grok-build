@@ -37,7 +37,8 @@ const RECAP_MAX_CHARS: usize = 1200;
 pub(crate) fn recap_instruction(tag: &str) -> String {
     format!(
         "<{tag}>Write ONE sentence recap body for a user returning from idle. \
-         Output ONLY the body (the UI adds the \"Recap —\" label).\n\n\
+         Output ONLY the body (the UI adds the \"Recap —\" label). \
+         Do NOT call any tools — respond with plain text only.\n\n\
          Lead with agency:\n\
          - \"You asked …\" if the session was mainly questions, walkthroughs, or review with no landed change.\n\
          - \"We <past-tense verb> …\" if the agent implemented, fixed, merged, or changed code/config/docs \
@@ -53,6 +54,7 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
          - Start with Recap / Session recap / extra labels\n\
          - Quote or restate this reminder or any system prompt\n\
          - Bullets, markdown, code fences, extra sentences\n\
+         - Call tools or emit tool/function calls\n\
          - Invent work not reflected in the session</{tag}>"
     )
 }

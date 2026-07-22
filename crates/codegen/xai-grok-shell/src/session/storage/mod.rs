@@ -16,6 +16,8 @@ use xai_grok_sampling_types::ReasoningEffort;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
+#[allow(dead_code)] // Inert relocation storage; orchestration lands in later stack layers.
+pub(crate) mod relocation;
 pub mod search;
 pub mod search_fts;
 pub mod search_remote_sync;
@@ -44,6 +46,36 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
             Err(e)
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    file.sync_all()?;
+    fullfsync_raw(file.as_raw_fd())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn fullfsync_raw(fd: std::os::fd::RawFd) -> io::Result<()> {
+    // macOS fsync may stop at volatile drive caches; F_FULLFSYNC requests stable media.
+    if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), windows))]
+pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
+    file.sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable file sync is unsupported on this platform",
+    ))
 }
 
 /// Async sibling of [`write_bytes_atomic`].
@@ -227,6 +259,9 @@ pub(crate) mod chat_rebuild {
         }
 
         fn on_user_chunk(&mut self, chunk: &acp::ContentChunk) -> Vec<ConversationItem> {
+            if super::is_host_turn_chunk(chunk) {
+                return self.flush_host_turn_boundary();
+            }
             let mut out = Vec::new();
 
             if !self.in_user_turn {
@@ -254,6 +289,9 @@ pub(crate) mod chat_rebuild {
         }
 
         fn on_agent_chunk(&mut self, chunk: &acp::ContentChunk) -> Vec<ConversationItem> {
+            if super::is_host_turn_chunk(chunk) {
+                return self.flush_host_turn_boundary();
+            }
             let mut out = Vec::new();
 
             if self.in_user_turn {
@@ -266,6 +304,16 @@ pub(crate) mod chat_rebuild {
                 self.has_agent_content = true;
             }
 
+            out
+        }
+
+        fn flush_host_turn_boundary(&mut self) -> Vec<ConversationItem> {
+            let mut out = Vec::new();
+            if self.in_user_turn {
+                out.extend(self.flush_user());
+                self.in_user_turn = false;
+            }
+            out.extend(self.flush_agent());
             out
         }
 
@@ -656,6 +704,7 @@ pub struct PersistedData {
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
 /// Persisted data WITHOUT updates - for memory-efficient session loading
@@ -673,6 +722,7 @@ pub struct PersistedDataLight {
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     /// Persisted goal mode orchestration state (None for sessions without goal mode)
     pub goal_mode_state: Option<crate::session::goal_tracker::GoalOrchestration>,
+    pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
 }
 
 /// Result of copying session data
@@ -797,6 +847,27 @@ fn acp_user_chunk_prompt_index(update: &SessionUpdate) -> Option<usize> {
         .map(|v| v as usize)
 }
 
+pub(crate) const HOST_TURN_META_KEY: &str = "hostTurn";
+
+pub(crate) fn is_host_turn_chunk(chunk: &acp::ContentChunk) -> bool {
+    chunk
+        .meta
+        .as_ref()
+        .and_then(|m| m.get(HOST_TURN_META_KEY))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
+fn is_host_turn_update(update: &SessionUpdate) -> bool {
+    let SessionUpdate::Acp(n) = update else {
+        return false;
+    };
+    let acp::SessionUpdate::UserMessageChunk(chunk) = &n.update else {
+        return false;
+    };
+    is_host_turn_chunk(chunk)
+}
+
 fn is_acp_user_message_chunk(update: &SessionUpdate) -> bool {
     matches!(
         update,
@@ -868,7 +939,7 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
     let mut tracker = UserRunTurnTracker::new();
 
     for (i, update) in updates.iter().enumerate() {
-        if is_acp_user_message_chunk(update) {
+        if is_acp_user_message_chunk(update) && !is_host_turn_update(update) {
             if tracker.on_user_chunk(acp_user_chunk_prompt_index(update)) {
                 user_turn_count += 1;
                 if user_turn_count > target_prompt_index + 1 {
@@ -887,6 +958,15 @@ pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_inde
 pub enum AppendUpdateError {
     NotCommitted(io::Error),
     Committed(io::Error),
+}
+
+#[derive(Debug)]
+pub enum AppendCwdSwitchError {
+    NotCommitted(io::Error),
+    Committed {
+        acknowledgement: xai_chat_state::StrictAppendAck,
+        source: io::Error,
+    },
 }
 
 impl AppendUpdateError {
@@ -956,8 +1036,20 @@ pub trait StorageAdapter: Send + Sync {
         )))
     }
 
-    /// Append a chat message and increment counter
+    /// Append a chat message and increment counter.
     async fn append_chat_message(&self, info: &Info, message: &ConversationItem) -> io::Result<()>;
+
+    /// Append one working-directory switch generation exactly once.
+    async fn append_cwd_switch_commit_aware(
+        &self,
+        _info: &Info,
+        _message: &ConversationItem,
+    ) -> Result<xai_chat_state::StrictAppendAck, AppendCwdSwitchError> {
+        Err(AppendCwdSwitchError::NotCommitted(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "working-directory switch append is unsupported",
+        )))
+    }
 
     /// Update the current model in summary (delegates to
     /// `update_current_model_and_agent` with `agent_name = None`).
@@ -1024,6 +1116,16 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
         state: &crate::session::goal_tracker::GoalOrchestration,
     ) -> io::Result<()>;
+
+    async fn delete_goal_mode_state(&self, info: &Info) -> io::Result<()>;
+
+    async fn write_workflow_run_state(
+        &self,
+        info: &Info,
+        manifest: &crate::session::workflow::store::WorkflowRunManifest,
+    ) -> io::Result<()>;
+
+    async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()>;
 
     /// Load all persisted data for a session
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData>;
@@ -1198,6 +1300,8 @@ pub(crate) struct RawUpdatePeek<'a> {
 pub(crate) struct RawChunkMetaPeek {
     #[serde(default, rename = "promptIndex")]
     pub prompt_index: Option<u64>,
+    #[serde(default, rename = "hostTurn")]
+    pub host_turn: Option<bool>,
 }
 
 /// Filter rewind dead branches from raw JSONL lines.
@@ -1242,7 +1346,13 @@ pub(crate) fn filter_rewind_lines<'a>(lines: Vec<&'a str>) -> Vec<&'a str> {
             continue;
         }
 
+        let is_host_turn = peek
+            .as_ref()
+            .and_then(|u| u.meta.as_ref())
+            .and_then(|m| m.host_turn)
+            .unwrap_or(false);
         let is_user_chunk = !is_xai
+            && !is_host_turn
             && tag
                 .as_ref()
                 .map(|(s, _)| *s == *USER_MESSAGE_CHUNK)
@@ -1305,7 +1415,7 @@ pub fn filter_rewind_updates(updates: Vec<SessionUpdate>) -> Vec<SessionUpdate> 
             continue;
         }
 
-        if is_acp_user_message_chunk(&update) {
+        if is_acp_user_message_chunk(&update) && !is_host_turn_update(&update) {
             if tracker.on_user_chunk(acp_user_chunk_prompt_index(&update)) {
                 prompt_starts.push(result.len());
             }
@@ -2134,6 +2244,14 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
                 .meta
                 .as_ref()
                 .is_some_and(|m| m.bash_command.is_some())
+            {
+                return PromptExtractEvent::NotUserMessage;
+            }
+            if peek
+                .update
+                .meta
+                .as_ref()
+                .is_some_and(|m| m.host_turn == Some(true))
             {
                 return PromptExtractEvent::NotUserMessage;
             }

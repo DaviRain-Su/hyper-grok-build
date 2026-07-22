@@ -3,8 +3,10 @@
 //! Wraps an `mpsc::UnboundedSender<PersistenceMsg>` and translates
 //! `ChatPersistence` trait calls into the appropriate `PersistenceMsg` variants.
 
-use tokio::sync::mpsc;
-use xai_chat_state::ChatPersistence;
+use std::io;
+
+use tokio::sync::{mpsc, oneshot};
+use xai_chat_state::{ChatPersistence, StrictAppendAck, StrictAppendError};
 use xai_grok_sampling_types::ConversationItem;
 
 use super::persistence::PersistenceMsg;
@@ -13,6 +15,7 @@ use super::persistence::PersistenceMsg;
 ///
 /// Translates:
 /// - `persist_message` → `PersistenceMsg::Chat`
+/// - `persist_working_directory_switch_and_ack` → `PersistenceMsg::AppendCwdSwitchAndAck`
 /// - `replace_history` → `PersistenceMsg::ReplaceChatHistory`
 /// - `flush` → `PersistenceMsg::Flush`
 pub struct ChannelChatPersistence {
@@ -29,6 +32,29 @@ impl ChannelChatPersistence {
 impl ChatPersistence for ChannelChatPersistence {
     fn persist_message(&mut self, item: &ConversationItem) {
         let _ = self.tx.send(PersistenceMsg::Chat(item.clone()));
+    }
+
+    fn persist_working_directory_switch_and_ack(
+        &mut self,
+        item: &ConversationItem,
+    ) -> oneshot::Receiver<Result<StrictAppendAck, StrictAppendError>> {
+        let (reply, receiver) = oneshot::channel();
+        if self
+            .tx
+            .send(PersistenceMsg::AppendCwdSwitchAndAck {
+                item: item.clone(),
+                respond_to: reply,
+            })
+            .is_err()
+        {
+            let (reply, receiver) = oneshot::channel();
+            let _ = reply.send(Err(StrictAppendError::Indeterminate(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "session persistence actor unavailable; retry by generation",
+            ))));
+            return receiver;
+        }
+        receiver
     }
 
     fn replace_history(&mut self, items: &[ConversationItem]) {
@@ -54,6 +80,31 @@ mod tests {
         persistence.persist_message(&item);
         let msg = rx.recv().await.unwrap();
         assert!(matches!(msg, PersistenceMsg::Chat(_)));
+    }
+
+    #[tokio::test]
+    async fn channel_persistence_sends_acknowledged_chat_append() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut persistence = ChannelChatPersistence::new(tx);
+        let item = ConversationItem::working_directory_switch("moved", 1);
+        let ack = persistence.persist_working_directory_switch_and_ack(&item);
+        let msg = rx.recv().await.unwrap();
+        let PersistenceMsg::AppendCwdSwitchAndAck {
+            item: persisted,
+            respond_to,
+        } = msg
+        else {
+            panic!("expected acknowledged chat append");
+        };
+        assert_eq!(
+            serde_json::to_vec(&persisted).unwrap(),
+            serde_json::to_vec(&item).unwrap()
+        );
+        respond_to.send(Ok(StrictAppendAck::Appended)).unwrap();
+        assert!(matches!(
+            ack.await.unwrap().unwrap(),
+            StrictAppendAck::Appended
+        ));
     }
 
     #[tokio::test]

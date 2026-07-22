@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use xai_sqlite_journal::JournalMode;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorktreeKind {
     Session,
@@ -38,14 +38,33 @@ impl WorktreeKind {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
+        Self::from_str_exact(s).unwrap_or(Self::Manual)
+    }
+
+    /// Exact known kind key. Unknown → None (unlike [`Self::from_str_lossy`]).
+    pub fn from_str_exact(s: &str) -> Option<Self> {
         match s {
-            "session" => Self::Session,
-            "ab" => Self::Ab,
-            "pool" => Self::Pool,
-            "fork" => Self::Fork,
-            "manual" => Self::Manual,
-            "subagent" => Self::Subagent,
-            _ => Self::Manual,
+            "session" => Some(Self::Session),
+            "ab" => Some(Self::Ab),
+            "pool" => Some(Self::Pool),
+            "fork" => Some(Self::Fork),
+            "manual" => Some(Self::Manual),
+            "subagent" => Some(Self::Subagent),
+            _ => None,
+        }
+    }
+
+    /// Config key parse: trim + case-insensitive; unknown → None.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        let t = s.trim();
+        if let Some(k) = Self::from_str_exact(t) {
+            return Some(k);
+        }
+        // Only allocate lowercase when needed.
+        if t.bytes().any(|b| b.is_ascii_uppercase()) {
+            Self::from_str_exact(&t.to_ascii_lowercase())
+        } else {
+            None
         }
     }
 }
@@ -305,6 +324,35 @@ impl WorktreeDb {
     /// Returns the number of records marked.
     pub fn sweep_dead(&self) -> Result<u64> {
         queries::sweep_dead(&self.conn)
+    }
+
+    /// Read a value from the `meta` table. `Ok(None)` when the key is absent.
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        match self
+            .conn
+            .query_row(schema::GET_META, [key], |row| row.get(0))
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("failed to read meta key {key}")),
+        }
+    }
+
+    /// Insert or replace a `meta` table value.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(schema::UPSERT_META, rusqlite::params![key, value])
+            .with_context(|| format!("failed to write meta key {key}"))?;
+        Ok(())
+    }
+
+    /// Test-only: run raw SQL (e.g. drop tables to force fail-closed paths).
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) -> Result<()> {
+        self.conn
+            .execute_batch(sql)
+            .context("execute_batch_for_test failed")?;
+        Ok(())
     }
 }
 

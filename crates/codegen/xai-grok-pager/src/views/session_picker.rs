@@ -551,6 +551,7 @@ pub(crate) fn session_picker_worktree_selection(
 }
 
 /// Rebuild backing-index expansion after a session query changes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_session_picker_query_expansion(
     entries: Option<&[SessionPickerEntry]>,
     content_results: Option<&[xai_grok_shell::extensions::session_search::SearchSessionHit]>,

@@ -22,7 +22,7 @@ pub(crate) fn grok_home() -> PathBuf {
 /// or seed RNGs.
 ///
 /// These are individual files (use `allow_file`, not `allow_path`).
-/// `/dev/pts` is a directory (PTY slaves on Linux) so it uses `allow_path`.
+/// Directory nodes under `/dev` belong in [`DEVICE_DIRS`].
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) const DEVICE_FILES: &[&str] = &[
     "/dev/null",    // output sink — used by virtually every CLI tool
@@ -31,13 +31,13 @@ pub(crate) const DEVICE_FILES: &[&str] = &[
     "/dev/urandom", // entropy — used by crypto/TLS
     "/dev/tty",     // controlling terminal — used by git, ssh, gpg
     "/dev/ptmx",    // PTY allocation — used by terminal spawning
-    "/dev/fd",      // file descriptor access (symlink to /proc/self/fd on Linux)
 ];
 
-/// Device directories that need write access.
+/// Device directories that need write access (use `allow_path`, not `allow_file`).
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) const DEVICE_DIRS: &[&str] = &[
     "/dev/pts", // PTY slaves (Linux)
+    "/dev/fd",  // fd table (symlink to /proc/self/fd on Linux; a directory)
 ];
 
 // ── Temporary directories ───────────────────────────────────────────────────

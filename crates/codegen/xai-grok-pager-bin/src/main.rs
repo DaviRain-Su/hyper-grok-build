@@ -1612,7 +1612,46 @@ fn install_heap_profile_hooks() {
         prof_available: jemalloc_prof_available,
     });
 }
+fn version_text(channel_label: &str) -> String {
+    format!(
+        "grok {}\n",
+        xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
+    )
+}
+fn write_version(writer: &mut impl std::io::Write, channel_label: &str) -> std::io::Result<()> {
+    writer.write_all(version_text(channel_label).as_bytes())
+}
+fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
+    if !args.version {
+        return false;
+    }
+    if let Err(error) = write_version(
+        &mut std::io::stdout().lock(),
+        xai_grok_update::channel_label(),
+    ) {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+    true
+}
+fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::Doctor(doctor_args)) = &args.command else {
+        return false;
+    };
+    if let Err(error) = xai_grok_pager::doctor_cmd::run(doctor_args.clone()) {
+        eprintln!("Error: {error:#}");
+        std::process::exit(1);
+    }
+    true
+}
 fn main() {
+    if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
+        std::process::exit(code);
+    }
+    let args = PagerArgs::parse_cli();
+    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+        return;
+    }
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
     xai_grok_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);
@@ -1623,9 +1662,6 @@ fn main() {
     }
     #[cfg(all(feature = "jemalloc", unix))]
     install_heap_profile_hooks();
-    if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
-        std::process::exit(code);
-    }
     xai_grok_pager::memory_trace::start(
         xai_grok_shell::util::grok_home::grok_home().join("memtrace"),
     );
@@ -1677,7 +1713,7 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|e| panic!("failed to start tokio runtime: {e}"));
-    let result = run_and_shutdown(runtime, async_main(), RUNTIME_SHUTDOWN_GRACE);
+    let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
     xai_grok_telemetry::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
@@ -1686,9 +1722,9 @@ fn main() {
         std::process::exit(1);
     }
 }
-async fn async_main() -> Result<()> {
+async fn async_main(args: PagerArgs) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut args = PagerArgs::parse_and_apply_cwd()?;
+    let mut args = args.apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROK_COMPACTION_MODE", mode) };
     }
@@ -1772,13 +1808,10 @@ async fn async_main() -> Result<()> {
                     );
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
-                    println!(
-                        "grok {}",
-                        xai_grok_version::display_version_with_commit(
-                            env!("VERSION_WITH_COMMIT"),
-                            xai_grok_update::channel_label(),
-                        )
-                    );
+                    write_version(
+                        &mut std::io::stdout().lock(),
+                        xai_grok_update::channel_label(),
+                    )?;
                 }
                 return Ok(());
             }
@@ -1807,6 +1840,9 @@ async fn async_main() -> Result<()> {
             }
             Command::Codex(_) => {
                 unreachable!("grok codex is rewritten into pager args before dispatch");
+            }
+            Command::Doctor(_) => {
+                unreachable!("doctor was consumed before runtime startup");
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
@@ -1993,16 +2029,10 @@ async fn async_main() -> Result<()> {
             .as_deref()
             .map(xai_grok_pager::headless::parse_json_schema)
             .transpose()?;
-        if json_schema.is_some() {
-            if args.output_format == xai_grok_pager::headless::OutputFormat::Plain {
-                args.output_format = xai_grok_pager::headless::OutputFormat::Json;
-            }
-            if args.self_verify {
-                anyhow::bail!(
-                    "--json-schema and --self-verify cannot be used together: \
-                     verification output would corrupt the structured response"
-                );
-            }
+        if json_schema.is_some()
+            && args.output_format == xai_grok_pager::headless::OutputFormat::Plain
+        {
+            args.output_format = xai_grok_pager::headless::OutputFormat::Json;
         }
         return xai_grok_pager::headless::run_single_turn(
             prompt,
@@ -2032,8 +2062,6 @@ async fn async_main() -> Result<()> {
                 max_turns: args.max_turns,
                 permission_mode_flag: args.permission_mode_flag.clone(),
                 reasoning_effort: args.reasoning_effort.clone(),
-                self_verify: args.self_verify,
-                best_of_n: args.best_of_n,
                 wait_for_background: !args.no_wait_for_background,
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
@@ -2333,6 +2361,36 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn version_output_writer_preserves_channel_aware_contract() {
+        for (label, expected_suffix) in [
+            (" [alpha]", " [alpha]\n"),
+            (" [stable]", " [stable]\n"),
+            ("", ")\n"),
+        ] {
+            let mut output = Vec::new();
+            write_version(&mut output, label).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.starts_with("grok "));
+            assert!(output.contains(env!("VERSION_WITH_COMMIT")));
+            assert!(output.ends_with(expected_suffix), "{output:?}");
+        }
+    }
+    #[test]
+    fn version_flags_and_doctor_are_distinct_early_intents() {
+        let version = PagerArgs::try_parse_from(["grok", "--version"]).unwrap();
+        assert!(version.version);
+        assert!(version.command.is_none());
+        let short = PagerArgs::try_parse_from(["grok", "-v"]).unwrap();
+        assert!(short.version);
+        assert!(short.command.is_none());
+        let subcommand = PagerArgs::try_parse_from(["grok", "version"]).unwrap();
+        assert!(!subcommand.version);
+        assert!(matches!(
+            subcommand.command,
+            Some(Command::Version { json: false })
+        ));
+    }
     #[cfg(all(feature = "jemalloc", unix))]
     struct TempHeapDump(std::path::PathBuf);
     #[cfg(all(feature = "jemalloc", unix))]

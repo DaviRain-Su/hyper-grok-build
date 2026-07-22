@@ -3851,6 +3851,9 @@ pub async fn connect_local_workspace(
             .await;
         });
     }
+    tokio::task::spawn_blocking(|| {
+        crate::worktree::run_auto_gc_best_effort();
+    });
     let ws_handle = WorkspaceHandle::new_with_data_collection(
         ws_config,
         workspace_home,

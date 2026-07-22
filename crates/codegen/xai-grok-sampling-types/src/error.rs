@@ -214,14 +214,14 @@ impl SamplingError {
     /// a new session.
     pub fn is_encrypted_content_error(&self) -> bool {
         matches!(
-                    self,
-                    SamplingError::Api {
-                        status: StatusCode::BAD_REQUEST,
-                        message,
-                        ..
-                    }
-        if message.contains("encrypted_content")
-                )
+            self,
+            SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message,
+                ..
+            }
+if message.contains("encrypted_content")
+        )
     }
 
     /// The API rejected the request because an inline image could not be
@@ -229,14 +229,14 @@ impl SamplingError {
     /// Exact-case match — consistent with `is_encrypted_content_error`.
     pub fn is_image_processing_error(&self) -> bool {
         matches!(
-                    self,
-                    SamplingError::Api {
-                        status,
-                        message,
-                        ..
-                    }
-        if matches!(status.as_u16(), 400 | 500) && message.contains("Could not process image")
-                )
+            self,
+            SamplingError::Api {
+                status,
+                message,
+                ..
+            }
+if matches!(status.as_u16(), 400 | 500) && message.contains("Could not process image")
+        )
     }
 
     pub fn is_retryable(&self) -> bool {

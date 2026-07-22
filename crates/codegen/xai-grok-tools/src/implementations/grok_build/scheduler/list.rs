@@ -111,14 +111,15 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
                 )
             })?;
 
-        let tasks = reply_rx.await.map_err(|_| {
+        let snapshot = reply_rx.await.map_err(|_| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("scheduler_list").expect("valid"),
                 "Scheduler actor dropped reply",
             )
         })?;
 
-        let summaries = tasks
+        let summaries = snapshot
+            .tasks
             .into_iter()
             .map(|t| {
                 let next_fire = t.next_fire_at().to_rfc3339();

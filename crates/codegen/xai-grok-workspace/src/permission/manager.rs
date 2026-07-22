@@ -7,11 +7,15 @@ use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
-use crate::permission::auto_mode::{EnvRisk, script_env_risk};
+use crate::permission::auto_mode::{EnvRisk, KUBECTL_UNSAFE_FLAGS, script_env_risk};
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
-use crate::permission::policy::{CompiledPolicy, shell_dash_c_script};
+use crate::permission::exec_risk::{
+    AmbientScanPlan, ambient_exec_risk_from_plan, ambient_scan_plan_from_segments,
+    script_may_invoke_git, segment_exec_facts,
+};
+use crate::permission::policy::{CompiledPolicy, ShellWord, shell_dash_c_script};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome};
 use crate::permission::shell_access::{
     combine_decisions, command_write_paths_in_tree, edit_target_requires_prompt, is_safe_write_sink,
@@ -174,6 +178,110 @@ fn rg_has_pre_flag(words: &[String]) -> bool {
         .any(|w| w == "--pre" || w.starts_with("--pre="))
 }
 
+/// True when `words` is a `kubectl` invocation that selects a caller-controlled
+/// kubeconfig, endpoint, auth, or identity.
+///
+/// A kubeconfig `users[].user.exec` credential plugin runs an arbitrary local
+/// process, so a read verb like `get`/`logs`/`describe` is not intrinsically
+/// side-effect-free once any of these flags point kubectl at attacker-supplied
+/// config/auth. Such invocations must not ride the safe-command auto-allow
+/// (nor a broader whitelist *prefix* grant — see `evaluate_bash`). Flag list is
+/// [`KUBECTL_UNSAFE_FLAGS`] so the two classifiers cannot drift.
+fn kubectl_has_unsafe_flag(words: &[String]) -> bool {
+    if words.first().map(String::as_str) != Some("kubectl") {
+        return false;
+    }
+    words.iter().skip(1).any(|w| {
+        let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+        KUBECTL_UNSAFE_FLAGS.contains(&name)
+    })
+}
+
+/// True when `words` is a `ps` that dumps process environments.
+///
+/// Dashless `e`/`E` dumps env on BSD/macOS/Linux (`ps e`, `ps auxe`).
+/// Uppercase `E` dumps env on macOS (`-E`); we prompt on any `E` on all
+/// platforms because the runtime OS is unknown (fail-safe) — lowercase
+/// `-e` stays select-all. Linux procps reinterprets dash clusters that
+/// contain lowercase BSD selectors `a`/`x` as BSD mode, so `-auxe`/`-axe`
+/// dump env; plain UNIX `-e`/`-ef`/`-Ae` stay select-all (the `a`/`x`
+/// match is deliberately case-sensitive so `-Ae` is not treated as BSD).
+/// Value operands of format/select flags (`-o etime`, `o command`,
+/// `-eo pid,cmd`) are skipped so they are not mistaken for option clusters.
+fn ps_dumps_environment(words: &[String]) -> bool {
+    if words.first().map(String::as_str) != Some("ps") {
+        return false;
+    }
+    let mut skip_next = false;
+    for w in words.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let s = w.as_str();
+        if s.starts_with("--format=") || s.starts_with("--sort=") {
+            continue;
+        }
+        // Only flags whose VALUES can contain e/E need listing; an omission
+        // merely over-prompts (never leaks). Skipping only ever swallows a
+        // ps operand.
+        if matches!(
+            s,
+            "-o" | "-O"
+                | "--format"
+                | "--sort"
+                | "-p"
+                | "-q"
+                | "-t"
+                | "-u"
+                | "-U"
+                | "-g"
+                | "-G"
+                | "-C"
+                | "-s"
+                | "--pid"
+                | "--ppid"
+                | "--sid"
+                | "--tty"
+                | "--user"
+                | "--group"
+                | "--cols"
+                | "--columns"
+                | "--width"
+                // BSD dashless format selectors take a following format list.
+                | "o"
+                | "O"
+        ) {
+            skip_next = true;
+            continue;
+        }
+        // Attached short form: `-oetime`, `-Opid`, …
+        if s.starts_with("-o") || s.starts_with("-O") {
+            continue;
+        }
+
+        // Env-dump option letters (checked before trailing-o skip so
+        // `-Eo`/`-axeo` still force a prompt).
+        let has_upper_e = s.contains('E');
+        let has_lower_e = s.contains('e');
+        let dashless = !s.starts_with('-');
+        // Lowercase a/x only: `-Ae` is UNIX select-all, `-AE` has E → env.
+        let bsd_selector_cluster =
+            s.starts_with('-') && !s.starts_with("--") && s.contains(['a', 'x']);
+        if has_upper_e || (has_lower_e && (dashless || bsd_selector_cluster)) {
+            return true;
+        }
+
+        // Short cluster ending in arg-taking `o`/`O` (`-eo etime`, `-axo cmd`):
+        // next word is the format list, not an option cluster.
+        if s.starts_with('-') && !s.starts_with("--") && s.ends_with(['o', 'O']) {
+            skip_next = true;
+            continue;
+        }
+    }
+    false
+}
+
 /// Check whether the command words (already parsed by tree-sitter) match one of
 /// the known safe command prefixes.
 fn is_safe_command_words(words: &[String]) -> bool {
@@ -181,6 +289,12 @@ fn is_safe_command_words(words: &[String]) -> bool {
         return false;
     }
     if rg_has_pre_flag(words) {
+        return false;
+    }
+    if kubectl_has_unsafe_flag(words) {
+        return false;
+    }
+    if ps_dumps_environment(words) {
         return false;
     }
     let joined = words.join(" ");
@@ -204,7 +318,6 @@ fn is_safe_command_words_str(cmd: &str) -> bool {
         || matches_command_prefix(cmd, "git ls-files")
         || matches_command_prefix(cmd, "git show")
         || matches_command_prefix(cmd, "git rev-parse")
-        || matches_command_prefix(cmd, "cargo check")
         || matches_command_prefix(cmd, "whoami")
         || matches_command_prefix(cmd, "hostname")
         || matches_command_prefix(cmd, "uptime")
@@ -253,8 +366,6 @@ const ALWAYS_SAFE_COMMANDS: &[&str] = &[
     // Search commands
     "grep",
     "rg",
-    // Build/check commands (read-only)
-    "cargo check",
     // Kubernetes read-only commands
     "kubectl get",
     "kubectl logs",
@@ -274,6 +385,12 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
         return false;
     }
     if rg_has_pre_flag(words) {
+        return false;
+    }
+    if kubectl_has_unsafe_flag(words) {
+        return false;
+    }
+    if ps_dumps_environment(words) {
         return false;
     }
 
@@ -380,6 +497,15 @@ struct BashEvaluation {
     exact_grant: bool,
     all_segments_granted: bool,
     has_opaque_shell: bool,
+    exec_risk: bool,
+    /// Raw segment word lists for ambient cwd tracking (git present, flags clean).
+    ambient_segments: Option<Vec<Vec<String>>>,
+}
+
+fn unparseable_exec_risk(cmd: &str) -> bool {
+    // WHY: word-only decomposition failed; ambient git never ran. Fail closed
+    // when the script may still invoke git so sandbox/Auto cannot auto-allow.
+    script_may_invoke_git(cmd)
 }
 
 /// Parse and classify one Bash request once, keeping ordinary segment outcome
@@ -394,6 +520,8 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             exact_grant,
             all_segments_granted: false,
             has_opaque_shell: false,
+            exec_risk: unparseable_exec_risk(cmd),
+            ambient_segments: None,
         };
     };
     let writes_real_file = command_write_paths_in_tree(tree.root_node(), cmd)
@@ -413,6 +541,8 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             exact_grant,
             all_segments_granted: false,
             has_opaque_shell: false,
+            exec_risk: unparseable_exec_risk(cmd),
+            ambient_segments: None,
         };
     };
     let mut needs_prompt: Vec<String> = Vec::new();
@@ -420,17 +550,33 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
     let mut via_session_grant = false;
     let mut all_segments_granted = true;
     let mut has_opaque_shell = false;
+    let mut exec_risk = false;
+    let mut has_git_command = false;
+    let mut ambient_raw: Vec<Vec<String>> = Vec::new();
     for parsed in segments {
         let raw_words = parsed.words();
+        ambient_raw.push(raw_words.to_vec());
         // Peel wrapper commands like `timeout 30 …`, `env FOO=1 …`, `nice -n 5 …`
         // so we classify the *inner* program. Without this, a single segment
         // such as `timeout 30 rm -rf /tmp/foo` would be treated as a benign
         // `timeout` invocation and silently auto-allowed.
         let words = unwrap_wrappers(raw_words);
-        if shell_dash_c_script(words).is_some()
+        // Opaque-shell floor (auto-mode): only actual/potential string reinterpretation
+        // (`bash|sh|… -c`, dynamic-head -c, eval). Unrecognized long options without
+        // `-c` (`bash --version`) stay non-opaque so the classifier may still run.
+        let shell_words: Vec<ShellWord<'_>> = words.iter().map(ShellWord::from).collect();
+        if shell_dash_c_script(&shell_words).is_potential_inline()
             || words.first().and_then(|w| w.rsplit(['/', '\\']).next()) == Some("eval")
         {
             has_opaque_shell = true;
+        }
+        // Raw words: interleaved normalize lives in segment_exec_facts.
+        let facts = segment_exec_facts(raw_words);
+        if facts.exec_risk {
+            exec_risk = true;
+        }
+        if facts.has_git {
+            has_git_command = true;
         }
         if is_setup_command(words) {
             continue;
@@ -452,6 +598,8 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
                 exact_grant,
                 all_segments_granted,
                 has_opaque_shell,
+                exec_risk,
+                ambient_segments: None,
             };
         }
 
@@ -466,6 +614,20 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         //    that `is_dangerous_command` took precedence over auto-allow.
         if is_dangerous_command_words(words) {
             any_dangerous = true;
+            needs_prompt.push(s);
+            continue;
+        }
+
+        // kubectl config/auth flags, `rg --pre`, and env-dumping `ps` (BSD
+        // `e`/`E`) must prompt even under a whitelist *prefix* grant. Always-allow
+        // persists only the verb prefix (e.g. "kubectl get", or a bare "ps" from
+        // approving `ps aux`), so it cannot be trusted to auto-allow these
+        // secret-exposing variants (H1 #3877754). An exact segment grant still
+        // auto-allows below. Do NOT set any_dangerous — that would also block
+        // exact grants.
+        if (kubectl_has_unsafe_flag(words) || rg_has_pre_flag(words) || ps_dumps_environment(words))
+            && !state.allowed_bash_commands.contains(&s)
+        {
             needs_prompt.push(s);
             continue;
         }
@@ -492,6 +654,11 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             any_dangerous,
         }
     };
+    let ambient_segments = if has_git_command && !exec_risk {
+        Some(ambient_raw)
+    } else {
+        None
+    };
     BashEvaluation {
         segments,
         writes_real_file,
@@ -499,6 +666,8 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         exact_grant,
         all_segments_granted,
         has_opaque_shell,
+        exec_risk,
+        ambient_segments,
     }
 }
 
@@ -795,16 +964,22 @@ fn bash_opaque_shell_floor_requires_prompt(evaluation: Option<&BashEvaluation>) 
     evaluation.is_some_and(|evaluation| evaluation.has_opaque_shell && !evaluation.exact_grant)
 }
 
+fn bash_exec_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
+    evaluation.is_some_and(|evaluation| evaluation.exec_risk && !evaluation.exact_grant)
+}
+
 fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
     bash_write_floor_requires_prompt(evaluation)
         || bash_unsafe_env_floor_requires_prompt(evaluation)
         || bash_opaque_shell_floor_requires_prompt(evaluation)
+        || bash_exec_floor_requires_prompt(evaluation)
 }
 
 fn bash_request_floor_defers_to_classifier(evaluation: Option<&BashEvaluation>) -> bool {
     evaluation.is_some_and(|evaluation| {
         !evaluation.writes_real_file
             && !evaluation.has_opaque_shell
+            && !evaluation.exec_risk
             && evaluation.env_risk == EnvRisk::Unvetted
     })
 }
@@ -1270,7 +1445,42 @@ fn spawn_permission_manager_with_pin(
                     }
 
                     let bash_evaluation = match &access {
-                        AccessKind::Bash(cmd) => Some(evaluate_bash(cmd, &state, true)),
+                        AccessKind::Bash(cmd) => {
+                            let mut evaluation = evaluate_bash(cmd, &state, true);
+                            if let Some(raw) = evaluation.ambient_segments.take() {
+                                let session_cwd = cwd.as_path().to_path_buf();
+                                let plan = ambient_scan_plan_from_segments(&raw, &session_cwd);
+                                // FailClosed needs no git2; CheckDirs is blocking.
+                                let ambient_risk = match plan {
+                                    AmbientScanPlan::FailClosed => true,
+                                    plan @ AmbientScanPlan::CheckDirs(_) => {
+                                        tokio::task::spawn_blocking(move || {
+                                            ambient_exec_risk_from_plan(&plan)
+                                        })
+                                        .await
+                                        .unwrap_or(true)
+                                    }
+                                };
+                                if respond_to.is_closed() {
+                                    tracing::info!(
+                                        tool = %tool_name,
+                                        "permission requester gone; ambient scan abandoned"
+                                    );
+                                    emit_event(
+                                        &Decision::Cancelled,
+                                        false,
+                                        false,
+                                        None,
+                                        Some(reasons::REQUESTER_GONE),
+                                    );
+                                    continue;
+                                }
+                                if ambient_risk {
+                                    evaluation.exec_risk = true;
+                                }
+                            }
+                            Some(evaluation)
+                        }
                         _ => None,
                     };
                     let protected_edit = match (&access, edit_path_context.as_ref()) {
@@ -2687,12 +2897,24 @@ mod tests {
                     .await;
                 assert!(
                     matches!(d, Decision::PolicyDeny(_)),
-                    "YOLO must not bypass the managed deny, got {d:?}"
+                    "YOLO must not bypass the direct managed deny, got {d:?}"
+                );
+                let inline_read = "bash -c 'cat .env'";
+                let d = yolo_mgr
+                    .request(AccessKind::Bash(inline_read.into()), tc(), None, None, None)
+                    .await;
+                assert!(
+                    matches!(d, Decision::PolicyDeny(_)),
+                    "YOLO must not bypass the inline Read deny, got {d:?}"
                 );
 
+                let inline_write = "bash -c 'echo x > .env'";
                 let state = PermissionState {
                     allow_bash_execute: true,
-                    allowed_bash_commands: HashSet::from(["cat .env".to_string()]),
+                    allowed_bash_commands: HashSet::from([
+                        "cat .env".to_string(),
+                        inline_write.to_string(),
+                    ]),
                     ..Default::default()
                 };
                 persist_state(&cwd, &state, None).await;
@@ -2702,7 +2924,112 @@ mod tests {
                     .await;
                 assert!(
                     matches!(d, Decision::PolicyDeny(_)),
-                    "persisted bash allow must not bypass the managed deny, got {d:?}"
+                    "persisted approval must not bypass the direct managed deny, got {d:?}"
+                );
+                let d = persisted_mgr
+                    .request(
+                        AccessKind::Bash(inline_write.into()),
+                        tc(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(d, Decision::PolicyDeny(_)),
+                    "persisted approval must not bypass the inline Edit deny, got {d:?}"
+                );
+            })
+            .await;
+    }
+
+    /// High-confidence `env -S` packed denials stay `PolicyDeny` under YOLO;
+    /// uncertain split-string shapes force a prompt (never silent allow).
+    #[tokio::test]
+    async fn managed_bash_deny_env_split_string_yolo() {
+        use crate::permission::types::{
+            PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let config = PermissionConfig::new(vec![PermissionRule {
+                    action: RuleAction::Deny,
+                    tool: ToolFilter::Bash,
+                    pattern: Some("rm*".to_owned()),
+                    pattern_mode: PatternMode::Glob,
+                }]);
+                // Record prompts so reject-once responses prove uncertain forms reached the Ask floor.
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client(
+                    &cwd,
+                    Some(config),
+                    client,
+                    ClientType::Generic,
+                );
+                mgr.set_yolo_mode(true);
+                // High-confidence packed deny → PolicyDeny even under YOLO.
+                for cmd in [
+                    "env -S 'rm -rf /tmp/victim'",
+                    "timeout 5 env -S 'rm -rf /tmp/victim'",
+                    "/usr/bin/env --split-string='rm -rf /tmp/victim'",
+                ] {
+                    let d = mgr
+                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
+                        .await;
+                    assert!(
+                        matches!(d, Decision::PolicyDeny(_)),
+                        "high-confidence env -S must PolicyDeny under YOLO: {cmd}, got {d:?}"
+                    );
+                }
+                assert!(
+                    prompts.borrow().is_empty(),
+                    "hard PolicyDeny must not prompt the user"
+                );
+                // Uncertain/malformed env -S: Ask floor blocks YOLO and reaches the
+                // user prompt (not silent Allow, not hard PolicyDeny).
+                let uncertain = [
+                    "env -S",
+                    "env -S 'echo $HOME'",
+                    r"env -S '\trm -rf /tmp/victim'",
+                    "env -iS 'rm -rf /tmp/victim'",
+                    "env -P /usr/bin -S 'echo $HOME'",
+                ];
+                for cmd in uncertain {
+                    let d = mgr
+                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
+                        .await;
+                    assert!(
+                        matches!(d, Decision::Reject(_)),
+                        "uncertain env -S must prompt under YOLO (reject answer), not Allow/PolicyDeny: {cmd}, got {d:?}"
+                    );
+                }
+                assert_eq!(
+                    prompts.borrow().len(),
+                    uncertain.len(),
+                    "each uncertain env -S shape must hit the user prompt once under YOLO"
+                );
+                // Ordinary env assignment still denies the peeled command under YOLO.
+                let d = mgr
+                    .request(
+                        AccessKind::Bash("env FOO=1 rm -rf /tmp/victim".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(d, Decision::PolicyDeny(_)),
+                    "ordinary env assignment must still PolicyDeny, got {d:?}"
+                );
+                assert_eq!(
+                    prompts.borrow().len(),
+                    uncertain.len(),
+                    "ordinary env assignment PolicyDeny must not add prompts"
                 );
             })
             .await;
@@ -4707,6 +5034,37 @@ mod tests {
         assert!(is_safe_command("uptime"));
         assert!(is_safe_command("ps"));
         assert!(is_safe_command("ps aux"));
+        assert!(is_safe_command("ps -e"));
+        assert!(is_safe_command("ps -ef"));
+        assert!(is_safe_command("ps -ely"));
+        assert!(is_safe_command("ps -Ae"));
+        assert!(is_safe_command("ps -o command"));
+        assert!(is_safe_command("ps -o etime"));
+        assert!(is_safe_command("ps -oetime"));
+        assert!(is_safe_command("ps o etime"));
+        assert!(is_safe_command("ps -eo user,pid,comm"));
+        assert!(is_safe_command("ps -eo etime"));
+        // BSD e/E dump process environments — must prompt.
+        assert!(!is_safe_command("ps e"));
+        assert!(!is_safe_command("ps eww"));
+        assert!(!is_safe_command("ps auxe"));
+        assert!(!is_safe_command("ps aux e"));
+        assert!(!is_safe_command("ps E"));
+        assert!(!is_safe_command("ps Eww"));
+        assert!(!is_safe_command("ps auxE"));
+        // Dashed env dumps: macOS `-E`; procps dash+BSD-selector clusters.
+        assert!(!is_safe_command("ps -auxe"));
+        assert!(!is_safe_command("ps -axe"));
+        assert!(!is_safe_command("ps -E"));
+        assert!(!is_safe_command("ps -auxE"));
+        assert!(!is_safe_command("ps -AE"));
+        assert!(!is_safe_command("ps -p 123 e"));
+        assert!(!is_safe_command("ps -axeo etime"));
+        assert!(!is_safe_command("ps -Eo command"));
+        // Wrappers / pipelines: env-dump ps must still prompt.
+        assert!(!is_safe_command("ps auxe | cat"));
+        assert!(!is_safe_command("env ps e"));
+        assert!(!is_safe_command("timeout 5 ps auxe"));
 
         // Git commands
         assert!(is_safe_command("git status"));
@@ -4745,14 +5103,40 @@ mod tests {
         assert!(is_safe_command("kubectl logs pod-name"));
         assert!(is_safe_command("kubectl logs -f pod-name"));
         assert!(is_safe_command("kubectl describe pod pod-name"));
+        // Common read flags must stay auto-allowed (no regression).
+        assert!(is_safe_command("kubectl get pods -n prod -o yaml"));
+        assert!(is_safe_command("kubectl logs -f pod --tail 10"));
+        assert!(is_safe_command("kubectl get pods -l app=x -A"));
+        assert!(is_safe_command("kubectl describe pod x -c ctr"));
+        assert!(is_safe_command("kubectl logs pod --previous"));
+        // Caller-controlled kubeconfig/endpoint/auth/identity flags can trigger
+        // an `exec` credential plugin — never auto-allow, even for read verbs.
+        assert!(!is_safe_command(
+            "kubectl get pods --kubeconfig=/tmp/evil.yaml"
+        ));
+        assert!(!is_safe_command(
+            "kubectl get pods --kubeconfig /tmp/evil.yaml"
+        ));
+        assert!(!is_safe_command("kubectl logs pod --context evil"));
+        assert!(!is_safe_command(
+            "kubectl describe pod x --server https://x"
+        ));
+        assert!(!is_safe_command("kubectl get pods -s https://x"));
+        assert!(!is_safe_command("kubectl get pods --as admin"));
+        assert!(!is_safe_command("kubectl get pods --cluster=evil"));
+        assert!(!is_safe_command("kubectl get pods --user evil"));
+        assert!(!is_safe_command("kubectl get pods --token=sekrit"));
+        assert!(!is_safe_command(
+            "kubectl get pods --as-group system:masters"
+        ));
+        assert!(!is_safe_command("kubectl get pods --username admin"));
+        assert!(!is_safe_command(
+            "kubectl get pods --client-certificate=/tmp/c.crt"
+        ));
 
         // bin/explorer ls
         assert!(is_safe_command("bin/explorer ls"));
         assert!(is_safe_command("bin/explorer ls /some/path"));
-
-        // cargo check
-        assert!(is_safe_command("cargo check"));
-        assert!(is_safe_command("cargo check --workspace"));
 
         // Commands with cd prefix should work
         assert!(is_safe_command("cd /some/path && ls"));
@@ -4770,6 +5154,10 @@ mod tests {
         assert!(!is_safe_command("sorting"));
         assert!(!is_safe_command("cutting"));
 
+        // `cargo check` runs build.rs / proc-macros / rustc-wrapper, so it is
+        // not side-effect-free and must not auto-approve.
+        assert!(!is_safe_command("cargo check"));
+        assert!(!is_safe_command("cargo check --workspace"));
         assert!(!is_safe_command("cargo build"));
         assert!(!is_safe_command("npm install"));
         assert!(!is_safe_command("python script.py"));
@@ -4792,15 +5180,15 @@ mod tests {
             default_always_allow_scope(&words("kubectl get pods -o json")),
             2
         );
-        assert_eq!(
-            default_always_allow_scope(&words("cargo check --workspace")),
-            2
-        );
         // Non-safe commands keep the two-words-plus-flags default.
         // `rg --pre` is not fully safe-listed, so do not narrow to bare `rg`.
         assert_eq!(
             default_always_allow_scope(&words("rg --pre cat pattern")),
             2
+        );
+        assert_eq!(
+            default_always_allow_scope(&words("cargo check --workspace")),
+            3
         );
         assert_eq!(default_always_allow_scope(&words("cargo test --lib")), 3);
         assert_eq!(default_always_allow_scope(&words("npm run build")), 2);
@@ -5246,6 +5634,29 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_kubectl_unsafe_flag_not_auto_allowed_by_prefix_grant() {
+        // A persisted "kubectl get" prefix (what Always-allow stores after a
+        // plain read) must not auto-approve a later invocation that selects a
+        // caller-controlled kubeconfig. An exact-string grant still auto-allows.
+        let cmd = "kubectl get pods --kubeconfig=/tmp/evil.yaml";
+        let mut prefix_state = PermissionState::default();
+        prefix_state
+            .allowed_bash_commands
+            .insert("kubectl get".into());
+        match evaluate_bash_segments(cmd, &prefix_state) {
+            SegmentEvaluation::NeedsPrompts { .. } => {}
+            other => panic!("prefix grant must still prompt, got {other:?}"),
+        }
+
+        let mut exact_state = PermissionState::default();
+        exact_state.allowed_bash_commands.insert(cmd.into());
+        match evaluate_bash_segments(cmd, &exact_state) {
+            SegmentEvaluation::AutoAllow { .. } => {}
+            other => panic!("exact grant must auto-allow, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn evaluate_disallow_segment_rejects_whole_script() {
         // Disallow on any segment short-circuits with a Reject for the
         // entire script — no prompt, no execution.
@@ -5333,6 +5744,359 @@ mod tests {
     }
 
     #[test]
+    fn exec_risk_flags_and_grants() {
+        use crate::permission::exec_risk::segment_has_exec_risk_flag;
+        let state = PermissionState::default();
+        for cmd in [
+            "sort --compress-program=/tmp/pwn in",
+            "sort --co=tools/x in",
+            "command sort --compress-program=/tmp/pwn in",
+            "exec sort --compress-program=/tmp/pwn in",
+            "command env sort --compress-program=/tmp/pwn in",
+            "git -c core.fsmonitor=/tmp/pwn status",
+            "git -ccore.fsmonitor=/tmp/pwn status",
+            "git --config-env=core.fsmonitor=EVIL status",
+            "git --git-dir=/evil/.git status",
+            "git --work-tree=/evil status",
+            "git --git-dir /evil/.git status",
+            "command git -c core.fsmonitor=/tmp/pwn status",
+            "command env git -c core.fsmonitor=/tmp/pwn status",
+            "git status $(true)",
+            "echo git $(true)",
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(evaluation.exec_risk, "exec floor: {cmd}");
+            assert!(
+                bash_request_floor_requires_prompt(Some(&evaluation)),
+                "{cmd}"
+            );
+            assert!(
+                !sandbox_may_auto_allow_bash(Some(&evaluation), true),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "command git status",
+            "command env git status",
+            "command timeout 1 git status",
+            "timeout 1 command env git status",
+        ] {
+            let e = evaluate_bash(cmd, &state, true);
+            assert!(!e.exec_risk, "{cmd}");
+            assert!(e.ambient_segments.is_some(), "{cmd}");
+        }
+
+        for cmd in [
+            "sort in.csv",
+            "sort --check big.csv",
+            "sort -- --compress-program=foo",
+            "git log -c",
+            "git status",
+            "git -C /tmp status",
+            "git -C/tmp status",
+        ] {
+            assert!(
+                !evaluate_bash(cmd, &state, true).exec_risk,
+                "must not flag: {cmd}"
+            );
+        }
+        let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        assert!(segment_has_exec_risk_flag(&words(
+            "/usr/bin/git --work-tree=/evil status"
+        )));
+        assert!(segment_has_exec_risk_flag(&words(
+            r"C:\Git\cmd\git.exe --git-dir=/evil/.git status"
+        )));
+
+        let compress = "sort --compress-program=/tmp/pwn in";
+        let broad = PermissionState {
+            allowed_bash_commands: HashSet::from(["sort".to_owned()]),
+            ..Default::default()
+        };
+        assert!(
+            bash_grant_pre_decision(
+                compress,
+                &evaluate_bash(compress, &broad, true),
+                &broad,
+                None,
+                BashGrantOpts::PRE_CLASSIFIER,
+            )
+            .is_none()
+        );
+        let exact = PermissionState {
+            allowed_bash_commands: HashSet::from([compress.to_owned()]),
+            ..Default::default()
+        };
+        assert!(
+            bash_grant_pre_decision(
+                compress,
+                &evaluate_bash(compress, &exact, true),
+                &exact,
+                None,
+                BashGrantOpts::PRE_CLASSIFIER,
+            )
+            .is_some()
+        );
+    }
+
+    fn evil_repo() -> (tempfile::TempDir, AbsPathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(
+            tmp.path().join(".git/config"),
+            "[core]\nfsmonitor = /tmp/pwn\n",
+        )
+        .unwrap();
+        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+        (tmp, cwd)
+    }
+
+    fn clean_repo() -> (tempfile::TempDir, AbsPathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        std::fs::write(
+            tmp.path().join(".git/config"),
+            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
+             [filter \"lfs\"]\n\tprocess = git-lfs filter-process\n",
+        )
+        .unwrap();
+        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+        (tmp, cwd)
+    }
+
+    #[tokio::test]
+    async fn production_ask_cargo_check_prompts_auto_allows() {
+        use crate::permission::auto_mode::LlmPermissionClassifier;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tmp, cwd) = clean_repo();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                let d = mgr
+                    .request(
+                        AccessKind::Bash("cargo check".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(matches!(d, Decision::Reject(_)), "Ask cargo check: {d:?}");
+                let ev = events.try_recv().expect("event");
+                assert!(ev.user_prompted && !ev.auto_approved);
+                assert_eq!(prompts.borrow().len(), 1);
+
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                mgr.set_auto_mode(true);
+                mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
+                    r#"{"thinking":"ok","shouldBlock":false,"reason":"ok"}"#,
+                )));
+                let d = mgr
+                    .request(
+                        AccessKind::Bash("cargo check".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert_eq!(d, Decision::Allow, "Auto cargo check must allow: {d:?}");
+                let ev = events.try_recv().expect("event");
+                assert!(ev.auto_approved && !ev.user_prompted);
+                assert_eq!(prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn production_exec_risk_prompts_default_and_auto() {
+        use crate::permission::auto_mode::LlmPermissionClassifier;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tmp, cwd) = evil_repo();
+                const CMDS: &[&str] = &[
+                    "sort --compress-program=/tmp/pwn in",
+                    "command sort --compress-program=/tmp/pwn in",
+                    "command env sort --compress-program=/tmp/pwn in",
+                    "git -c core.fsmonitor=/tmp/pwn status",
+                    "git -ccore.fsmonitor=/tmp/pwn status",
+                    "git --git-dir=/evil/.git status",
+                    "git --work-tree=/evil status",
+                    "git status",
+                    "command git status",
+                    "command env git status",
+                    "command timeout 1 git status",
+                    "exec git status",
+                    "git status $(true)",
+                ];
+                for (auto, label) in [(false, "default"), (true, "auto")] {
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, mut events) =
+                        manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                    if auto {
+                        mgr.set_auto_mode(true);
+                        mgr.set_classifier(Some(LlmPermissionClassifier::with_fixed_model_text(
+                            r#"{"thinking":"ok","shouldBlock":false,"reason":"ok"}"#,
+                        )));
+                    }
+                    for cmd in CMDS {
+                        let d = mgr
+                            .request(
+                                AccessKind::Bash((*cmd).into()),
+                                tool_call(),
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                        assert!(
+                            matches!(d, Decision::Reject(_)),
+                            "{label}/{cmd}: expected prompt-reject, got {d:?}"
+                        );
+                        let ev = events.try_recv().expect("event");
+                        assert!(ev.user_prompted && !ev.auto_approved, "{label}/{cmd}");
+                    }
+                    assert_eq!(prompts.borrow().len(), CMDS.len(), "{label}");
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn production_broad_git_grant_cannot_cross_exec_floor() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tmp, cwd) = evil_repo();
+                let mut seeded = PermissionState::default();
+                seeded.allowed_bash_commands.insert("git".to_owned());
+                persist_state(&cwd, &seeded, None).await;
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                for cmd in [
+                    "git status",
+                    "command git status",
+                    "command env git status",
+                    "command timeout 1 git status",
+                    "git --git-dir=/evil/.git status",
+                    "git -ccore.fsmonitor=/tmp/pwn status",
+                ] {
+                    let d = mgr
+                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
+                        .await;
+                    assert!(
+                        matches!(d, Decision::Reject(_)),
+                        "broad git grant must not auto-allow {cmd}: {d:?}"
+                    );
+                    let ev = events.try_recv().expect("event");
+                    assert!(ev.user_prompted && !ev.auto_approved, "{cmd}");
+                }
+                assert_eq!(prompts.borrow().len(), 6);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn production_exact_grant_and_yolo_bypass_exec_floor() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tmp, cwd) = evil_repo();
+                const EXACT: &str = "sort --compress-program=/tmp/pwn in";
+                let mut seeded = PermissionState::default();
+                seeded.allowed_bash_commands.insert(EXACT.to_owned());
+                persist_state(&cwd, &seeded, None).await;
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                let d = mgr
+                    .request(
+                        AccessKind::Bash(EXACT.into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert_eq!(d, Decision::Allow, "exact grant must allow");
+                assert_eq!(prompts.borrow().len(), 0);
+
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                mgr.set_yolo_mode(true);
+                let d = mgr
+                    .request(
+                        AccessKind::Bash(EXACT.into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert_eq!(d, Decision::Allow, "yolo must allow");
+                assert_eq!(prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn production_clean_repo_controls_auto_allow() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tmp, cwd) = clean_repo();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                for cmd in [
+                    "ls",
+                    "sort in.csv",
+                    "git status",
+                    "git diff",
+                    "timeout 1 git status",
+                ] {
+                    let d = mgr
+                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
+                        .await;
+                    assert_eq!(d, Decision::Allow, "control: {cmd}");
+                    let ev = events.try_recv().expect("allow event");
+                    assert!(ev.auto_approved && !ev.user_prompted, "{cmd}");
+                }
+                assert_eq!(prompts.borrow().len(), 0);
+
+                // Safe-list is wrapper-only; transparent outer layers still prompt.
+                let d = mgr
+                    .request(
+                        AccessKind::Bash("command env git status".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(matches!(d, Decision::Reject(_)), "{d:?}");
+                let ev = events.try_recv().expect("prompt event");
+                assert!(ev.user_prompted && !ev.auto_approved);
+                assert_eq!(prompts.borrow().len(), 1);
+            })
+            .await;
+    }
+
+    #[test]
     fn unsafe_environment_detection_covers_script_forms() {
         let state = PermissionState::default();
         for (cmd, env_risk) in [
@@ -5408,6 +6172,46 @@ mod tests {
         };
         let granted = evaluate_bash(cmd, &granted_state, true);
         assert!(!bash_opaque_shell_floor_requires_prompt(Some(&granted)));
+    }
+
+    #[test]
+    fn opaque_shell_floor_only_for_inline_c_and_eval() {
+        let state = PermissionState::default();
+        // Positive: supported -c shapes (plain, option-edge, wrapped) and eval.
+        for cmd in [
+            "bash -c 'echo hi'",
+            "sh -c 'echo hi'",
+            "bash -lc 'echo hi'",
+            "bash -c -x 'echo hi'",
+            "bash -c -- 'echo hi'",
+            "bash --noprofile -c 'echo hi'",
+            "bash --verbose -c 'echo hi'",
+            "env bash -c 'echo hi'",
+            "eval 'echo hi'",
+            "/bin/bash -c 'echo hi'",
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(
+                evaluation.has_opaque_shell,
+                "expected opaque-shell floor for {cmd}"
+            );
+            assert!(bash_opaque_shell_floor_requires_prompt(Some(&evaluation)));
+        }
+        // Negative: display/script long options without -c must not hard-prompt
+        // as opaque shells (classifier may still run in auto mode).
+        for cmd in [
+            "bash --version",
+            "bash --help",
+            "bash --verbose script.sh",
+            "sh --version",
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(
+                !evaluation.has_opaque_shell,
+                "non-inline shell form must not acquire opaque floor: {cmd}"
+            );
+            assert!(!bash_opaque_shell_floor_requires_prompt(Some(&evaluation)));
+        }
     }
 
     #[test]
@@ -5615,6 +6419,25 @@ mod tests {
                 assert_eq!(p, vec!["rm -rf /tmp/foo".to_string()]);
             }
             other => panic!("expected NeedsPrompts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_ps_env_dump_prompted_even_if_ps_prefix_granted() {
+        // H1 #3877754: approving a benign `ps aux` persists a bare `ps`
+        // grant via `default_always_allow_scope`. Env-dump forms must not
+        // ride that prefix; benign `ps aux` still may.
+        let mut state = PermissionState::default();
+        state.allowed_bash_commands.insert("ps".to_string());
+        match evaluate_bash_segments("ps auxe", &state) {
+            SegmentEvaluation::NeedsPrompts { segments: p, .. } => {
+                assert_eq!(p, vec!["ps auxe".to_string()]);
+            }
+            other => panic!("expected NeedsPrompts for env-dump ps, got {other:?}"),
+        }
+        match evaluate_bash_segments("ps aux", &state) {
+            SegmentEvaluation::AutoAllow { .. } => {}
+            other => panic!("expected AutoAllow for benign ps aux, got {other:?}"),
         }
     }
 

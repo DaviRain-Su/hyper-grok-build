@@ -532,6 +532,10 @@ pub struct TodoSummary {
 /// handled by the consumer (e.g. `xai-grok-shell`), which has access to
 /// memory backends and other shell-specific dependencies.
 pub struct CompactionStateContext {
+    /// Monotonic cwd generation; zero preserves the legacy compaction shape.
+    pub cwd_generation: u64,
+    /// Project instructions resolved for the latest destination cwd.
+    pub destination_project_instructions: Option<String>,
     /// Messages since the last **real** user turn (assistant + omitted tool
     /// results).  Synthetic user injections (system reminders) do not reset
     /// the boundary, preventing orphaned ToolResults in the compacted output.
@@ -555,6 +559,8 @@ pub struct CompactionStateContext {
 /// [`CompactionStateContext::build`].
 #[derive(Default)]
 pub struct CompactionInputs {
+    pub cwd_generation: u64,
+    pub destination_project_instructions: Option<String>,
     pub running_tasks: Vec<BackgroundTaskSummary>,
     pub running_subagents: Vec<RunningSubagentSummary>,
     pub agent_edited_paths: BTreeSet<String>,
@@ -569,6 +575,8 @@ impl CompactionStateContext {
     /// compaction boundary.
     pub async fn build(conversation: &[ConversationItem], inputs: CompactionInputs) -> Self {
         Self {
+            cwd_generation: inputs.cwd_generation,
+            destination_project_instructions: inputs.destination_project_instructions,
             recent_messages: extract_messages_since_last_real_user(conversation),
             last_user_query: extract_last_real_user_query(conversation),
             agent_edited_paths: inputs.agent_edited_paths.into_iter().collect(),
@@ -602,6 +610,8 @@ impl CompactionStateContext {
     /// `recent_messages` so the model keeps verbatim tool context.
     pub fn for_compaction(&self) -> Self {
         Self {
+            cwd_generation: self.cwd_generation,
+            destination_project_instructions: self.destination_project_instructions.clone(),
             recent_messages: Vec::new(),
             last_user_query: self.last_user_query.clone(),
             agent_edited_paths: self.agent_edited_paths.clone(),
@@ -839,7 +849,15 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
         input.system_message,
         ConversationItem::user_meta(input.user_message_prefix),
     ];
-    if let Some(ref reminder) = input.agents_md_reminder {
+    let project_instructions = if input.state_context.cwd_generation == 0 {
+        input.agents_md_reminder.as_ref()
+    } else {
+        input
+            .state_context
+            .destination_project_instructions
+            .as_ref()
+    };
+    if let Some(reminder) = project_instructions {
         compacted.push(ConversationItem::project_instructions(reminder.clone()));
     }
     if let Some(ref last_query) = input.state_context.last_user_query {
@@ -2852,21 +2870,94 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             "system-reminder should list edited files"
         );
     }
-    /// End-to-end test: build a compacted history with realistic file re-reads
-    /// (line-numbered content matching extract_file_content_lines output),
-    /// a truncated file, and a too-large file reference.
-    ///
-    /// Verifies the exact string content of every message in the compacted
-    /// history, including the plain-text "Called the read_file tool..." /
-    /// AGENTS.md slot in the post-compaction conversation must be tagged
-    /// `SyntheticReason::ProjectInstructions`, NOT `CompactionMeta`. This is
-    /// the contract `spawn_session_actor`'s idempotence guard relies on when
-    /// a session is resumed from a post-compaction `chat_history.jsonl`: it
-    /// skips re-inserting AGENTS.md when it sees a tagged `User` item,
-    /// preserving the KV-cache invariant.
+    /// Generation zero ignores relocation-only fields and preserves legacy output.
+    #[test]
+    fn generation_zero_compaction_keeps_legacy_project_instructions() {
+        let state_context = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: Some("destination rules".into()),
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            running_subagents: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+        };
+        let compacted = build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "prefix".into(),
+            agents_md_reminder: Some("startup rules".into()),
+            state_context: &state_context,
+            compaction_summary: "summary".into(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        });
+        assert_eq!(compacted[2].text_content(), "startup rules");
+    }
+    #[test]
+    fn relocated_compaction_uses_destination_project_instructions() {
+        let state_context = CompactionStateContext {
+            cwd_generation: 1,
+            destination_project_instructions: Some("destination rules".into()),
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            running_subagents: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+        };
+        let compacted = build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "prefix".into(),
+            agents_md_reminder: Some("startup rules".into()),
+            state_context: &state_context,
+            compaction_summary: "summary".into(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        });
+        assert_eq!(compacted[2].text_content(), "destination rules");
+    }
+    #[test]
+    fn relocated_compaction_does_not_restore_source_instructions_when_destination_has_none() {
+        let state_context = CompactionStateContext {
+            cwd_generation: 1,
+            destination_project_instructions: None,
+            recent_messages: vec![],
+            last_user_query: None,
+            agent_edited_paths: vec![],
+            running_tasks: vec![],
+            running_subagents: vec![],
+            connected_mcp_servers: vec![],
+            todos: vec![],
+        };
+        let compacted = build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "prefix".into(),
+            agents_md_reminder: Some("source rules".into()),
+            state_context: &state_context,
+            compaction_summary: "summary".into(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        });
+        assert!(!compacted.iter().any(|item| {
+            matches!(item, ConversationItem::User(user)
+            if user.synthetic_reason == Some(SyntheticReason::ProjectInstructions))
+        }));
+    }
+    /// The AGENTS.md slot must use the structural project-instructions tag.
     #[test]
     fn build_compacted_history_tags_agents_md_with_project_instructions() {
         let state_context = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],
@@ -2908,6 +2999,8 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
     #[test]
     fn build_compacted_history_omits_agents_md_when_none() {
         let state_context = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             recent_messages: vec![],
             last_user_query: None,
             agent_edited_paths: vec![],

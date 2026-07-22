@@ -12,19 +12,16 @@
 //! mock server mid-session and surfacing as a confusing 60s stream timeout
 //! instead of an obvious failure.
 //!
-//! ## Gate-release ownership (streaming sessions)
+//! ## Streaming sessions
 //!
-//! [`spawn_streaming_marker_session`] holds every agent completion
-//! (`hold_agent_completions`) and paces deltas, so the turn provably cannot
-//! finish while the gesture runs. The CALLER owns the release: call
-//! `content.release_agent_completions()` after the gesture (before quitting,
-//! so the pager exits a completed turn rather than an aborted stream).
+//! [`spawn_streaming_marker_session`] returns a blocked turn expectation. The
+//! caller releases it after the gesture and before quitting.
 
 use std::path::Path;
 use std::time::Duration;
 
 use crate::PtyHarness;
-use crate::content::ContentController;
+use crate::content::{AgentTurnExpectation, ContentController};
 
 /// Transcript state a cell's gesture starts from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,18 +124,23 @@ pub const STREAMING_CHUNK_DELAY: Duration = Duration::from_millis(30);
 /// `GROK_SCROLL_LOG` — the PTY spawn strips host-terminal identity first,
 /// so injected markers always win).
 ///
-/// Returns `(harness, controller, baseline)` where `baseline` is the
-/// topmost visible marker index — see the footgun notes in the module docs
-/// before binding the controller.
+/// `blocked_turn` is present only for a streaming session.
 pub async fn spawn_marker_session(
     binary: &Path,
     kind: SessionKind,
     marker_count: usize,
     extra_env: &[(&str, &str)],
-) -> (PtyHarness, ContentController, usize) {
+) -> (
+    PtyHarness,
+    ContentController,
+    usize,
+    Option<AgentTurnExpectation>,
+) {
     match kind {
         SessionKind::Settled | SessionKind::BottomPinned => {
-            spawn_settled_marker_session(binary, marker_count, extra_env).await
+            let (harness, content, baseline) =
+                spawn_settled_marker_session(binary, marker_count, extra_env).await;
+            (harness, content, baseline, None)
         }
         SessionKind::Streaming => {
             spawn_streaming_marker_session(
@@ -232,29 +234,29 @@ pub async fn spawn_settled_marker_session(
 /// [`SessionKind::Streaming`] preamble: the whole fenced marker block rides
 /// the first delta (the mock splits deltas on single spaces and the block
 /// contains none), the space-separated tail streams word-by-word at
-/// `chunk_delay`, and the completion gate holds the turn's terminal event —
-/// mid-turn by construction until the caller releases the gate (see the
-/// module docs). Setup guards: transcript overflows the viewport and
-/// [`STREAM_END_SENTINEL`] is not on screen (bottom-pinned follow would
-/// render it if the stream had finished).
+/// `chunk_delay`, and the matched expectation prevents terminal completion
+/// until the caller releases it. Setup guards: transcript overflows the
+/// viewport and [`STREAM_END_SENTINEL`] is not on screen.
 pub async fn spawn_streaming_marker_session(
     binary: &Path,
     marker_count: usize,
     tail_words: usize,
     chunk_delay: Duration,
     extra_env: &[(&str, &str)],
-) -> (PtyHarness, ContentController, usize) {
+) -> (
+    PtyHarness,
+    ContentController,
+    usize,
+    Option<AgentTurnExpectation>,
+) {
     let content = ContentController::start().await.expect("start content");
     content.set_chunk_delay(Some(chunk_delay));
-    content.hold_agent_completions();
-    // set_turns (not set_response): only agent turns ride the completion
-    // gate; aux title/classifier requests fall through untouched.
     let mut turn = marker_response(marker_count);
     for i in 0..tail_words {
         turn.push_str(&format!("TAIL-{i:04} "));
     }
     turn.push_str(STREAM_END_SENTINEL);
-    content.set_turns([turn]);
+    let turn = content.expect_agent_turn_blocked("streaming marker turn", turn);
 
     let mut harness = spawn_pager(binary, &content, extra_env);
     // The last marker rides the first delta, so this waits only for the
@@ -272,7 +274,7 @@ pub async fn spawn_streaming_marker_session(
     );
     let baseline = assert_scrollable_baseline(&harness, "mid-stream");
 
-    (harness, content, baseline)
+    (harness, content, baseline, Some(turn))
 }
 
 #[cfg(test)]

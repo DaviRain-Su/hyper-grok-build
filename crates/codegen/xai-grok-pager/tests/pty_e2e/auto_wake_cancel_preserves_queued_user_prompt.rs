@@ -56,22 +56,8 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_bg_wake",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_bg_wake",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
+    let _background_turn =
+        expect_tool_turn(&content, "call_bg_wake", "run_terminal_command", bg_args);
     content.set_response("TURN1_SETTLED");
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -122,42 +108,22 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     // consumed-completion sweep), then a foreground sleep that pins the turn
     // running while the user message and Ctrl+C land.
     let poll_args = json!({ "task_ids": [task_id.clone()] }).to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_wake_poll",
-            "get_command_or_subagent_output",
-            &poll_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_wake_poll",
-            "get_command_or_subagent_output",
-            &poll_args,
-        )),
+    let _poll_turn = expect_tool_turn(
+        &content,
+        "call_wake_poll",
+        "get_command_or_subagent_output",
+        poll_args,
     );
     let hold_args = json!({
         "command": format!("/bin/sleep {HOLD_SLEEP_SECS}"),
         "description": "hold turn"
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_wake_hold",
-            "run_terminal_command",
-            &hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_wake_hold",
-            "run_terminal_command",
-            &hold_args,
-        )),
+    let _hold_turn = expect_tool_turn(
+        &content,
+        "call_wake_hold",
+        "run_terminal_command",
+        hold_args,
     );
     // Fallback for every unscripted request after the queues drain (and the
     // response the surviving user prompt streams on the fixed path).

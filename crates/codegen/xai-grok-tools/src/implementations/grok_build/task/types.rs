@@ -20,7 +20,36 @@ use std::sync::Arc;
 
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SubagentOwner {
+    #[default]
+    Task,
+    Workflow {
+        run_id: String,
+    },
+}
+
+impl SubagentOwner {
+    pub fn workflow(run_id: impl Into<String>) -> Self {
+        Self::Workflow {
+            run_id: run_id.into(),
+        }
+    }
+
+    pub fn workflow_run_id(&self) -> Option<&str> {
+        match self {
+            Self::Task => None,
+            Self::Workflow { run_id } => Some(run_id),
+        }
+    }
+
+    pub fn is_workflow(&self) -> bool {
+        matches!(self, Self::Workflow { .. })
+    }
+}
 
 use crate::register_resource;
 
@@ -60,9 +89,12 @@ pub struct SubagentRequest {
     /// between-turn "idle completion" reminder — used by harness-internal
     /// subagents like the goal planner/classifier that the model must never see.
     pub surface_completion: bool,
+    pub await_to_completion: bool,
     /// Harness-only: seed child with normalized parent conversation, then append
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
+    pub owner: SubagentOwner,
+    pub cancel_token: CancellationToken,
     /// Oneshot channel for the coordinator to send back the result.
     #[educe(Debug(ignore))]
     pub result_tx: oneshot::Sender<SubagentResult>,
@@ -107,6 +139,9 @@ pub struct SubagentRuntimeOverrides {
     pub harness_agent_type: Option<String>,
     pub completion_output_cap: Option<usize>,
     pub spawn_depth: Option<u32>,
+    pub output_token_budget: Option<u64>,
+    pub output_schema: Option<serde_json::Value>,
+    pub loop_task_id: Option<String>,
 }
 
 /// Re-export of [`xai_tool_types::is_not_sentinel`] for existing call sites.
@@ -325,8 +360,10 @@ pub struct SubagentResult {
     pub tool_calls: u32,
     pub turns: u32,
     pub duration_ms: u64,
-    /// Total tokens consumed by the subagent's context window.
     pub tokens_used: u64,
+    pub output_tokens_used: u64,
+    pub total_tokens_used: u64,
+    pub output_usage_incomplete: bool,
     /// Path to the isolated worktree if one was created.
     pub worktree_path: Option<String>,
     /// Set when a blocking subagent exceeded its await budget and was
@@ -349,6 +386,9 @@ impl Default for SubagentResult {
             turns: 0,
             duration_ms: 0,
             tokens_used: 0,
+            output_tokens_used: 0,
+            total_tokens_used: 0,
+            output_usage_incomplete: false,
             worktree_path: None,
             backgrounded: false,
         }
@@ -383,6 +423,14 @@ pub struct SubagentQueryRequest {
     /// Oneshot for the coordinator to send back the snapshot.
     #[educe(Debug(ignore))]
     pub respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentLoopUnitActiveRequest {
+    pub task_id: String,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<bool>,
 }
 
 /// Point-in-time snapshot of a subagent's state.
@@ -455,6 +503,7 @@ impl SubagentSnapshotStatus {
 pub enum SubagentCancelTarget {
     SubagentId(String),
     ParentPromptId(String),
+    WorkflowRunId(String),
 }
 
 /// Cancel request sent by KillTaskTool or session cancellation paths,
@@ -663,6 +712,7 @@ pub enum SubagentEvent {
     MarkUsageNotApplied(SubagentMarkUsageNotAppliedRequest),
     ValidateType(SubagentValidateTypeRequest),
     DescribeType(SubagentDescribeRequest),
+    LoopUnitActive(SubagentLoopUnitActiveRequest),
 }
 
 // Resource types

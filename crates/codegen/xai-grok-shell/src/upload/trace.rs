@@ -3,78 +3,12 @@ use super::turn::{PromptTraceContext, UploadWait};
 use crate::sampling::types::ToolDefinition;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use base64::Engine as _;
-use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
 use xai_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy};
 use xai_grok_workspace::permission::PermissionEvent;
-/// Upload request payload to cloud storage in the background (best-effort, non-blocking).
-///
-/// Used by the legacy `stream_via_*` path to upload the per-request
-/// payload before streaming. M7 removed those call sites; the
-/// uploading from the new sampler path is a follow-up (M7 deferred work).
-#[expect(
-    dead_code,
-    reason = "legacy stream_via_* path removed; re-enable when sampler uploads traces"
-)]
-pub(crate) fn spawn_trace_upload<T: Serialize + Send + 'static>(
-    gcs_config: TraceExportConfig,
-    filename: &str,
-    payload: &T,
-    artifact_tracker: Option<super::manifest::ArtifactTracker>,
-) {
-    let Some(prefix) = gcs_config.gcs_prefix.as_deref() else {
-        tracing::debug!("Skipping request upload: gcs_prefix is not set");
-        return;
-    };
-    let bytes = match serde_json::to_vec_pretty(payload) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::debug!(?e, "Failed to serialize request for trace upload");
-            return;
-        }
-    };
-    let prefix = prefix.trim_matches('/').to_string();
-    let filename = filename.to_string();
-    tokio::spawn(async move {
-        let object_path = if prefix.is_empty() {
-            filename.clone()
-        } else {
-            format!("{prefix}/{filename}")
-        };
-        let ok = xai_file_utils::gcs::upload_bytes(
-            &gcs_config,
-            &object_path,
-            &bytes,
-            "application/json",
-        )
-        .await;
-        if let Err(ref e) = ok {
-            tracing::debug!(
-                ? e, object_path = % object_path, "Failed to upload request trace"
-            );
-        }
-        if let Some(ref manifest) = artifact_tracker {
-            match &ok {
-                Ok(_) => super::manifest::record_artifact(
-                    manifest,
-                    &filename,
-                    super::manifest::ArtifactResult::Succeeded,
-                ),
-                Err(e) => super::manifest::record_artifact(
-                    manifest,
-                    &filename,
-                    super::manifest::ArtifactResult::Failed {
-                        reason: "upload_failed",
-                        error: Some(&format!("{e:#}")),
-                    },
-                ),
-            }
-        }
-    });
-}
 /// Upload the canonical tool definitions trace and wait for completion.
 ///
 /// `ToolDefinition` serializes in Chat Completions format:
@@ -483,17 +417,6 @@ pub(crate) async fn upload_full_prompt_txt(ctx: &PromptTraceContext, _full_promp
         "prompt_content_upload_disabled",
     );
 }
-/// Path format: {session_id}/turn_{N}/config.json
-pub(crate) async fn upload_config(
-    ctx: &PromptTraceContext,
-    _agent_config: &crate::agent::config::Config,
-) {
-    super::manifest::skip_artifact(
-        &ctx.artifact_tracker,
-        "config.json",
-        "config_content_upload_disabled",
-    );
-}
 /// Plugin state snapshot for cloud storage trace upload.
 ///
 /// Captures which plugins are loaded, their enabled/trusted status, and basic metadata.
@@ -887,6 +810,8 @@ pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext) {
 }
 /// Uploads the session-scoped unified log to cloud storage.
 /// Path format: {session_id}/turn_{N}/unified_log.jsonl
+///
+/// Called only from 401/404 auth-failure diagnostics, never per turn.
 ///
 /// Only entries belonging to the current session (matching `sid`) are included.
 /// The snapshot runs on a blocking thread since `snapshot_session_log` reads

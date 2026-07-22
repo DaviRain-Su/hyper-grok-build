@@ -15,12 +15,18 @@ async fn queue_and_interjection_lifecycle() {
     // Gate turn 1's terminal event so the ENTIRE mid-turn setup — queue P1
     // and P2, remove P1, refocus the prompt, type + chord I1 — provably lands
     // while turn 1 is still the running turn, even under heavy suite load.
-    content.hold_agent_completions();
-    content.set_turns([
+    let mut turn_one = content.expect_agent_turn_blocked(
+        "running turn before queue lifecycle send-now",
         slow_turn_text("STEPONE"),
-        "STEPTWO sent-now message acknowledged.".to_owned(),
-        "STEPTHREE promoted prompt handled.".to_owned(),
-    ]);
+    );
+    let _turn_two = content.expect_agent_turn(
+        "lifecycle sent-now message",
+        "STEPTWO sent-now message acknowledged.",
+    );
+    let _turn_three = content.expect_agent_turn(
+        "remaining lifecycle queued prompt",
+        "STEPTHREE promoted prompt handled.",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =
@@ -36,6 +42,9 @@ async fn queue_and_interjection_lifecycle() {
     harness
         .wait_for_text("STEPONE", Duration::from_secs(45))
         .expect("step 1: turn streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
+        .await
+        .expect("turn 1 reached completion barrier");
 
     harness.inject_keys(b"lifecycle p-one\r").expect("queue P1");
     harness
@@ -70,7 +79,7 @@ async fn queue_and_interjection_lifecycle() {
         .inject_keys(b"lifecycle i-one")
         .expect("type send-now message");
     harness.inject_keys(CTRL_ENTER).expect("send-now chord");
-    content.release_agent_completions();
+    turn_one.release();
     // Cancel-and-send: turn 1 is cancelled silently; I1 commits as a
     // standard "❯ " prompt block and runs as its own turn.
     // I1 (send-now) then P2 drain back-to-back. The "❯ lifecycle i-one"

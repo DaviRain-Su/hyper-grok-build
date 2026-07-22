@@ -67,8 +67,7 @@ fn rewind_then_resubmit_drains_immediately_and_discards_orphan() {
     // User edits and re-submits without waiting.
     let effects = dispatch(Action::SendPrompt("second".into()), &mut app);
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. }
-if text == "second"));
+    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "second"));
     assert!(app.agents[&id].session.state.is_turn_running());
     let second_pid = app.agents[&id].session.current_prompt_id.clone();
     assert!(second_pid.is_some());
@@ -380,10 +379,9 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
     );
 
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { text, .. }
-if text == "fix the bug properly")),
+        effects.iter().any(
+            |e| matches!(e, Effect::SendPrompt { text, .. } if text == "fix the bug properly")
+        ),
         "edited prompt must be sent, got {effects:?}"
     );
     let agent = &app.agents[&id];
@@ -469,10 +467,9 @@ fn inline_edit_all_mode_previews_confirms_and_resubmits() {
         &mut app,
     );
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { text, .. }
-if text == "fix the bug properly")),
+        effects.iter().any(
+            |e| matches!(e, Effect::SendPrompt { text, .. } if text == "fix the bug properly")
+        ),
         "got {effects:?}"
     );
     assert!(
@@ -725,10 +722,9 @@ fn inline_edit_resubmit_sends_slash_text_literally() {
     );
 
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SendPrompt { text, .. }
-if text == "/etc/hosts is wrong, fix it")),
+        effects.iter().any(
+            |e| matches!(e, Effect::SendPrompt { text, .. } if text == "/etc/hosts is wrong, fix it")
+        ),
         "slash-lookalike edit must be sent as a prompt, got {effects:?}"
     );
 }

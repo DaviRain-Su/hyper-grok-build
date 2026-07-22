@@ -1,6 +1,6 @@
 //! PTY: a parked wait produces two static markers — the park pushes a plain
 //! "Worked for X" line (the still-running work shows on the status row's
-//! "watching · …" cue, not in the transcript) and the turn that follows ends
+//! "… still running" cue, not in the transcript) and the turn that follows ends
 //! with its own marker below. A prompt typed mid-park is cancel-and-send:
 //! the shell silently cancels the parked turn (no "Turn cancelled by user"
 //! marker) and runs the message as its OWN next turn, whose completion pushes
@@ -33,29 +33,15 @@ async fn endline_park_two_static_markers() {
     };
 
     // Tool call 1: a flag-gated background command — the work the watching
-    // cue counts ("watching · 1 command").
+    // cue counts ("1 command still running").
     let bg_args = json!({
         "command": gated_loop(&park_flag),
         "description": "flag-gated command",
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_endline_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_endline_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
+    let _background_turn =
+        expect_tool_turn(&content, "call_endline_bg", "run_terminal_command", bg_args);
 
     // Tool call 2: the flag-gated foreground hold — the turn idles here (no
     // deadline) until the test has extracted the task id and enqueued the
@@ -65,21 +51,11 @@ async fn endline_park_two_static_markers() {
         "description": "hold for id extraction"
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_endline_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_endline_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
+    let _id_hold_turn = expect_tool_turn(
+        &content,
+        "call_endline_id_hold",
+        "run_terminal_command",
+        id_hold_args,
     );
 
     // Fallback for the cancel-and-sent prompt's turn: plain text ends it.
@@ -128,21 +104,11 @@ async fn endline_park_two_static_markers() {
         "timeout_ms": 600_000
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_endline_wait",
-            "get_command_or_subagent_output",
-            &wait_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_endline_wait",
-            "get_command_or_subagent_output",
-            &wait_args,
-        )),
+    let _wait_turn = expect_tool_turn(
+        &content,
+        "call_endline_wait",
+        "get_command_or_subagent_output",
+        wait_args,
     );
 
     // Everything downstream is scripted — let the id-extraction hold finish.
@@ -160,17 +126,22 @@ async fn endline_park_two_static_markers() {
             )
         });
     harness
-        .wait_for_text("watching · 1 command", Duration::from_secs(30))
+        .wait_for_text("1 command still running", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "parked watching cue never appeared; screen:\n{}",
                 harness.screen_contents()
             )
         });
+    // The status row's cue is the only "still running" on screen — the
+    // parked marker line itself stays a plain "Worked for X".
+    let screen = harness.screen_contents();
     assert!(
-        !harness.contains_text("still running"),
-        "the parked marker carries no still-running suffix; screen:\n{}",
-        harness.screen_contents()
+        screen
+            .lines()
+            .filter(|l| l.contains("Worked for"))
+            .all(|l| !l.contains("still running")),
+        "the parked marker carries no still-running suffix; screen:\n{screen}"
     );
 
     // Type mid-park: Enter is cancel-and-send (the wait makes it a sendable
@@ -200,7 +171,9 @@ async fn endline_park_two_static_markers() {
 
     // Two static markers: the park line unchanged above the promoted prompt
     // and the new turn's final marker below it — both plain "Worked for X"
-    // lines (no still-running suffix) — with NO cancelled marker anywhere
+    // lines (no still-running suffix; the bg command is still gated, so the
+    // status row legitimately shows "1 command still running" — scope the
+    // suffix check to the marker lines) — with NO cancelled marker anywhere
     // (silent send-now cancel).
     let two_markers = wait_until(Duration::from_secs(90), || {
         harness.update(Duration::from_millis(100));
@@ -208,7 +181,10 @@ async fn endline_park_two_static_markers() {
         // Positional: park marker ABOVE the promoted prompt ABOVE the final
         // marker (screen text is row-major), both markers intact.
         screen.matches("Worked for").count() == 2
-            && !screen.contains("still running")
+            && screen
+                .lines()
+                .filter(|l| l.contains("Worked for"))
+                .all(|l| !l.contains("still running"))
             && !screen.contains("Turn cancelled by user")
             && matches!(
                 (

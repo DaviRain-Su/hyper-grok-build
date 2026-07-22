@@ -821,9 +821,10 @@ impl CompactionsRemaining {
 /// persistence, Responses API mapping, UI). Chat Completions requests map
 /// `Xhigh` → `"max"` only on the [`ChatCompletionRequest`] field (Kimi K3 /
 /// OpenAI-style alias) via [`serialize_chat_reasoning_effort`].
-/// `"max"` deserializes to the first-class [`Self::Max`] tier (Codex
-/// app-server; also what Kimi K3 catalogs emit), while `FromStr` keeps
-/// `"max"` as a CLI/UX alias of `Xhigh`.
+/// `"max"` deserializes / parses to the first-class [`Self::Max`] tier
+/// (Responses API, Codex, Kimi K3 catalogs). `"ultra"` is Hyper/Codex's
+/// subagent-delegation tier and maps to `"max"` on Chat Completions and
+/// Messages wire forms.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -833,18 +834,20 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
-    /// Canonical wire/id is `"xhigh"`; `"max"` parses to [`Self::Max`] on
-    /// deserialize but stays a `FromStr` alias of `Xhigh`.
+    /// Canonical wire/id is `"xhigh"`.
     Xhigh,
-    /// Codex app-server tier above `xhigh` for maximum single-agent depth.
+    /// First-class max tier (Responses API / Codex); also what Kimi K3
+    /// catalogs emit as `"max"`.
     Max,
     /// Codex app-server tier that enables automatic subagent delegation.
+    /// Chat Completions and Messages wire map this to `"max"`.
     Ultra,
 }
 
 /// Chat Completions wire for [`ChatCompletionRequest::reasoning_effort`].
 ///
-/// Maps [`ReasoningEffort::Xhigh`] → `"max"` so Moonshot/Kimi K3 (and
+/// Maps [`ReasoningEffort::Xhigh`] / [`ReasoningEffort::Max`] /
+/// [`ReasoningEffort::Ultra`] → `"max"` so Moonshot/Kimi K3 (and
 /// OpenAI-style aliases) accept the field, without changing the enum's
 /// global serialize form used for conversation persistence.
 fn serialize_chat_reasoning_effort<S: serde::Serializer>(
@@ -876,7 +879,8 @@ impl ReasoningEffort {
             Self::Low => crate::rs::ReasoningEffort::Low,
             Self::Medium => crate::rs::ReasoningEffort::Medium,
             Self::High => crate::rs::ReasoningEffort::High,
-            Self::Xhigh | Self::Max | Self::Ultra => crate::rs::ReasoningEffort::Xhigh,
+            Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
+            Self::Max | Self::Ultra => crate::rs::ReasoningEffort::Max,
         }
     }
 
@@ -890,6 +894,7 @@ impl ReasoningEffort {
             crate::rs::ReasoningEffort::Medium => Self::Medium,
             crate::rs::ReasoningEffort::High => Self::High,
             crate::rs::ReasoningEffort::Xhigh => Self::Xhigh,
+            crate::rs::ReasoningEffort::Max => Self::Max,
         }
     }
 
@@ -906,14 +911,12 @@ impl ReasoningEffort {
         }
     }
 
-    /// Anthropic Messages API `output_config.effort` string; `None` for unsupported variants.
     pub fn to_messages_api(self) -> Option<&'static str> {
         match self {
             Self::None | Self::Minimal => None,
-            Self::Low => Some("low"),
-            Self::Medium => Some("medium"),
-            Self::High => Some("high"),
-            Self::Xhigh | Self::Max | Self::Ultra => Some("max"),
+            // Ultra is not a Messages wire token; fold to max like Chat Completions.
+            Self::Ultra => Some("max"),
+            _ => Some(self.as_str()),
         }
     }
 }
@@ -934,10 +937,8 @@ impl std::str::FromStr for ReasoningEffort {
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
-            // Keep `max` as the historical CLI alias of `xhigh` for typed
-            // input. A model catalog can still expose first-class `Max` by
-            // deserializing an effort option whose value is `"max"`.
-            "xhigh" | "max" => Ok(Self::Xhigh),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
             "ultra" => Ok(Self::Ultra),
             _ => Err(format!(
                 "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max, ultra)"
@@ -946,7 +947,6 @@ impl std::str::FromStr for ReasoningEffort {
     }
 }
 
-/// Canonical wire parse only (`max` → `Xhigh`); remapped menu ids need a model catalog.
 pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
     token.parse().ok()
 }
@@ -1395,9 +1395,9 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
-        // `"max"` deserializes to the first-class Max tier (Codex app-server;
-        // Kimi K3 catalogs emit the same token). Serialize still emits
-        // canonical `"xhigh"` for Xhigh so session persistence stays stable.
+        // `"max"` deserializes to the first-class Max tier (Codex / Kimi K3).
+        // Serialize still emits canonical `"xhigh"` for Xhigh so session
+        // persistence stays stable.
         assert_eq!(
             serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
             ReasoningEffort::Max
@@ -1409,27 +1409,22 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_from_str_accepts_max_as_xhigh() {
+    fn reasoning_effort_from_str_parses_max_and_xhigh_as_distinct_tiers() {
         assert_eq!(
             "max".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
-        );
-        assert_eq!(
-            "MAX".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "xhigh".parse::<ReasoningEffort>().unwrap(),
             ReasoningEffort::Xhigh
         );
-        assert_eq!(ReasoningEffort::Xhigh.as_str(), "xhigh");
     }
 
     #[test]
     fn parse_canonical_effort_token_helper() {
         assert_eq!(
             parse_canonical_effort_token("max"),
-            Some(ReasoningEffort::Xhigh)
+            Some(ReasoningEffort::Max)
         );
         assert_eq!(
             parse_canonical_effort_token("high"),

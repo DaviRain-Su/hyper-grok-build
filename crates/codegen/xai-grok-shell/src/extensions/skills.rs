@@ -90,6 +90,12 @@ pub struct SkillsListRequest {
     pub cwd: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowsListRequest {
+    session_id: acp::SessionId,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsListResponse {
@@ -277,6 +283,7 @@ fn extra_skill_dirs_from_config() -> Vec<String> {
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(
+    agent: &crate::agent::mvp_agent::MvpAgent,
     args: &acp::ExtRequest,
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
     compat: CompatConfig,
@@ -405,6 +412,25 @@ pub async fn handle(
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
             let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
+        }
+
+        "x.ai/workflows/list" => {
+            let req: WorkflowsListRequest = serde_json::from_str(args.params.get())?;
+            let Some(handle) = agent.session_handle_waiting_for_load(&req.session_id).await else {
+                return super::to_ext_response(Err::<serde_json::Value, _>(anyhow::anyhow!(
+                    "unknown session id: {}",
+                    req.session_id.0
+                )));
+            };
+            let (launches_enabled, _management_available) = handle.workflow_catalog_state().await;
+            let workflows = if launches_enabled {
+                crate::session::workflow::registry::list_workflows(Some(
+                    handle.tool_context.cwd.as_path(),
+                ))
+            } else {
+                Vec::new()
+            };
+            super::to_ext_response(Ok(serde_json::json!({ "workflows": workflows })))
         }
 
         "x.ai/skills/config" => {

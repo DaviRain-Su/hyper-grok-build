@@ -1228,6 +1228,18 @@ mod tests {
             .arg("pdeathsig_does_not_let_a_child_outlive_its_parent") // unique substring filter
             .arg("--nocapture")
             .env(PDEATHSIG_HELPER_ENV, "1")
+            // The helper is a fresh libtest run of exactly the one filtered test.
+            // Strip Bazel's per-shard test env so that when this target is built
+            // with `shard_count > 1`, the re-exec'd helper does not re-apply
+            // sharding to its single filtered test — otherwise the test could be
+            // partitioned into a shard other than the inherited TEST_SHARD_INDEX,
+            // run zero tests, and exit 0 instead of PDEATHSIG_HELPER_OK, failing
+            // the driver's verdict assertion. Also drop the inherited test filter
+            // so only our positional filter selects the test.
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

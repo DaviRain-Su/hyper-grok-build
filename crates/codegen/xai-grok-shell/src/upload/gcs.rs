@@ -117,28 +117,6 @@ impl WithAuth for TraceExportConfig {
 /// is configured.
 pub(crate) const SESSION_TRACES_BUCKET: Option<&str> =
     option_env!("GROK_SESSION_TRACES_BUCKET_DEFAULT");
-/// Build the GCS console browse URL for the per-turn unified log.
-///
-/// The log is already uploaded by `complete_prompt_trace` at
-/// `{session_id}/turn_{N}/unified_log.jsonl`. This just computes
-/// the URL so feedback Slack messages can link to it.
-///
-/// `bucket_url` is the resolved trace bucket (`gs://…`) so the link tracks
-/// runtime overrides; falls back to the compiled-in default. `None` when
-/// neither yields a GCS bucket.
-pub(crate) fn unified_log_url(
-    bucket_url: Option<&str>,
-    session_id: &str,
-    turn_number: i64,
-) -> Option<String> {
-    let bucket = match bucket_url {
-        Some(url) => url.strip_prefix("gs://")?.trim_end_matches('/'),
-        None => SESSION_TRACES_BUCKET?,
-    };
-    Some(format!(
-        "https://console.cloud.google.com/storage/browser/_details/{bucket}/{session_id}/turn_{turn_number}/unified_log.jsonl"
-    ))
-}
 /// Upload bytes to the `auth-diagnostics/{version}/{user_id}/{ts}.jsonl` path
 /// for easy aggregation across users. Used by both the auth refresh failure
 /// uploader and the 401/404 error trace uploader.

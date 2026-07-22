@@ -63,7 +63,7 @@ The state icon matches Grok Build's sibling views (
 A row stays in **Working** while it has live background work even if its
 turn has finished — a running background task, a `monitor`, or an active
 scheduled `/loop`. The activity line says what's running (e.g.
-`watching · 1 monitor · 2 loops`), since each can wake the agent for a
+`1 monitor · 2 loops still running`), since each can wake the agent for a
 new turn.
 
 There are no inline group headers — the sort order keeps same-state

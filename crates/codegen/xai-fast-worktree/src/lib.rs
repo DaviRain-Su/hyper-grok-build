@@ -9,6 +9,8 @@
 //! 6. SQLite metadata tracking (behind `metadata` feature)
 
 mod api;
+#[cfg(feature = "metadata")]
+mod auto_gc;
 #[cfg(target_os = "linux")]
 pub mod btrfs;
 mod copy;
@@ -31,12 +33,25 @@ pub use api::cleanup_orphaned_btrfs_snapshots;
 #[cfg(target_os = "linux")]
 pub use api::cleanup_orphaned_overlay_snapshots;
 #[cfg(feature = "metadata")]
+pub use api::gc::effective_max_age;
+#[cfg(feature = "metadata")]
 pub use api::gc::{GcOptions, GcReport, gc_worktrees, gc_worktrees_with_delegate};
 pub use api::{
     BtrfsDelegate, BtrfsMode, CleanupReport, CopyReport, CreationMode, DelegateSnapshotResult,
     DirtyFilesReport, ENOSPC_OS_MESSAGE, IgnoredFilesMode, OUT_OF_DISK_CONTEXT, RemoveReport,
     WorkingTreeMode, WorktreeBuilder, WorktreeReport, cleanup_worktrees_in,
     cleanup_worktrees_in_with_delegate, remove_worktree, remove_worktree_with_delegate,
+};
+#[cfg(feature = "metadata")]
+pub use auto_gc::{
+    AutoGcOptions, AutoGcOutcome, AutoGcReport, DEFAULT_MAX_AGE_SECS, DEFAULT_MIN_INTERVAL_SECS,
+    DEFAULT_REBUILD_MIN_INTERVAL_SECS, ENV_AUTO_GC, ENV_AUTO_GC_DRY_RUN, ENV_AUTO_GC_MAX_AGE,
+    ENV_AUTO_GC_REBUILD, MAX_AGE_SECS_MAX, MAX_AGE_SECS_MIN, META_LAST_AUTO_GC_AT,
+    META_LAST_AUTO_REBUILD_AT, MIN_INTERVAL_SECS_MAX, MIN_INTERVAL_SECS_MIN,
+    ResolvedWorktreeAutoGc, WorktreeAutoGcLayer, age_expiry_allowed, build_auto_gc_options,
+    clamp_max_age_secs, clamp_min_interval_secs, default_max_age_by_kind, env_auto_gc_disabled,
+    env_auto_gc_dry_run, env_auto_gc_max_age, env_auto_gc_rebuild, maybe_auto_gc,
+    maybe_auto_gc_default, process_cwd_scan_available, resolve_worktree_auto_gc_from_layers,
 };
 #[cfg(feature = "metadata")]
 pub use db::{

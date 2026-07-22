@@ -17,6 +17,11 @@ use xai_grok_workspace::session::git::normalize_repo_url;
 
 pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Over-fetch factor: extra headroom for the cross-lane merge before truncation.
+pub(crate) fn over_fetch(limit: usize) -> usize {
+    (limit * 3).max(100)
+}
+
 /// Unified session entry returned by the merge.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +58,14 @@ pub struct MergedSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_kind: Option<String>,
 }
+/// Inputs to [`merge`]. The registry page is cwd-independent, so a widen reuses
+/// it without a second RPC.
+pub(crate) struct SessionLanes {
+    pub local: Vec<Summary>,
+    pub remote: Vec<SessionRecord>,
+    pub repo_urls: Vec<String>,
+}
+
 /// Fetch sessions from both local storage and the remote registry,
 /// merge, dedup, and return a sorted list.
 pub async fn fetch_merged(
@@ -61,6 +74,39 @@ pub async fn fetch_merged(
     query: Option<&str>,
     limit: usize,
 ) -> Vec<MergedSession> {
+    let SessionLanes {
+        local,
+        remote,
+        repo_urls,
+    } = fetch_lanes(client, cwd, query, limit).await;
+    merge(remote, local, query, &repo_urls, limit)
+}
+
+/// Retain summaries matching `repo_urls`; empty `repo_urls` leaves them unfiltered.
+pub(crate) fn filter_summaries_by_repo(
+    summaries: Vec<Summary>,
+    repo_urls: &[String],
+) -> Vec<Summary> {
+    if repo_urls.is_empty() {
+        return summaries;
+    }
+    summaries
+        .into_iter()
+        .filter(|s| {
+            s.git_remotes
+                .iter()
+                .any(|u| normalize_repo_url(u).is_some_and(|n| repo_urls.contains(&n)))
+        })
+        .collect()
+}
+
+/// Fetch the three [`merge`] lanes concurrently for `cwd`.
+pub(crate) async fn fetch_lanes(
+    client: Option<&SessionRegistryClient>,
+    cwd: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> SessionLanes {
     let cwd_owned = cwd.map(String::from);
 
     let local_fut = async {
@@ -93,7 +139,7 @@ pub async fn fetch_merged(
         };
         // Fetch more than the user-facing limit from the remote source to
         // avoid premature truncation before merging with local results.
-        let remote_limit = (limit * 3).max(100) as i64;
+        let remote_limit = over_fetch(limit) as i64;
         tokio::time::timeout(REMOTE_TIMEOUT, client.search(query, remote_limit))
             .await
             .unwrap_or_else(|_| {
@@ -115,8 +161,12 @@ pub async fn fetch_merged(
         .unwrap_or_default()
     };
 
-    let (local, remote, local_repo_urls) = tokio::join!(local_fut, remote_fut, repo_urls_fut);
-    merge(remote, local, query, &local_repo_urls, limit)
+    let (local, remote, repo_urls) = tokio::join!(local_fut, remote_fut, repo_urls_fut);
+    SessionLanes {
+        local,
+        remote,
+        repo_urls,
+    }
 }
 
 /// Merge remote and local results. Local entries are inserted first so
@@ -328,6 +378,10 @@ mod tests {
                 id: acp::SessionId::new(id),
                 cwd: "/test".into(),
             },
+            cwd_generation: 0,
+            previous_cwd: None,
+            pending_cwd_switch_reminder: None,
+            cwd_switch_bookkeeping_generation: 0,
             session_summary: title.into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             updated_at: updated.parse().unwrap(),

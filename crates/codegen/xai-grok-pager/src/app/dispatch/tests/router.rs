@@ -26,6 +26,291 @@ fn auth_copy_dispatch_preserves_all_delivery_states() {
         ));
     }
 }
+#[test]
+fn external_prompt_editor_arms_typed_request_and_preserves_composer_modes() {
+    use crate::app::agent_view::PromptInputMode;
+    for mode in [
+        PromptInputMode::Normal,
+        PromptInputMode::Bash,
+        PromptInputMode::Feedback,
+        PromptInputMode::Remember,
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent
+            .prompt
+            .set_screen_mode(crate::app::ScreenMode::Minimal);
+        agent.prompt_input_mode = mode;
+        agent.prompt.set_text("draft with\nnewlines");
+        let effects = dispatch(Action::EditPromptExternal, &mut app);
+        assert!(effects.is_empty());
+        let request = app.pending_editor.take().expect("editor request");
+        match request {
+            crate::app::external_editor::PendingEditorRequest::PromptDraft {
+                agent_id,
+                original_text,
+            } => {
+                assert_eq!(agent_id, id);
+                assert_eq!(original_text, "draft with\nnewlines");
+            }
+            other => panic!("expected prompt draft request, got {other:?}"),
+        }
+        assert_eq!(app.agents[&id].prompt_input_mode, mode);
+        assert_eq!(app.agents[&id].prompt.text(), "draft with\nnewlines");
+    }
+}
+#[test]
+fn external_prompt_editor_refuses_nonminimal_and_owned_input() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none(), "full TUI must refuse");
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app.agents.get_mut(&id).unwrap().active_pane = ActivePane::Scrollback;
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(
+        matches!(
+            app.pending_editor,
+            Some(crate::app::external_editor::PendingEditorRequest::PromptDraft { .. })
+        ),
+        "minimal's logical composer remains authoritative after Tab/Vim focus"
+    );
+    app.pending_editor = None;
+    app.agents.get_mut(&id).unwrap().cancel_turn_view =
+        Some(crate::views::modal::CancelTurnViewState {
+            active_idx: 0,
+            running_count: 1,
+        });
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none(), "modal owner must refuse");
+    assert_eq!(app.agents[&id].prompt.text(), "draft");
+    app.agents.get_mut(&id).unwrap().cancel_turn_view = None;
+    app.agents.get_mut(&id).unwrap().prompt_mode = PromptMode::EditingQueued {
+        id: 1,
+        original: "queued".to_owned(),
+        server_id: None,
+        kind: crate::app::agent::QueueEntryKind::Prompt,
+    };
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none(), "queue edit must refuse");
+    assert_eq!(app.agents[&id].prompt.text(), "draft");
+    app.agents.get_mut(&id).unwrap().prompt_mode = PromptMode::Normal;
+    app.agents.get_mut(&id).unwrap().prompt.set_text("/");
+    let models = app.agents[&id].session.models.clone();
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .refresh_slash(&models);
+    assert!(app.agents[&id].prompt.any_dropdown_open());
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none(), "dropdown owner must refuse");
+}
+#[test]
+fn external_prompt_editor_refuses_elements_with_visible_message() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_screen_mode(crate::app::ScreenMode::Minimal);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let pasted = "one\ntwo\nthree\nfour";
+    let _ = agent.prompt.handle_paste(pasted);
+    assert!(!agent.prompt.textarea.elements().is_empty());
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none());
+    assert_eq!(app.agents[&id].prompt.text(), pasted);
+    assert!(!app.agents[&id].prompt.textarea.elements().is_empty());
+    assert!(
+        app.agents[&id]
+            .scrollback
+            .iter_entries()
+            .any(|(_, entry)| entry.block.searchable_text().as_deref()
+                == Some(crate::app::external_editor::ATTACHMENT_MESSAGE))
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.prompt.set_text("");
+    agent.prompt.textarea.insert_element(
+        "@src/main.rs",
+        crate::views::prompt_widget::KIND_FILE_REF,
+        None,
+    );
+    let file_ref_text = agent.prompt.text().to_owned();
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none());
+    assert_eq!(app.agents[&id].prompt.text(), file_ref_text);
+    assert!(!app.agents[&id].prompt.textarea.elements().is_empty());
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.prompt.set_text("");
+    let image = crate::prompt_images::PastedImage {
+        element_id: xai_ratatui_textarea::ElementId::from_raw(0),
+        display_number: 0,
+        mime_type: "image/png".to_owned(),
+        dimensions: Some((8, 8)),
+        byte_len: 1,
+        encoded_bytes: Some(vec![0].into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: crate::prompt_images::PromptImagePreview::default(),
+    };
+    agent.prompt.insert_image(image).unwrap();
+    let image_text = agent.prompt.text().to_owned();
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none());
+    assert_eq!(app.agents[&id].prompt.text(), image_text);
+    assert_eq!(app.agents[&id].prompt.images.len(), 1);
+}
+#[test]
+fn external_prompt_editor_refuses_voice_and_pending_paste_with_visible_messages() {
+    use crate::app::agent_view::AgentDeferredSend;
+    use crate::app::app_view::{VoiceState, VoiceTarget};
+    for voice_state in [
+        VoiceState::ColdStart {
+            hold: false,
+            target: VoiceTarget::Agent(AgentId(0)),
+        },
+        VoiceState::Recording {
+            hold: false,
+            target: VoiceTarget::Agent(AgentId(0)),
+            interim: Some("partial".to_owned()),
+        },
+        VoiceState::Stopping {
+            target: VoiceTarget::Agent(AgentId(0)),
+            interim: Some("partial".to_owned()),
+        },
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        app.voice_state = voice_state;
+        app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+        let _ = dispatch(Action::EditPromptExternal, &mut app);
+        assert!(app.pending_editor.is_none());
+        assert_eq!(app.agents[&id].prompt.text(), "draft");
+        assert!(
+            app.agents[&id]
+                .scrollback
+                .iter_entries()
+                .any(|(_, entry)| entry.block.searchable_text().as_deref()
+                    == Some(crate::app::external_editor::VOICE_MESSAGE))
+        );
+    }
+    for (probes, deferred_send) in [
+        (1, None),
+        (1, Some(AgentDeferredSend::SendPrompt)),
+        (0, Some(AgentDeferredSend::SendPrompt)),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("draft");
+        agent.paste_probe_in_flight = probes;
+        agent.deferred_send = deferred_send;
+        let _ = dispatch(Action::EditPromptExternal, &mut app);
+        assert!(app.pending_editor.is_none());
+        assert_eq!(app.agents[&id].prompt.text(), "draft");
+        assert_eq!(app.agents[&id].paste_probe_in_flight, probes);
+        assert_eq!(app.agents[&id].deferred_send, deferred_send);
+        assert!(
+            app.agents[&id]
+                .scrollback
+                .iter_entries()
+                .any(|(_, entry)| entry.block.searchable_text().as_deref()
+                    == Some(crate::app::external_editor::PASTE_MESSAGE))
+        );
+    }
+}
+#[test]
+fn deferred_paste_completion_after_refused_editor_does_not_implicitly_send_without_stash() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.prompt.set_text("draft");
+    let draft_len = agent.prompt.text().len();
+    agent.prompt.set_cursor(draft_len);
+    agent.paste_probe_in_flight = 1;
+    let _ = dispatch(Action::EditPromptExternal, &mut app);
+    assert!(app.pending_editor.is_none());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ClipboardAttachmentProbed {
+            ctx: crate::app::actions::ClipboardPasteContext {
+                target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
+                    agent_id: id,
+                    images_dir: None,
+                },
+                source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
+                    text: crate::app::actions::ClipboardTextRead::Success(Some(
+                        "pasted".to_owned(),
+                    )),
+                    tip_showing: false,
+                },
+            },
+            image: crate::app::actions::ProbedAttachment::NoRaster,
+            file_urls: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "no deferred submit was armed");
+    assert_eq!(app.agents[&id].prompt.text(), "draftpasted");
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+}
+#[test]
+fn external_prompt_editor_result_replaces_or_clears_without_sending() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    app.agents.get_mut(&id).unwrap().prompt.set_text("original");
+    crate::app::external_editor::apply_prompt_text(&mut app, id, "edited\n".to_owned());
+    assert_eq!(app.agents[&id].prompt.text(), "edited\n");
+    assert!(app.agents[&id].session.state.is_turn_running());
+    assert!(app.agents[&id].session.pending_prompts.is_empty());
+    crate::app::external_editor::apply_prompt_text(&mut app, id, String::new());
+    assert_eq!(app.agents[&id].prompt.text(), "");
+    assert!(app.agents[&id].session.state.is_turn_running());
+}
+#[test]
+fn editor_failure_targets_original_agent_and_vanished_agent_is_safe() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().prompt.set_text("original");
+    crate::app::external_editor::report_prompt_failure(&mut app, id, "editor failed");
+    assert_eq!(app.agents[&id].prompt.text(), "original");
+    assert!(
+        app.agents[&id]
+            .scrollback
+            .iter_entries()
+            .any(|(_, entry)| entry.block.searchable_text().as_deref() == Some("editor failed"))
+    );
+    app.agents.shift_remove(&id);
+    crate::app::external_editor::apply_prompt_text(&mut app, id, "ignored".to_owned());
+    crate::app::external_editor::report_prompt_failure(&mut app, id, "ignored");
+    assert!(app.agents.is_empty());
+}
+#[test]
+fn config_editor_action_still_uses_typed_request() {
+    let mut app = test_app_with_agent();
+    let path = std::path::PathBuf::from("/tmp/agent-config.md");
+    let _ = dispatch(
+        Action::SuspendForEditor {
+            path: path.clone(),
+            refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Agents),
+        },
+        &mut app,
+    );
+    assert!(matches!(app.pending_editor, Some(crate
+        ::app::external_editor::PendingEditorRequest::ConfigFile { path : ref queued,
+        refresh_agents_modal : Some(crate ::views::agents_modal::AgentsTab::Agents), })
+        if queued == & path));
+}
 fn seed_foreign_resume_hint(
     app: &mut AppView,
     tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool,
@@ -505,8 +790,7 @@ fn dispatch_send_prompt_announcements_via_registry() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
-        hidden_ids }
-if hidden_ids.contains("crit-a"))),
+        hidden_ids } if hidden_ids.contains("crit-a"))),
         "expected persist effect carrying the hidden id, got {effects:?}"
     );
     assert!(app.hidden_announcement_ids.contains("crit-a"));
@@ -570,8 +854,7 @@ fn announcements_show_clears_visible_critical_ids_only() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
-        hidden_ids }
-if ! hidden_ids.contains("outage-a"))),
+        hidden_ids } if ! hidden_ids.contains("outage-a"))),
         "expected persist effect without the un-hidden id, got {effects:?}"
     );
     assert_eq!(shown_banner_id(&app).as_deref(), Some("outage-a"));
@@ -663,8 +946,7 @@ fn announcements_show_clears_hidden_promo_ids() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::PersistAnnouncementsHidden {
-        hidden_ids }
-if ! hidden_ids.contains("promo-a"))),
+        hidden_ids } if ! hidden_ids.contains("promo-a"))),
         "expected persist effect without the un-hidden promo id, got {effects:?}"
     );
     assert_eq!(shown_banner_id(&app).as_deref(), Some("promo-a"));
@@ -892,7 +1174,7 @@ fn slash_hooks_opens_modal() {
     let id = AgentId(0);
     let effects = dispatch(Action::SendPrompt("/hooks".into()), &mut app);
     assert!(app.agents[&id].extensions_modal.is_some());
-    assert_eq!(effects.len(), 5);
+    assert_eq!(effects.len(), 6);
 }
 #[test]
 fn acp_bootstrap_command_appears_in_autocomplete() {
@@ -952,8 +1234,7 @@ fn acp_bootstrap_command_executes_as_passthrough() {
     let effects = dispatch(Action::SendPrompt("/flush".into()), &mut app);
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(& effects[0], Effect::SendPrompt { text, .. }
-if text == "/flush"),
+        matches!(& effects[0], Effect::SendPrompt { text, .. } if text == "/flush"),
         "ACP command should passthrough, got: {effects:?}"
     );
 }
@@ -1776,7 +2057,7 @@ fn show_tasks_empty_commits_empty_message() {
     assert_eq!(agent_scrollback_len(&app), before + 1);
     assert_eq!(
         last_system_text(&app, AgentId(0)),
-        "No background tasks or subagents."
+        "No background tasks, workflows, or subagents."
     );
 }
 #[test]

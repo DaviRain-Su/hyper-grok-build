@@ -87,21 +87,7 @@ async fn minimal_flush_left_no_hpad() {
         "description": "flush-left permission check",
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_flush",
-            "run_terminal_command",
-            &args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events(
-            "run_terminal_command",
-            &args,
-        )),
-    );
+    let _permission_turn = expect_tool_turn(&content, "call_flush", "run_terminal_command", args);
     harness
         .inject_keys(b"run the flush check\r")
         .expect("submit tool prompt");

@@ -56,12 +56,13 @@ xai-test-utils = { workspace = true }
 # Only used by tests behind #[cfg(feature = "metadata")] in db/tests.rs.
 rusqlite = { version = "0.37", features = ["bundled"] }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 nix = { version = "0.30", features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = { workspace = true }
 nix = { version = "0.30", features = ["fs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

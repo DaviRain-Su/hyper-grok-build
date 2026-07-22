@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "0.2.106"
+version = "0.2.109"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -55,6 +55,7 @@ portable-pty = "0.9"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+shlex = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
 rand = { workspace = true }
@@ -200,6 +201,11 @@ harness = false
 # PTY integration tests are split into coherent scheduling families. The test
 # modules remain under tests/pty_e2e/; these roots only define which cases share
 # one Cargo/Bazel process. All cases stay #[ignore]d for ordinary Cargo runs.
+# Selected Cargo runs must provide PAGER_BINARY; Bazel wires the sibling binary.
+[[test]]
+name = "doctor_early_dispatch"
+path = "tests/doctor_early_dispatch.rs"
+
 [[test]]
 name = "pty_e2e_smoke"
 path = "tests/pty_e2e_smoke.rs"
@@ -269,6 +275,12 @@ path = "src/bin/question_view_playground.rs"
 [[bin]]
 name = "todo-pane-playground"
 path = "src/bin/todo_pane_playground.rs"
+
+# Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
+# `cargo clippy --workspace -- -D warnings` on this package is stricter than
+# the workspace-default clippy allows used in CI.
+[lints]
+workspace = true
 
 [features]
 default = ["jemalloc", "sandbox-enforce"]

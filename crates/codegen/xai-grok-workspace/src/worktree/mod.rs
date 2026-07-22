@@ -2360,8 +2360,9 @@ pub struct RehydrateSessionResponse {
 // ============================================================================
 
 use xai_fast_worktree::{
-    DbStats, GcOptions, GcReport, ListFilter, WorktreeDb, WorktreeKind, WorktreeRecord,
-    gc_worktrees as fw_gc_worktrees, rebuild_worktree_db, resolve_grok_home,
+    AutoGcOptions, DbStats, GcOptions, GcReport, ListFilter, WorktreeAutoGcLayer, WorktreeDb,
+    WorktreeKind, WorktreeRecord, gc_worktrees as fw_gc_worktrees, maybe_auto_gc,
+    rebuild_worktree_db, resolve_grok_home, resolve_worktree_auto_gc_from_layers,
 };
 
 pub fn open_db() -> Result<WorktreeDb> {
@@ -2414,8 +2415,83 @@ pub fn gc_worktrees_mgmt(
         max_age_secs,
         force,
         dry_run,
+        ..Default::default()
     };
     fw_gc_worktrees(&db, &opts)
+}
+
+/// Map settings → resolve layer (shared by shell + workspace).
+pub fn worktree_auto_gc_layer_from_settings(
+    s: &xai_grok_config_types::WorktreeAutoGcSettings,
+) -> WorktreeAutoGcLayer {
+    use std::collections::BTreeMap;
+    use xai_grok_config_types::WorktreeKindMaxAge;
+
+    let max_age_by_kind = s
+        .max_age_by_kind
+        .as_ref()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    let kind = WorktreeKind::from_str_opt(k)?;
+                    let age = match v {
+                        WorktreeKindMaxAge::Secs(n) => Some(*n),
+                        WorktreeKindMaxAge::Never => None,
+                    };
+                    Some((kind, age))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    WorktreeAutoGcLayer {
+        enabled: s.enabled,
+        max_age_secs: s.max_age_secs,
+        min_interval_secs: s.min_interval_secs,
+        dry_run: s.dry_run,
+        include_orphan_snapshots: s.include_orphan_snapshots,
+        max_age_by_kind,
+        include_rebuild: s.include_rebuild,
+        rebuild_min_interval_secs: s.rebuild_min_interval_secs,
+    }
+}
+
+/// Env + `$GROK_HOME/config.toml` only — **`remote=None` is intentional**.
+///
+/// Workspace handle startup has no remote-settings blob (unlike shell agent
+/// init, which resolves env > TOML > remote). Remote `worktree_auto_gc`
+/// kill-switch / staged rollout therefore does not apply on pure-workspace
+/// processes; use `GROK_WORKTREE_AUTO_GC=0` / `GROK_WORKTREE_AUTO_GC_DRY_RUN=1`
+/// or local TOML until remote is plumbed into `make_workspace_handle`.
+fn resolve_worktree_auto_gc_local() -> xai_fast_worktree::ResolvedWorktreeAutoGc {
+    use xai_grok_config_types::WorktreeAutoGcSettings;
+
+    let local = if let Ok(home) = resolve_grok_home() {
+        let path = home.join("config.toml");
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(root) = text.parse::<toml::Value>()
+        {
+            root.get("worktree")
+                .and_then(|w| w.get("auto_gc"))
+                // toml::Value only deserializes by value (no &Value Deserializer).
+                .and_then(|v| WorktreeAutoGcSettings::deserialize(v.clone()).ok())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let layer = local.as_ref().map(worktree_auto_gc_layer_from_settings);
+    // remote=None: see doc comment on this function.
+    resolve_worktree_auto_gc_from_layers(layer.as_ref(), None)
+}
+
+/// Sync auto-GC for handle startup (caller must `spawn_blocking`).
+pub fn run_auto_gc_best_effort() {
+    let opts = AutoGcOptions::from_resolved(resolve_worktree_auto_gc_local());
+    if let Err(e) = WorktreeDb::open_default().and_then(|db| maybe_auto_gc(&db, &opts)) {
+        tracing::warn!(error = %e, "auto worktree gc failed");
+    }
 }
 
 pub fn worktree_db_stats() -> Result<DbStats> {

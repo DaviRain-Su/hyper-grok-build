@@ -1612,6 +1612,38 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     let cfg = AgentConfig::default();
     MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
 }
+fn session_usage_request(session_id: &str) -> acp::ExtRequest {
+    acp::ExtRequest::new(
+        "x.ai/session/usage",
+        serde_json::value::to_raw_value(&serde_json::json!({ "sessionId" : session_id }))
+            .unwrap()
+            .into(),
+    )
+}
+#[tokio::test(flavor = "current_thread")]
+async fn session_usage_unknown_session_is_resource_not_found() {
+    let agent = build_minimal_agent_for_tests();
+    let err = crate::extensions::usage::handle(&agent, &session_usage_request("no-such-session"))
+        .await
+        .expect_err("unknown session");
+    assert_eq!(
+        err.code,
+        acp::Error::resource_not_found(None::<String>).code
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn session_usage_dead_chat_state_actor_fails_closed() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("usage-dead-actor-sess");
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info.id = sid.clone();
+    agent.sessions.borrow_mut().insert(sid, handle);
+    let err =
+        crate::extensions::usage::handle(&agent, &session_usage_request("usage-dead-actor-sess"))
+            .await
+            .expect_err("dead chat-state actor");
+    assert_eq!(err.code, acp::Error::internal_error().code);
+}
 /// Build a minimal MvpAgent with pre-loaded auth for gate tests.
 fn build_agent_with_auth(auth: crate::auth::GrokAuth) -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;

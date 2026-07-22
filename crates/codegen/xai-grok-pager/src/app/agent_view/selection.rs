@@ -898,6 +898,8 @@ impl AgentView {
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::BgTask(_)));
         let is_subagent = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Subagent(_)));
+        let is_workflow = entry_block
+            .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Workflow(_)));
 
         // Word-select tip probe (see WORD_SELECT_REPEAT_WINDOW): assistant
         // messages only — headers / prompts / tool rows are fold-nav surfaces
@@ -995,6 +997,14 @@ impl AgentView {
                     if self.subagent_views.contains_key(&child_sid) {
                         self.open_subagent_fullscreen(child_sid);
                     }
+                }
+            }
+            2 if is_workflow => {
+                if let Some(entry) = self.scrollback.entry(idx)
+                    && let crate::scrollback::block::RenderBlock::Workflow(ref wf) = entry.block
+                {
+                    let run_id = wf.run_id.clone();
+                    self.open_workflow_detail_by_run_id(&run_id);
                 }
             }
             2 if is_prompt => {
@@ -1622,6 +1632,55 @@ mod tests {
             agent.handle_scrollback_click(t + Duration::from_millis(100), idx, false);
         agent.last_click = last;
         tip2
+    }
+
+    #[test]
+    fn workflow_double_click_opens_matching_run_id_and_closes_goal_detail() {
+        use crate::scrollback::blocks::WorkflowBlock;
+        use crate::views::workflows::WorkflowRunSnapshot;
+
+        let run = |run_id: &str| WorkflowRunSnapshot {
+            run_id: run_id.to_owned(),
+            name: "same-display-name".to_owned(),
+            objective: "objective".to_owned(),
+            status: "active".to_owned(),
+            management_available: true,
+            builtin: false,
+            phases: Vec::new(),
+            current_phase: None,
+            agents: Vec::new(),
+            agent_budget: None,
+            agents_used: 0,
+            agents_reserved: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 0,
+            received_at: Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        };
+        let mut agent = make_agent();
+        agent.workflow_runs = vec![run("wf_other"), run("wf_target")];
+        agent.show_goal_detail = true;
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::Workflow(
+                WorkflowBlock::started("wf_target", "same-display-name", "objective"),
+            ));
+
+        assert!(!double_click_gesture(&mut agent, Instant::now(), 0));
+
+        assert!(agent.show_workflows);
+        assert!(!agent.show_goal_detail);
+        assert_eq!(
+            agent.workflows_view.selected_run_id.as_deref(),
+            Some("wf_target")
+        );
+        assert_eq!(
+            agent.workflows_view.detail_run_id.as_deref(),
+            Some("wf_target")
+        );
     }
 
     /// The word-select tip needs a REPEATED double-click on assistant text:

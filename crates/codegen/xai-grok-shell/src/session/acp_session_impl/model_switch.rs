@@ -211,11 +211,20 @@ impl SessionActor {
             }
             bridge
                 .update_resource(
-                    xai_grok_tools::implementations::grok_build::update_goal::GoalUpdateHandle(
-                        self.goal_update_tx.clone(),
+                    xai_grok_tools::implementations::grok_build::workflow::WorkflowLaunchHandle(
+                        self.workflow_launch_tx.clone(),
                     ),
                 )
                 .await;
+            if !self.goal_runs_on_workflow_engine() {
+                bridge
+                    .update_resource(
+                        xai_grok_tools::implementations::grok_build::update_goal::GoalUpdateHandle(
+                            self.goal_update_tx.clone(),
+                        ),
+                    )
+                    .await;
+            }
             if let Some(reservations) = self.tool_context.task_completion_reservations.clone() {
                 bridge.update_resource(reservations).await;
             }

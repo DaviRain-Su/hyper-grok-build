@@ -167,6 +167,110 @@ async fn load_rebuilds_chat_history_from_updates() {
         "rebuilt cache carries the transcript text"
     );
 }
+#[tokio::test]
+async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
+    use crate::session::workflow::store::{
+        script_revision_path, WorkflowRunManifest, WORKFLOW_RUN_MANIFEST_VERSION,
+    };
+    use crate::session::workflow::tracker::WorkflowTracker;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut tracker = WorkflowTracker::default();
+    let state = tracker
+        .start_run(
+            "wf_restore".into(),
+            "demo".into(),
+            "ship".into(),
+            Vec::new(),
+            None,
+            Some("workflows/wf_restore/journal.jsonl".into()),
+        );
+    let run_dir = adapter.session_dir(&info).join("workflows/wf_restore");
+    std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
+    std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
+    std::fs::write(run_dir.join("args.json"), r#"{"objective":"ship"}"#).unwrap();
+    let manifest = WorkflowRunManifest {
+        version: WORKFLOW_RUN_MANIFEST_VERSION,
+        state,
+        script_revision: 0,
+    };
+    adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.workflow_runs.len(), 1);
+    assert_eq!(loaded.workflow_runs[0].script, "complete(\"ok\");");
+    assert_eq!(
+        loaded.workflow_runs[0].args, serde_json::json!({ "objective" : "ship" })
+    );
+    let mut legacy = manifest.clone();
+    legacy.version = 2;
+    adapter.write_workflow_run_state(&info, &legacy).await.unwrap();
+    let loaded_v2 = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded_v2.workflow_runs.len(), 1);
+    assert_eq!(loaded_v2.workflow_runs[0].manifest.version, 2);
+    adapter.delete_workflow_run_state(&info, "wf_restore").await.unwrap();
+    adapter.write_workflow_run_state(&info, &manifest).await.unwrap();
+    assert!(run_dir.join("cleared").is_file());
+    assert!(
+        adapter.load_session_without_updates(& info). await .unwrap().workflow_runs
+        .is_empty()
+    );
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_restore_rejects_symlinks_and_caps_run_count() {
+    use std::os::unix::fs::symlink;
+    use crate::session::workflow::store::{
+        MAX_RESTORED_WORKFLOW_RUNS, WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest,
+        script_revision_path,
+    };
+    use crate::session::workflow::tracker::WorkflowTracker;
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let workflows = adapter.session_dir(&info).join("workflows");
+    std::fs::create_dir_all(&workflows).unwrap();
+    for index in 0..=MAX_RESTORED_WORKFLOW_RUNS {
+        let run_id = format!("wf_{index:03}");
+        let run_dir = workflows.join(&run_id);
+        std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
+        let mut tracker = WorkflowTracker::default();
+        let state = tracker
+            .start_run(
+                run_id.clone(),
+                "demo".into(),
+                "ship".into(),
+                Vec::new(),
+                None,
+                Some(format!("workflows/{run_id}/journal.jsonl")),
+            );
+        let manifest = WorkflowRunManifest {
+            version: WORKFLOW_RUN_MANIFEST_VERSION,
+            state,
+            script_revision: 0,
+        };
+        std::fs::write(
+                run_dir.join("state.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
+        std::fs::write(run_dir.join("args.json"), "{}").unwrap();
+    }
+    let attacker = temp_dir.path().join("attacker.json");
+    std::fs::write(&attacker, "{}").unwrap();
+    let symlinked = workflows.join("wf_symlink");
+    std::fs::create_dir_all(symlinked.join("scripts")).unwrap();
+    symlink(&attacker, symlinked.join("state.json")).unwrap();
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.workflow_runs.len(), MAX_RESTORED_WORKFLOW_RUNS);
+    assert!(
+        loaded.workflow_runs.iter().all(| run | run.manifest.state.run_id !=
+        "wf_symlink")
+    );
+}
 /// `load_session_without_updates` always defers rewind points while the full
 /// `load_session` / `load_rewind_points` still return them.
 #[tokio::test]
@@ -415,6 +519,7 @@ async fn test_subagent_notifications_round_trip() {
             role: None,
             model: None,
             resumed_from: None,
+            workflow_run_id: None,
         },
         meta: None,
     };
@@ -530,6 +635,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             role: None,
             model: None,
             resumed_from: Some("source-agent-id".to_string()),
+            workflow_run_id: None,
         },
         meta: None,
     };
@@ -1628,6 +1734,78 @@ async fn fork_filter_clears_updates() {
         .unwrap();
     assert_eq!(result.updates_copied, 0, "fork_filter should clear updates");
 }
+async fn assert_copy_clears_pending_relocation(fork_filter: bool) {
+    use crate::session::persistence::PendingCwdSwitchReminder;
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new(format!("pending-source-{fork_filter}")),
+        cwd: "/src".into(),
+    };
+    let target = Info {
+        id: acp::SessionId::new(format!("pending-target-{fork_filter}")),
+        cwd: "/target".into(),
+    };
+    let mut summary = adapter.init_session(&source, default_model_id()).await.unwrap();
+    summary.cwd_generation = 3;
+    summary.previous_cwd = Some("/older".into());
+    summary.pending_cwd_switch_reminder = Some(PendingCwdSwitchReminder {
+        cwd_generation: 3,
+        previous_cwd: "/src".into(),
+        destination_cwd: "/destination".into(),
+        content: "switch".into(),
+        destination_project_instructions: None,
+    });
+    adapter.write_summary_sync(&source, &summary).unwrap();
+    adapter
+        .append_chat_message(
+            &source,
+            &ConversationItem::working_directory_switch("switch", 3),
+        )
+        .await
+        .unwrap();
+    adapter
+        .copy_session_data(
+            &source,
+            &target,
+            CopySessionOptions {
+                fork_filter,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let copied = adapter.read_summary_sync(&target).unwrap();
+    assert_eq!(copied.cwd_generation, 3);
+    assert_eq!(copied.previous_cwd.as_deref(), Some("/older"));
+    assert!(copied.pending_cwd_switch_reminder.is_none());
+    let expected_generation = if fork_filter { 0 } else { 3 };
+    assert_eq!(copied.cwd_switch_bookkeeping_generation, expected_generation);
+    if !fork_filter {
+        let before = copied.num_chat_messages;
+        assert!(
+            matches!(adapter.append_cwd_switch_commit_aware(& target, &
+            ConversationItem::working_directory_switch("switch", 3),). await .unwrap(),
+            xai_chat_state::StrictAppendAck::AlreadyPresent(item) if item.text_content()
+            == "switch")
+        );
+        let retried = adapter.read_summary_sync(&target).unwrap();
+        assert_eq!(retried.num_chat_messages, before);
+        assert_eq!(
+            adapter.read_chat_history_sync(adapter.chat_file(& target),
+            CHAT_FORMAT_VERSION).unwrap().iter().filter(| item | item
+            .working_directory_switch_generation() == Some(3)).count(), 1
+        );
+    }
+}
+#[tokio::test]
+async fn unfiltered_copy_clears_pending_relocation() {
+    assert_copy_clears_pending_relocation(false).await;
+}
+#[tokio::test]
+async fn filtered_copy_clears_pending_relocation() {
+    assert_copy_clears_pending_relocation(true).await;
+}
 #[tokio::test]
 async fn init_session_stamps_configured_profile_on_new_session() {
     let tmp = TempDir::new().unwrap();
@@ -1773,6 +1951,10 @@ fn write_test_summary(
             id: acp::SessionId::new(session_id),
             cwd: urlencoding::decode(cwd_encoded).unwrap().into_owned(),
         },
+        cwd_generation: 0,
+        previous_cwd: None,
+        pending_cwd_switch_reminder: None,
+        cwd_switch_bookkeeping_generation: 0,
         session_summary: format!("summary for {session_id}"),
         created_at: updated_at,
         updated_at,
@@ -2089,8 +2271,7 @@ fn strip_invalid_images_http_url_untouched() {
     assert_eq!(strip_invalid_images(& mut items), 0);
     assert!(
         matches!(& items[0], ConversationItem::User(u) if matches!(& u.content[0],
-        ContentPart::Image { url : u }
-if u.as_ref() == "https://example.com/photo.jpg"))
+        ContentPart::Image { url : u } if u.as_ref() == "https://example.com/photo.jpg"))
     );
 }
 #[test]
@@ -2221,8 +2402,7 @@ fn strip_invalid_images_truncated_jpeg_stripped() {
     assert_eq!(strip_invalid_images(& mut items), 1);
     assert!(
         matches!(& items[0], ConversationItem::User(u) if matches!(& u.content[1],
-        ContentPart::Text { text }
-if text.contains("invalid data")))
+        ContentPart::Text { text } if text.contains("invalid data")))
     );
 }
 #[test]
@@ -2526,8 +2706,7 @@ fn read_chat_history_quarantines_original_on_image_strip() {
     let (_, chat_path, items) = load_raw_chat(&temp_dir, raw.as_bytes());
     assert!(
         matches!(& items[0], ConversationItem::User(u) if matches!(& u.content[0],
-        ContentPart::Text { text }
-if text.contains("invalid data")))
+        ContentPart::Text { text } if text.contains("invalid data")))
     );
     let quarantine = chat_path.with_extension("jsonl.corrupt");
     assert_eq!(
@@ -2706,6 +2885,115 @@ async fn append_chat_message_no_spurious_newlines_on_clean_tail() {
         .read_chat_history_sync(adapter.chat_file(&info), CHAT_FORMAT_VERSION)
         .unwrap();
     assert_eq!(user_text(& items), vec!["one", "two"]);
+}
+#[tokio::test]
+async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let storage = std::sync::Arc::new(adapter.clone());
+    let actor_info = info.clone();
+    tokio::spawn(async move {
+        let mut drop_first_ack = true;
+        while let Some(
+            crate::session::persistence::PersistenceMsg::AppendCwdSwitchAndAck {
+                item,
+                respond_to,
+            },
+        ) = rx.recv().await
+        {
+            let result = storage
+                .append_cwd_switch_commit_aware(&actor_info, &item)
+                .await
+                .map_err(|error| match error {
+                    crate::session::storage::AppendCwdSwitchError::NotCommitted(
+                        error,
+                    ) => xai_chat_state::StrictAppendError::NotCommitted(error),
+                    crate::session::storage::AppendCwdSwitchError::Committed {
+                        acknowledgement,
+                        source,
+                    } => {
+                        xai_chat_state::StrictAppendError::Committed {
+                            acknowledgement,
+                            source,
+                        }
+                    }
+                });
+            if drop_first_ack {
+                drop_first_ack = false;
+            } else {
+                let _ = respond_to.send(result);
+            }
+        }
+    });
+    let persistence = crate::session::chat_persistence::ChannelChatPersistence::new(tx);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let chat = xai_chat_state::ChatStateActor::spawn(
+        vec![],
+        xai_grok_sampling_types::SamplingConfig {
+            base_url: String::new(),
+            model: String::new(),
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            api_backend: Default::default(),
+            extra_headers: Default::default(),
+            context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+            reasoning_effort: None,
+            stream_tool_calls: None,
+        },
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    assert!(
+        matches!(chat.append_working_directory_switch_and_ack("authoritative A".into(),
+        std::num::NonZeroU64::new(5).unwrap(),). await,
+        Err(xai_chat_state::StrictAppendError::Indeterminate(_)))
+    );
+    assert!(chat.get_conversation(). await .is_empty());
+    assert!(
+        matches!(chat.append_working_directory_switch_and_ack("candidate B".into(),
+        std::num::NonZeroU64::new(5).unwrap(),). await .unwrap(),
+        xai_chat_state::StrictAppendAck::AlreadyPresent(item) if item.text_content() ==
+        "authoritative A")
+    );
+    let memory = chat.get_conversation().await;
+    let disk = adapter
+        .read_chat_history_sync(adapter.chat_file(&info), CHAT_FORMAT_VERSION)
+        .unwrap();
+    assert_eq!(memory.len(), 1);
+    assert_eq!(disk.len(), 1);
+    assert_eq!(memory[0].text_content(), "authoritative A");
+    assert_eq!(disk[0].text_content(), "authoritative A");
+}
+#[tokio::test]
+async fn acknowledged_chat_append_preserves_existing_file_bytes_and_appends_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let first = ConversationItem::system("sys");
+    let second = ConversationItem::assistant("answer");
+    adapter.append_chat_message(&info, &first).await.unwrap();
+    adapter.append_chat_message(&info, &second).await.unwrap();
+    let path = adapter.chat_file(&info);
+    let prefix = std::fs::read(&path).unwrap();
+    let switch = ConversationItem::working_directory_switch("moved", 4);
+    assert!(
+        matches!(adapter.append_cwd_switch_commit_aware(& info, & switch). await
+        .unwrap(), xai_chat_state::StrictAppendAck::Appended)
+    );
+    let after = std::fs::read(&path).unwrap();
+    assert!(after.starts_with(& prefix));
+    let mut expected_suffix = serde_json::to_vec(&switch).unwrap();
+    expected_suffix.push(b'\n');
+    assert_eq!(& after[prefix.len()..], expected_suffix);
+    let loaded = adapter.read_chat_history_sync(path, CHAT_FORMAT_VERSION).unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[2].working_directory_switch_generation(), Some(4));
 }
 /// Same self-healing for `updates.jsonl` appends, and the lenient reader
 /// skips the isolated torn line.

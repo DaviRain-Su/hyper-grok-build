@@ -165,9 +165,7 @@ async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Res
     let mut env: Vec<(&str, &str)> = cell.env.to_vec();
     env.push(("GROK_SCROLL_LOG", log_value));
 
-    // Live bindings on purpose: `content` owns the mock server (and the
-    // streaming completion gate) — see the session module's footgun docs.
-    let (mut harness, content, baseline) =
+    let (mut harness, content, baseline, streaming_turn) =
         spawn_marker_session(binary, cell.session, MARKER_COUNT, &env).await;
 
     // Replay the gesture table: sleep each step's pre-delay (host-side lower
@@ -194,19 +192,18 @@ async fn run_cell_inner(cell: MatrixCell, binary: &Path, log_path: &Path) -> Res
     let quiet_frames = harness.frame_count();
     let marker_after = topmost_visible_marker(&harness);
 
-    // Streaming teardown: the CALLER owns the gate release (session-module
-    // contract) — release after the gesture so the pager exits a completed
-    // turn, and prove the release took (the held gate is the alternative
-    // explanation for almost any streaming-cell wedge).
-    if cell.session == SessionKind::Streaming {
-        content.release_agent_completions();
+    if let Some(mut streaming_turn) = streaming_turn {
+        streaming_turn.release();
         let deadline = Instant::now() + COMPLETION_TIMEOUT;
         while harness.contains_text("Responding") {
             if Instant::now() >= deadline {
-                bail!("teardown: turn never completed after the gate release");
+                bail!("teardown: turn never completed after the expectation release");
             }
             harness.update(Duration::from_millis(200));
         }
+        tokio::time::timeout(COMPLETION_TIMEOUT, streaming_turn.wait_satisfied())
+            .await
+            .context("teardown: streaming expectation was not satisfied")?;
     }
     harness.quit().context("teardown: quit pager")?;
     drop(content);
@@ -397,18 +394,21 @@ mod tests {
         assert!(check_quiet(0).is_pass());
         assert!(check_quiet(QUIET_MAX_FRAMES).is_pass());
         let result = check_quiet(QUIET_MAX_FRAMES + 1);
-        assert!(matches!(result, InvariantResult::Violated { ref detail }
-if detail.contains("churn")));
+        assert!(
+            matches!(result, InvariantResult::Violated { ref detail } if detail.contains("churn"))
+        );
     }
 
     #[test]
     fn screen_rejects_streaming_sessions_and_marker_loss() {
         let streaming = check_screen(SessionKind::Streaming, 100, Some(100), &[]);
-        assert!(matches!(streaming, InvariantResult::Violated { ref detail }
-if detail.contains("streaming")));
+        assert!(
+            matches!(streaming, InvariantResult::Violated { ref detail } if detail.contains("streaming"))
+        );
         let lost = check_screen(SessionKind::BottomPinned, 100, None, &[]);
-        assert!(matches!(lost, InvariantResult::Violated { ref detail }
-if detail.contains("no marker")));
+        assert!(
+            matches!(lost, InvariantResult::Violated { ref detail } if detail.contains("no marker"))
+        );
         // Empty capture ⇒ no movement expected; a matching marker passes.
         assert!(check_screen(SessionKind::BottomPinned, 100, Some(100), &[]).is_pass());
         let moved = check_screen(SessionKind::BottomPinned, 100, Some(97), &[]);

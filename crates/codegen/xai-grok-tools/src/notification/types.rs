@@ -312,6 +312,10 @@ pub struct ScheduledTaskFired {
     /// RFC3339 timestamp of next fire (for live countdown viz).
     pub next_fire_at: Option<String>,
     pub subagent_id: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub generation: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub revision: u64,
 }
 
 /// Notification that a scheduled task was removed (deleted, expired, or one-shot completed).
@@ -319,6 +323,10 @@ pub struct ScheduledTaskFired {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScheduledTaskRemoved {
     pub task_id: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub generation: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub revision: u64,
 }
 
 /// Notification that a scheduled task was created and should appear in the tasks pane.
@@ -333,6 +341,10 @@ pub struct ScheduledTaskCreated {
     pub human_schedule: String,
     /// RFC3339 timestamp of next fire (for live countdown viz).
     pub next_fire_at: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub generation: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub revision: u64,
 }
 
 /// A streaming event from a Monitor tool background process.
@@ -604,5 +616,22 @@ mod tests {
             }
             other => panic!("expected BashOutputChunk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scheduler_lifecycle_versions_default_for_legacy_json_and_round_trip() {
+        let legacy: ScheduledTaskRemoved =
+            serde_json::from_value(serde_json::json!({ "task_id": "loop-1" })).unwrap();
+        assert_eq!(legacy.generation, "");
+        assert_eq!(legacy.revision, 0);
+
+        let current = ScheduledTaskRemoved {
+            task_id: "loop-1".into(),
+            generation: "019b0000-0000-7000-8000-000000000000".into(),
+            revision: 7,
+        };
+        let round_trip: ScheduledTaskRemoved =
+            serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        assert_eq!(round_trip, current);
     }
 }

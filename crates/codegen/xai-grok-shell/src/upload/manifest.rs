@@ -199,13 +199,13 @@ pub(crate) async fn write_upload_manifest(ctx: &PromptTraceContext, manifest: &U
 mod tests {
     use super::*;
     /// Artifact names expected by the session-trace ingest pipeline.
-    /// Excludes files auto-tracked by `spawn_trace_upload` and `upload_tool_definitions`.
+    /// Artifacts recorded by the turn-end upload path (excludes
+    /// `upload_tool_definitions`, which runs earlier in the turn).
     fn ingestion_expected_artifacts() -> Vec<&'static str> {
         vec![
             "metadata.json",
             "turn_result.json",
             "permission_decisions.json",
-            "config.json",
             "turn_messages.json",
             "memory.tar.gz",
         ]

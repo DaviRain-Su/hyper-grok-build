@@ -18,11 +18,14 @@ async fn minimal_double_esc_committed_queued_prompt_single_render() {
     // Gate turn 1's completion so the queue provably lands mid-turn; turn 2
     // (the promoted prompt's) streams nothing before the cancel thanks to
     // the pacing set just before the release.
-    content.hold_agent_completions();
-    content.set_turns([
-        "STEPONE first reply.".to_owned(),
-        "STEPTWO never streams before the cancel.".to_owned(),
-    ]);
+    let mut turn_one = content.expect_agent_turn_blocked(
+        "running turn before minimal queue promotion",
+        "STEPONE first reply.",
+    );
+    let _turn_two = content.expect_agent_turn(
+        "promoted minimal prompt cancelled before first token",
+        "STEPTWO never streams before the cancel.",
+    );
 
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
@@ -33,6 +36,9 @@ async fn minimal_double_esc_committed_queued_prompt_single_render() {
     harness
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("turn 1 streamed (completion still gated)");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
+        .await
+        .expect("turn 1 reached completion barrier");
 
     harness
         .inject_keys(format!("{QUEUED_PROMPT}\r").as_bytes())
@@ -45,7 +51,7 @@ async fn minimal_double_esc_committed_queued_prompt_single_render() {
     // its turn starts — but its first token is 30s away, the exact window
     // where a naive rewind would double-show the committed block.
     content.set_chunk_delay(Some(Duration::from_secs(30)));
-    content.release_agent_completions();
+    turn_one.release();
     harness
         .wait_for_full_text(
             &format!("\u{276F} {QUEUED_PROMPT}"),

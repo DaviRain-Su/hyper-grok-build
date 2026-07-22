@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "0.2.106"
+version = "0.2.109"
 edition.workspace = true
 
 [features]
@@ -137,6 +137,7 @@ xai-token-estimation = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tty-utils = { workspace = true }
+xai-workflow = { path = "../xai-workflow" }
 xai-system-power = { workspace = true }
 xai-grok-workspace = { workspace = true }
 xai-grok-subagent-resolution = { path = "../xai-grok-subagent-resolution" }

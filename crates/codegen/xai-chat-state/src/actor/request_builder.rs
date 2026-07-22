@@ -142,6 +142,7 @@ impl ChatStateActor {
             x_grok_deployment_id: None,
             x_grok_user_id: None,
             trace,
+            prompt_cache_key: None,
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_schema: None,
             // Set by SamplingClient from SamplerConfig.kimi_dialect before wire.
@@ -600,13 +601,13 @@ mod tests {
 
     fn has_placeholder(item: &ConversationItem) -> bool {
         matches!(
-                    item,
-                    ConversationItem::User(u) if u.content.iter().any(|p| matches!(
-                        p,
-                        ContentPart::Text { text }
-        if text.as_ref() == IMAGE_COMPACT_PLACEHOLDER
-                    ))
-                )
+            item,
+            ConversationItem::User(u) if u.content.iter().any(|p| matches!(
+                p,
+                ContentPart::Text { text }
+if text.as_ref() == IMAGE_COMPACT_PLACEHOLDER
+            ))
+        )
     }
 
     // Images are sized ~100 KB so the ~235 B placeholder that replaces an

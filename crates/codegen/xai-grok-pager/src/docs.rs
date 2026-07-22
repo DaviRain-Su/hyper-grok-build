@@ -64,7 +64,7 @@ pub static USER_GUIDE: &[Doc] = &[
     guide!(
         "04-slash-commands.md",
         "Slash Commands",
-        "All / commands for session management, models, memory, hooks"
+        "All / commands, including goals, research, and workflow management"
     ),
     guide!(
         "05-configuration.md",

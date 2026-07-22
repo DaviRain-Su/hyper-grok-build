@@ -4,7 +4,10 @@
 //! `crate::session::prompt_queue::*` and cross-crate `xai_grok_shell::session::prompt_queue::*`
 //! path resolving without edits.
 
-pub use xai_prompt_queue::{QueueChanged, QueueEntryMeta, QueueEntryWire};
+pub use xai_prompt_queue::{
+    COMBINED_DISPLAY_TEXTS_META, CombineGate, QueueChanged, QueueEntryMeta, QueueEntryWire,
+    TEXT_SEPARATOR, combine_prefix_len, is_combined, join_texts, stamp_combined_display_texts,
+};
 
 // Outbound method for broadcast_queue_changed. An ACP routing concern, not a queue concern.
 pub const QUEUE_CHANGED_METHOD: &str = "x.ai/queue/changed";
@@ -25,8 +28,13 @@ mod tests {
                 kind: "prompt".to_string(),
                 text: "hello".to_string(),
                 position: 0,
+                combined_texts: None,
             }],
             running_prompt_id: None,
+
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["sessionId"], "sess-1");
@@ -44,6 +52,10 @@ mod tests {
             session_id: "sess-1".to_string(),
             entries: Vec::new(),
             running_prompt_id: Some("prompt-running".to_string()),
+
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["runningPromptId"], "prompt-running");
@@ -61,6 +73,7 @@ mod tests {
             kind: "prompt".to_string(),
             text: "hello".to_string(),
             position: 0,
+            combined_texts: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["lastEditor"], "grok-vscode");

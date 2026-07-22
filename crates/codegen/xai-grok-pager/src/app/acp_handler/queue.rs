@@ -11,6 +11,8 @@ pub(crate) struct PendingRunningAdoption {
     /// The queued prompt's text (for the turn-start shim's user block), if the
     /// pager knew about the prompt. `None` for prompts queued by other clients.
     pub text: Option<String>,
+    /// Combined-turn display segments (len ≥ 2); shim paints one bubble each.
+    pub combined_texts: Option<Vec<String>>,
     /// The adopted entry's `kind` (`"prompt"`/`"bash"`/`"verification"`/…),
     /// which selects the turn-start shim's display block + focus flag.
     pub kind: String,
@@ -69,19 +71,30 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
     let running_prompt_id = changed.running_prompt_id.clone();
     let session_id = changed.session_id.clone();
 
-    // Capture the running prompt's text + kind from the currently-known queue
-    // (an optimistic echo, or a prior authoritative entry) BEFORE the broadcast
-    // is applied — the new broadcast drops the now-running item from `entries`,
-    // so it's gone afterward. The turn-start shim uses them to render the right
-    // display block.
+    // Prefer running_* fields on the payload (authoritative; present when a
+    // turn is promoting). Fall back to the local mirror for older shells.
     let running_entry = running_prompt_id.as_ref().and_then(|pid| {
         app.shared_prompt_queue(&session_id)
             .and_then(|q| q.iter().find(|e| &e.id == pid).cloned())
     });
-    let running_text: Option<String> = running_entry.as_ref().map(|e| e.text.clone());
-    let running_kind: String = running_entry
-        .as_ref()
-        .map(|e| e.kind.clone())
+    let running_text: Option<String> = changed
+        .running_text
+        .clone()
+        .or_else(|| running_entry.as_ref().map(|e| e.text.clone()));
+    let running_combined: Option<Vec<String>> = changed
+        .running_combined_texts
+        .clone()
+        .filter(|v| v.len() >= 2)
+        .or_else(|| {
+            running_entry
+                .as_ref()
+                .and_then(|e| e.combined_texts.clone())
+                .filter(|v| v.len() >= 2)
+        });
+    let running_kind: String = changed
+        .running_kind
+        .clone()
+        .or_else(|| running_entry.as_ref().map(|e| e.kind.clone()))
         .unwrap_or_else(|| "prompt".to_string());
 
     // Resolve the owning agent before the queue is replaced.
@@ -285,6 +298,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                             pid,
                             running_text,
                             &running_kind,
+                            running_combined,
                         )
                     });
                     super::super::dispatch::note_peek_page_flip(app, aid, page_flip_entry);
@@ -356,6 +370,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                         PendingRunningAdoption {
                             prompt_id: pid.clone(),
                             text: running_text,
+                            combined_texts: running_combined,
                             kind: running_kind,
                             turn_ended: false,
                         },

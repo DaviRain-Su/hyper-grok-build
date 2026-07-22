@@ -407,7 +407,10 @@ impl SessionActor {
                     | crate::session::commands::PromptCompletionKind::MaxTurnsReached { .. }
             )
         });
-        let turn_succeeded = result.is_ok() && !turn_cancelled;
+        let turn_succeeded = result
+            .as_ref()
+            .ok()
+            .is_some_and(|ok| !turn_cancelled && ok.stop_reason != acp::StopReason::Refusal);
         let infra_pause_message = result
             .as_ref()
             .err()

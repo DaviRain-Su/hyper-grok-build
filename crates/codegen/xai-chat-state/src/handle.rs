@@ -8,7 +8,7 @@ use xai_grok_sampling_types::{
     ToolSpec, TraceContext,
 };
 
-use crate::commands::{ChatStateCommand, RepairHistoryBlocked};
+use crate::commands::{ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError};
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
     TurnCapture,
@@ -48,6 +48,29 @@ impl ChatStateHandle {
             ChatStateCommand::PushUserMessageAndAck { item, reply }
         })
         .await
+    }
+
+    /// Strictly append one working-directory switch and await persistence.
+    /// A matching generation returns `AlreadyPresent`; indeterminate errors must be retried.
+    pub async fn append_working_directory_switch_and_ack(
+        &self,
+        content: String,
+        cwd_generation: std::num::NonZeroU64,
+    ) -> Result<StrictAppendAck, StrictAppendError> {
+        self.query("AppendWorkingDirectorySwitchAndAck", |reply| {
+            ChatStateCommand::AppendWorkingDirectorySwitchAndAck {
+                content,
+                cwd_generation,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or_else(|| {
+            Err(StrictAppendError::Indeterminate(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "chat-state actor unavailable; retry by generation",
+            )))
+        })
     }
 
     /// Push a user message with an explicit dangling-repair reason.

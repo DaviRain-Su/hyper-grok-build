@@ -35,11 +35,11 @@ async fn reasoning_efforts_fallback_menu_matches_builtin() {
     // descriptions) renders — not just a couple, so this genuinely pins
     // "fallback == today".
     harness
-        .wait_for_text("Maximum reasoning", Duration::from_secs(10))
+        .wait_for_text("Extended reasoning", Duration::from_secs(10))
         .expect("built-in xhigh row");
     let screen = harness.screen_contents();
     for description in [
-        "Maximum reasoning",         // xhigh
+        "Extended reasoning",        // xhigh
         "Heavy reasoning",           // high
         "Balanced reasoning",        // medium
         "Faster, lighter reasoning", // low

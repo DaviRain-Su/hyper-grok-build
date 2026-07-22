@@ -99,6 +99,7 @@ pub struct AgentBuilder {
         xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     subagents_enabled: bool,
+    background_workflows_enabled: bool,
     ask_user_question_enabled: bool,
     subagent_toggle: HashMap<String, bool>,
     task_model_slugs: Vec<String>,
@@ -176,6 +177,21 @@ fn merge_tool_params(
         }
     }
 }
+fn apply_workflow_tool_gates(
+    tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+    background_workflows_enabled: bool,
+) {
+    use xai_grok_tools::types::tool::ToolKind;
+    if background_workflows_enabled {
+        tool_config
+            .tools
+            .retain(|tool| tool.kind != Some(ToolKind::GoalUpdate));
+    } else {
+        tool_config
+            .tools
+            .retain(|tool| tool.kind != Some(ToolKind::Workflow));
+    }
+}
 impl AgentBuilder {
     pub fn new(
         working_directory: PathBuf,
@@ -223,6 +239,7 @@ impl AgentBuilder {
             app_builder_deployer_config: Default::default(),
             write_file_enabled: true,
             subagents_enabled: false,
+            background_workflows_enabled: false,
             ask_user_question_enabled: true,
             subagent_toggle: HashMap::new(),
             task_model_slugs: Vec::new(),
@@ -533,6 +550,10 @@ impl AgentBuilder {
         self.subagents_enabled = enabled;
         self
     }
+    pub fn with_background_workflows_enabled(mut self, enabled: bool) -> Self {
+        self.background_workflows_enabled = enabled;
+        self
+    }
     /// Set public model slugs advertised in the GrokBuild Task description.
     pub fn with_task_model_slugs(mut self, slugs: Vec<String>) -> Self {
         self.task_model_slugs = slugs;
@@ -765,6 +786,7 @@ impl AgentBuilder {
             );
             tool_config.tools.retain(|tc| tc.id != ask_user_id);
         }
+        apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
         let task_tool_id = format!(
             "{}:{}",
             xai_grok_tools::types::tool::ToolNamespace::GrokBuild,

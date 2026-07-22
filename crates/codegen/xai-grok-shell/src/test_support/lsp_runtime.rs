@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_tools::implementations::grok_build::task::types::{SubagentRequest, SubagentResult};
+use xai_grok_tools::implementations::grok_build::task::types::{
+    SubagentOwner, SubagentRequest, SubagentResult,
+};
 pub(crate) type GatewayOut = <acp::AgentSide as xai_acp_lib::AcpSide>::OutMessage;
 pub(crate) fn test_gateway() -> GatewaySender {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -94,6 +96,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         app_builder_deployer_config: Default::default(),
         write_file_enabled: true,
         goal_enabled: false,
+        background_workflows_enabled: false,
         ask_user_question_enabled: true,
         parent_cmd_tx: None,
         parent_session_info: None,
@@ -148,7 +151,9 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             .to_string(),
         auto_wake_enabled: true,
         goal_loop_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        parent_blocking_wait_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        parent_blocking_wait_depth: std::sync::Arc::new(
+            crate::tools::tool_context::BlockingWaitState::new(),
+        ),
         parent_terminal_backend: None,
         parent_notification_handle: None,
         parent_scheduler_handle: None,
@@ -170,7 +175,10 @@ pub(crate) fn make_request(
         runtime_overrides: Default::default(),
         run_in_background: false,
         surface_completion: true,
+        await_to_completion: false,
         fork_context: false,
+        owner: SubagentOwner::Task,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         result_tx: tx,
     };
     (req, rx)

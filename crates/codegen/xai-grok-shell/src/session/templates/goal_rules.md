@@ -33,11 +33,9 @@ resolves to it. The verifier AUDITS your committed tests and saved evidence
 instead of rebuilding them, so honest, durable proof is what passes.
 
 TEST PROACTIVELY: run targeted tests after every change, not just at the end.
-Before calling `{GOAL_TOOL}(completed: true)`, run the test suite relevant to
-what you changed (the touched packages/modules — the whole repo suite only when
-the change is repo-wide).
-
-{GOAL_STATE}Call `{GOAL_TOOL}(completed: true, message: "summary")` when done; the harness
-verifies what's complete and tells you what's missing on the next nudge.
-Call `{GOAL_TOOL}(blocked_reason: "reason")` only when truly stuck after multiple
-attempts. Call `{GOAL_TOOL}(message: "status note")` to log progress.
+The harness evaluates completion automatically after every model round. When the
+work appears complete it runs the adversarial verification panel itself and
+continues with any concrete gaps. Do not stop merely to announce completion.
+If a real external blocker remains after repeated attempts, explain the exact
+evidence and user action needed in your final response; the harness applies the
+repeated-blocker policy automatically.

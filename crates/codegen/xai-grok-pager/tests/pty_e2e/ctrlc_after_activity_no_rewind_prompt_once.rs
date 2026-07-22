@@ -13,7 +13,10 @@ async fn ctrlc_after_activity_no_rewind_prompt_once() {
 
     let content = ContentController::start().await.expect("start content");
     content.set_chunk_delay(Some(Duration::from_millis(150)));
-    content.set_turns([slow_turn_text("CANCELME")]);
+    let _cancelled_turn = content.expect_agent_turn(
+        "turn cancelled after visible activity",
+        slow_turn_text("CANCELME"),
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =

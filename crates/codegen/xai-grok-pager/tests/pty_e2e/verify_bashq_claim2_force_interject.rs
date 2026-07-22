@@ -19,11 +19,11 @@ async fn verify_bashq_claim2_force_interject() {
         }
         s
     };
-    content.set_turns([
-        step_one,
-        // Consumed only on a broken binary (a wrong model continuation).
-        "STEPTWO force-send continuation.".to_owned(),
-    ]);
+    let _turn_one = content.expect_agent_turn("running turn before queued bash send-now", step_one);
+    let _unexpected_turn = content.expect_agent_turn(
+        "unexpected model continuation for bash send-now",
+        "STEPTWO force-send continuation.",
+    );
 
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");

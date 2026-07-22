@@ -565,7 +565,10 @@ impl ToolBridge {
         {
             return Vec::new();
         }
-        reply_rx.await.unwrap_or_default()
+        reply_rx
+            .await
+            .map(|snapshot| snapshot.tasks)
+            .unwrap_or_default()
     }
 
     pub async fn delete_scheduled_task(
@@ -593,9 +596,15 @@ impl ToolBridge {
             .map_err(|_| {
                 xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
             })?;
-        reply_rx.await.map_err(|_| {
-            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor dropped reply")
-        })
+        reply_rx
+            .await
+            .map_err(|_| {
+                xai_tool_runtime::ToolError::custom(
+                    "process_manager",
+                    "Scheduler actor dropped reply",
+                )
+            })?
+            .map_err(crate::implementations::grok_build::scheduler::types::scheduler_tool_error)
     }
 
     /// Move a foreground command to background by tool_call_id.

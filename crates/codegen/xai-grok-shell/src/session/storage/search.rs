@@ -953,6 +953,11 @@ fn collect_all_indexable_content_single_pass(updates_path: &Path) -> io::Result<
                             .meta
                             .as_ref()
                             .is_some_and(|m| m.bash_command.is_some())
+                            || peek
+                                .update
+                                .meta
+                                .as_ref()
+                                .is_some_and(|m| m.host_turn == Some(true))
                         {
                             prompt_events.push(PromptExtractEvent::NotUserMessage);
                         } else {
@@ -1201,6 +1206,11 @@ fn collect_delta_content(updates_path: &Path, offset: u64) -> io::Result<DeltaRe
                         .meta
                         .as_ref()
                         .is_none_or(|m| m.bash_command.is_none())
+                    && peek
+                        .update
+                        .meta
+                        .as_ref()
+                        .is_none_or(|m| m.host_turn != Some(true))
                 {
                     user_texts.push(text.into_owned());
                 }
@@ -1320,6 +1330,10 @@ mod tests {
                 id: acp::SessionId::new(session_id),
                 cwd: cwd.to_string(),
             },
+            cwd_generation: 0,
+            previous_cwd: None,
+            pending_cwd_switch_reminder: None,
+            cwd_switch_bookkeeping_generation: 0,
             session_summary: title.to_string(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

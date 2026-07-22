@@ -120,10 +120,25 @@ impl ChannelBackend {
     }
 }
 
+struct CancelResultReceiverOnDrop {
+    cancel_token: tokio_util::sync::CancellationToken,
+    armed: bool,
+}
+
+impl Drop for CancelResultReceiverOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel_token.cancel();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
     async fn spawn(&self, request: SubagentRequest) -> Result<SubagentResult, ToolError> {
         let (result_tx, result_rx) = oneshot::channel();
+        let cancel_on_receiver_drop = request.owner.is_workflow();
+        let cancel_token = request.cancel_token.clone();
 
         // Replace the dummy oneshot with our fresh one. Using struct update
         // syntax (`..request`) ensures new fields added to `SubagentRequest`
@@ -141,7 +156,19 @@ impl SubagentBackend for ChannelBackend {
                 )
             })?;
 
-        result_rx.await.map_err(|_| {
+        let mut receiver_guard = cancel_on_receiver_drop.then(|| CancelResultReceiverOnDrop {
+            cancel_token: cancel_token.clone(),
+            armed: true,
+        });
+        let result = result_rx.await;
+        if result.is_ok() {
+            if let Some(guard) = receiver_guard.as_mut() {
+                guard.armed = false;
+            }
+        } else if cancel_on_receiver_drop {
+            cancel_token.cancel();
+        }
+        result.map_err(|_| {
             ToolError::custom(
                 "channel_closed",
                 "Subagent result channel dropped — child session may have crashed",
@@ -349,7 +376,10 @@ mod tests {
             runtime_overrides: Default::default(),
             run_in_background: false,
             surface_completion: true,
+            await_to_completion: false,
             fork_context: false,
+            owner: super::super::types::SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx: dummy_tx,
         };
 
@@ -381,7 +411,10 @@ mod tests {
             runtime_overrides: Default::default(),
             run_in_background: false,
             surface_completion: true,
+            await_to_completion: false,
             fork_context: false,
+            owner: super::super::types::SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx: dummy_tx,
         };
 
@@ -512,6 +545,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
+        fn request_for(owner: super::super::types::SubagentOwner) -> SubagentRequest {
+            let (dummy_tx, _dummy_rx) = oneshot::channel();
+            SubagentRequest {
+                id: "drop-owner-test".to_string(),
+                prompt: "test".to_string(),
+                description: "test".to_string(),
+                subagent_type: "general-purpose".to_string(),
+                parent_session_id: "parent".to_string(),
+                parent_prompt_id: None,
+                resume_from: None,
+                cwd: None,
+                runtime_overrides: Default::default(),
+                run_in_background: false,
+                surface_completion: false,
+                await_to_completion: true,
+                fork_context: false,
+                owner,
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+                result_tx: dummy_tx,
+            }
+        }
+
+        for (owner, should_cancel) in [
+            (super::super::types::SubagentOwner::Task, false),
+            (super::super::types::SubagentOwner::workflow("wf-1"), true),
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+            let backend = Arc::new(ChannelBackend::new(tx));
+            let request = request_for(owner);
+            let cancel_token = request.cancel_token.clone();
+            let task = tokio::spawn({
+                let backend = backend.clone();
+                async move { backend.spawn(request).await }
+            });
+            let spawned = recv_event!(rx, Spawn);
+            task.abort();
+            let _ = task.await;
+            assert_eq!(
+                cancel_token.is_cancelled(),
+                should_cancel,
+                "only workflow receiver drop owns cancellation"
+            );
+            drop(spawned.result_tx);
+        }
+    }
+
+    #[tokio::test]
     async fn channel_backend_spawn_result_dropped() {
         let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
         let backend = ChannelBackend::new(tx);
@@ -534,7 +615,10 @@ mod tests {
             runtime_overrides: Default::default(),
             run_in_background: false,
             surface_completion: true,
+            await_to_completion: false,
             fork_context: false,
+            owner: super::super::types::SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx: dummy_tx,
         };
 

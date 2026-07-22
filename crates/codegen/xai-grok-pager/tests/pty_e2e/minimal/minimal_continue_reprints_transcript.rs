@@ -38,7 +38,7 @@ async fn minimal_continue_reprints_transcript() {
         project.path(),
     );
     resumed
-        .wait_for_full_text(&turn_sentinel(1), WELCOME_TIMEOUT)
+        .wait_for_full_text(&turn_sentinel(1), RESUME_TIMEOUT)
         .unwrap_or_else(|e| {
             panic!(
                 "history must be reprinted after --continue: {e}\nfull:\n{}",

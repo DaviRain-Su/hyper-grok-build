@@ -370,6 +370,28 @@ impl SessionHandle {
             Vec::new()
         })
     }
+    pub(crate) async fn workflow_catalog_state(&self) -> (bool, bool) {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::GetWorkflowCatalogState { respond_to: tx })
+            .is_err()
+        {
+            return (false, false);
+        }
+        rx.await.unwrap_or((false, false))
+    }
+    pub(crate) async fn list_available_commands(&self) -> Vec<acp::AvailableCommand> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::ListAvailableCommands { respond_to: tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
     /// Replace the live session's client-registered hooks (see `SessionCommand::SetClientHooks`).
     pub(crate) fn set_client_hooks(&self, hooks: crate::extensions::hooks::ClientHooks) {
         let _ = self.cmd_tx.send(SessionCommand::SetClientHooks { hooks });

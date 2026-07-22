@@ -867,8 +867,7 @@ mod tests {
         let result = execute_dream(&lock, &storage, response, 5, 300, &sdir, &[]);
 
         assert!(
-            matches!(result.status, DreamStatus::Completed { chars_written }
-if chars_written == response.chars().count())
+            matches!(result.status, DreamStatus::Completed { chars_written } if chars_written == response.chars().count())
         );
         assert_eq!(result.sessions_eligible, 5);
         assert_eq!(result.cleaned_stems.len(), 0);

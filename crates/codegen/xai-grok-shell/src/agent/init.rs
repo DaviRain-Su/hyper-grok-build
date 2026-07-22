@@ -121,7 +121,7 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
     cfg
 }
 
-/// Initialize process-level singletons (deployment sync, bundled files,
+/// Initialize process-level singletons (deployment sync, built-in metadata,
 /// telemetry). `Once`-guarded: only the first call takes effect.
 /// Telemetry user ID is updated separately via [`update_telemetry_config`].
 fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
@@ -135,12 +135,12 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         }
 
         let grok_home = crate::util::grok_home::grok_home();
-        crate::builtin::extract_bundled_files(&grok_home);
+        crate::builtin::extract_builtin_files(&grok_home);
 
         crate::extensions::marketplace::purge_default_skills_installs(&grok_home);
 
         // Auto-register is gated (default off; env/remote settings enables). Kept out
-        // of extract_bundled_files so the gate can read the resolved
+        // of built-in extraction so the gate can read the resolved
         // remote_settings, which resolve_config has populated by now.
         if cfg.resolve_official_marketplace_auto_register().value {
             crate::extensions::marketplace::ensure_official_marketplace_source(&grok_home);

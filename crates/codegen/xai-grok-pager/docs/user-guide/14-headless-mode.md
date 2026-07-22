@@ -33,7 +33,7 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
 | `--tools <TOOLS>`       | Allowlist of built-in tools (comma-separated). MCP meta-tools remain available unless denied. Headless only. |
 | `--disallowed-tools <TOOLS>` | Denylist of built-in tools to remove (comma-separated). Supports `Agent` entries. Headless only. |
 | `--max-turns <N>`       | Maximum number of agentic turns before stopping. Headless only. |
-| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (alias of `xhigh`). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
+| `--reasoning-effort` / `--effort <LEVEL>` | Reasoning effort for reasoning models. Canonical levels: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (each a distinct tier; a model only accepts the levels its menu advertises). Also accepts per-model menu option ids (e.g. `deep` → mapped wire value), same as `/effort`. Works in TUI and headless. |
 | `--permission-mode <MODE>` | Permission mode. `bypassPermissions` enables always-approve via this flag (see [22-permissions-and-safety.md](22-permissions-and-safety.md)); for deny-by-default use `defaultMode` in `.claude/settings.json`. |
 | `--allow <RULE>`        | Permission allow rule with glob patterns (repeatable). Works in TUI and headless. |
 | `--deny <RULE>`         | Permission deny rule with glob patterns (repeatable). Works in TUI and headless. |
@@ -43,7 +43,7 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
 | `--no-auto-update`      | Disable update checks for this session                |
 | `--sandbox <PROFILE>`   | Sandbox profile for filesystem/network access         |
 
-> **Note:** `--tools`, `--disallowed-tools`, `--max-turns`, and `--agents` are headless-only flags. If used in the interactive TUI, a warning is printed and the flag is ignored. `--reasoning-effort`/`--effort`, `--permission-mode`, `--allow`, and `--deny` work in both modes. For more flags (agents, verification, worktrees), see [Additional Headless Flags](#additional-headless-flags).
+> **Note:** `--tools`, `--disallowed-tools`, `--max-turns`, and `--agents` are headless-only flags. If used in the interactive TUI, a warning is printed and the flag is ignored. `--reasoning-effort`/`--effort`, `--permission-mode`, `--allow`, and `--deny` work in both modes. For more flags (agents and worktrees), see [Additional Headless Flags](#additional-headless-flags).
 
 ### Tool Filtering
 
@@ -575,8 +575,6 @@ These flags supplement the [Command-Line Options](#command-line-options) table a
 | `--agent <NAME>`              | Agent name or definition file path                |
 | `--agents <JSON>`             | Inline subagent definitions as JSON               |
 | `--system-prompt-override`    | Override the agent's system prompt                |
-| `--check` / `--self-verify`   | Append verification loop (headless only)          |
-| `--best-of-n <N>`             | Run task N ways, pick best (headless only)         |
 | `--no-plan`                   | Disable plan mode                                 |
 | `--no-subagents`              | Disable subagent spawning                         |
 | `--no-memory`                 | Disable cross-session memory                      |

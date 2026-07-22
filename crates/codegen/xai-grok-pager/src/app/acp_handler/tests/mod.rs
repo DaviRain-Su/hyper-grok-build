@@ -83,6 +83,7 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         context_source: None,
         resumed_from: None,
         capability_mode: None,
+        workflow_run_id: None,
         context_normalized: false,
         parent_prompt_id: None,
         started_at: Instant::now(),
@@ -110,6 +111,47 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         worktree_path: None,
         child_updates_replayed: false,
     }
+}
+#[test]
+fn workflow_catalog_projection_and_open_modal_refresh_are_coalesced() {
+    let workflow = acp::AvailableCommand::new("review", "review")
+        .meta(serde_json::json!({ "workflowSource" : "project" }).as_object().cloned());
+    assert_eq!(
+        workflow_commands(& [workflow]), vec![("review", "review", Some("project"),
+        None)]
+    );
+    let mut app = make_app_with_agent("session-workflows");
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().extensions_modal = Some(
+        crate::views::extensions_modal::ExtensionsModalState::new(
+            crate::views::extensions_modal::ExtensionsTab::Skills,
+        ),
+    );
+    queue_open_workflows_modal_refresh(&mut app, id);
+    queue_open_workflows_modal_refresh(&mut app, id);
+    assert_eq!(app.pending_effects.len(), 1);
+    assert!(
+        matches!(app.pending_effects.first(), Some(Effect::FetchWorkflowsList { agent_id,
+        session_id }) if * agent_id == id && session_id.0.as_ref() ==
+        "session-workflows")
+    );
+}
+#[test]
+fn workflow_catalog_projection_detects_same_name_metadata_changes() {
+    let command = |description: &str, path: &str| {
+        acp::AvailableCommand::new("review", description)
+            .meta(
+                serde_json::json!(
+                    { "workflowSource" : "project", "workflowPath" : path, }
+                )
+                    .as_object()
+                    .cloned(),
+            )
+    };
+    assert_ne!(
+        workflow_commands(& [command("Workflow: old", "/old/review.rhai")]),
+        workflow_commands(& [command("Workflow: new", "/new/review.rhai")]),
+    );
 }
 pub(super) fn compressed_entry(
     index: usize,
@@ -393,6 +435,18 @@ pub(super) fn queue_changed_running(
     ids: &[&str],
     running: Option<&str>,
 ) -> acp::ExtNotification {
+    queue_changed_running_ex(session_id, ids, running, None, None, None)
+}
+/// Like [`queue_changed_running`], with optional running-turn display
+/// fields (`runningText` / `runningKind` / `runningCombinedTexts`).
+pub(super) fn queue_changed_running_ex(
+    session_id: &str,
+    ids: &[&str],
+    running: Option<&str>,
+    running_text: Option<&str>,
+    running_kind: Option<&str>,
+    running_combined_texts: Option<&[&str]>,
+) -> acp::ExtNotification {
     let entries: Vec<serde_json::Value> = ids
         .iter()
         .enumerate()
@@ -408,6 +462,15 @@ pub(super) fn queue_changed_running(
     );
     if let Some(r) = running {
         params["runningPromptId"] = serde_json::Value::String(r.to_string());
+    }
+    if let Some(t) = running_text {
+        params["runningText"] = serde_json::Value::String(t.to_string());
+    }
+    if let Some(k) = running_kind {
+        params["runningKind"] = serde_json::Value::String(k.to_string());
+    }
+    if let Some(segs) = running_combined_texts {
+        params["runningCombinedTexts"] = serde_json::json!(segs);
     }
     acp::ExtNotification::new(
         "x.ai/queue/changed",
@@ -1216,6 +1279,7 @@ pub(super) fn test_subagent_spawned(
         effective_context_source: None,
         context_normalized: false,
         capability_mode: None,
+        workflow_run_id: None,
         persona: None,
         role: None,
         model: None,

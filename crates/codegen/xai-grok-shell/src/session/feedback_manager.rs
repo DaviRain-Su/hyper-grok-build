@@ -70,17 +70,39 @@ pub(crate) fn new_submission(
     s
 }
 
-/// Pipeline: persist → strip → submit → telemetry (telemetry fields captured
-/// before strip). Callers merge `GROK_USER_METADATA` and set
-/// `submission.request_id`; `telemetry_enabled` must be
-/// `is_telemetry_enabled() && !is_zdr()` for all entry points.
+#[derive(Debug)]
+pub(crate) struct SubmitFeedbackOptions {
+    pub solicited: bool,
+    pub telemetry_enabled: bool,
+    pub author_identity: Option<crate::util::user_identity::ResolvedUserIdentity>,
+}
+
 pub(crate) async fn submit_feedback_workflow(
     submission: &mut FeedbackSubmission,
     feedback_client: Option<&FeedbackClient>,
     persistence_tx: Option<&tokio::sync::mpsc::UnboundedSender<PersistenceMsg>>,
-    solicited: bool,
-    telemetry_enabled: bool,
+    opts: SubmitFeedbackOptions,
 ) -> SubmitOutcome {
+    let SubmitFeedbackOptions {
+        solicited,
+        telemetry_enabled,
+        author_identity,
+    } = opts;
+
+    if let Some(user_meta) = crate::agent::mvp_agent::parse_json_object_env("GROK_USER_METADATA") {
+        submission.merge_metadata(user_meta);
+    }
+    // Exhaustive destructure (no `..`) so a new field must be handled, not dropped.
+    if let Some(crate::util::user_identity::ResolvedUserIdentity { name, email }) = author_identity
+    {
+        if let Some(name) = name {
+            submission.author_name = Some(name);
+        }
+        if let Some(email) = email {
+            submission.author_email = Some(email);
+        }
+    }
+
     if let Some(tx) = persistence_tx {
         let entry = LocalFeedbackEntry::UserFeedback(UserFeedbackEntry {
             submitted_at: chrono::Utc::now(),
@@ -109,7 +131,8 @@ pub(crate) async fn submit_feedback_workflow(
     let request_id = submission.request_id.clone();
     let appearance_id = request_id.clone();
 
-    // Keep client-enriched triage fields; do not strip_metadata (Slack shows Option fields when set).
+    // Send the full submission: the feedback backend surfaces these triage
+    // fields, so session context and metadata are intentionally not stripped here.
 
     let outcome = if let Some(client) = feedback_client {
         let result = if let Some(req_id) = request_id {
@@ -174,9 +197,10 @@ pub(crate) struct SessionFeedbackData {
 }
 
 /// Feedback feature flags threaded through session spawn.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FeedbackFlags {
     pub enabled: bool,
+    pub user: Option<crate::agent::config::FeedbackUserConfig>,
 }
 
 /// Configuration for the feedback manager.
@@ -204,6 +228,7 @@ pub struct FeedbackManagerConfig {
     /// Timeout for draining the upload queue on shutdown (default: 30s).
     /// If uploads don't complete within this time, remaining items are abandoned.
     pub drain_timeout: Duration,
+    pub user: Option<crate::agent::config::FeedbackUserConfig>,
 }
 
 impl Default for FeedbackManagerConfig {
@@ -215,6 +240,7 @@ impl Default for FeedbackManagerConfig {
             client_type: ClientType::Agent,
             loc_tracking_enabled: false,
             drain_timeout: Duration::from_secs(30),
+            user: None,
         }
     }
 }
@@ -353,28 +379,18 @@ impl FeedbackManager {
         submission.context_window_tokens = Some(signals.context_window_tokens);
         submission.client_version = session_data.client_version;
 
-        // Point to the per-turn unified log already uploaded by
-        // complete_prompt_trace. Only set when trace uploads are active
-        // Stats are set inside get_or_init; presence implies the queue exists.
-        // The session actor has no agent config; use the compiled-in default
-        // bucket. The ACP feedback extension path resolves the runtime bucket.
-        if submission.unified_log_url.is_none() && self.upload_queue_stats.get().is_some() {
-            submission.unified_log_url =
-                crate::upload::gcs::unified_log_url(None, &self.session_id, turn_number);
-        }
-
-        if let Some(user_meta) =
-            crate::agent::mvp_agent::parse_json_object_env("GROK_USER_METADATA")
-        {
-            submission.merge_metadata(user_meta);
-        }
+        let author_identity =
+            crate::util::user_identity::cached_identity(self.config.user.as_ref()).await;
 
         submit_feedback_workflow(
             &mut submission,
             self.feedback_client.as_ref(),
             persistence_tx,
-            false, // solicited: slash command isn't responding to a request
-            telemetry_enabled,
+            SubmitFeedbackOptions {
+                solicited: false,
+                telemetry_enabled,
+                author_identity,
+            },
         )
         .await
     }
@@ -1428,5 +1444,216 @@ mod tests {
 
         am.set_refresher(std::sync::Arc::new(NoOpRefresher));
         assert!(with_am.has_token_refresher());
+    }
+}
+
+#[cfg(test)]
+mod author_identity_tests {
+    use super::*;
+    use crate::util::user_identity::ResolvedUserIdentity;
+    use axum::{Router, routing::post};
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    /// Mock feedback backend: capture the POST /v1/feedback JSON body.
+    async fn start_capture_server() -> (
+        SocketAddr,
+        Arc<parking_lot::Mutex<Option<serde_json::Value>>>,
+    ) {
+        let captured = Arc::new(parking_lot::Mutex::new(None::<serde_json::Value>));
+        let captured_for_handler = captured.clone();
+        let router = Router::new().route(
+            "/v1/feedback",
+            post(move |body: axum::Json<serde_json::Value>| {
+                let captured = captured_for_handler.clone();
+                async move {
+                    *captured.lock() = Some(body.0);
+                    axum::Json(serde_json::json!({
+                        "feedbackId": "fb-1",
+                        "createdAt": chrono::Utc::now(),
+                    }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (addr, captured)
+    }
+
+    fn text_submission() -> FeedbackSubmission {
+        let mut s = new_submission(
+            "sess-1".to_string(),
+            ClientType::Tui,
+            FeedbackContent::Text("great session".to_string()),
+        );
+        s.model_id = Some("grok-4".to_string());
+        s
+    }
+
+    /// End-to-end: an env var (as a device-management launcher would inject)
+    /// referenced by `[feedback.user]` with `$VAR` is expanded at config load,
+    /// resolved, carried on the feedback POST alongside the rest of the
+    /// submission, and retained on the local entry.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn env_var_identity_reaches_the_wire_end_to_end() {
+        let _email =
+            xai_grok_test_support::env::EnvGuard::set("GROK_TEST_WORK_EMAIL", "ada@corp.example");
+        let _name =
+            xai_grok_test_support::env::EnvGuard::set("GROK_TEST_WORK_NAME", "Ada Lovelace");
+
+        // The loader expands `$VAR` at load, exactly as a trusted config tier ships it.
+        let mut value = toml::from_str::<toml::Value>(
+            r#"
+[feedback.user]
+name = ["$GROK_TEST_WORK_NAME"]
+email = ["$GROK_TEST_WORK_EMAIL"]
+"#,
+        )
+        .unwrap();
+        crate::config::expand_env_vars_in_toml(&mut value);
+        let cfg = crate::agent::config::Config::new_from_toml_cfg(&value).unwrap();
+        let user = cfg.feedback.user.expect("[feedback.user] present");
+
+        // Resolve through the real production entry point.
+        let identity = crate::util::user_identity::cached_identity(Some(&user))
+            .await
+            .expect("identity resolved");
+        assert_eq!(identity.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(identity.email.as_deref(), Some("ada@corp.example"));
+
+        let (addr, captured) = start_capture_server().await;
+        let client = crate::agent::feedback_client::FeedbackClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1"),
+            Some("tok".into()),
+        );
+        let mut submission = text_submission();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = submit_feedback_workflow(
+            &mut submission,
+            Some(&client),
+            Some(&tx),
+            SubmitFeedbackOptions {
+                solicited: false,
+                telemetry_enabled: false,
+                author_identity: Some(identity),
+            },
+        )
+        .await;
+        assert!(matches!(outcome, SubmitOutcome::Submitted));
+
+        // Author identity rides on the same submission as the rest of the
+        // feedback; nothing is stripped here.
+        let body = captured.lock().clone().expect("server saw the POST");
+        assert_eq!(body["authorName"], "Ada Lovelace");
+        assert_eq!(body["authorEmail"], "ada@corp.example");
+        assert_eq!(body["modelId"], "grok-4");
+        assert_eq!(body["feedbackText"], "great session");
+
+        // The local entry keeps the author fields and the full context.
+        let msg = rx.try_recv().expect("persistence entry was sent");
+        let PersistenceMsg::Feedback(LocalFeedbackEntry::UserFeedback(entry)) = msg else {
+            panic!("expected a feedback persistence entry");
+        };
+        let persisted = entry.submission.expect("submission persisted");
+        assert_eq!(persisted.author_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(persisted.author_email.as_deref(), Some("ada@corp.example"));
+        assert_eq!(persisted.model_id.as_deref(), Some("grok-4"));
+    }
+
+    /// `GROK_USER_METADATA` is merged into the submission and travels with it:
+    /// onto the wire body for triage and onto the local feedback.jsonl entry.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn workflow_merges_user_metadata_into_submission() {
+        let _guard = xai_grok_test_support::env::EnvGuard::set(
+            "GROK_USER_METADATA",
+            r#"{"team": "platform-tools"}"#,
+        );
+        let (addr, captured) = start_capture_server().await;
+        let client = crate::agent::feedback_client::FeedbackClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1"),
+            Some("tok".into()),
+        );
+        let mut submission = text_submission();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = submit_feedback_workflow(
+            &mut submission,
+            Some(&client),
+            Some(&tx),
+            SubmitFeedbackOptions {
+                solicited: false,
+                telemetry_enabled: false,
+                author_identity: None,
+            },
+        )
+        .await;
+        assert!(matches!(outcome, SubmitOutcome::Submitted));
+
+        let body = captured.lock().clone().expect("server saw the POST");
+        assert_eq!(body["metadata"]["team"], "platform-tools");
+
+        let msg = rx.try_recv().expect("persistence entry was sent");
+        let PersistenceMsg::Feedback(LocalFeedbackEntry::UserFeedback(entry)) = msg else {
+            panic!("expected a feedback persistence entry");
+        };
+        let persisted = entry.submission.expect("submission persisted");
+        assert_eq!(
+            persisted.metadata.expect("metadata merged before persist")["team"],
+            "platform-tools"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn workflow_without_identity_omits_author_fields() {
+        let (addr, captured) = start_capture_server().await;
+        let client = crate::agent::feedback_client::FeedbackClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1"),
+            Some("tok".into()),
+        );
+
+        // Both no opt-in and an unresolved opt-in must leave the author keys
+        // out of the body and the local entry.
+        for (case, author_identity) in [
+            ("no opt-in", None),
+            ("unresolved", Some(ResolvedUserIdentity::default())),
+        ] {
+            // Reset so this case can't pass on the previous case's body.
+            *captured.lock() = None;
+            let mut submission = text_submission();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let outcome = submit_feedback_workflow(
+                &mut submission,
+                Some(&client),
+                Some(&tx),
+                SubmitFeedbackOptions {
+                    solicited: false,
+                    telemetry_enabled: false,
+                    author_identity,
+                },
+            )
+            .await;
+            assert!(matches!(outcome, SubmitOutcome::Submitted), "{case}");
+
+            let body = captured.lock().clone().expect("server saw the POST");
+            assert!(body.get("authorName").is_none(), "{case}: {body}");
+            assert!(body.get("authorEmail").is_none(), "{case}: {body}");
+
+            let msg = rx.try_recv().expect("persistence entry was sent");
+            let PersistenceMsg::Feedback(LocalFeedbackEntry::UserFeedback(entry)) = msg else {
+                panic!("expected a feedback persistence entry");
+            };
+            let persisted = entry.submission.expect("submission persisted");
+            assert_eq!(persisted.author_name, None, "{case}");
+            assert_eq!(persisted.author_email, None, "{case}");
+        }
     }
 }

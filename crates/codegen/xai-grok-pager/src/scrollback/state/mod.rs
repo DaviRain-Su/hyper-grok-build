@@ -848,6 +848,59 @@ impl ScrollbackState {
         true
     }
 
+    /// Fold a turn completion into a tail-adjacent parked "Worked for X"
+    /// marker from the same prompt turn: the parked row already IS the
+    /// turn's boundary, so it takes the final elapsed + stop hooks in place
+    /// (unparked) instead of an identical row stacking beneath it. Returns
+    /// `false` (caller pushes a fresh marker) when the tail doesn't match,
+    /// the event isn't a completion (a failure/cancel is a different
+    /// outcome), or minimal mode already committed the row — print-once: an
+    /// in-place mutation would never reach the terminal.
+    pub fn fold_completion_into_tail_parked_marker(
+        &mut self,
+        event: &super::blocks::SessionEvent,
+        stop_hooks: &[(String, Vec<super::blocks::tool::HookRunEntry>)],
+        prompt_id: Option<&str>,
+    ) -> bool {
+        use super::blocks::SessionEvent;
+        // `is_none` also keeps `None` from matching a pid-less parked marker.
+        if prompt_id.is_none() || !matches!(event, SessionEvent::TurnCompleted { .. }) {
+            return false;
+        }
+        let tail_match = self.last().and_then(|entry| match &entry.block {
+            RenderBlock::SessionEvent(b) if b.parked && b.prompt_id.as_deref() == prompt_id => {
+                Some(entry.id)
+            }
+            _ => None,
+        });
+        let Some(id) = tail_match else {
+            return false;
+        };
+        if self.is_committed(id) {
+            return false;
+        }
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return false;
+        };
+        let RenderBlock::SessionEvent(ref mut b) = entry.block else {
+            return false;
+        };
+        b.event = event.clone();
+        b.parked = false;
+        b.stop_hooks = stop_hooks.to_vec();
+        // A hook-carrying marker rests Collapsed (the right-justified summary)
+        // on every sibling path — fresh pushes via `default_display_mode` and
+        // `attach_stop_hooks_to_marker` — so the fold matches.
+        if b.has_stop_hook_content() && !entry.display_mode_pinned {
+            entry.display_mode = DisplayMode::Collapsed;
+        }
+        entry.invalidate_cache();
+        self.mark_structurally_dirty(id);
+        // The marker's searchable text changed (parked elapsed → final).
+        self.bump_content_generation();
+        true
+    }
+
     /// Push a text chunk to an agent message entry.
     ///
     /// This is the preferred way to append streaming content because it:
@@ -1126,20 +1179,25 @@ impl ScrollbackState {
     /// the single point where block timing begins — constructors default
     /// to `started_at = None`.
     pub fn set_last_running(&mut self, running: bool) {
-        if let Some((_, entry)) = self.entries.last_mut() {
-            let was_running = entry.is_running;
-            entry.is_running = running;
-            entry.invalidate_cache();
+        if let Some(id) = self.entries.last().map(|(_, entry)| entry.id) {
+            self.set_entry_running(id, running);
+        }
+    }
 
-            // Start timing when a tool block enters running state.
-            if running && !was_running {
-                if let RenderBlock::ToolCall(ref mut tc) = entry.block {
-                    tc.start_timing();
-                }
-                self.running.insert(entry.id);
-            } else if !running && was_running {
-                self.running.remove(&entry.id);
+    pub fn set_entry_running(&mut self, id: EntryId, running: bool) {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return;
+        };
+        let was_running = entry.is_running;
+        entry.is_running = running;
+        entry.invalidate_cache();
+        if running && !was_running {
+            if let RenderBlock::ToolCall(ref mut tc) = entry.block {
+                tc.start_timing();
             }
+            self.running.insert(entry.id);
+        } else if !running && was_running {
+            self.running.remove(&entry.id);
         }
     }
 

@@ -33,22 +33,8 @@ async fn queued_message_renders_once_not_twice() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_qonce_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_qonce_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
+    let _background_turn =
+        expect_tool_turn(&content, "call_qonce_bg", "run_terminal_command", bg_args);
 
     // Tool call 2: the flag-gated foreground hold — the mid-turn window
     // where the follow-up is queued.
@@ -57,21 +43,11 @@ async fn queued_message_renders_once_not_twice() {
         "description": "hold for id extraction"
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_qonce_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_qonce_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
+    let _id_hold_turn = expect_tool_turn(
+        &content,
+        "call_qonce_id_hold",
+        "run_terminal_command",
+        id_hold_args,
     );
 
     // Fallback for both post-wait turns (the parked turn's wrap-up and the
@@ -126,21 +102,11 @@ async fn queued_message_renders_once_not_twice() {
         "timeout_ms": 600_000
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_qonce_wait",
-            "get_command_or_subagent_output",
-            &wait_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_qonce_wait",
-            "get_command_or_subagent_output",
-            &wait_args,
-        )),
+    let _wait_turn = expect_tool_turn(
+        &content,
+        "call_qonce_wait",
+        "get_command_or_subagent_output",
+        wait_args,
     );
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 

@@ -1,8 +1,5 @@
 //! Goal mode support — notification helpers and state formatters.
 //!
-//! The model drives goal orchestration directly via the `update_goal` tool.
-//! This module provides notification helpers used by `SessionActor` to emit
-//! `GoalUpdated` events and format elapsed time.
 
 use crate::extensions::notification::{
     SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
@@ -15,9 +12,6 @@ use crate::session::persistence::PersistenceMsg;
 // ---------------------------------------------------------------------------
 
 /// Lightweight notification sender for goal progress updates.
-///
-/// Used by `SessionActor` to emit `GoalUpdated` notifications when the
-/// `update_goal` tool reports progress.
 pub(crate) struct GoalNotifySender {
     session_id: agent_client_protocol::SessionId,
     gateway: xai_acp_lib::AcpAgentGatewaySender,
@@ -47,7 +41,19 @@ impl GoalNotifySender {
     ) {
         tracker.account_elapsed();
         let Some(o) = tracker.snapshot() else { return };
+        let _ = self
+            .persistence_tx
+            .send(PersistenceMsg::GoalModeState(o.clone()));
         self.send_update(build_goal_updated(o, tokens_used, finished_subagent_tokens));
+    }
+
+    pub(crate) fn persist_goal_state(&self, tracker: &GoalTracker) {
+        let Some(snapshot) = tracker.snapshot() else {
+            return;
+        };
+        let _ = self
+            .persistence_tx
+            .send(PersistenceMsg::GoalModeState(snapshot.clone()));
     }
 
     /// Like [`Self::emit_goal_updated`] but fire-and-forget to the gateway

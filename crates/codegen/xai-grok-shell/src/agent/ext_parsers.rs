@@ -80,6 +80,14 @@ pub(super) fn parse_queue_edit_command(
                 editor: owner,
             })
         }
+        "x.ai/queue/hold_edit" => {
+            let id = params.get("id").and_then(|v| v.as_str())?.to_string();
+            Some(SessionCommand::HoldCombineEdit { id })
+        }
+        "x.ai/queue/release_edit" => {
+            let id = params.get("id").and_then(|v| v.as_str())?.to_string();
+            Some(SessionCommand::ReleaseCombineEdit { id })
+        }
         _ => None,
     }
 }

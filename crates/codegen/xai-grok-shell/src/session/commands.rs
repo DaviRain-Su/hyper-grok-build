@@ -562,6 +562,15 @@ pub enum SessionCommand {
         new_text: String,
         editor: Option<String>,
     },
+    /// Hold a queued prompt out of combine-on-promote while a client edits it
+    /// in the composer. Released via [`Self::ReleaseCombineEdit`].
+    HoldCombineEdit {
+        id: String,
+    },
+    /// Release a previous [`Self::HoldCombineEdit`].
+    ReleaseCombineEdit {
+        id: String,
+    },
     /// Atomically interject a queued (not-yet-running) prompt into the running
     /// turn: the actor removes it from `pending_inputs` and pushes
     /// its text into `pending_interjections` in a single mailbox op, so the
@@ -611,6 +620,12 @@ pub enum SessionCommand {
     /// files and is included in GCS CopyFile snapshots.
     PersistFeedback(Box<crate::session::persistence::LocalFeedbackEntry>),
     AdvertiseCommands,
+    GetWorkflowCatalogState {
+        respond_to: oneshot::Sender<(bool, bool)>,
+    },
+    ListAvailableCommands {
+        respond_to: oneshot::Sender<Vec<acp::AvailableCommand>>,
+    },
     /// Re-discover skills from disk, update the SkillManager baseline,
     /// and re-advertise slash commands to the client.
     ReloadSkills,
@@ -705,6 +720,10 @@ pub enum SessionCommand {
     GoalSummaryTurn {
         /// Short instruction appended as a verbatim user message.
         prompt_text: String,
+    },
+    WorkflowCompletionTurn {
+        run_id: String,
+        revision: u64,
     },
     /// Take turn messages from the chat state actor (proxied from mvp_agent).
     TakeTurnMessages {

@@ -101,7 +101,7 @@ async fn stuck_drag_recovers_on_esc_pty() {
     // The two post-Esc latched-extend paths: `<32` = left-drag motion (button 0 + motion bit),
     // `<35` = bare move with no button held, reported under any-event tracking (DECSET 1003).
     // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Any-event-tracking
-    let far_motion = sgr_mouse(32, row, far_col, 'M') + &sgr_mouse(35, row, far_col, 'M');
+    let far_motion = sgr_mouse(32, row, far_col, 'M') + sgr_mouse(35, row, far_col, 'M').as_str();
     harness
         .inject_keys(far_motion.as_bytes())
         .expect("post-esc motion");

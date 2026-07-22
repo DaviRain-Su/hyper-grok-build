@@ -419,7 +419,7 @@ fn last_marker_block(agent: &AgentView) -> &SessionEventBlock {
 #[test]
 fn real_end_marker_stays_plain_with_running_work() {
     // Background work never rides the end marker as a "still running" suffix
-    // — the persistent "watching · …" status row carries it instead. The
+    // — the persistent "… still running" status row carries it instead. The
     // running command shows up in the watchers count only.
     let mut agent = running_driver("p1");
     insert_bg_task(&mut agent, "bg-1", false);
@@ -530,5 +530,254 @@ fn driver_arm_records_cancel_trigger_for_reconcile() {
             .as_ref()
             .and_then(|p| p.cancel_trigger.as_deref()),
         Some("send_now")
+    );
+}
+
+/// All `TurnCompleted` markers (parked and final) in scrollback order.
+fn completed_markers(sb: &ScrollbackState) -> Vec<SessionEventBlock> {
+    (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::SessionEvent(b))
+                if matches!(b.event, SessionEvent::TurnCompleted { .. }) =>
+            {
+                Some(b.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The tail parked marker `maybe_push_parked_marker` leaves mid-turn (same
+/// shape as `push_parked_marker_block`).
+fn push_parked_tail(agent: &mut AgentView, prompt_id: &str, secs: u64) {
+    let mut parked = SessionEventBlock::new(SessionEvent::TurnCompleted {
+        elapsed: Some(std::time::Duration::from_secs(secs)),
+    });
+    parked.parked = true;
+    parked.prompt_id = Some(prompt_id.into());
+    agent
+        .scrollback
+        .push_block(RenderBlock::SessionEvent(parked));
+}
+
+#[test]
+fn completion_folds_tail_parked_marker_instead_of_duplicating() {
+    // Park → work finished → turn ended with nothing in between: the
+    // completion folds into the parked marker, not a second identical row.
+    let mut agent = running_driver("p1");
+    push_parked_tail(&mut agent, "p1", 3);
+
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p1"),
+    );
+
+    let markers = completed_markers(&agent.scrollback);
+    assert_eq!(
+        markers.len(),
+        1,
+        "park + completion must render ONE marker, got {}",
+        markers.len()
+    );
+    assert!(!markers[0].parked, "the folded marker is the real turn end");
+    assert_eq!(
+        markers[0].event.message(),
+        "Worked for 5.0s",
+        "the folded marker carries the final elapsed"
+    );
+}
+
+#[test]
+fn completion_fold_attaches_stop_hooks_to_folded_marker() {
+    let mut agent = running_driver("p1");
+    push_parked_tail(&mut agent, "p1", 3);
+    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
+        prompt_id: Some("p1".into()),
+        groups: one_stop_group(),
+    });
+
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p1"),
+    );
+
+    let markers = completed_markers(&agent.scrollback);
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        markers[0].stop_hooks.len(),
+        1,
+        "stop hooks must ride the folded marker"
+    );
+    // A hook-carrying marker rests Collapsed on the fresh-push and
+    // attach_stop_hooks paths; the fold must match.
+    let folded = agent.scrollback.last().expect("folded marker entry");
+    assert_eq!(
+        folded.display_mode,
+        crate::scrollback::types::DisplayMode::Collapsed,
+        "folded marker with stop hooks must rest collapsed"
+    );
+}
+
+#[test]
+fn completion_folds_marker_pushed_by_real_park_path() {
+    // Drive the real park — blocking wait through the tracker, then
+    // `maybe_push_parked_marker` — so the fold's keys (parked + prompt_id)
+    // stay pinned to the production marker shape, not the test helper's.
+    let mut agent = running_driver("p1");
+    super::super::agent_view::test_fixtures::simulate_task_output_wait(&mut agent, "bg-1");
+    agent.maybe_push_parked_marker();
+    let parked = completed_markers(&agent.scrollback);
+    assert_eq!(parked.len(), 1, "real park path must push one marker");
+    assert!(parked[0].parked);
+
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p1"),
+    );
+
+    let markers = completed_markers(&agent.scrollback);
+    assert_eq!(
+        markers.len(),
+        1,
+        "completion must fold into the marker the real park path pushed"
+    );
+    assert!(!markers[0].parked);
+}
+
+#[test]
+fn completion_does_not_fold_across_bg_completion_chip() {
+    // Park → bg task completes (chip lands under the marker) → turn ends:
+    // folding would teleport the boundary above the chip, so this flow
+    // intentionally keeps both markers.
+    let mut agent = running_driver("p1");
+    push_parked_tail(&mut agent, "p1", 3);
+    agent.scrollback.push_block(RenderBlock::bg_task_completed(
+        "sleep 5",
+        "task-1",
+        std::time::Duration::from_secs(5),
+    ));
+
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(9)),
+        }),
+        Some("p1"),
+    );
+
+    let markers = completed_markers(&agent.scrollback);
+    assert_eq!(
+        markers.len(),
+        2,
+        "a chip between park and completion keeps both markers"
+    );
+}
+
+#[test]
+fn completion_does_not_fold_committed_parked_marker() {
+    // Minimal mode already printed the parked row (print-once): an in-place
+    // fold would never reach the terminal — a fresh marker must be pushed.
+    let mut agent = running_driver("p1");
+    push_parked_tail(&mut agent, "p1", 3);
+    let parked_idx = agent.scrollback.len() - 1;
+    agent.scrollback.mark_committed(parked_idx);
+    agent.scrollback.set_commit_scan_cursor(parked_idx + 1);
+
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p1"),
+    );
+
+    let markers = completed_markers(&agent.scrollback);
+    assert_eq!(
+        markers.len(),
+        2,
+        "committed tail must not fold: the completion appends a fresh marker"
+    );
+    assert!(markers[0].parked, "the committed parked row is untouched");
+    assert!(!markers[1].parked, "the fresh marker is the real turn end");
+    let fresh = agent.scrollback.last().expect("fresh marker entry");
+    assert!(
+        !agent.scrollback.is_committed(fresh.id),
+        "fresh marker is uncommitted so the commit pass will print it"
+    );
+}
+
+#[test]
+fn completion_does_not_fold_foreign_or_buried_parked_markers() {
+    // Different prompt id at the tail: not this turn's park — push normally.
+    let mut agent = running_driver("p2");
+    push_parked_tail(&mut agent, "p1", 3);
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p2"),
+    );
+    assert_eq!(
+        completed_markers(&agent.scrollback).len(),
+        2,
+        "a foreign parked marker must not swallow another turn's completion"
+    );
+
+    // Buried park (agent output rendered after it): the park no longer
+    // explains the tail — the completion pushes its own marker.
+    let mut agent = running_driver("p1");
+    push_parked_tail(&mut agent, "p1", 3);
+    agent.scrollback.push_block(RenderBlock::System(
+        crate::scrollback::blocks::SystemMessageBlock::new("resumed"),
+    ));
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p1"),
+    );
+    assert_eq!(
+        completed_markers(&agent.scrollback).len(),
+        2,
+        "a buried parked marker must not fold"
+    );
+}
+
+#[test]
+fn failure_never_folds_into_a_parked_marker() {
+    // A parked "Worked for" is a completion-shaped boundary; a failure is a
+    // different outcome and must render as its own row beneath it.
+    let mut agent = running_driver("p1");
+    push_parked_tail(&mut agent, "p1", 3);
+    push_turn_terminal_marker(
+        &mut agent,
+        Some(SessionEvent::TurnFailed {
+            error: "boom".into(),
+            elapsed: Some(std::time::Duration::from_secs(5)),
+        }),
+        Some("p1"),
+    );
+    assert_eq!(
+        completed_markers(&agent.scrollback).len(),
+        1,
+        "the parked marker stays"
+    );
+    assert!(
+        matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnFailed { .. })
+        ),
+        "the failure renders as its own row"
     );
 }

@@ -53,8 +53,7 @@ fn tool_id_rejects_disallowed_characters() {
     ] {
         let err = ToolId::new(bad).unwrap_err();
         assert!(
-            matches!(err, IdError::InvalidFormat { ref value }
-if value == bad),
+            matches!(err, IdError::InvalidFormat { ref value } if value == bad),
             "expected InvalidFormat for {bad:?}, got {err:?}"
         );
     }
@@ -74,8 +73,7 @@ fn tool_id_rejects_empty_segments_around_separator() {
     for bad in [":foo", "foo:", ":"] {
         let err = ToolId::new(bad).unwrap_err();
         assert!(
-            matches!(err, IdError::InvalidFormat { ref value }
-if value == bad),
+            matches!(err, IdError::InvalidFormat { ref value } if value == bad),
             "expected InvalidFormat for {bad:?}, got {err:?}"
         );
     }
@@ -105,8 +103,7 @@ fn server_id_rejects_reserved_auto_prefix() {
     for bad in ["auto:my-server", "auto:", "auto:tool:read_file"] {
         let err = ServerId::new(bad).unwrap_err();
         assert!(
-            matches!(err, IdError::ReservedPrefix { ref value }
-if value == bad),
+            matches!(err, IdError::ReservedPrefix { ref value } if value == bad),
             "expected ReservedPrefix for {bad:?}, got {err:?}"
         );
     }

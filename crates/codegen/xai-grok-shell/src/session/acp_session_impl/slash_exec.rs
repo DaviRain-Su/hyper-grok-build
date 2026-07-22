@@ -95,7 +95,7 @@ impl SessionActor {
                         e
                     }
                 };
-                self.send_slash_command_output(&msg).await;
+                self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::HooksList => {
@@ -132,12 +132,12 @@ impl SessionActor {
                     }
                     None => "No hooks loaded for this session.".to_string(),
                 };
-                self.send_slash_command_output(&text).await;
+                self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::HooksAdd { path } => {
                 if path.is_empty() {
-                    self.send_slash_command_output(
+                    self.send_host_turn_slash_command_output(
                         "Usage: /hooks add <path>\nProvide a path to a hook JSON file or directory under ~/.grok/.",
                     )
                     .await;
@@ -149,7 +149,7 @@ impl SessionActor {
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::HookAdded { success: true },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Added hook path: {path}\n\
                                  Restart session to load hooks from this path."
                             ))
@@ -159,7 +159,7 @@ impl SessionActor {
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::HookAdded { success: false },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Failed to add hook path: {e}"
                             ))
                             .await;
@@ -170,7 +170,7 @@ impl SessionActor {
             }
             BuiltinAction::HooksRemove { path } => {
                 if path.is_empty() {
-                    self.send_slash_command_output(
+                    self.send_host_turn_slash_command_output(
                         "Usage: /hooks-remove <path>\nProvide the path to remove from hooks-paths.",
                     )
                     .await;
@@ -180,7 +180,7 @@ impl SessionActor {
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::HookRemoved { success: true },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Removed hook path: {path}\nRestart session to stop loading hooks from this path."
                             ))
                             .await;
@@ -189,7 +189,7 @@ impl SessionActor {
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::HookRemoved { success: false },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Failed to remove hook path: {e}"
                             ))
                             .await;
@@ -204,7 +204,7 @@ impl SessionActor {
                     Ok((root, false)) => format!("Not currently trusted: {}", root.display()),
                     Err(e) => e,
                 };
-                self.send_slash_command_output(&msg).await;
+                self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsList => {
@@ -271,7 +271,7 @@ impl SessionActor {
                     }
                     _ => "No plugins installed.".to_string(),
                 };
-                self.send_slash_command_output(&text).await;
+                self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsReload => {
@@ -282,13 +282,13 @@ impl SessionActor {
                         xai_grok_telemetry::session_ctx::log_event(
                             xai_grok_telemetry::events::PluginReloaded { success: true },
                         );
-                        self.send_slash_command_output(&msg).await;
+                        self.send_host_turn_slash_command_output(&msg).await;
                     }
                     None => {
                         xai_grok_telemetry::session_ctx::log_event(
                             xai_grok_telemetry::events::PluginReloaded { success: false },
                         );
-                        self.send_slash_command_output(
+                        self.send_host_turn_slash_command_output(
                             "No plugin registry handle available. Start a new session to discover plugins.",
                         )
                         .await;
@@ -297,7 +297,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsTrust => {
-                self.send_slash_command_output(
+                self.send_host_turn_slash_command_output(
                     "Trust/untrust has been replaced by enable/disable. Use /plugins enable <id> instead.",
                 )
                 .await;
@@ -367,12 +367,12 @@ impl SessionActor {
                     ctx.total,
                     context_pct,
                 );
-                self.send_slash_command_output(&text).await;
+                self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::PluginsAdd { path } => {
                 if path.is_empty() {
-                    self.send_slash_command_output(
+                    self.send_host_turn_slash_command_output(
                         "Usage: /plugins add <path>\n\
                          Provide the path to a plugin directory to add.",
                     )
@@ -396,10 +396,10 @@ impl SessionActor {
                                 },
                             );
                             let msg = format!("Added plugin path: {path_str}");
-                            self.send_slash_command_output(&msg).await;
+                            self.send_host_turn_slash_command_output(&msg).await;
                             if let Some(ref handle) = self.plugin_registry_handle {
                                 let reload_msg = self.reload_plugins_impl(handle, false).await;
-                                self.send_slash_command_output(&reload_msg).await;
+                                self.send_host_turn_slash_command_output(&reload_msg).await;
                             }
                         }
                         Err(e) => {
@@ -409,7 +409,7 @@ impl SessionActor {
                                     success: false,
                                 },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Failed to add plugin path: {e}"
                             ))
                             .await;
@@ -420,7 +420,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsRemove { path } => {
                 if path.is_empty() {
-                    self.send_slash_command_output(
+                    self.send_host_turn_slash_command_output(
                         "Usage: /plugins remove <path>\n\
                          Provide the path to a plugin directory to remove.",
                     )
@@ -441,17 +441,17 @@ impl SessionActor {
                                 xai_grok_telemetry::events::PluginRemoved { success: true },
                             );
                             let msg = format!("Removed plugin path: {path_str}");
-                            self.send_slash_command_output(&msg).await;
+                            self.send_host_turn_slash_command_output(&msg).await;
                             if let Some(ref handle) = self.plugin_registry_handle {
                                 let reload_msg = self.reload_plugins_impl(handle, false).await;
-                                self.send_slash_command_output(&reload_msg).await;
+                                self.send_host_turn_slash_command_output(&reload_msg).await;
                             }
                         }
                         Err(e) => {
                             xai_grok_telemetry::session_ctx::log_event(
                                 xai_grok_telemetry::events::PluginRemoved { success: false },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Failed to remove plugin path: {e}"
                             ))
                             .await;
@@ -462,7 +462,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsInstall { source, trust } => {
                 if source.is_empty() {
-                    self.send_slash_command_output(
+                    self.send_host_turn_slash_command_output(
                         "Usage: /plugins install <source>\n\
                          Source can be a git URL or local path.\n\
                          Examples:\n\
@@ -493,7 +493,7 @@ impl SessionActor {
                                 format!("local directory: {}", path.display())
                             }
                         };
-                        self.send_slash_command_output(&format!(
+                        self.send_host_turn_slash_command_output(&format!(
                             "About to install plugin from: {source_desc}\n\
                              \n\
                              This will clone/link the source and activate all executable surfaces:\n\
@@ -532,7 +532,7 @@ impl SessionActor {
                                     plugin_name = %outcome.plugin_names.join(","),
                                 )
                                 .in_scope(|| {});
-                                self.send_slash_command_output(&format!(
+                                self.send_host_turn_slash_command_output(&format!(
                                     "Installed {} plugin(s) from {source}: {}\n\
                                      Run /plugins reload to activate.",
                                     outcome.plugin_names.len(),
@@ -562,7 +562,7 @@ impl SessionActor {
                                         error_category: Some(error_category),
                                     },
                                 );
-                                self.send_slash_command_output(&format!(
+                                self.send_host_turn_slash_command_output(&format!(
                                     "Failed to install plugin: {e}"
                                 ))
                                 .await;
@@ -574,7 +574,7 @@ impl SessionActor {
             }
             BuiltinAction::PluginsUninstall { name, confirm } => {
                 if name.is_empty() {
-                    self.send_slash_command_output(
+                    self.send_host_turn_slash_command_output(
                         "Usage: /plugins uninstall <name>\n\
                          Provide the name of an installed plugin to remove.",
                     )
@@ -589,7 +589,7 @@ impl SessionActor {
                                     success: true,
                                 },
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Uninstalled repo \"{}\" ({} plugin(s): {})",
                                 outcome.repo_key,
                                 outcome.removed_plugins.len(),
@@ -603,7 +603,7 @@ impl SessionActor {
                             other_plugins,
                             total,
                         }) => {
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Plugin \"{name}\" belongs to repo \"{repo_key}\" which also contains:\n\
                                  {}\n\
                                  \n\
@@ -618,7 +618,7 @@ impl SessionActor {
                             .await;
                         }
                         Err(UninstallError::NotFound { name }) => {
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Plugin \"{name}\" not found in install registry.\n\
                                  Use /plugins list to see installed plugins."
                             ))
@@ -633,7 +633,7 @@ impl SessionActor {
 
                 match crate::plugin::update_plugins(name.as_deref()) {
                     Ok(outcomes) if outcomes.is_empty() => {
-                        self.send_slash_command_output("No installed plugins to update.")
+                        self.send_host_turn_slash_command_output("No installed plugins to update.")
                             .await;
                     }
                     Ok(outcomes) => {
@@ -664,10 +664,12 @@ impl SessionActor {
                                 }
                             })
                             .collect();
-                        self.send_slash_command_output(&messages.join("\n")).await;
+                        self.send_host_turn_slash_command_output(&messages.join("\n"))
+                            .await;
                     }
                     Err(e) => {
-                        self.send_slash_command_output(&format!("{e}")).await;
+                        self.send_host_turn_slash_command_output(&format!("{e}"))
+                            .await;
                     }
                 }
                 ok_end_turn(0, None)
@@ -707,7 +709,7 @@ impl SessionActor {
                                 error = %e,
                                 "failed to list memory files",
                             );
-                            self.send_slash_command_output(&format!(
+                            self.send_host_turn_slash_command_output(&format!(
                                 "Failed to list memory files: {e}"
                             ))
                             .await;
@@ -715,8 +717,10 @@ impl SessionActor {
                         }
                     }
                 } else {
-                    self.send_slash_command_output("Memory is not enabled for this session.")
-                        .await;
+                    self.send_host_turn_slash_command_output(
+                        "Memory is not enabled for this session.",
+                    )
+                    .await;
                     vec![]
                 };
                 tracing::info!(
@@ -784,7 +788,7 @@ impl SessionActor {
                     let state = if enabled { "enabled" } else { "disabled" };
                     format!("Memory is already {state}.")
                 };
-                self.send_slash_command_output(&msg).await;
+                self.send_host_turn_slash_command_output(&msg).await;
                 self.refresh_goal_harness_enabled().await;
                 ok_end_turn(0, None)
             }
@@ -794,41 +798,103 @@ impl SessionActor {
             BuiltinAction::GoalSet { .. } => {
                 unreachable!("GoalSet is intercepted in handle_prompt")
             }
+            BuiltinAction::DeepResearch { query } => {
+                if query.is_empty() {
+                    self.send_host_turn_slash_command_output(
+                        "Usage: /deep-research <query>\nResearch with bounded parallel agents, \
+                         independently cross-check the evidence, and write a concise cited report.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let resolved = match crate::session::workflow::registry::resolve_by_name(
+                    "deep-research",
+                    None,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.send_host_turn_slash_command_output(&format!(
+                            "deep-research workflow unavailable: {e}"
+                        ))
+                        .await;
+                        return ok_end_turn(0, None);
+                    }
+                };
+                let spec = crate::session::workflow::manager::LaunchSpec {
+                    objective: query.clone(),
+                    args: serde_json::json!({ "query": query }),
+                    agent_budget: None,
+                    resume_run_id: None,
+                };
+                let launched = self.workflow_manager.lock().await.launch(resolved, spec);
+                match launched {
+                    Ok((run_id, outcome_rx)) => {
+                        let (display, objective) = self
+                            .workflow_tracker()
+                            .await
+                            .lock()
+                            .get(&run_id)
+                            .map(|r| (r.name.clone(), r.objective.clone()))
+                            .unwrap_or_else(|| ("deep-research".to_string(), String::new()));
+                        self.push_workflow_launch_reminder(
+                            &display,
+                            &run_id,
+                            &objective,
+                            &format!("/deep-research {objective}"),
+                            false,
+                        );
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Deep research '{display}' started in the background. It will \
+                             cross-check candidate claims and return a concise cited report here. \
+                             Use /workflows to follow progress."
+                        ))
+                        .await;
+                        tokio::spawn(async move {
+                            if let Ok(outcome) = outcome_rx.await {
+                                tracing::info!(run_id, ?outcome, "deep-research finished");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        self.send_host_turn_slash_command_output(&format!(
+                            "Could not start deep research: {e}"
+                        ))
+                        .await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::WorkflowManage { run_id, op } => {
+                let msg = self.manage_workflow_run(&run_id, &op).await;
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::WorkflowLaunch { name, input } => {
+                let (registry, _) = self.named_workflow_snapshot();
+                let msg = self.launch_named_workflow(&registry, &name, &input).await;
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::GoalStatus => {
                 let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                 let goal_tokens = self.goal_tokens_used(current_tokens);
                 let msg = {
                     let mut tracker = self.goal_tracker.lock();
-                    // Flush pending wall-clock delta so elapsed_ms is up to date.
                     tracker.account_elapsed();
                     match tracker.snapshot() {
-                        Some(o) => {
-                            let phase = format!("{:?}", o.phase);
-                            let status = format!("{:?}", o.status);
-                            let elapsed =
-                                crate::session::goal_orchestrator::format_elapsed(o.elapsed_ms);
-                            // `goal_tokens` already includes live subagent
-                            // spend via the token records — no live fold-in.
-                            let mut buf = format!(
-                                "Goal: {}\n\
-                                 Status: {status} | Phase: {phase}\n\
-                                 Tokens used: {goal_tokens}\n\
-                                 Elapsed: {elapsed}",
-                                o.objective,
-                            );
-                            if let Some(budget) = o.token_budget {
-                                buf.push_str(&format!(" | Budget: {budget}"));
-                            }
-                            if let Some(ref role) = o.current_subagent_role {
-                                buf.push_str(&format!("\nActive subagent: {role}"));
-                            }
-                            buf
-                        }
+                        Some(goal) => format!(
+                            "Goal: {}\nStatus: {:?} | Phase: {:?}\nGoal tokens used: {}\nElapsed: {}",
+                            goal.objective,
+                            goal.status,
+                            goal.phase,
+                            goal_tokens,
+                            crate::session::goal_orchestrator::format_elapsed(goal.elapsed_ms),
+                        ),
                         None => "No goal is currently set. Use /goal <objective> to start one."
                             .to_string(),
                     }
                 };
-                self.send_slash_command_output(&msg).await;
+                self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalPause => {
@@ -838,35 +904,26 @@ impl SessionActor {
                     let mut tracker = self.goal_tracker.lock();
                     match tracker.status() {
                         Some(GoalStatus::Active) => {
-                            debug_assert!(
-                                tracker.pause(GoalPauseReason::User),
-                                "Active goal must pause"
-                            );
+                            tracker.pause(GoalPauseReason::User);
                             ("Goal paused. Use /goal resume to continue.", true)
                         }
-                        Some(
-                            GoalStatus::UserPaused
-                            | GoalStatus::BackOffPaused
-                            | GoalStatus::NoProgressPaused
-                            | GoalStatus::InfraPaused
-                            | GoalStatus::Blocked,
-                        ) => ("Goal is already paused.", false),
+                        Some(status) if status.is_paused() => ("Goal is already paused.", false),
                         Some(GoalStatus::Complete) => ("Goal is already complete.", false),
                         Some(GoalStatus::BudgetLimited) => ("Goal is budget-limited.", false),
                         None => ("No goal is currently set.", false),
+                        Some(_) => ("Goal is not active.", false),
                     }
                 };
                 if changed {
                     self.clear_pending_classifier_completions();
-                    let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
-                    let notify = self.goal_notify_sender();
-                    notify.emit_goal_updated(
+                    let (tokens_used, finished) = self.goal_tokens(current_tokens);
+                    self.goal_notify_sender().emit_goal_updated(
                         &mut self.goal_tracker.lock(),
                         tokens_used,
-                        finished_marginal,
+                        finished,
                     );
                 }
-                self.send_slash_command_output(msg).await;
+                self.send_host_turn_slash_command_output(msg).await;
                 ok_end_turn(0, None)
             }
             // GoalResume is intercepted in handle_prompt (like GoalSet) so a
@@ -875,25 +932,32 @@ impl SessionActor {
                 unreachable!("GoalResume is intercepted in handle_prompt")
             }
             BuiltinAction::GoalClear => {
+                let (respond_to, deleted) = tokio::sync::oneshot::channel();
+                if self
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::DeleteGoalModeState { respond_to })
+                    .is_err()
+                    || !matches!(deleted.await, Ok(Ok(())))
+                {
+                    self.send_host_turn_slash_command_output(
+                        "Could not durably clear the goal. The goal remains loaded; retry /goal clear.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
                 self.goal_tracker.lock().clear();
-                // `/goal clear` is a deliberate user reset — drop both
-                // streaks so stale counters from the previous goal
-                // can't leak into the next one.
                 self.goal_continuation_streak
                     .store(0, std::sync::atomic::Ordering::Relaxed);
                 self.goal_blocked_streak
                     .store(0, std::sync::atomic::Ordering::Relaxed);
-                // Drop goal-turn-origin task ids so a future goal's drain
-                // doesn't suppress the next goal's (or post-goal) tasks.
                 self.goal_turn_task_ids.lock().clear();
-                // Clear per-subagent token records so stale entries
-                // from the previous goal don't leak into the next.
                 self.subagent_token_records.lock().clear();
                 self.clear_pending_classifier_completions();
-                // Emit a cleared notification so the pager drops goal state.
-                let update = crate::session::goal_orchestrator::build_goal_cleared();
-                self.send_xai_notification(update).await;
-                self.send_slash_command_output("Goal cleared.").await;
+                self.send_xai_notification(crate::session::goal_orchestrator::build_goal_cleared())
+                    .await;
+                self.send_host_turn_slash_command_output("Goal cleared.")
+                    .await;
                 ok_end_turn(0, None)
             }
         }
@@ -901,7 +965,7 @@ impl SessionActor {
 
     async fn execute_feedback_command(self: &Arc<Self>, text: String) -> PromptTurnResult {
         if text.is_empty() {
-            self.send_slash_command_output("Usage: /feedback <text>")
+            self.send_host_turn_slash_command_output("Usage: /feedback <text>")
                 .await;
             return ok_end_turn(0, None);
         }
@@ -933,18 +997,18 @@ impl SessionActor {
 
         match outcome {
             SubmitOutcome::Submitted => {
-                self.send_slash_command_output("Feedback submitted. Thank you!")
+                self.send_host_turn_slash_command_output("Feedback submitted. Thank you!")
                     .await;
             }
             SubmitOutcome::LocalOnly => {
-                self.send_slash_command_output(
+                self.send_host_turn_slash_command_output(
                     "Feedback saved locally; no feedback server is configured for this session.",
                 )
                 .await;
             }
             SubmitOutcome::Failed(err) => {
                 tracing::warn!(error = %err, "feedback submission failed");
-                self.send_slash_command_output(
+                self.send_host_turn_slash_command_output(
                     "Feedback saved locally; submitting to the server failed (see logs).",
                 )
                 .await;

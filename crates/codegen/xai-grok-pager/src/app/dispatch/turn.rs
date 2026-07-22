@@ -106,7 +106,7 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
             let running_count = agent
                 .subagent_sessions
                 .values()
-                .filter(|s| s.is_running())
+                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
                 .count();
             if running_count > 0 && agent.cancel_turn_view.is_none() {
                 agent.cancel_turn_view = Some(crate::views::modal::CancelTurnViewState {
@@ -225,10 +225,16 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
         && agent.session.pending_prompts.is_empty()
         && !in_flight_committed;
     if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
+        if let Some(pid) = agent.session.current_prompt_id.clone() {
+            agent.note_rewound_prompt(&pid);
+        }
         agent.prompt.set_text(&stashed.text);
         agent.prompt.restore_chip_elements(&stashed.chip_elements);
         agent.prompt.set_images(stashed.images);
         agent.prompt.set_cursor(stashed.text.len());
+        for id in stashed.combined_scrollback_entries {
+            agent.scrollback.remove_entry(id);
+        }
         agent.scrollback.remove_entry(stashed.scrollback_entry);
         // Full state reset: tracker cleanup + state Idle + clear timing
         // fields + clear current_prompt_id.
@@ -411,7 +417,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
             && agent.session.current_prompt_id.is_none()
         {
             if p.prompt_id != pending.prompt_id && agent.should_adopt_running_prompt(&p.prompt_id) {
-                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind)
+                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind, p.combined_texts)
             } else {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
                 None

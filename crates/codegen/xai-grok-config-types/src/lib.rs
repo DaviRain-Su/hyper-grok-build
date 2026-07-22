@@ -51,6 +51,120 @@ pub struct DoomLoopRecoverySettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 }
+/// Per-kind age policy for auto-GC: seconds or never.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeKindMaxAge {
+    Secs(u64),
+    Never,
+}
+impl Serialize for WorktreeKindMaxAge {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Secs(n) => serializer.serialize_u64(*n),
+            Self::Never => serializer.serialize_str("never"),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for WorktreeKindMaxAge {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = WorktreeKindMaxAge;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("u64 seconds or \"never\"")
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(WorktreeKindMaxAge::Secs(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                u64::try_from(v)
+                    .map(WorktreeKindMaxAge::Secs)
+                    .map_err(E::custom)
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v.eq_ignore_ascii_case("never") {
+                    Ok(WorktreeKindMaxAge::Never)
+                } else if let Ok(n) = v.parse::<u64>() {
+                    Ok(WorktreeKindMaxAge::Secs(n))
+                } else {
+                    Err(E::custom("expected \"never\" or integer seconds"))
+                }
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(WorktreeKindMaxAge::Never)
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(WorktreeKindMaxAge::Never)
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+/// Local `[worktree.auto_gc]` / remote `worktree_auto_gc` policy.
+/// Field-wise tolerant deserialize so one bad key cannot drop a sibling kill-switch.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WorktreeAutoGcSettings {
+    /// `Some(false)` kill-switch; absent ⇒ default on (env kill still applies).
+    #[serde(
+        default,
+        deserialize_with = "de_opt_bool_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled: Option<bool>,
+    /// Age cutoff seconds when platform age-expiry is allowed; clamped by resolver.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_u64_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_age_secs: Option<u64>,
+    /// Min seconds between successful auto-GC stamps; clamped by resolver.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_u64_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_interval_secs: Option<u64>,
+    /// Count age candidates without deleting.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_bool_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dry_run: Option<bool>,
+    /// Linux only.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_bool_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub include_orphan_snapshots: Option<bool>,
+    /// Per-kind max ages (`session`/`ab`/`pool`/`fork`/`manual`/`subagent`).
+    /// Seconds or `"never"`. Absent keys use defaults (client default: `manual`=never).
+    /// Remote may set `manual` to a finite TTL — not client-pinned; local TOML can restore `"never"`.
+    /// Unknown kind keys ignored at resolve.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_max_age_by_kind_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_age_by_kind: Option<std::collections::BTreeMap<String, WorktreeKindMaxAge>>,
+    /// Optional discovery rebuild + stale `.git/worktrees/` prune (default off).
+    #[serde(
+        default,
+        deserialize_with = "de_opt_bool_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub include_rebuild: Option<bool>,
+    /// Independent rebuild throttle seconds; absent ⇒ 24h. Clamped like `min_interval_secs`.
+    #[serde(
+        default,
+        deserialize_with = "de_opt_u64_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rebuild_min_interval_secs: Option<u64>,
+}
 /// Display-refresh probe + auto-cadence settings: ONE struct for local
 /// `[ui.display_refresh]`, remote settings `display_refresh`, and `UiConfig`.
 /// Field-wise tolerant deserialize (wrong types → `None`); unknown keys kept in
@@ -208,6 +322,96 @@ fn de_opt_u32_tolerant<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_any(V)
 }
+fn de_opt_u64_tolerant<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Option<u64>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("u64 (wrong types ignored)")
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(u64::try_from(v).ok())
+        }
+        fn visit_u32<E: serde::de::Error>(self, v: u32) -> Result<Self::Value, E> {
+            Ok(Some(u64::from(v)))
+        }
+        fn visit_i32<E: serde::de::Error>(self, v: i32) -> Result<Self::Value, E> {
+            Ok(u64::try_from(v).ok())
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<A: serde::de::Deserializer<'de>>(
+            self,
+            d: A,
+        ) -> Result<Self::Value, A::Error> {
+            d.deserialize_any(V)
+        }
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+    deserializer.deserialize_any(V)
+}
+/// Tolerant map: bad whole value → None; per-entry bad values skipped.
+fn de_opt_max_age_by_kind_tolerant<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<std::collections::BTreeMap<String, WorktreeKindMaxAge>>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(map) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (k, v) in map {
+                if let Ok(age) = serde_json::from_value::<WorktreeKindMaxAge>(v) {
+                    out.insert(k, age);
+                }
+            }
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
+}
+/// Nested `worktree_auto_gc` object: present-but-malformed → `None` (warn) so
+/// one bad nested value cannot fail the whole [`RemoteSettings`] parse.
+fn deserialize_tolerant_worktree_auto_gc<'de, D>(
+    deserializer: D,
+) -> Result<Option<WorktreeAutoGcSettings>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match serde_json::from_value::<WorktreeAutoGcSettings>(v) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) => {
+                tracing::warn!(
+                    error = % e,
+                    "ignoring malformed remote worktree_auto_gc; falling through to TOML/defaults"
+                );
+                Ok(None)
+            }
+        },
+    }
+}
 /// Remote settings fetched from cli-chat-proxy `GET /v1/settings`.
 ///
 /// All fields are `Option` with `#[serde(default)]` so that:
@@ -348,6 +552,13 @@ pub struct RemoteSettings {
     /// TOML/defaults; a partial object falls through per-field.
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoverySettings>,
+    /// Automatic worktree GC policy; see [`WorktreeAutoGcSettings`].
+    /// Absent ⇒ every knob falls through to TOML/defaults; a partial object
+    /// falls through per-field. Present-but-malformed nested value is dropped
+    /// to `None` (does not fail the whole `RemoteSettings` parse). Platform
+    /// age-expiry policy is client-hardcoded and not remote-overridable.
+    #[serde(default, deserialize_with = "deserialize_tolerant_worktree_auto_gc")]
+    pub worktree_auto_gc: Option<WorktreeAutoGcSettings>,
     /// Enable/disable the runtime turn-end TodoGate remotely.
     /// Precedence: CLI `--todo-gate` > this field > built-in default (`false`).
     /// The gate ships disabled; set this to `Some(true)` (via the
@@ -456,6 +667,8 @@ pub struct RemoteSettings {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub goal_skeptic_models: Vec<GoalRoleModel>,
+    #[serde(default)]
+    pub workflows_enabled: Option<bool>,
     /// Remote fallback for managed MCP connector fetching.
     #[serde(default)]
     pub managed_mcps_enabled: Option<bool>,
@@ -940,6 +1153,96 @@ pub struct GoalRoleModel {
 mod tests {
     use super::*;
     #[test]
+    fn worktree_auto_gc_partial_object_and_round_trip() {
+        let json = r#"{"worktree_auto_gc":{"enabled":false}}"#;
+        let s: RemoteSettings = serde_json::from_str(json).unwrap();
+        let agc = s.worktree_auto_gc.as_ref().expect("present");
+        assert_eq!(agc.enabled, Some(false));
+        assert_eq!(agc.max_age_secs, None);
+        assert_eq!(agc.min_interval_secs, None);
+        assert_eq!(agc.dry_run, None);
+        assert_eq!(agc.include_orphan_snapshots, None);
+        assert_eq!(agc.max_age_by_kind, None);
+        let full = r#"{
+            "worktree_auto_gc": {
+                "enabled": true,
+                "max_age_secs": 604800,
+                "min_interval_secs": 21600,
+                "dry_run": true,
+                "include_orphan_snapshots": false,
+                "max_age_by_kind": {
+                    "session": 604800,
+                    "subagent": 86400,
+                    "manual": "never"
+                }
+            }
+        }"#;
+        let s: RemoteSettings = serde_json::from_str(full).unwrap();
+        let agc = s.worktree_auto_gc.clone().unwrap();
+        let mut kind_map = std::collections::BTreeMap::new();
+        kind_map.insert("session".into(), WorktreeKindMaxAge::Secs(604800));
+        kind_map.insert("subagent".into(), WorktreeKindMaxAge::Secs(86400));
+        kind_map.insert("manual".into(), WorktreeKindMaxAge::Never);
+        assert_eq!(
+            agc,
+            WorktreeAutoGcSettings {
+                enabled: Some(true),
+                max_age_secs: Some(604800),
+                min_interval_secs: Some(21600),
+                dry_run: Some(true),
+                include_orphan_snapshots: Some(false),
+                max_age_by_kind: Some(kind_map),
+                include_rebuild: None,
+                rebuild_min_interval_secs: None,
+            }
+        );
+        let out = serde_json::to_string(&s).unwrap();
+        let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
+        assert_eq!(s2.worktree_auto_gc, s.worktree_auto_gc);
+        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.worktree_auto_gc, None);
+        let extra = r#"{"worktree_auto_gc":{"enabled":true,"future_knob":1}}"#;
+        let s: RemoteSettings = serde_json::from_str(extra).unwrap();
+        assert_eq!(s.worktree_auto_gc.unwrap().enabled, Some(true));
+        let partial_bad = r#"{"worktree_auto_gc":{"enabled":false,"max_age_secs":"nope"}}"#;
+        let s: RemoteSettings = serde_json::from_str(partial_bad).unwrap();
+        let agc = s.worktree_auto_gc.as_ref().expect("object still present");
+        assert_eq!(agc.enabled, Some(false));
+        assert_eq!(agc.max_age_secs, None);
+        let kind_partial = r#"{
+            "worktree_auto_gc": {
+                "max_age_by_kind": {
+                    "subagent": 86400,
+                    "session": {"nested": true},
+                    "manual": "never"
+                }
+            }
+        }"#;
+        let s: RemoteSettings = serde_json::from_str(kind_partial).unwrap();
+        let map = s
+            .worktree_auto_gc
+            .as_ref()
+            .and_then(|a| a.max_age_by_kind.as_ref())
+            .expect("map present");
+        assert_eq!(map.get("subagent"), Some(&WorktreeKindMaxAge::Secs(86400)));
+        assert_eq!(map.get("manual"), Some(&WorktreeKindMaxAge::Never));
+        assert!(!map.contains_key("session"));
+        let null_never =
+            r#"{"worktree_auto_gc":{"max_age_by_kind":{"manual":null,"pool":172800}}}"#;
+        let s: RemoteSettings = serde_json::from_str(null_never).unwrap();
+        let map = s.worktree_auto_gc.unwrap().max_age_by_kind.unwrap();
+        assert_eq!(map.get("manual"), Some(&WorktreeKindMaxAge::Never));
+        assert_eq!(map.get("pool"), Some(&WorktreeKindMaxAge::Secs(172800)));
+        assert_eq!(
+            serde_json::to_value(&WorktreeKindMaxAge::Never).unwrap(),
+            serde_json::Value::String("never".into())
+        );
+        let nested_bad = r#"{"leader_mode":true,"worktree_auto_gc":"not-an-object"}"#;
+        let s: RemoteSettings = serde_json::from_str(nested_bad).unwrap();
+        assert_eq!(s.leader_mode, Some(true));
+        assert_eq!(s.worktree_auto_gc, None);
+    }
+    #[test]
     fn remote_settings_vendor_sessions_round_trip_and_default_absent() {
         let session_flags = |settings: &RemoteSettings| {
             (
@@ -1416,6 +1719,15 @@ mod tests {
         let json = r#"{}"#;
         let s: RemoteSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.contextual_hints, None);
+    }
+    #[test]
+    fn remote_settings_workflows_flag_round_trips() {
+        let settings: RemoteSettings =
+            serde_json::from_str(r#"{"workflows_enabled": true}"#).unwrap();
+        assert_eq!(settings.workflows_enabled, Some(true));
+        let round: RemoteSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(round.workflows_enabled, Some(true));
     }
     #[test]
     fn remote_settings_goal_planner_enabled_present() {

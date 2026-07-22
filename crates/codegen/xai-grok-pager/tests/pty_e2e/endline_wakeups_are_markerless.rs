@@ -2,9 +2,9 @@
 //! background commands running (one plain "Worked for" marker), and each
 //! released flag lands a completion chip and the auto-wake response with NO
 //! wake-end marker after it, while every earlier line stays unchanged above
-//! (nothing mutates). The persistent "watching · N commands" status row above
-//! the prompt counts the remaining work down between wakes and disappears
-//! once nothing is left; no "still running" copy appears anywhere.
+//! (nothing mutates). The persistent "N commands still running" status row
+//! above the prompt counts the remaining work down between wakes and
+//! disappears once nothing is left; markers never carry that copy as a suffix.
 //!
 //! Positional chain asserted at the end: marker < chip < wake reply < chip <
 //! reply < chip < reply — exactly ONE "Worked for" total (the user turn's).
@@ -30,52 +30,33 @@ async fn endline_wakeups_are_markerless() {
         .collect();
 
     // The turn backgrounds one flag-gated command per tool call…
-    for (i, flag) in flags.iter().enumerate() {
-        let args = json!({
-            "command": format!(
-                "while [ ! -e {} ]; do /bin/sleep 0.2; done",
-                flag.display()
-            ),
-            "description": format!("flag-gated command {i}"),
-            "is_background": true
+    let _background_turns: Vec<_> = flags
+        .iter()
+        .enumerate()
+        .map(|(i, flag)| {
+            let args = json!({
+                "command": format!(
+                    "while [ ! -e {} ]; do /bin/sleep 0.2; done",
+                    flag.display()
+                ),
+                "description": format!("flag-gated command {i}"),
+                "is_background": true
+            })
+            .to_string();
+            expect_tool_turn(
+                &content,
+                &format!("call_endline_status_{i}"),
+                "run_terminal_command",
+                args,
+            )
         })
-        .to_string();
-        let call_id = format!("call_endline_status_{i}");
-        content.enqueue_response(
-            "/v1/responses",
-            ScriptedResponse::sse(responses_api_tool_call_events(
-                &call_id,
-                "run_terminal_command",
-                &args,
-            )),
-        );
-        content.enqueue_response(
-            "/v1/chat/completions",
-            ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-                &call_id,
-                "run_terminal_command",
-                &args,
-            )),
-        );
-    }
-    // …then a text response ends it with all three still running, and each
-    // auto-wake turn consumes one distinct scripted reply (FIFO per path; the
-    // stage gating below keeps the consumption order deterministic).
-    for text in [
-        "STATUS_TURN_SETTLED",
-        "WAKE_REPLY_ONE",
-        "WAKE_REPLY_TWO",
-        "WAKE_REPLY_THREE",
-    ] {
-        content.enqueue_response(
-            "/v1/responses",
-            ScriptedResponse::sse(responses_api_message_events(text)),
-        );
-        content.enqueue_response(
-            "/v1/chat/completions",
-            ScriptedResponse::sse(chat_completions_message_events(text)),
-        );
-    }
+        .collect();
+    // …then a text response ends it with all three still running, followed by
+    // one response for each auto-wake.
+    let _settled_turn = content.expect_agent_turn("initial settled turn", "STATUS_TURN_SETTLED");
+    let _wake_one = content.expect_agent_turn("first completion wake", "WAKE_REPLY_ONE");
+    let _wake_two = content.expect_agent_turn("second completion wake", "WAKE_REPLY_TWO");
+    let _wake_three = content.expect_agent_turn("third completion wake", "WAKE_REPLY_THREE");
     content.set_response("STATUS_FALLBACK");
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -117,7 +98,7 @@ async fn endline_wakeups_are_markerless() {
             )
         });
     harness
-        .wait_for_text("watching · 3 commands", Duration::from_secs(30))
+        .wait_for_text("3 commands still running", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "the watching cue never showed the running count; screen:\n{}",
@@ -134,7 +115,7 @@ async fn endline_wakeups_are_markerless() {
         let screen = harness.screen_contents();
         screen.contains("WAKE_REPLY_ONE")
             && screen.matches("Worked for").count() == 1
-            && screen.contains("watching · 2 commands")
+            && screen.contains("2 commands still running")
     });
     assert!(
         wake_one,
@@ -149,7 +130,7 @@ async fn endline_wakeups_are_markerless() {
         let screen = harness.screen_contents();
         screen.contains("WAKE_REPLY_TWO")
             && screen.matches("Worked for").count() == 1
-            && screen.contains("watching · 1 command")
+            && screen.contains("1 command still running")
     });
     assert!(
         wake_two,
@@ -158,14 +139,14 @@ async fn endline_wakeups_are_markerless() {
     );
 
     // Release flag 2: zero left — still exactly one marker, and the watching
-    // cue disappears entirely.
+    // cue disappears entirely (its "still running" copy leaves the screen).
     std::fs::write(&flags[2], b"done").expect("release flag 2");
     let wake_three = wait_until(Duration::from_secs(45), || {
         harness.update(Duration::from_millis(100));
         let screen = harness.screen_contents();
         screen.contains("WAKE_REPLY_THREE")
             && screen.matches("Worked for").count() == 1
-            && !screen.contains("watching ·")
+            && !screen.contains("still running")
     });
     assert!(
         wake_three,
@@ -174,7 +155,8 @@ async fn endline_wakeups_are_markerless() {
     );
 
     // Full chain, positional: marker < chip < reply < chip < reply < chip <
-    // reply — one marker total, and ZERO "still running" lines anywhere.
+    // reply — one marker total, and no marker carries a "still running"
+    // suffix (that copy belongs to the status row's cue, retired above).
     let screen = harness.screen_contents();
     let chips: Vec<usize> = screen
         .match_indices("Task completed")
@@ -203,10 +185,12 @@ async fn endline_wakeups_are_markerless() {
             && chips[2] < w3,
         "chain out of order; screen:\n{screen}"
     );
-    assert_eq!(
-        screen.matches("still running").count(),
-        0,
-        "no still-running copy may appear in the transcript; screen:\n{screen}"
+    assert!(
+        screen
+            .lines()
+            .filter(|l| l.contains("Worked for"))
+            .all(|l| !l.contains("still running")),
+        "markers must never carry a still-running suffix; screen:\n{screen}"
     );
 
     write_cast_if_requested(&harness, "endline_wakeups_are_markerless.cast");

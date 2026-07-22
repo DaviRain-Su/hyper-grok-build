@@ -7,12 +7,14 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{ContentController, PtyHarness, StyledLine, pager_binary, parse_keys};
+use crate::{
+    AgentTurnExpectation, ContentController, PtyHarness, StyledLine, pager_binary, parse_keys,
+};
 
 const SGR_LEFT_BUTTON: u16 = 0;
 const SGR_MIDDLE_BUTTON: u16 = 1;
@@ -26,6 +28,7 @@ pub const SGR_SCROLL_DOWN: u16 = 65;
 const DEFAULT_ROWS: u16 = 50;
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 15_000;
+const EXPECTATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Declarative scenario consumed by [`ScriptedScenarioRunner`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,11 +175,12 @@ pub struct WorkspaceConfig {
 pub struct MockConfig {
     #[serde(default = "default_mock_response")]
     pub response: String,
-    /// Optional per-agent-turn responses, consumed FIFO (one per real agent
-    /// turn; aux requests don't consume one — see
-    /// `MockInferenceServer::set_agent_turns`). Lets a scenario give each
-    /// turn a distinct sentinel, e.g. to prove a transcript tail was
-    /// truncated and re-generated. Falls back to `response` when exhausted.
+    /// Required per-agent-turn responses, registered as ordered foreground
+    /// expectations on both supported pager inference backends. Every listed
+    /// turn must be satisfied before the runner reports success. Lets a
+    /// scenario give each turn a distinct sentinel, e.g. to prove a transcript
+    /// tail was truncated and re-generated. Falls back to `response` when
+    /// exhausted.
     #[serde(default)]
     pub turns: Vec<String>,
     #[serde(default)]
@@ -531,9 +535,15 @@ impl ScriptedScenarioRunner {
             .await
             .context("start mock content")?;
         content.set_response(&scenario.mock.response);
-        if !scenario.mock.turns.is_empty() {
-            content.set_turns(scenario.mock.turns.iter().cloned());
-        }
+        let turn_expectations: Vec<_> = scenario
+            .mock
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                content.expect_agent_turn(format!("scenario turn {}", index + 1), turn)
+            })
+            .collect();
 
         if let Some(config_toml) = &scenario.environment.config_toml {
             let grok_home = content.home().join(".grok");
@@ -631,6 +641,34 @@ impl ScriptedScenarioRunner {
                 step: scenario.steps.len(),
                 severity: BugSeverity::Bug,
                 message: "pager exited before scenario completed".to_owned(),
+                screen_text: harness.screen_contents(),
+            });
+            report.status = ScriptedRunStatus::Failed;
+        }
+
+        if report.status == ScriptedRunStatus::Running {
+            let settle_deadline = Instant::now() + EXPECTATION_SETTLE_TIMEOUT;
+            while turn_expectations
+                .iter()
+                .any(|expectation| !expectation.is_satisfied())
+                && Instant::now() < settle_deadline
+            {
+                harness.update(Duration::from_millis(100));
+            }
+        }
+        let unsatisfied_turns: Vec<_> = turn_expectations
+            .iter()
+            .filter(|expectation| !expectation.is_satisfied())
+            .map(AgentTurnExpectation::diagnostic)
+            .collect();
+        if !unsatisfied_turns.is_empty() {
+            report.bugs.push(BugFinding {
+                step: scenario.steps.len(),
+                severity: BugSeverity::Bug,
+                message: format!(
+                    "required mock.turns expectations were not satisfied:\n- {}",
+                    unsatisfied_turns.join("\n- ")
+                ),
                 screen_text: harness.screen_contents(),
             });
             report.status = ScriptedRunStatus::Failed;

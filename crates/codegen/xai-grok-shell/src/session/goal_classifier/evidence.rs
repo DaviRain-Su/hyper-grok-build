@@ -44,28 +44,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use xai_grok_sampling_types::ConversationItem;
 
+use crate::util::subprocess::git_bin;
+
 /// Max wall-clock for git commands during evidence capture.
 const DIFF_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-
-/// Resolve the `git` binary path. Honours `GIT_BIN_PATH` (Bazel's
-/// hermetic-git data dep) and falls back to bare `git` on `PATH`.
-/// Bazel passes the env var as a runfiles-relative path; resolve it
-/// against the current working directory so spawn doesn't see a
-/// non-existent relative path.
-pub(crate) fn git_bin() -> std::ffi::OsString {
-    let Some(raw) = std::env::var_os("GIT_BIN_PATH") else {
-        return std::ffi::OsString::from("git");
-    };
-    let path = std::path::PathBuf::from(&raw);
-    if path.is_relative() {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(&path).into_os_string(),
-            Err(_) => raw,
-        }
-    } else {
-        raw
-    }
-}
 
 /// Build a `tokio::process::Command` for `git` with `kill_on_drop(true)`
 /// so a `tokio::time::timeout` firing reaps the child instead of
@@ -1157,16 +1139,13 @@ mod tests {
         })
     }
 
-    /// Assistant item with a populated `tool_calls` slot but no
-    /// textual content — exactly the shape produced when the model
-    /// emits a single `update_goal(completed: true)` and no prose.
     fn assistant_tool_call_only() -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: "".into(),
             tool_calls: vec![xai_grok_sampling_types::ToolCall {
                 id: "call_1".into(),
-                name: "update_goal".to_string(),
-                arguments: "{\"completed\":true}".into(),
+                name: "read_file".to_string(),
+                arguments: "{\"target_file\":\"x\"}".into(),
             }],
             model_id: None,
             model_fingerprint: None,

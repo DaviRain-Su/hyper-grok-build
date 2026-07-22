@@ -16,6 +16,34 @@ fn byok_from_models(
         .or_else(|| models.values().find_map(|m| m.own_credential()))
 }
 impl MvpAgent {
+    pub fn reload_skills_all_sessions(&self) -> usize {
+        let session_ids: Vec<agent_client_protocol::SessionId> = self
+            .sessions
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
+        for sid in &session_ids {
+            if let Some(handle) = self.sessions.borrow().get(sid).cloned() {
+                let _ = handle.cmd_tx.send(SessionCommand::ReloadSkills);
+            }
+        }
+        session_ids.len()
+    }
+    pub fn advertise_commands_all_sessions(&self) -> usize {
+        let session_ids: Vec<agent_client_protocol::SessionId> = self
+            .sessions
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
+        for session_id in &session_ids {
+            if let Some(handle) = self.sessions.borrow().get(session_id).cloned() {
+                let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
+            }
+        }
+        session_ids.len()
+    }
     pub(super) fn resolve_image_description_model(&self) -> String {
         self.cfg
             .borrow()
@@ -550,17 +578,13 @@ impl MvpAgent {
     /// `acp_session.rs` fill in the real per-model gating as soon as a
     /// session starts.
     ///
-    /// Exception: `/goal` is gated on the `resolve_goal()` feature flag
-    /// (a config/managed-settings switch known at initialize time) plus
-    /// the `update_goal` tool, which is part of the default coding-agent
-    /// toolset. So when the flag is on we advertise `/goal` pre-session;
     /// otherwise it wouldn't appear in the slash menu until after the
-    /// first user turn created a session.
     pub(crate) fn command_availability(
         &self,
     ) -> crate::session::slash_commands::CommandAvailability {
         crate::session::slash_commands::CommandAvailability {
             goal: self.cfg.borrow().resolve_goal().value,
+            workflows: self.cfg.borrow().resolve_workflows().value,
             ..crate::session::slash_commands::CommandAvailability::default()
         }
     }
@@ -800,6 +824,7 @@ impl MvpAgent {
         let is_xai = auth.is_xai_auth();
         let user_id = auth.user_id.clone();
         let team_id = auth.team_id.clone();
+        let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
         let Some(settings) = self.fetch_remote_settings(auth.clone()).await else {
             tracing::warn!("post-auth settings refresh failed (HTTP or parse error)");
             return;
@@ -861,6 +886,9 @@ impl MvpAgent {
         crate::auth::credential_provider::sync_external_otel_identity();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
         self.reconfigure_heap_profile_monitor();
+        if remote_was_absent {
+            self.spawn_auto_worktree_gc();
+        }
     }
     /// Refresh remote settings settings and re-resolve eagerly-resolved config fields.
     ///
@@ -1471,9 +1499,9 @@ impl MvpAgent {
             raw,
             cfg.remote_settings.as_ref(),
         );
-        let session_registry_local = config_root
-            .as_ref()
-            .and_then(crate::util::config::session_registry_from_toml_opt);
+        let session_registry_local = crate::util::config::session_registry_local_override(
+            config_root.as_ref(),
+        );
         tracing::info!(
             worktree_type = ? worktree_type, source = wt_source,
             "WORKTREE_CONFIG_SHELL: resolved worktree type at agent startup"
@@ -2892,6 +2920,7 @@ impl MvpAgent {
             persisted_signals,
             persisted_plan_mode,
             persisted_goal_mode,
+            persisted_workflow_runs,
             persisted_announcement_state,
             session_meta,
             managed_mcp_expires_at,
@@ -3039,6 +3068,7 @@ impl MvpAgent {
             let resolved = cfg.resolve_feedback();
             let flags = crate::session::feedback_manager::FeedbackFlags {
                 enabled: resolved.value,
+                user: cfg.feedback.user.clone(),
             };
             (resolved, flags)
         };
@@ -3353,6 +3383,7 @@ impl MvpAgent {
         let web_fetch_config = self.prepare_web_fetch_config();
         let write_file_enabled = self.cfg.borrow().resolve_write_file().value;
         let goal_enabled = self.cfg.borrow().resolve_goal().value;
+        let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
         let ask_user_question_enabled = crate::upload::turn::parse_ask_user_question_from_meta(
                 session_meta,
@@ -3566,6 +3597,7 @@ impl MvpAgent {
                     persisted_signals,
                     persisted_plan_mode,
                     persisted_goal_mode,
+                    persisted_workflow_runs,
                     persisted_announcement_state,
                     self.memory_config.clone(),
                     loc_tracking_enabled,
@@ -3586,6 +3618,7 @@ impl MvpAgent {
                     app_builder_deployer_config,
                     write_file_enabled,
                     goal_enabled,
+                    background_workflows_enabled,
                     subagents_enabled,
                     ask_user_question_enabled,
                     client_hooks,

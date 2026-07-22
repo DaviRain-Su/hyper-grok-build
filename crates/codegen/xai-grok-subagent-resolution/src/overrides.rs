@@ -20,6 +20,23 @@ fn parse_enum_from_str<T: DeserializeOwned>(s: &str) -> Option<T> {
     serde_json::from_value::<T>(serde_json::Value::String(s.to_string())).ok()
 }
 
+pub fn intersect_capability_modes(
+    requested: Option<SubagentCapabilityMode>,
+    ceiling: Option<SubagentCapabilityMode>,
+) -> Option<SubagentCapabilityMode> {
+    use SubagentCapabilityMode as Mode;
+    match (requested, ceiling) {
+        (None, None) => None,
+        (Some(mode), None) | (None, Some(mode)) => Some(mode),
+        (Some(Mode::All), Some(mode)) | (Some(mode), Some(Mode::All)) => Some(mode),
+        (Some(Mode::ReadOnly), Some(_)) | (Some(_), Some(Mode::ReadOnly)) => Some(Mode::ReadOnly),
+        (Some(Mode::ReadWrite), Some(Mode::ReadWrite)) => Some(Mode::ReadWrite),
+        (Some(Mode::Execute), Some(Mode::Execute)) => Some(Mode::Execute),
+        (Some(Mode::ReadWrite), Some(Mode::Execute))
+        | (Some(Mode::Execute), Some(Mode::ReadWrite)) => Some(Mode::ReadOnly),
+    }
+}
+
 /// Resolve effective runtime config from explicit overrides, role defaults,
 /// and persona defaults.
 ///
@@ -58,13 +75,13 @@ pub fn resolve_effective_overrides(
         .or_else(|| role.and_then(|r| r.reasoning_effort.clone()));
 
     // ── Capability mode resolution ───────────────────────────────
-    let capability_mode = overrides.capability_mode.or_else(|| {
-        role.and_then(|r| {
-            r.default_capability_mode
-                .as_deref()
-                .and_then(parse_enum_from_str::<SubagentCapabilityMode>)
-        })
+    let role_capability_mode = role.and_then(|r| {
+        r.default_capability_mode
+            .as_deref()
+            .and_then(parse_enum_from_str::<SubagentCapabilityMode>)
     });
+    let capability_mode =
+        intersect_capability_modes(overrides.capability_mode, role_capability_mode);
 
     // ── Persona resolution ───────────────────────────────────────
     let persona = overrides.persona.clone();
@@ -225,6 +242,9 @@ mod tests {
             harness_agent_type: None,
             completion_output_cap: None,
             spawn_depth: None,
+            output_token_budget: None,
+            output_schema: None,
+            loop_task_id: None,
         }
     }
 
@@ -282,22 +302,27 @@ mod tests {
     }
 
     #[test]
-    fn explicit_capability_mode_overrides_role() {
-        let overrides = make_overrides(
-            None,
-            None,
-            Some(SubagentCapabilityMode::ReadOnly),
-            None,
-            None,
-        );
+    fn explicit_capability_mode_intersects_role_ceiling() {
+        let overrides = make_overrides(None, None, Some(SubagentCapabilityMode::All), None, None);
         let role = SubagentRole {
-            default_capability_mode: Some("all".into()),
+            default_capability_mode: Some("read-only".into()),
             ..Default::default()
         };
         let result =
             resolve_effective_overrides(&overrides, Some(&role), &empty_personas(), None, None);
         assert_eq!(
             result.capability_mode,
+            Some(SubagentCapabilityMode::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn incompatible_write_and_execute_modes_intersect_to_read_only() {
+        assert_eq!(
+            intersect_capability_modes(
+                Some(SubagentCapabilityMode::ReadWrite),
+                Some(SubagentCapabilityMode::Execute),
+            ),
             Some(SubagentCapabilityMode::ReadOnly)
         );
     }

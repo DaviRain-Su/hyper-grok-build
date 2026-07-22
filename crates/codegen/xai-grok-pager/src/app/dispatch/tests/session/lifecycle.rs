@@ -1169,8 +1169,7 @@ fn deferred_worktree_ref_replays_through_gate() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::CreateWorktreeSession { git_ref :
-        Some(r), .. }
-if r == "feature-branch")),
+        Some(r), .. } if r == "feature-branch")),
         "the deferred --worktree <ref> replays with its git ref",
     );
     assert!(
@@ -1231,8 +1230,7 @@ fn gated_worktree_without_load_id_preserves_stashed_resume() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::CreateWorktreeSession {
-        load_session_id : Some(id), .. }
-if id == "resume-me")),
+        load_session_id : Some(id), .. } if id == "resume-me")),
         "the deferred worktree replays with the preserved resume id",
     );
     assert!(app.deferred_startup.session.is_none());
@@ -1398,6 +1396,7 @@ fn auth_complete_retries_stashed_prompt_after_mid_session_login() {
             text: "retry me".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
             chip_elements: Vec::new(),
         });
     }

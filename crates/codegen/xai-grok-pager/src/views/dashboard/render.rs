@@ -6040,10 +6040,10 @@ mod tests {
         );
         assert!(
             lines.iter().any(|l| matches!(
-                            l,
-                            DashboardLine::Header { state, count }
-            if *state == RowState::Working && *count == 2
-                        )),
+                l,
+                DashboardLine::Header { state, count }
+if *state == RowState::Working && *count == 2
+            )),
             "collapsed Working header must still render with its true count",
         );
         let working_rows = lines
@@ -6081,8 +6081,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| matches!(l, DashboardLine::PinnedHeader { count }
-if *count == 1)),
+                .any(|l| matches!(l, DashboardLine::PinnedHeader { count } if *count == 1)),
             "collapsed Pinned header must still render",
         );
         // The pinned row is hidden; the (non-pinned) Working row remains.
@@ -6144,10 +6143,10 @@ if *count == 1)),
         // Header still shows the TRUE total, not the visible count.
         assert!(
             lines.iter().any(|l| matches!(
-                            l,
-                            DashboardLine::Header { state, count }
-            if *state == RowState::Idle && *count == total as usize
-                        )),
+                l,
+                DashboardLine::Header { state, count }
+if *state == RowState::Idle && *count == total as usize
+            )),
             "Idle header keeps the true total count",
         );
     }

@@ -930,6 +930,25 @@ fn vscode_embed_family_shares_vscode_scroll_profile() {
 }
 
 #[test]
+fn cancel_stream_drops_pending_momentum_and_fractional_carry() {
+    let base = Instant::now();
+    let mut state = MouseScrollState::new_at(base);
+    let config = make_config(3, ScrollInputMode::Trackpad);
+
+    state.on_scroll_event_at(base, ScrollDirection::Up, config);
+    state.carry_lines = 0.75;
+    state.carry_direction = Some(ScrollDirection::Up);
+    assert!(state.has_active_stream());
+
+    state.cancel_stream();
+
+    assert!(!state.has_active_stream());
+    assert_eq!(state.carry_lines, 0.0);
+    assert_eq!(state.carry_direction, None);
+    assert_eq!(state.on_tick_at(base + Duration::from_secs(1)).lines, 0);
+}
+
+#[test]
 fn wheel_flood_flushes_capped_with_backlog_carry() {
     // Wheel-path cap: a confirmed-wheel flood (e.g. terminal momentum
     // bursts, or a trackpad misread as wheel) used to flush its whole

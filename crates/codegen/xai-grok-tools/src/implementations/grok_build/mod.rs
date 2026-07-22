@@ -32,6 +32,7 @@ pub mod update_goal;
 pub mod video_gen;
 pub mod web_fetch;
 pub mod web_search;
+pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
@@ -65,3 +66,4 @@ pub use video_gen::{
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
+pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};

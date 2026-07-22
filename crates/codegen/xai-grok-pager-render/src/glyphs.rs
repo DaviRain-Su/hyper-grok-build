@@ -135,7 +135,7 @@ pub fn token_arrow() -> &'static str {
 /// U+25CE BULLSEYE, U+25C9 FISHEYE, U+25CE BULLSEYE) normally; a 1-column
 /// dot pulse (`·`, `○`, `•`, `○`) on legacy ConHost.
 ///
-/// Animates the "watching · N monitors" cue in the turn-status line: a
+/// Animates the "N monitors still running" cue in the turn-status line: a
 /// concentric circle that breathes open → shut like a scanning scope. Of
 /// the fancy frames only the white circle `○` (U+25CB, CP437 `0x09`) is
 /// part of CP437 — the bullseye `◎` and fisheye `◉` live in the Geometric

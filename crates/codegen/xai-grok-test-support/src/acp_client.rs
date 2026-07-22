@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use crate::scaled;
+
 use agent_client_protocol::{self as acp, Agent as _};
 use tempfile::TempDir;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -306,16 +308,27 @@ impl GrokStdioClient {
         self.home.as_ref().expect("test home already taken").path()
     }
 
+    /// Timing breadcrumb for tuning CI timeout budgets (visible with --nocapture).
+    fn log_timing(what: &str, started: std::time::Instant) {
+        eprintln!("[harness-timing] {what}: {:?}", started.elapsed());
+    }
+
     pub async fn initialize_with_timeout(&self) -> acp::InitializeResponse {
-        tokio::time::timeout(Duration::from_secs(20), self.initialize())
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(scaled(Duration::from_secs(20)), self.initialize())
             .await
-            .unwrap_or_else(|_| panic!("initialize timed out\nstderr:\n{}", self.stderr()))
+            .unwrap_or_else(|_| panic!("initialize timed out\nstderr:\n{}", self.stderr()));
+        Self::log_timing("initialize", started);
+        r
     }
 
     pub async fn create_session_with_timeout(&self, cwd: &Path) -> acp::SessionId {
-        tokio::time::timeout(Duration::from_secs(20), self.create_session(cwd))
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(scaled(Duration::from_secs(20)), self.create_session(cwd))
             .await
-            .unwrap_or_else(|_| panic!("session/new timed out\nstderr:\n{}", self.stderr()))
+            .unwrap_or_else(|_| panic!("session/new timed out\nstderr:\n{}", self.stderr()));
+        Self::log_timing("session/new", started);
+        r
     }
 
     pub async fn create_session_with_model_timeout(
@@ -324,7 +337,7 @@ impl GrokStdioClient {
         model_id: &str,
     ) -> acp::SessionId {
         tokio::time::timeout(
-            Duration::from_secs(20),
+            scaled(Duration::from_secs(20)),
             self.create_session_with_model(cwd, model_id),
         )
         .await
@@ -342,7 +355,7 @@ impl GrokStdioClient {
         model_id: &str,
     ) -> acp::Result<acp::SetSessionModelResponse> {
         tokio::time::timeout(
-            Duration::from_secs(20),
+            scaled(Duration::from_secs(20)),
             self.set_model(session_id, model_id),
         )
         .await
@@ -359,9 +372,15 @@ impl GrokStdioClient {
         session_id: &acp::SessionId,
         text: &str,
     ) -> acp::Result<acp::PromptResponse> {
-        tokio::time::timeout(Duration::from_secs(30), self.prompt(session_id, text))
-            .await
-            .unwrap_or_else(|_| panic!("prompt timed out\nstderr:\n{}", self.stderr()))
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(
+            scaled(Duration::from_secs(30)),
+            self.prompt(session_id, text),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("prompt timed out\nstderr:\n{}", self.stderr()));
+        Self::log_timing("prompt", started);
+        r
     }
 
     pub async fn load_session_with_timeout(
@@ -372,7 +391,7 @@ impl GrokStdioClient {
         // 60s: session/load replays history and is slower under Rosetta
         // (macos-x86_64 lifecycle CI). 20s flaked repeatedly there.
         tokio::time::timeout(
-            Duration::from_secs(60),
+            scaled(Duration::from_secs(60)),
             self.conn.load_session(
                 acp::LoadSessionRequest::new(session_id.clone(), cwd.to_path_buf())
                     .mcp_servers(vec![]),
@@ -459,7 +478,7 @@ impl RawStdioClient {
     ) -> serde_json::Value {
         use tokio::io::AsyncBufReadExt as _;
 
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + scaled(timeout);
         let mut line = String::new();
         let mut skipped = 0_usize;
         let mut skipped_tail: Vec<String> = Vec::new();

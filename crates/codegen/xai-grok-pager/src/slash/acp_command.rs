@@ -129,8 +129,9 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
                 if path.is_some() && scope.is_some() {
                     (path, scope, false)
+                } else if m.get("scope").is_some() && scope.is_none() {
+                    (None, None, false)
                 } else if m.get("path").is_some() || m.get("scope").is_some() {
-                    // Has skill-like keys but they're invalid
                     (None, None, true)
                 } else {
                     // Meta exists but has no skill keys (e.g., other metadata)
@@ -176,6 +177,36 @@ mod tests {
     }
 
     #[test]
+    fn unknown_scope_passes_through_instead_of_erroring() {
+        let cmd = make_cmd(
+            "pr-cleanup",
+            Some(serde_json::json!({
+                "scope": "workflow",
+                "path": ".grok/workflows/pr-cleanup.rhai",
+            })),
+        );
+        let acp_cmd = AcpSlashCommand::from(&cmd);
+        assert!(!acp_cmd.meta_malformed);
+        assert!(!acp_cmd.is_skill());
+
+        let models = crate::acp::model_state::ModelState::default();
+        let mut ctx = CommandExecCtx {
+            models: &models,
+            session_id: None,
+            bundle_state: &crate::app::bundle::BundleState::default(),
+            screen_mode: crate::app::ScreenMode::Minimal,
+            billing_surface_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        };
+        match acp_cmd.run(&mut ctx, "fix the branch") {
+            CommandResult::PassThrough(text) => {
+                assert_eq!(text, "/pr-cleanup fix the branch");
+            }
+            other => panic!("expected PassThrough, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn valid_skill_meta_populates_fields() {
         let meta = serde_json::json!({
             "scope": "local",
@@ -192,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_scope_value_is_malformed() {
+    fn unknown_scope_value_is_foreign_kind_not_malformed() {
         let meta = serde_json::json!({
             "scope": "invalid_scope",
             "path": "/path/to/SKILL.md"
@@ -201,7 +232,7 @@ mod tests {
         let acp_cmd = AcpSlashCommand::from(&cmd);
         assert!(acp_cmd.skill_path.is_none());
         assert!(acp_cmd.skill_scope.is_none());
-        assert!(acp_cmd.meta_malformed);
+        assert!(!acp_cmd.meta_malformed);
     }
 
     #[test]
@@ -290,6 +321,7 @@ mod tests {
             session_id: None,
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,

@@ -45,34 +45,36 @@ async fn verb_group_fold_expand_collapse_pty() {
     let home_str = content.home().to_string_lossy().into_owned();
 
     // read x3 → grep x2 → edit → read x2, then a plain completion to settle.
-    enqueue_tool_turn(&content, "call_r1", "read_file", read_args(&paths[0]));
-    enqueue_tool_turn(&content, "call_r2", "read_file", read_args(&paths[1]));
-    enqueue_tool_turn(&content, "call_r3", "read_file", read_args(&paths[2]));
-    enqueue_tool_turn(
-        &content,
-        "call_g1",
-        "grep",
-        json!({ "pattern": "hello", "path": home_str }).to_string(),
-    );
-    enqueue_tool_turn(
-        &content,
-        "call_g2",
-        "grep",
-        json!({ "pattern": "verb", "path": home_str }).to_string(),
-    );
-    enqueue_tool_turn(
-        &content,
-        "call_e1",
-        "search_replace",
-        json!({
-            "file_path": paths[3].to_string_lossy(),
-            "old_string": "hello verb group",
-            "new_string": "hola verb group",
-        })
-        .to_string(),
-    );
-    enqueue_tool_turn(&content, "call_r4", "read_file", read_args(&paths[4]));
-    enqueue_tool_turn(&content, "call_r5", "read_file", read_args(&paths[5]));
+    let _tool_turns = [
+        expect_tool_turn(&content, "call_r1", "read_file", read_args(&paths[0])),
+        expect_tool_turn(&content, "call_r2", "read_file", read_args(&paths[1])),
+        expect_tool_turn(&content, "call_r3", "read_file", read_args(&paths[2])),
+        expect_tool_turn(
+            &content,
+            "call_g1",
+            "grep",
+            json!({ "pattern": "hello", "path": home_str }).to_string(),
+        ),
+        expect_tool_turn(
+            &content,
+            "call_g2",
+            "grep",
+            json!({ "pattern": "verb", "path": home_str }).to_string(),
+        ),
+        expect_tool_turn(
+            &content,
+            "call_e1",
+            "search_replace",
+            json!({
+                "file_path": paths[3].to_string_lossy(),
+                "old_string": "hello verb group",
+                "new_string": "hola verb group",
+            })
+            .to_string(),
+        ),
+        expect_tool_turn(&content, "call_r4", "read_file", read_args(&paths[4])),
+        expect_tool_turn(&content, "call_r5", "read_file", read_args(&paths[5])),
+    ];
     content.set_response(DONE_SENTINEL);
 
     let binary = pager_binary().expect("resolve pager binary");

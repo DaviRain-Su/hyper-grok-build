@@ -615,7 +615,7 @@ impl SessionActor {
                             xai_grok_workspace::permission::classifier_output_json_schema(),
                         ),
                         reasoning_effort: classifier_reasoning_effort,
-                        x_grok_conv_id: Some(session_id.clone()),
+                        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
                         x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
                         x_grok_session_id: Some(session_id),
                         x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
@@ -734,6 +734,11 @@ impl SessionActor {
     pub(crate) async fn prepare_sampler_for_turn(&self) {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
+        if self.tool_context.task_output_token_budget.is_some()
+            || self.tool_context.sampler_retry_only_before_output
+        {
+            sampler_config.doom_loop_recovery = None;
+        }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
     }
@@ -761,6 +766,31 @@ impl SessionActor {
         error: xai_grok_sampler::SamplingErrorInfo,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use xai_grok_sampler::SamplingErrorKind;
+        if self.tool_context.task_output_token_budget.is_some() {
+            self.tool_context.fail_task_output_usage_closed();
+            let message = format!(
+                "budgeted workflow child model request failed; output grant exhausted: {}",
+                error.message
+            );
+            self.log_terminal_failure("output_budget_usage_unknown", error.status_code, &message);
+            return Err(acp::Error::internal_error().data(message));
+        }
+        if self.tool_context.sampler_retry_only_before_output {
+            let handle = self.chat_state_handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.mark_usage_incomplete(true, true).await;
+            });
+            let message = format!(
+                "workflow child model request failed; usage may understate real spend: {}",
+                error.message
+            );
+            self.log_terminal_failure(
+                "workflow_child_sampling_failed",
+                error.status_code,
+                &message,
+            );
+            return Err(acp::Error::internal_error().data(message));
+        }
         if self.should_compact_on_error(&error).await {
             let cw = error
                 .model_metadata
@@ -1383,6 +1413,8 @@ impl SessionActor {
         api_duration_ms: Option<u64>,
     ) {
         if let Some(ref u) = response.usage {
+            self.tool_context
+                .record_task_model_output(u64::from(u.completion_tokens));
             self.chat_state_handle
                 .record_token_usage(u64::from(u.total_tokens));
             self.chat_state_handle.record_last_turn_usage(u.clone());
@@ -1394,6 +1426,17 @@ impl SessionActor {
             );
             self.signals_handle()
                 .record_token_usage(u.completion_tokens, u.reasoning_tokens);
+        } else if self.tool_context.task_output_token_budget.is_some() {
+            self.tool_context.fail_task_output_usage_closed();
+            let handle = self.chat_state_handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.mark_usage_incomplete(true, true).await;
+            });
+        } else if self.tool_context.sampler_retry_only_before_output {
+            let handle = self.chat_state_handle.clone();
+            tokio::spawn(async move {
+                let _ = handle.mark_usage_incomplete(true, true).await;
+            });
         }
     }
     pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {

@@ -630,3 +630,73 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
         "no dangling tool_use: uses={tool_use_ids:?} results={tool_result_ids:?}"
     );
 }
+
+/// Recap wire shape: main-turn tools + `prompt_cache_key` = session id, so the
+/// request rides the parent turn's prefix cache instead of cold-prefilling.
+#[tokio::test(flavor = "current_thread")]
+async fn recap_request_rides_parent_prompt_cache() {
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            // Register a real tool so the "recap sends the main turn's tools"
+            // assertion is non-vacuous.
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("You asked about the borrow checker.");
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("you are a coding agent"),
+                ConversationItem::user("explain the borrow checker"),
+                ConversationItem::assistant("it enforces shared-xor-mutable"),
+            ]);
+
+            actor.handle_recap(false).await;
+
+            assert!(
+                server.has_responses_request(),
+                "recap must hit /v1/responses"
+            );
+            let requests = server.requests();
+            let recap_req = requests
+                .iter()
+                .rev()
+                .find(|r| r.path.contains("responses"))
+                .expect("a responses request must be recorded");
+
+            let conv_id = recap_req
+                .header("x-grok-conv-id")
+                .expect("recap must send x-grok-conv-id");
+            assert!(
+                conv_id.starts_with("recap-"),
+                "conv id keeps the recap-* label: {conv_id}"
+            );
+
+            let body = recap_req.body.as_ref().expect("recap body must be JSON");
+            assert_eq!(
+                body["prompt_cache_key"].as_str(),
+                Some(actor.session_info.id.to_string().as_str()),
+                "prompt_cache_key must be the parent session id for sticky routing"
+            );
+            let main_turn_specs =
+                actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
+            assert!(!main_turn_specs.is_empty(), "test env must expose tools");
+            let tools = body["tools"].as_array().expect("tools must be present");
+            assert_eq!(
+                tools.len(),
+                main_turn_specs.len(),
+                "recap must send exactly the main turn's tool specs"
+            );
+        })
+        .await;
+}

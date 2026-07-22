@@ -121,6 +121,85 @@ fn detect_raw() -> ColorLevel {
     })
 }
 
+/// Standalone diagnostic color evidence.
+///
+/// This never consults stdout, because `grok doctor --json` is commonly piped.
+/// Stderr or an independently opened controlling terminal is sufficient
+/// evidence that the process is diagnosing that terminal; a fully headless
+/// invocation is honest about having no color evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandaloneColorEvidence {
+    Available(ColorLevel),
+    Unavailable,
+}
+
+pub fn standalone(terminal: TerminalName) -> StandaloneColorEvidence {
+    use std::io::IsTerminal;
+
+    standalone_from_env(
+        &crate::host::collect_unicode_env(),
+        std::io::stderr().is_terminal(),
+        controlling_terminal_available(),
+        terminal,
+    )
+}
+
+fn controlling_terminal_available() -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("CONIN$")
+            .is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+fn standalone_from_env(
+    env: &std::collections::HashMap<String, String>,
+    stderr_is_terminal: bool,
+    controlling_terminal: bool,
+    terminal: TerminalName,
+) -> StandaloneColorEvidence {
+    if env.contains_key("NO_COLOR") {
+        return StandaloneColorEvidence::Available(ColorLevel::None);
+    }
+    if !stderr_is_terminal && !controlling_terminal {
+        return StandaloneColorEvidence::Unavailable;
+    }
+    let colorterm = env.get("COLORTERM").map(|value| value.to_ascii_lowercase());
+    if colorterm
+        .as_deref()
+        .is_some_and(|value| value == "truecolor" || value == "24bit")
+        || terminal_supports_truecolor_brand(terminal)
+    {
+        return StandaloneColorEvidence::Available(ColorLevel::TrueColor);
+    }
+    let term = env
+        .get("TERM")
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if term.contains("256color") {
+        StandaloneColorEvidence::Available(ColorLevel::Ansi256)
+    } else if term.is_empty() || term == "dumb" {
+        StandaloneColorEvidence::Unavailable
+    } else {
+        StandaloneColorEvidence::Available(ColorLevel::Basic)
+    }
+}
+
 /// Return the cached color level (calls [`detect`] if not yet initialized).
 pub fn get() -> ColorLevel {
     detect()
@@ -175,8 +254,12 @@ pub fn quantize(color: Color) -> Color {
 /// this fallback our themes get quantized to the 16-color ANSI palette there
 /// and the subtle bg/border/muted gradations collapse onto each other.
 fn terminal_supports_truecolor() -> bool {
+    terminal_supports_truecolor_brand(terminal_context().brand)
+}
+
+fn terminal_supports_truecolor_brand(terminal: TerminalName) -> bool {
     if matches!(
-        terminal_context().brand,
+        terminal,
         TerminalName::Iterm2
             | TerminalName::Ghostty
             | TerminalName::Kitty
@@ -269,6 +352,79 @@ fn rgb_to_ansi16(r: u8, g: u8, b: u8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn standalone_color_uses_stderr_terminal_not_stdout() {
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("COLORTERM", "truecolor")]),
+                true,
+                false,
+                TerminalName::Unknown,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::TrueColor)
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "xterm-256color")]),
+                true,
+                false,
+                TerminalName::Unknown,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::Ansi256)
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("COLORTERM", "truecolor")]),
+                false,
+                false,
+                TerminalName::Ghostty,
+            ),
+            StandaloneColorEvidence::Unavailable
+        );
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("NO_COLOR", "1")]),
+                false,
+                false,
+                TerminalName::Ghostty,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::None)
+        );
+    }
+
+    #[test]
+    fn standalone_color_uses_controlling_terminal_when_stderr_is_piped() {
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "xterm-256color")]),
+                false,
+                true,
+                TerminalName::Unknown,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::Ansi256)
+        );
+    }
+
+    #[test]
+    fn standalone_color_uses_known_terminal_brand_without_colorterm() {
+        assert_eq!(
+            standalone_from_env(
+                &env(&[("TERM", "xterm")]),
+                true,
+                false,
+                TerminalName::WezTerm,
+            ),
+            StandaloneColorEvidence::Available(ColorLevel::TrueColor)
+        );
+    }
 
     #[test]
     fn truecolor_passes_through() {

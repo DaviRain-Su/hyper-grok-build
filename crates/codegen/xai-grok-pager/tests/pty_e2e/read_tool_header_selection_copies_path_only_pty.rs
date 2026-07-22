@@ -23,7 +23,7 @@ async fn read_tool_header_selection_copies_path_only_pty() {
     // Filename alone is what the fish-shortened header may show; always present.
     let path_tail = READ_HDR_FILE;
 
-    seed_read_file_tool_call(&content, &abs_path);
+    let _read_turn = seed_read_file_tool_call(&content, &abs_path);
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut env = content.env_for_pager();

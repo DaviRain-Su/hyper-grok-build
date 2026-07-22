@@ -3,14 +3,14 @@
 //! The adversarial skeptic panel is the whole verification: it
 //! spawns N independent skeptic subagents in parallel,
 //! parses each one's JSON verdict (with terminal-token fallback), and
-//! aggregates via majority-refute to drive `update_goal(completed:
-//! true)`. Each spawn sends a `SubagentEvent::Spawn` directly over
 //! `tool_context.subagent_event_tx` — no `task` tool call, so the
 //! parent model's transcript stays clean. The spawn is hidden behind
 //! the [`GoalClassifierSpawner`] trait so tests can inject deterministic
 //! responses; production uses [`ChannelSpawner`]. The struct / trait /
 //! constant names retain the `classifier` prefix to keep the env /
 //! remote / config wire contract stable across the rewire.
+
+#![allow(dead_code)]
 
 pub(crate) mod evidence;
 
@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use xai_file_utils::events::EventWriter;
+use xai_grok_tools::implementations::grok_build::task::types::SubagentOwner;
 
 // Constants
 
@@ -404,7 +405,7 @@ pub(crate) fn parse_skeptic_terminal_response(text: &str) -> Option<bool> {
 /// signal (each skeptic renders `CHANGES_FILE: (unavailable)` and the
 /// verifier prompt's rule 5 takes over).
 pub(crate) async fn capture_git_baseline(workspace_root: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(evidence::git_bin());
+    let mut cmd = tokio::process::Command::new(crate::util::subprocess::git_bin());
     cmd.arg("rev-parse").arg("HEAD").current_dir(workspace_root);
 
     let output = match tokio::time::timeout(GIT_BASELINE_CAPTURE_TIMEOUT, cmd.output()).await {
@@ -615,7 +616,10 @@ impl ChannelSpawner {
             run_in_background: false,
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
+            await_to_completion: false,
             fork_context: false,
+            owner: SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
         if self
@@ -5636,7 +5640,7 @@ mod tests {
         let wait_for = |target: usize| {
             let observed = observed.clone();
             async move {
-                for _ in 0..10_000 {
+                for _ in 0..2_000 {
                     if observed
                         .spawn_count
                         .load(std::sync::atomic::Ordering::SeqCst)
@@ -5644,7 +5648,7 @@ mod tests {
                     {
                         return;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
                 panic!("timed out waiting for spawn_count == {target}");
             }

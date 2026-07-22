@@ -7,8 +7,6 @@ description = "Shared prompt-queue wire types for xai-grok-shell and xai-grok-pa
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-
-[dev-dependencies]
 serde_json = { workspace = true }
 
 [lints]

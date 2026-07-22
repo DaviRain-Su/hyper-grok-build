@@ -793,6 +793,12 @@ impl MouseScrollState {
         self.stream.is_some()
     }
 
+    pub(crate) fn cancel_stream(&mut self) {
+        self.stream = None;
+        self.carry_lines = 0.0;
+        self.carry_direction = None;
+    }
+
     /// Deadline for the event loop's dedicated scroll clock: delay until the
     /// next flush/finalize check is due. Pending lines are due on the redraw
     /// cadence, the stream-gap finalize at the 80ms mark — never the

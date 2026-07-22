@@ -473,6 +473,15 @@ fn tmux_meta_empty_outside_tmux() {
 // -- build_terminal_context_from_env (integration) ------------------------
 
 #[test]
+fn standalone_context_does_not_run_live_tmux_queries() {
+    let env = env_from(&[("TMUX", "/tmp/definitely-missing-tmux-server")]);
+    let ctx = standalone_terminal_context_from_env(&env, crate::host::HostOs::Linux);
+    assert_eq!(ctx.multiplexer, MultiplexerKind::Tmux);
+    assert_eq!(ctx.tmux_version, None);
+    assert_eq!(ctx.tmux_extended_keys, None);
+}
+
+#[test]
 fn context_plain_terminal() {
     let env = env_from(&[("TERM_PROGRAM", "Ghostty")]);
     let ctx = build_terminal_context_from_env(&env);

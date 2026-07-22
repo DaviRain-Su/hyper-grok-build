@@ -2714,6 +2714,30 @@ fn auth_provider_honored_only_from_trusted_disk_layers() {
         "a provider in a trusted disk layer is honored"
     );
 }
+#[test]
+fn model_provider_honored_only_from_trusted_disk_layers() {
+    let layers = ConfigLayers {
+        managed: toml::from_str(
+                "[model_providers.gateway]\nbase_url = \"https://gateway.example/v1\"\n\
+                 [model_providers.gateway.auth]\ncommand = \"/usr/local/bin/gw-token\"\n",
+            )
+            .unwrap(),
+        ..Default::default()
+    };
+    let cfg = crate::agent::config::Config::new_from_toml_cfg(
+            &layers.effective_config_disk_only(),
+        )
+        .unwrap();
+    assert!(
+        cfg.model_providers.contains_key("gateway"),
+        "a model provider in a trusted disk layer is honored"
+    );
+    assert_eq!(
+        cfg.auth_providers.get("model_provider:gateway").map(| c | c.command.as_str()),
+        Some("/usr/local/bin/gw-token"),
+        "its inline auth registers as a synthetic auth provider"
+    );
+}
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
 /// `requirements.toml` (deployment key + S3 trace upload) via the actual
@@ -2783,6 +2807,78 @@ trace_upload_endpoint_url = "https://s3.acme-corp.example"
         Some("https://s3.acme-corp.example")
     );
     assert!(cfg.endpoints.deployment_key.is_some());
+}
+/// `[feedback.user]` in the managed layer must survive the layer
+/// merge into the resolved `Config` (its presence is the opt-in).
+#[test]
+fn managed_config_feedback_user_reaches_resolved_config() {
+    let managed = toml::from_str(
+            r#"
+[endpoints]
+cli_chat_proxy_base_url = "https://cli-chat-proxy.grok.com/v1"
+
+[feedback.user]
+name = ["os_user"]
+email = ["git_email", "team@example.com"]
+email_domain = "example.com"
+"#,
+        )
+        .unwrap();
+    let layers = ConfigLayers {
+        managed,
+        ..Default::default()
+    };
+    let cfg = crate::agent::config::Config::new_from_toml_cfg(
+            &layers.effective_config_disk_only(),
+        )
+        .unwrap();
+    let user = cfg
+        .feedback
+        .user
+        .expect("[feedback.user] from managed_config.toml must reach Config");
+    assert_eq!(user.name, vec!["os_user"]);
+    assert_eq!(user.email, vec!["git_email", "team@example.com"]);
+    assert_eq!(user.email_domain.as_deref(), Some("example.com"));
+    let layers = ConfigLayers::default();
+    let cfg = crate::agent::config::Config::new_from_toml_cfg(
+            &layers.effective_config_disk_only(),
+        )
+        .unwrap();
+    assert_eq!(cfg.feedback.user, None);
+}
+/// RCE guard: a project `.grok/config.toml` must never source
+/// `[feedback.user]` (its `command` runs `sh -c`).
+#[test]
+#[serial_test::serial]
+fn project_config_never_sources_feedback_user() {
+    use xai_grok_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set("GROK_HOME", home.path());
+    let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
+    let _sim = simulate_release_build();
+    let repo = tempfile::tempdir().unwrap();
+    git2::Repository::init(repo.path()).unwrap();
+    let grok = repo.path().join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+            grok.join("config.toml"),
+            "[plugins]\npaths = [\"./p\"]\n\n[feedback.user]\ncommand = \"/evil\"\n",
+        )
+        .unwrap();
+    let cwd = repo.path();
+    crate::agent::folder_trust::grant_folder_trust(cwd);
+    assert!(
+        resolve_effective_plugins_config(cwd).paths.iter().any(| p | p == "./p"),
+        "trusted project [plugins].paths must merge (proves the project config is read)"
+    );
+    let cfg = crate::agent::config::Config::new_from_toml_cfg(
+            &load_effective_config().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        cfg.feedback.user, None,
+        "a project [feedback.user] must never reach Config (would be sh -c RCE)"
+    );
 }
 #[test]
 fn config_layers_origins_tracks_source() {

@@ -1,6 +1,5 @@
 //! Goal-harness support for `SessionActor`: reminder/directive templates,
-//! the `update_goal` drain guards and acks, goal wrappers, and goal token
-//! accounting. Complements the `goal` sibling (orchestration flows).
+//! goal wrappers, availability, and goal token accounting.
 
 use super::*;
 
@@ -8,6 +7,12 @@ use super::*;
 /// auto-pauses with `GoalPauseReason::BackOff`. See `handle_turn_end`.
 /// Compile-time constant for v1; remote tunability is a deferred follow-up.
 pub(super) const GOAL_CONTINUATION_BACKOFF_THRESHOLD: u32 = 3;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GoalClassifierPolicy {
+    pub enabled: bool,
+    pub max_runs: u32,
+}
 
 impl DrainSource {
     /// Consume the source, returning `(input, Option<ack_tx>)`.
@@ -44,15 +49,27 @@ pub(super) fn try_send_ack(
     }
 }
 
-/// Resolved policy for the goal-achievement classifier. Single-shot
-/// snapshot per drain so the disabled / enabled / cap-reached branches
-/// see consistent values even if the underlying flag flips mid-loop.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct GoalClassifierPolicy {
-    /// Master kill-switch (env > local > remote > default(false)).
-    pub enabled: bool,
-    /// Maximum per-goal classifier runs before the goal auto-pauses.
-    pub max_runs: u32,
+pub(super) fn send_ack(
+    ack_tx: tokio::sync::oneshot::Sender<
+        xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalAck,
+    >,
+    ack: xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalAck,
+) {
+    if ack_tx.send(ack).is_err() {
+        tracing::debug!("update_goal ack receiver dropped before harness could respond");
+    }
+}
+
+pub(super) const GOAL_CLASSIFIER_PENDING_QUEUE_CAP: usize = 4;
+
+pub(super) struct InFlightGuard<'a> {
+    pub(super) flag: &'a std::sync::atomic::AtomicBool,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl NotAchievedSyntheticReason {
@@ -87,33 +104,7 @@ impl NotAchievedSyntheticReason {
     }
 }
 
-/// Maximum number of deferred `completed: true` commands buffered in
-/// `pending_classifier_completions` between turn-ends. A pathological
-/// model that emits many mid-turn completions otherwise grows the
-/// queue unboundedly within a turn. On overflow the oldest entry is
-/// dropped and a `FailClosed { PendingQueueFull }` event is emitted
-/// so the cap is observable in telemetry.
-pub(super) const GOAL_CLASSIFIER_PENDING_QUEUE_CAP: usize = 4;
-
-/// Scope-guard that clears `goal_classifier_in_flight` on drop —
-/// fires on normal return AND on unwind (panic) so a panic mid-fire
-/// can never wedge the flag `true` for the lifetime of the actor.
-/// The drain body acquires the guard immediately after a successful
-/// `compare_exchange` on the flag and holds it through every `.await`
-/// of the fire branch.
-pub(super) struct InFlightGuard<'a> {
-    pub(super) flag: &'a std::sync::atomic::AtomicBool,
-}
-
-impl Drop for InFlightGuard<'_> {
-    fn drop(&mut self) {
-        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
 /// Disarm-able tracker scope-guard: runs `on_drop` on scope exit AND when a
-/// turn cancel drops an in-flight future mid-await (same drop-safety
-/// contract as [`InFlightGuard`]), so partial verification / strategist
 /// state can never outlive its run.
 ///
 /// No `GoalUpdated` from `Drop`: the Ctrl+C cancel path emits its own
@@ -147,19 +138,6 @@ impl<F: FnOnce(&mut crate::session::goal_tracker::GoalTracker)> Drop for Tracker
         if let Some(f) = self.on_drop.take() {
             f(&mut self.tracker.lock());
         }
-    }
-}
-
-/// Send an `UpdateGoalAck` on the tool's oneshot. Logs at `debug` if
-/// the receiver was dropped (benign — tool future aborted).
-pub(super) fn send_ack(
-    ack_tx: tokio::sync::oneshot::Sender<
-        xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalAck,
-    >,
-    ack: xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalAck,
-) {
-    if ack_tx.send(ack).is_err() {
-        tracing::debug!("update_goal ack receiver dropped before harness could respond");
     }
 }
 
@@ -213,7 +191,6 @@ pub(super) fn goal_reminder_plan_path(
 /// Worker rounds a refuted goal may run without re-firing verification
 /// before the continuation directive escalates to a forceful "re-verify
 /// now" block. A refuted weak model can otherwise churn indefinitely —
-/// verification only fires when it calls `update_goal(completed: true)`.
 /// Override with `GROK_GOAL_REVERIFY_AFTER` (floored at 1).
 pub(crate) const GOAL_REVERIFY_AFTER_DEFAULT: u32 = 8;
 
@@ -240,7 +217,6 @@ pub(super) const GOAL_CONTINUATION_BAIL_PREFACE: &str = "You appear to be stoppi
 /// The template is the slim current form: verification is owned by
 /// the harness (the adversarial skeptic panel in `goal_classifier.rs`),
 /// so this body only carries TRACKING / WORKING / VERIFY / TEST
-/// guidance and the `{GOAL_TOOL}` completion contract. No per-goal
 /// verdict-file path is substituted — `{VERIFIER_ID}` no longer
 /// appears in the template; `verifier_id` continues to anchor
 /// harness-owned skeptic verdict files inside `goal_classifier.rs`.
@@ -273,6 +249,43 @@ pub(super) fn render_goal_rules(
     };
     GOAL_RULES_TEMPLATE
         .replace("{OBJECTIVE}", objective)
+        .replace("{TASK_TOOL}", &names.task)
+        .replace("{TODO_TOOL}", &names.todo)
+        .replace("{PLAN_BLOCK}", &plan_block)
+        .replace("{BLOCK_RECAP}", block_recap)
+        .replace("{DISCIPLINE_BLOCK}", &discipline)
+        .replace("{GOAL_STATE}", goal_state)
+        // literal `{SCRATCH_DIR}` in the objective WOULD be expanded here
+        // (harmless, astronomically unlikely). The `{SCRATCH}` placeholder the
+        // text references is a different token, left unreplaced.
+        .replace("{SCRATCH_DIR}", scratch_dir)
+        // Only claim the dir exists when the harness actually created it.
+        .replace(
+            "{SCRATCH_STATUS}",
+            if scratch_ready {
+                "The dir has been created for you."
+            } else {
+                "Create it with `mkdir -p` if it does not already exist."
+            },
+        )
+}
+
+pub(super) fn render_goal_rules_legacy(
+    objective: &str,
+    names: &GoalToolNames,
+    block_recap: &str,
+    goal_state: &str,
+    plan_path: Option<&std::path::Path>,
+    scratch_dir: &str,
+    scratch_ready: bool,
+) -> String {
+    let discipline = render_goal_task_discipline(names);
+    let plan_block = match plan_path {
+        Some(path) => render_goal_plan_block(path, names),
+        None => String::new(),
+    };
+    GOAL_RULES_TEMPLATE_LEGACY
+        .replace("{OBJECTIVE}", objective)
         .replace("{GOAL_TOOL}", &names.goal)
         .replace("{TASK_TOOL}", &names.task)
         .replace("{TODO_TOOL}", &names.todo)
@@ -280,12 +293,7 @@ pub(super) fn render_goal_rules(
         .replace("{BLOCK_RECAP}", block_recap)
         .replace("{DISCIPLINE_BLOCK}", &discipline)
         .replace("{GOAL_STATE}", goal_state)
-        // Ordered after `{OBJECTIVE}`, consistent with `{GOAL_TOOL}` etc.: a
-        // literal `{SCRATCH_DIR}` in the objective WOULD be expanded here
-        // (harmless, astronomically unlikely). The `{SCRATCH}` placeholder the
-        // text references is a different token, left unreplaced.
         .replace("{SCRATCH_DIR}", scratch_dir)
-        // Only claim the dir exists when the harness actually created it.
         .replace(
             "{SCRATCH_STATUS}",
             if scratch_ready {
@@ -319,7 +327,6 @@ pub(super) fn format_goal_pause_message(
 }
 
 /// Make `{` / `}` inert in a model-controlled directive-slot value: a
-/// smuggled `{goal_tool}` etc. would otherwise be re-expanded by a
 /// later `.replace` pass and spoof a harness slot. A zero-width space
 /// inside each brace keeps legitimate braces (code spans, JSON)
 /// visually intact while no `{placeholder}` token can match; borrowed
@@ -401,7 +408,6 @@ pub(super) fn render_goal_continuation_directive(
     reverify_block: &str,
     next_step: &str,
     todo_tool: &str,
-    goal_tool: &str,
     scratch_dir: &str,
     scratch_ready: bool,
 ) -> String {
@@ -426,10 +432,57 @@ pub(super) fn render_goal_continuation_directive(
         .replace("{reverify_block}", reverify_block)
         .replace("{next_step}", &next_step)
         .replace("{todo_tool}", todo_tool)
-        .replace("{goal_tool}", goal_tool)
         // `{SCRATCH}` is left literal — the model resolves it to this dir.
         .replace("{scratch_dir}", scratch_dir)
         // Only claim the dir exists when the harness actually created it.
+        .replace(
+            "{scratch_status}",
+            if scratch_ready {
+                "(created for you)"
+            } else {
+                "(create with `mkdir -p` if missing)"
+            },
+        )
+        .replace("{strategist_note}", &strategist_note)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_goal_continuation_directive_legacy(
+    objective: &str,
+    tokens: u64,
+    elapsed: &str,
+    bail_preface: &str,
+    plan_pointer: &str,
+    verifier_gaps: &str,
+    strategist_note: &str,
+    reverify_block: &str,
+    next_step: &str,
+    todo_tool: &str,
+    goal_tool: &str,
+    scratch_dir: &str,
+    scratch_ready: bool,
+) -> String {
+    debug_assert!(
+        !objective.is_empty(),
+        "render_goal_continuation_directive_legacy requires a non-empty objective; \
+         an empty value leaves the Objective: line dangling in the nudge",
+    );
+    let bail_preface = neutralize_directive_slot(bail_preface);
+    let verifier_gaps = neutralize_directive_slot(verifier_gaps);
+    let strategist_note = neutralize_directive_slot(strategist_note);
+    let next_step = neutralize_directive_slot(next_step);
+    GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_LEGACY
+        .replace("{objective}", objective)
+        .replace("{tokens}", &tokens.to_string())
+        .replace("{elapsed}", elapsed)
+        .replace("{bail_preface}", &bail_preface)
+        .replace("{plan_pointer}", plan_pointer)
+        .replace("{verifier_gaps}", &verifier_gaps)
+        .replace("{reverify_block}", reverify_block)
+        .replace("{next_step}", &next_step)
+        .replace("{todo_tool}", todo_tool)
+        .replace("{goal_tool}", goal_tool)
+        .replace("{scratch_dir}", scratch_dir)
         .replace(
             "{scratch_status}",
             if scratch_ready {
@@ -447,6 +500,26 @@ pub(super) fn render_goal_continuation_directive(
 /// way to finish) and inlines the live count; the lead hardens past
 /// `3 * threshold`.
 pub(super) fn render_goal_reverify_block(
+    rounds_since_verify: u32,
+    refuted: bool,
+    threshold: u32,
+) -> String {
+    if !refuted || rounds_since_verify < threshold {
+        return String::new();
+    }
+    let lead = if rounds_since_verify >= threshold.saturating_mul(3) {
+        "STOP DRIFTING — VERIFY THE REMAINING GAP NOW."
+    } else {
+        "Re-run the verification plan before continuing."
+    };
+    format!(
+        "{lead} You have run {rounds_since_verify} rounds since the last \
+         adversarial rejection. The host evaluates completion after every round. \
+         Fix the single concrete gap rather than making cosmetic changes.\n\n"
+    )
+}
+
+pub(super) fn render_goal_reverify_block_legacy(
     rounds_since_verify: u32,
     refuted: bool,
     threshold: u32,
@@ -540,7 +613,18 @@ pub(super) fn render_strategist_note(
 /// directly (empty → ""). The verbose per-skeptic details file is
 /// deliberately NOT referenced — pointing the model at it bloats context;
 /// the file stays on disk for the user.
-pub(super) fn render_verifier_gaps_block(gaps: &str, goal_tool: &str) -> String {
+pub(super) fn render_verifier_gaps_block(gaps: &str) -> String {
+    if gaps.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Verification rejected the prior completion candidate. Fix every gap \
+         the skeptic panel flagged below — these take priority — \
+         before claiming completion again:\n{gaps}\n\n",
+    )
+}
+
+pub(super) fn render_verifier_gaps_block_legacy(gaps: &str, goal_tool: &str) -> String {
     if gaps.is_empty() {
         return String::new();
     }
@@ -582,13 +666,6 @@ pub(super) fn resolve_goal_next_step(plan_path: Option<&Path>) -> Option<String>
         .map(|item| neutralize_reminder_tags(cap_chars(&item, GOAL_NEXT_STEP_MAX_CHARS)))
 }
 
-/// Format the user-facing chat notification body emitted when
-/// `drain_goal_updates` transitions the goal to `Blocked` via the
-/// `update_goal(blocked_reason: ...)` path. `reason` is the short
-/// blocked_reason string; `detail` is the optional longer body from
-/// the tool's `message` field. Kept as a free function so the format
-/// is testable in isolation and is the single source of truth for the
-/// notification text.
 pub(super) fn format_blocked_chat_notification(reason: &str, detail: Option<&str>) -> String {
     let mut out = String::with_capacity(reason.len() + detail.map_or(0, str::len) + 96);
     out.push_str("Goal paused — verification blocked.\nReason: ");
@@ -814,9 +891,6 @@ pub(crate) struct GoalRoleModelConfig {
     pub(crate) skeptic_pool: Vec<crate::util::config::GoalRoleModel>,
 }
 
-/// `goal_enabled` AND `update_goal` registered in the session toolset.
-/// Canonical pause message shared by the planner fail-closed path and the
-/// session-load reconciler so the user sees one consistent reason.
 pub(crate) fn planner_failure_pause_message() -> String {
     "Planning failed; resume with /goal to retry.".to_string()
 }
@@ -876,6 +950,12 @@ impl SessionActor {
         set.extend(task_ids);
     }
 
+    pub(super) fn sync_goal_harness(&self) -> bool {
+        self.goal_harness_enabled
+            .store(self.goal_enabled, std::sync::atomic::Ordering::Relaxed);
+        self.goal_enabled
+    }
+
     pub(super) fn sync_goal_harness_from_tools(&self, tool_names: &[String]) -> bool {
         let enabled = goal_slash_and_harness_available(self.goal_enabled, tool_names);
         self.goal_harness_enabled
@@ -884,8 +964,12 @@ impl SessionActor {
     }
 
     pub(super) async fn refresh_goal_harness_enabled(&self) {
-        let tool_names = self.registered_tool_names().await;
-        self.sync_goal_harness_from_tools(&tool_names);
+        if self.goal_runs_on_workflow_engine() {
+            self.sync_goal_harness();
+        } else {
+            let tool_names = self.registered_tool_names().await;
+            self.sync_goal_harness_from_tools(&tool_names);
+        }
     }
 
     pub(super) async fn maybe_reconcile_active_goal_without_harness(&self) {
@@ -946,6 +1030,16 @@ impl SessionActor {
                 planner_failure_pause_message(),
             )
             .await;
+    }
+
+    pub(super) fn prune_subagent_records_for_active_goal(&self) {
+        let goal_id = match self.goal_tracker.lock().snapshot() {
+            Some(o) => o.goal_id.clone(),
+            None => return,
+        };
+        self.subagent_token_records
+            .lock()
+            .retain(|_, r| r.goal_id.as_deref() != Some(goal_id.as_str()));
     }
 
     /// Run the planner subagent for a goal that has no plan yet.
@@ -1455,19 +1549,6 @@ impl SessionActor {
             &goal_id,
             current_model_id,
         )
-    }
-
-    /// Drop every subagent record attributed to the currently-loaded
-    /// goal. Called before `tracker.complete()` so the registry
-    /// doesn't accumulate orphaned records across goals.
-    pub(super) fn prune_subagent_records_for_active_goal(&self) {
-        let goal_id = match self.goal_tracker.lock().snapshot() {
-            Some(o) => o.goal_id.clone(),
-            None => return,
-        };
-        self.subagent_token_records
-            .lock()
-            .retain(|_, r| r.goal_id.as_deref() != Some(goal_id.as_str()));
     }
 
     /// Push the tool-layer `GoalLoopActive` flag so per-tool-call bg-task /

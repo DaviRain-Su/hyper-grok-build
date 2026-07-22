@@ -1,7 +1,6 @@
 use super::support::create_test_actor;
 use super::{
-    date_rollover_reminder, goal_slash_and_harness_available, laziness_injection_active,
-    resolve_reminder_policy, todo_gate_active,
+    date_rollover_reminder, laziness_injection_active, resolve_reminder_policy, todo_gate_active,
 };
 use crate::session::persistence::PersistenceMsg;
 use crate::util::config::RemoteSettings;
@@ -127,24 +126,6 @@ fn policy_with_gate(enabled: bool) -> ReminderPolicy {
     p
 }
 use crate::session::goal_tracker::GoalStatus;
-#[test]
-fn goal_slash_and_harness_available_predicate_matrix() {
-    use xai_grok_tools::implementations::grok_build::UPDATE_GOAL_TOOL_NAME;
-    let other = vec!["todo_write".to_string()];
-    let with_update = vec![UPDATE_GOAL_TOOL_NAME.to_string()];
-    for (goal_enabled, tool_names, expect) in [
-        (false, &other, false),
-        (true, &other, false),
-        (true, &with_update, true),
-        (false, &with_update, false),
-    ] {
-        assert_eq!(
-            goal_slash_and_harness_available(goal_enabled, tool_names),
-            expect,
-            "goal_enabled={goal_enabled} tools={tool_names:?}",
-        );
-    }
-}
 #[test]
 fn laziness_injection_active_predicate_matrix() {
     let def = def_with_template(TemplateOverride::None);

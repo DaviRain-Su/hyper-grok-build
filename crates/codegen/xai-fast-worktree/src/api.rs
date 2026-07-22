@@ -7,6 +7,28 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Serializes tests that chdir or assert process-CWD scan results (process-global cwd).
+/// Gated on `metadata` because every caller lives under that feature's test modules
+/// (`gc` / `auto_gc`); without the feature these would be dead under `-D warnings`.
+#[cfg(all(test, feature = "metadata"))]
+pub(crate) static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, feature = "metadata"))]
+pub(crate) fn cwd_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Restores process cwd on drop (pair with [`cwd_test_guard`]).
+#[cfg(all(test, feature = "metadata"))]
+pub(crate) struct CwdGuard(pub PathBuf);
+
+#[cfg(all(test, feature = "metadata"))]
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
@@ -1478,20 +1500,49 @@ impl BtrfsDelegate for RecordingDelegate {
 
 #[cfg(feature = "metadata")]
 pub mod gc {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use anyhow::Result;
 
     use crate::BtrfsDelegate;
-    use crate::db::{ListFilter, WorktreeDb, WorktreeStatus};
+    use crate::db::{ListFilter, WorktreeDb, WorktreeKind, WorktreeStatus};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Default, Serialize, Deserialize)]
     pub struct GcOptions {
+        /// Default max age for kinds not in [`Self::max_age_by_kind`].
+        /// `None` + empty map disables the age path.
         pub max_age_secs: Option<i64>,
         pub force: bool,
         pub dry_run: bool,
+        /// Paths that must not be age-expired (auto path: process cwd).
+        #[serde(default)]
+        pub protect_paths: Vec<PathBuf>,
+        /// Age-path only; equivalent to `max_age_by_kind[kind] = None`.
+        /// Honored even when `force=true`. Dead-path unregister still applies.
+        #[serde(default)]
+        pub skip_kinds: Vec<WorktreeKind>,
+        /// Per-kind override of [`Self::max_age_secs`]. `None` = never age-expire.
+        /// `force` does not override never-expire.
+        #[serde(default)]
+        pub max_age_by_kind: BTreeMap<WorktreeKind, Option<i64>>,
+    }
+
+    /// `Some(secs)` to age-expire; `None` = never. Order: skip_kinds → map → max_age_secs.
+    pub fn effective_max_age(opts: &GcOptions, kind: WorktreeKind) -> Option<i64> {
+        if opts.skip_kinds.contains(&kind) {
+            return None;
+        }
+        opts.max_age_by_kind
+            .get(&kind)
+            .copied()
+            .unwrap_or(opts.max_age_secs)
+    }
+
+    pub(crate) fn age_path_enabled(opts: &GcOptions) -> bool {
+        opts.max_age_secs.is_some() || !opts.max_age_by_kind.is_empty()
     }
 
     #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1504,104 +1555,229 @@ pub mod gc {
         /// from agents predating this field still deserialize.
         #[serde(default)]
         pub remove_failed: u64,
-        // TODO(v2): untracked_found, untracked_registered (via rebuild_worktree_db),
-        // stale_registrations_cleaned (stale .git/worktrees/ cleanup)
+        // Rebuild / stale-registration hygiene live on `AutoGcReport` (optional
+        // auto path), not on every `gc_worktrees` call.
     }
 
-    /// Decode a `kill(pid, 0)` outcome into liveness. `ret == 0` ⇒ the process
-    /// exists. Otherwise: `ESRCH` ⇒ no such process (dead); anything else
-    /// (notably `EPERM`/`EACCES` — exists but owned by another user) ⇒ alive.
-    /// `kill -0`'s exit status can't distinguish `EPERM` from `ESRCH` and wrongly
-    /// reports `EPERM` as dead; split out so this is unit-testable.
-    #[cfg(target_os = "linux")]
+    /// `ret == 0` or non-`ESRCH` errno ⇒ alive (`EPERM`/`EACCES` included).
+    #[cfg(unix)]
     fn pid_alive_from_kill(ret: i32, errno: i32) -> bool {
         ret == 0 || errno != libc::ESRCH
     }
 
     fn is_pid_alive(pid: u32) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
-            // pid 0 targets the caller's process group and pid > i32::MAX wraps to
-            // a negative pid_t (also a process group); neither is a real tracked
-            // pid (creator_pid is always our own process id), so treat as dead.
+            // pid 0 / >i32::MAX select process groups, not a tracked creator_pid.
             if pid == 0 || pid > i32::MAX as u32 {
                 return false;
             }
-            // A null signal (sig 0) runs the kernel's existence/permission check
-            // without delivering a signal.
             let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             pid_alive_from_kill(ret, errno)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(unix))]
         {
-            // No libc dependency off Linux; fall back to `kill -0` exit status.
-            let mut cmd = std::process::Command::new("kill");
-            xai_tty_utils::detach_std_command(&mut cmd);
-            cmd.stdin(std::process::Stdio::null());
-            cmd.args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
+            let _ = pid;
+            false
         }
     }
 
-    /// Physical CWDs of every readable running process, via the Linux `/proc`
-    /// scan. Empty on non-Linux — the creator-PID guard still applies.
-    /// Dep-free on purpose (avoids re-adding a process-listing crate just for
-    /// this guard).
+    /// Foreign process CWDs for GC age guards.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum LiveCwdScan {
+        Ok(Vec<PathBuf>),
+        /// No enumerator (Windows/FreeBSD/…); PID guards only.
+        #[allow(dead_code)]
+        Unsupported,
+        /// Enumerator failed or unusable — age path fail-closes.
+        Failed,
+    }
+
+    /// `force` bypasses CWD requirements; `Failed` blocks age deletes.
+    pub(crate) fn age_path_cwd_usable(scan: &LiveCwdScan, force: bool) -> bool {
+        force || matches!(scan, LiveCwdScan::Ok(_) | LiveCwdScan::Unsupported)
+    }
+
+    fn scan_contains_cwd(cwds: &[PathBuf], path: &Path) -> bool {
+        let path_canon = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        cwds.iter().any(|c| {
+            c.as_path() == path
+                || c == &path_canon
+                || dunce::canonicalize(c).is_ok_and(|cc| cc == path_canon)
+        })
+    }
+
+    /// Fail closed when our own CWD is not visible in the scan.
+    ///
+    /// `current_dir()` errors also fail closed — we cannot confirm this
+    /// process is outside every candidate path without knowing CWD.
+    fn validate_cwd_scan(cwds: Vec<PathBuf>) -> LiveCwdScan {
+        match std::env::current_dir() {
+            Ok(cwd) if scan_contains_cwd(&cwds, &cwd) => LiveCwdScan::Ok(cwds),
+            Ok(_) => LiveCwdScan::Failed,
+            Err(_) => LiveCwdScan::Failed,
+        }
+    }
+
+    /// Linux `/proc/<pid>/cwd`, macOS libproc; else [`LiveCwdScan::Unsupported`].
     #[cfg(target_os = "linux")]
-    fn live_process_cwds() -> Vec<PathBuf> {
+    pub(crate) fn live_process_cwds() -> LiveCwdScan {
         let Ok(entries) = std::fs::read_dir("/proc") else {
-            return Vec::new();
+            return LiveCwdScan::Failed;
         };
-        entries
+        let cwds: Vec<PathBuf> = entries
             .filter_map(Result::ok)
-            // Only numeric `/proc/<pid>` entries expose a `cwd` symlink.
             .filter(|e| {
                 e.file_name()
                     .to_str()
                     .is_some_and(|n| n.parse::<u32>().is_ok())
             })
-            // An unreadable link (process exited / not permitted) means nothing
-            // is parked there, so drop it.
             .filter_map(|e| std::fs::read_link(e.path().join("cwd")).ok())
-            .collect()
+            .collect();
+        validate_cwd_scan(cwds)
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn live_process_cwds() -> Vec<PathBuf> {
-        Vec::new()
+    #[cfg(target_os = "macos")]
+    pub(crate) fn live_process_cwds() -> LiveCwdScan {
+        macos_live_process_cwds()
     }
 
-    /// True if any `live_cwds` entry sits inside `wt_path`. Kernel CWD links are
-    /// physical paths, so also match the canonicalized worktree path — a
-    /// symlinked `$GROK_HOME` or custom worktree path would otherwise never match.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn live_process_cwds() -> LiveCwdScan {
+        LiveCwdScan::Unsupported
+    }
+
+    #[cfg(target_os = "macos")]
+    const VIP_PATH_LEN: usize = 1024;
+
+    /// NUL-bounded path from fixed `vip_path` (never scan past `VIP_PATH_LEN`).
+    #[cfg(target_os = "macos")]
+    fn vip_path_to_pathbuf(path: &[[libc::c_char; 32]; 32]) -> Option<PathBuf> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // SAFETY: fixed-size array layout matches MAXPATHLEN vip_path.
+        let bytes = unsafe { std::slice::from_raw_parts(path.as_ptr().cast::<u8>(), VIP_PATH_LEN) };
+        let nul = bytes.iter().position(|&b| b == 0)?;
+        let s = &bytes[..nul];
+        if s.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(OsStr::from_bytes(s)))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_live_process_cwds() -> LiveCwdScan {
+        let Some(pids) = macos_list_all_pids() else {
+            return LiveCwdScan::Failed;
+        };
+        let expected = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+        let mut out = Vec::with_capacity(pids.len());
+        for pid in pids {
+            if pid <= 0 {
+                continue;
+            }
+            // SAFETY: zeroed buffer sized for PROC_PIDVNODEPATHINFO.
+            let mut info = unsafe { std::mem::zeroed::<libc::proc_vnodepathinfo>() };
+            let ret = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDVNODEPATHINFO,
+                    0,
+                    (&raw mut info).cast(),
+                    expected,
+                )
+            };
+            if ret != expected || info.pvi_cdir.vip_vi.vi_stat.vst_dev == 0 {
+                continue;
+            }
+            if let Some(p) = vip_path_to_pathbuf(&info.pvi_cdir.vip_path) {
+                out.push(p);
+            }
+        }
+        validate_cwd_scan(out)
+    }
+
+    /// `proc_listallpids` returns a **byte** count (probe and fill), not a PID count.
+    /// Convert via `size_of::<pid_t>()` / `i32` before allocating or truncating.
+    #[cfg(target_os = "macos")]
+    fn macos_list_all_pids() -> Option<Vec<i32>> {
+        const PID_SIZE: usize = std::mem::size_of::<i32>();
+        // SAFETY: null + size 0 is the documented size probe (returns bytes needed).
+        let bytes_needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if bytes_needed < 1 {
+            return None;
+        }
+        let mut capacity_pids = (bytes_needed as usize) / PID_SIZE;
+        if capacity_pids < 1 {
+            return None;
+        }
+        for _ in 0..4 {
+            // Headroom for pids that appear between probe and fill.
+            capacity_pids = capacity_pids
+                .saturating_add(capacity_pids / 4)
+                .max(capacity_pids + 32);
+            let mut pids = vec![0i32; capacity_pids];
+            let buf_bytes = (pids.len() * PID_SIZE) as i32;
+            // SAFETY: kernel writes at most `buf_bytes` into `pids`; return is byte count.
+            let n_bytes = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), buf_bytes) };
+            if n_bytes < 1 {
+                return None;
+            }
+            let n_pids = (n_bytes as usize) / PID_SIZE;
+            if n_pids < pids.len() {
+                pids.truncate(n_pids);
+                return Some(pids);
+            }
+            // Buffer was full — grow and retry.
+            capacity_pids = n_pids;
+        }
+        None
+    }
+
+    /// True if any `live_cwds` entry sits inside `wt_path` (raw + canonical).
     fn cwd_within(wt_path: &Path, live_cwds: &[PathBuf]) -> bool {
         let wt_canon = dunce::canonicalize(wt_path).unwrap_or_else(|_| wt_path.to_path_buf());
-        live_cwds
-            .iter()
-            .any(|cwd| cwd.starts_with(wt_path) || cwd.starts_with(&wt_canon))
+        live_cwds.iter().any(|cwd| {
+            if cwd.starts_with(wt_path) || cwd.starts_with(&wt_canon) {
+                return true;
+            }
+            match dunce::canonicalize(cwd) {
+                Ok(cwd_canon) => cwd_canon.starts_with(wt_path) || cwd_canon.starts_with(&wt_canon),
+                Err(_) => false,
+            }
+        })
     }
 
-    /// Effective freshness timestamp: the more recent of creation and last
-    /// access (last_accessed_at is never read as older than created_at).
     fn last_active(rec: &crate::db::WorktreeRecord) -> i64 {
         rec.last_accessed_at
             .unwrap_or(rec.created_at)
             .max(rec.created_at)
     }
 
-    /// Guarded — must not be reclaimed — when the creator process is still
-    /// running or any live process has its CWD inside the tree.
     fn is_guarded(rec: &crate::db::WorktreeRecord, live_cwds: &[PathBuf]) -> bool {
         rec.creator_pid.is_some_and(is_pid_alive) || cwd_within(Path::new(&rec.path), live_cwds)
     }
 
-    /// Reclaimable only when expired (older than `cutoff` by [`last_active`]) and
-    /// unguarded. Used for the per-candidate re-check against a freshly-read row.
-    fn is_reclaimable(rec: &crate::db::WorktreeRecord, cutoff: i64, live_cwds: &[PathBuf]) -> bool {
+    fn is_path_protected(wt_path: &Path, protect_paths: &[PathBuf]) -> bool {
+        !protect_paths.is_empty() && cwd_within(wt_path, protect_paths)
+    }
+
+    /// Expired + unguarded + not path-protected + not never-expire (pre-remove re-check).
+    fn is_reclaimable(
+        rec: &crate::db::WorktreeRecord,
+        now: i64,
+        live_cwds: &[PathBuf],
+        opts: &GcOptions,
+    ) -> bool {
+        let Some(max_age) = effective_max_age(opts, rec.kind) else {
+            return false;
+        };
+        let cutoff = now.saturating_sub(max_age.max(0));
+        if is_path_protected(Path::new(&rec.path), &opts.protect_paths) {
+            return false;
+        }
         last_active(rec) < cutoff && !is_guarded(rec, live_cwds)
     }
 
@@ -1650,64 +1826,90 @@ pub mod gc {
         }
 
         // Expired alive-worktree reclamation (liveness-guarded).
-        if let Some(max_age) = opts.max_age_secs {
-            // Clamp: a negative max_age must not push the cutoff into the future
-            // (which would expire everything), and an extreme value must not
-            // overflow the subtraction.
-            let cutoff = now.saturating_sub(max_age.max(0));
-            // One process-table scan, reused by the in-tree liveness guard below;
-            // skipped under --force, where the guard never fires.
-            let live_cwds = if opts.force {
-                Vec::new()
+        // First-pass CWD scan (cheap filter). Pre-remove re-check rescans so a
+        // process that chdir'd into the tree after this snapshot is still guarded.
+        // Failed scan → fail closed.
+        if age_path_enabled(opts) {
+            let cwd_scan = if opts.force {
+                LiveCwdScan::Ok(Vec::new())
             } else {
                 live_process_cwds()
             };
+            if !age_path_cwd_usable(&cwd_scan, opts.force) {
+                tracing::warn!(
+                    "process CWD scan failed or unusable; skipping age-expiry (fail closed)"
+                );
+                return Ok(report);
+            }
+            let live_cwds: &[PathBuf] = match &cwd_scan {
+                LiveCwdScan::Ok(v) => v.as_slice(),
+                LiveCwdScan::Unsupported => &[],
+                LiveCwdScan::Failed => unreachable!("gated by age_path_cwd_usable"),
+            };
             let alive = db.list(&ListFilter::default())?;
             for rec in alive {
-                // A worktree touched within the age window must not expire;
-                // callers bump last_accessed_at on use.
+                let Some(max_age) = effective_max_age(opts, rec.kind) else {
+                    // Metrics-only: never-expire kinds are retained on purpose.
+                    // Prefer global `max_age_secs` as the "would have expired"
+                    // reference when set; when only per-kind ages apply
+                    // (`max_age_secs = None`), still count so dry-run/dogfood
+                    // skip totals are not under-counted.
+                    if let Some(ref_age) = opts.max_age_secs {
+                        let ref_cutoff = now.saturating_sub(ref_age.max(0));
+                        if last_active(&rec) < ref_cutoff {
+                            report.skipped_alive += 1;
+                        }
+                    } else {
+                        report.skipped_alive += 1;
+                    }
+                    continue;
+                };
+                let cutoff = now.saturating_sub(max_age.max(0));
                 if last_active(&rec) >= cutoff {
                     continue;
                 }
                 let path = Path::new(&rec.path);
-                // Cheap first-pass guard against the upfront snapshot; the
-                // per-candidate re-check below re-confirms against a fresh row.
-                if !opts.force && is_guarded(&rec, &live_cwds) {
+                if !opts.force
+                    && (is_guarded(&rec, live_cwds) || is_path_protected(path, &opts.protect_paths))
+                {
                     report.skipped_alive += 1;
                     continue;
                 }
-                // Dry run: count the candidate without touching disk or DB. Skip
-                // a missing path — a real run sweeps it to dead first, so it's
-                // already counted in dead_removed (don't double-count here).
                 if opts.dry_run {
                     if path.exists() {
                         report.expired_removed += 1;
                     }
                     continue;
                 }
-                // Re-evaluate against a freshly-read row + live process scan right
-                // before the destructive step: the list snapshot is stale (earlier
-                // removals take time), so a concurrent touch_worktree_for_cwd
-                // (bumps last_accessed_at), a revived creator, or a process that
-                // chdir'd into the tree must still protect it.
+                // Fresh DB row + fresh CWD scan immediately before remove.
                 if !opts.force {
                     match db.get_by_id(&rec.id) {
                         Ok(Some(fresh)) => {
-                            if !is_reclaimable(&fresh, cutoff, &live_process_cwds()) {
+                            let recheck_scan = live_process_cwds();
+                            if !age_path_cwd_usable(&recheck_scan, false) {
+                                tracing::warn!(
+                                    "process CWD scan failed on pre-remove re-check; skipping remaining age-expiry (fail closed)"
+                                );
+                                return Ok(report);
+                            }
+                            let recheck_cwds: &[PathBuf] = match &recheck_scan {
+                                LiveCwdScan::Ok(v) => v.as_slice(),
+                                LiveCwdScan::Unsupported => &[],
+                                LiveCwdScan::Failed => {
+                                    unreachable!("gated by age_path_cwd_usable")
+                                }
+                            };
+                            if !is_reclaimable(&fresh, now, recheck_cwds, opts) {
                                 report.skipped_alive += 1;
                                 continue;
                             }
                         }
-                        // Fail closed: a vanished row (concurrently unregistered)
-                        // or an unreadable DB must not green-light a remove.
                         Ok(None) | Err(_) => continue,
                     }
                 }
                 if path.exists() {
                     match super::remove_worktree_with_delegate(path, delegate.clone()) {
                         Ok(_) => report.expired_removed += 1,
-                        // A failed remove (e.g. EPERM) leaves the record tracked
-                        // for a later retry; surface it instead of reporting zero.
                         Err(e) => {
                             tracing::warn!(
                                 path = %path.display(),
@@ -1718,7 +1920,6 @@ pub mod gc {
                         }
                     }
                 } else if db.unregister(&rec.id).unwrap_or(false) {
-                    // Path already gone: drop the stale record.
                     report.expired_removed += 1;
                 }
             }
@@ -1731,7 +1932,7 @@ pub mod gc {
     mod tests {
         use super::*;
 
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         #[test]
         fn pid_alive_from_kill_decodes_errno() {
             // Testable without needing a process in each errno state.
@@ -1744,15 +1945,24 @@ pub mod gc {
             assert!(pid_alive_from_kill(-1, libc::EACCES), "EACCES ⇒ alive");
         }
 
+        #[cfg(unix)]
         #[test]
         fn is_pid_alive_true_for_running_processes() {
             assert!(is_pid_alive(std::process::id()));
-            // PID 1 (init) always exists.
-            #[cfg(target_os = "linux")]
-            assert!(is_pid_alive(1), "init must be detected as alive");
+            // PID 1 (init/launchd) always exists on Unix.
+            assert!(is_pid_alive(1), "pid 1 must be detected as alive");
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(not(unix))]
+        #[test]
+        fn is_pid_alive_never_false_alive_on_non_unix() {
+            // Safe fallback: never report a pid as alive without a real probe.
+            assert!(!is_pid_alive(std::process::id()));
+            assert!(!is_pid_alive(0));
+            assert!(!is_pid_alive(u32::MAX));
+        }
+
+        #[cfg(unix)]
         #[test]
         fn is_pid_alive_false_for_guarded_pids() {
             // pid 0 and pid > i32::MAX are process-group selectors to kill(2), not
@@ -1761,6 +1971,7 @@ pub mod gc {
             assert!(!is_pid_alive(u32::MAX));
         }
 
+        #[cfg(unix)]
         #[test]
         fn is_pid_alive_false_for_reaped_child() {
             // A fully reaped child's pid is gone (ESRCH) and must read as dead.
@@ -1772,6 +1983,96 @@ pub mod gc {
             assert!(!is_pid_alive(pid));
         }
 
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[test]
+        fn live_process_cwds_includes_own_cwd_after_chdir() {
+            let _cwd_lock = crate::api::cwd_test_guard();
+            let tmp = tempfile::TempDir::new().unwrap();
+            let dir = dunce::canonicalize(tmp.path()).unwrap();
+            let _cwd = crate::api::CwdGuard(std::env::current_dir().unwrap());
+            std::env::set_current_dir(&dir).expect("chdir into temp");
+            let LiveCwdScan::Ok(cwds) = live_process_cwds() else {
+                panic!("CWD scan must succeed on this OS after chdir");
+            };
+            assert!(
+                scan_contains_cwd(&cwds, &dir),
+                "own CWD {dir:?} must appear in live_process_cwds (got {} entries)",
+                cwds.len()
+            );
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[test]
+        fn live_process_cwds_ok_and_nonempty_on_supported_os() {
+            let _cwd_lock = crate::api::cwd_test_guard();
+            match live_process_cwds() {
+                LiveCwdScan::Ok(cwds) => assert!(
+                    !cwds.is_empty(),
+                    "process CWD scan must observe at least one CWD on this OS"
+                ),
+                other => panic!("expected LiveCwdScan::Ok on supported OS, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn validate_cwd_scan_fails_closed_when_self_missing() {
+            let _cwd_lock = crate::api::cwd_test_guard();
+            assert!(
+                matches!(validate_cwd_scan(Vec::new()), LiveCwdScan::Failed),
+                "empty scan cannot observe self CWD"
+            );
+            assert!(
+                matches!(
+                    validate_cwd_scan(vec![PathBuf::from("/no/such/unrelated/cwd")]),
+                    LiveCwdScan::Failed
+                ),
+                "unrelated paths only ⇒ unusable scan"
+            );
+            let cwd = std::env::current_dir().unwrap();
+            match validate_cwd_scan(vec![cwd.clone()]) {
+                LiveCwdScan::Ok(v) => {
+                    assert_eq!(v.len(), 1);
+                    assert_eq!(v[0], cwd);
+                }
+                other => panic!("self path must validate: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn age_path_cwd_usable_fail_closed_on_failed_scan() {
+            assert!(
+                !age_path_cwd_usable(&LiveCwdScan::Failed, false),
+                "Failed scan must block age path"
+            );
+            assert!(
+                age_path_cwd_usable(&LiveCwdScan::Failed, true),
+                "force bypasses CWD scan requirement"
+            );
+            assert!(age_path_cwd_usable(
+                &LiveCwdScan::Ok(vec![PathBuf::from("/")]),
+                false
+            ));
+            assert!(age_path_cwd_usable(&LiveCwdScan::Unsupported, false));
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn vip_path_to_pathbuf_respects_nul_bound() {
+            let mut raw = [[0 as libc::c_char; 32]; 32];
+            // "ab" then NUL — rest garbage must not be read.
+            raw[0][0] = b'a' as libc::c_char;
+            raw[0][1] = b'b' as libc::c_char;
+            raw[0][2] = 0;
+            raw[0][3] = b'x' as libc::c_char;
+            let p = vip_path_to_pathbuf(&raw).expect("path");
+            assert_eq!(p, PathBuf::from("ab"));
+            // All zeros → None
+            assert!(vip_path_to_pathbuf(&[[0 as libc::c_char; 32]; 32]).is_none());
+            // No NUL within 1024 → None (not UB)
+            let no_nul = [[b'z' as libc::c_char; 32]; 32];
+            assert!(vip_path_to_pathbuf(&no_nul).is_none());
+        }
+
         #[test]
         fn cwd_within_matches_nested_and_canonical_paths() {
             let tmp = tempfile::TempDir::new().unwrap();
@@ -1781,6 +2082,12 @@ pub mod gc {
             assert!(cwd_within(&wt, &[wt.join("a").join("b")]));
             assert!(!cwd_within(&wt, &[tmp.path().join("other")]));
             assert!(!cwd_within(&wt, &[]));
+            // protect/cwd entry matching after canonicalize (raw path may differ).
+            let nested = wt.join("a").join("b");
+            let nested_canon = dunce::canonicalize(&nested).unwrap();
+            let wt_canon = dunce::canonicalize(&wt).unwrap();
+            assert!(cwd_within(&wt_canon, &[nested]));
+            assert!(cwd_within(&wt, &[nested_canon]));
         }
 
         fn rec_at(path: &str, created_at: i64) -> crate::db::WorktreeRecord {
@@ -1804,24 +2111,106 @@ pub mod gc {
 
         #[test]
         fn is_reclaimable_requires_expired_and_unguarded() {
-            let cutoff = 1_000;
-            // Expired (old created_at, never accessed) and unguarded → reclaimable.
-            assert!(is_reclaimable(&rec_at("/no/such/wt", 1), cutoff, &[]));
+            let now = 1_000;
+            // max_age=0 → cutoff=now; created_at=1 is expired.
+            let base = GcOptions {
+                max_age_secs: Some(0),
+                ..Default::default()
+            };
+            assert!(is_reclaimable(&rec_at("/no/such/wt", 1), now, &[], &base));
             // A recent last_accessed_at within the window protects it.
             let mut fresh = rec_at("/no/such/wt", 1);
-            fresh.last_accessed_at = Some(cutoff + 10);
-            assert!(!is_reclaimable(&fresh, cutoff, &[]));
-            // A live creator pid protects it.
+            fresh.last_accessed_at = Some(now + 10);
+            assert!(!is_reclaimable(&fresh, now, &[], &base));
+            // A live creator pid protects it (Unix probe only; non-Unix is never alive).
             let mut live_creator = rec_at("/no/such/wt", 1);
             live_creator.creator_pid = Some(std::process::id());
-            assert!(!is_reclaimable(&live_creator, cutoff, &[]));
+            #[cfg(unix)]
+            assert!(!is_reclaimable(&live_creator, now, &[], &base));
+            #[cfg(not(unix))]
+            assert!(
+                is_reclaimable(&live_creator, now, &[], &base),
+                "non-Unix PID probe is fail-closed (never alive)"
+            );
             // A live process CWD inside the tree protects it.
             let inside = std::path::PathBuf::from("/no/such/wt/sub");
             assert!(!is_reclaimable(
                 &rec_at("/no/such/wt", 1),
-                cutoff,
-                &[inside]
+                now,
+                &[inside],
+                &base
             ));
+            // protect_paths hit (same semantics as CWD) blocks reclaim.
+            let protect = std::path::PathBuf::from("/no/such/wt/nested");
+            let with_protect = GcOptions {
+                max_age_secs: Some(0),
+                protect_paths: vec![protect],
+                ..Default::default()
+            };
+            assert!(!is_reclaimable(
+                &rec_at("/no/such/wt", 1),
+                now,
+                &[],
+                &with_protect
+            ));
+            // skip_kinds / never-expire blocks reclaim even when otherwise expired.
+            let skip = GcOptions {
+                max_age_secs: Some(0),
+                skip_kinds: vec![WorktreeKind::Session],
+                ..Default::default()
+            };
+            assert!(!is_reclaimable(&rec_at("/no/such/wt", 1), now, &[], &skip));
+            let never_map = GcOptions {
+                max_age_secs: Some(0),
+                max_age_by_kind: [(WorktreeKind::Session, None)].into_iter().collect(),
+                ..Default::default()
+            };
+            assert!(!is_reclaimable(
+                &rec_at("/no/such/wt", 1),
+                now,
+                &[],
+                &never_map
+            ));
+            // Finite per-kind cutoff: age=100 with max=50 → reclaimable; max=200 → not.
+            let mut aged = rec_at("/no/such/wt", 1);
+            aged.last_accessed_at = Some(now - 100);
+            let short = GcOptions {
+                max_age_secs: Some(10_000),
+                max_age_by_kind: [(WorktreeKind::Session, Some(50))].into_iter().collect(),
+                ..Default::default()
+            };
+            assert!(is_reclaimable(&aged, now, &[], &short));
+            let long = GcOptions {
+                max_age_secs: Some(10),
+                max_age_by_kind: [(WorktreeKind::Session, Some(200))].into_iter().collect(),
+                ..Default::default()
+            };
+            assert!(!is_reclaimable(&aged, now, &[], &long));
+        }
+
+        #[test]
+        fn effective_max_age_precedence() {
+            let opts = GcOptions {
+                max_age_secs: Some(100),
+                skip_kinds: vec![WorktreeKind::Manual],
+                max_age_by_kind: [
+                    (WorktreeKind::Subagent, Some(10)),
+                    (WorktreeKind::Pool, None),
+                    // Conflict: map says expire Manual, skip_kinds wins.
+                    (WorktreeKind::Manual, Some(1)),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            };
+            assert_eq!(effective_max_age(&opts, WorktreeKind::Session), Some(100));
+            assert_eq!(effective_max_age(&opts, WorktreeKind::Subagent), Some(10));
+            assert_eq!(effective_max_age(&opts, WorktreeKind::Pool), None);
+            assert_eq!(
+                effective_max_age(&opts, WorktreeKind::Manual),
+                None,
+                "skip_kinds beats max_age_by_kind for the same kind"
+            );
         }
     }
 }
@@ -2849,6 +3238,8 @@ mod tests {
             // (GROK_HOME is process-global) can't INSERT-OR-REPLACE our row.
             let wt_path = fx.home.join("register-fields-wt");
             std::fs::create_dir(&wt_path).unwrap();
+            // register_worktree stores the canonical path (/var → /private/var on macOS).
+            let wt_canon = dunce::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
 
             super::super::register_worktree(
                 &wt_path,
@@ -2869,7 +3260,7 @@ mod tests {
                 .list(&ListFilter::default())
                 .unwrap()
                 .into_iter()
-                .filter(|r| r.path == wt_path)
+                .filter(|r| r.path == wt_canon)
                 .collect();
             assert_eq!(mine.len(), 1);
             assert_eq!(mine[0].kind, WorktreeKind::Session);
@@ -2989,9 +3380,10 @@ mod tests {
             let report = gc::gc_worktrees(
                 &db,
                 &gc::GcOptions {
-                    max_age_secs: Some(0), // everything is expired
+                    max_age_secs: Some(0),
                     force: false,
                     dry_run: false,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3079,6 +3471,7 @@ mod tests {
                     max_age_secs: Some(0),
                     force: true,
                     dry_run: false,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3119,6 +3512,7 @@ mod tests {
                     max_age_secs: Some(i64::MIN),
                     force: false,
                     dry_run: false,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3171,6 +3565,7 @@ mod tests {
                     max_age_secs: Some(0),
                     force: false,
                     dry_run: false,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3186,10 +3581,33 @@ mod tests {
             assert_eq!(report.expired_removed, 1);
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        fn scan_has_cwd_under(prefix: &std::path::Path) -> bool {
+            match gc::live_process_cwds() {
+                gc::LiveCwdScan::Ok(cwds) => cwds.iter().any(|p| {
+                    p.starts_with(prefix)
+                        || dunce::canonicalize(p).is_ok_and(|c| c.starts_with(prefix))
+                }),
+                _ => false,
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        fn wait_until(pred: impl Fn() -> bool) -> bool {
+            use std::time::Duration;
+            for _ in 0..200 {
+                if pred() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         #[test]
         fn gc_cwd_guard_skips_then_reclaims_expired_worktree() {
-            use std::time::Duration;
+            let _cwd_lock = crate::api::cwd_test_guard();
             let tmp = tempfile::TempDir::new().unwrap();
             let db = db_at(&tmp);
             let dir = tmp.path().join("cwd-wt");
@@ -3205,34 +3623,30 @@ mod tests {
                 git_ref: None,
                 head_commit: None,
                 session_id: None,
-                creator_pid: None, // creator gone: only the CWD guard can protect it
-                created_at: 1,     // very old → expired
+                creator_pid: None,
+                created_at: 1,
                 last_accessed_at: None,
                 status: crate::db::WorktreeStatus::Alive,
                 metadata: None,
             };
             db.register(&record).unwrap();
 
-            // A live process parked inside the expired worktree subtree.
             let mut child = std::process::Command::new("sleep")
                 .arg("30")
                 .current_dir(&nested)
                 .spawn()
                 .expect("spawn sleep");
-            // Wait for the kernel to reflect the child's CWD before GC scans.
             let want = dunce::canonicalize(&nested).unwrap();
-            let link = format!("/proc/{}/cwd", child.id());
-            for _ in 0..200 {
-                if std::fs::read_link(&link).is_ok_and(|p| p.starts_with(&want)) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            assert!(
+                wait_until(|| scan_has_cwd_under(&want)),
+                "live_process_cwds must observe the parked child before GC"
+            );
 
             let opts = gc::GcOptions {
                 max_age_secs: Some(0),
                 force: false,
                 dry_run: false,
+                ..Default::default()
             };
             let guarded = gc::gc_worktrees(&db, &opts).unwrap();
             assert_eq!(
@@ -3245,12 +3659,24 @@ mod tests {
             // Once the process exits, the same expired worktree is reclaimed.
             child.kill().ok();
             child.wait().ok();
+            assert!(
+                wait_until(|| !scan_has_cwd_under(&want)),
+                "child CWD must leave the scan after exit before reclaim"
+            );
             let reclaimed = gc::gc_worktrees(&db, &opts).unwrap();
             assert_eq!(
                 reclaimed.expired_removed, 1,
                 "no live process inside ⇒ the expired worktree is reclaimed"
             );
             assert!(!dir.exists());
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[test]
+        fn gc_age_path_fail_closed_when_scan_unusable() {
+            // Pure gate: Failed scan blocks age; force still allows.
+            assert!(!gc::age_path_cwd_usable(&gc::LiveCwdScan::Failed, false));
+            assert!(gc::age_path_cwd_usable(&gc::LiveCwdScan::Failed, true));
         }
 
         #[test]
@@ -3287,6 +3713,7 @@ mod tests {
                     max_age_secs: Some(0),
                     force: true,
                     dry_run: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3334,6 +3761,7 @@ mod tests {
                     max_age_secs: Some(0),
                     force: true,
                     dry_run: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3385,6 +3813,7 @@ mod tests {
                     max_age_secs: Some(0),
                     force: true,
                     dry_run: false,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -3404,12 +3833,14 @@ mod tests {
 
         /// True if a record with `path` exists in the DB (assert on our own
         /// record rather than total count: other tests may write to the same
-        /// open_default DB concurrently).
+        /// open_default DB concurrently). Matches `register_worktree`'s
+        /// canonical path storage (/var vs /private/var on macOS).
         fn record_present(db: &WorktreeDb, path: &std::path::Path) -> bool {
+            let canon = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
             db.list(&ListFilter::default())
                 .unwrap()
                 .iter()
-                .any(|r| r.path == path)
+                .any(|r| r.path == path || r.path == canon)
         }
 
         #[test]
@@ -3546,6 +3977,7 @@ mod tests {
                     max_age_secs: Some(0),
                     force: true,
                     dry_run: false,
+                    ..Default::default()
                 },
                 Some(delegate),
             )
@@ -3586,12 +4018,713 @@ mod tests {
                 max_age_secs: Some(86400),
                 force: true,
                 dry_run: false,
+                protect_paths: vec![std::path::PathBuf::from("/tmp/p")],
+                skip_kinds: vec![WorktreeKind::Manual],
+                max_age_by_kind: [(WorktreeKind::Subagent, Some(3600))].into_iter().collect(),
             };
             let json = serde_json::to_string(&opts).unwrap();
             let deser: gc::GcOptions = serde_json::from_str(&json).unwrap();
             assert_eq!(deser.max_age_secs, Some(86400));
             assert!(deser.force);
             assert!(!deser.dry_run);
+            assert_eq!(deser.protect_paths, opts.protect_paths);
+            assert_eq!(deser.skip_kinds, vec![WorktreeKind::Manual]);
+            assert_eq!(
+                deser.max_age_by_kind.get(&WorktreeKind::Subagent),
+                Some(&Some(3600))
+            );
+            // Absent new fields deserialize as empty (old agents).
+            let legacy = r#"{"max_age_secs":1,"force":false,"dry_run":true}"#;
+            let legacy_opts: gc::GcOptions = serde_json::from_str(legacy).unwrap();
+            assert!(legacy_opts.protect_paths.is_empty());
+            assert!(legacy_opts.skip_kinds.is_empty());
+            assert!(legacy_opts.max_age_by_kind.is_empty());
+
+            // JSON null value in map → never-expire (None).
+            let with_null = r#"{
+                "max_age_secs": 100,
+                "force": false,
+                "dry_run": false,
+                "max_age_by_kind": {"manual": null, "subagent": 3600}
+            }"#;
+            let null_opts: gc::GcOptions = serde_json::from_str(with_null).unwrap();
+            assert_eq!(
+                null_opts.max_age_by_kind.get(&WorktreeKind::Manual),
+                Some(&None)
+            );
+            assert_eq!(
+                null_opts.max_age_by_kind.get(&WorktreeKind::Subagent),
+                Some(&Some(3600))
+            );
+            let round = serde_json::to_string(&null_opts).unwrap();
+            let back: gc::GcOptions = serde_json::from_str(&round).unwrap();
+            assert_eq!(back.max_age_by_kind, null_opts.max_age_by_kind);
+        }
+
+        #[test]
+        fn gc_protect_paths_skips_age_expiry_including_dry_run() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let dir = tmp.path().join("protected-wt");
+            let nested = dir.join("nested");
+            std::fs::create_dir_all(&nested).unwrap();
+            let record = crate::db::WorktreeRecord {
+                id: "prot-1".to_string(),
+                path: dir.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&record).unwrap();
+
+            // Protect via a nested path (same canonicalize rules as cwd_within).
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: true,
+                    protect_paths: vec![nested],
+                    skip_kinds: vec![],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                report.expired_removed, 0,
+                "dry_run must not count protect_paths hits as would-expire"
+            );
+            assert_eq!(report.skipped_alive, 1);
+            assert!(dir.exists());
+
+            // Without protect, dry_run would-count it.
+            let unguarded = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(unguarded.expired_removed, 1);
+        }
+
+        #[test]
+        fn gc_protect_paths_pre_remove_recheck() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let dir = tmp.path().join("prot-real");
+            std::fs::create_dir(&dir).unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "prot-real".to_string(),
+                path: dir.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            })
+            .unwrap();
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: false,
+                    protect_paths: vec![dir.clone()],
+                    skip_kinds: vec![],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(report.expired_removed, 0);
+            assert_eq!(report.skipped_alive, 1);
+            assert!(dir.exists(), "protect_paths must block real remove");
+        }
+
+        #[test]
+        fn force_does_not_override_skip_kinds() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let dir = tmp.path().join("manual-force");
+            std::fs::create_dir(&dir).unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual-force".into(),
+                path: dir.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Manual,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            })
+            .unwrap();
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: true,
+                    dry_run: false,
+                    protect_paths: vec![],
+                    skip_kinds: vec![WorktreeKind::Manual],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                dir.exists(),
+                "force must not age-expire kinds listed in skip_kinds"
+            );
+            assert_eq!(report.expired_removed, 0);
+        }
+
+        #[test]
+        fn gc_skip_kinds_manual_age_only_not_dead() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let manual_dir = tmp.path().join("manual-alive");
+            let session_dir = tmp.path().join("session-alive");
+            std::fs::create_dir(&manual_dir).unwrap();
+            std::fs::create_dir(&session_dir).unwrap();
+            let base = crate::db::WorktreeRecord {
+                id: String::new(),
+                path: std::path::PathBuf::new(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual".into(),
+                path: manual_dir.clone(),
+                kind: WorktreeKind::Manual,
+                ..base.clone()
+            })
+            .unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "session".into(),
+                path: session_dir.clone(),
+                kind: WorktreeKind::Session,
+                ..base.clone()
+            })
+            .unwrap();
+            // Dead manual (missing path) still reclaimed on dead path.
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual-dead".into(),
+                path: "/nonexistent/manual-dead".into(),
+                kind: WorktreeKind::Manual,
+                ..base
+            })
+            .unwrap();
+
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: false,
+                    protect_paths: vec![],
+                    skip_kinds: vec![WorktreeKind::Manual],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                manual_dir.exists(),
+                "Manual must not age-expire when in skip_kinds"
+            );
+            assert!(
+                !session_dir.exists(),
+                "Session must still age-expire under skip_kinds=[Manual]"
+            );
+            assert_eq!(report.expired_removed, 1);
+            assert!(
+                report.skipped_alive >= 1,
+                "expired skip_kinds must surface in skipped_alive"
+            );
+            assert_eq!(report.dead_removed, 1, "dead Manual still unregisters");
+
+            // dry_run must not count skipped kinds as would-expire.
+            let dir2 = tmp.path().join("manual-dry");
+            std::fs::create_dir(&dir2).unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual-dry".into(),
+                path: dir2.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Manual,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            })
+            .unwrap();
+            let dry = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: true,
+                    protect_paths: vec![],
+                    skip_kinds: vec![WorktreeKind::Manual],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                dry.expired_removed, 0,
+                "dry_run must not count skip_kinds as expired"
+            );
+            assert!(
+                dry.skipped_alive >= 1,
+                "dry_run still counts expired skip_kinds as skipped_alive"
+            );
+            assert!(dir2.exists());
+        }
+
+        #[test]
+        fn per_kind_max_age_expires_session_not_manual() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let session_dir = tmp.path().join("session-alive");
+            let manual_dir = tmp.path().join("manual-alive");
+            std::fs::create_dir(&session_dir).unwrap();
+            std::fs::create_dir(&manual_dir).unwrap();
+            let base = crate::db::WorktreeRecord {
+                id: String::new(),
+                path: std::path::PathBuf::new(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&crate::db::WorktreeRecord {
+                id: "session".into(),
+                path: session_dir.clone(),
+                kind: WorktreeKind::Session,
+                ..base.clone()
+            })
+            .unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual".into(),
+                path: manual_dir.clone(),
+                kind: WorktreeKind::Manual,
+                ..base
+            })
+            .unwrap();
+
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: false,
+                    max_age_by_kind: [(WorktreeKind::Manual, None)].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                !session_dir.exists(),
+                "session must age-expire under default max_age"
+            );
+            assert!(
+                manual_dir.exists(),
+                "manual never-expire via max_age_by_kind"
+            );
+            assert_eq!(report.expired_removed, 1);
+            assert!(report.skipped_alive >= 1);
+        }
+
+        #[test]
+        fn per_kind_shorter_ttl_expires_subagent_keeps_session() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let now = crate::db::now_epoch_secs();
+            // Subagent last active 2h ago; session last active 2h ago.
+            // subagent TTL=1h → expire; session default=7d → keep.
+            let sub_dir = tmp.path().join("sub");
+            let sess_dir = tmp.path().join("sess");
+            std::fs::create_dir(&sub_dir).unwrap();
+            std::fs::create_dir(&sess_dir).unwrap();
+            let age = 2 * 3600;
+            let base = crate::db::WorktreeRecord {
+                id: String::new(),
+                path: std::path::PathBuf::new(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: now - age,
+                last_accessed_at: Some(now - age),
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&crate::db::WorktreeRecord {
+                id: "sub".into(),
+                path: sub_dir.clone(),
+                kind: WorktreeKind::Subagent,
+                ..base.clone()
+            })
+            .unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "sess".into(),
+                path: sess_dir.clone(),
+                kind: WorktreeKind::Session,
+                ..base
+            })
+            .unwrap();
+
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(7 * 86400),
+                    force: false,
+                    dry_run: false,
+                    max_age_by_kind: [(WorktreeKind::Subagent, Some(3600))].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!sub_dir.exists(), "subagent past 1h TTL must expire");
+            assert!(sess_dir.exists(), "session within 7d must stay");
+            assert_eq!(report.expired_removed, 1);
+        }
+
+        #[test]
+        fn force_does_not_override_max_age_by_kind_never() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let dir = tmp.path().join("manual-never");
+            std::fs::create_dir(&dir).unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual-never".into(),
+                path: dir.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Manual,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            })
+            .unwrap();
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: true,
+                    dry_run: false,
+                    max_age_by_kind: [(WorktreeKind::Manual, None)].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                dir.exists(),
+                "force must not age-expire never-kinds in max_age_by_kind"
+            );
+            assert_eq!(report.expired_removed, 0);
+        }
+
+        #[test]
+        fn dry_run_counts_per_kind_cutoffs() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let now = crate::db::now_epoch_secs();
+            let age = 2 * 3600;
+            let sub_dir = tmp.path().join("sub-dry");
+            let sess_dir = tmp.path().join("sess-dry");
+            let man_dir = tmp.path().join("man-dry");
+            std::fs::create_dir(&sub_dir).unwrap();
+            std::fs::create_dir(&sess_dir).unwrap();
+            std::fs::create_dir(&man_dir).unwrap();
+            let base = crate::db::WorktreeRecord {
+                id: String::new(),
+                path: std::path::PathBuf::new(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: now - age,
+                last_accessed_at: Some(now - age),
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&crate::db::WorktreeRecord {
+                id: "sub-dry".into(),
+                path: sub_dir.clone(),
+                kind: WorktreeKind::Subagent,
+                ..base.clone()
+            })
+            .unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "sess-dry".into(),
+                path: sess_dir.clone(),
+                kind: WorktreeKind::Session,
+                ..base.clone()
+            })
+            .unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "man-dry".into(),
+                path: man_dir.clone(),
+                kind: WorktreeKind::Manual,
+                ..base
+            })
+            .unwrap();
+
+            let dry = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(7 * 86400),
+                    force: false,
+                    dry_run: true,
+                    max_age_by_kind: [
+                        (WorktreeKind::Subagent, Some(3600)),
+                        (WorktreeKind::Manual, None),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                dry.expired_removed, 1,
+                "only subagent past its kind TTL is would-expire"
+            );
+            assert!(sub_dir.exists() && sess_dir.exists() && man_dir.exists());
+
+            // max_age_secs=0: session+subagent would-expire; manual never → skipped.
+            let dry0 = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: false,
+                    dry_run: true,
+                    max_age_by_kind: [
+                        (WorktreeKind::Subagent, Some(3600)),
+                        (WorktreeKind::Manual, None),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(dry0.expired_removed, 2);
+            assert!(dry0.skipped_alive >= 1);
+        }
+
+        #[test]
+        fn max_age_by_kind_only_without_default_enables_age_path() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let pool_dir = tmp.path().join("pool-only");
+            let sess_dir = tmp.path().join("sess-unlisted");
+            std::fs::create_dir(&pool_dir).unwrap();
+            std::fs::create_dir(&sess_dir).unwrap();
+            let base = crate::db::WorktreeRecord {
+                id: String::new(),
+                path: std::path::PathBuf::new(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Session,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&crate::db::WorktreeRecord {
+                id: "pool-only".into(),
+                path: pool_dir.clone(),
+                kind: WorktreeKind::Pool,
+                ..base.clone()
+            })
+            .unwrap();
+            // Session has no map entry and max_age_secs=None → must not expire.
+            db.register(&crate::db::WorktreeRecord {
+                id: "sess-unlisted".into(),
+                path: sess_dir.clone(),
+                kind: WorktreeKind::Session,
+                ..base
+            })
+            .unwrap();
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: None,
+                    force: false,
+                    dry_run: false,
+                    max_age_by_kind: [(WorktreeKind::Pool, Some(0))].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!pool_dir.exists(), "listed kind expires");
+            assert!(
+                sess_dir.exists(),
+                "unlisted kind must not expire when max_age_secs=None"
+            );
+            assert_eq!(report.expired_removed, 1);
+        }
+
+        #[test]
+        fn skip_kinds_beats_max_age_by_kind_on_same_kind() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let dir = tmp.path().join("manual-conflict");
+            std::fs::create_dir(&dir).unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual-conflict".into(),
+                path: dir.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Manual,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            })
+            .unwrap();
+            let opts = gc::GcOptions {
+                max_age_secs: Some(0),
+                force: true,
+                dry_run: false,
+                skip_kinds: vec![WorktreeKind::Manual],
+                max_age_by_kind: [(WorktreeKind::Manual, Some(0))].into_iter().collect(),
+                ..Default::default()
+            };
+            let report = gc::gc_worktrees(&db, &opts).unwrap();
+            assert!(
+                dir.exists(),
+                "skip_kinds must win over max_age_by_kind Some(secs)"
+            );
+            assert_eq!(report.expired_removed, 0);
+
+            let dry = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    dry_run: true,
+                    force: false,
+                    ..opts
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                dry.expired_removed, 0,
+                "dry_run must not count skip-winning kinds as would-expire"
+            );
+            assert!(dry.skipped_alive >= 1);
+        }
+
+        #[test]
+        fn configurable_manual_can_expire() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let dir = tmp.path().join("manual-expire");
+            std::fs::create_dir(&dir).unwrap();
+            db.register(&crate::db::WorktreeRecord {
+                id: "manual-exp".into(),
+                path: dir.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".to_string(),
+                kind: WorktreeKind::Manual,
+                creation_mode: "linked".to_string(),
+                git_ref: None,
+                head_commit: None,
+                session_id: None,
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::db::WorktreeStatus::Alive,
+                metadata: None,
+            })
+            .unwrap();
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(7 * 86400),
+                    force: false,
+                    dry_run: false,
+                    max_age_by_kind: [(WorktreeKind::Manual, Some(0))].into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                !dir.exists(),
+                "manual with explicit max_age_by_kind must be configurable to expire"
+            );
+            assert_eq!(report.expired_removed, 1);
         }
 
         #[test]

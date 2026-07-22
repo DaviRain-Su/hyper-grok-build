@@ -1,5 +1,13 @@
 use super::*;
 
+/// Running-turn display fields for `x.ai/queue/changed` (clients paint turn-start UI).
+pub(super) struct RunningPromptDisplay {
+    pub id: String,
+    pub text: String,
+    pub kind: String,
+    pub combined_texts: Option<Vec<String>>,
+}
+
 impl SessionActor {
     /// Queue a user-originated prompt (writes to prompt history).
     ///
@@ -171,6 +179,7 @@ impl SessionActor {
                 last_editor: None,
                 kind: kind.to_string(),
                 text: Self::queue_text_from_blocks(&prompt_blocks),
+                combined_texts: None,
             })
         };
         let log_prompt_id = prompt_id.clone();
@@ -206,11 +215,7 @@ impl SessionActor {
             .tool_context
             .goal_loop_active_gate
             .load(std::sync::atomic::Ordering::Relaxed);
-        let blocked_in_wait = self
-            .tool_context
-            .blocking_wait_depth
-            .load(std::sync::atomic::Ordering::SeqCst)
-            > 0;
+        let blocked_in_wait = self.tool_context.blocking_wait_depth.depth() > 0;
         let held_user_queue = state.pending_inputs.iter().any(|queued| {
             !queued.origin.is_synthetic()
                 && Some(queued.prompt_id.as_str()) != running_front_id.as_deref()
@@ -340,6 +345,7 @@ impl SessionActor {
                 last_editor: meta.last_editor.clone(),
                 kind: meta.kind.clone(),
                 text: meta.text.clone(),
+                combined_texts: meta.combined_texts.clone(),
                 position: out.len(),
             });
         }
@@ -350,20 +356,75 @@ impl SessionActor {
     /// Fire-and-forget via the gateway, carrying `sessionId`
     /// so session routing fans it to every attached client. Never persisted.
     pub(super) fn broadcast_queue_changed(&self, state: &State) {
+        let running = state.running_prompt_id().and_then(|pid| {
+            state
+                .pending_inputs
+                .iter()
+                .find(|i| i.prompt_id == pid)
+                .map(Self::running_display_from_item)
+        });
+        self.broadcast_queue_changed_inner(state, running);
+    }
+
+    /// Broadcast with explicit running-turn display (promote before `running_task`
+    /// so clients paint before the user-echo races in).
+    pub(super) fn broadcast_queue_changed_promoting(
+        &self,
+        state: &State,
+        running: RunningPromptDisplay,
+    ) {
+        self.broadcast_queue_changed_inner(state, Some(running));
+    }
+
+    pub(super) fn running_display_from_item(item: &InputItem) -> RunningPromptDisplay {
+        let meta = item.queue_meta.as_ref();
+        RunningPromptDisplay {
+            id: item.prompt_id.clone(),
+            text: meta
+                .map(|m| m.text.clone())
+                .unwrap_or_else(|| Self::queue_text_from_blocks(&item.prompt_blocks)),
+            kind: meta
+                .map(|m| m.kind.clone())
+                .unwrap_or_else(|| "prompt".to_string()),
+            combined_texts: meta
+                .and_then(|m| m.combined_texts.clone())
+                .filter(|v| v.len() >= 2),
+        }
+    }
+
+    fn broadcast_queue_changed_inner(&self, state: &State, running: Option<RunningPromptDisplay>) {
+        let running_id = running.as_ref().map(|r| r.id.clone());
+        // Exclude the running/promoting row from `entries` (same as when
+        // `running_task` is set).
+        let mut entries = self.build_queue_wire(state);
+        if let Some(rid) = running_id.as_deref() {
+            entries.retain(|e| e.id != rid);
+            for (i, e) in entries.iter_mut().enumerate() {
+                e.position = i;
+            }
+        }
+        let (running_text, running_kind, running_combined_texts) = match running {
+            Some(r) => (Some(r.text), Some(r.kind), r.combined_texts),
+            None => (None, None, None),
+        };
         let payload = crate::session::prompt_queue::QueueChanged {
             session_id: self.session_info.id.0.to_string(),
-            entries: self.build_queue_wire(state),
-            // Correlation signal: the prompt the actor is currently
-            // draining, so subscribers can adopt `current_prompt_id`. `None`
-            // when no turn is running. Keyed on `running_task` (same lock as
-            // `pending_inputs`), not the early-cleared `current_prompt_id` pin.
-            running_prompt_id: state.running_prompt_id().map(str::to_string),
+            entries,
+            running_prompt_id: running_id,
+            running_text,
+            running_kind,
+            running_combined_texts,
         };
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),
             event = "server_broadcast_queue",
             running_prompt_id = payload.running_prompt_id.as_deref().unwrap_or(""),
+            combined_segs = payload
+                .running_combined_texts
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0),
             entry_count = payload.entries.len(),
             entries = ?payload.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
             session = self.session_info.id.0.as_ref(),
@@ -700,6 +761,165 @@ impl SessionActor {
         self.broadcast_queue_changed(&state);
     }
 
+    /// Merge consecutive plain prompts into `pending[0]` via
+    /// [`xai_prompt_queue::combine_prefix_len`]. `skip_ids` holds rows under
+    /// composer edit. Merged-away items complete as
+    /// [`PromptCompletionKind::RemovedFromQueue`].
+    pub(super) fn combine_front_pending_inputs(
+        pending: &mut std::collections::VecDeque<InputItem>,
+        skip_ids: &[&str],
+    ) {
+        use xai_prompt_queue::{CombineGate, combine_prefix_len};
+
+        if pending.len() < 2 {
+            return;
+        }
+        let gates: Vec<CombineGate<'_>> = pending.iter().map(Self::combine_gate).collect();
+        let n = combine_prefix_len(gates, skip_ids);
+        if n < 2 {
+            return;
+        }
+        for _ in 1..n {
+            let Some(next) = pending.remove(1) else {
+                break;
+            };
+            // The follower's text is folded into the front's turn below, so it
+            // still runs — but its own queue row is gone, so it resolves as
+            // RemovedFromQueue (the same completion a client sees for an
+            // explicit dequeue). The multi-client UI repaints its bubble from
+            // the promote broadcast's `running_combined_texts`.
+            Self::respond_removed_prompt(next.respond_to);
+            let extra = Self::joined_text_blocks(&next.prompt_blocks);
+            if let Some(front) = pending.front_mut() {
+                Self::append_text_to_prompt(front, &extra);
+            }
+        }
+    }
+
+    fn combine_gate(item: &InputItem) -> xai_prompt_queue::CombineGate<'_> {
+        let is_bash = Self::extract_bash_command(&item.prompt_blocks).is_some();
+        let is_plain_prompt =
+            item.queue_meta.as_ref().map(|m| m.kind.as_str()) == Some("prompt") && !is_bash;
+        let mut has_text = false;
+        let mut has_images = false;
+        let mut is_expanded_skill = false;
+        let mut non_text_non_image = false;
+        for block in &item.prompt_blocks {
+            match block {
+                acp::ContentBlock::Text(t) => {
+                    if Self::has_display_text(t) {
+                        is_expanded_skill = true;
+                    }
+                    if !t.text.is_empty() {
+                        has_text = true;
+                    }
+                }
+                acp::ContentBlock::Image(_) => has_images = true,
+                _ => non_text_non_image = true,
+            }
+        }
+        // Follower eligibility also requires single plain text; encode via
+        // is_expanded_skill / has_images / non_text_non_image.
+        let text = item
+            .queue_meta
+            .as_ref()
+            .map(|m| m.text.as_str())
+            .unwrap_or("");
+        xai_prompt_queue::CombineGate {
+            id: item.prompt_id.as_str(),
+            is_plain_prompt: is_plain_prompt && has_text && !non_text_non_image,
+            is_synthetic: item.origin.is_synthetic(),
+            is_expanded_skill,
+            is_bash,
+            has_images,
+            text: if text.is_empty() {
+                // Fall back so empty meta still participates when blocks have text.
+                item.prompt_blocks
+                    .iter()
+                    .find_map(|b| match b {
+                        acp::ContentBlock::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+            } else {
+                text
+            },
+        }
+    }
+
+    fn has_display_text(t: &acp::TextContent) -> bool {
+        t.meta
+            .as_ref()
+            .and_then(|m| m.get("displayText"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+    }
+
+    fn joined_text_blocks(blocks: &[acp::ContentBlock]) -> String {
+        use xai_prompt_queue::join_texts;
+        join_texts(blocks.iter().filter_map(|block| match block {
+            acp::ContentBlock::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
+            _ => None,
+        }))
+    }
+
+    fn append_text_to_prompt(item: &mut InputItem, extra: &str) {
+        use xai_prompt_queue::TEXT_SEPARATOR;
+
+        if extra.is_empty() {
+            return;
+        }
+        if let Some(meta) = item.queue_meta.as_mut() {
+            match meta.combined_texts.as_mut() {
+                Some(segs) => segs.push(extra.to_string()),
+                None => {
+                    meta.combined_texts = Some(vec![meta.text.clone(), extra.to_string()]);
+                }
+            }
+        }
+        // Append to the LAST text block so a multi-text front stays ordered
+        // (front text first, then the follower); `combined_texts` mirrors that.
+        if let Some(acp::ContentBlock::Text(t)) = item
+            .prompt_blocks
+            .iter_mut()
+            .rev()
+            .find(|b| matches!(b, acp::ContentBlock::Text(_)))
+        {
+            if !t.text.is_empty() {
+                t.text.push_str(TEXT_SEPARATOR);
+            }
+            t.text.push_str(extra);
+        }
+        if let Some(meta) = item.queue_meta.as_mut() {
+            meta.text = Self::queue_text_from_blocks(&item.prompt_blocks);
+        }
+        Self::stamp_combined_display_texts_meta(item);
+    }
+
+    fn stamp_combined_display_texts_meta(item: &mut InputItem) {
+        use xai_prompt_queue::stamp_combined_display_texts;
+
+        let Some(segs) = item
+            .queue_meta
+            .as_ref()
+            .and_then(|m| m.combined_texts.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        // Stamp the first text block (matches append_text_to_prompt); an
+        // image-first front would otherwise lose the replay multi-bubble meta.
+        let Some(acp::ContentBlock::Text(t)) = item
+            .prompt_blocks
+            .iter_mut()
+            .find(|b| matches!(b, acp::ContentBlock::Text(_)))
+        else {
+            return;
+        };
+        let map = t.meta.get_or_insert_with(acp::Meta::new);
+        stamp_combined_display_texts(map, &segs);
+    }
+
     /// Replace a queued item's prompt body with `new_text` and bump its LWW
     /// version metadata. Shared by `handle_edit_queued_prompt` and the
     /// turn-ended fallback in `handle_interject_queued_prompt`.
@@ -739,6 +959,7 @@ impl SessionActor {
         item.prompt_blocks = blocks;
         if let Some(meta) = item.queue_meta.as_mut() {
             meta.text = new_text;
+            meta.combined_texts = None;
             meta.version = meta.version.saturating_add(1);
             meta.last_editor = editor.map(str::to_string);
         }

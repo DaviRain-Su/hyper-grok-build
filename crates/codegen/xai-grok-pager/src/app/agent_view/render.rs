@@ -67,10 +67,13 @@ impl AgentView {
     /// Open the fullscreen subagent view for `child_sid`, replaying child
     /// `updates.jsonl` when scrollback only has the injected task prompt.
     pub(crate) fn open_subagent_fullscreen(&mut self, child_sid: String) {
-        if self.subagent_views.contains_key(&child_sid) {
-            crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
-            self.active_subagent = Some(child_sid);
+        if let Some(child) = self.subagent_views.get_mut(&child_sid) {
+            child.mark_as_subagent_view();
+        } else {
+            return;
         }
+        crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        self.active_subagent = Some(child_sid);
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
     ///
@@ -295,11 +298,12 @@ impl AgentView {
                     selected_entry.is_some_and(|e| e.block.supports_fullscreen()),
                 )
             };
-        let can_demote = self
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .is_some();
+        let can_demote = !self.is_subagent_view
+            && self
+                .session
+                .tracker
+                .running_execute_tool_call_id()
+                .is_some();
         let selected_can_kill = if self.active_pane == ActivePane::Catalog {
             false
         } else if self.active_pane == ActivePane::Tasks {
@@ -603,6 +607,7 @@ impl AgentView {
             && inner.height > 3
             && let Some(child_view) = self.subagent_views.get_mut(child_sid)
         {
+            child_view.mark_as_subagent_view();
             let (_, post_flush) = child_view.draw(
                 inner,
                 buf,
@@ -630,7 +635,6 @@ impl AgentView {
     }
     /// `area` is the screen region assigned to this agent view.
     /// When a tracing overlay is visible, this is smaller than `f.area()`.
-    ///
     #[allow(clippy::too_many_arguments)]
     /// Render the agent into `area`.
     ///
@@ -1020,6 +1024,7 @@ impl AgentView {
             &self.session.scheduled_tasks,
             self.cron_task_id.as_deref(),
             &queued_cron_ids,
+            &self.workflow_runs,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
             self.active_pane = ActivePane::Scrollback;
@@ -1225,6 +1230,7 @@ impl AgentView {
             &self.session.bg_tasks,
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
+            &self.workflow_runs,
         );
         if running_count > 0 {
             let spinner_frames = crate::glyphs::dot_spinner_frames();
@@ -1252,7 +1258,7 @@ impl AgentView {
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
                 .values()
-                .filter(|s| !s.finished)
+                .filter(|s| !s.finished && s.workflow_run_id.is_none())
                 .filter_map(|s| s.tokens_used)
                 .sum();
             status.push(
@@ -1958,11 +1964,12 @@ impl AgentView {
                 self.hit_cancel_button.rect = None;
                 self.hit_bg_button.rect = None;
             } else {
-                let has_running_execute = self
-                    .session
-                    .tracker
-                    .running_execute_tool_call_id()
-                    .is_some();
+                let has_running_execute = !self.is_subagent_view
+                    && self
+                        .session
+                        .tracker
+                        .running_execute_tool_call_id()
+                        .is_some();
                 let is_pending_user_input =
                     !self.permission_queue.is_empty() || self.question_view.is_some();
                 let goal_verifying = self
@@ -2190,17 +2197,11 @@ impl AgentView {
         }
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
-        let usage_visible = self
-            .prompt
-            .slash_controller
-            .registry()
-            .get("usage")
-            .is_some();
         let warning = self.credit_balance.as_ref().and_then(|bal| {
             crate::views::credit_bar::usage_warning_for_session(
                 bal,
                 self.auto_topup.as_ref(),
-                usage_visible,
+                self.billing_surface_visible,
                 self.chat_kind,
             )
         });
@@ -4127,7 +4128,7 @@ impl AgentView {
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
                 .values()
-                .filter(|s| !s.finished)
+                .filter(|s| !s.finished && s.workflow_run_id.is_none())
                 .filter_map(|s| s.tokens_used)
                 .sum();
             let close_rect = crate::views::goal_detail::render_goal_detail(
@@ -4142,6 +4143,18 @@ impl AgentView {
             );
             self.hit_goal_close.rect = close_rect;
             self.frame_occluder_rects.push(overlay_rect);
+        }
+        if self.show_workflows {
+            let runs = self.workflow_runs_newest_first();
+            let mut view = self.workflows_view.clone();
+            view.normalize(&runs);
+            let tick = self.tasks.tick_count() as usize;
+            let popup =
+                crate::views::workflows::render_workflows(buf, area, &runs, &mut view, tick);
+            self.workflows_view = view;
+            if let Some(popup) = popup {
+                self.frame_occluder_rects.push(popup);
+            }
         }
         self.pane_areas = layout.pane_areas();
         {

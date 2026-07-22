@@ -1,5 +1,8 @@
 # Auto-generated workspace root. Prefer editing per-crate Cargo.toml files.
 
+[patch.crates-io]
+async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "95b52ebdedf42143083cf3d6f0e0be7c84e9c808" }
+
 [workspace]
 resolver = "2"
 members = [
@@ -66,6 +69,7 @@ members = [
     "crates/codegen/xai-token-estimation",
     "crates/codegen/xai-tracing-macros",
     "crates/codegen/xai-tty-utils",
+    "crates/codegen/xai-workflow",
     "crates/common/xai-circuit-breaker",
     "crates/common/xai-computer-hub-core",
     "crates/common/xai-computer-hub-mcp-adapter",
@@ -206,6 +210,7 @@ regex = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
 reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
+rhai = { version = "1.25", features = ["serde"] }
 ring = "0.17"
 rsa = "0.9"
 runfiles = "0.1"

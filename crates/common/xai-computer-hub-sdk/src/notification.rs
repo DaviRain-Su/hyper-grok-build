@@ -233,8 +233,7 @@ mod tests {
         });
         let notif = HubNotification::parse(&value).expect("should parse as Unknown, not None");
         assert!(
-            matches!(notif, HubNotification::Unknown { ref method, .. }
-if method == "tool.notification"),
+            matches!(notif, HubNotification::Unknown { ref method, .. } if method == "tool.notification"),
             "tool.notification without envelope session_id should fall back to Unknown, got {notif:?}"
         );
     }
@@ -274,8 +273,7 @@ if method == "tool.notification"),
         });
         let notif = HubNotification::parse(&value).expect("should parse as Unknown, not None");
         assert!(
-            matches!(notif, HubNotification::Unknown { ref method, .. }
-if method == "tools_changed"),
+            matches!(notif, HubNotification::Unknown { ref method, .. } if method == "tools_changed"),
             "malformed tools_changed should fall back to Unknown, got {notif:?}"
         );
     }
@@ -357,8 +355,7 @@ if method == "tools_changed"),
         });
         let notif = HubNotification::parse(&value).expect("should parse as Unknown, not None");
         assert!(
-            matches!(notif, HubNotification::Unknown { ref method, .. }
-if method == "tool.notification"),
+            matches!(notif, HubNotification::Unknown { ref method, .. } if method == "tool.notification"),
             "malformed tool.notification should fall back to Unknown, got {notif:?}"
         );
     }

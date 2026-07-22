@@ -16,10 +16,14 @@ async fn minimal_queue_indicator_shows_while_running() {
     let content = ContentController::start().await.expect("start content");
     // Pace turn 1 so it's still streaming when we queue behind it.
     content.set_chunk_delay(Some(Duration::from_millis(150)));
-    content.set_turns([
+    let _turn_one = content.expect_agent_turn(
+        "running turn before minimal queue promotion",
         slow_turn_text("STEPONE"),
-        "STEPTWO queued prompt handled.".to_owned(),
-    ]);
+    );
+    let _turn_two = content.expect_agent_turn(
+        "promoted minimal queued prompt",
+        "STEPTWO queued prompt handled.",
+    );
 
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);

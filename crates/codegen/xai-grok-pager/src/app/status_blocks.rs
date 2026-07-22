@@ -1,16 +1,13 @@
-//! Read-only "status" text for the `/queue` and `/tasks` system blocks.
+//! Read-only system-block text for `/queue`, `/tasks`, and `/usage`.
 //!
-//! These build plain text that the dispatcher commits into scrollback as a
-//! `system` block. They work in every render mode, but are the *primary*
-//! inspection surface in minimal mode, which has no interactive `QueuePane` /
-//! `TasksPane`. Kept out of the (very large) `dispatch` module so the
-//! pure formatting is easy to read and unit-test; `dispatch` just gathers the
-//! active agent and pushes the returned text.
+//! Plain text committed into scrollback — the primary inspection surface in
+//! minimal mode (no interactive panes). Kept out of `dispatch` for easy
+//! unit tests.
 
 use crate::app::agent::BgTaskStatus;
 use crate::app::agent_view::AgentView;
 use crate::app::subagent::format_subagent_label;
-use crate::util::format_duration;
+use crate::util::{format_duration, group_thousands};
 
 /// `/queue` body — a read-only list of the queued prompts.
 ///
@@ -46,17 +43,50 @@ pub(crate) fn queue_block_text(agent: &AgentView) -> String {
     }
 }
 
-/// `/tasks` body — a read-only list of background tasks, subagents, and
-/// scheduled (`/loop`) tasks.
 ///
-/// Grouped subagents → background tasks/monitors → scheduled, each running-first
-/// then newest-first, matching the spirit of
 /// [`crate::views::tasks_pane::TasksPane`] without its styled rows.
 pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     let mut rows: Vec<String> = Vec::new();
 
+    let mut workflows: Vec<_> = agent.workflow_runs.iter().collect();
+    workflows.sort_by(|a, b| {
+        b.is_active()
+            .cmp(&a.is_active())
+            .then(b.received_at.cmp(&a.received_at))
+            .then(a.run_id.cmp(&b.run_id))
+    });
+    for run in workflows {
+        let active = run.active_agent_count();
+        let agents = match active {
+            0 => String::new(),
+            1 => " · 1 agent".to_string(),
+            n => format!(" · {n} agents"),
+        };
+        let phase = run
+            .current_phase
+            .as_deref()
+            .map(str::trim)
+            .filter(|phase| !phase.is_empty())
+            .map(|phase| format!(" · {phase}"))
+            .unwrap_or_default();
+        rows.push(format!(
+            "  {:<9}Workflow · {}{phase}{agents}  ({})",
+            if run.is_active() {
+                "running".to_string()
+            } else {
+                run.status.replace('_', " ")
+            },
+            run.name,
+            format_duration(std::time::Duration::from_millis(run.live_elapsed_ms()))
+        ));
+    }
+
     // ── Subagents ──
-    let mut subs: Vec<_> = agent.subagent_sessions.values().collect();
+    let mut subs: Vec<_> = agent
+        .subagent_sessions
+        .values()
+        .filter(|s| s.workflow_run_id.is_none())
+        .collect();
     subs.sort_by(|a, b| {
         b.is_running()
             .cmp(&a.is_running())
@@ -136,7 +166,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     }
 
     if rows.is_empty() {
-        "No background tasks or subagents.".to_string()
+        "No background tasks, workflows, or subagents.".to_string()
     } else {
         let header = format!(
             "Task{} ({}):",
@@ -144,6 +174,75 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
             rows.len()
         );
         join_header_rows(header, rows)
+    }
+}
+
+/// `/usage` body — per-session token and cost totals, scoped to the ledger's
+/// lifetime: since session start, or since the last `/resume`.
+pub(crate) fn session_usage_block_text(
+    usage: &xai_grok_shell::extensions::notification::PromptUsage,
+) -> String {
+    let t = &usage.totals;
+    if t.model_calls == 0 && usage.model_usage.is_empty() {
+        return if usage.usage_is_incomplete {
+            "Session usage: none recorded, but tracking is incomplete and may under-count."
+                .to_string()
+        } else {
+            "Session usage: no model calls yet in this session.".to_string()
+        };
+    }
+
+    let mut rows = Vec::new();
+    rows.push(format!(
+        "  Input tokens:   {} ({} cached)",
+        group_thousands(t.input_tokens),
+        group_thousands(t.cached_read_tokens),
+    ));
+    rows.push(format!(
+        "  Output tokens:  {} ({} reasoning)",
+        group_thousands(t.output_tokens),
+        group_thousands(t.reasoning_tokens),
+    ));
+    rows.push(format!(
+        "  Total tokens:   {}",
+        group_thousands(t.total_tokens)
+    ));
+    rows.push(format!(
+        "  Model calls:    {} · API time: {}",
+        group_thousands(t.model_calls),
+        format_duration(std::time::Duration::from_millis(t.api_duration_ms)),
+    ));
+    rows.push(format!("  Cost:           {}", format_cost(t)));
+
+    if usage.model_usage.len() > 1 {
+        rows.push("  By model:".to_string());
+        for (model, m) in &usage.model_usage {
+            rows.push(format!(
+                "    {model} — {} in / {} out · {}",
+                group_thousands(m.input_tokens),
+                group_thousands(m.output_tokens),
+                format_cost(m),
+            ));
+        }
+    }
+
+    if usage.usage_is_incomplete {
+        rows.push("  Note: usage is incomplete and may under-count.".to_string());
+    }
+
+    join_header_rows(
+        "Session usage (since start or last resume):".to_string(),
+        rows,
+    )
+}
+
+/// Cost cell. Ticks are 1e10 per USD; partial sums are scrubbed to absent.
+fn format_cost(m: &xai_grok_shell::extensions::notification::PromptUsageModel) -> String {
+    use xai_grok_shell::extensions::notification::ticks_to_usd;
+    match m.cost_usd_ticks {
+        Some(ticks) => format!("${:.4}", ticks_to_usd(ticks)),
+        None if m.cost_is_partial => "not available (not reported for some calls)".to_string(),
+        None => "not available (not reported)".to_string(),
     }
 }
 
@@ -182,6 +281,107 @@ fn join_header_rows(header: String, rows: Vec<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_shell::extensions::notification::{PromptUsage, PromptUsageModel};
+
+    fn model_row(input: u64, output: u64, ticks: Option<i64>) -> PromptUsageModel {
+        PromptUsageModel {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            cached_read_tokens: 0,
+            reasoning_tokens: 0,
+            model_calls: 1,
+            api_duration_ms: 1_000,
+            cost_usd_ticks: ticks,
+            cost_is_partial: false,
+            cost_missing_calls: 0,
+        }
+    }
+
+    #[test]
+    fn session_usage_block_empty_ledger() {
+        let usage = PromptUsage::default();
+        assert_eq!(
+            session_usage_block_text(&usage),
+            "Session usage: no model calls yet in this session."
+        );
+
+        // Empty but incomplete must not read as a clean zero.
+        let incomplete = PromptUsage {
+            usage_is_incomplete: true,
+            ..Default::default()
+        };
+        assert!(session_usage_block_text(&incomplete).contains("incomplete"));
+    }
+
+    #[test]
+    fn session_usage_block_formats_tokens_and_cost() {
+        let mut totals = model_row(1_234_567, 45_678, Some(12_345_000_000));
+        totals.cached_read_tokens = 1_000_000;
+        totals.reasoning_tokens = 12_000;
+        totals.model_calls = 42;
+        totals.api_duration_ms = 192_000;
+        let usage = PromptUsage {
+            totals,
+            ..Default::default()
+        };
+        let text = session_usage_block_text(&usage);
+        // Snapshot pins content and column alignment together; single-model
+        // sessions must skip the redundant by-model breakdown.
+        insta::assert_snapshot!("session_usage_block_full", text);
+    }
+
+    #[test]
+    fn session_usage_block_lists_models_when_multiple() {
+        let mut usage = PromptUsage {
+            totals: model_row(150, 15, None),
+            ..Default::default()
+        };
+        usage
+            .model_usage
+            .insert("grok-build".into(), model_row(100, 10, None));
+        usage
+            .model_usage
+            .insert("grok-4".into(), model_row(50, 5, None));
+        let text = session_usage_block_text(&usage);
+        assert!(text.contains("By model:"), "{text}");
+        assert!(text.contains("grok-build — 100 in / 10 out"), "{text}");
+        assert!(text.contains("grok-4 — 50 in / 5 out"), "{text}");
+    }
+
+    #[test]
+    fn session_usage_block_absent_cost_is_unknown_not_free() {
+        let usage = PromptUsage {
+            totals: model_row(100, 10, None),
+            ..Default::default()
+        };
+        let text = session_usage_block_text(&usage);
+        insta::assert_snapshot!("session_usage_block_absent_cost", text);
+        // Unknown cost must never read as free.
+        assert!(!text.contains("$0"), "{text}");
+    }
+
+    #[test]
+    fn session_usage_block_flags_partial_and_incomplete() {
+        let mut totals = model_row(100, 10, None);
+        totals.cost_is_partial = true;
+        let usage = PromptUsage {
+            totals,
+            usage_is_incomplete: true,
+            ..Default::default()
+        };
+        let text = session_usage_block_text(&usage);
+        assert!(text.contains("not reported for some calls"), "{text}");
+        assert!(text.contains("usage is incomplete"), "{text}");
+    }
+
+    #[test]
+    fn group_thousands_groups_digits() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
 
     #[test]
     fn first_nonempty_line_skips_blank_leading_lines() {

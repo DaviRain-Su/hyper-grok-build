@@ -10,17 +10,11 @@ use super::common::*;
 #[ignore]
 async fn empty_enter_force_sends_top_queued() {
     let content = ContentController::start().await.expect("start content");
-    let mut turn_one = content.expect_response_blocked(
-        "running turn before send-now",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(&slow_turn_text("TURNONE"))),
-    );
-    let mut turn_two = content.expect_response(
+    let mut turn_one = content
+        .expect_agent_turn_blocked("running turn before send-now", slow_turn_text("TURNONE"));
+    let mut turn_two = content.expect_agent_turn(
         "promoted queued follow-up",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(
-            "TURNTWO reply to the promoted follow-up.",
-        )),
+        "TURNTWO reply to the promoted follow-up.",
     );
 
     let binary = pager_binary().expect("resolve pager binary");

@@ -14,11 +14,14 @@ async fn interjection_reaches_model_ctrl_l_in_vscode_family() {
     let content = ContentController::start().await.expect("start content");
     // Gate turn 1's terminal event so the typed text + chord provably land
     // mid-turn regardless of suite load.
-    content.hold_agent_completions();
-    content.set_turns([
+    let mut turn_one = content.expect_agent_turn_blocked(
+        "running turn before VS Code send-now",
         slow_turn_text("TURNONE"),
-        "TURNTWO reply to the sent-now message.".to_owned(),
-    ]);
+    );
+    let _turn_two = content.expect_agent_turn(
+        "VS Code sent-now message",
+        "TURNTWO reply to the sent-now message.",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut env = content.env_for_pager();
@@ -36,12 +39,15 @@ async fn interjection_reaches_model_ctrl_l_in_vscode_family() {
     harness
         .wait_for_text("TURNONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
+        .await
+        .expect("turn 1 reached completion barrier");
 
     harness
         .inject_keys(b"please also check the logs")
         .expect("type message");
     harness.inject_keys(CTRL_L).expect("send-now via Ctrl+L");
-    content.release_agent_completions();
+    turn_one.release();
     harness
         .wait_for_text(
             "\u{276F} please also check the logs",

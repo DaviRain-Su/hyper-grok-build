@@ -18,8 +18,6 @@ use xai_grok_tools::types::tool::ToolKind;
 /// Resolved client-facing tool names for a role's prompt placeholders.
 ///
 /// Built parent-side from the role's resolved toolset, with one literal
-/// fallback per kind (mirroring the `unwrap_or_else(|| "update_goal".into())`
-/// pattern in `resolve_goal_tool_names`). An explicit `{model, agent_type}`
 /// role draws its names from the `describe_subagent_type` summary (so a
 /// `name_override` is reflected); an inherit / fail-open role draws them from
 /// the parent tool bridge. `{TOOLSET_TOOLS}` enumerates the role's toolset for

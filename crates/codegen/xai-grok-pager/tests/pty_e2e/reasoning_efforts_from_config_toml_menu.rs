@@ -45,7 +45,7 @@ async fn reasoning_efforts_from_config_toml_menu() {
         .wait_for_text("ConfigHigh", Duration::from_secs(10))
         .expect("config-driven label in /effort dropdown");
     assert!(
-        !harness.contains_text("Maximum reasoning"),
+        !harness.contains_text("Extended reasoning"),
         "config list must replace the built-in rows\nscreen:\n{}",
         harness.screen_contents()
     );

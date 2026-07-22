@@ -58,8 +58,7 @@ pub async fn spawn_grok_shell(
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 
     // Run the full bootstrap sequence: config resolution, process-level
-    // singletons (including `extract_bundled_files` which writes compiled-in
-    // skills to ~/.grok/skills/), and model catalog construction.
+    // singletons, and model catalog construction.
     let (agent_config, models_manager) =
         xai_grok_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -73,6 +72,8 @@ pub async fn spawn_grok_shell(
     // Clone before `auth_manager` is moved into the agent closure below, so the
     // pager (voice channel) can share the same refreshing bearer.
     let auth_manager_for_pager = auth_manager.clone();
+
+    let skills_paths = agent_config.skills.paths.clone();
 
     let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<ProviderRouterAgent>> + Send + 'static> = {
         Box::new(move |client_tx| {
@@ -88,7 +89,8 @@ pub async fn spawn_grok_shell(
     };
 
     // Spawn the agent thread with direct dispatch
-    let handle = spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone())?;
+    let handle =
+        spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone(), skills_paths)?;
 
     Ok(SpawnedAgent {
         _thread_handle: handle,
@@ -106,6 +108,7 @@ fn spawn_agent_thread_direct(
     spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<ProviderRouterAgent>> + Send + 'static>,
     channel: AcpAgentChannel,
     cancel: CancellationToken,
+    skills_paths: Vec<String>,
 ) -> Result<thread::JoinHandle<Result<()>>> {
     Ok(thread::Builder::new()
         .name("acp-agent-worker".into())
@@ -119,8 +122,45 @@ fn spawn_agent_thread_direct(
                 let agent_rc = spawn_agent(client_tx)?;
 
                 // Direct dispatch: RPC requests go straight to the agent
-                let gw_rx = AcpGatewayReceiver::new(channel.rx, agent_rc).with_tracing(true);
+                let gw_rx =
+                    AcpGatewayReceiver::new(channel.rx, agent_rc.clone()).with_tracing(true);
                 tokio::task::spawn_local(gw_rx.run());
+
+                let _skills_watcher = {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let workspace_user_dir =
+                        xai_grok_agent::prompt::workspace_user::optional_workspace_user_dir();
+                    xai_grok_shell::config::watcher::SkillsFileWatcher::start(
+                        Some(cwd.as_path()),
+                        workspace_user_dir.as_deref(),
+                        &skills_paths,
+                    )
+                    .map(|(mut watcher, mut skills_rx)| {
+                        let agent = agent_rc.clone();
+                        tokio::task::spawn_local(async move {
+                            while let Some(change) = skills_rx.recv().await {
+                                let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+                                match change {
+                                    xai_grok_shell::config::watcher::DiscoveryChange::Skills => {
+                                        tracing::info!(
+                                            "skill directory changed on disk; reloading skills for all sessions"
+                                        );
+                                        agent.reload_skills_all_sessions();
+                                        if created_discovery_dir {
+                                            agent.advertise_commands_all_sessions();
+                                        }
+                                    }
+                                    xai_grok_shell::config::watcher::DiscoveryChange::Workflows => {
+                                        tracing::info!(
+                                            "workflow directory changed on disk; re-advertising commands for all sessions"
+                                        );
+                                        agent.advertise_commands_all_sessions();
+                                    }
+                                }
+                            }
+                        })
+                    })
+                };
                 tokio::task::yield_now().await;
 
                 // Keep running until cancelled

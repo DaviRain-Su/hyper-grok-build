@@ -888,7 +888,8 @@ impl DemoApp {
                 code: KeyCode::Char('z'),
                 modifiers,
                 ..
-            } if modifiers.contains(KeyModifiers::CONTROL)
+            }
+if modifiers.contains(KeyModifiers::CONTROL)
                 && modifiers.contains(KeyModifiers::SHIFT) =>
             {
                 if self.textarea.redo() {

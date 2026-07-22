@@ -2,6 +2,146 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SchedulerVersion {
+    generation: uuid::Uuid,
+    revision: u64,
+}
+
+impl SchedulerVersion {
+    pub(super) fn generation(self) -> String {
+        self.generation.to_string()
+    }
+
+    pub(super) fn revision(self) -> u64 {
+        self.revision
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SchedulerClock {
+    version: SchedulerVersion,
+}
+
+#[derive(Debug)]
+pub(crate) struct SchedulerReservation {
+    source: SchedulerVersion,
+    generation: uuid::Uuid,
+    next_revision: u64,
+    remaining: u64,
+    rollover: Option<GenerationRollover>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GenerationRollover {
+    pub(crate) old_generation: uuid::Uuid,
+    pub(crate) new_generation: uuid::Uuid,
+}
+
+pub(crate) struct SchedulerCommit {
+    pub(crate) version: SchedulerVersion,
+    pub(crate) rollover: Option<GenerationRollover>,
+}
+
+impl SchedulerReservation {
+    pub(crate) fn version_at(&self, offset: u64) -> SchedulerVersion {
+        assert!(
+            offset < self.remaining,
+            "scheduler reservation offset is exhausted"
+        );
+        SchedulerVersion {
+            generation: self.generation,
+            revision: self.next_revision + offset,
+        }
+    }
+
+    pub(crate) fn commit_next(&mut self, clock: &mut SchedulerClock) -> SchedulerCommit {
+        assert!(self.remaining > 0, "scheduler reservation is exhausted");
+        let rollover = self.rollover;
+        let expected_source = rollover.map_or(
+            SchedulerVersion {
+                generation: self.generation,
+                revision: self.next_revision - 1,
+            },
+            |_| self.source,
+        );
+        assert_eq!(
+            clock.version, expected_source,
+            "stale scheduler reservation"
+        );
+
+        let version = self.version_at(0);
+        clock.version = version;
+        self.rollover = None;
+        self.remaining -= 1;
+        if self.remaining > 0 {
+            self.next_revision = self
+                .next_revision
+                .checked_add(1)
+                .expect("preflighted revision");
+        }
+        SchedulerCommit { version, rollover }
+    }
+}
+
+impl SchedulerClock {
+    pub(crate) fn new() -> Self {
+        Self {
+            version: SchedulerVersion {
+                generation: uuid::Uuid::now_v7(),
+                revision: 0,
+            },
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> SchedulerVersion {
+        self.version
+    }
+
+    pub(crate) fn prepare_transition(&self, count: usize) -> SchedulerReservation {
+        assert!(
+            count > 0 && count <= MAX_SCHEDULER_TRANSITIONS,
+            "invalid scheduler reservation size"
+        );
+        let count = count as u64;
+        let rollover =
+            self.version
+                .revision
+                .checked_add(count)
+                .is_none()
+                .then(|| GenerationRollover {
+                    old_generation: self.version.generation,
+                    new_generation: uuid::Uuid::now_v7(),
+                });
+        SchedulerReservation {
+            source: self.version,
+            generation: rollover
+                .map(|rollover| rollover.new_generation)
+                .unwrap_or(self.version.generation),
+            next_revision: if rollover.is_some() {
+                1
+            } else {
+                self.version.revision + 1
+            },
+            remaining: count,
+            rollover,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn at_revision_for_test(revision: u64) -> Self {
+        let mut clock = Self::new();
+        clock.version.revision = revision;
+        clock
+    }
+}
+
+impl Default for SchedulerClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
     #[error("invalid interval: {0}")]
@@ -12,6 +152,39 @@ pub enum SchedulerError {
 
     #[error("no scheduled task with id {0}; call scheduler_list to see active task ids")]
     TaskNotFound(String),
+
+    #[error("failed to persist scheduler resources: {0}")]
+    Persistence(#[source] std::io::Error),
+
+    #[error("failed to publish scheduler tombstone: {0}")]
+    Notification(#[source] crate::notification::NotificationAcknowledgementError),
+
+    #[error("durable scheduler removal requires an acknowledging notification consumer")]
+    NoDurableNotificationConsumer,
+
+    #[error("scheduler removal for {0} is pending")]
+    RemovalPending(String),
+
+    #[error("scheduler removal cancelled")]
+    Cancelled,
+
+    #[error("scheduler removal timed out")]
+    Timeout,
+}
+
+pub fn scheduler_tool_error(error: SchedulerError) -> xai_tool_runtime::ToolError {
+    let code = match &error {
+        SchedulerError::InvalidInterval(_)
+        | SchedulerError::TaskLimitReached(_)
+        | SchedulerError::TaskNotFound(_) => "scheduler_invalid_request",
+        SchedulerError::Persistence(_) => "scheduler_persistence",
+        SchedulerError::Notification(_) => "scheduler_notification",
+        SchedulerError::NoDurableNotificationConsumer => "scheduler_durability_unavailable",
+        SchedulerError::RemovalPending(_) => "scheduler_removal_pending",
+        SchedulerError::Cancelled => "scheduler_cancelled",
+        SchedulerError::Timeout => "scheduler_timeout",
+    };
+    xai_tool_runtime::ToolError::custom(code, error.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +195,7 @@ pub struct ScheduledTask {
     pub prompt: String,
     #[serde(default = "default_recurring")]
     pub recurring: bool,
+    #[serde(default)]
     pub durable: bool,
     #[serde(default)]
     pub foreground: bool,
@@ -43,6 +217,8 @@ pub struct ScheduledTask {
 pub const LOOP_FRESH_CHAIN_EVERY: u32 = 10;
 
 pub const LOOP_COMPLETION_OUTPUT_CAP: usize = 4_000;
+
+const MAX_SCHEDULER_TRANSITIONS: usize = 50;
 
 fn default_recurring() -> bool {
     true
@@ -101,13 +277,20 @@ impl ScheduledTask {
 }
 
 /// Persisted state for the scheduler, stored via Resources + ResourcesPersistence.
-/// Only durable tasks are serialized; non-durable tasks are filtered out before save.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SchedulerState {
     pub tasks: Vec<ScheduledTask>,
 }
 
 crate::register_resource!("grok_build", "Scheduler", SchedulerState);
+
+#[derive(Debug, Clone)]
+pub struct SchedulerSnapshot {
+    // Consumed by the authoritative scheduler snapshot layer in the next migration PR.
+    #[allow(dead_code)]
+    pub(crate) version: SchedulerVersion,
+    pub tasks: Vec<ScheduledTask>,
+}
 
 /// Handle for tools to communicate with the SchedulerActor.
 /// Ephemeral -- not serialized, not persisted. Inserted via `resources.insert()`.
@@ -127,10 +310,10 @@ pub enum SchedulerCommand {
     },
     Delete {
         id: String,
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, SchedulerError>>,
     },
     List {
-        reply: oneshot::Sender<Vec<ScheduledTask>>,
+        reply: oneshot::Sender<SchedulerSnapshot>,
     },
 }
 
@@ -189,22 +372,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_without_recurring_field_deserializes_as_recurring() {
+    fn legacy_state_defaults_recurring_and_durable_fields() {
         let json = r#"{"id":"abc123","intervalSecs":300,"prompt":"check",
-                       "durable":true,"createdAt":"2026-01-01T00:00:00Z",
-                       "lastFiredAt":null,"expiresAt":null}"#;
-        let task: ScheduledTask = serde_json::from_str(json).unwrap();
-        assert!(task.recurring);
-    }
-
-    #[test]
-    fn legacy_one_shot_state_still_deserializes() {
-        let json = r#"{"id":"abc123","intervalSecs":300,"prompt":"check",
-                       "recurring":false,"durable":true,
                        "createdAt":"2026-01-01T00:00:00Z",
                        "lastFiredAt":null,"expiresAt":null}"#;
         let task: ScheduledTask = serde_json::from_str(json).unwrap();
-        assert!(!task.recurring);
+        assert!(task.recurring && !task.durable);
     }
 
     #[test]
@@ -214,8 +387,54 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_state_default_is_empty() {
-        let state = SchedulerState::default();
-        assert!(state.tasks.is_empty());
+    fn clocks_start_with_fresh_uuid_v7_generations() {
+        let first = SchedulerClock::new().snapshot();
+        let second = SchedulerClock::new().snapshot();
+
+        assert_ne!(first.generation, second.generation);
+        assert_eq!(first.generation.get_version_num(), 7);
+        assert_eq!(first.revision(), 0);
+    }
+
+    #[test]
+    fn reservation_preflights_and_commits_in_order() {
+        let mut clock = SchedulerClock::new();
+        let mut reservation = clock.prepare_transition(2);
+
+        assert_eq!(clock.snapshot().revision(), 0);
+        let first = reservation.commit_next(&mut clock);
+        assert_eq!(first.version.revision(), 1);
+        assert!(first.rollover.is_none());
+        assert_eq!(reservation.commit_next(&mut clock).version.revision(), 2);
+        assert_eq!(clock.snapshot().revision(), 2);
+
+        let mut boundary = SchedulerClock::at_revision_for_test(u64::MAX - 1);
+        let mut final_step = boundary.prepare_transition(1);
+        assert_eq!(
+            final_step.commit_next(&mut boundary).version.revision(),
+            u64::MAX
+        );
+        let exhausted = SchedulerClock::at_revision_for_test(u64::MAX - 1);
+        let old_generation = exhausted.snapshot().generation;
+        let reservation = exhausted.prepare_transition(2);
+        let rollover = reservation.rollover.unwrap();
+        assert_eq!(rollover.old_generation, old_generation);
+        assert_ne!(rollover.new_generation, old_generation);
+        assert_eq!(exhausted.snapshot().revision(), u64::MAX - 1);
+    }
+
+    #[test]
+    fn stale_rollover_commit_does_not_mutate_clock() {
+        let mut clock = SchedulerClock::at_revision_for_test(u64::MAX);
+        let mut stale = clock.prepare_transition(1);
+        clock = SchedulerClock::new();
+        let before = clock.snapshot();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = stale.commit_next(&mut clock);
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(clock.snapshot(), before);
     }
 }

@@ -63,6 +63,12 @@ pub enum WarningTarget {
         #[serde(skip_serializing_if = "Option::is_none")]
         field: Option<String>,
     },
+    ModelProviderSection,
+    ModelProvider {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
 }
 
 impl WarningTarget {
@@ -73,13 +79,17 @@ impl WarningTarget {
             Self::Model { key, .. } => format!("model.\"{key}\""),
             Self::AuthProviderSection => "auth_provider".to_owned(),
             Self::AuthProvider { name, .. } => format!("auth_provider.\"{name}\""),
+            Self::ModelProviderSection => "model_providers".to_owned(),
+            Self::ModelProvider { id, .. } => format!("model_providers.\"{id}\""),
         }
     }
 
     pub(crate) fn field(&self) -> Option<&str> {
         match self {
-            Self::Model { field, .. } | Self::AuthProvider { field, .. } => field.as_deref(),
-            Self::ModelSection | Self::AuthProviderSection => None,
+            Self::Model { field, .. }
+            | Self::AuthProvider { field, .. }
+            | Self::ModelProvider { field, .. } => field.as_deref(),
+            Self::ModelSection | Self::AuthProviderSection | Self::ModelProviderSection => None,
         }
     }
 }
@@ -140,6 +150,30 @@ impl ConfigWarning {
     pub(crate) fn auth_provider_section(kind: ConfigWarningKind, reason: String) -> Self {
         Self {
             target: WarningTarget::AuthProviderSection,
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn model_provider(
+        id: &str,
+        field: Option<&str>,
+        kind: ConfigWarningKind,
+        reason: String,
+    ) -> Self {
+        Self {
+            target: WarningTarget::ModelProvider {
+                id: id.to_owned(),
+                field: field.map(str::to_owned),
+            },
+            kind,
+            reason,
+        }
+    }
+
+    pub(crate) fn model_provider_section(kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::ModelProviderSection,
             kind,
             reason,
         }
@@ -623,10 +657,10 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].kind, ConfigWarningKind::NotATable);
         assert!(matches!(
-                    &warnings[0].target,
-                    WarningTarget::Model { key, field: None }
-        if key == "oops"
-                ));
+            &warnings[0].target,
+            WarningTarget::Model { key, field: None }
+if key == "oops"
+        ));
     }
 
     /// Exhaustive literal (no `..`): a new struct field is a compile error
@@ -640,6 +674,7 @@ mod tests {
             api_key: Some("key".into()),
             env_key: Some(crate::agent::config::EnvKeys::single("ENV_KEY")),
             auth_provider: Some("corp-gateway".into()),
+            model_provider: Some("gateway".into()),
             api_base_url: Some("https://api.example.com".into()),
             max_completion_tokens: Some(1024),
             temperature: Some(0.5),

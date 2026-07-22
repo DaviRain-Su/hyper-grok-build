@@ -33,15 +33,18 @@ tmux source-file ~/.tmux.conf
 # or detach and reattach
 ```
 
-### Live diagnostics inside Grok
+### Terminal diagnostics
 
-Run this slash command:
+Run a read-only report from your shell without starting the TUI:
 
+```bash
+grok doctor
+grok doctor --json  # machine-readable report
 ```
-/terminal-setup
-```
 
-The command reports the terminal, multiplexer, **color level**, **available themes**, and a compact **Clipboard** status table, then lists any issues and fixes. When color is below truecolor, it explains how to unlock the truecolor-only themes (TokyoNight, RosePineMoon, OscuraMidnight) — or notes that Terminal.app is inherently 256-color. The aliases `/terminal-check` and `/terminal-info` run the same command.
+The command reports the terminal, multiplexer, **color level**, **available themes**, the same compact **Clipboard** preflight status used by `/doctor`, and—when this build can capture audio—the **microphone** it would open. It also lists detected issues, recommendations, and probes that could not run. It exits successfully when it produces a report, even when the report contains issues or recommendations. Color detection uses stderr or the controlling terminal rather than stdout, so `grok doctor --json | jq` reports the same terminal capabilities as direct output. Passive mic lookup does not open a stream and cannot detect a denied macOS microphone grant.
+
+Inside Grok, run the read-only `/doctor`. It uses the same diagnostic facts and clipboard policy, with runtime-only evidence such as the current screen mode, Kitty keyboard negotiation, and XTVERSION replies. When voice mode is on, it also shows the Voice section. Standalone doctor points to `/doctor` only for live-TUI evidence; skipped tmux and other external probes remain separate unavailable notes. When color is below truecolor, both reports explain how to unlock truecolor-only themes (TokyoNight, RosePineMoon, OscuraMidnight), or note that Terminal.app is inherently 256-color. The permanent aliases `/terminal-setup`, `/terminal-check`, and `/terminal-info` run the same slash command.
 
 ---
 
@@ -80,11 +83,11 @@ Detection has these limitations:
 
 **Fix**: Apply the two settings above, then restart Grok.
 
-**Verify**: Run `/terminal-setup`. Expect `color truecolor` and `themes all`. If `color` is `256` or `basic`, the issues section has the unlock fix.
+**Verify**: Run `/doctor`. Expect `color truecolor` and `themes all`. If `color` is `256` or `basic`, the issues section has the unlock fix.
 
 ### Problem: Clipboard problems
 
-Grok writes to the clipboard through up to three routes, shown in the **Clipboard** section of `/terminal-setup`:
+Grok writes to the clipboard through up to three routes, shown in the **Clipboard** section of `/doctor`:
 
 - **native** — Grok always writes to the native OS clipboard first.
 - **tmux buffer** — inside tmux, Grok also writes to the tmux paste buffer (`tmux load-buffer`).
@@ -92,7 +95,7 @@ Grok writes to the clipboard through up to three routes, shown in the **Clipboar
 
 **Linux Wayland**: on compositors that support the data-control protocol (GNOME 48+, KDE, Sway, Hyprland — the **Clipboard** section shows `data-control on`; the line is omitted off Wayland) copies work even if the terminal loses focus mid-copy. On older compositors (GNOME 46/47), keep the terminal focused until the copy toast confirms, and install the `wl-clipboard` package (provides `wl-copy`) for the most reliable route — Grok shows a startup warning when this applies. If data-control misbehaves on your compositor, set `GROK_CLIPBOARD_NO_DATA_CONTROL=1` to stop Grok from speaking that protocol entirely — copies then go through the CLI tools (`wl-copy`/`xclip`).
 
-**OSC 52 kill switch**: Grok emits OSC 52 on every Linux copy (and over SSH/tmux/containers). Terminals that do not implement OSC 52 may paint the base64 payload as visible garbage (for example some VNC/X11 clients such as OpenText Exceed). Set `GROK_CLIPBOARD_NO_OSC52=1` before starting Grok to force the OSC 52 leg off; `/terminal-setup` then shows `osc 52 off`. Native and tmux clipboard legs are unchanged.
+**OSC 52 kill switch**: Grok emits OSC 52 on every Linux copy (and over SSH/tmux/containers). Terminals that do not implement OSC 52 may paint the base64 payload as visible garbage (for example some VNC/X11 clients such as OpenText Exceed). Set `GROK_CLIPBOARD_NO_OSC52=1` before starting Grok to force the OSC 52 leg off; `/doctor` then shows `osc 52 off`. Native and tmux clipboard legs are unchanged.
 
 **Linux X11 selections**: X11 **PRIMARY** and **CLIPBOARD** are separate. Selecting text usually fills PRIMARY; an explicit Copy action fills CLIPBOARD. In Grok:
 
@@ -112,6 +115,8 @@ Apple Terminal ignores OSC 52, so copying from a Grok session over SSH can't rea
 `grok wrap` also protects your local terminal from dirty disconnects: if the wrapped command dies while a remote TUI has mouse reporting, the alternate screen, or similar modes enabled (for example the SSH connection drops mid-session), wrap resets those modes on exit instead of leaving the terminal spraying mouse escape codes.
 
 When Grok starts inside an SSH session that isn't already running under `grok wrap`, a one-time contextual tip above the prompt recommends `grok wrap ssh <host>` (it stops appearing on its own once you launch through wrap). To turn it off, set `ssh_wrap = false` under `[ui.contextual_hints]` in `~/.grok/config.toml`, or use `/settings` → **Show contextual hints** → **SSH wrap**.
+
+For repeated use, run `grok doctor fix ssh-wrap` on your **local machine**. Canonical `terminal.ssh-wrap` remains accepted and appears in JSON. After showing the exact change and asking for confirmation, it adds an interactive-shell alias to `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`. Automatic setup is unavailable on Windows. The safety scan refuses direct `ssh` alias/function declarations in that target file only; aliases from sourced files, plugins, or dynamic shell setup require manual review before confirming. Use `command ssh ...` to bypass the alias. For manually typed `ssh -f`, ControlPersist workflows, or OpenSSH's `~^Z` local suspend, use the bypass because wrapping is not fully transparent for those cases.
 
 > **Warning**: `grok wrap` is **experimental** and may misbehave in some setups.
 
@@ -149,6 +154,8 @@ Zellij intercepts many Ctrl/Alt key combinations before they reach full-screen T
 
 After this, Zellij starts **locked**. Most keys pass through to Grok. Press `Ctrl+g` to temporarily unlock Zellij when you need its pane/session management.
 
+In minimal mode, if `Ctrl+G` still does not reach Grok, open the command palette and select **Edit Prompt in External Editor**. This preserves the current draft; typing `/edit-prompt` starts an empty editor draft because the command itself occupies the composer.
+
 Zellij recommends this approach for TUI users.
 
 ### Problem: `Ctrl+Enter` doesn't interject in WezTerm
@@ -167,7 +174,7 @@ config.enable_kitty_keyboard = true
 
 Reload (`Cmd+Shift+R` or restart WezTerm) and restart `grok`.
 
-**Verify**: Run `/terminal-setup` inside Grok. While a turn is active, you see the interject hint, and `Ctrl+Enter` interjects.
+**Verify**: Run `/doctor` inside Grok. While a turn is active, you see the interject hint, and `Ctrl+Enter` interjects.
 
 **Quick workaround** (no global change):
 
@@ -196,7 +203,7 @@ terminal and skips the protocol for the same reason.
 **Fix**: Use **`Alt+Enter`** to insert a newline. xterm.js delivers it
 reliably as `ESC`+`CR` regardless of the keyboard protocol, and Grok's
 prompt hint bar advertises `Alt+Enter: newline` whenever it detects this
-situation. Run `/terminal-setup` to confirm — the `newline` row shows
+situation. Run `/doctor` to confirm — the `newline` row shows
 `Alt+Enter` when `Shift+Enter` is unavailable.
 
 ### Problem: Mouse scrolling stops working (native scrollbar takes over)
@@ -206,6 +213,15 @@ If Grok's mouse-driven scrolling stops responding and your terminal falls back t
 **Apple Terminal**: Go to **View > Allow Mouse Reporting** (keyboard shortcut `Cmd+R`) to re-enable it. A checkmark appears next to the option when active.
 
 **iTerm2**: Open **Settings** (`Cmd+,`) → **Profiles** → **Terminal** → ensure **"Enable mouse reporting"** is checked. Alternatively, restart iTerm2.
+
+### Problem: Voice dictation records nothing
+
+You start voice (`/voice` or `Ctrl+Space`), talk, and no words appear. After ~10 seconds Grok stops and shows a toast with the cause:
+
+- **"microphone delivered only silence"** — the mic opens but delivers essentially zero audio. On macOS this is almost always microphone permission: the OS feeds unauthorized apps silence instead of erroring, and the permission belongs to the *terminal app* hosting Grok (Ghostty, iTerm2, …), not Grok itself. Open **System Settings → Privacy & Security → Microphone**, enable your terminal, and **restart the terminal**. If access is already allowed, check the input device and level under **System Settings → Sound → Input** (a fully muted or dead input can look the same; residual noise may instead show the “heard audio” toast).
+- **"heard audio but no speech was detected"** — audio is flowing, so the mic path is open; speak into the selected device, or try again.
+
+**Verify**: Run `grok doctor` or `/terminal-setup` (with voice mode on). The **Voice** section shows the microphone Grok would capture from. Neither can detect a *denied permission* passively — macOS only reveals that once recording starts (the toast above).
 
 ### Problem: Byobu + GNU screen
 

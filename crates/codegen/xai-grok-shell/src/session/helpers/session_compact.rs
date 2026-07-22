@@ -1248,6 +1248,8 @@ mod compacted_history_shape_tests {
     fn fallback_minimal_history_has_no_tool_results() {
         use xai_chat_state::compaction_utils::validate_compacted_history;
         let state_context = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             recent_messages: vec![],
             last_user_query: Some("fix the bug".to_string()),
             agent_edited_paths: vec!["src/main.rs".to_string()],
@@ -1458,6 +1460,8 @@ mod compacted_history_shape_tests {
     #[test]
     fn fallback_preserves_subagents() {
         let original = CompactionStateContext {
+            cwd_generation: 0,
+            destination_project_instructions: None,
             recent_messages: vec![ConversationItem::assistant("working")],
             last_user_query: Some("fix the bug".to_string()),
             agent_edited_paths: vec!["src/main.rs".to_string()],
@@ -1485,6 +1489,8 @@ mod compacted_history_shape_tests {
             todos: vec![],
         };
         let fallback = CompactionStateContext {
+            cwd_generation: original.cwd_generation,
+            destination_project_instructions: original.destination_project_instructions.clone(),
             recent_messages: vec![],
             last_user_query: original.last_user_query.clone(),
             agent_edited_paths: original.agent_edited_paths.clone(),

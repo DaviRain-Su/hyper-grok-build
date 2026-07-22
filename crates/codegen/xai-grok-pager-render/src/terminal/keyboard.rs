@@ -2,8 +2,8 @@
 //!
 //! Classifies keyboard delivery semantics so input-handling code can consume one struct
 //! instead of branching on brand. The classification depends on the
-//! current `HostOs`, queried internally — today only macOS rows are
-//! populated. Extend [`KeyboardCapabilities`] with new fields (paste
+//! host OS — today only macOS rows are populated. Extend
+//! [`KeyboardCapabilities`] with new fields (paste
 //! protocol, focus reporting, custom escapes) instead of adding more
 //! `match self.brand` sites scattered through the pager.
 
@@ -81,13 +81,18 @@ impl KeyboardCapabilities {
     }
 }
 
-/// Classify keyboard capabilities for a given `(brand, os, display_server)`.
+/// Classify keyboard capabilities for the current host.
 ///
 /// Today the table is populated only for macOS; other OSes return the
 /// default (all-`Unknown`). When a Linux/Windows probe lands, add a
 /// per-OS arm here rather than forking the function.
 pub fn keyboard_capabilities(brand: TerminalName) -> KeyboardCapabilities {
-    match HostOs::current() {
+    keyboard_capabilities_for_host(brand, HostOs::current())
+}
+
+/// Classify keyboard capabilities for explicit host evidence.
+pub fn keyboard_capabilities_for_host(brand: TerminalName, host: HostOs) -> KeyboardCapabilities {
+    match host {
         HostOs::Macos => macos_capabilities(brand),
         HostOs::Linux | HostOs::Windows | HostOs::Other => KeyboardCapabilities::default(),
     }

@@ -2,7 +2,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use super::types::{SchedulerCommand, SchedulerHandle};
+use super::types::{SchedulerCommand, SchedulerHandle, scheduler_tool_error};
 
 /// Canonical tool name advertised by `SchedulerDeleteTool::id()`.
 /// See note on `SCHEDULER_CREATE_TOOL_NAME`.
@@ -115,9 +115,15 @@ impl xai_tool_runtime::Tool for SchedulerDeleteTool {
                 xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
             })?;
 
-        let removed = reply_rx.await.map_err(|_| {
-            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor dropped reply")
-        })?;
+        let removed = reply_rx
+            .await
+            .map_err(|_| {
+                xai_tool_runtime::ToolError::custom(
+                    "process_manager",
+                    "Scheduler actor dropped reply",
+                )
+            })?
+            .map_err(scheduler_tool_error)?;
 
         if removed {
             Ok(SchedulerDeleteOutput {

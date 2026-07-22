@@ -10,16 +10,14 @@ use super::common::*;
 #[ignore]
 async fn removed_queued_prompt_never_sent() {
     let content = ContentController::start().await.expect("start content");
-    content.set_turns([
+    let mut turn_one = content.expect_agent_turn_blocked(
+        "running turn while queued prompt is removed",
         slow_turn_text("TURNONE"),
-        "TURNTWO promoted prompt response.".to_owned(),
-    ]);
-    // Hold turn 1 open deterministically: its content streams, but its
-    // completion is gated until we release it below. This removes the
-    // turn-end race — the removed row can never be promoted out from under
-    // the removal, which under load previously let the "removed" prompt run
-    // as its own turn (consuming TURNTWO) and left the survivor stranded.
-    content.hold_agent_completions();
+    );
+    let _turn_two = content.expect_agent_turn(
+        "surviving queued prompt",
+        "TURNTWO promoted prompt response.",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =
@@ -35,6 +33,9 @@ async fn removed_queued_prompt_never_sent() {
     harness
         .wait_for_text("TURNONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
+        .await
+        .expect("turn 1 reached completion barrier");
 
     harness
         .inject_keys(b"queued alpha\r")
@@ -76,7 +77,7 @@ async fn removed_queued_prompt_never_sent() {
 
     // Now let turn 1 finish: the sole survivor `queued bravo` promotes FIFO
     // into turn 2.
-    content.release_agent_completions();
+    turn_one.release();
 
     // Assert promotion on the WIRE, not on scrollback text. The auto-shown
     // queue pane overlays the top of the scrollback, so the promoted turn's

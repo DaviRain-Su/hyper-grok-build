@@ -507,6 +507,10 @@ impl ReplayState {
     }
 
     fn handle_user_chunk(&mut self, chunk: &agent_client_protocol::ContentChunk) -> ReplayAction {
+        if crate::session::storage::is_host_turn_chunk(chunk) {
+            self.flush_host_turn_boundary();
+            return ReplayAction::Continue;
+        }
         let chunk_prompt_index = chunk
             .meta
             .as_ref()
@@ -546,6 +550,11 @@ impl ReplayState {
     }
 
     fn handle_agent_chunk(&mut self, chunk: &agent_client_protocol::ContentChunk) {
+        if crate::session::storage::is_host_turn_chunk(chunk) {
+            self.flush_host_turn_boundary();
+            return;
+        }
+
         // An agent chunk ends any in-progress user message.
         if self.in_user_message {
             self.flush_pending_user();
@@ -556,6 +565,14 @@ impl ReplayState {
             self.current_agent_text.push_str(&t.text);
             self.has_pending_agent = true;
         }
+    }
+
+    fn flush_host_turn_boundary(&mut self) {
+        if self.in_user_message {
+            self.flush_pending_user();
+            self.in_user_message = false;
+        }
+        self.flush_pending_agent();
     }
 
     fn conversation_has_markers(&self) -> bool {
@@ -690,6 +707,52 @@ mod tests {
                 acp::TextContent::new(text.to_string()),
             ))),
         )))
+    }
+
+    fn make_host_turn_update(session_id: &str, text: &str, user: bool) -> SessionUpdate {
+        let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        )))
+        .meta(serde_json::json!({ "hostTurn": true }).as_object().cloned());
+        let update = if user {
+            acp::SessionUpdate::UserMessageChunk(chunk)
+        } else {
+            acp::SessionUpdate::AgentMessageChunk(chunk)
+        };
+        SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            update,
+        )))
+    }
+
+    #[test]
+    fn test_replay_suppresses_full_host_turn_and_flushes_preceding_agent() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update_pi("s1", "real user", 0),
+            make_agent_update("s1", "real assistant"),
+            make_host_turn_update("s1", "/workflows", true),
+            make_host_turn_update("s1", "host-only slash output", false),
+            make_user_update_pi("s1", "next real user", 1),
+            make_agent_update("s1", "next real assistant"),
+        ];
+
+        let result = replay_updates(&updates, tmp.path(), 2);
+        let texts: Vec<_> = result
+            .conversation
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "real user",
+                "real assistant",
+                "next real user",
+                "next real assistant"
+            ]
+        );
+        assert_eq!(result.prompt_index_reached, 2);
     }
 
     fn make_rewind_marker(target: usize) -> SessionUpdate {

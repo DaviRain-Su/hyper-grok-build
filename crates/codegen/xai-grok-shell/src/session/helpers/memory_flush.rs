@@ -514,7 +514,7 @@ mod tests {
             max_flush_write_chars: 50,
             ..default_flush_config()
         };
-        let content = "# Title\n\n".to_string() + &"x".repeat(100);
+        let content = format!("# Title\n\n{}", "x".repeat(100));
         let result = process_flush_response(&content, &config);
         if let FlushResult::Accepted(text) = result {
             assert!(text.chars().count() <= 50);

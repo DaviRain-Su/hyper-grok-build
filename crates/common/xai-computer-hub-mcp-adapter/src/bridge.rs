@@ -560,10 +560,12 @@ mod tests {
                 match output {
                     ToolOutputWire::Mcp { blocks } => {
                         assert_eq!(blocks.len(), 2);
-                        assert!(matches!(&blocks[0], McpBlock::Text { text }
-if text == "result text"));
-                        assert!(matches!(&blocks[1], McpBlock::Image { mime_type, .. }
-if mime_type == "image/png"));
+                        assert!(
+                            matches!(&blocks[0], McpBlock::Text { text } if text == "result text")
+                        );
+                        assert!(
+                            matches!(&blocks[1], McpBlock::Image { mime_type, .. } if mime_type == "image/png")
+                        );
                     }
                     other => panic!("expected Mcp blocks, got {other:?}"),
                 }

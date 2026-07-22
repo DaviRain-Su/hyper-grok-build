@@ -56,9 +56,13 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
         .context("welcome")?;
 
     harness.inject_keys(b"scroll test\r")?;
+    // Follow mode pins the viewport to the bottom, so the top marker only
+    // flashes on-screen before scrolling above the viewport — polling for it
+    // races a fast stream. Wait for the bottom marker, which stays visible in
+    // follow mode once the response reaches it.
     harness
-        .wait_for_text("MARKER_TOP_OF_RESPONSE", Duration::from_secs(30))
-        .context("top marker while streaming")?;
+        .wait_for_text("MARKER_BOTTOM_OF_RESPONSE", Duration::from_secs(30))
+        .context("response reached bottom while following")?;
 
     // Wait for stream end. Follow mode pins the viewport to the bottom.
     let settle_deadline = Instant::now() + Duration::from_secs(45);

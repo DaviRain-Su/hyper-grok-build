@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod language;
+pub mod pcm;
 pub mod pipeline;
 pub mod probe;
 pub mod stt;
@@ -25,7 +26,10 @@ pub use language::{
 pub use pipeline::{VoiceCommand, run_voice_pipeline};
 #[cfg(feature = "audio")]
 pub use probe::run_mic_only_probe;
-pub use probe::{VoiceProbeOptions, VoiceProbeReport, format_probe_report, run_streaming_probe};
+pub use probe::{
+    InputDeviceInfo, VoiceProbeOptions, VoiceProbeReport, format_probe_report, input_device_info,
+    run_streaming_probe,
+};
 
 /// Whether this build can capture microphone audio (the `audio` feature).
 /// Production CLI builds enable it on every OS: macOS/Windows link `cpal`

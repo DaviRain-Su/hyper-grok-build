@@ -19,10 +19,10 @@ dependencies and environment state. NEVER set `HOME`, `CARGO_HOME`, `RUSTUP_HOME
 package-manager homes, virtualenvs, caches, or config dirs to scratch, or persist
 references to scratch, which is deleted when the goal ends.
 The plan's `{SCRATCH}` placeholder resolves there. The verifier AUDITS your committed tests
-and saved evidence rather than rebuilding them — leave honest
-proof or you WILL be refuted.
-Before calling `{goal_tool}(completed: true)`, run the
-plan's `## Verification plan` steps yourself and confirm the observations
-it lists hold — the harness re-checks against those SAME steps each attempt
-and inlines any outstanding verifier gaps above.
+and saved evidence rather than rebuilding them — leave honest proof or you
+WILL be refuted.
+Run the plan's `## Verification plan` steps yourself and confirm the
+observations it lists hold. The harness evaluates completion automatically
+after this round, re-checks the same steps adversarially when appropriate, and
+inlines any outstanding verifier gaps above.
 </system-reminder>

@@ -91,6 +91,7 @@ pub(crate) struct SummaryPatch {
     /// automatic LLM title generation so it never clobbers a title the user
     /// set via `/rename`. Ignored when `generated_title` is also set.
     pub generated_title_if_absent: Option<String>,
+    pub cwd_switch_bookkeeping_generation: Option<u64>,
 }
 
 impl Summary {
@@ -118,6 +119,17 @@ impl Summary {
         }
         if let Some(version) = patch.chat_format_version {
             self.chat_format_version = self.chat_format_version.max(version);
+        }
+        if let Some(generation) = patch.cwd_switch_bookkeeping_generation
+            && generation > self.cwd_switch_bookkeeping_generation
+        {
+            self.cwd_switch_bookkeeping_generation = generation;
+            // An explicit chat counter op already owns the resulting count
+            // (append increments; history replacement sets). Without one, this
+            // patch repairs a line found on disk after an earlier summary failure.
+            if patch.chat_messages.is_none() {
+                self.num_chat_messages = self.num_chat_messages.saturating_add(1);
+            }
         }
         if let Some(trace_turn) = &patch.trace_turn {
             // next_trace_turn is monotonic; keep request_id paired with the

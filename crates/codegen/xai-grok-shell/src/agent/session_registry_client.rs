@@ -71,7 +71,7 @@ pub struct UpdateRequest {
 // Response types
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
     pub session_id: String,

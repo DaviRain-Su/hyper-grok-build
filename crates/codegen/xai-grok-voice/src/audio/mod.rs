@@ -10,9 +10,11 @@
 #[cfg(not(target_os = "linux"))]
 mod capture;
 #[cfg(not(target_os = "linux"))]
-pub use capture::{CaptureHandle, capture_pcm_for_duration, spawn_pcm_capture};
+pub use capture::{CaptureHandle, capture_pcm_for_duration, input_device_info, spawn_pcm_capture};
 
 #[cfg(target_os = "linux")]
 mod capture_linux;
 #[cfg(target_os = "linux")]
-pub use capture_linux::{CaptureHandle, capture_pcm_for_duration, spawn_pcm_capture};
+pub use capture_linux::{
+    CaptureHandle, capture_pcm_for_duration, input_device_info, spawn_pcm_capture,
+};

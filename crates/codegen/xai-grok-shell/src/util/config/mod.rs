@@ -30,5 +30,5 @@ pub use tips::*;
 pub use worktree::*;
 pub use xai_grok_config_types::{
     CampaignOverride, ContextualHintsRemote, DisplayRefreshSettings, DoomLoopRecoverySettings,
-    GoalRoleModel, RemoteSettings,
+    GoalRoleModel, RemoteSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge,
 };

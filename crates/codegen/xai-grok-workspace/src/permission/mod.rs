@@ -1,5 +1,7 @@
 pub mod auto_mode;
+pub mod bash_command_splitting;
 pub mod claude_settings;
+mod exec_risk;
 mod hub_permission;
 mod manager;
 mod policy;
@@ -43,4 +45,3 @@ pub use prompter::{
 pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;
 pub use types::{AccessKind, ClientType, Decision, PermissionCommand, PermissionEvent};
-pub mod bash_command_splitting;

@@ -10,16 +10,14 @@ use crate::common::*;
 #[ignore]
 async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
     let content = ContentController::start().await.expect("start content");
-    content.set_turns([
+    let mut turn_one = content.expect_agent_turn_blocked(
+        "running turn before minimal Ctrl+O send-now",
         slow_turn_text("STEPONE"),
-        "STEPTWO send-now via Ctrl+O acknowledged.".to_owned(),
-    ]);
-    // Hold turn 1 open deterministically: its content streams, but its
-    // completion is gated until we release it below. Chunk-delay pacing alone
-    // left a wall-clock race — under parallel-suite load turn 1 could finish
-    // before Ctrl+O landed, so the follow-up was promoted FIFO as a plain
-    // prompt and the send-now chrome never appeared.
-    content.hold_agent_completions();
+    );
+    let _turn_two = content.expect_agent_turn(
+        "minimal Ctrl+O sent-now prompt",
+        "STEPTWO send-now via Ctrl+O acknowledged.",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut env = content.env_for_pager();
@@ -40,6 +38,9 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
     harness
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_blocked())
+        .await
+        .expect("turn 1 reached completion barrier");
 
     harness
         .inject_keys(b"minimal send-now payload\r")
@@ -62,7 +63,7 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
         .expect("send-now chrome (not a silent transcript open)");
 
     // Let the mock's gate go so the promoted turn streams its reply.
-    content.release_agent_completions();
+    turn_one.release();
     harness
         .wait_for_text("STEPTWO", Duration::from_secs(40))
         .expect("send-now turn reply");

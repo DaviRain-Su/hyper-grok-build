@@ -37,11 +37,15 @@ async fn edit_interject_lone_queued_row_keeps_tui_alive() {
         }
         s
     };
-    content.set_turns([
-        step_one,
-        "STEPTWO interjection acknowledged.".to_owned(),
-        "STEPTHREE liveness prompt handled.".to_owned(),
-    ]);
+    let _turn_one = content.expect_agent_turn("running turn before edited interjection", step_one);
+    let _turn_two = content.expect_agent_turn(
+        "edited interjection continuation",
+        "STEPTWO interjection acknowledged.",
+    );
+    let _turn_three = content.expect_agent_turn(
+        "post-interjection liveness prompt",
+        "STEPTHREE liveness prompt handled.",
+    );
 
     // Image fixture under the isolated HOME; the pasted absolute path becomes
     // an `[Image #1]` composer chip (path-paste detection reads + decodes it).

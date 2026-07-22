@@ -68,34 +68,30 @@ async fn edit_merge_sequential_pty() {
 
     // Three 1:1 replacements at widely separated, increasing lines so every
     // merged-hunk gap is computable (edits sit ~11 lines apart, context ±3).
-    enqueue_tool_turn(
-        &content,
-        "call_sr_1",
-        "search_replace",
-        edit_args(&abs, "v03", "charlie", EDIT_ONE_MARK),
-    );
-    enqueue_tool_turn(
-        &content,
-        "call_sr_2",
-        "search_replace",
-        edit_args(&abs, "v14", "november", "EDIT_TWO_MARK"),
-    );
-    enqueue_tool_turn(
-        &content,
-        "call_sr_3",
-        "search_replace",
-        edit_args(&abs, "v25", "yankee", EDIT_THREE_MARK),
-    );
+    let _edit_turns: [AgentTurnExpectation; 3] = [
+        expect_tool_turn(
+            &content,
+            "call_sr_1",
+            "search_replace",
+            edit_args(&abs, "v03", "charlie", EDIT_ONE_MARK),
+        ),
+        expect_tool_turn(
+            &content,
+            "call_sr_2",
+            "search_replace",
+            edit_args(&abs, "v14", "november", "EDIT_TWO_MARK"),
+        ),
+        expect_tool_turn(
+            &content,
+            "call_sr_3",
+            "search_replace",
+            edit_args(&abs, "v25", "yankee", EDIT_THREE_MARK),
+        ),
+    ];
     // The first prompt's turn ends on agent text — the break for the run.
     let break_text = format!("{BREAK_TEXT_SENTINEL} first batch settled.");
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_message_events(&break_text)),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_message_events(&break_text)),
-    );
+    let _break_turn: AgentTurnExpectation =
+        content.expect_agent_turn("first batch settled", &break_text);
     content.set_response(DONE_SENTINEL);
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -202,7 +198,7 @@ async fn edit_merge_sequential_pty() {
     harness
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle after break-case edit");
-    enqueue_tool_turn(
+    let _edit_four = expect_tool_turn(
         &content,
         "call_sr_4",
         "search_replace",

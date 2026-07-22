@@ -1414,10 +1414,78 @@ pub fn session_registry_from_toml_opt(root: &TomlValue) -> Option<bool> {
     }
 }
 
+/// Overrides `[cli] session_registry`; usable before `~/.grok/config.toml` exists.
+pub const SESSION_REGISTRY_ENV_VAR: &str = "GROK_SESSION_REGISTRY";
+
+pub fn session_registry_from_env_opt() -> Option<bool> {
+    xai_grok_config::env_bool(SESSION_REGISTRY_ENV_VAR)
+}
+
+/// Where a local session-registry override came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrySource {
+    /// [`SESSION_REGISTRY_ENV_VAR`].
+    Env,
+    /// `[cli] session_registry` in config.toml.
+    ConfigToml,
+}
+
+impl RegistrySource {
+    /// The user-facing name of this source, for diagnostics.
+    pub const fn label(self) -> &'static str {
+        match self {
+            RegistrySource::Env => SESSION_REGISTRY_ENV_VAR,
+            RegistrySource::ConfigToml => "[cli] session_registry",
+        }
+    }
+}
+
+/// Env var, then `[cli] session_registry`; `None` defers to remote settings.
+pub fn session_registry_local_override_sourced(
+    root: Option<&TomlValue>,
+) -> Option<(bool, RegistrySource)> {
+    if let Some(v) = session_registry_from_env_opt() {
+        return Some((v, RegistrySource::Env));
+    }
+    root.and_then(session_registry_from_toml_opt)
+        .map(|v| (v, RegistrySource::ConfigToml))
+}
+
+pub fn session_registry_local_override(root: Option<&TomlValue>) -> Option<bool> {
+    session_registry_local_override_sourced(root).map(|(v, _)| v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use toml::Value as TomlValue;
+
+    /// Env beats config.toml; unrecognized env defers; both absent defers to remote.
+    #[test]
+    #[serial_test::serial]
+    fn session_registry_local_override_precedence() {
+        let toml_true: TomlValue = toml::from_str("[cli]\nsession_registry = true").unwrap();
+        {
+            let _g = xai_grok_test_support::EnvGuard::set(SESSION_REGISTRY_ENV_VAR, "false");
+            assert_eq!(
+                session_registry_local_override_sourced(Some(&toml_true)),
+                Some((false, RegistrySource::Env)),
+                "env wins and reports itself as the source"
+            );
+        }
+        {
+            let _g = xai_grok_test_support::EnvGuard::set(SESSION_REGISTRY_ENV_VAR, "bogus");
+            assert_eq!(
+                session_registry_local_override_sourced(Some(&toml_true)),
+                Some((true, RegistrySource::ConfigToml)),
+                "unrecognized env values defer to config.toml"
+            );
+        }
+        {
+            let _g = xai_grok_test_support::EnvGuard::unset(SESSION_REGISTRY_ENV_VAR);
+            assert_eq!(session_registry_local_override_sourced(None), None);
+        }
+    }
 
     #[test]
     fn mcp_server_defined_at_checks_raw_key_presence() {

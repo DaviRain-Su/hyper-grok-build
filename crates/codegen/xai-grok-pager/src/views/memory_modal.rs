@@ -595,8 +595,7 @@ fn render_file_list(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, 
             );
 
             if is_selected
-                && matches!(state.mode, MemoryModalMode::ConfirmingDelete { idx }
-if idx == filt_idx)
+                && matches!(state.mode, MemoryModalMode::ConfirmingDelete { idx } if idx == filt_idx)
             {
                 let hint = " [x to confirm]";
                 let hint_w = hint.len() as u16;

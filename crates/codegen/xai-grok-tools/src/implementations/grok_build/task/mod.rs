@@ -315,11 +315,17 @@ impl xai_tool_runtime::Tool for TaskTool {
                 harness_agent_type: None,
                 completion_output_cap: None,
                 spawn_depth: None,
+                output_token_budget: None,
+                output_schema: None,
+                loop_task_id: None,
             },
             run_in_background: input.run_in_background,
             // Model-spawned subagents must still appear in the idle reminder.
             surface_completion: true,
+            await_to_completion: false,
             fork_context: false,
+            owner: SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
 

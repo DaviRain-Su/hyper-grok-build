@@ -47,7 +47,7 @@ Use `kill_command_or_subagent(task_id)` to terminate a running background task o
 
 ## Send a Running Task to the Background
 
-In the interactive TUI, press `Ctrl+G` to send the running foreground command to the background. Do this when:
+In the interactive TUI, press `Ctrl+B` to send the running foreground command to the background. This is the only backgrounding shortcut. Do this when:
 
 - A command takes longer than expected.
 - You want to ask the agent something else while a command runs.
@@ -175,7 +175,7 @@ Cancel a scheduled task by ID. Returns success if the task was found and removed
 
 ## The Tasks Pane
 
-In the interactive TUI, press `Ctrl+B` to toggle the tasks pane. This pane lists, in a single view:
+In the interactive TUI, press `Ctrl+G` to toggle the tasks pane. This pane lists, in a single view:
 
 - Running subagents and their progress
 - Active background tasks and their status
@@ -186,15 +186,15 @@ To toggle the prompt queue instead, press `Ctrl+;`.
 
 ---
 
-## The Watching Status Line
+## The Still-Running Status Line
 
 Whenever background work is still running while the agent looks idle — between turns, or while a turn is blocked on a user-interruptible wait — a persistent status line appears above the prompt:
 
 ```
-◎ watching · 1 command · 2 monitors · 1 loop · 1 subagent
+◎ 1 command · 2 monitors · 1 loop · 1 subagent still running
 ```
 
-It counts running background commands, monitors, scheduled `/loop` tasks, and background subagents, and updates live as each finishes. Any of them can wake the agent for a new turn (commands and subagents on completion, monitors on events, loops on their timer), so the cue stays up until nothing is left. Completions land in the transcript as a single "Task completed" chip — the transcript never repeats "N commands still running" lines.
+It counts running background commands, monitors, scheduled `/loop` tasks, and background subagents, and updates live as each finishes. Any of them can wake the agent for a new turn (commands and subagents on completion, monitors on events, loops on their timer), so the cue stays up until nothing is left. The running counts live only on this status line: completions land in the transcript as a single "Task completed" chip, and "Worked for" markers stay plain — the transcript never repeats or restates the running counts.
 
 ---
 

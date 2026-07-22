@@ -100,6 +100,7 @@ pub enum ToolKind {
     UseTool,
     Monitor,
     GoalUpdate,
+    Workflow,
     #[serde(other)]
     Other,
 }

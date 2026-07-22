@@ -502,7 +502,7 @@ impl AcpUpdateTracker {
     }
     /// Get the tool_call_id of the currently running Execute tool, if any.
     ///
-    /// Used by demotion (Ctrl-G) to know which tool to background.
+    /// Used by demotion (Ctrl+B) to know which tool to background.
     /// Returns None if no Execute tool is currently pending.
     pub fn running_execute_tool_call_id(&self) -> Option<&str> {
         self.pending_tools
@@ -991,10 +991,11 @@ impl AcpUpdateTracker {
         self.finish_thinking(scrollback);
         self.current_agent_msg = None;
         if is_todo_tool(&tc)
-            || is_goal_tool(&tc)
             || is_bg_plumbing_tool(&tc)
             || is_task_tool(&tc)
+            || is_goal_tool(&tc)
             || is_scheduler_tool(&tc)
+            || is_workflow_tool(&tc)
         {
             if is_task_tool(&tc) {
                 let is_background = tc
@@ -1117,7 +1118,6 @@ impl AcpUpdateTracker {
         );
         let tc_id = tcu.tool_call_id.0.to_string();
         if !is_completed {
-            let mut deferred_visible_change = false;
             let defer_as_bg = if let Some(pending) = self.pending_tools.get_mut(&tc_id) {
                 let bash_output = extract_bash_output_from_value(&tcu.fields.raw_output);
                 pending.base.update(tcu.fields);
@@ -1133,10 +1133,9 @@ impl AcpUpdateTracker {
                     let drop_placeholder = entry_placeholder && !has_real_command;
                     let desc = extract_raw_field(&pending.base, "description");
                     if drop_placeholder {
-                        deferred_visible_change = pending
-                            .entry_id
-                            .take()
-                            .is_some_and(|id| scrollback.remove_entry(id));
+                        if let Some(id) = pending.entry_id.take() {
+                            scrollback.remove_entry(id);
+                        }
                         Some((tc_id.clone(), desc, false))
                     } else {
                         if let Some(entry_id) = pending.entry_id {
@@ -1152,7 +1151,6 @@ impl AcpUpdateTracker {
                                 kind_changed = verb_group_kind_changed(&entry.block, &block);
                                 entry.block = block;
                                 entry.invalidate_cache();
-                                deferred_visible_change = true;
                             }
                             if kind_changed {
                                 scrollback.mark_structurally_dirty(entry_id);
@@ -1194,9 +1192,6 @@ impl AcpUpdateTracker {
                     self.pending_tools.remove(&deferred_id);
                 }
                 self.bg_deferred_tools.insert(deferred_id, description);
-                if deferred_visible_change && !is_replay {
-                    self.bump_agent_output_epoch();
-                }
                 return false;
             }
             unreachable!("both branches above return");
@@ -1283,6 +1278,21 @@ impl AcpUpdateTracker {
             .and_then(|m| m.get(user_message_chunk_meta::PROMPT_INDEX))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
+        if let Some(segments) = combined_display_texts_from_chunk(&chunk) {
+            let mut last_id = None;
+            for seg in &segments {
+                last_id = Some(scrollback.push_block(RenderBlock::UserPrompt(
+                    crate::scrollback::blocks::UserPromptBlock::new(seg.clone()),
+                )));
+            }
+            if let (Some(pi), Some(id)) = (prompt_index, last_id)
+                && let Some(entry) = scrollback.get_by_id_mut(id)
+                && let RenderBlock::UserPrompt(ref mut block) = entry.block
+            {
+                block.prompt_index = Some(pi);
+            }
+            return true;
+        }
         let display_override = match &chunk.content {
             acp::ContentBlock::Text(t) => t
                 .meta
@@ -1357,6 +1367,23 @@ impl AcpUpdateTracker {
         }
         true
     }
+}
+/// Per-prompt display strings from combine ([`user_prompt_meta::COMBINED_DISPLAY_TEXTS`]).
+fn combined_display_texts_from_chunk(chunk: &acp::ContentChunk) -> Option<Vec<String>> {
+    let acp::ContentBlock::Text(t) = &chunk.content else {
+        return None;
+    };
+    let arr = t
+        .meta
+        .as_ref()?
+        .get(user_prompt_meta::COMBINED_DISPLAY_TEXTS)?
+        .as_array()?;
+    let segs: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect();
+    (segs.len() >= 2).then_some(segs)
 }
 /// Parse `skillTokenRanges` content-block meta (`[[start, end], …]`) into
 /// byte ranges. Malformed entries are skipped; bounds/boundary validation
@@ -2236,12 +2263,6 @@ fn is_todo_tool(tc: &acp::ToolCall) -> bool {
         "todo_write" | "TodoWrite" | "Updating plan"
     ) || is_todo_variant(extract_variant(tc))
 }
-/// Check if a tool call is a goal-update tool (update_goal).
-///
-/// Suppressed from scrollback because the goal dashboard provides visibility.
-fn is_goal_tool(tc: &acp::ToolCall) -> bool {
-    tc.title == "update_goal" || matches!(extract_variant(tc), Some("UpdateGoal"))
-}
 /// Check if a tool call is a task tool (subagent spawn).
 ///
 /// Suppressed from scrollback because the SubagentBlock (created from
@@ -2250,6 +2271,25 @@ fn is_goal_tool(tc: &acp::ToolCall) -> bool {
 fn is_task_tool(tc: &acp::ToolCall) -> bool {
     matches!(tc.title.as_str(), "task" | "Task" | "spawn_subagent")
         || is_task_variant(extract_variant(tc))
+}
+fn is_goal_tool(tc: &acp::ToolCall) -> bool {
+    tc.title == "update_goal"
+        || tc.title.starts_with("Goal:")
+        || matches!(extract_variant(tc), Some("UpdateGoal" | "WorkflowSignal"))
+}
+fn is_workflow_tool(tc: &acp::ToolCall) -> bool {
+    let is_workflow = tc.title == "workflow" || matches!(extract_variant(tc), Some("Workflow"));
+    if !is_workflow {
+        return false;
+    }
+    let validate_only = tc.title.starts_with("Validating workflow")
+        || tc
+            .raw_input
+            .as_ref()
+            .and_then(|v| v.get("validate_only"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    !validate_only
 }
 /// Check if a tool call is a scheduler tool (scheduler_create/delete/list).
 ///
@@ -2664,6 +2704,45 @@ mod tests {
         acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
             acp::TextContent::new(text.to_string()),
         )))
+    }
+    #[test]
+    fn workflow_suppression_keeps_authoring_calls_visible() {
+        let wf = |title: &str, raw: serde_json::Value| {
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("t1")), title.to_string())
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .raw_input(Some(raw))
+        };
+        assert!(is_workflow_tool(&wf(
+            "Workflow: deep-research",
+            serde_json::json!({
+            "variant" : "Workflow", "name" : "deep-research" }),
+        )));
+        assert!(is_workflow_tool(&wf(
+            "Workflow: resume run",
+            serde_json::json!({ "variant" :
+            "Workflow", "resume_from_run_id" : "wf_1" }),
+        )));
+        assert!(!is_workflow_tool(&wf(
+            "Validating workflow 'triage'",
+            serde_json::json!({
+            "variant" : "Workflow", "script" : "let meta = ...", "validate_only" : true
+            }),
+        )));
+        assert!(is_workflow_tool(&wf(
+            "Creating workflow 'triage'",
+            serde_json::json!({
+            "variant" : "Workflow", "script" : "let meta = ..." }),
+        )));
+        assert!(!is_workflow_tool(&wf(
+            "workflow",
+            serde_json::json!({ "validate_only" :
+            true }),
+        )));
+        assert!(is_workflow_tool(&wf(
+            "workflow",
+            serde_json::json!({ "name" : "goal" }),
+        )));
     }
     fn tool_call(id: &str, kind: acp::ToolKind, title: &str) -> acp::SessionUpdate {
         acp::SessionUpdate::ToolCall(
@@ -5765,7 +5844,11 @@ mod tests {
             !modified,
             "bg tool deferral should suppress further output streaming"
         );
-        assert_eq!(tracker.agent_output_epoch(), output_epoch + 1);
+        assert_eq!(
+            tracker.agent_output_epoch(),
+            output_epoch,
+            "deferral must not bump the epoch (re-pushes the parked marker)"
+        );
         assert_eq!(sb.len(), 1, "real execute entry kept for demotion");
         assert!(
             !tracker.pending_tools.is_empty(),
@@ -5779,6 +5862,37 @@ mod tests {
             tracker.bg_deferred_tools.get("tc1").unwrap().as_deref(),
             Some("long running task"),
             "description should be extracted from raw_input"
+        );
+    }
+    /// Regression: a bg-tool deferral (here dropping the placeholder row) must
+    /// not bump `agent_output_epoch` — bumping re-pushed the parked marker.
+    #[test]
+    fn bg_tool_deferral_does_not_bump_agent_output_epoch() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            tool_call("tc1", acp::ToolKind::Other, "run_terminal_command"),
+            &meta(),
+            &mut sb,
+        );
+        assert_eq!(sb.len(), 1);
+        let epoch = tracker.agent_output_epoch();
+        let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("tc1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::InProgress))
+                .raw_input(Some(serde_json::json!(
+                    { "is_background" : true, "description" :
+                    "long running task" }
+                ))),
+        ));
+        assert!(!tracker.handle_update(update, &meta(), &mut sb));
+        assert_eq!(sb.len(), 0, "placeholder dropped on deferral");
+        assert!(tracker.bg_deferred_tools.contains_key("tc1"));
+        assert_eq!(
+            tracker.agent_output_epoch(),
+            epoch,
+            "deferral must not bump the epoch (re-pushes the parked marker)"
         );
     }
     /// Eager kind=Other title=`run_terminal_command` must not flash in the TUI.

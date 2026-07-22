@@ -107,7 +107,7 @@ async fn edit_hl_inplace_refresh_pty() {
     // Small unique edit on the field line after the closing """ (the spill zone).
     let old = "    notes: str = Field(..., min_length=1)";
     let new = "    notes: str = Field(..., min_length=2)  # HL upgrade target";
-    enqueue_tool_turn(
+    let _tool_turn = expect_tool_turn(
         &content,
         "call_edit_hl",
         "search_replace",

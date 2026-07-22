@@ -14,11 +14,16 @@ use super::common::*;
 async fn cancel_discards_buffered_interjection() {
     let content = ContentController::start().await.expect("start content");
     content.set_chunk_delay(Some(Duration::from_millis(150)));
-    content.set_turns([
-        slow_turn_text("CANCELTURN"),
+    let _cancelled_turn =
+        content.expect_agent_turn("turn cancelled by send-now", slow_turn_text("CANCELTURN"));
+    let _explicitly_cancelled_turn = content.expect_agent_turn(
+        "send-now turn cancelled explicitly",
         slow_turn_text("STEERTURN"),
-        "FRESHTURN after cancel.".to_owned(),
-    ]);
+    );
+    let _fresh_turn = content.expect_agent_turn(
+        "fresh turn after explicit cancel",
+        "FRESHTURN after cancel.",
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =

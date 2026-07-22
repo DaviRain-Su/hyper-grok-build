@@ -36,8 +36,8 @@ pub mod scroll_matrix;
 pub mod timing;
 
 pub use content::{
-    ContentController, InferenceEndpoint, InferenceExpectation, InferenceRequestMatcher, MockModel,
-    ScriptedResponse, SseEvent, sse,
+    AgentTurnExpectation, ContentController, InferenceEndpoint, InferenceExpectation,
+    InferenceRequestMatcher, MockModel, ScriptedResponse, SseEvent, sse,
 };
 pub use env::pager_binary;
 pub use flows::{

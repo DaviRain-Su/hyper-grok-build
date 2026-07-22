@@ -15,10 +15,10 @@ async fn cancel_then_resend_prompt_appears_once() {
     // Turn 1 is rewound pre-first-token (the 30s pacing guarantees the
     // pristine window); turn 2 is the resend's reply, streamed after the
     // pacing is dropped below.
-    content.set_turns([
-        "GONE never streams.".to_owned(),
-        "RESENT_REPLY to the restored prompt.".to_owned(),
-    ]);
+    let _rewound_turn =
+        content.expect_agent_turn("rewound turn before first token", "GONE never streams.");
+    let _resent_turn =
+        content.expect_agent_turn("resent prompt turn", "RESENT_REPLY to the restored prompt.");
     content.set_chunk_delay(Some(Duration::from_secs(30)));
 
     let binary = pager_binary().expect("resolve pager binary");

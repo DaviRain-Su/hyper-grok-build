@@ -197,8 +197,9 @@ mod tests {
         // Create content larger than MAX_TRACKED_TEXT_BYTES
         let large = vec![b'a'; MAX_TRACKED_TEXT_BYTES + 1];
         let state = classify_bytes(&large);
-        assert!(matches!(state, FileContentState::TooLarge { byte_len }
-if byte_len == MAX_TRACKED_TEXT_BYTES + 1));
+        assert!(
+            matches!(state, FileContentState::TooLarge { byte_len } if byte_len == MAX_TRACKED_TEXT_BYTES + 1)
+        );
     }
 
     #[test]
@@ -231,8 +232,9 @@ if byte_len == MAX_TRACKED_TEXT_BYTES + 1));
         let large = vec![b'a'; MAX_TRACKED_TEXT_BYTES + 1];
         std::fs::write(&path, &large).unwrap();
         let state = read_file_bounded(&path).await;
-        assert!(matches!(state, FileContentState::TooLarge { byte_len }
-if byte_len == MAX_TRACKED_TEXT_BYTES + 1));
+        assert!(
+            matches!(state, FileContentState::TooLarge { byte_len } if byte_len == MAX_TRACKED_TEXT_BYTES + 1)
+        );
     }
 
     // === LFS pointer tests ===
@@ -274,8 +276,9 @@ if byte_len == MAX_TRACKED_TEXT_BYTES + 1));
         let pointer =
             b"version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 12345\n";
         let state = classify_bytes(pointer);
-        assert!(matches!(state, FileContentState::LfsPointer { byte_len }
-if byte_len == pointer.len()));
+        assert!(
+            matches!(state, FileContentState::LfsPointer { byte_len } if byte_len == pointer.len())
+        );
     }
 
     #[test]
@@ -284,8 +287,7 @@ if byte_len == pointer.len()));
             .to_string();
         let len = pointer.len();
         let state = classify_string(pointer);
-        assert!(matches!(state, FileContentState::LfsPointer { byte_len }
-if byte_len == len));
+        assert!(matches!(state, FileContentState::LfsPointer { byte_len } if byte_len == len));
     }
 
     #[tokio::test]
@@ -296,8 +298,9 @@ if byte_len == len));
             b"version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 12345\n";
         std::fs::write(&path, pointer).unwrap();
         let state = read_file_bounded(&path).await;
-        assert!(matches!(state, FileContentState::LfsPointer { byte_len }
-if byte_len == pointer.len()));
+        assert!(
+            matches!(state, FileContentState::LfsPointer { byte_len } if byte_len == pointer.len())
+        );
     }
 
     #[tokio::test]

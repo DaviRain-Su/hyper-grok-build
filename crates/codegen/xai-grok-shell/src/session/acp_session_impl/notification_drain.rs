@@ -116,37 +116,109 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
-        let mut state = self.state.lock().await;
-        if state.running_task.is_some() {
-            let queue_depth = state.pending_inputs.len();
-            if queue_depth > 0 {
-                xai_grok_telemetry::unified_log::debug(
-                    "shell.prompt.start_blocked",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "reason": "task_already_running",
-                        "queue_depth": queue_depth,
-                    })),
-                );
-                tracing::debug!(
-                    target: "qtrace",
-                    pid = std::process::id(),
-                    event = "server_start_blocked",
-                    queue_depth,
-                    front_prompt_id = state
-                        .pending_inputs
-                        .front()
-                        .map(|i| i.prompt_id.as_str())
-                        .unwrap_or(""),
-                    session = self.session_info.id.0.as_ref(),
-                    "maybe_start_running_task blocked: a turn is already running",
-                );
+        // Fast path under the lock: nothing to promote.
+        let may_combine;
+        {
+            let state = self.state.lock().await;
+            if state.running_task.is_some() {
+                let queue_depth = state.pending_inputs.len();
+                if queue_depth > 0 {
+                    xai_grok_telemetry::unified_log::debug(
+                        "shell.prompt.start_blocked",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "reason": "task_already_running",
+                            "queue_depth": queue_depth,
+                        })),
+                    );
+                    tracing::debug!(
+                        target: "qtrace",
+                        pid = std::process::id(),
+                        event = "server_start_blocked",
+                        queue_depth,
+                        front_prompt_id = state
+                            .pending_inputs
+                            .front()
+                            .map(|i| i.prompt_id.as_str())
+                            .unwrap_or(""),
+                        session = self.session_info.id.0.as_ref(),
+                        "maybe_start_running_task blocked: a turn is already running",
+                    );
+                }
+                return;
             }
+            if state.pending_inputs.is_empty() {
+                return;
+            }
+            // A merge needs 2+ queued prompts; sample here so the common
+            // single-prompt promote skips the config disk read below.
+            may_combine = state.pending_inputs.len() >= 2;
+        }
+
+        // Config I/O outside the state lock, and only when a merge is even
+        // possible — keeps the single-prompt promote (the common case) off disk.
+        let combine_queued = may_combine
+            && crate::util::config::load_config()
+                .await
+                .ui
+                .combine_queued_prompts
+                .unwrap_or(false);
+
+        let mut state = self.state.lock().await;
+        // Re-check after the await gap.
+        if state.running_task.is_some() || state.pending_inputs.is_empty() {
             return;
         }
 
         // Note: Auto-compact is now handled inline during process_conversation_turn,
         // so we no longer need to check for queued auto-compact here.
+
+        // Drop stale workflow-completion synthetic fronts (already reported).
+        loop {
+            let stale = match state.pending_inputs.front().map(|item| &item.origin) {
+                Some(super::PromptOrigin::WorkflowCompleted { completion_id }) => {
+                    match completion_id
+                        .rsplit_once('-')
+                        .and_then(|(run_id, revision)| {
+                            revision
+                                .parse::<u64>()
+                                .ok()
+                                .map(|revision| (run_id, revision))
+                        }) {
+                        Some((run_id, revision)) => {
+                            let tracker = self.workflow_tracker().await;
+                            !tracker.lock().is_unreported_completion(run_id, revision)
+                        }
+                        None => true,
+                    }
+                }
+                _ => false,
+            };
+            if !stale {
+                break;
+            }
+            if let Some(item) = state.pending_inputs.pop_front() {
+                Self::respond_removed_prompt(item.respond_to);
+            }
+        }
+
+        // GC stale edit-holds: an id that is no longer queued (promoted,
+        // removed, or whose fire-and-forget `release_edit` was dropped) can
+        // never be edited again, so drop it to bound the set over a long session.
+        if !state.combine_edit_holds.is_empty() {
+            let live: std::collections::HashSet<String> = state
+                .pending_inputs
+                .iter()
+                .map(|i| i.prompt_id.clone())
+                .collect();
+            state.combine_edit_holds.retain(|id| live.contains(id));
+        }
+
+        if combine_queued {
+            let holds: Vec<String> = state.combine_edit_holds.iter().cloned().collect();
+            let skip: Vec<&str> = holds.iter().map(String::as_str).collect();
+            SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &skip);
+        }
 
         // Start the next pending user prompt. Pull all needed fields from the
         // queue head in one `front_mut` scope so we can mutate `state` again
@@ -164,10 +236,12 @@ impl SessionActor {
             verbatim,
             json_schema,
             origin,
+            running_display,
         ) = {
             let Some(front) = state.pending_inputs.front_mut() else {
                 return;
             };
+            let running_display = SessionActor::running_display_from_item(front);
             (
                 front.persist_ack.take(),
                 front.parsed_prompt_tx.take(),
@@ -181,6 +255,7 @@ impl SessionActor {
                 front.verbatim,
                 front.json_schema.clone(),
                 front.origin.clone(),
+                running_display,
             )
         };
         if matches!(origin, super::PromptOrigin::User) {
@@ -217,10 +292,19 @@ impl SessionActor {
             pid = std::process::id(),
             event = "server_promote",
             prompt_id = %prompt_id,
+            combined_segs = running_display
+                .combined_texts
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0),
             remaining_queued = state.pending_inputs.len().saturating_sub(1),
             session = self.session_info.id.0.as_ref(),
             "promoting front of pending_inputs to the running turn",
         );
+        // Promote broadcast before spawn so clients paint (and arm echo-skip)
+        // before the user-message chunk can race in.
+        self.broadcast_queue_changed_promoting(&state, running_display);
+
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
             prompt_id,
@@ -236,9 +320,6 @@ impl SessionActor {
             persist_ack,
             parsed_prompt_tx,
         ));
-        // The front prompt is now the in-flight turn; re-broadcast so the
-        // shared queue drops it from the pending list.
-        self.broadcast_queue_changed(&state);
     }
 
     /// Drain pending notifications into a single batched turn, if idle and not suppressed.

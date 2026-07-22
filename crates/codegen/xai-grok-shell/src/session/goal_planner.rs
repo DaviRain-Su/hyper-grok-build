@@ -4,11 +4,14 @@
 //! file; the spawn is hidden behind [`GoalPlannerSpawner`] so tests can inject
 //! a deterministic spawner.
 
+#![allow(dead_code)]
+
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xai_file_utils::events::EventWriter;
+use xai_grok_tools::implementations::grok_build::task::types::SubagentOwner;
 
 // Shared per-role model override + spawn-and-retry-once fail-open wrapper
 
@@ -351,7 +354,10 @@ impl ChannelSpawner {
             run_in_background: false,
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
+            await_to_completion: false,
             fork_context: true,
+            owner: SubagentOwner::Task,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             result_tx,
         };
         if self

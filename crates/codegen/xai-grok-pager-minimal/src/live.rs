@@ -499,7 +499,7 @@ fn minimal_advance_phase_timer(
 /// Reuses the full-TUI [`turn_status::render_turn_status`] widget so minimal
 /// surfaces the same rich activity detail (`Run …` / `Thinking…` /
 /// `Waiting on subagent…` / `Retrying (attempt N)…` / `Cancelling…`), the
-/// per-phase + turn timers, and the "watching · …" cue (running commands /
+/// per-phase + turn timers, and the "… still running" cue (running commands /
 /// monitors / loops / background subagents, shown while idle or parked) —
 /// instead of collapsing everything to "working…". Keyboard-only, so the
 /// mouse `[stop]` / `[↓]` buttons are suppressed (`None`), and
@@ -883,7 +883,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_minimal_status(&mut buf, area, &a, &None, None, &theme);
         let text = read(&buf);
-        assert!(text.contains("watching"), "watching cue: {text:?}");
+        assert!(
+            text.contains("1 loop still running"),
+            "watching cue: {text:?}"
+        );
         assert!(!text.contains("/help"), "not the idle hint: {text:?}");
     }
     #[test]

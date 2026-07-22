@@ -42,21 +42,7 @@ async fn background_task_reaped_on_quit() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_bg",
-            "run_terminal_command",
-            &args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events(
-            "run_terminal_command",
-            &args,
-        )),
-    );
+    let _background_turn = expect_tool_turn(&content, "call_bg", "run_terminal_command", args);
     // Follow-up turns settle to plain text so the session goes idle.
     content.set_response("BG_TASK_STARTED");
 

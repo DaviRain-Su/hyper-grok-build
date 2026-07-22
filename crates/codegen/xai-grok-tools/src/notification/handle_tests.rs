@@ -3,6 +3,8 @@ use super::*;
 fn removed(task_id: &str) -> ScheduledTaskRemoved {
     ScheduledTaskRemoved {
         task_id: task_id.into(),
+        generation: String::new(),
+        revision: 0,
     }
 }
 
@@ -12,6 +14,8 @@ fn created(task_id: &str) -> ScheduledTaskCreated {
         prompt: task_id.into(),
         human_schedule: "every 5 minutes".into(),
         next_fire_at: None,
+        generation: String::new(),
+        revision: 0,
     }
 }
 
@@ -40,7 +44,6 @@ async fn acknowledged_removal_stays_in_fifo() {
     assert_eq!(task_id(&third.notification), "after");
     assert!(third.acknowledgement.is_none());
 
-    assert_eq!(batch.durable_targets(), DurableNotificationTargets::Present);
     batch.wait().await.unwrap();
 }
 
@@ -102,16 +105,4 @@ async fn batch_distinguishes_dropped_and_rejected_acknowledgements() {
             consumer_rejections: vec!["rejected".into()],
         })
     );
-}
-
-#[tokio::test]
-async fn plain_and_noop_batches_make_zero_durable_targets_explicit() {
-    for handle in [
-        ToolNotificationHandle::channel().0,
-        ToolNotificationHandle::noop(),
-    ] {
-        let batch = handle.send_scheduled_task_removed_acknowledged(removed("deleted"));
-        assert_eq!(batch.durable_targets(), DurableNotificationTargets::None);
-        batch.wait().await.unwrap();
-    }
 }

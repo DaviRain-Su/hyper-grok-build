@@ -10,7 +10,10 @@ use super::common::*;
 async fn send_now_tip_after_mid_turn_queue() {
     let content = ContentController::start().await.expect("start content");
     content.set_chunk_delay(Some(Duration::from_millis(150)));
-    content.set_turns([slow_turn_text("TURNONE"), "TURNTWO done.".to_owned()]);
+    let _turn_one = content.expect_agent_turn(
+        "running turn while send-now tip appears",
+        slow_turn_text("TURNONE"),
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     let env = contextual_hints_env(&content);

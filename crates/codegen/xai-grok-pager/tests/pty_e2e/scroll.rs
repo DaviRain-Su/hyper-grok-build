@@ -16,8 +16,8 @@ use xai_grok_pager_pty_harness::PtyHarness;
 pub(crate) use xai_grok_pager_pty_harness::{SGR_SCROLL_DOWN, SGR_SCROLL_UP};
 
 use super::common::{
-    ContentController, DEFAULT_COLS, DEFAULT_ROWS, MOCK_RESPONSE_SENTINEL, PROMPT,
-    WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT, locate_screen_text, pager_binary, sgr_mouse,
+    AgentTurnExpectation, ContentController, DEFAULT_COLS, DEFAULT_ROWS, MOCK_RESPONSE_SENTINEL,
+    PROMPT, WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT, locate_screen_text, pager_binary, sgr_mouse,
 };
 
 /// Wheel-report position, 0-based (row,col): inside the scrollback pane at
@@ -244,20 +244,11 @@ fn streaming_marker_turn_text(marker_count: usize, tail_words: usize) -> String 
 /// Spawn the pager onto a turn that is STILL STREAMING and provably cannot
 /// complete (the shared preamble of the mid-stream wheel tests): the marker
 /// block arrives on the first delta, the tail keeps deltas in flight at
-/// `chunk_delay` per SSE event, and the mock's completion gate
-/// (`hold_agent_completions`) holds the turn's terminal event — every
-/// assertion against the returned harness is mid-turn by construction until
-/// the caller releases the gate. `extra_env` is appended to the controller's
-/// pager env (e.g. the forced-wheel pricing vars). Ends after the setup
-/// guards; the caller owns all wheel activity, the gate release, and the
-/// completion wait.
-///
-/// Returns the harness, the content controller (it owns the mock server AND
-/// the held gate — callers must eventually call `release_agent_completions()`
-/// for the turn to finish), and the topmost visible marker index as the
-/// movement baseline, taken bottom-pinned in follow mode with the first
-/// marker off-screen-top and [`STREAM_END_SENTINEL`] not yet on screen
-/// (guards panic with the screen contents otherwise).
+/// `chunk_delay` per SSE event, and a matched expectation prevents terminal
+/// completion until released. `extra_env` is appended to the controller's
+/// pager env. Returns the harness, content controller, blocked turn, and the
+/// bottom-pinned topmost visible marker index; setup asserts that marker zero
+/// is above the viewport and [`STREAM_END_SENTINEL`] has not arrived.
 ///
 /// Destructure the controller into a live binding (`content` / `_content`),
 /// never `_` — a `_` binding drops it immediately, killing the mock server
@@ -271,13 +262,13 @@ pub(crate) async fn spawn_streaming_marker_turn(
     tail_words: usize,
     chunk_delay: Duration,
     extra_env: &[(&str, &str)],
-) -> (PtyHarness, ContentController, usize) {
+) -> (PtyHarness, ContentController, AgentTurnExpectation, usize) {
     let content = ContentController::start().await.expect("start content");
     content.set_chunk_delay(Some(chunk_delay));
-    content.hold_agent_completions();
-    // set_turns (not set_response): only agent turns ride the completion
-    // gate; aux title/classifier requests fall through to echo untouched.
-    content.set_turns([streaming_marker_turn_text(marker_count, tail_words)]);
+    let turn = content.expect_agent_turn_blocked(
+        "streaming marker turn",
+        streaming_marker_turn_text(marker_count, tail_words),
+    );
 
     let binary = pager_binary().expect("resolve pager binary");
     // spawn_with_content minus the fixed env: content env + the caller's.
@@ -326,5 +317,5 @@ pub(crate) async fn spawn_streaming_marker_turn(
         )
     });
 
-    (harness, content, top_before)
+    (harness, content, turn, top_before)
 }

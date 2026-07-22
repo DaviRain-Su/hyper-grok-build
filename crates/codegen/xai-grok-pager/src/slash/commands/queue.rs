@@ -61,6 +61,7 @@ mod tests {
             session_id: sid,
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Minimal,
+            billing_surface_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         };
         match (QueueCommand.run(&mut ctx, ""), sid.is_some()) {

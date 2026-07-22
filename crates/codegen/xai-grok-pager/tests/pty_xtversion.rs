@@ -64,7 +64,7 @@ fn wait_for_raw_bytes(harness: &mut PtyHarness, needle: &[u8], timeout: Duration
 }
 
 /// Unknown brand → probe fires; the harness's scripted reply is surfaced
-/// in `/terminal-setup`, never as screen garbage.
+/// in `/doctor`, never as screen garbage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn unknown_brand_probe_round_trip() {
@@ -87,13 +87,11 @@ async fn unknown_brand_probe_round_trip() {
         .expect("welcome text");
     assert_no_probe_garbage_on_screen(&harness);
 
-    // Surface check: /terminal-setup shows the probed identity.
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    // Surface check: /doctor shows the probed identity.
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("PtyHarnessTerm 9.9", Duration::from_secs(10))
-        .expect("XTVERSION identity shown in /terminal-setup");
+        .expect("XTVERSION identity shown in /doctor");
 
     assert!(!harness.contains_text("panicked"));
     harness.quit().expect("clean quit");
@@ -123,9 +121,7 @@ async fn allowlisted_brand_probe_fires() {
         .expect("welcome text");
     assert_no_probe_garbage_on_screen(&harness);
 
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("PtyHarnessTerm 9.9", Duration::from_secs(10))
         .expect("XTVERSION identity shown for an allowlisted brand");
@@ -195,13 +191,11 @@ async fn unknown_brand_no_reply_starts_cleanly() {
     assert!(!harness.contains_text("panicked"));
     assert_no_probe_garbage_on_screen(&harness);
 
-    // /terminal-setup must omit the xtversion line entirely.
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    // /doctor must omit the xtversion line entirely.
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("Environment", Duration::from_secs(10))
-        .expect("terminal-setup output");
+        .expect("doctor output");
     assert!(
         !harness.contains_text("xtversion"),
         "xtversion line should be absent when the terminal never replied"
@@ -235,12 +229,10 @@ async fn unknown_brand_malformed_reply_is_discarded() {
     assert!(!harness.contains_text("panicked"));
     assert_no_probe_garbage_on_screen(&harness);
 
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("Environment", Duration::from_secs(10))
-        .expect("terminal-setup output");
+        .expect("doctor output");
     assert!(
         !harness.contains_text("xtversion"),
         "malformed reply must not produce an xtversion line"
@@ -276,12 +268,10 @@ async fn unknown_brand_late_reply_swallowed_and_recorded() {
         .expect("welcome text");
     assert_no_probe_garbage_on_screen(&harness);
 
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("PtyHarnessTerm 9.9", Duration::from_secs(10))
-        .expect("late XTVERSION identity shown in /terminal-setup");
+        .expect("late XTVERSION identity shown in /doctor");
 
     assert!(!harness.contains_text("panicked"));
     harness.quit().expect("clean quit");
@@ -345,12 +335,10 @@ async fn unknown_brand_split_reply_round_trip() {
         .expect("welcome text");
     assert_no_probe_garbage_on_screen(&harness);
 
-    harness
-        .inject_keys(b"/terminal-setup\r")
-        .expect("run /terminal-setup");
+    harness.inject_keys(b"/doctor\r").expect("run /doctor");
     harness
         .wait_for_text("PtyHarnessTerm 9.9", Duration::from_secs(10))
-        .expect("split XTVERSION reply shown in /terminal-setup");
+        .expect("split XTVERSION reply shown in /doctor");
 
     assert!(!harness.contains_text("panicked"));
     harness.quit().expect("clean quit");

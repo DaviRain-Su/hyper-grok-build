@@ -534,8 +534,7 @@ mod tests {
         ]);
         let blocks = extract_content_blocks(&v);
         assert_eq!(blocks.len(), 2);
-        assert!(matches!(&blocks[0], ContentBlock::Text { text }
-if text == "a"));
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "a"));
         assert!(matches!(&blocks[1], ContentBlock::Image { .. }));
     }
 
@@ -653,8 +652,7 @@ if text == "a"));
         assert_eq!(blocks.len(), 2);
         // First block is the remainder text (field order in JSON objects
         // is not guaranteed, so just check it's Text and non-empty).
-        assert!(matches!(&blocks[0], ContentBlock::Text { text }
-if text.contains("summary")));
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text.contains("summary")));
         assert!(matches!(&blocks[1], ContentBlock::Image { .. }));
     }
 
@@ -670,8 +668,7 @@ if text.contains("summary")));
         let blocks = extract_content_blocks(&v);
         // results field → 2 blocks extracted, metadata → remainder text.
         assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], ContentBlock::Text { text }
-if text.contains("metadata")));
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text.contains("metadata")));
         assert_eq!(blocks[1], ContentBlock::Text { text: "a".into() });
         assert_eq!(blocks[2], ContentBlock::Text { text: "b".into() });
     }

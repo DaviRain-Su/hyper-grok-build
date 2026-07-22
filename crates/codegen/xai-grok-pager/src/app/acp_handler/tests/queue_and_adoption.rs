@@ -328,6 +328,9 @@
             session_id: "sess-1".to_string(),
             entries: Vec::new(),
             running_prompt_id: Some("prompt-running".to_string()),
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
         };
         let raw = serde_json::value::to_raw_value(&shell_payload).unwrap();
         let json_str = raw.get().to_string();
@@ -410,6 +413,59 @@
         );
         // The running item left the shared queue.
         assert!(app.shared_prompt_queue("sess-1").is_none());
+    }
+
+    #[test]
+    fn running_combined_texts_paints_one_bubble_per_segment() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+        let before = app.agents[&id].scrollback.len();
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some("p-combo"),
+                Some("first\n\nsecond"),
+                Some("prompt"),
+                Some(&["first", "second"]),
+            ),
+            &mut app,
+        ));
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.session.current_prompt_id.as_deref(), Some("p-combo"));
+        assert_eq!(agent.scrollback.len(), before + 2);
+        let texts: Vec<_> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i))
+            .filter_map(|e| match &e.block {
+                RenderBlock::UserPrompt(ub) => Some(ub.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+    }
+
+    #[test]
+    fn running_text_without_segments_paints_single_bubble() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+        let before = app.agents[&id].scrollback.len();
+        assert!(handle_queue_changed(
+            &queue_changed_running_ex(
+                "sess-1",
+                &[],
+                Some("p-join"),
+                Some("first\n\nsecond"),
+                Some("prompt"),
+                None,
+            ),
+            &mut app,
+        ));
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.scrollback.len(), before + 1);
+        match &agent.scrollback.entry(before).unwrap().block {
+            RenderBlock::UserPrompt(ub) => assert_eq!(ub.text, "first\n\nsecond"),
+            other => panic!("expected user prompt, got {other:?}"),
+        }
     }
 
     /// Regression: when the shell promotes
@@ -1430,8 +1486,12 @@
                 kind: "bash".to_string(),
                 text: "ls -la".to_string(),
                 position: 0,
+                combined_texts: None,
             }],
             running_prompt_id: None,
+            running_text: None,
+            running_kind: None,
+            running_combined_texts: None,
         };
         let json = serde_json::to_string(&shell).unwrap();
         let mirror: crate::app::prompt_queue::QueueChanged = serde_json::from_str(&json).unwrap();
@@ -1679,6 +1739,7 @@
             crate::app::acp_handler::PendingRunningAdoption {
                 prompt_id: "p1".to_string(),
                 text: Some("first".to_string()),
+                combined_texts: None,
                 kind: "prompt".to_string(),
                 turn_ended: false,
             },

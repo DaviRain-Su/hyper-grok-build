@@ -10,6 +10,7 @@ use xai_grok_shell::sampling::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
 };
 use xai_grok_shell::session::ExtMethodResult;
+use xai_grok_shell::session::unified_list::ListScope;
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {
@@ -446,6 +447,18 @@ pub(super) fn parse_session_list_partial(
         },
     )
 }
+/// Reads `_meta["x.ai/listScope"]` from a session-list payload.
+pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
+    match payload
+        .get("_meta")
+        .and_then(|m| m.get("x.ai/listScope"))
+        .and_then(|v| v.as_str())
+    {
+        Some("repo") => ListScope::Repo,
+        Some("all") => ListScope::All,
+        _ => ListScope::Cwd,
+    }
+}
 /// Parse the `x.ai/session/list` response payload (the unwrapped
 /// `{ "sessions": [...] }` object) into [`SessionPickerEntry`] rows.
 ///
@@ -797,6 +810,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("page_flip_on_send", "Bool", &value));
             };
             xai_grok_shell::util::config::set_page_flip_on_send(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "combine_queued_prompts" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("combine_queued_prompts", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_combine_queued_prompts(b)
                 .await
                 .map_err(|e| e.to_string())
         }

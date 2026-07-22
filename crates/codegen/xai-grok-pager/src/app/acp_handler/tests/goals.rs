@@ -451,3 +451,249 @@
         );
     }
 
+
+    fn workflow_update_value(
+        run_id: &str,
+        name: &str,
+        status: &str,
+        foreground: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "sessionUpdate": "workflow_updated",
+            "run_id": run_id,
+            "revision": 0,
+            "name": name,
+            "objective": "obj",
+            "status": status,
+            "foreground": foreground,
+            "elapsed_ms": 1_000,
+        })
+    }
+
+    fn send_workflow_update(
+        app: &mut AppView,
+        run_id: &str,
+        name: &str,
+        status: &str,
+        foreground: bool,
+    ) -> bool {
+        dispatch_goal_update(app, workflow_update_value(run_id, name, status, foreground))
+    }
+
+    fn send_revisioned_workflow_update(
+        app: &mut AppView,
+        run_id: &str,
+        name: &str,
+        status: &str,
+        foreground: bool,
+        revision: u64,
+    ) -> bool {
+        let mut update = workflow_update_value(run_id, name, status, foreground);
+        update["revision"] = serde_json::json!(revision);
+        dispatch_goal_update(app, update)
+    }
+
+    #[test]
+    fn workflow_updated_never_owns_goal_ui() {
+        let mut app = make_app_with_agent("sess-A");
+        send_workflow_update(&mut app, "wf_goal", "goal", "active", true);
+        assert!(app.agents[&AgentId(0)].goal_state.is_none());
+        assert_eq!(app.agents[&AgentId(0)].workflow_runs.len(), 1);
+    }
+
+    #[test]
+    fn workflow_updates_bypass_global_xai_highwater_and_use_run_revision() {
+        let mut app = make_app_with_agent("sess-A");
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().last_applied_xai_event_seq = Some(100);
+
+        let mut update = workflow_update_value("wf", "deep-research", "active", false);
+        update["revision"] = serde_json::json!(1);
+        let raw_payload = serde_json::json!({
+            "sessionId": "sess-A",
+            "update": update,
+            "_meta": { "eventId": "sess-A-5" },
+        });
+        let raw = serde_json::value::to_raw_value(&raw_payload).unwrap();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let affected = handle(
+            AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
+                request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        assert!(affected, "per-run workflow revision must win over the global highwater");
+        assert_eq!(app.agents[&id].workflow_runs[0].run_id, "wf");
+        assert_eq!(app.agents[&id].last_applied_xai_event_seq, Some(100));
+        assert_eq!(app.agents[&id].last_seen_event_id.as_deref(), Some("sess-A-5"));
+    }
+
+    #[test]
+    fn workflow_revisions_reject_regression_and_resurrection() {
+        let mut app = make_app_with_agent("sess-A");
+        send_revisioned_workflow_update(&mut app, "wf", "deep-research", "complete", false, 3);
+        assert!(!send_revisioned_workflow_update(
+            &mut app, "wf", "deep-research", "active", false, 2,
+        ));
+        assert_eq!(app.agents[&AgentId(0)].workflow_runs[0].status, "complete");
+        send_revisioned_workflow_update(&mut app, "wf", "", "cleared", false, 4);
+        assert!(!send_revisioned_workflow_update(
+            &mut app, "wf", "deep-research", "complete", false, 3,
+        ));
+        assert!(app.agents[&AgentId(0)].workflow_runs.is_empty());
+    }
+
+    #[test]
+    fn workflow_snapshot_derives_active_count_from_roster() {
+        let mut app = make_app_with_agent("sess-A");
+        let mut update = workflow_update_value("wf", "deep-research", "active", false);
+        update["revision"] = serde_json::json!(1);
+        update["active_agents"] = serde_json::json!(99);
+        update["agents"] = serde_json::json!([
+            { "agent_id": "a1", "label": "one", "state": "running" },
+            { "agent_id": "a2", "label": "two", "state": "done" }
+        ]);
+        dispatch_goal_update(&mut app, update);
+        assert_eq!(app.agents[&AgentId(0)].workflow_runs[0].active_agents, 1);
+    }
+
+    #[test]
+    fn workflow_block_animates_while_running_and_finishes_on_terminal() {
+        let mut app = make_app_with_agent("sess-A");
+        send_workflow_update(&mut app, "wf_bg", "deep-research", "active", false);
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let eid = *agent.workflow_blocks.get("wf_bg").expect("live block id");
+            let entry = agent.scrollback.get_by_id(eid).expect("entry");
+            assert!(entry.is_running, "live workflow block must animate");
+        }
+        send_workflow_update(&mut app, "wf_bg", "deep-research", "cancelled", false);
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.workflow_blocks.is_empty(),
+                "terminal status must drop the run's block id"
+            );
+            let sb = &agent.scrollback;
+            let entry = (0..sb.len())
+                .filter_map(|i| sb.get(i))
+                .find(|e| matches!(e.block, RenderBlock::Workflow(_)))
+                .expect("workflow block stays in scrollback as history");
+            assert!(
+                !entry.is_running,
+                "finish_running must clear the running flag on terminal status"
+            );
+            if let RenderBlock::Workflow(ref wb) = entry.block {
+                assert!(
+                    matches!(
+                        wb.status,
+                        crate::scrollback::blocks::WorkflowBlockStatus::Cancelled { .. }
+                    ),
+                    "wire cancelled maps to the Cancelled block status"
+                );
+            }
+        }
+    }
+
+    fn count_workflow_blocks(agent: &AgentView) -> usize {
+        let sb = &agent.scrollback;
+        (0..sb.len())
+            .filter_map(|i| sb.get(i))
+            .filter(|e| matches!(e.block, RenderBlock::Workflow(_)))
+            .count()
+    }
+
+    #[test]
+    fn failed_reconnect_reload_restores_runs_and_avoids_duplicate_workflow_block() {
+        let mut app = make_app_with_agent("sess-A");
+        let id = AgentId(0);
+
+        assert!(send_revisioned_workflow_update(&mut app, "wf", "deep-research", "active", false, 3));
+        assert_eq!(app.agents[&id].workflow_runs.len(), 1);
+        assert_eq!(count_workflow_blocks(&app.agents[&id]), 1);
+        let block_id = *app.agents[&id].workflow_blocks.get("wf").expect("live block id");
+
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.begin_session_reload(1);
+            assert!(agent.workflow_runs.is_empty(), "staging clears the run list");
+            assert!(agent.finish_session_reload(1, false));
+        }
+
+        assert_eq!(
+            app.agents[&id].workflow_runs.len(),
+            1,
+            "run list restored after a failed reload"
+        );
+        assert_eq!(
+            app.agents[&id].workflow_blocks.get("wf").copied(),
+            Some(block_id),
+            "block map restored, still pointing at the restored scrollback block"
+        );
+
+        assert!(
+            !send_revisioned_workflow_update(&mut app, "wf", "deep-research", "active", false, 2),
+            "restored revision highwater still rejects a regression"
+        );
+        assert!(send_revisioned_workflow_update(&mut app, "wf", "deep-research", "complete", false, 4));
+        assert_eq!(
+            count_workflow_blocks(&app.agents[&id]),
+            1,
+            "restored block map prevents a duplicate workflow history block"
+        );
+    }
+
+    #[test]
+    fn cleared_workflow_update_bypasses_revision_highwater() {
+        let mut app = make_app_with_agent("sess-A");
+        let id = AgentId(0);
+
+        assert!(send_revisioned_workflow_update(&mut app, "wf", "deep-research", "active", false, 5));
+        assert_eq!(app.agents[&id].workflow_runs.len(), 1);
+
+        assert!(send_workflow_update(&mut app, "wf", "deep-research", "cleared", false));
+        assert!(
+            app.agents[&id].workflow_runs.is_empty(),
+            "cleared removes the run despite a lower/default revision"
+        );
+        assert!(
+            !app.agents[&id].workflow_blocks.contains_key("wf"),
+            "cleared drops the live block id"
+        );
+        assert!(
+            app.agents[&id].cleared_workflow_runs.contains("wf"),
+            "clear tombstone recorded"
+        );
+    }
+
+    #[test]
+    fn first_seen_terminal_workflow_emits_history_block() {
+        let mut app = make_app_with_agent("sess-A");
+        assert!(send_workflow_update(&mut app, "wf_done", "deep-research", "complete", false));
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.workflow_runs.len(), 1, "run is tracked in the projection");
+        assert_eq!(
+            count_workflow_blocks(agent),
+            1,
+            "a first-seen terminal status must still emit a workflow history block"
+        );
+        let sb = &agent.scrollback;
+        let entry = (0..sb.len())
+            .filter_map(|i| sb.get(i))
+            .find(|e| matches!(e.block, RenderBlock::Workflow(_)))
+            .expect("workflow history block");
+        assert!(!entry.is_running, "the history block is finished, not animating");
+        if let RenderBlock::Workflow(ref wb) = entry.block {
+            assert!(
+                matches!(wb.status, crate::scrollback::blocks::WorkflowBlockStatus::Done { .. }),
+                "wire complete maps to the Done block status"
+            );
+        }
+        assert!(
+            !agent.workflow_blocks.contains_key("wf_done"),
+            "terminal status drops the live block id (kept only as history)"
+        );
+    }

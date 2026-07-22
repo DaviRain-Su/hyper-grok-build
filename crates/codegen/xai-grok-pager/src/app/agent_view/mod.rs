@@ -150,6 +150,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
 mod input;
+pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
 mod jump;
 mod links;
@@ -167,6 +168,7 @@ mod selection;
 mod session;
 mod shell_completion;
 mod viewer;
+mod workflows_overlay;
 use super::actions;
 use super::dispatch;
 pub(super) fn active_contexts_for_pane(pane: ActivePane) -> Vec<crate::actions::When> {
@@ -565,6 +567,10 @@ pub(crate) struct SessionReload {
     tracker: crate::acp::tracker::AcpUpdateTracker,
     /// Pre-outage todo list (replayed Plan updates overwrite the live pane).
     todo: TodoPane,
+    workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
+    workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    workflow_run_revisions: std::collections::HashMap<String, u64>,
+    cleared_workflow_runs: std::collections::HashSet<String>,
     /// Reconnect cursor as of window open, restored with the stash so a
     /// later reload doesn't skip events the restored transcript never got.
     last_seen_event_id: Option<String>,
@@ -743,6 +749,7 @@ pub struct AgentView {
     /// pane drove. Bounded FIFO — only recent ids matter (a stale chunk arrives
     /// right after its turn ends).
     pub self_originated_prompt_ids: VecDeque<String>,
+    pub rewound_prompt_ids: VecDeque<String>,
     /// Highwater of the largest `eventId` counter applied to this session's
     /// scrollback (see `acp::meta::NotificationMeta::event_seq`). Incoming
     /// `session/update`s with a counter `<=` this are duplicates (replay/live
@@ -843,6 +850,12 @@ pub struct AgentView {
     /// Current goal orchestration state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub goal_state: Option<super::agent::GoalDisplayState>,
+    pub workflow_blocks: std::collections::HashMap<String, crate::scrollback::entry::EntryId>,
+    pub workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
+    pub workflow_run_revisions: std::collections::HashMap<String, u64>,
+    pub cleared_workflow_runs: std::collections::HashSet<String>,
+    pub show_workflows: bool,
+    pub workflows_view: crate::views::workflows::WorkflowsViewState,
     /// The consumed parked-wait marker slot for the current turn, if any.
     /// Keyed by prompt id: a new turn naturally invalidates the slot with no
     /// explicit clear site. See [`ParkedMarkerSlot`].
@@ -1327,6 +1340,8 @@ pub struct AgentView {
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,
+    /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
+    pub billing_surface_visible: bool,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,
@@ -1503,6 +1518,7 @@ pub struct AgentView {
 /// bounded ring is plenty and keeps a long-lived session from growing the set
 /// without bound.
 const SELF_ORIGINATED_PROMPT_CAP: usize = 64;
+const REWOUND_PROMPT_ID_CAP: usize = 64;
 /// Cap on [`AgentView::follow_up_pending`]. Only a handful of turns can ever be
 /// "buffered but not-yet-adopted" at once (the ext/`session/update` race window
 /// is tiny), so a small bounded map is plenty; an overflow evicts the oldest
@@ -2012,6 +2028,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::OpenSettings => return None,
         ActionId::ToggleTodos
         | ActionId::ToggleTasks
+        | ActionId::EditPromptExternal
         | ActionId::ToggleQueue
         | ActionId::OpenSessions
         | ActionId::OpenExtensions
@@ -2118,7 +2135,7 @@ fn collect_citation_links(
 /// editing tests in `queue_edit.rs`, and the parked-wait tests in
 /// `dispatch/queue.rs` / `acp_handler.rs`.
 #[cfg(test)]
-pub(super) mod test_fixtures {
+pub(crate) mod test_fixtures {
     use super::{AgentPane, AgentView};
     use crate::acp::model_state::ModelState;
     use crate::actions::ActionRegistry;
@@ -2286,6 +2303,7 @@ pub(super) mod test_fixtures {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
             started_at: Instant::now(),
@@ -2326,6 +2344,59 @@ pub(super) mod test_fixtures {
                 )
             })
             .count()
+    }
+    pub fn raw_ctrl_b_event() -> crossterm::event::Event {
+        crossterm::event::Event::Key(KeyEvent::new(KeyCode::Char('\u{0002}'), KeyModifiers::NONE))
+    }
+    pub fn add_running_bg_task(agent: &mut AgentView) {
+        agent.session.bg_tasks.insert(
+            "task-1".into(),
+            crate::app::agent::BgTaskState {
+                task_id: "task-1".into(),
+                tool_call_id: "tool-1".into(),
+                command: "sleep 5".into(),
+                description: None,
+                cwd: String::new(),
+                output_file: String::new(),
+                status: crate::app::agent::BgTaskStatus::Running,
+                start_time: std::time::SystemTime::now(),
+                end_time: None,
+                exit_code: None,
+                signal: None,
+                stdout: String::new(),
+                stdout_line_count: 0,
+                truncated: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                is_monitor: false,
+                restored_from_replay: false,
+            },
+        );
+        agent.tasks.sync(
+            &agent.session.bg_tasks,
+            &agent.subagent_sessions,
+            &agent.session.scheduled_tasks,
+            None,
+            &std::collections::HashSet::new(),
+            &agent.workflow_runs,
+        );
+    }
+    pub fn add_running_execute(agent: &mut AgentView) {
+        use crate::acp::meta::NotificationMeta;
+        use std::sync::Arc;
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.handle_update(
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new(Arc::from("exec-1")), "sleep 5")
+                    .kind(acp::ToolKind::Execute)
+                    .status(acp::ToolCallStatus::InProgress)
+                    .content(vec![])
+                    .locations(vec![]),
+            ),
+            &NotificationMeta::default(),
+            &mut agent.scrollback,
+        );
     }
     pub fn make_running_agent() -> AgentView {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2374,6 +2445,7 @@ pub(super) mod test_fixtures {
             kind: "prompt".into(),
             text: "server one".into(),
             position: 0,
+            combined_texts: None,
         }];
         agent.queue.sync_from_merged(
             &agent.session.pending_prompts,
@@ -2642,6 +2714,94 @@ pub(super) mod test_fixtures {
         );
         assert!(agent.follow_up_seen.is_empty());
         assert_eq!(agent.follow_up_next_gen, 0);
+    }
+    fn wf_snapshot(run_id: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
+        crate::views::workflows::WorkflowRunSnapshot {
+            run_id: run_id.to_string(),
+            name: "deep-research".to_string(),
+            objective: "obj".to_string(),
+            status: status.to_string(),
+            management_available: true,
+            builtin: false,
+            phases: Vec::new(),
+            current_phase: None,
+            agents: Vec::new(),
+            agent_budget: None,
+            agents_used: 0,
+            agents_reserved: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 1_000,
+            received_at: std::time::Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        }
+    }
+    #[test]
+    fn reconnect_reload_failure_restores_workflow_projection() {
+        let mut agent = make_agent();
+        let block =
+            crate::scrollback::blocks::WorkflowBlock::started("wf-1", "deep-research", "obj");
+        let block_id = agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::Workflow(block));
+        agent.workflow_blocks.insert("wf-1".to_string(), block_id);
+        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
+        agent.workflow_run_revisions.insert("wf-1".to_string(), 4);
+        agent.cleared_workflow_runs.insert("wf-old".to_string());
+        agent.begin_session_reload(1);
+        assert!(
+            agent.workflow_runs.is_empty(),
+            "staging clears the run list"
+        );
+        assert!(
+            agent.workflow_blocks.is_empty(),
+            "staging clears the block map"
+        );
+        assert!(agent.workflow_run_revisions.is_empty());
+        assert!(agent.cleared_workflow_runs.is_empty());
+        assert!(agent.finish_session_reload(1, false));
+        assert_eq!(
+            agent.workflow_runs.len(),
+            1,
+            "run list restored on failed reload"
+        );
+        assert_eq!(agent.workflow_runs[0].run_id, "wf-1");
+        assert_eq!(
+            agent.workflow_run_revisions.get("wf-1").copied(),
+            Some(4),
+            "revision highwater restored so a stale re-delivery is still deduped"
+        );
+        assert!(
+            agent.cleared_workflow_runs.contains("wf-old"),
+            "cleared tombstone set restored"
+        );
+        assert_eq!(
+            agent.workflow_blocks.get("wf-1").copied(),
+            Some(block_id),
+            "block map restored"
+        );
+        assert!(
+            agent.scrollback.get_by_id(block_id).is_some(),
+            "the restored block map points at a block that is back in the scrollback"
+        );
+    }
+    #[test]
+    fn reconnect_reload_success_drops_stashed_workflow_projection() {
+        let mut agent = make_agent();
+        agent.workflow_runs.push(wf_snapshot("wf-1", "active"));
+        agent.workflow_run_revisions.insert("wf-1".to_string(), 2);
+        agent.cleared_workflow_runs.insert("wf-old".to_string());
+        agent.begin_session_reload(1);
+        agent.mark_reload_replay_seen();
+        assert!(agent.finish_session_reload(1, true));
+        assert!(
+            agent.workflow_runs.is_empty(),
+            "success keeps the rebuilt (here empty) run list, not the stash"
+        );
+        assert!(agent.workflow_run_revisions.is_empty());
+        assert!(agent.cleared_workflow_runs.is_empty());
     }
     /// Drives the production `finalize_reload_and_maybe_adopt` that the
     /// `event_loop.rs` reconnect loop also calls (so a future reorder of the

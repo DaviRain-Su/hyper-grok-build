@@ -367,7 +367,7 @@ impl ClipboardFeedback {
             Self::VsCodeSshNonAscii => {
                 "Copied. VS Code over SSH may garble non-ASCII; use /minimal if needed."
             }
-            Self::FailedRemote | Self::Failed => "Copy failed. Try /terminal-setup or /minimal.",
+            Self::FailedRemote | Self::Failed => "Copy failed. Try /doctor or /minimal.",
         }
     }
 
@@ -2064,14 +2064,14 @@ mod tests {
             (
                 ClipboardFeedback::FailedRemote,
                 ClipboardDelivery::Failed,
-                "Copy failed. Try /terminal-setup or /minimal.",
+                "Copy failed. Try /doctor or /minimal.",
                 "failed_remote",
                 120,
             ),
             (
                 ClipboardFeedback::Failed,
                 ClipboardDelivery::Failed,
-                "Copy failed. Try /terminal-setup or /minimal.",
+                "Copy failed. Try /doctor or /minimal.",
                 "failed",
                 120,
             ),

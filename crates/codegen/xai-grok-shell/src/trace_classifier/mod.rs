@@ -599,7 +599,7 @@ pub fn build_classifier_request(
         temperature: Some(0.0),
         max_output_tokens: Some(LAZINESS_MAX_OUTPUT_TOKENS),
         reasoning_effort: None,
-        x_grok_conv_id: session_id_str.clone(),
+        x_grok_conv_id: Some(format!("trace-classifier-{}", uuid::Uuid::new_v4())),
         x_grok_req_id: Some(format!("{LAZINESS_REQ_ID_PREFIX}{}", uuid::Uuid::new_v4())),
         x_grok_session_id: session_id_str,
         x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
@@ -1882,7 +1882,16 @@ mod tests {
         assert!(req.hosted_tools.is_empty());
         assert!(req.tool_choice.is_none());
 
-        assert_eq!(req.x_grok_conv_id.as_deref(), Some("sess-x"));
+        let conv_id = req.x_grok_conv_id.as_deref().expect("conv id");
+        let conv_suffix = conv_id
+            .strip_prefix("trace-classifier-")
+            .expect("conv id starts with trace-classifier-");
+        assert_eq!(
+            uuid::Uuid::parse_str(conv_suffix)
+                .expect("conv suffix parses as UUID")
+                .get_version_num(),
+            4,
+        );
         assert_eq!(req.x_grok_session_id.as_deref(), Some("sess-x"));
         let req_id = req.x_grok_req_id.as_deref().expect("req id");
         // N3: shared const for the prefix.

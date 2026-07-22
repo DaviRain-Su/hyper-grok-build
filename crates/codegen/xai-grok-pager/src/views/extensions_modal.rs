@@ -1650,6 +1650,29 @@ pub enum TabDataState<T> {
     Error(String),
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WorkflowInfo {
+    pub name: String,
+    pub description: String,
+    pub when_to_use: Option<String>,
+    pub source: String,
+    pub path: Option<String>,
+}
+
+impl WorkflowInfo {
+    fn has_usable_command_name(&self) -> bool {
+        let name = self.name.as_str();
+        !name.is_empty()
+            && name.len() <= 64
+            && !name.starts_with('-')
+            && !name.ends_with('-')
+            && !name.contains("--")
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }
+}
+
 /// State for the hooks/plugins modal popup.
 pub struct ExtensionsModalState {
     /// Shared modal window chrome state (close button, tabs, footer
@@ -1706,6 +1729,7 @@ pub struct ExtensionsModalState {
     pub skills_data: TabDataState<Vec<SkillInfo>>,
     pub skills_selected: usize,
     pub skills_scroll: usize,
+    pub workflows_data: TabDataState<Vec<WorkflowInfo>>,
     /// MCP servers tab state.
     pub mcps_data: TabDataState<Vec<crate::views::mcps_modal::McpServerInfo>>,
     /// Last selection that triggered auto-scroll. Prevents mouse scroll
@@ -1792,6 +1816,7 @@ impl ExtensionsModalState {
             skills_data: TabDataState::Loading,
             skills_selected: 0,
             skills_scroll: 0,
+            workflows_data: TabDataState::Loading,
             mcps_data: TabDataState::Loading,
             mcps_scroll_pinned_selection: None,
             mcps_scroll: 0,
@@ -2586,6 +2611,74 @@ pub fn render_extensions_modal(
                     entry_group_keys.push(None);
                     entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
+                }
+                match state.workflows_data {
+                    TabDataState::Loaded(ref workflows) => {
+                        let query_lower = state.picker_state.query().to_lowercase();
+                        let visible: Vec<&WorkflowInfo> = workflows
+                            .iter()
+                            .filter(|workflow| workflow.has_usable_command_name())
+                            .filter(|w| {
+                                query_lower.is_empty()
+                                    || w.name.to_lowercase().contains(&query_lower)
+                                    || w.description.to_lowercase().contains(&query_lower)
+                            })
+                            .collect();
+                        if !visible.is_empty() {
+                            entry_labels.push("Workflows".to_string());
+                            entry_right_labels.push(String::new());
+                            entry_desc_lines.push(vec![]);
+                            entry_summary_lines.push(vec![]);
+                            entry_fields.push(vec![]);
+                            entry_is_header.push(true);
+                            entry_dimmed.push(false);
+                            entry_indent.push(0);
+                            entry_data_indices.push(None);
+                            entry_group_keys.push(None);
+                            entry_badge_text.push(String::new());
+                            entry_badge_color.push(None);
+                            for wf in visible {
+                                entry_labels.push(wf.name.clone());
+                                entry_right_labels.push(format!("({})", wf.source));
+                                if wf.description.is_empty() {
+                                    entry_desc_lines.push(vec![]);
+                                } else {
+                                    entry_desc_lines.push(vec![wf.description.clone()]);
+                                }
+                                entry_summary_lines.push(vec![]);
+                                let mut fields = Vec::new();
+                                if let Some(ref p) = wf.path {
+                                    fields.push(("path".to_string(), p.clone()));
+                                }
+                                if let Some(ref w) = wf.when_to_use {
+                                    fields.push(("when to use".to_string(), w.clone()));
+                                }
+                                entry_fields.push(fields);
+                                entry_is_header.push(false);
+                                entry_dimmed.push(false);
+                                entry_indent.push(0);
+                                entry_data_indices.push(None);
+                                entry_group_keys.push(None);
+                                entry_badge_text.push(String::new());
+                                entry_badge_color.push(None);
+                            }
+                        }
+                    }
+                    TabDataState::Error(ref msg) => {
+                        entry_labels.push(format!("workflows: {}", msg));
+                        entry_right_labels.push(String::new());
+                        entry_desc_lines.push(vec![]);
+                        entry_summary_lines.push(vec![]);
+                        entry_fields.push(vec![]);
+                        entry_is_header.push(false);
+                        entry_dimmed.push(true);
+                        entry_indent.push(0);
+                        entry_data_indices.push(None);
+                        entry_group_keys.push(None);
+                        entry_badge_text.push(String::new());
+                        entry_badge_color.push(None);
+                    }
+                    TabDataState::Loading => {}
                 }
             }
             ExtensionsTab::Plugins => {
@@ -4735,6 +4828,68 @@ mod tests {
             selected = selected.min(match_count - 1);
         }
         assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn skills_tab_renders_workflows_group() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(vec![]);
+        state.workflows_data = TabDataState::Loaded(vec![WorkflowInfo {
+            name: "fix-ci".to_string(),
+            description: "Fix failing CI on the current PR".to_string(),
+            when_to_use: Some("when CI is red".to_string()),
+            source: "builtin".to_string(),
+            path: None,
+        }]);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+
+        assert!(
+            buffer_count(&buf, "Workflows") >= 1,
+            "the Workflows group header must render on the Skills tab"
+        );
+        assert_eq!(
+            buffer_count(&buf, "fix-ci"),
+            1,
+            "the workflow name must render as a row"
+        );
+        assert_eq!(
+            buffer_count(&buf, "(builtin)"),
+            1,
+            "the workflow source must render as the right label"
+        );
+        assert!(
+            state.entry_data_indices.iter().all(|d| d.is_none()),
+            "workflow rows (and the header) must not map to skill data indices"
+        );
+    }
+
+    #[test]
+    fn skills_tab_hides_unusable_workflow_names() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
+        state.skills_data = TabDataState::Loaded(vec![]);
+        state.workflows_data = TabDataState::Loaded(vec![
+            WorkflowInfo {
+                name: "valid-workflow".into(),
+                description: "Valid".into(),
+                when_to_use: None,
+                source: "project".into(),
+                path: None,
+            },
+            WorkflowInfo {
+                name: "Not Launchable".into(),
+                description: "Invalid".into(),
+                when_to_use: None,
+                source: "project".into(),
+                path: None,
+            },
+        ]);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert_eq!(buffer_count(&buf, "valid-workflow"), 1);
+        assert_eq!(buffer_count(&buf, "Not Launchable"), 0);
     }
 
     // ── Plugin fixtures ─────────────────────────────────────────────

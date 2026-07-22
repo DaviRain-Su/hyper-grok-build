@@ -111,10 +111,7 @@ impl AgentView {
             self.open_scrollback_search(None);
             return InputOutcome::Changed;
         }
-        if key!('r', CONTROL).matches(key)
-            && (registry.find(ActionId::ToggleMouseCapture).is_some()
-                || crate::app::mouse_reporting_toggle_enabled())
-        {
+        if registry.lookup(key, When::ScrollbackFocused) == Some(ActionId::ToggleMouseCapture) {
             return InputOutcome::Action(Action::ToggleMouseCapture);
         }
         if let Some(outcome) =
@@ -315,11 +312,11 @@ impl AgentView {
     pub(super) fn handle_bg_tasks_key(
         &mut self,
         key: &KeyEvent,
-        _registry: &ActionRegistry,
+        registry: &ActionRegistry,
     ) -> InputOutcome {
         use crate::views::overlay::{handle_overlay_key, handle_overlay_nav_key};
         use crate::views::tasks_pane::TaskEntry;
-        if key!('b', CONTROL).matches(key) {
+        if registry.matches_id(ActionId::ToggleTasks, key) {
             self.tasks.overlay.toggle();
             self.tasks.on_state_change();
             if !self.tasks.overlay.focused {
@@ -375,6 +372,11 @@ impl AgentView {
                     }
                 }
                 Some(TaskEntry::Scheduled { .. }) => {}
+                Some(TaskEntry::Workflow { name, .. }) => {
+                    let name = name.clone();
+                    self.open_workflow_detail(&name);
+                    return InputOutcome::Changed;
+                }
                 Some(TaskEntry::Header { .. }) => {}
                 None => {}
             }
@@ -402,6 +404,15 @@ impl AgentView {
                 }
                 Some(TaskEntry::Scheduled { task_id, .. }) => {
                     return InputOutcome::Action(Action::CancelScheduledTask(task_id.clone()));
+                }
+                Some(TaskEntry::Workflow {
+                    name, stoppable, ..
+                }) => {
+                    if *stoppable {
+                        return InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
+                            format!("/workflow stop {name}"),
+                        ));
+                    }
                 }
                 Some(TaskEntry::Header { .. }) => {}
                 None => {}
@@ -489,6 +500,16 @@ impl AgentView {
     ///
     /// Positive `lines` = scroll down, negative = scroll up.
     pub fn handle_scroll(&mut self, lines: i32, col: u16, row: u16) {
+        if self.show_workflows {
+            let runs = self.workflow_runs_newest_first();
+            let mut view = self.workflows_view.clone();
+            view.handle_scroll(lines, col, row, &runs);
+            self.workflows_view = view;
+            return;
+        }
+        if self.show_goal_detail {
+            return;
+        }
         if let Some(ref mut modal) = self.active_modal {
             use crate::views::modal::ActiveModal;
             match modal {
@@ -735,6 +756,77 @@ mod scroll_granularity_tests {
             agent.prompt.suggestions.dropdown.selected, 0,
             "-3-line wheel notch must move the completion selection by exactly -1"
         );
+    }
+    #[test]
+    fn wheel_over_fullscreen_overlays_never_scrolls_panes_beneath() {
+        let mut agent = make_agent();
+        agent.pane_areas.scrollback = Rect::new(0, 0, 80, 10);
+        for i in 0..30 {
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::agent_message(
+                    format!("line {i}"),
+                ));
+        }
+        agent.scrollback.prepare_layout(80, 10);
+        agent.scrollback.scroll_up(5);
+        let before = agent.scrollback.scroll_info().0;
+        assert!(before > 0, "setup: scrollback holds a real offset");
+        agent.show_workflows = true;
+        agent.handle_scroll(3, 5, 4);
+        agent.handle_scroll(-3, 5, 4);
+        assert_eq!(
+            agent.scrollback.scroll_info().0,
+            before,
+            "wheel must not leak through the /workflows modal"
+        );
+        agent.show_workflows = false;
+        agent.show_goal_detail = true;
+        agent.handle_scroll(-3, 5, 4);
+        assert_eq!(
+            agent.scrollback.scroll_info().0,
+            before,
+            "wheel must not leak through the goal detail overlay"
+        );
+    }
+}
+#[cfg(test)]
+mod mouse_reporting_registry_tests {
+    use super::super::{AgentPane, test_fixtures::make_agent};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    fn ctrl_r() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+    }
+    #[test]
+    fn mouse_toggle_chord_follows_live_mode_registry() {
+        for mode in [
+            crate::app::ScreenMode::Fullscreen,
+            crate::app::ScreenMode::Inline,
+        ] {
+            let mut agent = make_agent();
+            agent.set_active_pane(AgentPane::Scrollback, true);
+            let registry = ActionRegistry::defaults_with_config_for(mode, true);
+            assert!(matches!(
+                agent.handle_input(&ctrl_r(), &registry),
+                InputOutcome::Action(Action::ToggleMouseCapture)
+            ));
+        }
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Scrollback, true);
+        let registry =
+            ActionRegistry::defaults_with_config_for(crate::app::ScreenMode::Minimal, true);
+        assert!(
+            registry
+                .find(crate::actions::ActionId::ToggleMouseCapture)
+                .is_none()
+        );
+        assert!(!matches!(
+            agent.handle_input(&ctrl_r(), &registry),
+            InputOutcome::Action(Action::ToggleMouseCapture)
+        ));
     }
 }
 #[cfg(test)]

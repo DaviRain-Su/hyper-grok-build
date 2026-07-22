@@ -383,6 +383,28 @@ const ROUTINE_PREFIXES: &[&str] = &[
     "set", // shell options affect only the spawned shell
 ];
 
+/// kubectl flags that select caller-controlled config / endpoint / auth /
+/// identity (including shorthands). Shared with
+/// `manager.rs::kubectl_has_unsafe_flag` so the two classifiers cannot drift.
+pub(crate) const KUBECTL_UNSAFE_FLAGS: &[&str] = &[
+    "--kubeconfig",
+    "--context",
+    "--cluster",
+    "--server",
+    "-s",
+    "--token",
+    "--user",
+    "--as",
+    "--as-group",
+    "--as-uid",
+    "--as-user-extra",
+    "--username",
+    "--password",
+    "--client-certificate",
+    "--client-key",
+    "--certificate-authority",
+];
+
 /// Env var KEYs safe to set for a routine command: cosmetic / logging only, with
 /// no effect on which binary runs or how it resolves code. Anything else
 /// (LD_PRELOAD, DYLD_*, PATH, NODE_OPTIONS, PYTHONPATH, GIT_SSH_COMMAND, FOO, ...)
@@ -496,6 +518,24 @@ fn bash_command_is_routine(words: &[String]) -> bool {
         && inner.iter().any(|w| {
             (w.starts_with('-') && !w.starts_with("--") && w.contains('o'))
                 || w.starts_with("--output")
+        })
+    {
+        return false;
+    }
+    // `rg --pre <cmd>` runs <cmd> per searched file; `--pre-glob` only filters.
+    if head == "rg"
+        && inner
+            .iter()
+            .any(|w| w == "--pre" || w.starts_with("--pre="))
+    {
+        return false;
+    }
+    // kubectl with caller-controlled kubeconfig/endpoint/identity can run an
+    // exec credential plugin; mirrors manager.rs::kubectl_has_unsafe_flag.
+    if head == "kubectl"
+        && inner.iter().skip(1).any(|w| {
+            let name = w.split_once('=').map_or(w.as_str(), |(name, _)| name);
+            KUBECTL_UNSAFE_FLAGS.contains(&name)
         })
     {
         return false;
@@ -1643,6 +1683,55 @@ mod tests {
         // Read-only `find` → Allow.
         assert_eq!(v("find . -name '*.rs'"), ClassifierVerdict::Allow);
         assert_eq!(v("find . -type f"), ClassifierVerdict::Allow);
+    }
+
+    /// `rg --pre <cmd>` executes <cmd> per searched file → must not auto-allow,
+    /// mirroring `manager.rs::rg_has_pre_flag`. `--pre-glob` only filters and
+    /// stays routine.
+    #[test]
+    fn heuristic_guards_rg_pre() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(v("rg --pre ./pre.sh TODO ."), ClassifierVerdict::Block);
+        assert_eq!(v("rg --pre=./pre.sh TODO ."), ClassifierVerdict::Block);
+        assert_eq!(v("rg --pre-glob '*.pdf' TODO ."), ClassifierVerdict::Allow);
+        assert_eq!(v("rg TODO ."), ClassifierVerdict::Allow);
+    }
+
+    /// `kubectl` with a caller-controlled kubeconfig/endpoint/identity flag must
+    /// not be routine, mirroring `manager.rs::kubectl_has_unsafe_flag`. Plain
+    /// read verbs with trusted default kubeconfig stay Allow.
+    #[test]
+    fn heuristic_guards_kubectl_unsafe_flags() {
+        let empty = ClassifierContext::default();
+        let v = |cmd: &str| {
+            HeuristicPermissionClassifier::classify_sync(
+                "run_terminal_command",
+                &AccessKind::Bash(cmd.into()),
+                Some(cmd),
+                &empty,
+            )
+        };
+        assert_eq!(
+            v("kubectl get pods --kubeconfig=/tmp/evil.yaml"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("kubectl get pods --kubeconfig /tmp/evil.yaml"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(
+            v("kubectl get pods -s https://evil"),
+            ClassifierVerdict::Block
+        );
+        assert_eq!(v("kubectl get pods -n prod"), ClassifierVerdict::Allow);
     }
 
     /// Output redirection to a real file is dropped from the parsed word list, so

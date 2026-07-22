@@ -21,7 +21,56 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::time::Instant;
+/// External-editor access to the ordinary composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalPromptEditorAccess {
+    Ready,
+    Attachments,
+    PastePending,
+    OwnedElsewhere,
+}
 impl AgentView {
+    /// Minimal's composer stays logically focused when Vim startup leaves the
+    /// legacy pane field on Scrollback; overlays and dropdowns still own input.
+    pub(crate) fn external_prompt_editor_access(
+        &self,
+        minimal_logical_prompt: bool,
+    ) -> ExternalPromptEditorAccess {
+        let pane_owns_prompt = minimal_logical_prompt || self.active_pane == AgentPane::Prompt;
+        let owned_elsewhere = !matches!(self.prompt_mode, super::PromptMode::Normal)
+            || self.active_subagent.is_some()
+            || !pane_owns_prompt
+            || self.active_modal.is_some()
+            || self.extensions_modal.is_some()
+            || self.agents_modal.is_some()
+            || self.persona_detail.is_some()
+            || self.scrollback_search.is_some()
+            || self.line_viewer.is_some()
+            || self.image_viewer.is_some()
+            || self.video_viewer.is_some()
+            || self.block_viewer.is_some()
+            || self.gboom.is_some()
+            || self.show_goal_detail
+            || self.btw_focused
+            || !self.permission_queue.is_empty()
+            || self.question_view.is_some()
+            || self.plan_approval_view.is_some()
+            || self.casual_commenting_range.is_some()
+            || self.cancel_turn_view.is_some()
+            || self.rewind_state.is_some()
+            || self.inline_edit.is_some()
+            || self.jump_state.is_some()
+            || self.prompt.any_dropdown_open();
+        if owned_elsewhere {
+            ExternalPromptEditorAccess::OwnedElsewhere
+        } else if self.paste_probe_in_flight > 0 || self.deferred_send.is_some() {
+            ExternalPromptEditorAccess::PastePending
+        } else if !self.prompt.textarea.elements().is_empty() || !self.prompt.images.is_empty() {
+            ExternalPromptEditorAccess::Attachments
+        } else {
+            ExternalPromptEditorAccess::Ready
+        }
+    }
     /// True when the scrollback pane is focused with nothing layered on top —
     /// no viewer, modal, btw, or open search. This is the precise state in
     /// which a bare `q`/`Esc` should close the enclosing surface (the subagent
@@ -98,6 +147,11 @@ impl AgentView {
             && !self.modal_owns_input()
             && self.jump_state.is_none()
     }
+    pub(crate) fn workflow_runs_newest_first(
+        &self,
+    ) -> Vec<&crate::views::workflows::WorkflowRunSnapshot> {
+        self.workflow_runs.iter().rev().collect()
+    }
     /// No per-pane `Esc` consumer is pending (text selection, link highlight,
     /// goal detail, rewind overlay, open `/btw` panel, or open `/jump` picker),
     /// so `Esc` is free to back out of the dashboard overlay rather than
@@ -107,6 +161,7 @@ impl AgentView {
         self.persistent_text_selection.is_none()
             && self.highlighted_link_idx.is_none()
             && !self.show_goal_detail
+            && !self.show_workflows
             && self.rewind_state.is_none()
             && self.btw_state.is_none()
             && self.jump_state.is_none()
@@ -373,6 +428,7 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
+                child_view.mark_as_subagent_view();
                 return child_view.handle_input_inner(ev, registry, prompt_paging);
             }
             return InputOutcome::Unchanged;
@@ -460,6 +516,9 @@ impl AgentView {
                 Event::Mouse(mouse) => self.handle_gboom_mouse(mouse),
                 _ => InputOutcome::Changed,
             };
+        }
+        if let Some(outcome) = self.handle_workflows_overlay_input(ev) {
+            return outcome;
         }
         if self.show_goal_detail && self.goal_state.is_some() {
             if let Event::Key(key) = ev
@@ -686,10 +745,10 @@ impl AgentView {
                     if registry.lookup(key, When::Always) == Some(ActionId::Quit) {
                         return InputOutcome::Unchanged;
                     }
-                    self.handle_modal_key(key)
+                    self.handle_modal_key_with_registry(key, registry)
                 }
-                Event::Mouse(mouse) => self.handle_modal_mouse(mouse),
-                Event::Paste(text) => self.handle_modal_paste(text),
+                Event::Mouse(mouse) => self.handle_modal_mouse_with_registry(mouse, registry),
+                Event::Paste(text) => self.handle_modal_paste(text, registry),
                 _ => InputOutcome::Changed,
             };
         }
@@ -877,7 +936,8 @@ impl AgentView {
                             || self.session.state.is_cancelling())
                     {
                         self.dismiss_jump_picker();
-                        return self.handle_agent_action(ActionId::CancelTurn);
+                        return self
+                            .handle_agent_action_with_registry(ActionId::CancelTurn, registry);
                     }
                     self.handle_jump_key(key)
                 }
@@ -920,6 +980,12 @@ impl AgentView {
                 }
                 _ => InputOutcome::Changed,
             };
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && registry.matches_id(ActionId::SendToBackground, key)
+        {
+            return self.handle_agent_action_with_registry(ActionId::SendToBackground, registry);
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
@@ -1010,7 +1076,7 @@ impl AgentView {
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
-            && key!('b', CONTROL).matches(key)
+            && registry.matches_id(ActionId::ToggleTasks, key)
         {
             self.tasks.overlay.toggle();
             self.tasks.on_state_change();
@@ -1040,17 +1106,6 @@ impl AgentView {
                 pending_delete: None,
             });
             return InputOutcome::Action(Action::FetchSessionList);
-        }
-        if let Event::Key(key) = ev
-            && key.kind != KeyEventKind::Release
-            && key!('g', CONTROL).matches(key)
-            && self
-                .session
-                .tracker
-                .running_execute_tool_call_id()
-                .is_some()
-        {
-            return InputOutcome::Action(Action::DemoteToBackground);
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
@@ -1088,7 +1143,10 @@ impl AgentView {
                 || (key.code == KeyCode::Char('/') && key.modifiers.contains(KeyModifiers::SHIFT)))
         {
             self.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
-                entries: crate::views::modal::default_palette_entries(self.sharing_enabled),
+                entries: crate::views::modal::default_palette_entries(
+                    self.sharing_enabled,
+                    self.prompt.slash_controller.screen_mode(),
+                ),
                 state: crate::views::picker::PickerState::input_active(),
                 window: crate::views::modal_window::ModalWindowState::new(),
             });
@@ -1098,9 +1156,14 @@ impl AgentView {
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('g')
             && key.modifiers.is_empty()
-            && self.goal_state.is_some()
+            && (self.goal_state.is_some() || !self.workflow_runs.is_empty())
         {
-            return InputOutcome::Action(Action::ToggleGoalDetail);
+            let has_active_workflow = self.workflow_runs.iter().any(|run| !run.is_terminal());
+            return InputOutcome::Action(if self.goal_state.is_some() && !has_active_workflow {
+                Action::ToggleGoalDetail
+            } else {
+                Action::ToggleWorkflows
+            });
         }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
@@ -1120,7 +1183,7 @@ impl AgentView {
                 );
             }
             if let Some(action_id) = registry.lookup(key, When::AgentScreen) {
-                return self.handle_agent_action(action_id);
+                return self.handle_agent_action_with_registry(action_id, registry);
             }
         }
         if let Event::Key(key) = ev
@@ -1137,8 +1200,19 @@ impl AgentView {
         }
         InputOutcome::Unchanged
     }
-    /// Handle an agent-level action (from registry lookup with `When::AgentScreen`).
+    /// Handle an agent-level action using the compatibility fullscreen registry.
+    /// Runtime key dispatch uses [`Self::handle_agent_action_with_registry`].
+    #[cfg(test)]
     pub(super) fn handle_agent_action(&mut self, action_id: ActionId) -> InputOutcome {
+        let registry = ActionRegistry::defaults();
+        self.handle_agent_action_with_registry(action_id, &registry)
+    }
+    /// Handle an agent-level action (from registry lookup with `When::AgentScreen`).
+    pub(super) fn handle_agent_action_with_registry(
+        &mut self,
+        action_id: ActionId,
+        registry: &ActionRegistry,
+    ) -> InputOutcome {
         match action_id {
             ActionId::CancelTurn => {
                 if self.session.state.is_turn_running() {
@@ -1165,9 +1239,34 @@ impl AgentView {
                     InputOutcome::Action(Action::SetYoloMode(!self.session.is_yolo()))
                 }
             }
+            ActionId::SendToBackground => {
+                if !self.is_subagent_view
+                    && self
+                        .session
+                        .tracker
+                        .running_execute_tool_call_id()
+                        .is_some()
+                {
+                    InputOutcome::Action(Action::DemoteToBackground)
+                } else {
+                    InputOutcome::Changed
+                }
+            }
+            ActionId::EditPromptExternal => {
+                if self.external_prompt_editor_access(true)
+                    == ExternalPromptEditorAccess::OwnedElsewhere
+                {
+                    InputOutcome::Changed
+                } else {
+                    InputOutcome::Action(Action::EditPromptExternal)
+                }
+            }
             ActionId::CommandPalette => {
                 self.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
-                    entries: crate::views::modal::default_palette_entries(self.sharing_enabled),
+                    entries: crate::views::modal::default_palette_entries(
+                        self.sharing_enabled,
+                        self.prompt.slash_controller.screen_mode(),
+                    ),
                     state: crate::views::picker::PickerState::input_active(),
                     window: crate::views::modal_window::ModalWindowState::new(),
                 });
@@ -1202,12 +1301,11 @@ impl AgentView {
             }
             ActionId::ShortcutsHelp => {
                 use crate::views::shortcuts_help;
-                let reg = crate::actions::ActionRegistry::defaults();
                 let mut contexts = active_contexts_for_pane(self.active_pane);
                 if self.in_dashboard_overlay {
                     contexts.push(crate::actions::When::DashboardOverlay);
                 }
-                let entries = shortcuts_help::build_entries(&contexts, &reg, self.vim_mode);
+                let entries = shortcuts_help::build_entries(&contexts, registry, self.vim_mode);
                 let state = shortcuts_help::build_initial_picker_state(&entries);
                 self.active_modal = Some(crate::views::modal::ActiveModal::ShortcutsHelp {
                     entries,
@@ -1301,6 +1399,226 @@ impl AgentView {
     #[cfg(test)]
     pub(crate) fn is_simple_mode(&self) -> bool {
         self.input_mode == InputMode::Simple
+    }
+}
+#[cfg(test)]
+mod background_and_tasks_shortcut_tests {
+    use super::super::AgentPane;
+    use super::super::test_fixtures::{add_running_bg_task, add_running_execute, make_agent};
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::history_search::HistoryEntry;
+    use crate::views::list_pane::InputBarMode;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    fn ctrl(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+    fn assert_demotes(outcome: InputOutcome) {
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::DemoteToBackground)
+        ));
+    }
+    fn seed_file_search(agent: &mut super::super::AgentView) {
+        agent.prompt.set_text("@src");
+        agent.prompt.set_cursor(2);
+        let context = crate::views::file_search::context::detect("@src", "@src".len())
+            .expect("file-search context");
+        agent.prompt.file_search.set_test_state(
+            context,
+            vec![xai_grok_workspace::file_system::FuzzyMatchResult {
+                path: nucleo::Utf32String::from("src/lib.rs"),
+                score: 100,
+                indices: Vec::new(),
+                is_dir: false,
+            }],
+            0,
+        );
+    }
+    #[test]
+    fn ctrl_b_is_consumed_when_ineligible_and_demotes_when_eligible() {
+        let registry = ActionRegistry::defaults();
+        for pane in [AgentPane::Prompt, AgentPane::Scrollback] {
+            let mut agent = make_agent();
+            agent.set_active_pane(pane, true);
+            agent.prompt.set_text("draft");
+            let cursor = agent.prompt.text().len();
+            agent.prompt.set_cursor(cursor);
+            assert!(matches!(
+                agent.handle_input(&ctrl('b'), &registry),
+                InputOutcome::Changed
+            ));
+            assert_eq!(agent.active_pane, pane);
+            assert_eq!(agent.prompt.text(), "draft");
+            assert_eq!(agent.prompt.cursor(), cursor);
+            assert!(!agent.tasks.overlay.focused);
+            add_running_execute(&mut agent);
+            assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+            assert_eq!(agent.active_pane, pane);
+            assert_eq!(agent.prompt.text(), "draft");
+            assert_eq!(agent.prompt.cursor(), cursor);
+        }
+    }
+    #[test]
+    fn ctrl_b_preempts_history_browse_and_search_without_mutating_them() {
+        let registry = ActionRegistry::defaults();
+        for browse in [true, false] {
+            let mut agent = make_agent();
+            agent.set_active_pane(AgentPane::Prompt, true);
+            let history = [HistoryEntry {
+                text: "earlier prompt".into(),
+            }];
+            if browse {
+                agent.prompt.history_search.activate_browse(&history, "");
+                agent.prompt.set_text("earlier prompt");
+            } else {
+                agent.prompt.history_search.activate(&history, "query");
+                agent.prompt.set_text("query");
+            }
+            let text = agent.prompt.text().to_string();
+            let cursor = agent.prompt.cursor();
+            let selected = agent.prompt.history_search.selected;
+            add_running_execute(&mut agent);
+            assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+            assert!(agent.prompt.history_search.is_active());
+            assert_eq!(agent.prompt.history_search.is_browse(), browse);
+            assert_eq!(agent.prompt.history_search.selected, selected);
+            assert_eq!(agent.prompt.text(), text);
+            assert_eq!(agent.prompt.cursor(), cursor);
+        }
+    }
+    #[test]
+    fn ctrl_b_preempts_file_search_without_mutating_it() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        seed_file_search(&mut agent);
+        assert!(agent.prompt.file_search_visible());
+        let context = agent.prompt.file_search.context().cloned();
+        let selected = agent.prompt.file_search.selected();
+        let cursor = agent.prompt.cursor();
+        add_running_execute(&mut agent);
+        assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+        assert_eq!(agent.prompt.file_search.context(), context.as_ref());
+        assert_eq!(agent.prompt.file_search.selected(), selected);
+        assert_eq!(agent.prompt.text(), "@src");
+        assert_eq!(agent.prompt.cursor(), cursor);
+    }
+    #[test]
+    fn ctrl_b_preempts_tasks_search_and_filter_without_mutating_them() {
+        let registry = ActionRegistry::defaults();
+        for (open_key, expected_mode) in [('/', InputBarMode::Search), ('f', InputBarMode::Filter)]
+        {
+            let mut agent = make_agent();
+            add_running_bg_task(&mut agent);
+            agent.tasks.overlay.visible = true;
+            agent.tasks.overlay.focused = true;
+            agent.set_active_pane(AgentPane::Tasks, true);
+            assert!(
+                agent
+                    .tasks
+                    .handle_key(&KeyEvent::new(KeyCode::Char(open_key), KeyModifiers::NONE,))
+            );
+            for c in "needle".chars() {
+                assert!(
+                    agent
+                        .tasks
+                        .handle_key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE,))
+                );
+            }
+            add_running_execute(&mut agent);
+            assert_demotes(agent.handle_input(&ctrl('b'), &registry));
+            assert_eq!(agent.active_pane, AgentPane::Tasks);
+            assert!(agent.tasks.overlay.visible);
+            assert!(agent.tasks.overlay.focused);
+            assert_eq!(agent.tasks.list_state.input_mode(), Some(expected_mode));
+            assert_eq!(agent.tasks.list_state.input_text(), "needle");
+        }
+    }
+    #[test]
+    fn fullscreen_child_ctrl_b_never_demotes_child_or_parent() {
+        let registry = ActionRegistry::defaults();
+        let child_sid = "child-sid".to_string();
+        let mut parent = make_agent();
+        add_running_execute(&mut parent);
+        assert!(
+            parent
+                .session
+                .tracker
+                .running_execute_tool_call_id()
+                .is_some()
+        );
+        let mut child = make_agent();
+        add_running_execute(&mut child);
+        assert!(
+            child
+                .session
+                .tracker
+                .running_execute_tool_call_id()
+                .is_some()
+        );
+        child.set_active_pane(AgentPane::Scrollback, true);
+        parent
+            .subagent_views
+            .insert(child_sid.clone(), Box::new(child));
+        assert!(!parent.subagent_views[&child_sid].is_subagent_view);
+        parent.open_subagent_fullscreen(child_sid.clone());
+        assert!(parent.subagent_views[&child_sid].is_subagent_view);
+        let outcome = parent.handle_input(&ctrl('b'), &registry);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(!matches!(
+            outcome,
+            InputOutcome::Action(Action::DemoteToBackground)
+        ));
+        assert_eq!(parent.active_subagent.as_deref(), Some(child_sid.as_str()));
+        assert!(
+            parent
+                .session
+                .tracker
+                .running_execute_tool_call_id()
+                .is_some()
+        );
+        assert!(
+            parent.subagent_views[&child_sid]
+                .session
+                .tracker
+                .running_execute_tool_call_id()
+                .is_some()
+        );
+        let child = &parent.subagent_views[&child_sid];
+        assert!(child.is_subagent_view);
+        assert!(
+            !child
+                .current_shortcut_hints(&registry)
+                .iter()
+                .any(|hint| hint.label == "send to bg")
+        );
+        assert!(child.hit_bg_button.rect.is_none());
+    }
+    #[test]
+    fn ctrl_g_toggles_tasks_and_never_demotes() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.set_text("draft");
+        let draft_len = agent.prompt.text().len();
+        agent.prompt.set_cursor(draft_len);
+        agent.set_active_pane(AgentPane::Prompt, true);
+        add_running_execute(&mut agent);
+        let first = agent.handle_input(&ctrl('g'), &registry);
+        assert!(matches!(first, InputOutcome::Changed));
+        assert_eq!(agent.active_pane, AgentPane::Tasks);
+        assert!(agent.tasks.overlay.visible);
+        assert!(agent.tasks.overlay.focused);
+        assert_eq!(agent.prompt.text(), "draft");
+        assert_eq!(agent.prompt.cursor(), draft_len);
+        let second = agent.handle_input(&ctrl('g'), &registry);
+        assert!(matches!(
+            second,
+            InputOutcome::Action(Action::FocusScrollback)
+        ));
+        assert!(!agent.tasks.overlay.visible);
+        assert!(!agent.tasks.overlay.focused);
     }
 }
 #[cfg(test)]
@@ -1740,7 +2058,10 @@ mod focus_gained_restore_tests {
         agent.session.state = AgentState::TurnRunning;
         with_permission(&mut agent);
         agent.active_modal = Some(ActiveModal::CommandPalette {
-            entries: crate::views::modal::default_palette_entries(false),
+            entries: crate::views::modal::default_palette_entries(
+                false,
+                agent.prompt.slash_controller.screen_mode(),
+            ),
             state: crate::views::picker::PickerState::input_active(),
             window: crate::views::modal_window::ModalWindowState::new(),
         });

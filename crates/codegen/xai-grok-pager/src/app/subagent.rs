@@ -25,6 +25,7 @@ pub struct SubagentInfo {
     pub resumed_from: Option<Arc<str>>,
     /// "read-only", "read-write", "execute", or "all".
     pub capability_mode: Option<Arc<str>>,
+    pub workflow_run_id: Option<Arc<str>>,
     /// Whether the context was normalized into `<background_context>`.
     pub context_normalized: bool,
     pub parent_prompt_id: Option<Arc<str>>,
@@ -512,6 +513,7 @@ mod tests {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            workflow_run_id: None,
             context_normalized: false,
             parent_prompt_id: None,
             started_at: Instant::now(),
@@ -1114,7 +1116,7 @@ mod tests {
             title,
             description: None,
         });
-        let expected_prefix = "Running: ".to_string() + &"a".repeat(40);
+        let expected_prefix = "Running: ".to_string() + "a".repeat(40).as_str();
         assert!(result.starts_with(&expected_prefix));
         assert!(result.ends_with('\u{2026}'), "truncated with ellipsis");
     }

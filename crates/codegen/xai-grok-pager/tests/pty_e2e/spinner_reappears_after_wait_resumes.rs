@@ -36,22 +36,8 @@ async fn spinner_reappears_after_wait_resumes() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_spinner_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_spinner_bg",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
+    let _background_turn =
+        expect_tool_turn(&content, "call_spinner_bg", "run_terminal_command", bg_args);
 
     // Tool call 2: the flag-gated foreground hold for id extraction.
     let id_hold_args = json!({
@@ -59,21 +45,11 @@ async fn spinner_reappears_after_wait_resumes() {
         "description": "hold for id extraction"
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_spinner_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_spinner_id_hold",
-            "run_terminal_command",
-            &id_hold_args,
-        )),
+    let _id_hold_turn = expect_tool_turn(
+        &content,
+        "call_spinner_id_hold",
+        "run_terminal_command",
+        id_hold_args,
     );
 
     // Fallback for the post-wait continuation: a slow stream (~5s at the
@@ -120,26 +96,16 @@ async fn spinner_reappears_after_wait_resumes() {
         "timeout_ms": 600_000
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_spinner_wait",
-            "get_command_or_subagent_output",
-            &wait_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_spinner_wait",
-            "get_command_or_subagent_output",
-            &wait_args,
-        )),
+    let _wait_turn = expect_tool_turn(
+        &content,
+        "call_spinner_wait",
+        "get_command_or_subagent_output",
+        wait_args,
     );
 
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
-    // Parked look: the plain marker renders, the "watching · …" cue takes
+    // Parked look: the plain marker renders, the "… still running" cue takes
     // the status row, and the running chrome (cancel keybar) drops — the
     // session reads as stopped.
     harness
@@ -152,7 +118,7 @@ async fn spinner_reappears_after_wait_resumes() {
             )
         });
     harness
-        .wait_for_text("watching · 1 command", Duration::from_secs(30))
+        .wait_for_text("1 command still running", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
                 "parked watching cue never appeared; screen:\n{}",

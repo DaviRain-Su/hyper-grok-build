@@ -206,11 +206,10 @@ pub(crate) async fn complete_prompt_trace(
     if let Some(capture) = streaming_partial.as_ref() {
         super::trace::upload_streaming_partial(&ctx, capture, wait).await;
     }
-    let (upload_outcome, _, _, _) = futures::join!(
+    let (upload_outcome, _, _) = futures::join!(
         super::trace::upload_session_state(&ctx, "after", session_copy_rx, wait),
         super::trace::upload_permission_events(&ctx, &permission_events, wait),
         super::trace::upload_memory_state(&ctx),
-        super::trace::upload_unified_log(&ctx, wait),
     );
     let artifacts_confirmed = upload_outcome.is_confirmed();
     let gated_artifact_failure: Option<(String, Option<u16>)> = None;

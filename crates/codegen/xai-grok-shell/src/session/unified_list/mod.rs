@@ -71,14 +71,47 @@ pub struct ListReq {
     pub limit: Option<usize>,
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Opt in to relaxing past the cwd when it has no session with messages:
+    /// include the repo's other directories, or all directories when the cwd is
+    /// not a git repo. Relaxed responses set `_meta["x.ai/listScope"]`.
+    /// Re-evaluated per page.
+    #[serde(default)]
+    pub allow_relax: bool,
     #[serde(default, rename = "_meta")]
     pub meta: Option<serde_json::Value>,
+}
+/// Directory scope the returned sessions were drawn from. Wire form is the
+/// `as_str` value (`x.ai/listScope`), so no serde derive is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListScope {
+    /// Scoped to the request cwd.
+    #[default]
+    Cwd,
+    /// Relaxed to the cwd's repo when the cwd itself had no sessions.
+    Repo,
+    /// Relaxed to all directories when the cwd is not a git repo.
+    All,
+}
+impl ListScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cwd => "cwd",
+            Self::Repo => "repo",
+            Self::All => "all",
+        }
+    }
+    /// True when the scope relaxed past the cwd, to the repo or to all directories.
+    pub const fn is_relaxed(self) -> bool {
+        !matches!(self, Self::Cwd)
+    }
 }
 pub struct UnifiedListResult {
     pub rows: Vec<UnifiedRow>,
     pub next_cursor: Option<String>,
     pub facets: FacetSummary,
     pub conversations_partial: Option<PartialReason>,
+    /// Directory scope `rows` were drawn from; see [`ListReq::allow_relax`].
+    pub scope: ListScope,
 }
 #[derive(Debug, Default)]
 struct ParsedMeta {
@@ -163,21 +196,46 @@ pub async fn build_unified_list(
     reg.apply_pushdown(&facet_filters, &mut source_query);
     let exclude_conversations = excludes_conversations(&facet_filters);
     let exclude_build = excludes_build(&facet_filters);
-    let over = (limit * 3).max(100);
+    let over = crate::session::merge::over_fetch(limit);
+    let can_relax = relax_eligible(RelaxGate {
+        opted_in: req.allow_relax,
+        no_facet_filters: facet_filters.is_empty(),
+        has_cwd: req.cwd.is_some(),
+        is_search: query.is_some(),
+    });
     let local_fut = async {
         if exclude_build {
-            return Vec::new();
+            return LocalLane::default();
         }
-        crate::session::merge::fetch_merged(
-            registry_client,
-            req.cwd.as_deref(),
-            query.as_deref(),
-            over,
-        )
-        .await
-        .into_iter()
-        .map(|m| merged_session_to_row(m, reg))
-        .collect::<Vec<UnifiedRow>>()
+        let cwd = req.cwd.as_deref();
+        if can_relax {
+            let lanes = crate::session::merge::fetch_lanes(registry_client, cwd, None, over).await;
+            let rows = to_rows(
+                crate::session::merge::merge(
+                    lanes.remote.clone(),
+                    lanes.local,
+                    None,
+                    &lanes.repo_urls,
+                    over,
+                ),
+                reg,
+            );
+            LocalLane {
+                rows,
+                relax: Some(RelaxInputs {
+                    remote: lanes.remote,
+                    repo_urls: lanes.repo_urls,
+                }),
+            }
+        } else {
+            let merged =
+                crate::session::merge::fetch_merged(registry_client, cwd, query.as_deref(), over)
+                    .await;
+            LocalLane {
+                rows: to_rows(merged, reg),
+                relax: None,
+            }
+        }
     };
     let conv_fut = async {
         if exclude_conversations {
@@ -223,7 +281,14 @@ pub async fn build_unified_list(
             }
         }
     };
-    let (local_rows, conv_lane) = tokio::join!(local_fut, conv_fut);
+    let (
+        LocalLane {
+            rows: local_rows,
+            relax,
+        },
+        conv_lane,
+    ) = tokio::join!(local_fut, conv_fut);
+    let (local_rows, scope) = maybe_relax(local_rows, relax, over, reg).await;
     {
         let (conv_lane_status, conv_rows) = match &conv_lane {
             ConvLane::Skipped => ("skipped", 0),
@@ -265,7 +330,87 @@ pub async fn build_unified_list(
         next_cursor: next_cursor.map(|c| c.encode()),
         facets,
         conversations_partial: partial,
+        scope,
     }
+}
+#[derive(Default)]
+struct LocalLane {
+    rows: Vec<UnifiedRow>,
+    relax: Option<RelaxInputs>,
+}
+struct RelaxInputs {
+    remote: Vec<crate::agent::session_registry_client::SessionRecord>,
+    repo_urls: Vec<String>,
+}
+fn to_rows(
+    merged: Vec<crate::session::merge::MergedSession>,
+    reg: &FacetRegistry,
+) -> Vec<UnifiedRow> {
+    merged
+        .into_iter()
+        .map(|m| merged_session_to_row(m, reg))
+        .collect()
+}
+#[derive(Clone, Copy)]
+struct RelaxGate {
+    opted_in: bool,
+    no_facet_filters: bool,
+    has_cwd: bool,
+    is_search: bool,
+}
+fn relax_eligible(gate: RelaxGate) -> bool {
+    gate.opted_in && gate.no_facet_filters && gate.has_cwd && !gate.is_search
+}
+/// True when no row has messages (a post-rebuild placeholder counts as empty).
+fn lane_has_no_messages(rows: &[UnifiedRow]) -> bool {
+    rows.iter().all(|r| r.legacy.num_messages == 0)
+}
+async fn maybe_relax(
+    local_rows: Vec<UnifiedRow>,
+    relax: Option<RelaxInputs>,
+    over: usize,
+    reg: &FacetRegistry,
+) -> (Vec<UnifiedRow>, ListScope) {
+    let Some(relax) = relax.filter(|_| lane_has_no_messages(&local_rows)) else {
+        return (local_rows, ListScope::Cwd);
+    };
+    let scope = if relax.repo_urls.is_empty() {
+        ListScope::All
+    } else {
+        ListScope::Repo
+    };
+    let all_local = crate::session::persistence::list_summaries(None)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::debug!("cwd scan failed: {e}");
+            Vec::new()
+        });
+    match relax_rows(relax, all_local, over, reg) {
+        Some(relaxed) => {
+            tracing::debug!(
+                rows = relaxed.len(),
+                scope = scope.as_str(),
+                "cwd empty; relaxing scope"
+            );
+            (relaxed, scope)
+        }
+        None => (local_rows, ListScope::Cwd),
+    }
+}
+/// Re-merge the registry page with a repo-scoped local scan (all directories
+/// when the cwd is not a repo); relax only when it reveals a messaged session.
+fn relax_rows(
+    relax: RelaxInputs,
+    all_local: Vec<crate::session::persistence::Summary>,
+    over: usize,
+    reg: &FacetRegistry,
+) -> Option<Vec<UnifiedRow>> {
+    let scoped = crate::session::merge::filter_summaries_by_repo(all_local, &relax.repo_urls);
+    let rows = to_rows(
+        crate::session::merge::merge(relax.remote, scoped, None, &relax.repo_urls, over),
+        reg,
+    );
+    (!lane_has_no_messages(&rows)).then_some(rows)
 }
 fn excludes_conversations(filters: &BTreeMap<String, Vec<serde_json::Value>>) -> bool {
     match filters.get(KIND_FACET_KEY) {
@@ -299,6 +444,9 @@ pub struct ExtListResponseMeta {
     pub facets: FacetSummary,
     #[serde(rename = "x.ai/partial")]
     pub partial: PartialInfo,
+    /// Present only when the listing relaxed beyond the cwd.
+    #[serde(rename = "x.ai/listScope", skip_serializing_if = "Option::is_none")]
+    pub list_scope: Option<&'static str>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct PartialInfo {
@@ -312,6 +460,7 @@ pub fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
         next_cursor,
         facets,
         conversations_partial,
+        scope,
     } = result;
     ExtListResponse {
         sessions: rows
@@ -325,6 +474,7 @@ pub fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
                 conversations: conversations_partial.is_some(),
                 reason: conversations_partial.map(PartialReason::as_str),
             },
+            list_scope: scope.is_relaxed().then_some(scope.as_str()),
         },
     }
 }
@@ -759,6 +909,7 @@ mod tests {
                 next_cursor: None,
                 facets: facet_registry().summarize_window(&[]),
                 conversations_partial: Some(reason),
+                scope: ListScope::Cwd,
             }))
             .expect("serialize");
             assert_eq!(
@@ -772,6 +923,7 @@ mod tests {
             next_cursor: None,
             facets: facet_registry().summarize_window(&[]),
             conversations_partial: None,
+            scope: ListScope::Cwd,
         }))
         .expect("serialize");
         assert_eq!(
@@ -779,5 +931,77 @@ mod tests {
             serde_json::json!({ "conversations" :
             false })
         );
+    }
+    /// Receive-side wire pin: a field rename would silently drop the pager's
+    /// `allowRelax`.
+    #[test]
+    fn list_req_deserializes_allow_relax_key() {
+        let req: ListReq = serde_json::from_str(r#"{"allowRelax": true}"#).expect("parse");
+        assert!(req.allow_relax);
+        let req: ListReq = serde_json::from_str("{}").expect("parse");
+        assert!(!req.allow_relax);
+    }
+    /// relax_rows scopes to the cwd's repo and relaxes only on a messaged session.
+    #[test]
+    fn relax_rows_scopes_to_repo_and_requires_messages() {
+        use crate::session::persistence::Summary;
+        let this_repo = "git@github.com:example/app.git";
+        let repo_url = xai_grok_workspace::session::git::normalize_repo_url(this_repo).unwrap();
+        let summary = |id: &str, remote: Option<&str>, num_messages: usize| {
+            let mut s = Summary::new(
+                &crate::session::info::Info {
+                    id: agent_client_protocol::SessionId::new(id),
+                    cwd: format!("/elsewhere/{id}"),
+                },
+                agent_client_protocol::ModelId::new("m"),
+            )
+            .expect("summary");
+            s.num_messages = num_messages;
+            s.git_remotes = remote.map(|r| vec![r.to_string()]).unwrap_or_default();
+            s
+        };
+        let relax = || RelaxInputs {
+            remote: Vec::new(),
+            repo_urls: vec![repo_url.clone()],
+        };
+        let rows = relax_rows(
+            relax(),
+            vec![
+                summary("mine", Some(this_repo), 4),
+                summary("theirs", Some("git@github.com:xai-org/other.git"), 9),
+            ],
+            30,
+            facet_registry(),
+        )
+        .expect("relaxes onto the same-repo messaged session");
+        let ids: Vec<_> = rows.iter().map(|r| r.legacy.session_id.clone()).collect();
+        assert_eq!(ids, ["mine"], "only the same-repo session survives");
+        assert!(
+            relax_rows(
+                relax(),
+                vec![summary("husk", Some(this_repo), 0)],
+                30,
+                facet_registry()
+            )
+            .is_none(),
+            "placeholder-only scan keeps the scoped view"
+        );
+    }
+    /// Send-side wire pin: `x.ai/listScope` present iff the scope relaxed.
+    #[test]
+    fn ext_list_response_serializes_scope() {
+        let result = |scope| UnifiedListResult {
+            rows: Vec::new(),
+            next_cursor: None,
+            facets: facet_registry().summarize_window(&[]),
+            conversations_partial: None,
+            scope,
+        };
+        let with =
+            serde_json::to_value(ext_list_response(result(ListScope::Repo))).expect("serialize");
+        assert_eq!(with["_meta"]["x.ai/listScope"], serde_json::json!("repo"));
+        let without =
+            serde_json::to_value(ext_list_response(result(ListScope::Cwd))).expect("serialize");
+        assert!(without["_meta"].get("x.ai/listScope").is_none());
     }
 }

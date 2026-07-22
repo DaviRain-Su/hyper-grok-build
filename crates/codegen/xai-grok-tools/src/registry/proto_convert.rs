@@ -140,10 +140,10 @@ mod tests {
         assert_eq!(err.tool_id, "GrokBuild:bash");
         assert_eq!(err.field_path(), "tools[3].params_json");
         assert!(matches!(
-                    &err.kind,
-                    ToolConfigEntryErrorKind::ParamsJsonParse { raw, .. }
-        if raw == "{not json"
-                ));
+            &err.kind,
+            ToolConfigEntryErrorKind::ParamsJsonParse { raw, .. }
+if raw == "{not json"
+        ));
     }
 
     #[test]
@@ -181,10 +181,10 @@ mod tests {
             assert_eq!(err.field_path(), "tools[2].name_override");
             assert!(
                 matches!(
-                                    &err.kind,
-                                    ToolConfigEntryErrorKind::NameOverrideInvalid { name: n, .. }
-                if n == name
-                                ),
+                    &err.kind,
+                    ToolConfigEntryErrorKind::NameOverrideInvalid { name: n, .. }
+if n == name
+                ),
                 "name={name:?} kind={:?}",
                 err.kind
             );

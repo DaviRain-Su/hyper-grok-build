@@ -10,24 +10,15 @@ use super::common::*;
 #[ignore]
 async fn empty_enter_sends_top_not_last_of_two() {
     let content = ContentController::start().await.expect("start content");
-    let mut turn_one = content.expect_response_blocked(
+    let mut turn_one = content.expect_agent_turn_blocked(
         "running turn before top-row send-now",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(&slow_turn_text("TURNONE"))),
+        slow_turn_text("TURNONE"),
     );
-    let mut turn_two = content.expect_response(
-        "top queued row",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(
-            "TURNTWO top-row send-now acknowledged.",
-        )),
-    );
-    let mut turn_three = content.expect_response(
+    let mut turn_two =
+        content.expect_agent_turn("top queued row", "TURNTWO top-row send-now acknowledged.");
+    let mut turn_three = content.expect_agent_turn(
         "remaining queued row",
-        InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(chat_completions_message_events(
-            "TURNTHREE remaining queue promoted.",
-        )),
+        "TURNTHREE remaining queue promoted.",
     );
 
     let binary = pager_binary().expect("resolve pager binary");

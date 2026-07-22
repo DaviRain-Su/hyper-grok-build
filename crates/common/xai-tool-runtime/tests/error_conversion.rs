@@ -45,16 +45,16 @@ fn invalid_arguments_round_trips_message_and_details() {
 fn not_found_maps_to_tool_not_found() {
     let err = ToolError::not_found(tid("missing"), "tool 'missing' not registered");
     let wire: ToolErrorWire = err.into();
-    assert!(matches!(wire, ToolErrorWire::ToolNotFound { tool_id }
-if tool_id == tid("missing")));
+    assert!(matches!(wire, ToolErrorWire::ToolNotFound { tool_id } if tool_id == tid("missing")));
 }
 
 #[test]
 fn permission_denied_round_trips_reason() {
     let err = ToolError::permission_denied("not authorised for write");
     let wire: ToolErrorWire = err.into();
-    assert!(matches!(wire, ToolErrorWire::PermissionDenied { reason }
-if reason == "not authorised for write"));
+    assert!(
+        matches!(wire, ToolErrorWire::PermissionDenied { reason } if reason == "not authorised for write")
+    );
 }
 
 #[test]
@@ -93,8 +93,7 @@ fn timeout_with_details() {
 fn cancelled_round_trips_tool_id() {
     let err = ToolError::cancelled(tid("paused"), "user cancelled");
     let wire: ToolErrorWire = err.into();
-    assert!(matches!(wire, ToolErrorWire::Cancelled { tool_id }
-if tool_id == tid("paused")));
+    assert!(matches!(wire, ToolErrorWire::Cancelled { tool_id } if tool_id == tid("paused")));
 }
 
 #[test]

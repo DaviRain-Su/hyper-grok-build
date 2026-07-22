@@ -59,7 +59,7 @@ fn budget_color(pct: f32, theme: &Theme) -> Color {
 
 /// Format elapsed milliseconds as a compact human-readable duration.
 /// Same style as `goal_orchestrator::format_elapsed` — keep in sync.
-fn format_elapsed(ms: u64) -> String {
+pub(crate) fn format_elapsed(ms: u64) -> String {
     let total_secs = ms / 1000;
     let hours = total_secs / 3600;
     let mins = (total_secs % 3600) / 60;
@@ -86,6 +86,8 @@ fn status_label(goal: &GoalDisplayState) -> (&'static str, Color, String) {
         | GoalDisplayStatus::NoProgressPaused
         | GoalDisplayStatus::InfraPaused
         | GoalDisplayStatus::Blocked => (goal.status.pause_label(), theme.warning, String::new()),
+        GoalDisplayStatus::Failed => ("Failed", theme.accent_error, String::new()),
+        GoalDisplayStatus::Interrupted => ("Interrupted", theme.accent_error, String::new()),
         GoalDisplayStatus::BudgetLimited => ("Budget Limited", theme.accent_error, String::new()),
         GoalDisplayStatus::Complete => ("Complete", theme.accent_success, String::new()),
     }
@@ -194,7 +196,7 @@ fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
 /// ellipsis if truncated. Uses display width (not char count) so CJK
 /// and emoji characters measure correctly — matches the
 /// `wrap_pause_message_lines` pattern.
-fn truncate_to_width(text: &str, budget: usize) -> String {
+pub(crate) fn truncate_to_width(text: &str, budget: usize) -> String {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
     if UnicodeWidthStr::width(text) <= budget {
@@ -220,7 +222,7 @@ fn truncate_to_width(text: &str, budget: usize) -> String {
 /// timestamp, pause reason) can't break a rendered row even if ratatui's own
 /// filter regresses. `keep_newlines` preserves `\n` for the pause-reason
 /// wrapper (which splits on it before render); single-row sinks pass `false`.
-fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
+pub(crate) fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
     s.chars()
         .map(|c| {
             if c.is_control() && !(keep_newlines && c == '\n') {
@@ -387,7 +389,15 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     //   1  commands hint
     let has_budget = goal.token_budget.is_some_and(|b| b > 0);
     let budget_bar = if has_budget { 1u16 } else { 0 };
-    let pause_hint = if goal.status.is_paused() { 1u16 } else { 0 };
+    let recovery_hint = if goal.status.is_paused()
+        || matches!(
+            goal.status,
+            GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+        ) {
+        1u16
+    } else {
+        0
+    };
     // Reason block renders as `Reason: <pause_message>` wrapped to the
     // inner column width. Prefix is part of the wrapped content so
     // continuation rows just continue at column 0 without alignment
@@ -395,7 +405,11 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     // `is_paused()` to stay in sync with the renderer — a future shell
     // bug that leaks `pause_message` on a non-paused snapshot must not
     // grow the modal box without also rendering content into it.
-    let reason_lines = if goal.status.is_paused() {
+    let reason_lines = if goal.status.is_paused()
+        || matches!(
+            goal.status,
+            GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+        ) {
         goal.pause_message
             .as_deref()
             .map(|m| {
@@ -452,7 +466,7 @@ pub fn goal_detail_area(screen: Rect, goal: &GoalDisplayState, todos: &[TodoItem
     let content_h = 2
         + 1
         + reason_lines
-        + pause_hint
+        + recovery_hint
         + 1
         + budget_bar
         + 1
@@ -608,12 +622,28 @@ pub fn render_goal_detail(
         return Some(close_rect);
     }
 
-    // ── Pause hint (only for any paused variant) ──
     if goal.status.is_paused() {
         let hint = format!(
             "Status: {} \u{2014} type /goal resume to continue",
             goal.status.pause_label()
         );
+        buf.set_line_safe(
+            x,
+            y,
+            &Line::from(Span::styled(hint, Style::default().fg(theme.warning))),
+            w,
+        );
+        y += 1;
+    } else if matches!(
+        goal.status,
+        GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+    ) {
+        let label = if goal.status == GoalDisplayStatus::Interrupted {
+            "Interrupted"
+        } else {
+            "Failed"
+        };
+        let hint = format!("Status: {label} \u{2014} type /goal clear, then start a new goal");
         buf.set_line_safe(
             x,
             y,
@@ -627,13 +657,12 @@ pub fn render_goal_detail(
         }
     }
 
-    // ── Reason block (only when paused AND pause_message is set) ──
     //
-    // Double-gate on `is_paused()`: the shell clears `pause_message` on
-    // every transition out of a paused state, but defending against a
-    // stale value on the wire is cheap and means a future shell bug
-    // can't make the modal render `Reason:` next to a non-paused status.
-    if goal.status.is_paused()
+    if (goal.status.is_paused()
+        || matches!(
+            goal.status,
+            GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+        ))
         && let Some(msg) = goal.pause_message.as_deref()
     {
         let formatted = format_pause_reason(msg);
@@ -1015,15 +1044,15 @@ pub fn render_goal_detail(
     // ── Commands hint ──
     if y < inner.y + inner.height {
         let hint_style = Style::default().fg(theme.gray_dim);
-        buf.set_line_safe(
-            x,
-            y,
-            &Line::from(Span::styled(
-                "Esc: close  /goal resume | pause | status | clear",
-                hint_style,
-            )),
-            w,
-        );
+        let hint = if matches!(
+            goal.status,
+            GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
+        ) {
+            "Esc: close  /goal clear, then start a new goal"
+        } else {
+            "Esc: close  /goal resume | pause | status | clear"
+        };
+        buf.set_line_safe(x, y, &Line::from(Span::styled(hint, hint_style)), w);
     }
 
     Some(close_rect)
@@ -1641,6 +1670,11 @@ mod tests {
             assert_eq!(c, theme.warning, "color for {status:?}");
             assert_eq!(p, "", "phase_text for {status:?}");
         }
+
+        goal.status = GoalDisplayStatus::Failed;
+        let (s, color, _) = status_label(&goal);
+        assert_eq!(s, "Failed");
+        assert_eq!(color, theme.accent_error);
 
         goal.status = GoalDisplayStatus::BudgetLimited;
         let (s, _, _) = status_label(&goal);

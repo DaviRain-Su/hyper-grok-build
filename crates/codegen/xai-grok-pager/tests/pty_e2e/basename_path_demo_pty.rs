@@ -48,17 +48,6 @@ fn write_asciicast(path: &Path, cols: u16, rows: u16, events: &[(f64, String)]) 
     }
 }
 
-fn enqueue_tool_turn(content: &ContentController, call_id: &str, name: &str, args: String) {
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(call_id, name, &args)),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events(name, &args)),
-    );
-}
-
 /// PTY demo: long abs path → collapsed header shows basename only; open block
 /// viewer and show full path in modal preamble. Dumps asciicast for video.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -74,7 +63,7 @@ async fn basename_path_demo_pty() {
     let abs = dunce::canonicalize(&target).unwrap_or(target.clone());
     let full_path = abs.to_string_lossy().into_owned();
 
-    enqueue_tool_turn(
+    let _tool_turn = expect_tool_turn(
         &content,
         "call_basename_read",
         "read_file",

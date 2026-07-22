@@ -100,6 +100,8 @@ mod interjection;
 mod tool_calls;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
+#[path = "acp_session_impl/workflow.rs"]
+mod workflow_run;
 pub(crate) use interjection::*;
 #[path = "acp_session_impl/laziness.rs"]
 mod laziness;
@@ -237,6 +239,7 @@ struct GoalToolNames {
 pub(super) const GOAL_TASK_DISCIPLINE_TEMPLATE: &str =
     include_str!("templates/goal_task_discipline.md");
 pub(super) const GOAL_RULES_TEMPLATE: &str = include_str!("templates/goal_rules.md");
+pub(super) const GOAL_RULES_TEMPLATE_LEGACY: &str = include_str!("templates/goal_rules_legacy.md");
 /// Plan-aware preamble folded into the goal-rules block when the planner
 /// is enabled and a plan exists. Empty on the legacy path.
 const GOAL_PLAN_BLOCK_TEMPLATE: &str = include_str!("templates/goal_plan_block.md");
@@ -255,6 +258,8 @@ const GOAL_PLAN_BLOCK_TEMPLATE: &str = include_str!("templates/goal_plan_block.m
 /// line is not rendered into this nudge.
 pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE: &str =
     include_str!("templates/goal_continuation_directive.md");
+pub(super) const GOAL_CONTINUATION_DIRECTIVE_TEMPLATE_LEGACY: &str =
+    include_str!("templates/goal_continuation_directive_legacy.md");
 /// Built continuation directive plus the optional premature-stop pattern that
 /// the caller emits when it actually continues. Produced by
 /// [`SessionActor::prepare_goal_continuation`].
@@ -277,6 +282,8 @@ pub(crate) struct State {
     pub(crate) running_task: Option<AgentTask>,
     pub(crate) pending_inputs: VecDeque<InputItem>,
     pub(crate) pending_notifications: Vec<PendingNotification>,
+    /// Prompt ids held out of combine-on-promote (composer edit in progress).
+    pub(crate) combine_edit_holds: std::collections::HashSet<String>,
     /// When true, notifications are buffered but not drained until genuine
     /// user re-engagement. Set by interactive Ctrl+C, cleared by a user prompt.
     pub(crate) notifications_suppressed: bool,
@@ -612,8 +619,6 @@ pub(crate) struct SessionActor {
     pub(crate) tool_context: ToolContext,
     /// Managed Read-deny glob patterns, resolved once at construction and
     /// (re-)injected into the ToolBridge so the Grep tool excludes policy-forbidden
-    /// paths. Actor-retained so session setup and harness-rebuild share one source
-    /// of truth (mirrors `goal_update_tx`), rather than re-resolving the config.
     pub(crate) deny_read_globs: Vec<String>,
     /// Consolidated MCP state (configs, clients, init status) protected by a single lock.
     /// This ensures atomicity when updating configs or checking initialization status.
@@ -626,6 +631,7 @@ pub(crate) struct SessionActor {
     pub(crate) chat_state_handle: xai_chat_state::ChatStateHandle,
     /// Current running prompt/turn id, shared with SessionHandle.
     pub(crate) current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) unattributed_background_usage: std::sync::atomic::AtomicBool,
     /// Open blocking reverse-requests (permission / question / plan-approval),
     /// keyed by `tool_call_id`. Shared with `SessionHandle` so the roster can
     /// read it synchronously to surface `NeedsInput`. Mutated by
@@ -767,9 +773,8 @@ pub(crate) struct SessionActor {
     pub(crate) plan_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
     /// Whether goal mode (`/goal`) is enabled for this session (feature flag).
     pub(crate) goal_enabled: bool,
-    /// `goal_enabled` && `update_goal` in toolset; refreshed with command availability.
+    pub(crate) background_workflows_enabled: bool,
     goal_harness_enabled: std::sync::atomic::AtomicBool,
-    /// One-shot: auto-pause persisted Active goal when harness is unavailable.
     goal_harness_availability_reconciled: std::sync::atomic::AtomicBool,
     /// Goal mode orchestration tracker. Session-scoped state for the
     /// Design-Execute-Verify loop. Modeled after `plan_mode` above.
@@ -789,14 +794,7 @@ pub(crate) struct SessionActor {
     /// once the counter reaches [`GOAL_CONTINUATION_BACKOFF_THRESHOLD`].
     /// In-memory only — session restart is itself a reset.
     pub(crate) goal_continuation_streak: std::sync::atomic::AtomicU32,
-    /// Consecutive blocked attempts from the model. Reset on successful
-    /// turn completion, goal completion, or goal resume. Only after 3
-    /// consecutive blocked attempts does the goal actually pause.
     pub(crate) goal_blocked_streak: std::sync::atomic::AtomicU32,
-    /// Receiver for goal-update envelopes from the `update_goal` tool.
-    /// Wrapped in `Option` so the drainer task can `.take()` it at
-    /// session start; tests put a fresh receiver back via
-    /// `seed_channel` helpers.
     pub(crate) goal_update_rx: std::cell::RefCell<
         Option<
             tokio::sync::mpsc::UnboundedReceiver<
@@ -804,21 +802,14 @@ pub(crate) struct SessionActor {
             >,
         >,
     >,
-    /// Sender half of the goal-update channel, retained so a mid-session
-    /// harness rebuild can re-register the `GoalUpdateHandle` on the fresh,
-    /// empty ToolBridge. The `rx` half is owned by the drainer task (see
-    /// `goal_update_rx`).
     pub(crate) goal_update_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalEnvelope,
     >,
-    /// Resolved master kill-switch for the verification stage (the
-    /// adversarial skeptic panel). `false` short-circuits
-    /// `drain_goal_updates` to plain `tracker.complete()` + ack
-    /// `CompletedWithoutClassifier` and BYPASSES the verification
-    /// stage. `true` enables the skeptic panel with all guards
-    /// (Active-only, mid-turn defer, in-flight re-entry, max-runs
-    /// cap). The field name is preserved to keep
-    /// the env / remote / config wire contract stable.
+    pub(crate) workflow_manager:
+        Arc<tokio::sync::Mutex<crate::session::workflow::manager::WorkflowManager>>,
+    pub(crate) workflow_launch_tx: tokio::sync::mpsc::UnboundedSender<
+        xai_grok_tools::implementations::grok_build::workflow::WorkflowLaunchEnvelope,
+    >,
     pub(crate) goal_classifier_enabled: bool,
     /// Master switch for the goal planner subagent.
     pub(crate) goal_planner_enabled: bool,
@@ -848,8 +839,6 @@ pub(crate) struct SessionActor {
     /// previously-frozen `skeptic_model_assignment` is overridden too — an
     /// instant rollback even for an already-frozen goal.
     pub(crate) goal_use_current_model_only: bool,
-    /// Resolved per-goal classifier run cap (number of
-    /// `update_goal(completed: true)` rejections before the goal
     /// auto-pauses via `BackOff`). Cached at actor construction like
     /// `goal_verifier_skeptic_count`. Default
     /// `GOAL_CLASSIFIER_MAX_RUNS_DEFAULT`; floored at
@@ -870,17 +859,9 @@ pub(crate) struct SessionActor {
     /// has run so subsequent prompt-flow ticks don't repeat the
     /// pause-on-load check.
     pub(crate) goal_plan_reconciled: std::sync::atomic::AtomicBool,
-    /// FIFO of mid-turn-deferred `completed: true` inputs. The
-    /// envelope's ack was resolved with `DeferredToTurnEnd` at defer
-    /// time; only the input is parked here for the TurnEnd drain to
-    /// run through the verification stage.
     pub(crate) pending_classifier_completions: parking_lot::Mutex<
         VecDeque<xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalInput>,
     >,
-    /// Per-session re-entry guard for the verification stage. Set with
-    /// `compare_exchange(false, true)` at fire-entry and cleared on
-    /// result. A second `completed: true` that races in while the
-    /// flag is set short-circuits through
     /// [`Self::account_not_achieved_without_sampler`].
     pub(crate) goal_classifier_in_flight: std::sync::atomic::AtomicBool,
     /// Agent-level managed MCP config cache (refreshed in background).
@@ -1155,8 +1136,11 @@ impl SessionActor {
     /// `send_available_commands_update`).
     async fn command_availability(&self) -> slash_commands::CommandAvailability {
         let tool_names = self.registered_tool_names().await;
-        let availability = self.build_command_availability(&tool_names);
-        self.maybe_reconcile_active_goal_without_harness().await;
+        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
+        let availability = self.build_command_availability(&tool_names, has_workflow_runs);
+        if !self.goal_runs_on_workflow_engine() {
+            self.maybe_reconcile_active_goal_without_harness().await;
+        }
         self.maybe_reconcile_active_goal_without_plan().await;
         availability
     }
@@ -1170,6 +1154,7 @@ impl SessionActor {
     fn build_command_availability(
         &self,
         tool_names: &[String],
+        has_workflow_runs: bool,
     ) -> slash_commands::CommandAvailability {
         use xai_grok_tools::implementations::memory::{
             MEMORY_GET_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME,
@@ -1177,7 +1162,11 @@ impl SessionActor {
         let memory_read_registered = tool_names
             .iter()
             .any(|n| n == MEMORY_SEARCH_TOOL_NAME || n == MEMORY_GET_TOOL_NAME);
-        let goal = self.sync_goal_harness_from_tools(tool_names);
+        let goal = if self.goal_runs_on_workflow_engine() {
+            self.sync_goal_harness()
+        } else {
+            self.sync_goal_harness_from_tools(tool_names)
+        };
         slash_commands::CommandAvailability {
             feedback: self.feedback_manager.is_enabled(),
             memory: self.memory.is_enabled() && memory_read_registered,
@@ -1188,6 +1177,10 @@ impl SessionActor {
             hooks: self.hook_registry.borrow().is_some(),
             plugins: self.plugin_registry.borrow().is_some(),
             goal,
+            workflows: tool_names.iter().any(|n| {
+                n == xai_grok_tools::implementations::grok_build::workflow::WORKFLOW_TOOL_NAME
+            }),
+            workflow_management: has_workflow_runs,
         }
     }
     /// Names of every tool registered with the session's tool bridge.
@@ -1205,16 +1198,43 @@ impl SessionActor {
             .map(|td| td.function.name)
             .collect()
     }
+    pub(crate) async fn workflow_tracker(
+        &self,
+    ) -> Arc<parking_lot::Mutex<crate::session::workflow::tracker::WorkflowTracker>> {
+        self.workflow_manager.lock().await.tracker()
+    }
+    pub(crate) fn goal_runs_on_workflow_engine(&self) -> bool {
+        self.background_workflows_enabled
+    }
     /// Send visible text output to the TUI from a slash command.
     ///
     /// Uses `AgentMessageChunk` so the text appears in the conversation
     /// scrollback, then flushes the replay buffer to ensure delivery
     /// before the turn ends.
     async fn send_slash_command_output(&self, text: &str) {
+        self.send_slash_command_output_with_meta(text, None).await;
+    }
+    async fn send_host_turn_slash_command_output(&self, text: &str) {
+        let mut chunk_meta = serde_json::Map::new();
+        chunk_meta.insert(
+            crate::session::storage::HOST_TURN_META_KEY.into(),
+            serde_json::json!(true),
+        );
+        self.send_slash_command_output_with_meta(text, Some(chunk_meta))
+            .await;
+    }
+    async fn send_slash_command_output_with_meta(
+        &self,
+        text: &str,
+        meta: Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
         self.send_update(
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                acp::TextContent::new(text.to_string()),
-            ))),
+            acp::SessionUpdate::AgentMessageChunk(
+                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                    text.to_string(),
+                )))
+                .meta(meta),
+            ),
             None,
         )
         .await;
@@ -1613,9 +1633,6 @@ mod rewind_cross_compaction_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
 mod rewind_synthetic_turn_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/rewrite_zero_turn_prefix_tests.rs"]
-mod rewrite_zero_turn_prefix_tests;
 /// Pins the `SubagentFinished` usage-fold attribution gate.
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
@@ -1801,9 +1818,6 @@ mod cancel_running_task_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/goal/goal_reminder_subagent_rules_tests.rs"]
-mod goal_reminder_subagent_rules_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;
@@ -2041,20 +2055,8 @@ mod managed_gateway_tool_tests {
     }
 }
 #[cfg(test)]
-#[path = "acp_session_tests/goal/goal_backoff_tests.rs"]
-mod goal_backoff_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/goal/goal_classifier_e2e_tests.rs"]
-mod goal_classifier_e2e_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/goal/goal_strategist_e2e_tests.rs"]
-mod goal_strategist_e2e_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/goal/goal_summarizer_e2e_tests.rs"]
-mod goal_summarizer_e2e_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;

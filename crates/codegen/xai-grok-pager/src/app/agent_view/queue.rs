@@ -25,11 +25,10 @@ impl AgentView {
         // BEFORE the removal so a potential auto-hide pane switch can't hit
         // the editing lock (see queue_edit.rs ordering invariant).
         if matches!(
-                    self.prompt_mode,
-                    PromptMode::EditingQueued { id: editing_id, server_id: None, .. }
-        if editing_id == id
-                )
-        {
+            self.prompt_mode,
+            PromptMode::EditingQueued { id: editing_id, server_id: None, .. }
+if editing_id == id
+        ) {
             self.exit_editing_mode();
         }
         self.queue.select_after_delete(id);
@@ -170,12 +169,12 @@ impl AgentView {
     /// held queue since drained).
     ///
     /// Called from the ACP notification path — not the draw path — so
-    /// background tabs and minimal mode stamp the park at its true moment;
-    /// each push is append-only (minimal mode commits print-once). A
+    /// background tabs and minimal mode stamp the park at its true moment. A
     /// [`ParkedMarkerSlot::Forgone`] slot stays silent for the rest of the
     /// turn (see [`Self::suppress_parked_marker_on_interject`]). UI-only: no
-    /// turn-lifecycle event, no stop hooks; the real completion prints its
-    /// own marker.
+    /// turn-lifecycle event, no stop hooks; the completion folds into an
+    /// uncommitted tail parked marker, else prints fresh (minimal-mode
+    /// commits are print-once).
     pub(crate) fn maybe_push_parked_marker(&mut self) {
         if !self.is_parked_on_sendable_wait()
             || self.is_waiting_on_subagent()
@@ -407,7 +406,12 @@ impl AgentView {
         watchers.subagents = self
             .subagent_sessions
             .values()
-            .filter(|s| s.is_running())
+            .filter(|s| s.is_running() && s.workflow_run_id.is_none())
+            .count();
+        watchers.workflows = self
+            .workflow_runs
+            .iter()
+            .filter(|run| run.is_active())
             .count();
         watchers
     }
@@ -420,6 +424,15 @@ impl AgentView {
         stop_hooks: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
         prompt_id: Option<String>,
     ) {
+        // Park → work finished → turn ended with nothing in between: fold the
+        // completion into the tail parked marker instead of stacking a dup row.
+        if self.scrollback.fold_completion_into_tail_parked_marker(
+            &event,
+            &stop_hooks,
+            prompt_id.as_deref(),
+        ) {
+            return;
+        }
         // The marker keeps its turn's pid for the tail-merge attribution check.
         let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
             event, stop_hooks, prompt_id,
@@ -872,6 +885,7 @@ mod queue_edit_routing_tests {
             last_editor: None,
             kind: "prompt".into(),
             text: format!("server {id}"),
+            combined_texts: None,
             position,
         }
     }
@@ -1341,6 +1355,7 @@ mod queue_edit_routing_tests {
                 kind: "prompt".into(),
                 text: "first".into(),
                 position: 0,
+                combined_texts: None,
             },
             QueueEntryWire {
                 id: "p2".into(),
@@ -1350,6 +1365,7 @@ mod queue_edit_routing_tests {
                 kind: "prompt".into(),
                 text: "second".into(),
                 position: 1,
+                combined_texts: None,
             },
         ];
         agent.session.pending_prompts.clear();
@@ -1737,8 +1753,33 @@ mod queue_edit_routing_tests {
 
 #[cfg(test)]
 mod watcher_tests {
-    use super::super::test_agent_view;
+    use super::super::{test_agent_view, test_fixtures};
     use crate::views::turn_status::Watchers;
+    use crate::views::workflows::WorkflowRunSnapshot;
+
+    fn active_workflow(run_id: &str) -> WorkflowRunSnapshot {
+        WorkflowRunSnapshot {
+            run_id: run_id.to_owned(),
+            name: "workflow".to_owned(),
+            objective: "objective".to_owned(),
+            status: "active".to_owned(),
+            management_available: true,
+            builtin: false,
+            phases: Vec::new(),
+            current_phase: None,
+            agents: Vec::new(),
+            agent_budget: None,
+            agents_used: 0,
+            agents_reserved: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            active_agents: 0,
+            elapsed_ms: 0,
+            received_at: std::time::Instant::now(),
+            pause_message: None,
+            result_summary: None,
+        }
+    }
 
     fn insert_bg_task(
         agent: &mut crate::app::agent_view::AgentView,
@@ -1786,6 +1827,56 @@ mod watcher_tests {
                 monitors: 1,
                 loops: 0,
                 subagents: 0,
+                workflows: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn workflow_children_coalesce_into_one_workflow_watcher() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.workflow_runs.push(active_workflow("wf-1"));
+        let mut child_a = test_fixtures::running_subagent_info("child-a");
+        child_a.workflow_run_id = Some("wf-1".into());
+        let mut child_b = test_fixtures::running_subagent_info("child-b");
+        child_b.workflow_run_id = Some("wf-1".into());
+        agent.subagent_sessions.insert("child-a".into(), child_a);
+        agent.subagent_sessions.insert("child-b".into(), child_b);
+
+        assert_eq!(
+            agent.watchers(),
+            Watchers {
+                commands: 0,
+                monitors: 0,
+                loops: 0,
+                subagents: 0,
+                workflows: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn standalone_subagent_and_workflow_remain_distinct_watchers() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.workflow_runs.push(active_workflow("wf-1"));
+        let mut workflow_child = test_fixtures::running_subagent_info("workflow-child");
+        workflow_child.workflow_run_id = Some("wf-1".into());
+        agent
+            .subagent_sessions
+            .insert("workflow-child".into(), workflow_child);
+        agent.subagent_sessions.insert(
+            "standalone-child".into(),
+            test_fixtures::running_subagent_info("standalone-child"),
+        );
+
+        assert_eq!(
+            agent.watchers(),
+            Watchers {
+                commands: 0,
+                monitors: 0,
+                loops: 0,
+                subagents: 1,
+                workflows: 1,
             }
         );
     }

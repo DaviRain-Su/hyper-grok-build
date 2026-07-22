@@ -17,13 +17,12 @@ async fn verify_bashq_claim3_edit_keeps_bash() {
         }
         s
     };
-    content.set_turns([
-        step_one,
-        // Consumed only on an unfixed binary (the demoted-to-prompt drain).
-        "STEPTHREE edited continuation.".to_owned(),
-    ]);
-    // Hold turn 1 open so the edit lands while the row is still queued.
-    content.hold_agent_completions();
+    let mut turn_one =
+        content.expect_agent_turn_blocked("running turn while queued bash row is edited", step_one);
+    let _unexpected_turn = content.expect_agent_turn(
+        "unexpected model continuation for edited bash row",
+        "STEPTHREE edited continuation.",
+    );
 
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
@@ -49,6 +48,15 @@ async fn verify_bashq_claim3_edit_keeps_bash() {
     harness
         .wait_for_text("STEPONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
+    tokio::time::timeout(Duration::from_secs(10), turn_one.wait_received())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "turn 1 expectation was not claimed: {}\nrequests:\n{}",
+                turn_one.diagnostic(),
+                content.server().request_log_summary(),
+            )
+        });
 
     harness
         .inject_keys(b"!printf 'CLAIMTHREE_%s_OK\\n' ORIG\r")
@@ -89,7 +97,16 @@ async fn verify_bashq_claim3_edit_keeps_bash() {
         .expect("queued row shows the edited text after the rebroadcast");
 
     harness.update(Duration::from_millis(500));
-    content.release_agent_completions();
+    tokio::time::timeout(Duration::from_secs(30), turn_one.wait_blocked())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "turn 1 did not reach its terminal barrier after the queued edit: {}\nrequests:\n{}",
+                turn_one.diagnostic(),
+                content.server().request_log_summary(),
+            )
+        });
+    turn_one.release();
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
     while !harness.contains_text("CLAIMTHREE_EDITED_OK") && !harness.contains_text("STEPTHREE") {
         assert!(

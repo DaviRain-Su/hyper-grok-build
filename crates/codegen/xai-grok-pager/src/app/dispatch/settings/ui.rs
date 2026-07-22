@@ -3,13 +3,14 @@
 use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
-    set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
-    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
-    set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
-    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
-    set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
+    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
+    set_display_refresh_auto_cadence_inner, set_fork_secondary_model_inner,
+    set_group_tool_verbs_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
+    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
+    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
+    set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
+    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
     set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
     set_voice_capture_mode_inner, set_voice_stt_language_inner,
@@ -113,7 +114,10 @@ pub(in crate::app::dispatch) fn dispatch_open_command_palette(app: &mut AppView)
         return vec![];
     }
     agent.active_modal = Some(ActiveModal::CommandPalette {
-        entries: crate::views::modal::default_palette_entries(agent.sharing_enabled),
+        entries: crate::views::modal::default_palette_entries(
+            agent.sharing_enabled,
+            agent.prompt.slash_controller.screen_mode(),
+        ),
         // Type-to-find: open in input mode (matches Ctrl+P).
         state: crate::views::picker::PickerState::input_active(),
         window: crate::views::modal_window::ModalWindowState::new(),
@@ -689,6 +693,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
+        ("combine_queued_prompts", SettingValue::Bool(b)) => {
+            Some(Action::SetCombineQueuedPrompts(*b))
+        }
         ("simple_mode", SettingValue::Bool(b)) => Some(Action::SetSimpleMode(*b)),
         ("contextual_hints.undo", SettingValue::Bool(b)) => Some(Action::SetContextualHintUndo(*b)),
         ("contextual_hints.plan_mode", SettingValue::Bool(b)) => {
@@ -879,6 +886,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
+        ("combine_queued_prompts", SettingValue::Bool(b)) => {
+            set_combine_queued_prompts_inner(app, *b)
+        }
         ("simple_mode", SettingValue::Bool(b)) => set_simple_mode_inner(app, *b),
         ("contextual_hints.undo", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.undo = v, *b)

@@ -7,7 +7,7 @@
 //! dedicated std thread and forwards PCM chunks through a sync channel.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -23,9 +23,15 @@ pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     bridge: tokio::task::JoinHandle<()>,
+    peak: Arc<AtomicU16>,
 }
 
 impl CaptureHandle {
+    /// Session peak of device-delivered PCM (see [`meter_and_send`]).
+    pub fn peak_meter(&self) -> Arc<AtomicU16> {
+        Arc::clone(&self.peak)
+    }
+
     /// Stop capture and wait for the thread to exit.
     ///
     /// Dropping a `CaptureHandle` also stops capture (see the `Drop` impl), but
@@ -76,9 +82,11 @@ pub fn spawn_pcm_capture(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
+    let peak = Arc::new(AtomicU16::new(0));
+    let peak_cb = Arc::clone(&peak);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), VoiceError>>(1);
     let thread = thread::spawn(move || {
-        run_capture_loop(sample_rate, sync_tx, stop_flag, ready_tx);
+        run_capture_loop(sample_rate, sync_tx, stop_flag, peak_cb, ready_tx);
     });
 
     // Wait briefly for the device to actually open (mirrors the STT
@@ -106,7 +114,31 @@ pub fn spawn_pcm_capture(
         stop,
         thread: Some(thread),
         bridge,
+        peak,
     })
+}
+
+/// Default cpal input device, or a config error when the host has none.
+fn default_input_device() -> Result<cpal::Device, VoiceError> {
+    cpal::default_host()
+        .default_input_device()
+        .ok_or_else(|| VoiceError::Config("no default input audio device".into()))
+}
+
+/// Default input device without opening a stream ([`crate::probe::input_device_info`]).
+pub fn input_device_info() -> Result<crate::probe::InputDeviceInfo, VoiceError> {
+    let device = default_input_device()?;
+    let name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+    let detail = match device.default_input_config() {
+        Ok(c) => format!(
+            "{} Hz, {} ch, {:?}",
+            c.sample_rate().0,
+            c.channels(),
+            c.sample_format()
+        ),
+        Err(e) => format!("default config unavailable: {e}"),
+    };
+    Ok(crate::probe::InputDeviceInfo { name, detail })
 }
 
 /// Record mono PCM16 LE for a fixed duration (probe / diagnostics).
@@ -119,7 +151,14 @@ pub fn capture_pcm_for_duration(
     let stop_flag = Arc::clone(&stop);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), VoiceError>>(1);
     let thread = thread::spawn(move || {
-        run_capture_loop(sample_rate, sync_tx, stop_flag, ready_tx);
+        // Duration probe does not read the session peak.
+        run_capture_loop(
+            sample_rate,
+            sync_tx,
+            stop_flag,
+            Arc::new(AtomicU16::new(0)),
+            ready_tx,
+        );
     });
 
     // Surface device-open failures before recording instead of returning empty.
@@ -159,6 +198,7 @@ struct CaptureStreamParams<'a> {
     target_rate: u32,
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    peak: Arc<AtomicU16>,
     /// Count of PCM chunks dropped because the channel was full. Logged off the
     /// audio thread by `run_capture_loop`.
     dropped: Arc<AtomicUsize>,
@@ -168,6 +208,7 @@ fn run_capture_loop(
     sample_rate: u32,
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    peak: Arc<AtomicU16>,
     ready_tx: std::sync::mpsc::SyncSender<Result<(), VoiceError>>,
 ) {
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -179,6 +220,7 @@ fn run_capture_loop(
         sample_rate,
         sync_tx,
         Arc::clone(&stop),
+        peak,
         Arc::clone(&dropped),
     ) {
         Ok(v) => {
@@ -202,12 +244,10 @@ fn open_capture_stream(
     sample_rate: u32,
     sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    peak: Arc<AtomicU16>,
     dropped: Arc<AtomicUsize>,
 ) -> Result<(cpal::Stream, String), VoiceError> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| VoiceError::Config("no default input audio device".into()))?;
+    let device = default_input_device()?;
 
     let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
 
@@ -244,6 +284,7 @@ fn open_capture_stream(
         target_rate: sample_rate,
         sync_tx,
         stop,
+        peak,
         dropped,
     };
 
@@ -350,6 +391,7 @@ where
         target_rate,
         sync_tx,
         stop,
+        peak,
         dropped,
     } = params;
     let channels = in_channels as usize;
@@ -371,17 +413,7 @@ where
                 if pcm.is_empty() {
                     return;
                 }
-                let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-                // Never block the real-time audio thread: shed load if the
-                // consumer is behind. Dropped chunks are counted and logged by
-                // `run_capture_loop`.
-                match sync_tx.try_send(bytes) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
-                        dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(TrySendError::Disconnected(_)) => {}
-                }
+                meter_and_send(&pcm, &peak, &sync_tx, &dropped);
             },
             |err| {
                 tracing::warn!(error = %err, "voice capture stream error");
@@ -391,6 +423,25 @@ where
         .map_err(|e| VoiceError::Config(format!("build input stream: {e}")))?;
 
     Ok(stream)
+}
+
+/// Meter then non-blocking send. Peak is updated **before** load-shed so the
+/// silence guard sees what the mic delivered, not what survived backpressure.
+fn meter_and_send(
+    pcm: &[i16],
+    peak: &AtomicU16,
+    sync_tx: &std::sync::mpsc::SyncSender<Vec<u8>>,
+    dropped: &AtomicUsize,
+) {
+    peak.fetch_max(crate::pcm::peak_abs_i16(pcm), Ordering::Relaxed);
+    let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+    match sync_tx.try_send(bytes) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(TrySendError::Disconnected(_)) => {}
+    }
 }
 
 fn frames_to_mono_i16<T>(data: &[T], channels: usize) -> Vec<i16>
@@ -446,6 +497,18 @@ fn resample_mono_i16(samples: &[i16], input_rate: u32, output_rate: u32) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meter_and_send_meters_shed_chunks() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        let peak = AtomicU16::new(0);
+        let dropped = AtomicUsize::new(0);
+
+        meter_and_send(&[100], &peak, &tx, &dropped); // fills the channel
+        meter_and_send(&[-9_000], &peak, &tx, &dropped); // shed, but metered
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(peak.load(Ordering::Relaxed), 9_000);
+    }
 
     #[test]
     fn resample_halves_rate() {

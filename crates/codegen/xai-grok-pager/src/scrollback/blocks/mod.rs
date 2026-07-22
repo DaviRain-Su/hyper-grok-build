@@ -16,6 +16,7 @@ mod system;
 mod thinking;
 pub mod tool;
 mod user;
+mod workflow;
 
 pub use agent::AgentMessageBlock;
 pub use bg_task::{BgTaskBlock, BgTaskKind};
@@ -34,6 +35,7 @@ pub use tool::{
     render_diff_hunks_highlighted,
 };
 pub use user::UserPromptBlock;
+pub use workflow::{WorkflowBlock, WorkflowBlockPhase, WorkflowBlockStatus};
 
 // Backwards compatibility alias
 pub type EditBlock = EditToolCallBlock;

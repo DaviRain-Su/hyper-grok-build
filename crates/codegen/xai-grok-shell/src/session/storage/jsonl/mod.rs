@@ -11,9 +11,8 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, Write};
-#[cfg(target_os = "macos")]
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use xai_chat_state::StrictAppendAck;
 use xai_grok_workspace::session::file_state::RewindPoint;
 #[derive(Clone)]
 enum SessionDirMode {
@@ -131,6 +130,16 @@ impl JsonlStorageAdapter {
     }
     fn goal_mode_state_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::GOAL_STATE_FILE)
+    }
+    fn workflows_dir(&self, info: &Info) -> PathBuf {
+        self.session_dir(info).join("workflows")
+    }
+    fn workflow_run_dir(&self, info: &Info, run_id: &str) -> io::Result<PathBuf> {
+        crate::session::workflow::store::validate_run_id(run_id)?;
+        Ok(self.workflows_dir(info).join(run_id))
+    }
+    fn workflow_run_state_file(&self, info: &Info, run_id: &str) -> io::Result<PathBuf> {
+        Ok(self.workflow_run_dir(info, run_id)?.join("state.json"))
     }
     fn rewind_points_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("rewind_points.jsonl")
@@ -255,13 +264,19 @@ impl JsonlStorageAdapter {
         Ok(summaries)
     }
     async fn append_jsonl<T: serde::Serialize>(&self, path: PathBuf, data: &T) -> io::Result<()> {
+        self.append_jsonl_with_durability(path, data, AppendDurability::Buffered)
+            .await
+    }
+    async fn append_jsonl_with_durability<T: serde::Serialize>(
+        &self,
+        path: PathBuf,
+        data: &T,
+        durability: AppendDurability,
+    ) -> io::Result<()> {
         let mut line =
             serde_json::to_vec(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        self.append_jsonl_line(path, line).await
-    }
-    async fn append_jsonl_line(&self, path: PathBuf, line: Vec<u8>) -> io::Result<()> {
-        Self::append_jsonl_line_blocking(path, line, AppendDurability::Buffered).await
+        Self::append_jsonl_line_blocking(path, line, durability).await
     }
     async fn append_jsonl_line_blocking(
         path: PathBuf,
@@ -287,6 +302,14 @@ impl JsonlStorageAdapter {
     /// the torn record is terminated as its own (single) corrupt line. This
     /// bounds the damage of any torn write to exactly one record, which the
     /// lenient readers (e.g. [`Self::read_chat_history_sync`]) then skip.
+    async fn sync_file_path_durable(path: PathBuf) -> io::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            let file = OpenOptions::new().read(true).open(&path)?;
+            Self::sync_file_durable(&file)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
     fn append_jsonl_line_sync(
         path: &Path,
         line: Vec<u8>,
@@ -338,6 +361,132 @@ impl JsonlStorageAdapter {
         let _ = lock.unlock();
         result
     }
+    async fn append_cwd_switch_with_bookkeeping(
+        &self,
+        info: &Info,
+        message: &ConversationItem,
+    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
+        let path = self.chat_file(info);
+        let mut line = serde_json::to_vec(message).map_err(|error| {
+            super::AppendCwdSwitchError::NotCommitted(io::Error::new(
+                io::ErrorKind::InvalidData,
+                error,
+            ))
+        })?;
+        line.push(b'\n');
+        let generation = message
+            .working_directory_switch_generation()
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| {
+                super::AppendCwdSwitchError::NotCommitted(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "working-directory switch item must carry a nonzero generation",
+                ))
+            })?;
+        let disposition = tokio::task::spawn_blocking(move || {
+            Self::append_cwd_switch_line_sync_with(
+                &path,
+                line,
+                generation,
+                Self::sync_file_durable,
+                || Self::sync_parent_directory(&path),
+            )
+        })
+        .await
+        .map_err(|error| super::AppendCwdSwitchError::NotCommitted(io::Error::other(error)))??;
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                record_activity: matches!(&disposition, StrictAppendAck::Appended),
+                chat_messages: matches!(&disposition, StrictAppendAck::Appended)
+                    .then_some(super::summary_write::CounterOp::Increment(1)),
+                chat_format_version: Some(CHAT_FORMAT_VERSION),
+                cwd_switch_bookkeeping_generation: Some(generation),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|source| super::AppendCwdSwitchError::Committed {
+            acknowledgement: disposition.clone(),
+            source,
+        })?;
+        Self::sync_file_path_durable(self.summary_file(info))
+            .await
+            .map_err(|source| super::AppendCwdSwitchError::Committed {
+                acknowledgement: disposition.clone(),
+                source,
+            })?;
+        Ok(disposition)
+    }
+    fn find_cwd_switch_generation(
+        path: &Path,
+        generation: u64,
+    ) -> io::Result<Option<ConversationItem>> {
+        let contents = match std::fs::read(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(contents.split(|byte| *byte == b'\n').find_map(|line| {
+            let item = serde_json::from_slice::<ConversationItem>(line).ok()?;
+            (item.working_directory_switch_generation() == Some(generation)).then_some(item)
+        }))
+    }
+    pub(crate) fn append_cwd_switch_line_sync_with(
+        path: &Path,
+        mut line: Vec<u8>,
+        generation: u64,
+        mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
+        mut sync_parent: impl FnMut() -> io::Result<()>,
+    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
+        let lock = Self::lock_append(path).map_err(super::AppendCwdSwitchError::NotCommitted)?;
+        let result = (|| {
+            if let Some(authoritative) = Self::find_cwd_switch_generation(path, generation)
+                .map_err(super::AppendCwdSwitchError::NotCommitted)?
+            {
+                return Ok(StrictAppendAck::AlreadyPresent(authoritative));
+            }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(super::AppendCwdSwitchError::NotCommitted)?;
+            let len = file
+                .metadata()
+                .map_err(super::AppendCwdSwitchError::NotCommitted)?
+                .len();
+            if len > 0 {
+                file.seek(io::SeekFrom::Start(len - 1))
+                    .map_err(super::AppendCwdSwitchError::NotCommitted)?;
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last)
+                    .map_err(super::AppendCwdSwitchError::NotCommitted)?;
+                if last[0] != b'\n' {
+                    line.insert(0, b'\n');
+                }
+            }
+            file.write_all(&line)
+                .map_err(super::AppendCwdSwitchError::NotCommitted)?;
+            file.flush()
+                .map_err(|source| super::AppendCwdSwitchError::Committed {
+                    acknowledgement: StrictAppendAck::Appended,
+                    source,
+                })?;
+            sync_file(&file).map_err(|source| super::AppendCwdSwitchError::Committed {
+                acknowledgement: StrictAppendAck::Appended,
+                source,
+            })?;
+            drop(file);
+            sync_parent().map_err(|source| super::AppendCwdSwitchError::Committed {
+                acknowledgement: StrictAppendAck::Appended,
+                source,
+            })?;
+            Ok(StrictAppendAck::Appended)
+        })();
+        let _ = lock.unlock();
+        result
+    }
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
     fn lock_append(path: &Path) -> io::Result<std::fs::File> {
@@ -350,33 +499,8 @@ impl JsonlStorageAdapter {
         lock.lock_exclusive()?;
         Ok(lock)
     }
-    #[cfg(target_os = "macos")]
     fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
-        file.sync_all()?;
-        Self::fullfsync_raw(file.as_raw_fd())
-    }
-    #[cfg(target_os = "macos")]
-    fn fullfsync_raw(fd: std::os::fd::RawFd) -> io::Result<()> {
-        let result = unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) };
-        if result == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
-        file.sync_all()
-    }
-    #[cfg(windows)]
-    fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
-        file.sync_all()
-    }
-    #[cfg(not(any(unix, windows)))]
-    fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "durable file sync is unsupported on this platform",
-        ))
+        super::sync_file_durable(file)
     }
     #[cfg(unix)]
     fn sync_parent_directory(path: &Path) -> io::Result<()> {
@@ -549,6 +673,128 @@ impl JsonlStorageAdapter {
                 Ok(None)
             }
         }
+    }
+    fn load_workflow_runs_sync(
+        &self,
+        info: &Info,
+    ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
+        use crate::session::workflow::store::{
+            MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
+            read_bounded_nofollow,
+        };
+        let workflows_dir = self.workflows_dir(info);
+        match std::fs::symlink_metadata(&workflows_dir) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Ok(Vec::new());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut entries: Vec<_> = std::fs::read_dir(&workflows_dir)?
+            .filter_map(Result::ok)
+            .take(MAX_RESTORED_WORKFLOW_RUNS.saturating_add(1))
+            .collect();
+        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
+        entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
+        entries.sort_by_key(|entry| entry.file_name());
+        if entries_truncated {
+            tracing::warn!(
+                path = % workflows_dir.display(), limit = MAX_RESTORED_WORKFLOW_RUNS,
+                "workflow restore run-count cap reached; ignoring remaining entries"
+            );
+        }
+        let mut restored = Vec::new();
+        for entry in entries {
+            let run_dir = entry.path();
+            let Ok(run_meta) = std::fs::symlink_metadata(&run_dir) else {
+                continue;
+            };
+            if run_meta.file_type().is_symlink() || !run_meta.is_dir() {
+                continue;
+            }
+            if std::fs::symlink_metadata(run_dir.join("cleared"))
+                .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+            {
+                continue;
+            }
+            let manifest_path = run_dir.join("state.json");
+            let manifest = match read_bounded_nofollow(&manifest_path, MAX_WORKFLOW_MANIFEST_BYTES)
+                .and_then(|bytes| {
+                    serde_json::from_slice::<crate::session::workflow::store::WorkflowRunManifest>(
+                        &bytes,
+                    )
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                }) {
+                Ok(manifest) => manifest,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        path = % manifest_path.display(), % error,
+                        "skipping invalid workflow manifest"
+                    );
+                    continue;
+                }
+            };
+            if !matches!(
+                manifest.version,
+                1..=crate::session::workflow::store::WORKFLOW_RUN_MANIFEST_VERSION
+            ) || crate::session::workflow::store::validate_run_id(&manifest.state.run_id)
+                .is_err()
+                || run_dir.file_name().and_then(|name| name.to_str())
+                    != Some(manifest.state.run_id.as_str())
+            {
+                tracing::warn!(
+                    path = % manifest_path.display(),
+                    "skipping unsupported or mismatched workflow manifest"
+                );
+                continue;
+            }
+            let script_path = crate::session::workflow::store::script_revision_path(
+                &run_dir,
+                manifest.script_revision,
+            );
+            let script = match read_bounded_nofollow(
+                &script_path,
+                crate::session::workflow::registry::MAX_WORKFLOW_SOURCE_BYTES,
+            )
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            }) {
+                Ok(script) => script,
+                Err(error) => {
+                    tracing::warn!(
+                        path = % script_path.display(), % error,
+                        "skipping workflow with missing immutable script"
+                    );
+                    continue;
+                }
+            };
+            let args_path = run_dir.join("args.json");
+            let args =
+                match read_bounded_nofollow(&args_path, MAX_WORKFLOW_ARGS_BYTES).and_then(|bytes| {
+                    serde_json::from_slice(&bytes)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                }) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = % args_path.display(), % error,
+                            "skipping workflow with missing immutable args"
+                        );
+                        continue;
+                    }
+                };
+            restored.push(crate::session::workflow::store::RestoredWorkflowRun {
+                manifest,
+                script,
+                args,
+            });
+        }
+        Ok(restored)
     }
     /// Read chat history from JSONL file, handling both legacy ChatRequestMessage format
     /// (version 0) and new ConversationItem format (version >= 1).
@@ -747,6 +993,13 @@ fn transform_session_id_in_update(
         }
     }
 }
+fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
+    matches!(
+        update, super::SessionUpdate::Xai(notification) if matches!(& notification
+        .update, crate ::extensions::notification::SessionUpdate::WorkflowUpdated { .. }
+        | crate ::extensions::notification::SessionUpdate::GoalUpdated { .. })
+    )
+}
 /// Apply fork-safety filtering to chat history before copying.
 ///
 /// 1. Removes synthetic user messages (doom loop warnings, compaction metadata)
@@ -842,6 +1095,21 @@ impl JsonlStorageAdapter {
         if options.fork_filter {
             fork_filter_chat(&mut chat_to_copy);
             updates_to_copy.clear();
+        } else {
+            updates_to_copy.retain(|update| !is_orchestration_projection_update(update));
+        }
+        for target in [
+            self.workflows_dir(target_info),
+            self.goal_mode_state_file(target_info)
+                .parent()
+                .expect("goal state has a parent")
+                .to_path_buf(),
+        ] {
+            match std::fs::remove_dir_all(&target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
         let inherited_prefix_len = if options.fork_filter {
             Some(chat_to_copy.len())
@@ -855,6 +1123,11 @@ impl JsonlStorageAdapter {
             chat_to_copy = xai_chat_state::compaction_utils::strip_reasoning_blocks(chat_to_copy);
         }
         let num_chat_messages = chat_to_copy.len();
+        let cwd_switch_bookkeeping_generation = chat_to_copy
+            .iter()
+            .filter_map(ConversationItem::working_directory_switch_generation)
+            .max()
+            .unwrap_or(0);
         let num_messages = updates_to_copy.len();
         let target_model_id = options
             .new_model_id
@@ -862,6 +1135,10 @@ impl JsonlStorageAdapter {
             .unwrap_or(source_summary.current_model_id);
         let target_summary = crate::session::persistence::Summary {
             info: target_info.clone(),
+            cwd_generation: source_summary.cwd_generation,
+            previous_cwd: source_summary.previous_cwd,
+            pending_cwd_switch_reminder: None,
+            cwd_switch_bookkeeping_generation,
             session_summary: source_summary.session_summary,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1121,6 +1398,13 @@ impl StorageAdapter for JsonlStorageAdapter {
         )
         .await
     }
+    async fn append_cwd_switch_commit_aware(
+        &self,
+        info: &Info,
+        message: &ConversationItem,
+    ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
+        self.append_cwd_switch_with_bookkeeping(info, message).await
+    }
     async fn update_current_model_and_agent(
         &self,
         info: &Info,
@@ -1229,6 +1513,78 @@ impl StorageAdapter for JsonlStorageAdapter {
         }
         super::write_bytes_atomic_async(&target, json).await
     }
+    async fn delete_goal_mode_state(&self, info: &Info) -> io::Result<()> {
+        match tokio::fs::remove_file(self.goal_mode_state_file(info)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+    async fn write_workflow_run_state(
+        &self,
+        info: &Info,
+        manifest: &crate::session::workflow::store::WorkflowRunManifest,
+    ) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(manifest)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let target = self.workflow_run_state_file(info, &manifest.state.run_id)?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+            if parent.join("cleared").is_file() {
+                return Ok(());
+            }
+        }
+        if target.is_file()
+            && let Ok(existing) = tokio::fs::read(&target).await
+            && let Ok(on_disk) = serde_json::from_slice::<
+                crate::session::workflow::store::WorkflowRunManifest,
+            >(&existing)
+            && on_disk.state.run_id == manifest.state.run_id
+            && on_disk.state.revision > manifest.state.revision
+        {
+            tracing::debug!(
+                run_id = % manifest.state.run_id, on_disk_revision = on_disk.state
+                .revision, incoming_revision = manifest.state.revision,
+                "skipping stale workflow manifest write"
+            );
+            return Ok(());
+        }
+        let tmp = target.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        tokio::fs::write(&tmp, json).await?;
+        #[cfg(windows)]
+        match tokio::fs::remove_file(&target).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(error);
+            }
+        }
+        if let Err(error) = tokio::fs::rename(&tmp, &target).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+    async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()> {
+        let target = self.workflow_run_state_file(info, run_id)?;
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+            let cleared = parent.join("cleared");
+            if !cleared.exists() {
+                tokio::fs::write(cleared, []).await?;
+            }
+        }
+        match tokio::fs::remove_file(target).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
         let summary = self.read_summary_sync(info)?;
         let chat_file = self.chat_file(info);
@@ -1251,6 +1607,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             .read_optional_json_sync::<crate::session::goal_tracker::GoalOrchestration>(
                 &self.goal_mode_state_file(info),
             )?;
+        let workflow_runs = self.load_workflow_runs_sync(info)?;
         let rewind_points = self.read_jsonl::<RewindPoint>(self.rewind_points_file(info))?;
         let result = PersistedData {
             summary,
@@ -1262,6 +1619,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             signals,
             announcement_state,
             goal_mode_state,
+            workflow_runs,
         };
         tracing::info!(
             session_id = % info.id, num_chat_messages = result.chat_history.len(),
@@ -1300,6 +1658,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             .read_optional_json_sync::<crate::session::goal_tracker::GoalOrchestration>(
                 &self.goal_mode_state_file(info),
             )?;
+        let workflow_runs = self.load_workflow_runs_sync(info)?;
         let result = super::PersistedDataLight {
             summary,
             chat_history,
@@ -1308,6 +1667,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             signals,
             announcement_state,
             goal_mode_state,
+            workflow_runs,
         };
         tracing::info!(
             session_id = % info.id, num_chat_messages = result.chat_history.len(),
@@ -1408,11 +1768,17 @@ impl StorageAdapter for JsonlStorageAdapter {
     ) -> io::Result<()> {
         self.write_jsonl(self.chat_file(info), messages).await?;
         let new_count = messages.len();
+        let cwd_switch_bookkeeping_generation = messages
+            .iter()
+            .filter_map(ConversationItem::working_directory_switch_generation)
+            .max()
+            .unwrap_or(0);
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
                 chat_messages: Some(super::summary_write::CounterOp::Set(new_count)),
                 chat_format_version: Some(CHAT_FORMAT_VERSION),
+                cwd_switch_bookkeeping_generation: Some(cwd_switch_bookkeeping_generation),
                 ..Default::default()
             },
         )

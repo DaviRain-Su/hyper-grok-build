@@ -1,6 +1,7 @@
 // Per-test-case module for the `pty_e2e` integration test crate.
 #[allow(unused_imports)]
 use crate::common::*;
+use xai_grok_pager_pty_harness::{InferenceEndpoint, InferenceRequestMatcher};
 
 /// Reasoning text streamed by the mock. Must never appear in the answer text
 /// so screen assertions can tell the two apart.
@@ -18,21 +19,17 @@ async fn minimal_commits_thinking_body_to_scrollback() {
     ])
     .await
     .expect("start content");
-    // The scripted turn streams reasoning deltas before the visible answer.
-    // Two copies so an auxiliary request can't starve the prompt turn
-    // (consumed FIFO; unconsumed scripts are dropped with the server).
     let reasoning = format!("{REASONING_SENTINEL} pondering syllables quietly");
     let answer = format!("{MOCK_RESPONSE_SENTINEL} the answer body.");
-    for _ in 0..2 {
-        content.enqueue_response(
-            "/v1/responses",
-            ScriptedResponse::sse(sse::responses_api_reasoning_and_text_events(
-                &reasoning,
-                &answer,
-                "test-model",
-            )),
-        );
-    }
+    let _thinking_turn = content.expect_response(
+        "minimal transcript reasoning turn",
+        InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
+        ScriptedResponse::sse(sse::responses_api_reasoning_and_text_events(
+            &reasoning,
+            &answer,
+            "test-model",
+        )),
+    );
     // Fallback mode for any further auxiliary traffic.
     content.set_response(answer.clone());
 

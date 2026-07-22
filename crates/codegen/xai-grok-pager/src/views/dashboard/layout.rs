@@ -51,6 +51,7 @@ pub struct PeekAllocation {
 /// - `pin_user`: last user exists → budget one pin row (paint charges it too).
 /// - Blank when body > 0 and room remains after pin+body (paint blanks only
 ///   when middle still has ≥2 rows after the blank so pin + body share).
+///
 /// Empty body reserves 1 row for the empty/hint line. Never exceeds
 /// `max_content`; body is also capped by [`MAX_LIVE_TAIL_ROWS`].
 pub fn peek_live_tail_desired_content(

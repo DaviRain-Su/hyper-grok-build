@@ -17,7 +17,8 @@ async fn queued_bash_promotion_renders_output_pty() {
         }
         s
     };
-    content.set_turns([step_one]);
+    let _turn_one =
+        content.expect_agent_turn("running turn before queued bash promotion", step_one);
 
     let project = tempfile::tempdir().expect("create project dir");
     std::fs::create_dir_all(project.path().join(".git")).expect("create .git");

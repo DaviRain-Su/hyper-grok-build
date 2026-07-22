@@ -7,6 +7,11 @@ pub enum VoiceEvent {
     /// Utterance complete (`speech_final` on streaming STT, or batch result).
     UtteranceFinal { text: String },
 
-    /// Non-fatal or fatal error from STT.
-    Error { message: String },
+    /// Non-fatal or fatal error from capture or STT.
+    Error {
+        /// Short description for a one-line toast.
+        message: String,
+        /// Optional longer fix steps, for surfaces that fit more than one line.
+        hint: Option<String>,
+    },
 }

@@ -196,7 +196,11 @@ fn build_local_rows(
         if !include_subagents {
             continue;
         }
-        let mut subagents: Vec<&SubagentInfo> = agent.subagent_sessions.values().collect();
+        let mut subagents: Vec<&SubagentInfo> = agent
+            .subagent_sessions
+            .values()
+            .filter(|info| info.workflow_run_id.is_none())
+            .collect();
         subagents.sort_by(|a, b| {
             let a_running = !a.finished;
             let b_running = !b.finished;
@@ -400,47 +404,22 @@ pub fn has_background_work(agent: &AgentView) -> bool {
         .any(|t| t.status == crate::app::agent::BgTaskStatus::Running)
         || !agent.session.scheduled_tasks.is_empty()
 }
-/// Compact `"watching · …"` label summarising a turn-idle agent's live
-/// background work, listing only the non-zero kinds with singular/plural
-/// nouns — e.g. `"watching · 1 monitor · 2 loops"` or
-/// `"watching · 1 task"`. `None` when there's no background work (the
-/// caller then falls back to a bare `"Working"`). Mirrors the agent
-/// view's idle "watching" cue (`turn_status::watching_label`) so the
-/// dashboard and the agent view speak the same language; the counting
-/// matches [`has_background_work`].
+/// Compact `"… still running"` label summarising a turn-idle agent's live
+/// background work — e.g. `"1 monitor · 2 loops still running"` or
+/// `"1 task still running"`. `None` when there's no background work (the
+/// caller then falls back to a bare `"Working"`). Shares the format
+/// mechanics with the agent view's idle cue
+/// ([`crate::views::turn_status::format_still_running`]) but keeps the
+/// dashboard's own nouns ("task", not "command") and omits subagents —
+/// dashboard rows list those separately. Counts come from local state (not
+/// backend content), so no sanitise.
 fn background_work_label(agent: &AgentView) -> Option<String> {
-    use std::fmt::Write as _;
-    let mut monitors = 0usize;
-    let mut tasks = 0usize;
-    for t in agent.session.bg_tasks.values() {
-        if t.status != crate::app::agent::BgTaskStatus::Running {
-            continue;
-        }
-        if t.is_monitor {
-            monitors += 1;
-        } else {
-            tasks += 1;
-        }
-    }
-    let loops = agent.session.scheduled_tasks.len();
-    if monitors + tasks + loops == 0 {
-        return None;
-    }
-    let mut label = String::with_capacity(24);
-    label.push_str("watching");
-    if monitors > 0 {
-        let noun = if monitors == 1 { "monitor" } else { "monitors" };
-        let _ = write!(label, " \u{00b7} {monitors} {noun}");
-    }
-    if loops > 0 {
-        let noun = if loops == 1 { "loop" } else { "loops" };
-        let _ = write!(label, " \u{00b7} {loops} {noun}");
-    }
-    if tasks > 0 {
-        let noun = if tasks == 1 { "task" } else { "tasks" };
-        let _ = write!(label, " \u{00b7} {tasks} {noun}");
-    }
-    Some(label)
+    let w = agent.watchers();
+    crate::views::turn_status::format_still_running([
+        (w.monitors, "monitor"),
+        (w.loops, "loop"),
+        (w.commands, "task"),
+    ])
 }
 /// Classify a subagent.
 ///
@@ -1084,6 +1063,7 @@ mod tests {
             context_source: None,
             resumed_from: None,
             capability_mode: None,
+            workflow_run_id: None,
             context_normalized: false,
             child_updates_replayed: false,
             parent_prompt_id: None,
@@ -1116,6 +1096,30 @@ mod tests {
     fn classify_subagent_running() {
         let info = make_subagent("a", false, None);
         assert_eq!(classify_subagent(&info), RowState::Working);
+    }
+    #[test]
+    fn full_tree_excludes_workflow_owned_subagent_rows() {
+        let mut agents = IndexMap::new();
+        let mut agent = crate::app::agent_view::test_fixtures::make_agent();
+        let mut workflow_child = make_subagent("workflow-child", false, None);
+        workflow_child.workflow_run_id = Some(Arc::from("wf_1"));
+        agent
+            .subagent_sessions
+            .insert("workflow-child".into(), workflow_child);
+        agents.insert(AgentId(0), agent);
+        let rows = build_rows(
+            &agents,
+            &Default::default(),
+            &[],
+            Some(AgentId(0)),
+            super::super::state::Grouping::State,
+            &Filter::default(),
+            None,
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !matches!(row.id, DashboardRowId::Subagent { .. }))
+        );
     }
     #[test]
     fn classify_subagent_completed() {
@@ -1921,7 +1925,7 @@ mod tests {
             .insert("m1".into(), running_bg_task("m1", true));
         assert_eq!(classify_top_level(&agent), RowState::Working);
         let row = top_level_row(AgentId(0), &agent, false, false, None);
-        assert_eq!(row.activity.as_deref(), Some("watching · 1 monitor"));
+        assert_eq!(row.activity.as_deref(), Some("1 monitor still running"));
     }
     /// An active scheduled `/loop` keeps the agent `Working` even with a
     /// fully idle turn, labelled as a loop.
@@ -1934,7 +1938,7 @@ mod tests {
             .insert("l1".into(), scheduled_loop("l1"));
         assert_eq!(classify_top_level(&agent), RowState::Working);
         let row = top_level_row(AgentId(0), &agent, false, false, None);
-        assert_eq!(row.activity.as_deref(), Some("watching · 1 loop"));
+        assert_eq!(row.activity.as_deref(), Some("1 loop still running"));
     }
     /// The background-work label lists every non-zero kind (monitors,
     /// then loops, then plain tasks) with correct singular/plural nouns.
@@ -1961,12 +1965,12 @@ mod tests {
         let row = top_level_row(AgentId(0), &agent, false, false, None);
         assert_eq!(
             row.activity.as_deref(),
-            Some("watching · 1 monitor · 1 loop · 2 tasks"),
+            Some("1 monitor · 1 loop · 2 tasks still running"),
         );
     }
     /// The background-work label is the LAST activity fallback: a more
     /// specific Working signal (here, replay loading) still wins over
-    /// "watching · …", so a real turn is never masked by it.
+    /// "… still running", so a real turn is never masked by it.
     #[test]
     fn specific_working_activity_wins_over_background_label() {
         let mut agent = make_idle_agent_with_model(None);

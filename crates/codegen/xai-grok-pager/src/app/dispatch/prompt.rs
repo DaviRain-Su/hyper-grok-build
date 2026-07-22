@@ -439,6 +439,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 session_id: agent.session.session_id.as_ref(),
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
+                billing_surface_visible: app.usage_visible,
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
@@ -543,6 +544,13 @@ pub(super) fn dispatch_send_prompt_inner(
                     agent.prompt.set_text("");
                 }
                 return dispatch(Action::ExitSession, app);
+            }
+            CommandResult::Action(Action::EditPromptExternal) => {
+                // Typed slash input occupies the composer; the palette route preserves an existing draft.
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                return dispatch(Action::EditPromptExternal, app);
             }
             CommandResult::Action(action) => {
                 if consume_input {
@@ -1422,7 +1430,7 @@ pub(super) fn handle_prompt_response(
             if response_pid.as_deref() != Some(p.prompt_id.as_str())
                 && agent.should_adopt_running_prompt(&p.prompt_id)
             {
-                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind)
+                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind, p.combined_texts)
             } else {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
                 None

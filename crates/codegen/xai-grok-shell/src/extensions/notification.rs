@@ -14,6 +14,27 @@ pub struct GoalDeliverableInfo {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowPhaseInfo {
+    pub title: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowAgentInfo {
+    pub agent_id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub state: String,
+    #[serde(default)]
+    pub tokens_used: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
 /// xAI-specific session notification (parallel to acp::SessionNotification)
 /// This wraps an XaiSessionUpdate with session context for persistence and replay.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -599,6 +620,8 @@ pub enum SessionUpdate {
         /// ID of the source subagent this session was resumed from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resumed_from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow_run_id: Option<String>,
     },
     /// Periodic progress update for a running subagent.
     ///
@@ -770,6 +793,47 @@ pub enum SessionUpdate {
     ImageDropped { notes: Vec<String> },
     /// Memory file listing for the pager's /memory modal.
     MemoryFiles { files: Vec<MemoryFileInfo> },
+    WorkflowUpdated {
+        run_id: String,
+        #[serde(default)]
+        revision: u64,
+        name: String,
+        objective: String,
+        status: String,
+        #[serde(default)]
+        foreground: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        phases: Vec<WorkflowPhaseInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_phase: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_budget: Option<u64>,
+        #[serde(default)]
+        agents_used: u64,
+        #[serde(default)]
+        agents_reserved: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agents_remaining: Option<u64>,
+        #[serde(default)]
+        agent_usage_incomplete: bool,
+        elapsed_ms: u64,
+        #[serde(default)]
+        active_agents: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_agent_label: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        agents: Vec<WorkflowAgentInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_event: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_event_detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_event_timestamp: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pause_message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_summary: Option<String>,
+    },
     /// Goal mode orchestration progress update.
     ///
     /// Sent on the parent session's notification channel at phase transitions
@@ -1429,6 +1493,7 @@ mod tests {
             role: None,
             model: None,
             resumed_from: None,
+            workflow_run_id: None,
         })
         .unwrap();
         let progress = serde_json::to_value(SessionUpdate::SubagentProgress {
