@@ -60,8 +60,8 @@ The `spawn_subagent` tool accepts a `subagent_type` parameter that selects the c
 | Type              | Description                                          |
 | ----------------- | ---------------------------------------------------- |
 | `general-purpose` | Default type. Full-capability agent for any task.    |
-| `explore`         | Research agent. Searches, reads, greps, and runs shell commands, but does not edit files. Use it for codebase investigation. |
-| `plan`            | Planning agent. Explores the codebase and produces a structured implementation plan; does not edit files. |
+| `explore`         | Fast read-only research agent. Reads files, lists directories, and searches code; it has no shell or editing tools. |
+| `plan`            | Read-only planning agent. Inspects the codebase and maintains a planning todo list; it has no shell or editing tools. |
 | `oracle`          | Deep-analysis advisor. Read-only; the working agent consults it when stuck, debugging a complex issue, or weighing approaches, then acts on its recommendation. Pin it to a stronger model for best effect. |
 
 Project- or user-defined agents can add new types or shadow these built-ins by name.
@@ -71,6 +71,19 @@ Project- or user-defined agents can add new types or shadow these built-ins by n
 The oracle pattern pairs a fast working model with a stronger analysis model: the main agent keeps working on its own model, and when it hits a problem that needs deeper reasoning it spawns the `oracle` subagent, reads its recommendation, and continues. The oracle is read-only at the toolset level, so it can inspect the repo but never edits it.
 
 Pin the oracle to your strongest configured model with `/agents` → select `oracle` → `m` (or `[subagents.models] oracle = "..."` in `config.toml`). Without a pin it inherits the session model, which defeats the purpose.
+
+The built-in Oracle is bounded by default: 12 model/tool-use rounds, 40 tool calls, and 180 seconds total wall-clock time. Thirty seconds are reserved for finalization. Near a limit, Grok Build tells Oracle to stop investigating and return its best structured recommendation; if it ignores the warning, the hard tool/time limit cancels it. The Oracle response contract includes findings, evidence, alternatives, risks, a verification handoff, confidence, and a final recommendation.
+
+Custom or shadowing agent definitions can use the same YAML frontmatter fields:
+
+```yaml
+maxTurns: 12
+maxToolCalls: 40
+timeoutSecs: 180
+finalizeGraceSecs: 30
+```
+
+All values must be greater than zero. `maxTurns` is the existing model/tool-loop limit; the other fields are optional. Agents without these fields remain unbounded, except when they inherit a parent `maxTurns` limit.
 
 ---
 
@@ -109,7 +122,7 @@ To set a persona's model from the TUI, select it in the Personas tab and press `
 | `description`       | Short summary shown in the persona catalog. Falls back to the first paragraph of `instructions`. |
 | `inputs` / `outputs`| Declared input and output contract (see below).                     |
 | `model`             | Model override applied when the persona is used.                    |
-| `reasoning_effort`  | Reasoning effort applied when the persona is used.                  |
+| `reasoning_effort`  | Validated reasoning effort (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`). |
 | `default_isolation` | Default isolation mode (`none` or `worktree`).                      |
 
 ### Input/Output Contracts
@@ -134,16 +147,17 @@ Each field has a `name`, an `io_type` (defaults to `file`), a `required` flag, a
 
 ### Persona Resolution
 
-When a persona applies, Grok Build resolves the effective model and reasoning effort in this order, highest priority first:
+When a persona applies, Grok Build resolves the effective model and reasoning effort once at the spawn boundary, in this order (highest priority first):
 
 1. Explicit spawn-time override
 2. Role default
 3. Persona default
-4. Parent session
+4. Agent-definition default
+5. Parent session
 
-Isolation follows the same order for the first three steps but defaults to `none` (no worktree) rather than inheriting from the parent session.
+Isolation follows the same first four layers but defaults to `none` (no worktree) rather than inheriting from the parent session. Capability mode is intentionally stricter: the explicit request, role, and agent-definition modes are intersected as security ceilings. A caller can narrow access, but cannot widen an `oracle`, `explore`, or `plan` agent beyond read-only. The clamp runs after default tool assembly, and built-in read-only agents do not inherit unclassified MCP tools; `explore` and `oracle` keep their exact curated toolsets.
 
-If a persona is requested but cannot be resolved -- it is not found, has no instructions, or its `instructions_file` is unreadable -- the spawn fails.
+If a persona is requested but cannot be resolved -- it is not found, has no instructions, or its `instructions_file` is unreadable -- the spawn fails. Reasoning-effort values are parsed into a fixed enum during configuration loading, so misspellings fail early instead of silently reaching a provider.
 
 ---
 
@@ -156,7 +170,7 @@ The main agent calls the `spawn_subagent` tool. Its parameters:
 | `prompt`          | The full task prompt for the subagent.                           |
 | `description`     | A short label for the task (3-5 words).                          |
 | `subagent_type`   | The agent type to launch. Defaults to `general-purpose`.         |
-| `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `false`. |
+| `background`       | Run the subagent in the background and return immediately with a subagent ID. Defaults to `true`. |
 | `capability_mode` | Restrict the subagent's tools: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation`       | `none` (shared workspace, the default) or `worktree` (isolated git worktree). |
 | `resume_from`     | Continue a completed subagent's conversation. Pass its subagent ID. |
@@ -177,7 +191,7 @@ A capability mode is an optional, coarse filter on a subagent's tools:
 | `execute`    | Yes  | No    | Yes     | Read, plus run shell commands and background tasks. No file edits. |
 | `all`        | Yes  | Yes   | Yes     | Unrestricted tool access.                    |
 
-If you omit `capability_mode`, the subagent uses its agent type's toolset. The built-in `explore` and `plan` types read, search, and run shell commands but cannot edit files; `general-purpose` ships the full toolset.
+If you omit `capability_mode`, the subagent uses its agent type's toolset. The built-in `explore`, `plan`, and `oracle` types are enforced read-only and have no shell or editing tools; `general-purpose` ships the full toolset.
 
 ---
 
@@ -258,7 +272,7 @@ Grok Build shows running and finished work in side panes on the agent screen:
 
 To view the available agent types and personas, open the command palette with `Ctrl+P` and choose **Manage Agents** (`/config-agents`).
 
-Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group.
+Subagents appear at the top of the tasks pane in their own collapsible "Subagents" group. Running rows show elapsed time (and the wall-clock limit when configured), live tool calls against their limit, and current context tokens. Finished rows switch to cumulative model usage and show trustworthy reported cost when available. Runtime-driven endings are labeled with reasons such as `tool limit`, `time limit`, or `budget finalized`.
 
 ---
 

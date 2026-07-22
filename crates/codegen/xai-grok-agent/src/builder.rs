@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::computer::types::{AsyncFileSystem, TerminalBackend};
+use xai_grok_tools::implementations::grok_build::task::types::SubagentCapabilityModeExt;
 use xai_grok_tools::notification::ToolNotificationHandle;
 use xai_grok_tools::registry::types::SessionContext;
 use xai_grok_tools::types::tool::ToolKind;
@@ -960,6 +961,13 @@ impl AgentBuilder {
         tool_config
             .tools
             .retain(|tc| definition.session_tools_allowed(&tc.id));
+        // Capability is a final security clamp over the fully assembled
+        // function toolset. Applying it here prevents injected write, image,
+        // execute, or other out-of-mode helpers from widening the resolved
+        // read/write/execute ceiling.
+        if let Some(mode) = definition.capability_mode {
+            mode.filter_tool_config(&mut tool_config);
+        }
         {
             let mut saw_directive = false;
             let types: Vec<String> = definition
@@ -1703,6 +1711,43 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn capability_mode_is_final_clamp_after_default_tool_injection() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+
+        let mut profile = crate::config::AgentDefinition::default_grok_build();
+        profile.capability_mode = Some(xai_tool_types::SubagentCapabilityMode::ReadOnly);
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(profile)
+        .build()
+        .await
+        .expect("read-only agent should build");
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .into_iter()
+            .map(|definition| definition.function.name)
+            .collect();
+
+        assert!(names.iter().any(|name| name == "read_file"));
+        for denied in [
+            "search_replace",
+            "write",
+            "run_terminal_command",
+            "image_gen",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == denied),
+                "{denied} escaped the read-only capability clamp: {names:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn curated_empty_toolset_fails_agent_build() {
         use xai_grok_tools::computer::local::LocalTerminalBackend;

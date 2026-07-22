@@ -794,7 +794,30 @@ fn instant_to_epoch_ms(instant: std::time::Instant) -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-use xai_grok_subagent_resolution::resolve_effective_overrides;
+use xai_grok_subagent_resolution::{
+    DefinitionRuntimeDefaults, resolve_effective_overrides,
+    resolve_subagent_spec as resolve_runtime_spec,
+};
+
+/// Exhaustive bridge from the common, dependency-cycle-safe subagent effort
+/// type to the sampler's canonical effort type.
+fn subagent_reasoning_effort_to_sampling(
+    effort: xai_tool_types::SubagentReasoningEffort,
+) -> xai_grok_sampling_types::ReasoningEffort {
+    use xai_grok_sampling_types::ReasoningEffort as Sampling;
+    use xai_tool_types::SubagentReasoningEffort as Subagent;
+    match effort {
+        Subagent::None => Sampling::None,
+        Subagent::Minimal => Sampling::Minimal,
+        Subagent::Low => Sampling::Low,
+        Subagent::Medium => Sampling::Medium,
+        Subagent::High => Sampling::High,
+        Subagent::Xhigh => Sampling::Xhigh,
+        Subagent::Max => Sampling::Max,
+        Subagent::Ultra => Sampling::Ultra,
+    }
+}
+
 /// Resolve the sampling config and model ID for a subagent.
 ///
 /// Subagents inherit the parent session's model by default. Only an
@@ -1871,6 +1894,328 @@ fn resolve_subagent_max_turns(
         .map(|v| v as usize)
         .or(parent_max_turns)
 }
+
+/// Effective per-run limits resolved from an agent definition and the parent
+/// session. Only `max_turns` inherits; tool and wall-clock limits are explicit
+/// agent policies so an unbounded parent does not silently gain a deadline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SubagentExecutionBudget {
+    max_turns: Option<usize>,
+    max_tool_calls: Option<u32>,
+    timeout_secs: Option<u64>,
+    finalize_grace_secs: Option<u64>,
+}
+
+impl SubagentExecutionBudget {
+    fn resolve(
+        definition: &xai_grok_agent::config::AgentDefinition,
+        parent_max_turns: Option<usize>,
+    ) -> Self {
+        let timeout_secs = definition.timeout_secs;
+        let finalize_grace_secs = timeout_secs.map(|timeout| {
+            definition
+                .finalize_grace_secs
+                .unwrap_or(30)
+                .min(timeout.saturating_sub(1).max(1))
+        });
+        Self {
+            max_turns: resolve_subagent_max_turns(definition.max_turns, parent_max_turns),
+            max_tool_calls: definition.max_tool_calls,
+            timeout_secs,
+            finalize_grace_secs,
+        }
+    }
+
+    fn is_unbounded(self) -> bool {
+        self.max_turns.is_none() && self.max_tool_calls.is_none() && self.timeout_secs.is_none()
+    }
+
+    fn wire(self) -> Option<crate::extensions::notification::SubagentBudgetInfo> {
+        if self.is_unbounded() {
+            return None;
+        }
+        Some(crate::extensions::notification::SubagentBudgetInfo {
+            max_turns: self.max_turns.and_then(|v| u32::try_from(v).ok()),
+            max_tool_calls: self.max_tool_calls,
+            timeout_secs: self.timeout_secs,
+            finalize_grace_secs: self.finalize_grace_secs,
+        })
+    }
+
+    /// Trigger a final-answer reminder before the hard tool-call limit. The
+    /// reserve grows for large budgets but is capped so investigation still
+    /// gets most of the configured allowance (40 calls finalizes at 32).
+    fn finalize_at_tool_calls(self) -> Option<u32> {
+        self.max_tool_calls.map(|limit| {
+            let reserve = (limit / 5).clamp(1, 8);
+            limit.saturating_sub(reserve).max(1)
+        })
+    }
+
+    /// The model-call count is the same unit as `max_turns`. Reserve the final
+    /// round for a recommendation without more tools.
+    fn finalize_at_model_calls(self) -> Option<u64> {
+        self.max_turns
+            .map(|limit| u64::try_from(limit.saturating_sub(1).max(1)).unwrap_or(u64::MAX))
+    }
+
+    fn finalize_at_elapsed(self) -> Option<std::time::Duration> {
+        self.timeout_secs.map(|timeout| {
+            std::time::Duration::from_secs(
+                timeout
+                    .saturating_sub(self.finalize_grace_secs.unwrap_or(1))
+                    .max(1),
+            )
+        })
+    }
+}
+
+/// Add the resolved numbers to the child prompt so the model can cooperate
+/// with the runtime supervisor instead of discovering the hard limit by being
+/// cancelled. This applies to custom bounded agents as well as Oracle.
+fn append_execution_budget_prompt(
+    definition: &mut xai_grok_agent::config::AgentDefinition,
+    budget: SubagentExecutionBudget,
+) {
+    if budget.is_unbounded() {
+        return;
+    }
+    let mut limits = Vec::new();
+    if let Some(turns) = budget.max_turns {
+        limits.push(format!("{turns} model/tool-use rounds"));
+    }
+    if let Some(calls) = budget.max_tool_calls {
+        limits.push(format!("{calls} tool calls"));
+    }
+    if let Some(seconds) = budget.timeout_secs {
+        limits.push(format!("{seconds} seconds total wall-clock time"));
+    }
+    let reminder = format!(
+        "\n\n<execution_budget>\nYour execution budget is {}. Build a hypothesis, inspect only discriminating evidence, and leave enough budget to produce the required final answer. When warned that the budget is nearly exhausted, call no more tools and answer immediately from the evidence already collected.\n</execution_budget>",
+        limits.join(", ")
+    );
+    definition
+        .prompt_body
+        .get_or_insert_with(String::new)
+        .push_str(&reminder);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubagentBudgetTrigger {
+    FinalizingTurns,
+    FinalizingToolCalls,
+    FinalizingTimeout,
+    MaxToolCalls,
+    Timeout,
+}
+
+impl SubagentBudgetTrigger {
+    fn code(self) -> u8 {
+        match self {
+            Self::FinalizingTurns => 1,
+            Self::FinalizingToolCalls => 2,
+            Self::FinalizingTimeout => 3,
+            Self::MaxToolCalls => 4,
+            Self::Timeout => 5,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::FinalizingTurns),
+            2 => Some(Self::FinalizingToolCalls),
+            3 => Some(Self::FinalizingTimeout),
+            4 => Some(Self::MaxToolCalls),
+            5 => Some(Self::Timeout),
+            _ => None,
+        }
+    }
+
+    fn termination_reason(self) -> &'static str {
+        match self {
+            Self::FinalizingTurns => "max_turns_finalize",
+            Self::FinalizingToolCalls => "max_tool_calls_finalize",
+            Self::FinalizingTimeout => "timeout_finalize",
+            Self::MaxToolCalls => "max_tool_calls",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    fn is_hard(self) -> bool {
+        matches!(self, Self::MaxToolCalls | Self::Timeout)
+    }
+}
+
+struct SubagentBudgetMonitor {
+    state: Arc<std::sync::atomic::AtomicU8>,
+    stop: CancellationToken,
+}
+
+impl SubagentBudgetMonitor {
+    fn finish(self) -> Option<SubagentBudgetTrigger> {
+        self.stop.cancel();
+        SubagentBudgetTrigger::from_code(self.state.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
+fn budget_exhausted_message(
+    trigger: SubagentBudgetTrigger,
+    budget: SubagentExecutionBudget,
+) -> String {
+    match trigger {
+        SubagentBudgetTrigger::MaxToolCalls => format!(
+            "subagent tool-call budget exhausted (limit: {})",
+            budget.max_tool_calls.unwrap_or_default()
+        ),
+        SubagentBudgetTrigger::Timeout => format!(
+            "subagent wall-clock budget exhausted (limit: {}s)",
+            budget.timeout_secs.unwrap_or_default()
+        ),
+        _ => "subagent execution budget requested finalization".to_string(),
+    }
+}
+
+fn can_use_partial_budget_result(
+    hard_budget_exhausted: bool,
+    final_text: &str,
+    structured_output_required: bool,
+) -> bool {
+    hard_budget_exhausted && !structured_output_required && !final_text.trim().is_empty()
+}
+
+fn budget_finalization_message(
+    trigger: SubagentBudgetTrigger,
+    budget: SubagentExecutionBudget,
+) -> String {
+    let reason = match trigger {
+        SubagentBudgetTrigger::FinalizingTurns => format!(
+            "the model/tool-use round budget is nearly exhausted ({})",
+            budget.max_turns.unwrap_or_default()
+        ),
+        SubagentBudgetTrigger::FinalizingToolCalls => format!(
+            "the tool-call budget is nearly exhausted ({}/{})",
+            budget.finalize_at_tool_calls().unwrap_or_default(),
+            budget.max_tool_calls.unwrap_or_default()
+        ),
+        SubagentBudgetTrigger::FinalizingTimeout => format!(
+            "the wall-clock budget is nearly exhausted ({} seconds remain)",
+            budget.finalize_grace_secs.unwrap_or_default()
+        ),
+        SubagentBudgetTrigger::MaxToolCalls | SubagentBudgetTrigger::Timeout => {
+            "the execution budget is exhausted".to_string()
+        }
+    };
+    format!(
+        "<system-reminder>\n{reason}. Stop investigating now. Do not call any more tools. Return the best answer supported by the evidence already collected, follow the required output headings, state unknowns honestly, and include exact verification steps for the working agent.\n</system-reminder>"
+    )
+}
+
+/// Watch a bounded child without modifying the generic session loop. Near a
+/// limit, interject a no-more-tools finalization reminder at the next safe
+/// model boundary. Hard tool/time limits still send Cancel + Shutdown signals,
+/// so a model that ignores the reminder cannot run indefinitely.
+fn spawn_subagent_budget_monitor(
+    budget: SubagentExecutionBudget,
+    child_handle: &SessionHandle,
+    started_at: std::time::Instant,
+    cancel_token: CancellationToken,
+) -> Option<SubagentBudgetMonitor> {
+    if budget.is_unbounded() {
+        return None;
+    }
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let stop = CancellationToken::new();
+    let monitor = SubagentBudgetMonitor {
+        state: state.clone(),
+        stop: stop.clone(),
+    };
+    let signals_handle = child_handle.signals_handle.clone();
+    let chat_state_handle = child_handle.chat_state_handle.clone();
+    let cmd_tx = child_handle.cmd_tx.clone();
+    tokio::task::spawn_local(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                _ = cancel_token.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            let elapsed = started_at.elapsed();
+            let signals = signals_handle.snapshot().await.unwrap_or_default();
+            let model_calls = chat_state_handle
+                .try_get_session_usage()
+                .await
+                .map(|usage| usage.totals.model_calls)
+                .unwrap_or_default();
+
+            let hard = if budget
+                .timeout_secs
+                .is_some_and(|limit| elapsed >= std::time::Duration::from_secs(limit))
+            {
+                Some(SubagentBudgetTrigger::Timeout)
+            } else if budget
+                .max_tool_calls
+                .is_some_and(|limit| signals.tool_call_count >= limit)
+            {
+                Some(SubagentBudgetTrigger::MaxToolCalls)
+            } else {
+                None
+            };
+            if let Some(trigger) = hard {
+                state.store(trigger.code(), std::sync::atomic::Ordering::Release);
+                let _ = cmd_tx.send(SessionCommand::Cancel {
+                    cancel_subagents: true,
+                    kill_background_tasks: true,
+                    rewind_if_pristine: false,
+                    trigger: Some(format!("subagent_{}", trigger.termination_reason())),
+                });
+                cancel_token.cancel();
+                break;
+            }
+
+            if state.load(std::sync::atomic::Ordering::Acquire) != 0 {
+                continue;
+            }
+            let soft = if budget
+                .finalize_at_elapsed()
+                .is_some_and(|limit| elapsed >= limit)
+            {
+                Some(SubagentBudgetTrigger::FinalizingTimeout)
+            } else if budget
+                .finalize_at_tool_calls()
+                .is_some_and(|limit| signals.tool_call_count >= limit)
+            {
+                Some(SubagentBudgetTrigger::FinalizingToolCalls)
+            } else if budget
+                .finalize_at_model_calls()
+                .is_some_and(|limit| model_calls >= limit)
+            {
+                Some(SubagentBudgetTrigger::FinalizingTurns)
+            } else {
+                None
+            };
+            if let Some(trigger) = soft
+                && state
+                    .compare_exchange(
+                        0,
+                        trigger.code(),
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                let _ = cmd_tx.send(SessionCommand::Interject {
+                    text: budget_finalization_message(trigger, budget),
+                    id: Some(format!("subagent-budget-{}", trigger.termination_reason())),
+                    images: Vec::new(),
+                });
+            }
+        }
+    });
+    Some(monitor)
+}
+
 /// What to do with a resumed subagent's isolated worktree directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResumeWorktreeAction {
@@ -2177,6 +2522,8 @@ fn send_pre_spawn_failure(
                 child_session_id: String::new(),
                 status: "failed".to_string(),
                 error: Some(error.to_string()),
+                termination_reason: None,
+                usage: None,
                 tool_calls: 0,
                 turns: 0,
                 duration_ms: 0,
@@ -2223,6 +2570,8 @@ fn fail_subagent(
             child_session_id: child_session_id.0.to_string(),
             status: result.status().to_string(),
             error: result.error.clone(),
+            termination_reason: result.termination_reason.clone(),
+            usage: None,
             tool_calls: 0,
             turns: 0,
             duration_ms,
@@ -2282,6 +2631,8 @@ async fn cancel_pending_subagent_at_promote(
             child_session_id: child_session_id.0.to_string(),
             status: result.status().to_string(),
             error: result.error.clone(),
+            termination_reason: result.termination_reason.clone(),
+            usage: None,
             tool_calls: 0,
             turns: 0,
             duration_ms,
@@ -2814,6 +3165,8 @@ fn cancelled_orphan_finish(
         child_session_id,
         status: "cancelled".to_string(),
         error: Some(ORPHAN_RECONCILE_REASON.to_string()),
+        termination_reason: Some("process_restart".to_string()),
+        usage: None,
         tool_calls: 0,
         turns: 0,
         duration_ms,
@@ -2941,6 +3294,8 @@ pub(crate) fn reconcile_orphaned_subagents(
                         child_session_id: m.child_session_id,
                         status: m.status,
                         error: m.error,
+                        termination_reason: None,
+                        usage: None,
                         tool_calls: m.tool_calls.unwrap_or(0),
                         turns: m.turns.unwrap_or(0),
                         duration_ms: m.duration_ms.unwrap_or(0),

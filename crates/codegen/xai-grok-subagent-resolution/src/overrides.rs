@@ -10,7 +10,7 @@ use xai_grok_tools::implementations::grok_build::task::types::SubagentRuntimeOve
 use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
 use crate::config::{SubagentPersona, SubagentRole};
-use crate::types::EffectiveRuntimeConfig;
+use crate::types::{DefinitionRuntimeDefaults, EffectiveRuntimeConfig};
 
 /// Parse a serde-deserializable enum from a plain string value.
 ///
@@ -40,11 +40,16 @@ pub fn intersect_capability_modes(
 /// Resolve effective runtime config from explicit overrides, role defaults,
 /// and persona defaults.
 ///
-/// Precedence for each field:
+/// Model, reasoning-effort, and isolation precedence:
 /// 1. Explicit spawn-time override (from `SubagentRuntimeOverrides`)
 /// 2. Role default (from `SubagentRole` in config)
 /// 3. Persona default (looked up by name from the personas map)
-/// 4. None (parent inheritance, handled downstream)
+/// 4. Agent-definition default
+/// 5. None (parent inheritance, handled downstream)
+///
+/// Capability modes are security ceilings rather than ordinary defaults: the
+/// explicit request, role, and agent definition are intersected so a caller can
+/// narrow access but cannot widen a read-only definition or role.
 ///
 /// Persona instructions are loaded eagerly: if `instructions_file` is set,
 /// the file is read from disk relative to `source_dir` (or `cwd` as fallback).
@@ -62,6 +67,28 @@ pub fn resolve_effective_overrides(
     cwd: Option<&Path>,
     role_name: Option<String>,
 ) -> EffectiveRuntimeConfig {
+    resolve_subagent_spec(
+        overrides,
+        role,
+        personas,
+        cwd,
+        role_name,
+        DefinitionRuntimeDefaults::default(),
+    )
+}
+
+/// Resolve all pure runtime layers at one boundary. Shell-only concerns such as
+/// catalog credential materialization, worktree creation, and session spawning
+/// remain downstream, but effort/capability/isolation no longer get reopened
+/// after this function returns.
+pub fn resolve_subagent_spec(
+    overrides: &SubagentRuntimeOverrides,
+    role: Option<&SubagentRole>,
+    personas: &HashMap<String, SubagentPersona>,
+    cwd: Option<&Path>,
+    role_name: Option<String>,
+    definition_defaults: DefinitionRuntimeDefaults,
+) -> EffectiveRuntimeConfig {
     // ── Model resolution ─────────────────────────────────────────
     let model_from_override_or_role = overrides
         .model
@@ -71,8 +98,7 @@ pub fn resolve_effective_overrides(
     // ── Reasoning effort resolution ──────────────────────────────
     let reasoning_from_override_or_role = overrides
         .reasoning_effort
-        .clone()
-        .or_else(|| role.and_then(|r| r.reasoning_effort.clone()));
+        .or_else(|| role.and_then(|r| r.reasoning_effort));
 
     // ── Capability mode resolution ───────────────────────────────
     let role_capability_mode = role.and_then(|r| {
@@ -80,8 +106,10 @@ pub fn resolve_effective_overrides(
             .as_deref()
             .and_then(parse_enum_from_str::<SubagentCapabilityMode>)
     });
-    let capability_mode =
-        intersect_capability_modes(overrides.capability_mode, role_capability_mode);
+    let capability_mode = intersect_capability_modes(
+        intersect_capability_modes(overrides.capability_mode, role_capability_mode),
+        definition_defaults.capability_mode,
+    );
 
     // ── Persona resolution ───────────────────────────────────────
     let persona = overrides.persona.clone();
@@ -91,7 +119,8 @@ pub fn resolve_effective_overrides(
     let model =
         model_from_override_or_role.or_else(|| resolved_persona.and_then(|p| p.model.clone()));
     let reasoning_effort = reasoning_from_override_or_role
-        .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort.clone()));
+        .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort))
+        .or(definition_defaults.reasoning_effort);
 
     // ── Persona instructions loading ─────────────────────────────
     // Fail-closed: if persona resolution produces an error (file unreadable,
@@ -134,9 +163,14 @@ pub fn resolve_effective_overrides(
         .isolation
         .or_else(|| {
             role.and_then(|r| r.default_isolation.as_deref())
-                .or_else(|| resolved_persona.and_then(|p| p.default_isolation.as_deref()))
                 .and_then(parse_enum_from_str::<SubagentIsolationMode>)
         })
+        .or_else(|| {
+            resolved_persona
+                .and_then(|p| p.default_isolation.as_deref())
+                .and_then(parse_enum_from_str::<SubagentIsolationMode>)
+        })
+        .or(definition_defaults.isolation)
         .unwrap_or(SubagentIsolationMode::None);
 
     EffectiveRuntimeConfig {
@@ -223,6 +257,7 @@ fn resolve_persona_instructions(
 mod tests {
     use super::*;
     use xai_grok_tools::implementations::grok_build::task::types::ModelOverrideProvenance;
+    use xai_tool_types::SubagentReasoningEffort;
 
     /// Helper to build an overrides struct with only the fields we care about.
     fn make_overrides(
@@ -235,7 +270,11 @@ mod tests {
         SubagentRuntimeOverrides {
             model: model.map(String::from),
             model_override_provenance: ModelOverrideProvenance::Harness,
-            reasoning_effort: reasoning_effort.map(String::from),
+            reasoning_effort: reasoning_effort.map(|value| {
+                value
+                    .parse::<SubagentReasoningEffort>()
+                    .expect("valid test reasoning effort")
+            }),
             persona: persona.map(String::from),
             capability_mode,
             isolation,
@@ -360,40 +399,40 @@ mod tests {
     fn explicit_reasoning_effort_overrides_role_and_persona() {
         let overrides = make_overrides(None, Some("p"), None, None, Some("low"));
         let role = SubagentRole {
-            reasoning_effort: Some("high".into()),
+            reasoning_effort: Some(SubagentReasoningEffort::High),
             ..Default::default()
         };
         let mut personas = HashMap::new();
         personas.insert(
             "p".to_string(),
             SubagentPersona {
-                reasoning_effort: Some("medium".into()),
+                reasoning_effort: Some(SubagentReasoningEffort::Medium),
                 instructions: Some("test".into()),
                 ..Default::default()
             },
         );
         let result = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-        assert_eq!(result.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::Low));
     }
 
     #[test]
     fn role_reasoning_effort_overrides_persona() {
         let overrides = make_overrides(None, Some("p"), None, None, None);
         let role = SubagentRole {
-            reasoning_effort: Some("high".into()),
+            reasoning_effort: Some(SubagentReasoningEffort::High),
             ..Default::default()
         };
         let mut personas = HashMap::new();
         personas.insert(
             "p".to_string(),
             SubagentPersona {
-                reasoning_effort: Some("medium".into()),
+                reasoning_effort: Some(SubagentReasoningEffort::Medium),
                 instructions: Some("test".into()),
                 ..Default::default()
             },
         );
         let result = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
-        assert_eq!(result.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::High));
     }
 
     #[test]
@@ -403,13 +442,62 @@ mod tests {
         personas.insert(
             "p".to_string(),
             SubagentPersona {
-                reasoning_effort: Some("medium".into()),
+                reasoning_effort: Some(SubagentReasoningEffort::Medium),
                 instructions: Some("test".into()),
                 ..Default::default()
             },
         );
         let result = resolve_effective_overrides(&overrides, None, &personas, None, None);
-        assert_eq!(result.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            result.reasoning_effort,
+            Some(SubagentReasoningEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn definition_defaults_fill_only_unset_runtime_fields() {
+        let overrides = make_overrides(None, None, None, None, None);
+        let defaults = DefinitionRuntimeDefaults {
+            reasoning_effort: Some(SubagentReasoningEffort::High),
+            capability_mode: Some(SubagentCapabilityMode::ReadOnly),
+            isolation: Some(SubagentIsolationMode::Worktree),
+        };
+
+        let result =
+            resolve_subagent_spec(&overrides, None, &empty_personas(), None, None, defaults);
+
+        assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::High));
+        assert_eq!(
+            result.capability_mode,
+            Some(SubagentCapabilityMode::ReadOnly)
+        );
+        assert_eq!(result.isolation, SubagentIsolationMode::Worktree);
+    }
+
+    #[test]
+    fn higher_layers_override_defaults_but_cannot_widen_capability_ceiling() {
+        let overrides = make_overrides(
+            None,
+            None,
+            Some(SubagentCapabilityMode::All),
+            Some(SubagentIsolationMode::None),
+            Some("low"),
+        );
+        let defaults = DefinitionRuntimeDefaults {
+            reasoning_effort: Some(SubagentReasoningEffort::High),
+            capability_mode: Some(SubagentCapabilityMode::ReadOnly),
+            isolation: Some(SubagentIsolationMode::Worktree),
+        };
+
+        let result =
+            resolve_subagent_spec(&overrides, None, &empty_personas(), None, None, defaults);
+
+        assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::Low));
+        assert_eq!(
+            result.capability_mode,
+            Some(SubagentCapabilityMode::ReadOnly)
+        );
+        assert_eq!(result.isolation, SubagentIsolationMode::None);
     }
 
     // ── Isolation precedence ─────────────────────────────────────
@@ -441,6 +529,28 @@ mod tests {
         };
         let result =
             resolve_effective_overrides(&overrides, Some(&role), &empty_personas(), None, None);
+        assert_eq!(result.isolation, SubagentIsolationMode::Worktree);
+    }
+
+    #[test]
+    fn invalid_role_isolation_falls_through_to_persona() {
+        let overrides = make_overrides(None, Some("isolated"), None, None, None);
+        let role = SubagentRole {
+            default_isolation: Some("invalid".into()),
+            ..Default::default()
+        };
+        let mut personas = HashMap::new();
+        personas.insert(
+            "isolated".to_string(),
+            SubagentPersona {
+                instructions: Some("Use isolation.".into()),
+                default_isolation: Some("worktree".into()),
+                ..Default::default()
+            },
+        );
+
+        let result = resolve_effective_overrides(&overrides, Some(&role), &personas, None, None);
+
         assert_eq!(result.isolation, SubagentIsolationMode::Worktree);
     }
 

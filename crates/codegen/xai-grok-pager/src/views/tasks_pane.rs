@@ -160,6 +160,84 @@ fn format_line_count_badge(count: usize, truncated: bool) -> String {
     format!("({}M{suffix})", count / 1_000_000)
 }
 
+fn subagent_termination_label(reason: &str) -> &str {
+    match reason {
+        "max_turns" => "turn limit",
+        "max_tool_calls" => "tool limit",
+        "timeout" => "time limit",
+        "max_turns_finalize" | "max_tool_calls_finalize" | "timeout_finalize" => "budget finalized",
+        other => other,
+    }
+}
+
+fn subagent_elapsed_label(info: &SubagentInfo) -> String {
+    let elapsed = format_duration(info.display_elapsed());
+    if info.is_running()
+        && let Some(timeout) = info.budget.as_ref().and_then(|budget| budget.timeout_secs)
+    {
+        return format!(
+            "{elapsed}/{}",
+            format_duration(std::time::Duration::from_secs(timeout))
+        );
+    }
+    elapsed
+}
+
+/// Compact live/completed subagent metrics for the Tasks pane. Live token
+/// counts are context occupancy; completed counts switch to cumulative billed
+/// usage and include cost only when every call reported it.
+fn format_subagent_metrics(info: &SubagentInfo) -> String {
+    // Progress can lag the terminal notification; once finished, prefer the
+    // authoritative final count instead of leaving a stale live count visible.
+    let calls = if info.finished {
+        info.tool_calls.or(info.tool_call_count)
+    } else {
+        info.tool_call_count.or(info.tool_calls)
+    };
+    let mut parts = Vec::new();
+    if let Some(calls) = calls {
+        if let Some(limit) = info
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.max_tool_calls)
+        {
+            parts.push(format!("{calls}/{limit} tools"));
+        } else if calls > 0 {
+            parts.push(format!("{calls} tools"));
+        }
+    }
+
+    let cumulative_tokens = info
+        .usage
+        .as_ref()
+        .map(|usage| usage.totals.total_tokens)
+        .filter(|tokens| *tokens > 0);
+    let tokens = cumulative_tokens.or(info.tokens_used);
+    if let Some(tokens) = tokens.filter(|tokens| *tokens > 0) {
+        let compact = crate::views::agent_status::format_tokens_compact(
+            i64::try_from(tokens).unwrap_or(i64::MAX),
+        );
+        let unit = if cumulative_tokens.is_some() {
+            "tok"
+        } else {
+            "ctx"
+        };
+        parts.push(format!("{compact} {unit}"));
+    }
+
+    if let Some(usage) = info.usage.as_ref()
+        && !usage.incomplete
+        && !usage.totals.cost_is_partial
+        && let Some(ticks) = usage.totals.cost_usd_ticks
+    {
+        parts.push(format!(
+            "${:.4}",
+            xai_grok_shell::extensions::notification::ticks_to_usd(ticks)
+        ));
+    }
+    parts.join(" · ")
+}
+
 // ---------------------------------------------------------------------------
 // TaskEntryId — identifies which entry a button belongs to
 // ---------------------------------------------------------------------------
@@ -431,14 +509,23 @@ impl TaskEntry {
                 format!(" \u{2014} {activity}"),
                 Style::default().fg(theme.gray),
             ));
+        } else if let Some(reason) = info.termination_reason.as_deref() {
+            spans.push(Span::styled(
+                format!(" \u{2014} {}", subagent_termination_label(reason)),
+                Style::default().fg(theme.gray),
+            ));
         }
 
-        let label = match (description.is_empty(), model_suffix.is_empty()) {
+        let mut label = match (description.is_empty(), model_suffix.is_empty()) {
             (true, true) => type_label.clone(),
             (true, false) => format!("{type_label} {model_suffix}"),
             (false, true) => format!("{type_label} {description}"),
             (false, false) => format!("{type_label} {description} {model_suffix}"),
         };
+        if let Some(reason) = info.termination_reason.as_deref() {
+            label.push(' ');
+            label.push_str(subagent_termination_label(reason));
+        }
         let styled = Line::from(spans);
 
         // Use a different hash namespace to avoid collisions with bg tasks
@@ -1727,7 +1814,7 @@ impl TasksPane {
         } else if info.is_running() {
             let frames = crate::glyphs::dot_spinner_frames();
             let frame_idx = (self.tick / SPINNER_DIVISOR) as usize % frames.len();
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = subagent_elapsed_label(info);
             (
                 frames[frame_idx],
                 Style::default().fg(theme.accent_running),
@@ -1735,7 +1822,7 @@ impl TasksPane {
                 Style::default().fg(theme.gray),
             )
         } else if info.status.as_deref() == Some("completed") {
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = subagent_elapsed_label(info);
             (
                 crate::glyphs::check_mark(),
                 Style::default().fg(theme.accent_success),
@@ -1743,7 +1830,7 @@ impl TasksPane {
                 Style::default().fg(theme.gray),
             )
         } else {
-            let elapsed = format_duration(info.display_elapsed());
+            let elapsed = subagent_elapsed_label(info);
             (
                 crate::glyphs::ballot_x(),
                 Style::default().fg(theme.accent_error),
@@ -1762,6 +1849,7 @@ impl TasksPane {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("");
+        let metrics_text = format_subagent_metrics(info);
         let right_text_w = right_text.width() as u16;
         let kill_w: u16 = if info.is_running() { 3 } else { 0 };
         let badge_w: u16 = if badge.is_empty() {
@@ -1774,7 +1862,12 @@ impl TasksPane {
         } else {
             model_text.width() as u16 + 1
         };
-        let overlay_w = kill_w + 3 + right_text_w + model_w + badge_w + 1;
+        let metrics_w: u16 = if metrics_text.is_empty() {
+            0
+        } else {
+            metrics_text.width() as u16 + 1
+        };
+        let overlay_w = kill_w + 3 + right_text_w + model_w + metrics_w + badge_w + 1;
         clear_overlay_area(buf, area, y, overlay_w);
 
         let mut rx = area.x + area.width;
@@ -1840,6 +1933,18 @@ impl TasksPane {
                 y,
                 &Span::styled(format!("{model_text} "), mstyle),
                 model_w,
+            );
+        }
+
+        // Live/completed usage and budget counters.
+        if !metrics_text.is_empty() {
+            rx = rx.saturating_sub(metrics_w);
+            let metrics_style = Style::default().fg(theme.gray);
+            buf.set_span(
+                rx,
+                y,
+                &Span::styled(format!("{metrics_text} "), metrics_style),
+                metrics_w,
             );
         }
 
@@ -1949,6 +2054,7 @@ mod tests {
             resumed_from: None,
             capability_mode: None,
             workflow_run_id: None,
+            budget: None,
             context_normalized: false,
             parent_prompt_id: None,
             started_at: Instant::now(),
@@ -1956,6 +2062,8 @@ mod tests {
             finished: false,
             status: None,
             error: None,
+            termination_reason: None,
+            usage: None,
             duration_ms: None,
             tool_calls: None,
             turns: None,
@@ -1976,6 +2084,108 @@ mod tests {
             worktree_path: None,
             child_updates_replayed: false,
         }
+    }
+
+    #[test]
+    fn subagent_metrics_show_live_tool_and_token_budget() {
+        let mut info = make_info();
+        info.tool_call_count = Some(32);
+        info.tokens_used = Some(45_000);
+        info.budget = Some(
+            xai_grok_shell::extensions::notification::SubagentBudgetInfo {
+                max_turns: Some(12),
+                max_tool_calls: Some(40),
+                timeout_secs: Some(180),
+                finalize_grace_secs: Some(30),
+            },
+        );
+        assert_eq!(format_subagent_metrics(&info), "32/40 tools · 45k ctx");
+        assert!(subagent_elapsed_label(&info).ends_with("/3m0s"));
+    }
+
+    #[test]
+    fn subagent_metrics_show_completed_cumulative_usage_and_cost() {
+        let mut info = make_info();
+        info.finished = true;
+        info.status = Some(Arc::from("completed"));
+        info.tool_calls = Some(40);
+        info.usage = Some(
+            xai_grok_shell::extensions::notification::SubagentUsageInfo {
+                totals: xai_grok_shell::extensions::notification::PromptUsageModel {
+                    total_tokens: 120_000,
+                    cost_usd_ticks: Some(125_000_000),
+                    ..Default::default()
+                },
+                incomplete: false,
+            },
+        );
+        assert_eq!(
+            format_subagent_metrics(&info),
+            "40 tools · 120k tok · $0.0125"
+        );
+    }
+
+    #[test]
+    fn completed_subagent_metrics_prefer_terminal_tool_count_over_stale_progress() {
+        let mut info = make_info();
+        info.finished = true;
+        info.status = Some(Arc::from("completed"));
+        info.tool_call_count = Some(32);
+        info.tool_calls = Some(40);
+        info.budget = Some(
+            xai_grok_shell::extensions::notification::SubagentBudgetInfo {
+                max_turns: Some(12),
+                max_tool_calls: Some(40),
+                timeout_secs: Some(180),
+                finalize_grace_secs: Some(30),
+            },
+        );
+
+        assert_eq!(format_subagent_metrics(&info), "40/40 tools");
+    }
+
+    #[test]
+    fn completed_subagent_metrics_fall_back_when_usage_has_no_token_counts() {
+        let mut info = make_info();
+        info.finished = true;
+        info.tokens_used = Some(45_000);
+        info.usage = Some(
+            xai_grok_shell::extensions::notification::SubagentUsageInfo {
+                incomplete: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(format_subagent_metrics(&info), "45k ctx");
+    }
+
+    #[test]
+    fn subagent_metrics_hide_untrustworthy_cost() {
+        let mut info = make_info();
+        info.finished = true;
+        info.usage = Some(
+            xai_grok_shell::extensions::notification::SubagentUsageInfo {
+                totals: xai_grok_shell::extensions::notification::PromptUsageModel {
+                    total_tokens: 10_000,
+                    cost_usd_ticks: Some(50_000_000),
+                    cost_is_partial: true,
+                    ..Default::default()
+                },
+                incomplete: false,
+            },
+        );
+        assert_eq!(format_subagent_metrics(&info), "10k tok");
+    }
+
+    #[test]
+    fn subagent_termination_reasons_have_readable_labels() {
+        assert_eq!(subagent_termination_label("max_turns"), "turn limit");
+        assert_eq!(subagent_termination_label("max_tool_calls"), "tool limit");
+        assert_eq!(subagent_termination_label("timeout"), "time limit");
+        assert_eq!(
+            subagent_termination_label("max_tool_calls_finalize"),
+            "budget finalized"
+        );
     }
 
     fn make_bg_task(task_id: &str, command: &str, status: BgTaskStatus) -> BgTaskState {

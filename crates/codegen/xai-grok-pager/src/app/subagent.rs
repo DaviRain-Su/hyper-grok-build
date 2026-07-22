@@ -26,6 +26,8 @@ pub struct SubagentInfo {
     /// "read-only", "read-write", "execute", or "all".
     pub capability_mode: Option<Arc<str>>,
     pub workflow_run_id: Option<Arc<str>>,
+    /// Effective runtime limits reported when the child was spawned.
+    pub budget: Option<xai_grok_shell::extensions::notification::SubagentBudgetInfo>,
     /// Whether the context was normalized into `<background_context>`.
     pub context_normalized: bool,
     pub parent_prompt_id: Option<Arc<str>>,
@@ -43,6 +45,10 @@ pub struct SubagentInfo {
     /// "completed", "failed", or "cancelled".
     pub status: Option<Arc<str>>,
     pub error: Option<Arc<str>>,
+    /// Stable reason for runtime-driven finalization/cancellation.
+    pub termination_reason: Option<Arc<str>>,
+    /// Cumulative model usage captured at completion.
+    pub usage: Option<xai_grok_shell::extensions::notification::SubagentUsageInfo>,
     /// Wall-clock duration in milliseconds.
     pub duration_ms: Option<u64>,
     pub tool_calls: Option<u32>,
@@ -514,6 +520,7 @@ mod tests {
             resumed_from: None,
             capability_mode: None,
             workflow_run_id: None,
+            budget: None,
             context_normalized: false,
             parent_prompt_id: None,
             started_at: Instant::now(),
@@ -521,6 +528,8 @@ mod tests {
             finished: false,
             status: None,
             error: None,
+            termination_reason: None,
+            usage: None,
             duration_ms: None,
             tool_calls: None,
             turns: None,

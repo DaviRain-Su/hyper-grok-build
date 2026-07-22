@@ -740,6 +740,8 @@ mod tests {
             models: &state,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
@@ -769,6 +771,8 @@ mod tests {
             models: &state,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         // Trailing space after a locked reasoning-capable model must NOT
@@ -847,6 +851,8 @@ mod tests {
             models: &state,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
@@ -901,6 +907,8 @@ mod tests {
             models: &state,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         // Ambiguous bare name + space must NOT enter effort phase.
@@ -969,6 +977,8 @@ mod tests {
             models: &state,
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
+            billing_surface_visible: true,
+            workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();

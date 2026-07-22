@@ -202,6 +202,32 @@ pub struct PromptUsageModel {
     pub cost_missing_calls: u64,
 }
 
+/// Compact cumulative usage attached to a completed subagent lifecycle event.
+///
+/// Cost is omitted whenever the ledger is incomplete or any model call failed
+/// to report a price. Absence therefore means unknown, never free.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentUsageInfo {
+    #[serde(flatten)]
+    pub totals: PromptUsageModel,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
+}
+
+impl SubagentUsageInfo {
+    pub fn from_totals(totals: &xai_chat_state::UsageTotals, incomplete: bool) -> Self {
+        let mut projected = PromptUsageModel::from(totals);
+        if incomplete || projected.cost_is_partial {
+            projected.cost_usd_ticks = None;
+        }
+        Self {
+            totals: projected,
+            incomplete,
+        }
+    }
+}
+
 impl From<&xai_chat_state::UsageTotals> for PromptUsageModel {
     fn from(t: &xai_chat_state::UsageTotals) -> Self {
         // Exhaustive destructure: a new ledger field cannot silently miss the
@@ -384,6 +410,29 @@ pub struct HookRunEntryDto {
     pub status: HookRunStatusDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+}
+
+/// Effective execution limits for a spawned subagent.
+///
+/// All fields are optional for backward compatibility and for unbounded custom
+/// agents. Built-in Oracle sessions populate all four values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentBudgetInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_grace_secs: Option<u64>,
+}
+
+impl SubagentBudgetInfo {
+    pub fn is_unbounded(&self) -> bool {
+        self.max_turns.is_none() && self.max_tool_calls.is_none() && self.timeout_secs.is_none()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -620,6 +669,10 @@ pub enum SessionUpdate {
         /// ID of the source subagent this session was resumed from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resumed_from: Option<String>,
+        /// Effective runtime limits. Missing means the client is connected to
+        /// an older server or this custom agent is unbounded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget: Option<SubagentBudgetInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_run_id: Option<String>,
     },
@@ -666,6 +719,13 @@ pub enum SessionUpdate {
         /// Error message if the subagent failed.
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Stable reason the runtime ended or finalized the subagent early
+        /// (for example `max_tool_calls` or `timeout`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        termination_reason: Option<String>,
+        /// Cumulative billed usage for this child session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<SubagentUsageInfo>,
         /// Number of tool calls made by the subagent.
         tool_calls: u32,
         /// Number of conversation turns taken by the subagent.
@@ -1493,6 +1553,7 @@ mod tests {
             role: None,
             model: None,
             resumed_from: None,
+            budget: None,
             workflow_run_id: None,
         })
         .unwrap();
@@ -1515,6 +1576,8 @@ mod tests {
             child_session_id: "c".into(),
             status: "completed".into(),
             error: None,
+            termination_reason: None,
+            usage: None,
             tool_calls: 1,
             turns: 1,
             duration_ms: 200,
@@ -1567,6 +1630,8 @@ mod tests {
             child_session_id: "cs-rt".into(),
             status: "completed".into(),
             error: None,
+            termination_reason: None,
+            usage: None,
             tool_calls: 5,
             turns: 2,
             duration_ms: 10_000,
@@ -1580,6 +1645,112 @@ mod tests {
 
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["tokens_used"], 75_000);
+    }
+
+    #[test]
+    fn subagent_budget_and_usage_roundtrip() {
+        let spawned = SessionUpdate::SubagentSpawned {
+            subagent_id: "sa-budget".into(),
+            parent_session_id: "parent".into(),
+            parent_prompt_id: None,
+            child_session_id: "child".into(),
+            subagent_type: "oracle".into(),
+            description: "analyze".into(),
+            effective_context_source: Some("new".into()),
+            context_normalized: false,
+            capability_mode: Some("read-only".into()),
+            persona: None,
+            role: None,
+            model: Some("strong-model".into()),
+            resumed_from: None,
+            budget: Some(SubagentBudgetInfo {
+                max_turns: Some(12),
+                max_tool_calls: Some(40),
+                timeout_secs: Some(180),
+                finalize_grace_secs: Some(30),
+            }),
+            workflow_run_id: None,
+        };
+        let spawned_json = serde_json::to_value(&spawned).unwrap();
+        assert_eq!(spawned_json["budget"]["maxToolCalls"], 40);
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(spawned_json).unwrap(),
+            spawned
+        );
+
+        let finished = SessionUpdate::SubagentFinished {
+            subagent_id: "sa-budget".into(),
+            child_session_id: "child".into(),
+            status: "completed".into(),
+            error: None,
+            termination_reason: Some("max_tool_calls_finalize".into()),
+            usage: Some(SubagentUsageInfo {
+                totals: PromptUsageModel {
+                    input_tokens: 1_000,
+                    output_tokens: 200,
+                    total_tokens: 1_200,
+                    model_calls: 4,
+                    cost_usd_ticks: Some(50_000_000),
+                    ..Default::default()
+                },
+                incomplete: false,
+            }),
+            tool_calls: 32,
+            turns: 1,
+            duration_ms: 90_000,
+            tokens_used: 1_100,
+            output: Some("recommendation".into()),
+            will_wake: false,
+        };
+        let finished_json = serde_json::to_value(&finished).unwrap();
+        assert_eq!(
+            finished_json["termination_reason"],
+            "max_tool_calls_finalize"
+        );
+        assert_eq!(finished_json["usage"]["modelCalls"], 4);
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(finished_json).unwrap(),
+            finished
+        );
+    }
+
+    #[test]
+    fn older_subagent_notifications_default_new_budget_and_usage_fields() {
+        let spawned: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "subagent_spawned",
+            "subagent_id": "sa-old",
+            "parent_session_id": "parent",
+            "child_session_id": "child",
+            "subagent_type": "explore",
+            "description": "inspect"
+        }))
+        .unwrap();
+        let SessionUpdate::SubagentSpawned { budget, .. } = spawned else {
+            panic!("expected spawned update");
+        };
+        assert!(budget.is_none());
+
+        let finished: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "subagent_finished",
+            "subagent_id": "sa-old",
+            "child_session_id": "child",
+            "status": "completed",
+            "error": null,
+            "tool_calls": 3,
+            "turns": 1,
+            "duration_ms": 500
+        }))
+        .unwrap();
+        let SessionUpdate::SubagentFinished {
+            termination_reason,
+            usage,
+            ..
+        } = finished
+        else {
+            panic!("expected finished update");
+        };
+        assert!(termination_reason.is_none());
+        assert!(usage.is_none());
     }
 
     #[test]

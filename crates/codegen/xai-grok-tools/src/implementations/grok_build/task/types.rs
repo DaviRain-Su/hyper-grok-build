@@ -21,7 +21,9 @@ use std::sync::Arc;
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
+use xai_tool_types::{
+    SubagentCapabilityMode, SubagentIsolationMode, SubagentReasoningEffort, WaitMode,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SubagentOwner {
@@ -119,8 +121,8 @@ pub struct SubagentRuntimeOverrides {
     pub model: Option<String>,
     /// Whether `model` came from a model-facing Task call or internal harness logic.
     pub model_override_provenance: ModelOverrideProvenance,
-    /// Override reasoning effort (e.g. "low", "medium", "high").
-    pub reasoning_effort: Option<String>,
+    /// Typed reasoning-effort override.
+    pub reasoning_effort: Option<SubagentReasoningEffort>,
     /// Named persona/SOUL template to apply.
     pub persona: Option<String>,
     /// Capability mode controlling tool access.
@@ -354,6 +356,9 @@ pub struct SubagentResult {
     /// True if the subagent was cancelled (by user or model).
     /// Distinct from failure — cancellation is intentional.
     pub cancelled: bool,
+    /// Stable runtime reason for early finalization/cancellation, separate
+    /// from the human-readable `error` string.
+    pub termination_reason: Option<String>,
     pub subagent_id: String,
     /// The child session ID (same as subagent_id for MVP).
     pub child_session_id: String,
@@ -380,6 +385,7 @@ impl Default for SubagentResult {
             output: Arc::from(""),
             error: None,
             cancelled: false,
+            termination_reason: None,
             subagent_id: String::new(),
             child_session_id: String::new(),
             tool_calls: 0,

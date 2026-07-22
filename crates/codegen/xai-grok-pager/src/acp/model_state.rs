@@ -99,14 +99,19 @@ impl ModelState {
         Some(self.current.as_ref()?.0.as_ref())
     }
 
-    /// Total context window tokens for the current model (if available).
-    fn current_context_window_tokens(&self) -> Option<u64> {
-        let meta = self.available.get(self.current.as_ref()?)?.meta.as_ref()?;
+    /// Total context window tokens advertised for a catalog model.
+    pub fn context_window_for(&self, model_id: &acp::ModelId) -> Option<u64> {
+        let meta = self.available.get(model_id)?.meta.as_ref()?;
         meta.get("totalContextTokens")
             .and_then(|value| match value {
                 serde_json::Value::Number(number) => number.as_u64(),
                 _ => None,
             })
+    }
+
+    /// Total context window tokens for the current model (if available).
+    fn current_context_window_tokens(&self) -> Option<u64> {
+        self.context_window_for(self.current.as_ref()?)
     }
 
     /// Whether the current model accepts image input, read from the model's
@@ -405,6 +410,21 @@ mod tests {
     fn test_current_model_name() {
         let state = sample_models();
         assert_eq!(state.current_model_name(), Some("Model A".to_string()));
+    }
+
+    #[test]
+    fn context_window_for_reads_target_model_metadata() {
+        let id = acp::ModelId::new(Arc::from("small-model"));
+        let mut state = ModelState::default();
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Small Model".to_string()).meta(
+                serde_json::json!({ "totalContextTokens": 128_000 })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
+        assert_eq!(state.context_window_for(&id), Some(128_000));
     }
 
     #[test]

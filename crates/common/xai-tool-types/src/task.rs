@@ -180,6 +180,68 @@ impl SubagentCapabilityMode {
     }
 }
 
+/// Typed reasoning effort used by subagent role/persona/default resolution.
+///
+/// This lives in the common tool-types crate so the task runtime and resolver
+/// can share it without introducing the `xai-grok-tools` ↔ sampling-types
+/// dependency cycle. The shell converts it exhaustively to its sampling enum at
+/// the final model boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    #[default]
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Ultra,
+}
+
+impl SubagentReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+}
+
+impl std::fmt::Display for SubagentReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SubagentReasoningEffort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            "ultra" => Ok(Self::Ultra),
+            _ => Err(format!(
+                "invalid subagent reasoning effort {value:?}; expected one of: \
+                 none, minimal, low, medium, high, xhigh, max, ultra"
+            )),
+        }
+    }
+}
+
 /// Isolation mode for subagent execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -827,10 +889,32 @@ Strengths:
 
 Guidelines:
 - The caller's description is a starting point, not ground truth — verify it against the code.
-- Reason step by step; prefer a correct, specific answer over a fast one.
+- Work hypothesis-first: inspect only evidence that can change the recommendation, then stop investigating.
+- Prefer a correct, specific answer over an exhaustive inventory. Never keep searching merely to appear thorough.
 - If the premise looks wrong, say so directly and explain why.
+- Stay read-only. Give the working agent exact verification commands or tests to run; do not claim you ran them.
 
 ## Required Output
+
+Use these headings, in order:
+
+### Findings
+The key diagnosis or decision, with important findings ordered by impact.
+
+### Evidence
+Concrete file paths, functions, and observed behavior supporting the findings. Distinguish verified facts from assumptions.
+
+### Alternatives
+Viable alternatives and the trade-offs that would change the choice. Write `None material` when there is no meaningful alternative.
+
+### Risks and Unknowns
+Residual risks, missing evidence, and what could falsify the recommendation.
+
+### Verification Handoff
+Exact tests, commands, or checks the working agent should run after acting on the advice. These are instructions, not claims that you executed them.
+
+### Confidence
+`High`, `Medium`, or `Low`, followed by one sentence explaining why.
 
 End your response with:
 
@@ -1114,6 +1198,29 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn subagent_reasoning_effort_parses_and_serializes_canonical_values() {
+        for (token, expected) in [
+            ("none", SubagentReasoningEffort::None),
+            ("minimal", SubagentReasoningEffort::Minimal),
+            ("low", SubagentReasoningEffort::Low),
+            ("medium", SubagentReasoningEffort::Medium),
+            ("high", SubagentReasoningEffort::High),
+            ("xhigh", SubagentReasoningEffort::Xhigh),
+            ("max", SubagentReasoningEffort::Max),
+            ("ultra", SubagentReasoningEffort::Ultra),
+        ] {
+            assert_eq!(token.parse(), Ok(expected));
+            assert_eq!(expected.as_str(), token);
+            assert_eq!(serde_json::to_value(expected).unwrap(), token);
+            assert_eq!(
+                serde_json::from_value::<SubagentReasoningEffort>(token.into()).unwrap(),
+                expected
+            );
+        }
+        assert!("highest".parse::<SubagentReasoningEffort>().is_err());
+    }
+
     fn result_with_status(status: &str) -> TaskOutputOutput {
         TaskOutputOutput::Result(TaskOutputResult {
             task_id: "t".into(),
@@ -1292,6 +1399,30 @@ mod tests {
         // Descriptions must be single-spaced (line-continuation whitespace is
         // stripped), so they read as one clean paragraph in the tool listing.
         assert!(!GENERAL_PURPOSE_SUBAGENT.description.contains("  "));
+    }
+
+    #[test]
+    fn oracle_prompt_has_structured_analysis_and_verification_contract() {
+        let headings = [
+            "### Findings",
+            "### Evidence",
+            "### Alternatives",
+            "### Risks and Unknowns",
+            "### Verification Handoff",
+            "### Confidence",
+            "### Recommendation",
+        ];
+        let mut previous = 0;
+        for heading in headings {
+            let index = ORACLE_PROMPT
+                .find(heading)
+                .unwrap_or_else(|| panic!("missing Oracle heading: {heading}"));
+            assert!(index >= previous, "Oracle headings must remain ordered");
+            previous = index;
+        }
+        assert!(ORACLE_PROMPT.contains("do not claim you ran them"));
+        assert!(ORACLE_PROMPT.contains("Never keep searching merely to appear thorough"));
+        assert!(ORACLE_PROMPT.rfind("### Recommendation").is_some());
     }
 
     #[test]

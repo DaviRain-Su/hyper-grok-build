@@ -15,17 +15,27 @@ pub enum ContextSource {
     Resumed,
 }
 
+/// Agent-definition defaults applied after explicit, role, and persona layers.
+/// Keeping these values in one typed input prevents the shell from reopening a
+/// supposedly resolved runtime config with ad-hoc string fallbacks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DefinitionRuntimeDefaults {
+    pub reasoning_effort: Option<xai_tool_types::SubagentReasoningEffort>,
+    pub capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
+    pub isolation: Option<xai_tool_types::SubagentIsolationMode>,
+}
+
 /// Resolved effective runtime configuration for a child agent.
 ///
-/// Precedence: explicit spawn-time override > role default > persona default > parent inheritance (None).
+/// Model, effort, and isolation use explicit > role > persona > definition >
+/// parent inheritance. Capability mode is the safe intersection of the
+/// explicit request, role ceiling, and definition ceiling.
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveRuntimeConfig {
     /// Resolved model ID override (if any).
     pub model: Option<String>,
-    /// Resolved reasoning effort (e.g. "low", "medium", "high").
-    // TODO(phase2): consider a typed `ReasoningEffort` enum to prevent typos.
-    // Currently stringly-typed for compatibility with the shell's existing API.
-    pub reasoning_effort: Option<String>,
+    /// Resolved, validated reasoning effort.
+    pub reasoning_effort: Option<xai_tool_types::SubagentReasoningEffort>,
     /// Resolved capability mode controlling tool access.
     pub capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
     /// Resolved persona name (for metadata/observability).

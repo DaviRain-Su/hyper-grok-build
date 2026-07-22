@@ -2130,6 +2130,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         role: None,
         model: None,
         resumed_from: Some("prev-agent-id".into()),
+        budget: None,
         workflow_run_id: None,
     };
     let json = serde_json::to_value(&notification).unwrap();
@@ -2151,6 +2152,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         role: None,
         model: None,
         resumed_from: None,
+        budget: None,
         workflow_run_id: None,
     };
     let json = serde_json::to_value(&fresh).unwrap();

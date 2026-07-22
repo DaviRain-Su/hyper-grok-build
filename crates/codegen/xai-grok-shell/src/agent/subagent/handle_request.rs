@@ -71,6 +71,97 @@ pub(super) fn task_model_override_error(
         is_session_auth,
     )
 }
+
+/// Fully layered, side-effect-free subagent spec. Model credential
+/// materialization and resume pinning remain downstream because they require
+/// async session/catalog state; all definition/runtime/tool/budget precedence is
+/// finalized here before worktree or child-session side effects begin.
+struct ResolvedSubagentSpec {
+    definition: xai_grok_agent::config::AgentDefinition,
+    runtime: xai_grok_subagent_resolution::EffectiveRuntimeConfig,
+    execution_budget: SubagentExecutionBudget,
+    child_depth: u32,
+}
+
+fn resolve_subagent_spec(
+    mut definition: xai_grok_agent::config::AgentDefinition,
+    request: &SubagentRequest,
+    ctx: &SubagentSpawnContext,
+) -> ResolvedSubagentSpec {
+    resolve_subagent_toolset(
+        &request.subagent_type,
+        request.runtime_overrides.harness_agent_type.as_deref(),
+        ctx,
+        &mut definition,
+    );
+    let (role, role_key) = {
+        let by_type = ctx.subagent_roles.get(&request.subagent_type);
+        if by_type.is_some() {
+            (by_type, Some(request.subagent_type.clone()))
+        } else {
+            let by_persona = request
+                .runtime_overrides
+                .persona
+                .as_deref()
+                .and_then(|persona| ctx.subagent_roles.get(persona));
+            let key = by_persona
+                .is_some()
+                .then(|| request.runtime_overrides.persona.clone())
+                .flatten();
+            (by_persona, key)
+        }
+    };
+    let cwd = ctx
+        .parent_session_info
+        .as_ref()
+        .map(|info| std::path::Path::new(&info.cwd));
+    let definition_defaults = DefinitionRuntimeDefaults {
+        reasoning_effort: definition.effort.map(Into::into),
+        capability_mode: definition.capability_mode,
+        isolation: definition.isolation.map(Into::into),
+    };
+    let mut runtime = resolve_runtime_spec(
+        &request.runtime_overrides,
+        role,
+        &ctx.subagent_personas,
+        cwd,
+        role_key,
+        definition_defaults,
+    );
+    if request.fork_context {
+        runtime.model = Some(ctx.model_id.0.to_string());
+    }
+    // Carry the fully intersected capability into AgentBuilder as a final
+    // post-injection clamp. The eager filter keeps downstream depth/workflow
+    // transforms accurate; the builder pass also catches dynamically injected
+    // tools before they can exceed the selected mode.
+    definition.capability_mode = runtime.capability_mode;
+    if let Some(mode) = runtime.capability_mode {
+        mode.filter_tool_config(&mut definition.tool_config);
+    }
+    let child_depth = request
+        .runtime_overrides
+        .spawn_depth
+        .unwrap_or(ctx.parent_depth + 1);
+    strip_task_tools_at_max_depth(&mut definition.tool_config, child_depth);
+    if request.owner.is_workflow() {
+        definition.tool_config.tools.retain(|tool| {
+            !matches!(
+                tool.id.rsplit(':').next(),
+                Some("scheduler_create" | "scheduler_list" | "scheduler_delete")
+            )
+        });
+    }
+    let execution_budget = SubagentExecutionBudget::resolve(&definition, ctx.parent_max_turns);
+    append_execution_budget_prompt(&mut definition, execution_budget);
+    ResolvedSubagentSpec {
+        definition,
+        runtime,
+        execution_budget,
+        child_depth,
+    }
+}
+
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -151,53 +242,13 @@ pub(crate) async fn handle_subagent_request(
         defused: false,
         error: None,
     };
-    resolve_subagent_toolset(
-        &request.subagent_type,
-        request.runtime_overrides.harness_agent_type.as_deref(),
-        &ctx,
-        &mut definition,
-    );
-    let (role, role_key) = {
-        let by_type = ctx.subagent_roles.get(&request.subagent_type);
-        if by_type.is_some() {
-            (by_type, Some(request.subagent_type.clone()))
-        } else {
-            let by_persona = request
-                .runtime_overrides
-                .persona
-                .as_deref()
-                .and_then(|p| ctx.subagent_roles.get(p));
-            let key = if by_persona.is_some() {
-                request.runtime_overrides.persona.clone()
-            } else {
-                None
-            };
-            (by_persona, key)
-        }
-    };
-    let cwd = ctx.parent_session_info.as_ref().map(|i| std::path::Path::new(&i.cwd));
-    let effective_runtime = resolve_effective_overrides(
-        &request.runtime_overrides,
-        role,
-        &ctx.subagent_personas,
-        cwd,
-        role_key,
-    );
-    let mut effective_runtime = effective_runtime;
-    if effective_runtime.reasoning_effort.is_none() {
-        effective_runtime.reasoning_effort = definition
-            .effort
-            .map(|e| <&str>::from(e).to_string());
-    }
-    {
-        use xai_tool_types::SubagentIsolationMode;
-        if effective_runtime.isolation == SubagentIsolationMode::None
-            && definition.isolation
-                == Some(xai_grok_agent::config::IsolationMode::Worktree)
-        {
-            effective_runtime.isolation = SubagentIsolationMode::Worktree;
-        }
-    }
+    let ResolvedSubagentSpec {
+        definition: resolved_definition,
+        runtime: mut effective_runtime,
+        execution_budget,
+        child_depth,
+    } = resolve_subagent_spec(definition, &request, &ctx);
+    definition = resolved_definition;
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {
         tracing::error!(
@@ -428,41 +479,12 @@ pub(crate) async fn handle_subagent_request(
             "Resolved runtime overrides for subagent"
         );
     }
-    effective_runtime.capability_mode = xai_grok_subagent_resolution::intersect_capability_modes(
-        effective_runtime.capability_mode,
-        definition.capability_mode,
-    );
     if let Some(mode) = effective_runtime.capability_mode {
-        mode.filter_tool_config(&mut definition.tool_config);
         tracing::info!(
             subagent_id = % request.id, capability_mode = ? mode, tools_remaining =
             definition.tool_config.tools.len(),
-            "Applied capability mode filter to agent tool config"
+            "Applied resolved capability ceiling to subagent tool config"
         );
-    }
-    let child_depth = request
-        .runtime_overrides
-        .spawn_depth
-        .unwrap_or(ctx.parent_depth + 1);
-    if strip_task_tools_at_max_depth(&mut definition.tool_config, child_depth) {
-        tracing::info!(
-            subagent_id = % request.id, child_depth,
-            "Stripped task tool from child at max depth"
-        );
-    }
-    if request.owner.is_workflow() {
-        definition
-            .tool_config
-            .tools
-            .retain(|tool| {
-                !matches!(
-                    tool.id.rsplit(':').next(), Some("scheduler_create" |
-                    "scheduler_list" | "scheduler_delete")
-                )
-            });
-    }
-    if request.fork_context {
-        effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
     let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
             effective_runtime.model.as_deref(),
@@ -471,10 +493,7 @@ pub(crate) async fn handle_subagent_request(
             &ctx,
         )
         .await;
-    let subagent_max_turns = resolve_subagent_max_turns(
-        definition.max_turns,
-        ctx.parent_max_turns,
-    );
+    let subagent_max_turns = execution_budget.max_turns;
     {
         let model_str = &effective_sampling_config.model;
         let model_unknown = !model_str.is_empty() && !ctx.available_models.is_empty()
@@ -513,21 +532,13 @@ pub(crate) async fn handle_subagent_request(
             return;
         }
     }
-    if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
+    if let Some(effort) = effective_runtime.reasoning_effort
         && ctx
             .models_manager
             .model_supports_reasoning_effort(effective_model_id.0.as_ref())
     {
-        use xai_grok_sampling_types::ReasoningEffort;
-        match raw.parse::<ReasoningEffort>() {
-            Ok(eff) => effective_sampling_config.reasoning_effort = Some(eff),
-            Err(err) => {
-                tracing::warn!(
-                    value = raw, error = % err,
-                    "subagent reasoning_effort: parse failed, ignoring override"
-                )
-            }
-        }
+        effective_sampling_config.reasoning_effort =
+            Some(subagent_reasoning_effort_to_sampling(effort));
     }
     let subagent_id = request.id.clone();
     let child_session_id = acp::SessionId::new(subagent_id.clone());
@@ -642,7 +653,9 @@ pub(crate) async fn handle_subagent_request(
             None,
             None,
             None,
-            effective_runtime.reasoning_effort.as_deref(),
+            effective_runtime
+                .reasoning_effort
+                .map(|effort| effort.as_str()),
             effective_runtime.role_name.as_deref(),
             request.parent_prompt_id.as_deref(),
             0,
@@ -659,7 +672,9 @@ pub(crate) async fn handle_subagent_request(
         upload_method: ctx.gcs_upload_method.clone(),
         model_id: Some(effective_model_id.0.to_string()),
         cwd: Some(child_session_info.cwd.clone()),
-        reasoning_effort: effective_runtime.reasoning_effort.clone(),
+        reasoning_effort: effective_runtime
+            .reasoning_effort
+            .map(|effort| effort.as_str().to_string()),
         role_name: effective_runtime.role_name.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         auth_manager: ctx.auth_manager.clone(),
@@ -693,6 +708,7 @@ pub(crate) async fn handle_subagent_request(
             role: effective_runtime.role_name.clone(),
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
+            budget: execution_budget.wire(),
             workflow_run_id: request.owner.workflow_run_id().map(str::to_string),
         },
         ctx.parent_cmd_tx.as_ref(),
@@ -704,7 +720,9 @@ pub(crate) async fn handle_subagent_request(
         cwd: None,
         isolation_mode: None,
         capability_mode: None,
-        reasoning_effort: effective_runtime.reasoning_effort.clone(),
+        reasoning_effort: effective_runtime
+            .reasoning_effort
+            .map(|effort| effort.as_str().to_string()),
         role_name: effective_runtime.role_name.clone(),
         parent_prompt_id: request.parent_prompt_id.clone(),
         depth: 0,
@@ -1369,6 +1387,12 @@ pub(crate) async fn handle_subagent_request(
             persist_ack: None,
             parsed_prompt_tx: None,
         });
+    let budget_monitor = spawn_subagent_budget_monitor(
+        execution_budget,
+        &child_handle,
+        start,
+        cancel_token.clone(),
+    );
     let mut result_tx = {
         let (dummy_tx, _) = oneshot::channel();
         Some(std::mem::replace(&mut request.result_tx, dummy_tx))
@@ -1460,16 +1484,35 @@ pub(crate) async fn handle_subagent_request(
         }
     };
     let duration_ms = start.elapsed().as_millis() as u64;
+    let budget_trigger = budget_monitor.and_then(SubagentBudgetMonitor::finish);
     let mut turn_token_totals: Option<(u64, u64, u64)> = None;
     let mut cancellation_may_hide_usage = false;
     let mut result = match wait_outcome {
         SubagentWaitOutcome::Cancelled => {
             let (tool_calls, turns) = signals_snapshot_counts(&child_handle).await;
             cancellation_may_hide_usage = turns > 0 || tool_calls > 0;
+            let hard_budget_trigger = budget_trigger.filter(|trigger| trigger.is_hard());
+            let final_text = child_handle
+                .chat_state_handle
+                .get_last_assistant_text_in_turn()
+                .await
+                .unwrap_or_default();
+            let partial_budget_result = can_use_partial_budget_result(
+                hard_budget_trigger.is_some(),
+                &final_text,
+                request.runtime_overrides.output_schema.is_some(),
+            );
             SubagentResult {
-                success: false,
-                cancelled: true,
-                error: Some("Subagent was cancelled".to_string()),
+                success: partial_budget_result,
+                cancelled: !partial_budget_result,
+                error: (!partial_budget_result).then(|| {
+                    hard_budget_trigger
+                        .map(|trigger| budget_exhausted_message(trigger, execution_budget))
+                        .unwrap_or_else(|| "Subagent was cancelled".to_string())
+                }),
+                termination_reason: hard_budget_trigger
+                    .map(|trigger| trigger.termination_reason().to_string()),
+                output: std::sync::Arc::from(final_text),
                 subagent_id: request.id.clone(),
                 child_session_id: child_session_id.0.to_string(),
                 tool_calls,
@@ -1503,7 +1546,7 @@ pub(crate) async fn handle_subagent_request(
             };
             let final_text = child_handle
                 .chat_state_handle
-                .get_last_assistant_text()
+                .get_last_assistant_text_in_turn()
                 .await
                 .unwrap_or_default();
             let result_tokens = child_handle.chat_state_handle.get_total_tokens().await;
@@ -1520,11 +1563,21 @@ pub(crate) async fn handle_subagent_request(
                     ),
                 ) => {
                     cancellation_may_hide_usage = true;
-                    let reason = cancellation_error_message(category, context.as_ref());
+                    let hard_budget_trigger = budget_trigger.filter(|trigger| trigger.is_hard());
+                    let reason = hard_budget_trigger
+                        .map(|trigger| budget_exhausted_message(trigger, execution_budget))
+                        .unwrap_or_else(|| cancellation_error_message(category, context.as_ref()));
+                    let partial_budget_result = can_use_partial_budget_result(
+                        hard_budget_trigger.is_some(),
+                        &final_text,
+                        request.runtime_overrides.output_schema.is_some(),
+                    );
                     SubagentResult {
-                        success: false,
-                        cancelled: true,
-                        error: Some(reason),
+                        success: partial_budget_result,
+                        cancelled: !partial_budget_result,
+                        error: (!partial_budget_result).then_some(reason),
+                        termination_reason: hard_budget_trigger
+                            .map(|trigger| trigger.termination_reason().to_string()),
                         output: if final_text.is_empty() {
                             std::sync::Arc::from(
                                 format!(
@@ -1561,10 +1614,17 @@ pub(crate) async fn handle_subagent_request(
                         },
                     ),
                 ) => {
+                    let partial_budget_result = can_use_partial_budget_result(
+                        true,
+                        &final_text,
+                        request.runtime_overrides.output_schema.is_some(),
+                    );
                     SubagentResult {
-                        success: false,
-                        cancelled: true,
-                        error: Some(format!("max turns reached (limit: {limit})")),
+                        success: partial_budget_result,
+                        cancelled: !partial_budget_result,
+                        error: (!partial_budget_result)
+                            .then(|| format!("max turns reached (limit: {limit})")),
+                        termination_reason: Some("max_turns".to_string()),
                         output: if final_text.is_empty() {
                             std::sync::Arc::from(
                                 format!(
@@ -1642,6 +1702,8 @@ pub(crate) async fn handle_subagent_request(
                     SubagentResult {
                         success,
                         error,
+                        termination_reason: budget_trigger
+                            .map(|trigger| trigger.termination_reason().to_string()),
                         output,
                         subagent_id: request.id.clone(),
                         child_session_id: child_session_id.0.to_string(),
@@ -1707,6 +1769,23 @@ pub(crate) async fn handle_subagent_request(
             }
         }
     };
+    if result.termination_reason.is_none()
+        && let Some(trigger) = budget_trigger.filter(|trigger| trigger.is_hard())
+    {
+        result.termination_reason = Some(trigger.termination_reason().to_string());
+    }
+    if result.success
+        && matches!(
+            result.termination_reason.as_deref(),
+            Some("max_turns" | "max_tool_calls" | "timeout")
+        )
+    {
+        result.output = std::sync::Arc::from(format!(
+            "[Partial result: the subagent reached its {} budget. Verify unknowns before acting.]\n\n{}",
+            result.termination_reason.as_deref().unwrap_or("execution"),
+            result.output
+        ));
+    }
     if let Some(trace_gcs_config) = gcs_upload_ctx
         .upload_method
         .as_ref()
@@ -1904,6 +1983,7 @@ pub(crate) async fn handle_subagent_request(
         subagent_usage_incomplete,
         output_tokens_used,
         total_tokens_used,
+        completion_usage,
     ) = match child_handle.chat_state_handle.try_get_session_usage().await {
         Ok(u) => {
             let output_tokens = u.totals.output_tokens;
@@ -1915,14 +1995,21 @@ pub(crate) async fn handle_subagent_request(
                 total_tokens,
                 has_usage_entries,
             );
+            let completion_usage = (u.totals.model_calls > 0 || usage_incomplete).then(|| {
+                crate::extensions::notification::SubagentUsageInfo::from_totals(
+                    &u.totals,
+                    usage_incomplete,
+                )
+            });
             (
                 Some(u.by_model.into_iter().collect::<Vec<_>>()),
                 usage_incomplete,
                 (!usage_incomplete).then_some(output_tokens),
                 Some(total_tokens),
+                completion_usage,
             )
         }
-        Err(()) => (None, true, None, None),
+        Err(()) => (None, true, None, None, None),
     };
     result.total_tokens_used = total_tokens_used.unwrap_or(0);
     if let Some((task_spent, task_incomplete)) = task_budget_usage {
@@ -2131,6 +2218,8 @@ pub(crate) async fn handle_subagent_request(
             child_session_id: result.child_session_id.clone(),
             status: result.status().to_string(),
             error: result.error.clone(),
+            termination_reason: result.termination_reason.clone(),
+            usage: completion_usage,
             tool_calls: result.tool_calls,
             turns: result.turns,
             duration_ms: result.duration_ms,

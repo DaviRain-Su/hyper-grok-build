@@ -1049,6 +1049,31 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
     }
     vec![]
 }
+const MODEL_SWITCH_CONTEXT_HINT_PERCENT: u64 = 85;
+
+/// Advisory shown after a successful switch when the existing transcript is
+/// already close to (or beyond) the target model's advertised window. The
+/// shell remains authoritative and performs its normal pre-sampling compaction
+/// check; this merely makes that otherwise invisible behavior explicit and
+/// points users to the on-demand `/compact` path.
+pub(in crate::app::dispatch) fn model_switch_context_hint(
+    used_tokens: u64,
+    target_window: Option<u64>,
+    target_name: &str,
+) -> Option<String> {
+    let target_window = target_window.filter(|window| *window > 0)?;
+    let percent = used_tokens.saturating_mul(100) / target_window;
+    if percent < MODEL_SWITCH_CONTEXT_HINT_PERCENT {
+        return None;
+    }
+    Some(format!(
+        "Current context is about {percent}% of {target_name}'s context window \
+         ({used_tokens}/{target_window} tokens). Grok Build will check whether \
+         compaction is needed before the next model call; run `/compact` first \
+         if you want to guide the summary."
+    ))
+}
+
 pub(in crate::app::dispatch) fn handle_switch_model_complete(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1071,10 +1096,22 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                     .unwrap_or_else(|| model_id.0.to_string());
                 let prev_model = agent.session.models.current.clone();
                 let prev_effort = agent.session.models.reasoning_effort;
+                let model_changed = prev_model.as_ref() != Some(&model_id);
+                let context_hint = model_changed
+                    .then(|| {
+                        model_switch_context_hint(
+                            agent
+                                .context_state
+                                .as_ref()
+                                .map_or(0, |context| context.used),
+                            agent.session.models.context_window_for(&model_id),
+                            &display_name,
+                        )
+                    })
+                    .flatten();
                 agent.session.models.set_current(model_id.clone(), effort);
                 let resolved_effort = agent.session.models.reasoning_effort;
-                let unchanged =
-                    prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
+                let unchanged = !model_changed && prev_effort == resolved_effort;
                 if !unchanged {
                     let msg = if let Some(eff) = resolved_effort {
                         format!("Switched to {display_name} ({eff} effort)")
@@ -1082,6 +1119,9 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                         format!("Switched to {display_name}")
                     };
                     agent.scrollback.push_block(RenderBlock::system(msg));
+                }
+                if let Some(hint) = context_hint {
+                    agent.scrollback.push_block(RenderBlock::system(hint));
                 }
                 if unchanged || crate::acp::router::is_codex_model(&model_id) {
                     vec![]

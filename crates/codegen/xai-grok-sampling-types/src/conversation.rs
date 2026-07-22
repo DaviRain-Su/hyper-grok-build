@@ -600,6 +600,21 @@ impl ConversationRequest {
         }
         stripped
     }
+
+    /// Remove provider/model-bound continuation state while retaining portable
+    /// user, assistant, and local tool history. Used for a single recovery
+    /// attempt when a provider rejects stale reasoning/signature/native-tool
+    /// items after a model switch.
+    pub fn strip_model_bound_state(&mut self) -> usize {
+        let before = self.items.len();
+        self.items.retain(|item| {
+            !matches!(
+                item,
+                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+            )
+        });
+        before.saturating_sub(self.items.len())
+    }
 }
 
 /// Tool choice options
@@ -1902,15 +1917,36 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 /// turn (there is intentionally no public single-item conversion, since a
 /// lone `Reasoning` item has no chat-completions equivalent).
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
+    conversation_to_chat_messages_for_model(items, None)
+}
+
+/// Model-aware Chat Completions conversion used by production requests.
+/// `reasoning_content` is provider-owned continuation state: retain it for
+/// same-model turns, but never carry it across a model switch. The assistant's
+/// visible text and tool history remain portable.
+fn conversation_to_chat_messages_for_model(
+    items: Vec<ConversationItem>,
+    target_model: Option<&str>,
+) -> Vec<ChatRequestMessage> {
+    let reasoning_is_replayable: Vec<bool> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            !matches!(item, ConversationItem::Reasoning(_))
+                || opaque_item_matches_target_model(&items, index, target_model)
+        })
+        .collect();
     let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
     let mut pending_reasoning: Vec<String> = Vec::new();
 
-    for item in items {
+    for (index, item) in items.into_iter().enumerate() {
         match item {
             ConversationItem::Reasoning(r) => {
-                let text = reasoning_item_text(&r);
-                if !text.is_empty() {
-                    pending_reasoning.push(text);
+                if reasoning_is_replayable[index] {
+                    let text = reasoning_item_text(&r);
+                    if !text.is_empty() {
+                        pending_reasoning.push(text);
+                    }
                 }
             }
             ConversationItem::Assistant(_) => {
@@ -1926,9 +1962,7 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
                 // assistant in the canonical `[Reasoning, BackendToolCall,
                 // Assistant]` turn ordering. Emit its synthetic assistant
                 // message but keep `pending_reasoning` intact so it still
-                // folds onto the following assistant — matching the Responses
-                // API path, which preserves reasoning across backend tool
-                // calls.
+                // folds onto the following assistant.
                 out.push(conversation_item_to_chat_message(item));
             }
             other => {
@@ -2107,10 +2141,11 @@ const STRUCTURED_OUTPUT_SCHEMA_NAME: &str = "structured_output";
 
 impl From<ConversationRequest> for ChatCompletionRequest {
     fn from(req: ConversationRequest) -> Self {
-        // Uses the reasoning-aware helper so `Reasoning` siblings collapse
-        // into `reasoning_content` on the following assistant rather than
-        // being emitted as empty assistant messages.
-        let messages: Vec<ChatRequestMessage> = conversation_to_chat_messages(req.items);
+        // Uses the model-aware helper so native `reasoning_content` remains
+        // available on same-model turns but is stripped on a model switch.
+        let target_model = req.model.clone();
+        let messages: Vec<ChatRequestMessage> =
+            conversation_to_chat_messages_for_model(req.items, target_model.as_deref());
 
         let tools_is_empty = req.tools.is_empty();
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
@@ -2348,12 +2383,12 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// in the same order the model emitted — which is what lets the server-side
 /// prefix KV-cache hit on repeat turns.
 ///
-/// Reasoning is model-bound opaque state, not portable conversation text.
-/// Synthetic reasoning from Messages or Chat Completions has no valid
-/// Responses item ID, while encrypted Responses reasoning can only be replayed
-/// to the model that produced the following assistant turn. Invalid items and
-/// items owned by another model are omitted; the visible assistant message
-/// still carries the portable cross-model context.
+/// Reasoning and native backend-tool items are model-bound opaque state, not
+/// portable conversation text. Synthetic reasoning from Messages or Chat
+/// Completions has no valid Responses item ID, while encrypted Responses state
+/// can only be replayed to the model that produced the following assistant
+/// turn. Invalid items and items owned by another model are omitted; the
+/// visible assistant message still carries the portable cross-model context.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let target_model = req.model.as_deref();
     let items: Vec<rs::InputItem> = req
@@ -2361,8 +2396,10 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
         .iter()
         .enumerate()
         .filter(|(index, item)| {
-            !matches!(item, ConversationItem::Reasoning(_))
-                || reasoning_matches_target_model(&req.items, *index, target_model)
+            !matches!(
+                item,
+                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+            ) || opaque_item_matches_target_model(&req.items, *index, target_model)
         })
         .flat_map(|(_, item)| conversation_item_to_input_items(item))
         .collect();
@@ -2413,27 +2450,27 @@ fn valid_responses_item_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-/// Return whether a model-bound reasoning sibling belongs to the target model.
+/// Return whether model-bound continuation state belongs to the target model.
 ///
-/// `Reasoning` has no model field of its own. Responses place it immediately
-/// before the `Assistant` it belongs to, with optional `BackendToolCall`
-/// siblings in between, so the following assistant's `model_id` is its source
-/// provenance. A user/system/tool-result boundary makes the item orphaned.
+/// `Reasoning` and native backend-tool calls have no model field of their own.
+/// They sit before the `Assistant` they belong to, so the following assistant's
+/// `model_id` is their source provenance. A user/system/tool-result boundary
+/// makes the item orphaned.
 ///
 /// Direct conversion helpers sometimes build requests without a model; retain
 /// their legacy behavior in that case. Production requests have a target model
 /// stamped before conversion. If old persisted history lacks assistant model
-/// metadata, dropping opaque reasoning is safer than sending an unverifiable
-/// encrypted blob and deterministically poisoning every later turn.
-fn reasoning_matches_target_model(
+/// metadata, dropping opaque state is safer than deterministically poisoning
+/// every later turn.
+fn opaque_item_matches_target_model(
     items: &[ConversationItem],
-    reasoning_index: usize,
+    opaque_index: usize,
     target_model: Option<&str>,
 ) -> bool {
     let Some(target_model) = target_model else {
         return true;
     };
-    let Some(tail) = items.get(reasoning_index.saturating_add(1)..) else {
+    let Some(tail) = items.get(opaque_index.saturating_add(1)..) else {
         return false;
     };
 
@@ -3308,8 +3345,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         }
     };
 
-    // Process all conversation items
-    for item in &req.items {
+    // Process all conversation items. Native thinking/signature blocks are
+    // replayed only to the model that produced their assistant turn.
+    for (index, item) in req.items.iter().enumerate() {
         match item {
             ConversationItem::System(s) => {
                 flush_assistant(&mut pending_assistant, &mut messages);
@@ -3403,23 +3441,27 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     cache_control: None,
                 });
             }
-            // Reasoning sibling — emit as Anthropic `thinking` block on the
-            // pending assistant turn. `tco_*` encrypted blobs only set
-            // `signature`; real model reasoning sets `thinking`.
+            // Messages thinking is opaque continuation state. A valid replay
+            // needs same-model provenance and normally a provider signature;
+            // only profiles that explicitly allow empty signatures retain one.
             ConversationItem::Reasoning(r) => {
-                flush_tool_results(&mut pending_tool_results, &mut messages);
-                let thinking = reasoning_item_text(r);
-                let signature = r
-                    .encrypted_content
-                    .as_deref()
-                    .map(str::to_owned)
-                    .unwrap_or_default();
-                if !thinking.is_empty() || !signature.is_empty() {
-                    pending_assistant.push(ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                    });
+                if !opaque_item_matches_target_model(&req.items, index, req.model.as_deref()) {
+                    continue;
                 }
+                let signature = r.encrypted_content.as_deref().unwrap_or_default();
+                let allows_empty_signature = req
+                    .model
+                    .as_deref()
+                    .and_then(xai_grok_models::kimi_request_profile)
+                    .is_some_and(xai_grok_models::kimi_allow_empty_thinking_signature);
+                if signature.is_empty() && !allows_empty_signature {
+                    continue;
+                }
+                flush_tool_results(&mut pending_tool_results, &mut messages);
+                pending_assistant.push(ContentBlock::Thinking {
+                    thinking: reasoning_item_text(r),
+                    signature: signature.to_owned(),
+                });
             }
         }
     }
@@ -5153,6 +5195,166 @@ if image_url.url == "https://example.com/image.png"
                 }) if text == "Codex answer"
             )
         }));
+    }
+
+    fn model_bound_history(source_model: &str) -> Vec<ConversationItem> {
+        let web_search: rs::WebSearchToolCall = serde_json::from_value(serde_json::json!({
+            "action": {"type": "search", "query": "opaque state"},
+            "id": "ws_model_bound",
+            "status": "completed"
+        }))
+        .expect("valid web search fixture");
+        vec![
+            ConversationItem::user("question for source model"),
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_model_bound".to_string(),
+                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                    text: "private continuation".to_string(),
+                })],
+                content: None,
+                encrypted_content: Some("provider-signature".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            ConversationItem::BackendToolCall(BackendToolCallItem {
+                kind: BackendToolKind::WebSearch(web_search),
+            }),
+            ConversationItem::assistant_with_model("portable answer", source_model),
+            ConversationItem::user("question for target model"),
+        ]
+    }
+
+    #[test]
+    fn model_switch_compatibility_matrix_strips_foreign_opaque_state() {
+        let source_model = "source-model";
+        let target_model = "target-model";
+
+        let chat: ChatCompletionRequest =
+            ConversationRequest::from_items(model_bound_history(source_model))
+                .with_model(target_model)
+                .into();
+        let historical_assistant = chat
+            .messages
+            .iter()
+            .find(|message| message.model_id.as_deref() == Some(source_model))
+            .expect("portable Chat assistant retained");
+        assert!(historical_assistant.reasoning_content.is_none());
+
+        let responses_req: rs::CreateResponse =
+            (&ConversationRequest::from_items(model_bound_history(source_model))
+                .with_model(target_model))
+                .into();
+        let rs::InputParam::Items(response_items) = responses_req.input else {
+            panic!("expected Responses items");
+        };
+        assert!(!response_items.iter().any(|item| matches!(
+            item,
+            rs::InputItem::Item(rs::Item::Reasoning(_))
+                | rs::InputItem::Item(rs::Item::WebSearchCall(_))
+        )));
+        assert!(response_items.iter().any(|item| matches!(
+            item,
+            rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                role: rs::Role::Assistant,
+                content: rs::EasyInputContent::Text(text),
+                ..
+            }) if text == "portable answer"
+        )));
+
+        let messages = build_messages_request(
+            &ConversationRequest::from_items(model_bound_history(source_model))
+                .with_model(target_model),
+        );
+        assert!(messages.messages.iter().all(|message| {
+            match &message.content {
+                crate::messages::MessageContent::Text(_) => true,
+                crate::messages::MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .all(|block| !matches!(block, crate::messages::ContentBlock::Thinking { .. })),
+            }
+        }));
+        assert!(
+            messages
+                .messages
+                .iter()
+                .any(|message| match &message.content {
+                    crate::messages::MessageContent::Text(text) => text == "portable answer",
+                    crate::messages::MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            crate::messages::ContentBlock::Text { text, .. }
+                                if text == "portable answer"
+                        )
+                    }),
+                })
+        );
+    }
+
+    #[test]
+    fn same_model_compatibility_matrix_preserves_native_continuation_state() {
+        let model = "same-model";
+
+        let chat: ChatCompletionRequest =
+            ConversationRequest::from_items(model_bound_history(model))
+                .with_model(model)
+                .into();
+        let historical_assistant = chat
+            .messages
+            .iter()
+            .find(|message| message.model_id.as_deref() == Some(model))
+            .expect("same-model Chat assistant retained");
+        assert_eq!(
+            historical_assistant.reasoning_content.as_deref(),
+            Some("private continuation")
+        );
+
+        let responses_req: rs::CreateResponse =
+            (&ConversationRequest::from_items(model_bound_history(model)).with_model(model)).into();
+        let rs::InputParam::Items(response_items) = responses_req.input else {
+            panic!("expected Responses items");
+        };
+        assert!(
+            response_items
+                .iter()
+                .any(|item| matches!(item, rs::InputItem::Item(rs::Item::Reasoning(_))))
+        );
+        assert!(
+            response_items
+                .iter()
+                .any(|item| matches!(item, rs::InputItem::Item(rs::Item::WebSearchCall(_))))
+        );
+
+        let messages = build_messages_request(
+            &ConversationRequest::from_items(model_bound_history(model)).with_model(model),
+        );
+        assert!(
+            messages
+                .messages
+                .iter()
+                .any(|message| match &message.content {
+                    crate::messages::MessageContent::Text(_) => false,
+                    crate::messages::MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            crate::messages::ContentBlock::Thinking { signature, .. }
+                                if signature == "provider-signature"
+                        )
+                    }),
+                })
+        );
+    }
+
+    #[test]
+    fn strip_model_bound_state_keeps_portable_transcript() {
+        let mut req = ConversationRequest::from_items(model_bound_history("source-model"));
+        assert_eq!(req.strip_model_bound_state(), 2);
+        assert!(req.items.iter().all(|item| !matches!(
+            item,
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+        )));
+        assert!(req.items.iter().any(|item| matches!(
+            item,
+            ConversationItem::Assistant(assistant) if assistant.content.as_ref() == "portable answer"
+        )));
     }
 
     #[test]

@@ -644,7 +644,19 @@ where
 {
     let opt = Option::<u32>::deserialize(deserializer)?;
     if let Some(0) = opt {
-        return Err(serde::de::Error::custom("maxTurns must be greater than 0"));
+        return Err(serde::de::Error::custom("value must be greater than 0"));
+    }
+    Ok(opt)
+}
+
+/// Accepts a positive u64 or null/absent. Rejects 0.
+fn deserialize_nonzero_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<u64>::deserialize(deserializer)?;
+    if let Some(0) = opt {
+        return Err(serde::de::Error::custom("value must be greater than 0"));
     }
     Ok(opt)
 }
@@ -731,8 +743,8 @@ pub struct AgentDefinition {
     #[serde(default = "default_grok_build_toolset")]
     pub tool_config: ToolServerConfig,
     /// Runtime capability mode that constrains which tool kinds the agent
-    /// can use. Applied during subagent spawn in `handle_subagent_request`
-    /// by filtering the definition's `tool_config` before session creation.
+    /// can use. Subagent resolution intersects all ceilings, and AgentBuilder
+    /// enforces the result after default tools have been injected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_mode: Option<xai_tool_types::SubagentCapabilityMode>,
     #[serde(default)]
@@ -770,8 +782,18 @@ pub struct AgentDefinition {
     pub disallowed_tools: Vec<String>,
     #[serde(default)]
     pub effort: Option<Effort>,
+    /// Maximum model/tool-use rounds for one prompt. `None` is unlimited.
     #[serde(default, deserialize_with = "deserialize_nonzero_u32")]
     pub max_turns: Option<u32>,
+    /// Maximum tool invocations before the runtime cancels the subagent.
+    #[serde(default, deserialize_with = "deserialize_nonzero_u32")]
+    pub max_tool_calls: Option<u32>,
+    /// Total subagent wall-clock budget, including initialization.
+    #[serde(default, deserialize_with = "deserialize_nonzero_u64")]
+    pub timeout_secs: Option<u64>,
+    /// Time reserved before `timeout_secs` for a final answer without more tools.
+    #[serde(default, deserialize_with = "deserialize_nonzero_u64")]
+    pub finalize_grace_secs: Option<u64>,
     #[serde(default)]
     pub isolation: Option<IsolationMode>,
     #[serde(default)]
@@ -1010,6 +1032,17 @@ pub enum Effort {
 impl Effort {
     pub const VALID_VALUES: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 }
+impl From<Effort> for xai_tool_types::SubagentReasoningEffort {
+    fn from(value: Effort) -> Self {
+        match value {
+            Effort::Low => Self::Low,
+            Effort::Medium => Self::Medium,
+            Effort::High => Self::High,
+            Effort::XHigh => Self::Xhigh,
+            Effort::Max => Self::Max,
+        }
+    }
+}
 const _: () = assert!(Effort::VALID_VALUES.len() == <Effort as strum::EnumCount>::COUNT);
 #[derive(
     Debug,
@@ -1030,6 +1063,14 @@ pub enum IsolationMode {
 }
 impl IsolationMode {
     pub const VALID_VALUES: &[&str] = &["none", "worktree"];
+}
+impl From<IsolationMode> for xai_tool_types::SubagentIsolationMode {
+    fn from(value: IsolationMode) -> Self {
+        match value {
+            IsolationMode::None => Self::None,
+            IsolationMode::Worktree => Self::Worktree,
+        }
+    }
 }
 const _: () =
     assert!(IsolationMode::VALID_VALUES.len() == <IsolationMode as strum::EnumCount>::COUNT);
@@ -1447,6 +1488,9 @@ impl AgentDefinition {
             tools: vec![],
             effort: None,
             max_turns: None,
+            max_tool_calls: None,
+            timeout_secs: None,
+            finalize_grace_secs: None,
             isolation: None,
             background: None,
             color: None,
@@ -1547,9 +1591,13 @@ impl AgentDefinition {
         Self {
             description: xai_tool_types::EXPLORE_SUBAGENT.description.to_string(),
             tool_config: explore_toolset(),
+            capability_mode: Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
+            tools: vec!["read_file".into(), "list_dir".into(), "grep".into()],
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::EXPLORE_PROMPT.to_string()),
             inherit_skills: false,
+            inject_default_tools: false,
+            mcp_inheritance: McpInheritance::None,
             ..Self::base(BuiltinAgentName::Explore, "")
         }
     }
@@ -1559,9 +1607,11 @@ impl AgentDefinition {
         Self {
             description: xai_tool_types::PLAN_SUBAGENT.description.to_string(),
             tool_config: plan_toolset(),
+            capability_mode: Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::PLAN_PROMPT.to_string()),
             inherit_skills: false,
+            mcp_inheritance: McpInheritance::None,
             ..Self::base(BuiltinAgentName::Plan, "")
         }
     }
@@ -1576,9 +1626,17 @@ impl AgentDefinition {
         Self {
             description: xai_tool_types::ORACLE_SUBAGENT.description.to_string(),
             tool_config: explore_toolset(),
+            capability_mode: Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
+            tools: vec!["read_file".into(), "list_dir".into(), "grep".into()],
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::ORACLE_PROMPT.to_string()),
             inherit_skills: false,
+            inject_default_tools: false,
+            mcp_inheritance: McpInheritance::None,
+            max_turns: Some(12),
+            max_tool_calls: Some(40),
+            timeout_secs: Some(180),
+            finalize_grace_secs: Some(30),
             ..Self::base(BuiltinAgentName::Oracle, "")
         }
     }
@@ -1970,6 +2028,82 @@ Agent.
         );
     }
     #[test]
+    fn test_parse_execution_budget_fields() {
+        let content = "---\nname: bounded\ndescription: Test\nmaxTurns: 12\nmaxToolCalls: 40\ntimeoutSecs: 180\nfinalizeGraceSecs: 30\n---\n";
+        let def = AgentDefinition::parse(content).unwrap();
+        assert_eq!(def.max_turns, Some(12));
+        assert_eq!(def.max_tool_calls, Some(40));
+        assert_eq!(def.timeout_secs, Some(180));
+        assert_eq!(def.finalize_grace_secs, Some(30));
+    }
+    #[test]
+    fn test_parse_zero_execution_budget_fields_rejected() {
+        for field in ["maxToolCalls", "timeoutSecs", "finalizeGraceSecs"] {
+            let content = format!("---\nname: test\ndescription: Test\n{field}: 0\n---\n");
+            assert!(
+                AgentDefinition::parse(&content).is_err(),
+                "{field}: 0 should be rejected at parse time"
+            );
+        }
+    }
+    #[test]
+    fn oracle_has_bounded_execution_defaults() {
+        let def = AgentDefinition::oracle();
+        assert_eq!(def.max_turns, Some(12));
+        assert_eq!(def.max_tool_calls, Some(40));
+        assert_eq!(def.timeout_secs, Some(180));
+        assert_eq!(def.finalize_grace_secs, Some(30));
+    }
+    #[test]
+    fn oracle_is_enforced_read_only_by_its_exact_toolset() {
+        let def = AgentDefinition::oracle();
+        let actual: Vec<&str> = def
+            .tool_config
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect();
+        let expected = [
+            ToolConfig::from(&grok_build::ReadFileTool).id,
+            ToolConfig::from(&grok_build::ListDirTool).id,
+            ToolConfig::from(&grok_build::GrepTool).id,
+        ];
+        assert_eq!(
+            actual,
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            def.capability_mode,
+            Some(xai_tool_types::SubagentCapabilityMode::ReadOnly)
+        );
+        assert_eq!(def.permission_mode, PermissionMode::Plan);
+        assert!(!def.inject_default_tools);
+        assert_eq!(def.mcp_inheritance, McpInheritance::None);
+        assert!(!def.hosted_tool_allowed("web_search"));
+        assert!(!def.hosted_tool_allowed("x_search"));
+    }
+    #[test]
+    fn built_in_read_only_subagents_have_runtime_capability_ceilings() {
+        for def in [
+            AgentDefinition::explore(),
+            AgentDefinition::plan(),
+            AgentDefinition::oracle(),
+        ] {
+            assert_eq!(
+                def.capability_mode,
+                Some(xai_tool_types::SubagentCapabilityMode::ReadOnly),
+                "{} must remain read-only after default tool injection",
+                def.name
+            );
+            assert_eq!(
+                def.mcp_inheritance,
+                McpInheritance::None,
+                "{} must not inherit unclassified MCP tools",
+                def.name
+            );
+        }
+    }
+    #[test]
     fn test_parse_model_empty_is_inherit() {
         let content = "---\nname: test\ndescription: Test\nmodel: \"\"\n---\n";
         let def = AgentDefinition::parse(content).unwrap();
@@ -1987,6 +2121,9 @@ Agent.
         let def = AgentDefinition::parse(content).unwrap();
         assert!(def.effort.is_none());
         assert!(def.max_turns.is_none());
+        assert!(def.max_tool_calls.is_none());
+        assert!(def.timeout_secs.is_none());
+        assert!(def.finalize_grace_secs.is_none());
         assert!(def.isolation.is_none());
         assert!(def.background.is_none());
         assert!(def.color.is_none());

@@ -14,7 +14,8 @@
 //! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
 //! - 429 (rate limited) — avoids burning long waits
 //!
-//! **Special handling** (not counted against retry budget):
+//! **Special handling**:
+//! - stale model-bound reasoning/signatures/native tool state → strip it and retry once
 //! - 413 / image processing errors → strip images and retry once
 //!
 //! **Not retried** (Fatal immediately):
@@ -117,6 +118,11 @@ pub enum RetryDecision {
         is_rate_limited: bool,
     },
 
+    /// Retry after stripping provider/model-bound continuation state from
+    /// conversation history. The caller upgrades to fatal when nothing can be
+    /// stripped, so this recovery cannot loop.
+    RetryWithModelBoundStateStrip,
+
     /// Retry after stripping inline images from the request (413
     /// Payload Too Large or image processing rejection).
     RetryWithImageStrip,
@@ -125,8 +131,8 @@ pub enum RetryDecision {
     /// error, first retry only).
     RetryWithClientRebuild { backoff: Duration },
 
-    /// Emit the error to the session and let it decide what to do
-    /// (auth refresh, encrypted-content mismatch).
+    /// Emit the error to the session and let it decide what to do (currently
+    /// authentication refresh).
     EmitToSession(SamplingError),
 
     /// Fatal: no further retries possible. Surface to the caller as the
@@ -147,14 +153,15 @@ pub fn classify_error(
     max_retries: u32,
     rate_limit_threshold: u32,
 ) -> RetryDecision {
-    // Auth and encrypted-content errors are session-owned. The sampler
-    // surfaces the raw error and lets the session refresh credentials
-    // or show a friendly message.
+    // Auth errors are session-owned so the session can refresh credentials.
     if err.is_auth_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
-    if err.is_encrypted_content_error() {
-        return RetryDecision::EmitToSession(clone_error(err));
+    // Opaque history is optional continuation state. Strip it and retry the
+    // portable transcript once instead of forcing a new session after a model
+    // switch. The request task fails closed when there is nothing to strip.
+    if err.is_model_bound_history_error() {
+        return RetryDecision::RetryWithModelBoundStateStrip;
     }
     if max_retries == 0 {
         return RetryDecision::Fatal(clone_error(err));
@@ -539,14 +546,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_encrypted_content_emits_to_session() {
-        let err = api_err(
-            StatusCode::BAD_REQUEST,
+    fn classify_model_bound_history_for_strip_recovery() {
+        for message in [
             "Could not decrypt the provided encrypted_content",
-        );
-        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::EmitToSession(_) => {}
-            other => panic!("expected EmitToSession, got {other:?}"),
+            "Invalid signature in thinking block",
+            "Invalid 'input[5].id': ''",
+            "Item with id 'rs_stale' not found",
+        ] {
+            let err = api_err(StatusCode::BAD_REQUEST, message);
+            assert!(matches!(
+                classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::RetryWithModelBoundStateStrip
+            ));
         }
     }
 

@@ -337,6 +337,8 @@ impl SubagentCoordinator {
             child_session_id: c.child_session_id.clone(),
             status: c.result.status().to_string(),
             error: c.result.error.clone(),
+            termination_reason: c.result.termination_reason.clone(),
+            usage: None,
             tool_calls: c.result.tool_calls,
             turns: c.result.turns,
             duration_ms,

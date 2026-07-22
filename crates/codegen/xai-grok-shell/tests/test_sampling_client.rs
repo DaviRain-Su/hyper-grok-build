@@ -407,7 +407,7 @@ async fn chat_completions_upgrade_folds_reconstructed_reasoning_into_request() {
             "\n",
             r#"{"type":"user","content":[{"type":"text","text":"q1"}]}"#,
             "\n",
-            r#"{"type":"assistant","content":"a1","reasoning":{"text":"legacy chain of thought","id":"rs_legacy"}}"#,
+            r#"{"type":"assistant","content":"a1","reasoning":{"text":"legacy chain of thought","id":"rs_legacy"},"model_id":"test-model"}"#,
             "\n",
         ),
     )
@@ -493,7 +493,9 @@ async fn responses_upgrade_roundtrips_reconstructed_reasoning_as_typed_input() {
 
     let server = MockInferenceServer::start().await.unwrap();
     server.set_response("ok");
-    let client = create_test_client(&server.url(), ApiBackend::Responses);
+    let mut config = test_sampler_config(&server.url(), ApiBackend::Responses, &[]);
+    config.model = "grok-build".to_string();
+    let client = Client::new(config).unwrap();
 
     let _ = client
         .conversation_collect(ConversationRequest::from_items(items))
@@ -571,7 +573,9 @@ async fn messages_upgrade_emits_reconstructed_reasoning_as_thinking_block() {
 
     let server = MockInferenceServer::start().await.unwrap();
     server.set_response("ok");
-    let client = create_test_client(&server.url(), ApiBackend::Messages);
+    let mut config = test_sampler_config(&server.url(), ApiBackend::Messages, &[]);
+    config.model = "grok-4.5".to_string();
+    let client = Client::new(config).unwrap();
 
     let _ = client
         .conversation_collect(ConversationRequest::from_items(items))

@@ -519,6 +519,12 @@ async fn test_subagent_notifications_round_trip() {
             role: None,
             model: None,
             resumed_from: None,
+            budget: Some(crate::extensions::notification::SubagentBudgetInfo {
+                max_turns: Some(12),
+                max_tool_calls: Some(40),
+                timeout_secs: Some(180),
+                finalize_grace_secs: Some(30),
+            }),
             workflow_run_id: None,
         },
         meta: None,
@@ -531,6 +537,18 @@ async fn test_subagent_notifications_round_trip() {
             child_session_id: "child-001".to_string(),
             status: "completed".to_string(),
             error: None,
+            termination_reason: Some("max_tool_calls_finalize".to_string()),
+            usage: Some(crate::extensions::notification::SubagentUsageInfo {
+                totals: crate::extensions::notification::PromptUsageModel {
+                    input_tokens: 1_000,
+                    output_tokens: 200,
+                    total_tokens: 1_200,
+                    model_calls: 4,
+                    cost_usd_ticks: Some(50_000_000),
+                    ..Default::default()
+                },
+                incomplete: false,
+            }),
             tool_calls: 5,
             turns: 2,
             duration_ms: 12345,
@@ -602,12 +620,18 @@ async fn test_subagent_notifications_round_trip() {
     let spawned_update = &spawned_json["params"]["update"];
     assert_eq!(spawned_update["sessionUpdate"], "subagent_spawned");
     assert_eq!(spawned_update["subagent_id"], "child-001");
+    assert_eq!(spawned_update["budget"]["maxToolCalls"], 40);
     let finished_json: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
     assert_eq!(finished_json["method"], "_x.ai/session/update");
     let finished_update = &finished_json["params"]["update"];
     assert_eq!(finished_update["sessionUpdate"], "subagent_finished");
     assert_eq!(finished_update["tool_calls"], 5);
     assert_eq!(finished_update["duration_ms"], 12345);
+    assert_eq!(
+        finished_update["termination_reason"],
+        "max_tool_calls_finalize"
+    );
+    assert_eq!(finished_update["usage"]["modelCalls"], 4);
 }
 #[tokio::test]
 async fn test_subagent_spawned_resumed_roundtrip() {
@@ -635,6 +659,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             role: None,
             model: None,
             resumed_from: Some("source-agent-id".to_string()),
+            budget: None,
             workflow_run_id: None,
         },
         meta: None,

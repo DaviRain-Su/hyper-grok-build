@@ -256,6 +256,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             model,
             effective_context_source,
             resumed_from,
+            budget,
             capability_mode,
             context_normalized,
             parent_prompt_id,
@@ -289,6 +290,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     resumed_from: resumed_from.map(Arc::from),
                     capability_mode: capability_mode.map(Arc::from),
                     workflow_run_id: workflow_run_id.clone().map(Arc::from),
+                    budget,
                     context_normalized,
                     parent_prompt_id: parent_prompt_id.map(Arc::from),
                     started_at: std::time::Instant::now(),
@@ -296,6 +298,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     finished: false,
                     status: None,
                     error: None,
+                    termination_reason: None,
+                    usage: None,
                     duration_ms: None,
                     tool_calls: None,
                     turns: None,
@@ -501,6 +505,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             child_session_id,
             status,
             error,
+            termination_reason,
+            usage,
             tool_calls,
             turns,
             duration_ms,
@@ -573,6 +579,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 info.finished = true;
                 info.status = Some(Arc::from(status));
                 info.error = error.map(Arc::from);
+                info.termination_reason = termination_reason.map(Arc::from);
+                info.usage = usage;
                 info.duration_ms = Some(duration_ms);
                 info.tool_calls = Some(tool_calls);
                 info.turns = Some(turns);

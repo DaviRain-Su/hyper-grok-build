@@ -1,5 +1,6 @@
 //! Tests for settings setters, toggles, resets, and rollback.
 use super::*;
+use crate::app::dispatch::session::lifecycle::model_switch_context_hint;
 /// `Action::ToggleVimMode` flips the active agent's `vim_mode` field,
 /// updates the in-process pager cache so future agents pick it up
 /// via `load_vim_mode`, emits `Effect::PersistSetting` so the new
@@ -386,6 +387,17 @@ fn model_switch_pending_resets_correctly_across_success_and_failure() {
         &mut app,
     );
     assert!(!app.agents[&id].session.model_switch_pending);
+}
+
+#[test]
+fn model_switch_context_hint_is_capacity_sensitive_and_actionable() {
+    assert!(model_switch_context_hint(84_000, Some(100_000), "Small Model").is_none());
+    let hint = model_switch_context_hint(85_000, Some(100_000), "Small Model")
+        .expect("85% should surface the switch hint");
+    assert!(hint.contains("85%"));
+    assert!(hint.contains("Small Model"));
+    assert!(hint.contains("`/compact`"));
+    assert!(model_switch_context_hint(100_000, None, "Unknown").is_none());
 }
 /// `set_compact_mode(app, new)` emits exactly one
 /// `Effect::PersistSetting` with the correct payload — `value`

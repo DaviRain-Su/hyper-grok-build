@@ -102,6 +102,10 @@ Switch models. Accepts a model ID or display name (case-insensitive), and for re
 /model Reasoning X high
 ```
 
+A normal switch keeps the portable transcript (user messages, visible assistant answers, and local tool results). Provider-specific reasoning signatures and native backend-tool continuation state are replayed only to the model that produced them. If a provider still rejects stale continuation state, Grok Build automatically retries once with the portable transcript and shows that recovery in the retry status.
+
+You do not need to compact before every switch. Before the next model call, Grok Build checks the transcript against the target model's context window and can auto-compact when required. When the existing context is already about 85% of the target window, the TUI adds a capacity warning; run `/compact <what to preserve>` first only when you want to guide the summary yourself.
+
 ### `/effort <level>`
 
 Set reasoning effort on the **current** model without reselecting it. Levels are `low`, `medium`, `high`, and `xhigh`, and it only applies when the active model supports reasoning effort.

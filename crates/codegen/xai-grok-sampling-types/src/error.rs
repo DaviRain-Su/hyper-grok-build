@@ -208,10 +208,7 @@ impl SamplingError {
         }
     }
 
-    /// The server rejected the request because the conversation history
-    /// contains `encrypted_content` from a different model family that the
-    /// current model cannot decrypt. Never retryable — the user must start
-    /// a new session.
+    /// The server rejected Responses reasoning encrypted by another model.
     pub fn is_encrypted_content_error(&self) -> bool {
         matches!(
             self,
@@ -222,6 +219,31 @@ impl SamplingError {
             }
 if message.contains("encrypted_content")
         )
+    }
+
+    /// The provider rejected opaque continuation state from conversation
+    /// history. Besides Responses `encrypted_content`, cover Anthropic-style
+    /// thinking signatures and Responses item IDs. The sampler may safely retry
+    /// once after removing only model-bound state; portable transcript content
+    /// remains intact.
+    pub fn is_model_bound_history_error(&self) -> bool {
+        let SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let normalized = message.to_ascii_lowercase();
+        normalized.contains("encrypted_content")
+            || (normalized.contains("thinking") && normalized.contains("signature"))
+            || (normalized.contains("input[")
+                && normalized.contains(".id")
+                && normalized.contains("invalid"))
+            || (normalized.contains("item")
+                && normalized.contains("id")
+                && (normalized.contains("not found") || normalized.contains("does not exist")))
     }
 
     /// The API rejected the request because an inline image could not be
@@ -776,7 +798,7 @@ mod tests {
         assert!(err.is_encrypted_content_error());
         assert!(
             !err.is_retryable(),
-            "encrypted_content errors must not be retried"
+            "encrypted_content errors must not enter generic transport retries"
         );
     }
 

@@ -84,6 +84,8 @@ pub(crate) fn finalize_killed_subagent(
             // `error` stays None.
             status: status.to_string(),
             error: None,
+            termination_reason: None,
+            usage: None,
             tool_calls: 0,
             turns: 0,
             // Real run time is unknown for an already-gone orphan (the row's

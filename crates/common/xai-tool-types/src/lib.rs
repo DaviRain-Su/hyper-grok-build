@@ -16,7 +16,7 @@ pub use task::{
     KillTaskToolNaming, MAX_MULTI_WAIT_IDS, MultiTaskOutputResult, ORACLE_PROMPT, ORACLE_SUBAGENT,
     PLAN_PROMPT, PLAN_SUBAGENT,
     SubagentCapabilityMode, SubagentCompletedOutput, SubagentDescriptor, SubagentIsolationMode,
-    SubagentToolNaming, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
+    SubagentReasoningEffort, SubagentToolNaming, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
     TaskOutputToolNaming, TaskToolInput, TaskToolNaming, WaitMode, WaitTasksToolInput,
     WaitTasksToolNaming, build_kill_task_description, build_task_description,
     build_task_output_description, build_wait_tasks_description, builtin_subagent_by_name,
