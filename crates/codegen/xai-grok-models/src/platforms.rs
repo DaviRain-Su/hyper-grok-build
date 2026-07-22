@@ -47,7 +47,12 @@ pub const ANTHROPIC_API_KEY_ENV: &str = "GROK_ANTHROPIC_API_KEY";
 /// Common Anthropic aliases used by Claude Code / Pi.
 pub const ANTHROPIC_API_KEY_ALIAS_ENV: &str = "ANTHROPIC_API_KEY";
 pub const ANTHROPIC_AUTH_TOKEN_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
+/// Grok-native base URL override. This already includes the API version path
+/// because Grok appends only `/messages`.
 pub const ANTHROPIC_BASE_URL_ENV: &str = "GROK_ANTHROPIC_BASE_URL";
+/// Claude Code / Anthropic SDK base URL override. SDK-style values name the
+/// gateway root and need `/v1` before Grok appends `/messages`.
+pub const ANTHROPIC_BASE_URL_ALIAS_ENV: &str = "ANTHROPIC_BASE_URL";
 
 const MOONSHOT_CN_BASE_URL_DEFAULT: &str = "https://api.moonshot.cn/v1";
 const MOONSHOT_AI_BASE_URL_DEFAULT: &str = "https://api.moonshot.ai/v1";
@@ -90,6 +95,29 @@ pub fn normalize_kimi_code_base_url(url: &str) -> String {
         return format!("{trimmed}/v1");
     }
     trimmed.to_string()
+}
+
+/// Convert Claude Code / Anthropic SDK base URLs into Grok's base shape.
+///
+/// Claude Code treats `ANTHROPIC_BASE_URL` as a gateway root and appends
+/// `/v1/messages`. Grok appends only `/messages`, so the equivalent Grok base
+/// must end in `/v1`. Already-versioned values are accepted defensively, as is
+/// a mistakenly supplied full `/v1/messages` endpoint.
+fn normalize_anthropic_sdk_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return ANTHROPIC_BASE_URL_DEFAULT.to_string();
+    }
+    if let Some(base) = trimmed.strip_suffix("/messages")
+        && base.ends_with("/v1")
+    {
+        return base.to_string();
+    }
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
 }
 
 /// Built-in inference platforms (aligned with official Pi `@earendil-works/pi-ai`
@@ -260,26 +288,44 @@ impl PlatformId {
 
     /// Inference / model-list base URL.
     pub fn base_url(self) -> String {
-        // Prefer well-known envs for core platforms; generic GROK_{ID}_BASE_URL for others.
-        let specific = match self {
-            Self::KimiCode => Some(KIMI_CODE_BASE_URL_ENV),
-            Self::OpenAiCodex => Some(OPENAI_CODEX_BASE_URL_ENV),
-            Self::MoonshotCn => Some(MOONSHOT_CN_BASE_URL_ENV),
-            Self::MoonshotAi => Some(MOONSHOT_AI_BASE_URL_ENV),
-            Self::OpenAi => Some(OPENAI_BASE_URL_ENV),
-            Self::Anthropic => Some(ANTHROPIC_BASE_URL_ENV),
-            _ => None,
-        };
-        let raw = if let Some(var) = specific {
-            env_or(var, self.default_base_url())
+        self.base_url_with(|name| std::env::var(name).ok())
+    }
+
+    /// Testable base-URL resolver. Grok-native overrides use the sampler's
+    /// `{base}/messages` convention; the Claude Code alias uses the Anthropic
+    /// SDK's `{root}/v1/messages` convention and is normalized accordingly.
+    fn base_url_with(self, mut getenv: impl FnMut(&str) -> Option<String>) -> String {
+        let mut read = |name: &str| getenv(name).filter(|value| !value.trim().is_empty());
+
+        let raw = if self == Self::Anthropic {
+            if let Some(url) = read(ANTHROPIC_BASE_URL_ENV) {
+                // GROK_ANTHROPIC_BASE_URL already uses Grok's versioned-base shape.
+                url
+            } else if let Some(url) = read(ANTHROPIC_BASE_URL_ALIAS_ENV) {
+                normalize_anthropic_sdk_base_url(&url)
+            } else {
+                self.default_base_url().to_string()
+            }
         } else {
-            let generic = format!(
-                "GROK_{}_BASE_URL",
-                self.as_str().replace('-', "_").to_ascii_uppercase()
-            );
-            match std::env::var(&generic) {
-                Ok(v) if !v.trim().is_empty() => v,
-                _ => self.default_base_url().to_string(),
+            // Prefer well-known envs for core platforms; generic
+            // GROK_{ID}_BASE_URL for the rest.
+            let specific = match self {
+                Self::KimiCode => Some(KIMI_CODE_BASE_URL_ENV),
+                Self::OpenAiCodex => Some(OPENAI_CODEX_BASE_URL_ENV),
+                Self::MoonshotCn => Some(MOONSHOT_CN_BASE_URL_ENV),
+                Self::MoonshotAi => Some(MOONSHOT_AI_BASE_URL_ENV),
+                Self::OpenAi => Some(OPENAI_BASE_URL_ENV),
+                Self::Anthropic => unreachable!("handled above"),
+                _ => None,
+            };
+            if let Some(var) = specific {
+                read(var).unwrap_or_else(|| self.default_base_url().to_string())
+            } else {
+                let generic = format!(
+                    "GROK_{}_BASE_URL",
+                    self.as_str().replace('-', "_").to_ascii_uppercase()
+                );
+                read(&generic).unwrap_or_else(|| self.default_base_url().to_string())
             }
         };
         if self == Self::KimiCode {
@@ -341,8 +387,10 @@ impl PlatformId {
             Self::OpenAi => &[OPENAI_API_KEY_ENV, OPENAI_API_KEY_ALIAS_ENV],
             Self::Anthropic => &[
                 ANTHROPIC_API_KEY_ENV,
-                ANTHROPIC_API_KEY_ALIAS_ENV,
+                // Match Claude Code: an explicit Bearer token wins over the
+                // standard x-api-key alias when both are present.
                 ANTHROPIC_AUTH_TOKEN_ENV,
+                ANTHROPIC_API_KEY_ALIAS_ENV,
             ],
             Self::DeepSeek => &["GROK_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
             Self::Groq => &["GROK_GROQ_API_KEY", "GROQ_API_KEY"],
@@ -514,6 +562,24 @@ pub struct BuiltinPlatformModel {
 impl BuiltinPlatformModel {
     pub fn catalog_key(&self) -> String {
         self.platform.managed_model_key(&self.model)
+    }
+
+    /// Base URL in Grok's `{base}/{backend-endpoint}` convention.
+    ///
+    /// Pi's Anthropic rows carry the SDK root (`https://api.anthropic.com`),
+    /// where the SDK itself appends `/v1/messages`. Grok appends only
+    /// `/messages`, so those rows must go through [`PlatformId::base_url`] to
+    /// gain `/v1` and honor both Grok and Claude Code environment overrides.
+    /// Other row overrides are already Grok-shaped provider-specific paths
+    /// (for example MiniMax's `/anthropic`) and remain unchanged.
+    pub fn resolved_base_url(&self) -> String {
+        if self.platform == PlatformId::Anthropic {
+            self.platform.base_url()
+        } else {
+            self.base_url_override
+                .clone()
+                .unwrap_or_else(|| self.platform.base_url())
+        }
     }
 
     pub fn context_window_nonzero(&self) -> NonZeroU64 {
@@ -1186,6 +1252,60 @@ mod tests {
     }
 
     #[test]
+    fn normalize_anthropic_sdk_base_url_adds_version_path() {
+        assert_eq!(
+            normalize_anthropic_sdk_base_url("https://gateway.example.com/coding"),
+            "https://gateway.example.com/coding/v1"
+        );
+        assert_eq!(
+            normalize_anthropic_sdk_base_url("https://gateway.example.com/coding/"),
+            "https://gateway.example.com/coding/v1"
+        );
+        assert_eq!(
+            normalize_anthropic_sdk_base_url("https://gateway.example.com/coding/v1"),
+            "https://gateway.example.com/coding/v1"
+        );
+        assert_eq!(
+            normalize_anthropic_sdk_base_url("https://gateway.example.com/coding/v1/messages"),
+            "https://gateway.example.com/coding/v1"
+        );
+    }
+
+    #[test]
+    fn anthropic_base_url_honors_claude_alias_and_grok_precedence() {
+        let claude_style = PlatformId::Anthropic.base_url_with(|name| {
+            (name == ANTHROPIC_BASE_URL_ALIAS_ENV)
+                .then(|| "https://gateway.example.com/coding/".to_string())
+        });
+        assert_eq!(claude_style, "https://gateway.example.com/coding/v1");
+
+        let grok_override = PlatformId::Anthropic.base_url_with(|name| match name {
+            ANTHROPIC_BASE_URL_ENV => Some("https://grok.example.com/custom/v1".to_string()),
+            ANTHROPIC_BASE_URL_ALIAS_ENV => {
+                Some("https://ignored.example.com/coding".to_string())
+            }
+            _ => None,
+        });
+        assert_eq!(grok_override, "https://grok.example.com/custom/v1");
+        assert_eq!(
+            PlatformId::Anthropic.base_url_with(|_| None),
+            ANTHROPIC_BASE_URL_DEFAULT
+        );
+    }
+
+    #[test]
+    fn anthropic_auth_token_precedes_standard_api_key_alias() {
+        assert_eq!(
+            PlatformId::Anthropic.api_key_env_names(),
+            &[
+                ANTHROPIC_API_KEY_ENV,
+                ANTHROPIC_AUTH_TOKEN_ENV,
+                ANTHROPIC_API_KEY_ALIAS_ENV,
+            ]
+        );
+    }
+
+    #[test]
     fn builtins_have_unique_catalog_keys() {
         let mut keys = std::collections::HashSet::new();
         for m in platform_builtin_models() {
@@ -1338,6 +1458,7 @@ mod tests {
             "MiniMax Messages backend must keep the catalog base_url_override"
         );
         assert_eq!(m.api_backend, PlatformApiBackend::Messages);
+        assert_eq!(m.resolved_base_url(), "https://api.minimax.io/anthropic");
         let cn = models
             .iter()
             .find(|m| m.catalog_key() == "minimax-cn/MiniMax-M2.7")
@@ -1345,6 +1466,10 @@ mod tests {
         assert_eq!(
             cn.base_url_override.as_deref(),
             Some("https://api.minimaxi.com/anthropic")
+        );
+        assert_eq!(
+            cn.resolved_base_url(),
+            "https://api.minimaxi.com/anthropic"
         );
     }
 

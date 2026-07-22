@@ -14,7 +14,7 @@ gateway process — each platform talks to the vendor API with Grok’s existing
 | Platform id | Env keys (examples) | Default base | Notes |
 |-------------|---------------------|--------------|--------|
 | `openai` | `OPENAI_API_KEY` | `api.openai.com/v1` | Responses (most models) |
-| `anthropic` | `ANTHROPIC_API_KEY` | `api.anthropic.com/v1` | Messages + `x-api-key` |
+| `anthropic` | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | `api.anthropic.com/v1` | Messages; Claude Code `ANTHROPIC_BASE_URL` gateways supported |
 | `kimi-code` | OAuth `login --kimi` | `api.kimi.com/coding/v1` | **Messages** + adaptive thinking (Pi official) |
 | `moonshot-cn` / `moonshot-ai` | `GROK_MOONSHOT_*` | moonshot.cn / .ai | Chat Completions |
 | `deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com` | |
@@ -65,7 +65,30 @@ default = "anthropic/claude-sonnet-4-5"
 ```
 
 **Credential precedence:** env (`GROK_*` then common aliases) >
-`[platforms.*].api_key` > per-model `[model.*]`.
+`[platforms.*].api_key` > per-model `[model.*]`. For Anthropic, the Claude
+Code Bearer credential `ANTHROPIC_AUTH_TOKEN` takes precedence over
+`ANTHROPIC_API_KEY`.
+
+### Reusing a Claude Code gateway
+
+Grok recognizes Claude Code's standard gateway variables:
+
+```bash
+export ANTHROPIC_BASE_URL="https://gateway.example.com"
+export ANTHROPIC_AUTH_TOKEN="..." # Bearer; or ANTHROPIC_API_KEY for x-api-key
+```
+
+Claude Code treats `ANTHROPIC_BASE_URL` as a gateway root and appends
+`/v1/messages`; Grok normalizes that root to the same endpoint. The
+Grok-specific `GROK_ANTHROPIC_BASE_URL` override has higher precedence and is
+already expected to include `/v1`.
+
+If Anthropic models remain unlocked after commenting these exports out of a
+shell startup file, restart the process that launches Grok or run this in its
+shell first: `unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL`.
+A running parent process retains the old environment and passes it to every new
+Grok child. Locked models can still be found intentionally in the picker's
+**All** view or by searching, but they cannot be selected.
 
 ---
 

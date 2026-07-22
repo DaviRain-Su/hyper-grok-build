@@ -1340,9 +1340,11 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
 /// the sibling-`Reasoning` data model.
 ///
 /// `id` is left empty because none of the synthesizing paths carry a
-/// stable upstream id; `encrypted_content` is `None` because the only
-/// source of `encrypted_content` is the Responses API itself (which
-/// hits the typed-`OutputItem::Reasoning` path, not this helper).
+/// stable upstream id. Empty-ID reasoning remains available for display and
+/// Chat Completions folding, but is omitted when a later model switch builds a
+/// Responses request (Responses/Codex rejects `input[i].id == ""`).
+/// `encrypted_content` is `None` because the only source of Responses-native
+/// encrypted content hits the typed `OutputItem::Reasoning` path instead.
 pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem {
     rs::ReasoningItem {
         id: String::new(),
@@ -2340,11 +2342,13 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 
 /// Build the [`rs::InputParam`] for a Responses API request.
 ///
-/// Conversion is a straight 1:1 map: each [`ConversationItem`] becomes its
-/// natural Responses-API input shape via [`conversation_item_to_input_items`].
-/// Reasoning items are top-level siblings (not bundled into the assistant),
-/// so they appear inline in the same order the model originally emitted —
-/// which is what lets the server-side prefix KV-cache hit on repeat turns.
+/// Each [`ConversationItem`] becomes its natural Responses-API input shape via
+/// [`conversation_item_to_input_items`]. Responses-replayable reasoning items
+/// are top-level siblings (not bundled into the assistant), so they appear
+/// inline in the same order the model emitted — which is what lets the
+/// server-side prefix KV-cache hit on repeat turns. Synthetic reasoning from
+/// Messages or Chat Completions has no valid Responses item ID and is omitted;
+/// the following assistant message still carries the cross-provider context.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let items: Vec<rs::InputItem> = req
         .items
@@ -2388,7 +2392,17 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     }
 }
 
-/// Convert a ConversationItem to Responses API InputItem(s)
+/// Responses item IDs accepted by OpenAI/Codex contain only ASCII letters,
+/// digits, underscores, or dashes. An empty ID marks reasoning synthesized by
+/// a non-Responses backend; replaying it produces `Invalid input[i].id`.
+fn valid_responses_item_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+/// Convert a ConversationItem to Responses API InputItem(s).
 fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
     match item {
         ConversationItem::System(s) => {
@@ -2408,10 +2422,16 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
             })]
         }
         ConversationItem::Reasoning(r) => {
-            // Reasoning items round-trip back to the Responses API in their
-            // native typed form. `status` is output-only (the API rejects it
-            // on input), so strip it before emission; everything else
-            // (summary, content, encrypted_content, id) passes through.
+            // Only reasoning with a wire-valid Responses item ID can be
+            // replayed. Messages and Chat Completions synthesize this shared
+            // item with an empty ID; Codex rejects it before reading the next
+            // user turn.
+            if !valid_responses_item_id(&r.id) {
+                return Vec::new();
+            }
+
+            // `status` is output-only (the API rejects it on input); preserve
+            // every other field for byte-stable native Responses continuity.
             let mut r = r.clone();
             r.status = None;
             vec![rs::InputItem::Item(rs::Item::Reasoning(r))]
@@ -4917,7 +4937,7 @@ if image_url.url == "https://example.com/image.png"
         let req = ConversationRequest::from_items(vec![
             ConversationItem::user("Hello"),
             ConversationItem::Reasoning(rs::ReasoningItem {
-                id: String::new(),
+                id: "tco_hidden_1".to_string(),
                 summary: vec![],
                 content: None,
                 encrypted_content: Some("enc_hidden_thoughts".to_string()),
@@ -4959,6 +4979,85 @@ if image_url.url == "https://example.com/image.png"
 
         // Summary should be empty
         assert!(reasoning.summary.is_empty());
+    }
+
+    #[test]
+    fn responses_input_filters_invalid_reasoning_ids_after_backend_switch() {
+        fn reasoning(id: &str) -> ConversationItem {
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: id.to_string(),
+                summary: vec![],
+                content: None,
+                encrypted_content: Some("provider-specific-signature".to_string()),
+                status: None,
+            })
+        }
+
+        let mut history = vec![
+            ConversationItem::user("question for a Messages model"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("messages thinking")),
+        ];
+        history.extend(
+            ["invalid id", "invalid.id", "invalid/id", "invalid:id", "无效"]
+                .into_iter()
+                .map(reasoning),
+        );
+        history.extend([
+            ConversationItem::Reasoning(rs::ReasoningItem {
+                id: "rs_abc-123".to_string(),
+                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                    text: "preserved summary".to_string(),
+                })],
+                content: Some(vec![rs::ReasoningTextContent {
+                    text: "preserved content".to_string(),
+                }]),
+                encrypted_content: Some("preserved-rs-encrypted".to_string()),
+                status: Some(rs::OutputStatus::Completed),
+            }),
+            reasoning("tco_abc_123"),
+            ConversationItem::assistant("answer preserved across providers"),
+            ConversationItem::user("next question for Codex"),
+        ]);
+
+        let responses_req: rs::CreateResponse = (&ConversationRequest::from_items(history)).into();
+        let rs::InputParam::Items(items) = responses_req.input else {
+            panic!("Expected Items input");
+        };
+        let reasoning_items: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                rs::InputItem::Item(rs::Item::Reasoning(reasoning)) => Some(reasoning),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            reasoning_items
+                .iter()
+                .map(|reasoning| reasoning.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rs_abc-123", "tco_abc_123"]
+        );
+        assert_eq!(reasoning_items[0].status, None, "status is output-only");
+        assert_eq!(
+            reasoning_items[0].encrypted_content.as_deref(),
+            Some("preserved-rs-encrypted")
+        );
+        assert_eq!(reasoning_items[0].summary.len(), 1);
+        assert_eq!(
+            reasoning_items[0].content.as_ref().unwrap()[0].text,
+            "preserved content"
+        );
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                    role: rs::Role::Assistant,
+                    content: rs::EasyInputContent::Text(text),
+                    ..
+                }) if text == "answer preserved across providers"
+            )
+        }));
     }
 
     #[test]

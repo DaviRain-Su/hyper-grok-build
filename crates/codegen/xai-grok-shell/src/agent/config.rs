@@ -3877,10 +3877,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         let config = ModelEntryConfig {
             id: Some(key.clone()),
             model: builtin.model.clone(),
-            base_url: builtin
-                .base_url_override
-                .clone()
-                .unwrap_or_else(|| builtin.platform.base_url()),
+            base_url: builtin.resolved_base_url(),
             api_base_url: None,
             name: Some(builtin.name.clone()),
             description: Some(builtin.description.clone()),
@@ -7104,6 +7101,57 @@ if n == name && f.as_deref() == field
         assert!(openai_codex_bearer_resolver_for_model(&codex).is_some());
     }
 
+    /// Pi stores Anthropic's SDK root (`api.anthropic.com`) on every catalog
+    /// row, but Grok appends only `/messages`. The injected model must resolve
+    /// through the platform so the default and Claude Code alias gain `/v1`.
+    #[test]
+    #[serial]
+    fn anthropic_builtin_resolves_versioned_base_and_env_overrides() {
+        fn injected_base() -> String {
+            let mut catalog = IndexMap::new();
+            inject_moonshot_builtin_models(&mut catalog);
+            catalog
+                .get("anthropic/claude-haiku-4-5")
+                .expect("Anthropic builtin present")
+                .info
+                .base_url
+                .clone()
+        }
+
+        {
+            let _grok = EnvGuard::unset(xai_grok_models::ANTHROPIC_BASE_URL_ENV);
+            let _claude = EnvGuard::unset(xai_grok_models::ANTHROPIC_BASE_URL_ALIAS_ENV);
+            assert_eq!(injected_base(), "https://api.anthropic.com/v1");
+        }
+        {
+            let _grok = EnvGuard::unset(xai_grok_models::ANTHROPIC_BASE_URL_ENV);
+            let _claude = EnvGuard::set(
+                xai_grok_models::ANTHROPIC_BASE_URL_ALIAS_ENV,
+                "https://gateway.example.com/proxy/",
+            );
+            assert_eq!(injected_base(), "https://gateway.example.com/proxy/v1");
+        }
+        {
+            let _claude = EnvGuard::set(
+                xai_grok_models::ANTHROPIC_BASE_URL_ALIAS_ENV,
+                "https://ignored.example.com/proxy",
+            );
+            let _grok = EnvGuard::set(
+                xai_grok_models::ANTHROPIC_BASE_URL_ENV,
+                "https://grok.example.com/exact",
+            );
+            assert_eq!(injected_base(), "https://grok.example.com/exact");
+        }
+        {
+            let _claude = EnvGuard::set(
+                xai_grok_models::ANTHROPIC_BASE_URL_ALIAS_ENV,
+                "https://gateway.example.com/fallback",
+            );
+            let _grok = EnvGuard::set(xai_grok_models::ANTHROPIC_BASE_URL_ENV, "   ");
+            assert_eq!(injected_base(), "https://gateway.example.com/fallback/v1");
+        }
+    }
+
     /// GPT-5.6 Sol/Terra expose max+ultra; Luna max only — matches Codex
     /// `models.json` `supported_reasoning_levels`.
     #[test]
@@ -7709,8 +7757,14 @@ if n == name && f.as_deref() == field
     fn anthropic_auth_token_env_resolves_to_bearer() {
         use xai_grok_test_support::EnvGuard;
         let _a = EnvGuard::unset(xai_grok_models::ANTHROPIC_API_KEY_ENV);
-        let _b = EnvGuard::unset(xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV);
-        let _c = EnvGuard::set(xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV, "sk-ant-bearer-token");
+        let _b = EnvGuard::set(
+            xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV,
+            "must-not-beat-bearer",
+        );
+        let _c = EnvGuard::set(
+            xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV,
+            "sk-ant-bearer-token",
+        );
 
         let mut model = test_model_entry(
             "claude",
@@ -7719,11 +7773,12 @@ if n == name && f.as_deref() == field
             None,
             None,
         );
-        model.env_key = Some(EnvKeys::new([
-            xai_grok_models::ANTHROPIC_API_KEY_ENV,
-            xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV,
-            xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV,
-        ]));
+        model.env_key = Some(EnvKeys::new(
+            xai_grok_models::PlatformId::Anthropic
+                .api_key_env_names()
+                .iter()
+                .copied(),
+        ));
         model.info.api_backend = ApiBackend::Messages;
         model.info.auth_scheme = AuthScheme::XApiKey;
 
@@ -7738,6 +7793,18 @@ if n == name && f.as_deref() == field
         assert_eq!(config.auth_scheme, AuthScheme::Bearer);
         let client = xai_grok_sampler::SamplingClient::new(config).expect("client should build");
         assert_eq!(client.auth_info().auth_type, "bearer");
+
+        // The Grok-scoped API key remains the highest-priority override even
+        // when both standard Claude Code credential variables are present.
+        {
+            let _scoped = EnvGuard::set(
+                xai_grok_models::ANTHROPIC_API_KEY_ENV,
+                "grok-scoped-api-key",
+            );
+            let creds = resolve_credentials(&model, None);
+            assert_eq!(creds.api_key.as_deref(), Some("grok-scoped-api-key"));
+            assert_eq!(creds.auth_scheme, AuthScheme::XApiKey);
+        }
     }
 
     #[test]
@@ -7755,11 +7822,12 @@ if n == name && f.as_deref() == field
             None,
             None,
         );
-        model.env_key = Some(EnvKeys::new([
-            xai_grok_models::ANTHROPIC_API_KEY_ENV,
-            xai_grok_models::ANTHROPIC_API_KEY_ALIAS_ENV,
-            xai_grok_models::ANTHROPIC_AUTH_TOKEN_ENV,
-        ]));
+        model.env_key = Some(EnvKeys::new(
+            xai_grok_models::PlatformId::Anthropic
+                .api_key_env_names()
+                .iter()
+                .copied(),
+        ));
         model.info.api_backend = ApiBackend::Messages;
         model.info.auth_scheme = AuthScheme::XApiKey;
 
