@@ -78,18 +78,18 @@ case "$OS" in
         ;;
     Linux)
         PLATFORM_OS="linux"
-        # Prefer musl static binaries (portable across glibc floors + Alpine).
-        # Fall back to gnu when an older release only published glibc assets
-        # (or a musl build is missing for this arch).
+        # v0.1.x publishes glibc (linux-gnu) assets — correct for Omarchy and
+        # other glibc distros. Prefer gnu; fall back to musl if a later release
+        # only ships static musl builds (or both are present and gnu is absent).
         case "$ARCH" in
             arm64|aarch64)
-                TRIPLE="aarch64-unknown-linux-musl"
-                TRIPLE_FALLBACK="aarch64-unknown-linux-gnu"
+                TRIPLE="aarch64-unknown-linux-gnu"
+                TRIPLE_FALLBACK="aarch64-unknown-linux-musl"
                 PLATFORM_ARCH="aarch64"
                 ;;
             x86_64|amd64)
-                TRIPLE="x86_64-unknown-linux-musl"
-                TRIPLE_FALLBACK="x86_64-unknown-linux-gnu"
+                TRIPLE="x86_64-unknown-linux-gnu"
+                TRIPLE_FALLBACK="x86_64-unknown-linux-musl"
                 PLATFORM_ARCH="x86_64"
                 ;;
             *) err "unsupported Linux architecture: $ARCH" ;;
@@ -189,7 +189,7 @@ if [ -z "$ARCHIVE_URL" ]; then
         | grep -v '^$' \
         | sort -u \
         | tr '\n' ' ')"
-    err "release $TAG has no asset for this platform (tried musl${TRIPLE_FALLBACK:+ and gnu}). Available: ${available:-none}"
+    err "release $TAG has no asset for this platform (tried gnu${TRIPLE_FALLBACK:+ and musl}). Available: ${available:-none}"
 fi
 
 # ── Download + verify ────────────────────────────────────────────────────────

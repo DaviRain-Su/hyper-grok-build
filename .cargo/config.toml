@@ -81,8 +81,3 @@ AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_BACKGROUND_THREADS = "0"
-# sqlite-vec 0.1.7-alpha.2 redefines uint*_t via BSD-only u_int*_t aliases
-# (sqlite-vec.c:~68). musl has stdint uint*_t but not u_int*_t, so the
-# compile fails. Map the aliases for musl cc-rs builds (asg017/sqlite-vec#156).
-CFLAGS_x86_64_unknown_linux_musl = "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
-CFLAGS_aarch64_unknown_linux_musl = "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"

@@ -43,7 +43,7 @@ Short CLI, no clash with `grok`, and room to grow beyond a single provider
 ## Installation
 
 Prebuilt single-file binaries for macOS (arm64/x86_64), Linux (arm64/x86_64,
-statically linked musl — no glibc version floor; Alpine-native), and Windows
+glibc / `linux-gnu` — correct for Omarchy, Ubuntu, Fedora, etc.), and Windows
 (x86_64) are published on
 [GitHub Releases](https://github.com/DaviRain-Su/hyper-grok-build/releases):
 

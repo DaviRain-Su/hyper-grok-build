@@ -29,13 +29,13 @@ jobs:
           # against the same SDK (macos-13 Intel runners are deprecated).
           - target: x86_64-apple-darwin
             os: macos-14
-          # musl static binaries: portable across glibc versions and Alpine.
-          - target: x86_64-unknown-linux-musl
+          # glibc dynamic binaries — proven release path (jemalloc + sqlite-vec).
+          # musl static builds are blocked until sqlite-vec is vendored without
+          # global CFLAGS (target-wide -Du_int* poisons tikv-jemalloc-sys).
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-            musl: true
-          - target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            musl: true
           - target: x86_64-pc-windows-msvc
             os: windows-2022
     runs-on: ${{ matrix.os }}
@@ -59,12 +59,6 @@ jobs:
 
       - name: Add build target
         run: rustup target add ${{ matrix.target }}
-
-      - name: Install musl toolchain (Linux static)
-        if: matrix.musl
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
 
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
@@ -119,10 +113,6 @@ jobs:
       - name: Build hyper (release-dist)
         env:
           GROK_VERSION: ${{ env.GROK_VERSION }}
-          # Belt-and-suspenders for sqlite-vec on musl (also set in .cargo/config.toml).
-          # BSD u_int*_t aliases are missing on musl; map them to stdint types.
-          CFLAGS_x86_64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
-          CFLAGS_aarch64_unknown_linux_musl: "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"
         run: cargo build --profile release-dist -p xai-grok-pager-bin --features community-build --locked --target ${{ matrix.target }}
 
       - name: Package archive (tar.gz)
