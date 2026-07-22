@@ -5539,6 +5539,25 @@ pub fn openai_codex_bearer_resolver_for_base_url(base_url: &str) -> Option<Share
     }
     Some(Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver) as SharedBearerResolver)
 }
+
+/// Third-party BYOK (api-key) platform owning `base_url`, if any.
+///
+/// Excludes first-party xAI Direct (`api.x.ai` — xAI session recovery is
+/// legitimate there) and the OAuth platforms (Kimi Code / OpenAI Codex have
+/// their own bearer-resolver branches upstream). The session reconstruct and
+/// 401-recovery paths use this to keep the xAI session bearer off third-party
+/// hosts: a live-only catalog entry (e.g. `ollama/glm-5.2` from the platform
+/// `/models` sync) is absent from the offline catalog the BYOK memo consults,
+/// so it misclassifies as `NotByok` and the session gate would otherwise sign
+/// the request with the xAI session JWT → third-party 401 → a false
+/// "auth recovery succeeded" loop refreshing the wrong credential.
+pub fn open_platform_endpoint(base_url: &str) -> Option<xai_grok_models::PlatformId> {
+    xai_grok_models::PlatformId::ALL.into_iter().find(|p| {
+        *p != xai_grok_models::PlatformId::XaiDirect
+            && !p.uses_oauth()
+            && p.base_url_matches(base_url)
+    })
+}
 /// Fold URL-derived headers into `extra_headers`.
 ///
 /// The sampler crate is intentionally URL-agnostic: it does not inspect

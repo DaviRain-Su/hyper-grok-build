@@ -164,6 +164,41 @@ impl SessionActor {
     pub(crate) fn invalidate_model_auth_memo(&self) {
         self.model_auth_memo.replace(None);
     }
+    /// Auth facts from the live models-manager catalog, which includes
+    /// platform `/models` live-synced entries (e.g. `ollama/glm-5.2`) that
+    /// the offline-config resolver in
+    /// [`crate::agent::config::resolve_model_auth_facts_and_provider`] cannot
+    /// see — a miss there classifies the model `NotByok` and activates the
+    /// xAI session-token gate for a third-party BYOK model. `None` when the
+    /// catalog is empty or the model is absent (caller falls back to the
+    /// offline resolver).
+    fn live_catalog_auth_facts(
+        &self,
+        model_id: &str,
+    ) -> Option<(
+        crate::agent::config::ModelAuthFacts,
+        Option<crate::auth::AuthProviderRef>,
+    )> {
+        use crate::agent::auth_method::ModelByok;
+        if model_id.is_empty() {
+            return None;
+        }
+        let models = self.models_manager.models();
+        if models.is_empty() {
+            return None;
+        }
+        let entry = crate::agent::config::find_model_by_id(&models, model_id)?;
+        let facts = crate::agent::config::ModelAuthFacts {
+            byok: if entry.has_own_credentials() {
+                ModelByok::Byok
+            } else {
+                ModelByok::NotByok
+            },
+            auth_scheme: entry.info().auth_scheme,
+        };
+        let provider = entry.effective_auth_provider().cloned();
+        Some((facts, provider))
+    }
     /// Reads and populates [`Self::model_auth_memo`]; a fresh `Unknown`
     /// falls back to the last definite entry (see the field's contract).
     fn model_auth_state(
@@ -181,8 +216,9 @@ impl SessionActor {
         {
             return (memo.facts, memo.provider.clone());
         }
-        let (fresh, provider) =
-            crate::agent::config::resolve_model_auth_facts_and_provider(model_id);
+        let (fresh, provider) = self.live_catalog_auth_facts(model_id).unwrap_or_else(|| {
+            crate::agent::config::resolve_model_auth_facts_and_provider(model_id)
+        });
         if fresh.byok == ModelByok::Unknown {
             if let Some(memo) = self.model_auth_memo.borrow().as_ref()
                 && memo.model_id == model_id
@@ -376,7 +412,15 @@ impl SessionActor {
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
-        let use_bearer_resolver = gate.active();
+        // A third-party BYOK platform endpoint must never carry the xAI
+        // session bearer: a live-only catalog entry (e.g. `ollama/glm-5.2`
+        // from the platform `/models` sync) is absent from the offline
+        // catalog the BYOK gate consults, so it can classify `NotByok` and
+        // activate the gate — the AuthManager resolver would then replace
+        // the stamped platform key with the xAI session JWT and the
+        // third-party host 401s (the false "recovery succeeded" loop).
+        let open_platform = crate::agent::config::open_platform_endpoint(&cfg.base_url);
+        let use_bearer_resolver = gate.active() && open_platform.is_none();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         let auth_scheme = model_facts.auth_scheme;
         // Capture before `cfg` fields are moved into `SamplingConfig`.
@@ -742,7 +786,7 @@ impl SessionActor {
                 return Ok(SamplerFailureRecovery::CompactAndResubmit);
             }
         }
-        let detailed_message = error.message.clone();
+        let mut detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content")
@@ -902,6 +946,32 @@ impl SessionActor {
                     );
                 }
             }
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && let Some(platform) = crate::agent::config::open_platform_endpoint(&failed_base_url)
+        {
+            // Same wrong-credential trap as Kimi/Codex: refreshing the xAI
+            // session cannot fix a third-party BYOK 401 — the retry re-sends
+            // a credential the platform must reject again, looping to the
+            // misleading "Auth recovery succeeded but ... 401" terminal
+            // error. Surface the 401 with the platform's setup hint so the
+            // user re-checks the platform key instead.
+            tracing::warn!(
+                session_id = % self.session_info.id.0,
+                platform = platform.as_str(),
+                "auth recovery: sampler 401 on open-platform endpoint — \
+                 not refreshable via xAI session"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth recovery: sampler 401 on open-platform endpoint — not refreshable via xAI session",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({ "platform" : platform.as_str() })),
+            );
+            detailed_message = format!(
+                "{detailed_message}\n\n\
+                 The request was rejected by {} — check the platform API key: {}.",
+                platform.display_name(),
+                platform.setup_hint()
+            );
         } else if auth_recovery_eligible
             && crate::auth::devbox_login::is_devbox_environment()
             && let Some(ref am) = self.auth_manager
@@ -1163,7 +1233,13 @@ impl SessionActor {
                 .await
                 .map(|c| (c.model, c.base_url))
                 .unwrap_or_default();
-            if self.auth_gate(&model_id, &base_url).active() {
+            // Never refresh-then-rewrite chat-state credentials with the xAI
+            // session token for a third-party BYOK platform endpoint: the
+            // stamped platform key is the correct signer, and the BYOK gate
+            // can misclassify live-only catalog models as `NotByok`.
+            if self.auth_gate(&model_id, &base_url).active()
+                && crate::agent::config::open_platform_endpoint(&base_url).is_none()
+            {
                 match am.get_valid_token().await {
                     Ok(key) => {
                         if creds.api_key.as_deref() != Some(&key) {

@@ -378,6 +378,58 @@ async fn pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough() {
         .await;
 }
 
+/// Regression: per-turn pre-flight refresh must not fire for a third-party
+/// BYOK platform endpoint even when the BYOK gate misclassifies the model as
+/// `NotByok` (live-only catalog entries are invisible to the offline lookup).
+/// Otherwise the stamped platform key in chat-state credentials is replaced
+/// by the xAI session token before the sampler even builds its config.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn pre_flight_refresh_skips_open_platform_endpoint() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            // Session-based method (cached_token) — the shape that activates
+            // the session gate for a `NotByok` classification.
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "ollama-platform-key".to_string(),
+            )
+            .await;
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://ollama.com/v1".into();
+                cfg.model = "ollama-live-only-model-not-in-offline-catalog".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            actor.refresh_token_if_expired().await;
+
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "pre-flight session refresh must NOT fire for an open-platform endpoint"
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_credentials()
+                    .await
+                    .api_key
+                    .as_deref(),
+                Some("ollama-platform-key"),
+                "stamped platform key must not be overwritten by the session token"
+            );
+        })
+        .await;
+}
+
 /// Proactive refresh keeps the cache hot so `refresh_token_if_expired`
 /// (per-turn pre-flight) is a cache hit — the refresher fires once
 /// (proactive), then the per-turn call sees the fresh token without
@@ -818,6 +870,109 @@ async fn reconstruct_full_config_prefers_codex_resolver_over_session_auth_manage
             assert!(
                 cfg.responses_codex_dialect,
                 "Codex dialect flag must be set for the chatgpt backend"
+            );
+        })
+        .await;
+}
+
+/// Regression: a live-only open-platform model (e.g. `ollama/glm-5.2` from
+/// the platform `/models` sync) is absent from the offline catalog the BYOK
+/// gate consults, so it classifies `NotByok` and the session gate activates.
+/// `reconstruct_full_config` must still keep the xAI session bearer resolver
+/// OFF the third-party endpoint — the stamped platform key in chat-state
+/// credentials is the correct signer. Previously the AuthManager resolver
+/// replaced it and the request went out with the xAI session JWT →
+/// `ollama.com` 401 → false "auth recovery succeeded" loop.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_no_session_resolver_for_open_platform_endpoint() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _auth_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+
+            let (_am_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "ollama-platform-key".to_string(),
+            )
+            .await;
+
+            // Point the session sampling config at the open-platform endpoint.
+            // The slug is deliberately absent from every offline catalog (a
+            // stand-in for live-only entries like `ollama/glm-5.2`), so the
+            // BYOK gate classifies `NotByok` regardless of the dev box's env
+            // — no env mutation needed, which would race parallel tests.
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://ollama.com/v1".into();
+                cfg.model = "ollama-live-only-model-not-in-offline-catalog".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "open-platform endpoint must not wire the xAI session bearer resolver"
+            );
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some("ollama-platform-key"),
+                "must sign with the stamped platform key, not the xAI session JWT"
+            );
+        })
+        .await;
+}
+
+/// Regression: a 401 from an open-platform endpoint must NOT run the xAI
+/// session-token recovery. The refresher "succeeds" on the wrong credential
+/// and the retry re-sends it, looping to the misleading "Auth recovery
+/// succeeded but inference request was still rejected (401)" terminal error.
+/// The 401 surfaces directly with the platform's setup hint instead.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn sampler_401_on_open_platform_endpoint_skips_session_recovery() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "ollama-platform-key".to_string(),
+            )
+            .await;
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                cfg.base_url = "https://ollama.com/v1".into();
+                cfg.model = "ollama-live-only-model-not-in-offline-catalog".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            let result = actor.handle_sampling_failure(auth_error()).await;
+
+            let Err(err) = result else {
+                panic!(
+                    "open-platform 401 must surface as a terminal error, not xAI session recovery"
+                );
+            };
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "xAI session refresher must not run for a third-party BYOK endpoint"
+            );
+            let rendered = format!("{err:?}");
+            assert!(
+                rendered.contains("Ollama Cloud"),
+                "terminal error should name the platform setup hint, got: {rendered}"
             );
         })
         .await;
