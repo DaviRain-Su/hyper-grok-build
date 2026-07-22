@@ -52,6 +52,15 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match VERSION file ($file_version)" >&2
             exit 1
           fi
+          # GROK_VERSION is compiled into x-grok-client-version. xAI returns
+          # HTTP 426 when the client is below their floor (currently 0.1.202).
+          # Refuse to stamp a release that production will hard-reject.
+          min_wire="0.1.202"
+          if ! printf '%s\n' "$min_wire" "$tag_version" | sort -V -C; then
+            echo "VERSION/tag $tag_version is below xAI wire minimum $min_wire" >&2
+            echo "Use the monorepo lockstep version (e.g. 0.2.109), not a marketing 0.1.x." >&2
+            exit 1
+          fi
           echo "GROK_VERSION=$tag_version" >> "$GITHUB_ENV"
 
       - name: Install toolchain (rust-toolchain.toml)

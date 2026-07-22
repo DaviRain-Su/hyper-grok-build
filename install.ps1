@@ -6,7 +6,7 @@
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex
-#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.1.0
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.2.109
 #
 # Environment:
 #   HYPER_SHARE_DIR        install root (default: %USERPROFILE%\.hyper)

@@ -9,7 +9,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | sh
-#   sh install.sh --version v0.1.0        # pin a specific release
+#   sh install.sh --version v0.2.109      # pin a specific release
 #
 # Environment:
 #   HYPER_SHARE_DIR        install root (default: ~/.hyper)
@@ -38,7 +38,7 @@ VERSION=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)
-            [ $# -ge 2 ] || err "--version requires an argument (e.g. --version v0.1.0)"
+            [ $# -ge 2 ] || err "--version requires an argument (e.g. --version v0.2.109)"
             VERSION="$2"
             shift
             ;;

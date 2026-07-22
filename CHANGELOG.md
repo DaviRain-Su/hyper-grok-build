@@ -2,9 +2,40 @@
 
 All notable changes to **Hyper** (`hyper` binary) are documented here.
 
+## [0.2.109] — 2026-07-22
+
+**Wire-compatible release.** Hyper stamps `x-grok-client-version` from the root
+`VERSION` file via `GROK_VERSION` at build time. xAI's API gate rejects clients
+below **0.1.202** (HTTP 426). The previous `0.1.0` marketing tag was therefore
+unusable against production Grok models (e.g. grok-4.5).
+
+This tag **matches the monorepo lockstep crate version** (`xai-grok-pager` /
+`xai-grok-version` / shell at `0.2.109`), which is also above the official
+stable line (`grok 0.2.106` at time of release).
+
+### Fixes
+- Align release `VERSION` / GitHub tag with monorepo client version so API
+  version gates accept the binary.
+- Document that Hyper release tags must track the pager lockstep version, not
+  an independent `0.1.x` marketing line.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.109
+```
+
+The earlier `v0.1.0` assets remain on GitHub Releases for historical download
+but must not be used against current xAI endpoints.
+
 ## [0.1.0] — 2026-07-22
 
 First tagged Hyper community release of the multi-provider Grok Build fork.
+
+> **Superseded for API use.** `x-grok-client-version: 0.1.0` is rejected by
+> xAI (min **0.1.202**). Upgrade to **v0.2.109** or later.
 
 ### Highlights
 
@@ -29,7 +60,7 @@ First tagged Hyper community release of the multi-provider Grok Build fork.
 ### Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.109
 ```
 
 See [README.md](./README.md) and [docs/KNOWN_ISSUES.md](./docs/KNOWN_ISSUES.md).
