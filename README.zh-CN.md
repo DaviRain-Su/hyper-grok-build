@@ -23,7 +23,9 @@ xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenAI、Anthropic、Z.AI、Ol
 既可以在终端中交互使用,也可以无头模式用于脚本/CI,
 还能通过 Agent Client Protocol(ACP)嵌入到编辑器中。
 UI 已本地化为 10 种语言(English、中文、日本語、한국어、Español、
-Português、Français、Deutsch、Русский),并可在设置中实时切换。
+Português、Français、Deutsch、Русский),并可在设置中实时切换。运行
+`hyper dashboard --web` 可以打开本地只读的纯 Rust Web 仪表盘，查看会话指标、
+事件时间线、图表、日志和实时事件流。
 
 [安装](#安装) ·
 [供应商](#供应商) ·

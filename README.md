@@ -25,7 +25,9 @@ executes shell commands, searches the web, and manages long-running tasks —
 interactively, headlessly for scripting/CI, or embedded in editors via the
 Agent Client Protocol (ACP). The UI is localized in 10 languages
 (English, 中文, 日本語, 한국어, Español, Português, Français, Deutsch,
-Русский) and switchable live from Settings.
+Русский) and switchable live from Settings. A local, read-only Rust web
+dashboard is available with `hyper dashboard --web` for session metrics,
+timelines, charts, logs, and live event streaming.
 
 [Installation](#installation) ·
 [Providers](#providers) ·

@@ -161,13 +161,27 @@ See ~/.grok/README.md for more information.
     /// `GROK_WORKSPACE_COMMAND=1` to enable it locally for testing.
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
-    /// Open the Agent Dashboard view at startup.
+    /// Open the Agent Dashboard, or launch its local web observability UI.
     ///
-    /// Centralised, agent-native overview of every session (top-level and
-    /// subagents). Disabled when `[dashboard].enabled = false` in
-    /// `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env
-    /// var is set.
-    Dashboard,
+    /// Bare `dashboard` opens the terminal-native multi-agent dashboard.
+    /// `dashboard --web` starts the read-only Rust web dashboard over local
+    /// session artifacts. The web server only accepts loopback bind addresses.
+    Dashboard(DashboardArgs),
+}
+
+#[derive(Debug, clap::Args, Clone, Default)]
+pub struct DashboardArgs {
+    /// Launch the local web dashboard instead of the terminal dashboard.
+    #[arg(long)]
+    pub web: bool,
+
+    /// Loopback address for `--web` (default: 127.0.0.1:9090).
+    #[arg(long, value_name = "ADDR", requires = "web")]
+    pub bind: Option<SocketAddr>,
+
+    /// Do not open the default browser for `--web`.
+    #[arg(long, requires = "web")]
+    pub no_open: bool,
 }
 /// Arguments for the subscription-backed Codex connector.
 #[derive(Debug, clap::Args, Clone)]

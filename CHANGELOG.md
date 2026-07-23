@@ -2,6 +2,12 @@
 
 All notable changes to **Hyper** (`hyper` binary) are documented here.
 
+## Unreleased
+
+### Added
+- Add `hyper dashboard --web`, a loopback-only, read-only web observability UI built with Axum and Leptos SSR.
+- Add session overview, filtering, detail, timeline, chat, charts, active-process memory, unified-log, JSON API, and live SSE views over existing `~/.grok` artifacts.
+
 ## [0.2.109] — 2026-07-22
 
 **Wire-compatible release.** Hyper stamps `x-grok-client-version` from the root
