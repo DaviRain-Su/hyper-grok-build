@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/in
 ## 供应商
 
 Hyper 保留了本代码树中的多供应商注册表(见 pager
-[用户指南](crates/codegen/xai-grok-pager/docs/user-guide/)):
+[用户指南（中文）](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)):
 
 | 平台 | 认证方式 | 备注 |
 | -------- | ---- | ----- |
@@ -96,7 +96,7 @@ Hyper 保留了本代码树中的多供应商注册表(见 pager
 
 选择器中的模型 id 形如 `{platform}/{model}`(例如
 `kimi-code/k3`、`codex:gpt-5.5`)。各平台文档位于
-`crates/codegen/xai-grok-pager/docs/user-guide/`(Moonshot、Kimi Code、
+`crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/`(Moonshot、Kimi Code、
 OpenAI Codex 等)。
 
 配置和凭据仍然存放在 **`~/.grok`**(与上游 Grok Build 相同的路径),
@@ -210,7 +210,13 @@ Amp 风格的 **agent 模式**(low / medium / high / ultra 档位)目前**仅有
 仓库内用户指南(示例中可能仍写着 `grok`;Hyper 的二进制名是
 `hyper`,路径仍在 `~/.grok` 下):
 
-[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
+- 中文：[用户指南（中文）](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)
+- English：[User Guide](crates/codegen/xai-grok-pager/docs/user-guide/)
+
+相关扩展文档：
+
+- [Hooks 与 Plugins 指南（中文）](crates/codegen/xai-grok-pager/docs/hooks-and-plugins.zh-CN.md)
+- [自定义 Hooks 指南（中文）](crates/codegen/xai-grok-pager/docs/custom-hooks.zh-CN.md)
 
 上游产品文档:[docs.x.ai/build](https://docs.x.ai/build/overview)
 
