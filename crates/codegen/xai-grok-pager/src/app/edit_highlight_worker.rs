@@ -478,6 +478,10 @@ mod tests {
 
     #[test]
     fn run_job_succeeds_on_temp_file() {
+        // The job stamps the current theme kind; hold the theme test lock so
+        // a concurrent theme-mutating test can't change the cache between
+        // `run_job` and the `current_kind()` assertion.
+        let _pinned = crate::test_util::pin_theme();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("probe.py");
         let body = "x = 1\ny = 2\n";

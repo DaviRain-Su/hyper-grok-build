@@ -533,9 +533,20 @@ fn personas_from_bundle(bundle: &BundleState) -> Vec<PersonaDetail> {
 /// shell's spawn-time precedence (inline config > project > user > bundled)
 /// and the user guide. Bundled-only names are appended after local ones.
 pub fn merge_persona_lists(bundle: &BundleState, cwd: &Path) -> Vec<PersonaDetail> {
+    merge_persona_lists_in(bundle, cwd, &xai_grok_config::grok_home())
+}
+
+/// [`merge_persona_lists`] with the personas home injected. Tests call this
+/// directly with a temp home: the `OnceLock`-cached `grok_home()` would
+/// otherwise leak the developer's real `~/.grok/personas` into assertions
+/// (see `docs/test-isolation.md` §2.3 / §4).
+fn merge_persona_lists_in(
+    bundle: &BundleState,
+    cwd: &Path,
+    grok_home: &Path,
+) -> Vec<PersonaDetail> {
     let mut list: Vec<PersonaDetail> = Vec::new();
     let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let grok_home = xai_grok_config::grok_home();
     let dirs = [
         (ConfigFileScope::Project, cwd.join(".grok").join("personas")),
         (ConfigFileScope::User, grok_home.join("personas")),
@@ -3389,7 +3400,8 @@ mod tests {
             personas: vec!["ignored".to_string()],
             ..Default::default()
         };
-        let list = merge_persona_lists(&bundle, Path::new("/tmp"));
+        let home = tempfile::tempdir().expect("home");
+        let list = merge_persona_lists_in(&bundle, Path::new("/tmp"), home.path());
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "researcher");
         assert_eq!(list[0].description.as_deref(), Some("thorough researcher"));
@@ -3407,7 +3419,8 @@ mod tests {
             persona_details: vec![],
             ..Default::default()
         };
-        let list = merge_persona_lists(&bundle, Path::new("/tmp"));
+        let home = tempfile::tempdir().expect("home");
+        let list = merge_persona_lists_in(&bundle, Path::new("/tmp"), home.path());
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "alpha");
         assert!(list[0].description.is_none());
@@ -3418,7 +3431,8 @@ mod tests {
     #[test]
     fn build_persona_list_empty_bundle() {
         let bundle = BundleState::default();
-        let list = merge_persona_lists(&bundle, Path::new("/tmp"));
+        let home = tempfile::tempdir().expect("home");
+        let list = merge_persona_lists_in(&bundle, Path::new("/tmp"), home.path());
         assert!(list.is_empty());
     }
     #[test]
@@ -3442,7 +3456,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let list = merge_persona_lists(&bundle, dir.path());
+        let home = tempfile::tempdir().expect("home");
+        let list = merge_persona_lists_in(&bundle, dir.path(), home.path());
         assert_eq!(list.len(), 2);
         assert_eq!(
             list[0].name, "local-only",
@@ -3473,7 +3488,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let list = merge_persona_lists(&bundle, dir.path());
+        let home = tempfile::tempdir().expect("home");
+        let list = merge_persona_lists_in(&bundle, dir.path(), home.path());
         assert_eq!(list.len(), 1, "same-name bundled entry is shadowed");
         assert_eq!(list[0].scope_label.as_deref(), Some("project"));
         assert!(
@@ -3582,7 +3598,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        let personas = merge_persona_lists(&bundle, Path::new("/tmp"));
+        let home = tempfile::tempdir().expect("home");
+        let personas = merge_persona_lists_in(&bundle, Path::new("/tmp"), home.path());
         let make_state = |query: &str| -> AgentsModalState {
             let mut state = AgentsModalState {
                 window: ModalWindowState::with_tabs(2),

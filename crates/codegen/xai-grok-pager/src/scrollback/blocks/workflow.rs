@@ -289,6 +289,9 @@ mod tests {
 
     #[test]
     fn cancelled_bullet_is_static_gray() {
+        // Reads the theme twice (bullet build + assert); hold the theme test
+        // lock so a concurrent cache-mutating test can't tear the pair.
+        let _theme = crate::test_util::pin_theme();
         let mut block = WorkflowBlock::started("wf_1", "deep-research", "q");
         block.status = WorkflowBlockStatus::Cancelled {
             elapsed: Duration::from_secs(1),

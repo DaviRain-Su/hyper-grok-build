@@ -544,6 +544,7 @@ mod tests {
 
     #[test]
     fn test_short_prompt_no_truncation() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         let expected = format!("{}hello", crate::glyphs::prompt_arrow());
@@ -554,6 +555,7 @@ mod tests {
 
     #[test]
     fn test_short_prompt_with_max_lines() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, Some(2), true, false);
         let expected = format!("{}hello", crate::glyphs::prompt_arrow());
@@ -566,6 +568,7 @@ mod tests {
 
     #[test]
     fn test_long_prompt_wraps() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("this is a very long prompt that should wrap");
         let lines = block.wrap_prompt_lines(20, None, true, false);
 
@@ -577,6 +580,7 @@ mod tests {
 
     #[test]
     fn test_truncation_adds_ellipsis() {
+        let _theme = crate::test_util::pin_theme();
         let block =
             UserPromptBlock::new("this is a very long prompt that should wrap to many lines");
         let lines = block.wrap_prompt_lines(20, Some(2), true, false);
@@ -593,6 +597,7 @@ mod tests {
 
     #[test]
     fn test_ellipsis_fits_within_width() {
+        let _theme = crate::test_util::pin_theme();
         // Create a prompt that wraps to exactly fill lines
         let block = UserPromptBlock::new("aaaa bbbb cccc dddd eeee ffff");
         let width = 15; // Narrow width to force wrapping
@@ -619,6 +624,7 @@ mod tests {
 
     #[test]
     fn test_bash_prompt_prefix() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::bash("ls -la");
         let lines = block.wrap_prompt_lines(80, None, true, false);
 
@@ -628,6 +634,7 @@ mod tests {
 
     #[test]
     fn skill_with_args_only_command_is_teal() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::skill("/pr-workflow create a ticket for this");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -643,6 +650,7 @@ mod tests {
 
     #[test]
     fn skill_without_args_all_teal() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::skill("/pr-workflow");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -656,6 +664,7 @@ mod tests {
 
     #[test]
     fn skill_multiline_only_first_token_teal() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::skill("/foo bar\nbaz");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 2);
@@ -676,6 +685,7 @@ mod tests {
 
     #[test]
     fn mid_text_token_only_token_is_teal() {
+        let _theme = crate::test_util::pin_theme();
         let text = "great /pr-workflow all good now";
         let block = UserPromptBlock::with_skill_tokens(text, vec![6..18]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -694,6 +704,7 @@ mod tests {
 
     #[test]
     fn mid_text_multiple_tokens_each_teal() {
+        let _theme = crate::test_util::pin_theme();
         let text = "run /commit then /review please";
         let block = UserPromptBlock::with_skill_tokens(text, vec![4..11, 17..24]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -712,6 +723,7 @@ mod tests {
 
     #[test]
     fn mid_text_token_on_second_logical_line() {
+        let _theme = crate::test_util::pin_theme();
         let text = "first line\nthen /model here";
         // "/model" starts after "first line\nthen " = 16 bytes.
         let block = UserPromptBlock::with_skill_tokens(text, vec![16..22]);
@@ -734,6 +746,7 @@ mod tests {
 
     #[test]
     fn invalid_token_ranges_are_dropped() {
+        let _theme = crate::test_util::pin_theme();
         let text = "héllo /model now"; // 'é' is 2 bytes: "/model" = 7..13
         let block = UserPromptBlock::with_skill_tokens(
             text,
@@ -761,6 +774,7 @@ mod tests {
 
     #[test]
     fn all_token_ranges_invalid_renders_plain() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::with_skill_tokens("plain text", vec![100..200]);
         assert!(block.skill_token_ranges.is_empty());
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -781,6 +795,7 @@ mod tests {
 
     #[test]
     fn collapsed_truncation_keeps_teal_on_straddling_token() {
+        let _theme = crate::test_util::pin_theme();
         // "/pr-workflow" (bytes 8..20) is wider than the content width, so it
         // straddles the last visible row and the hidden continuation; the
         // truncating re-wrap must keep the visible head teal.
@@ -801,6 +816,7 @@ mod tests {
 
     #[test]
     fn collapsed_truncation_keeps_teal_on_token_within_last_line() {
+        let _theme = crate::test_util::pin_theme();
         // "/do-it" (bytes 8..14) fits fully on the truncated last line even at
         // the ellipsis-reduced width, so it must survive whole and teal.
         let text = "one\ntwo\n/do-it more words here";
@@ -823,6 +839,7 @@ mod tests {
 
     #[test]
     fn narrow_wrap_keeps_teal_on_both_rows_of_split_token() {
+        let _theme = crate::test_util::pin_theme();
         // Expanded (no max_lines): the 12-wide token cannot fit at width 8, so
         // the wrapper splits it mid-token; every piece must stay teal.
         let text = "aa /pr-workflow zz";
@@ -845,6 +862,7 @@ mod tests {
 
     #[test]
     fn test_multiline_input() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("line one\nline two\nline three");
         let lines = block.wrap_prompt_lines(80, None, true, false);
 
@@ -856,6 +874,7 @@ mod tests {
 
     #[test]
     fn test_multiline_truncated() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("line one\nline two\nline three");
         let lines = block.wrap_prompt_lines(80, Some(2), true, false);
 
@@ -866,6 +885,7 @@ mod tests {
 
     #[test]
     fn test_exact_fit_no_ellipsis() {
+        let _theme = crate::test_util::pin_theme();
         // If content fits exactly in max_lines, no ellipsis needed
         let block = UserPromptBlock::new("short");
         let lines = block.wrap_prompt_lines(80, Some(1), true, false);
@@ -876,6 +896,7 @@ mod tests {
 
     #[test]
     fn test_selected_prompt_uses_accent_color() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, true);
         let expected = format!("{}hello", crate::glyphs::prompt_arrow());
@@ -897,6 +918,7 @@ mod tests {
 
     #[test]
     fn test_unselected_prompt_still_uses_accent_pointer() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, false);
 
@@ -924,6 +946,7 @@ mod tests {
 
     #[test]
     fn test_prompt_lines_have_selection_range() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert!(
@@ -935,6 +958,7 @@ mod tests {
 
     #[test]
     fn test_prompt_prefix_excluded_from_selection() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -949,6 +973,7 @@ mod tests {
 
     #[test]
     fn test_prompt_no_prefix_all_selectable() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, false, false);
         assert_eq!(lines.len(), 1);
@@ -957,6 +982,7 @@ mod tests {
 
     #[test]
     fn test_prompt_wrapped_lines_have_joiners() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("this is a long prompt that should wrap");
         let lines = block.wrap_prompt_lines(15, None, true, false);
         assert!(lines.len() > 1);
@@ -968,6 +994,7 @@ mod tests {
 
     #[test]
     fn test_prompt_multiline_joiners() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("line one\nline two");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 2);
@@ -979,6 +1006,7 @@ mod tests {
 
     #[test]
     fn test_cron_prompt_prefix() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::cron("/pr-babysit check");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -992,6 +1020,7 @@ mod tests {
 
     #[test]
     fn test_bash_prefix_excluded_from_selection() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::bash("ls -la");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -1005,6 +1034,7 @@ mod tests {
 
     #[test]
     fn test_continuation_indent_excluded_from_selection() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("line one\nline two");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 2);
@@ -1023,6 +1053,7 @@ mod tests {
 
     #[test]
     fn test_short_prompt_not_foldable() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("hello");
         assert!(!block.is_foldable());
         assert_eq!(block.default_display_mode(), DisplayMode::Expanded);
@@ -1030,6 +1061,7 @@ mod tests {
 
     #[test]
     fn test_three_line_prompt_not_foldable() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("one\ntwo\nthree");
         assert!(!block.is_foldable());
         assert_eq!(block.default_display_mode(), DisplayMode::Expanded);
@@ -1037,6 +1069,7 @@ mod tests {
 
     #[test]
     fn test_four_line_prompt_is_foldable() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("one\ntwo\nthree\nfour");
         assert!(block.is_foldable());
         assert_eq!(block.default_display_mode(), DisplayMode::Collapsed);
@@ -1044,6 +1077,7 @@ mod tests {
 
     #[test]
     fn test_long_single_line_is_foldable() {
+        let _theme = crate::test_util::pin_theme();
         // A single line long enough to wrap past 3 visual lines at 60-char width
         let long_line = "a ".repeat(120); // 240 chars → 4 visual lines at 60
         let block = UserPromptBlock::new(long_line);
@@ -1053,6 +1087,7 @@ mod tests {
 
     #[test]
     fn test_short_single_line_not_foldable() {
+        let _theme = crate::test_util::pin_theme();
         // A single line that fits in 3 visual lines at 60-char width
         let short_line = "a ".repeat(60); // 120 chars → 2 visual lines at 60
         let block = UserPromptBlock::new(short_line);
@@ -1061,6 +1096,7 @@ mod tests {
 
     #[test]
     fn test_fold_toggle_collapsed_to_expanded() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("one\ntwo\nthree\nfour");
         assert_eq!(
             block.next_fold_mode(DisplayMode::Collapsed, false),
@@ -1070,6 +1106,7 @@ mod tests {
 
     #[test]
     fn test_fold_toggle_expanded_to_collapsed() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("one\ntwo\nthree\nfour");
         assert_eq!(
             block.next_fold_mode(DisplayMode::Expanded, false),
@@ -1079,6 +1116,7 @@ mod tests {
 
     #[test]
     fn test_fold_toggle_truncated_to_expanded() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("one\ntwo\nthree\nfour");
         assert_eq!(
             block.next_fold_mode(DisplayMode::Truncated, false),
@@ -1088,6 +1126,7 @@ mod tests {
 
     #[test]
     fn user_prompt_bold_only_in_minimal() {
+        let _theme = crate::test_util::pin_theme();
         let theme = Theme::current();
         let (prefix, body, skill) = UserPromptBlock::prompt_styles(&theme, true);
         assert!(prefix.add_modifier.contains(Modifier::BOLD));
@@ -1111,6 +1150,7 @@ mod tests {
     /// tests that call `Theme::current()` without the theme test mutex).
     #[test]
     fn prompt_band_color_native_vs_rgb() {
+        let _theme = crate::test_util::pin_theme();
         use ratatui::style::Color;
 
         let theme = Theme::groknight();
@@ -1144,6 +1184,7 @@ mod tests {
     /// keeps it. Does not toggle process-global native lock.
     #[test]
     fn user_prompt_band_is_semantic_not_panel() {
+        let _theme = crate::test_util::pin_theme();
         let block = UserPromptBlock::new("scan me");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert!(

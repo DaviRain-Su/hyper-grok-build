@@ -77,3 +77,39 @@ impl Drop for EnvVarGuard {
         }
     }
 }
+
+/// RAII guard pinning the theme cache to GrokNight under the theme test
+/// lock, immune to the runner's `NO_COLOR` / `TERM=dumb` environment
+/// (unpinned theme resolution otherwise picks degraded palettes and breaks
+/// color/glyph assertions in minimal CI shells). Mirrors
+/// `app::dispatch::tests::with_theme_test_env` — theme-sensitive tests in
+/// every module must hold the same lock so they serialize with the dispatch
+/// theme tests that reset the cache on exit.
+///
+/// Usage: `let _theme = crate::test_util::pin_theme();` at the top of a test.
+pub struct PinnedThemeGuard(std::sync::MutexGuard<'static, ()>);
+
+/// Pin the theme cache to GrokNight until the returned guard drops.
+pub fn pin_theme() -> PinnedThemeGuard {
+    let guard = crate::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::theme::cache::reset_for_test();
+    crate::theme::cache::seed_auto_theme_defaults_for_test();
+    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+    crate::theme::system_appearance::clear_mock();
+    // `color_support::detect()` is OnceLock-cached env detection — force it
+    // per-call so `NO_COLOR`/`TERM=dumb` runners still render full color.
+    crate::theme::color_support::force_level_for_test(Some(
+        crate::theme::color_support::ColorLevel::TrueColor,
+    ));
+    PinnedThemeGuard(guard)
+}
+
+impl Drop for PinnedThemeGuard {
+    fn drop(&mut self) {
+        crate::theme::system_appearance::clear_mock();
+        crate::theme::cache::reset_for_test();
+        crate::theme::color_support::force_level_for_test(None);
+    }
+}

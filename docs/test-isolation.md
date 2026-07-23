@@ -131,3 +131,16 @@ scratch 路径（`cli_models` 用的就是这个，避开 `OnceLock`-cached 真�
 | `session::acp_session::auth_error_no_retry_tests::pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough` | BYOK env 使 `model_auth_facts` 判 `Byok`，gate 关闭 | `#[serial]` + `_byok` |
 | `session::acp_session::auth_error_no_retry_tests::*` 的 `auth_manager_with_*` callers | helper 临时 unset `GROK_AUTH`/`GROK_AUTH_PATH`，会清掉并行 Codex fixture | helper 改用 `AuthManager::new_test_isolated`，不再 mutation 进程 env |
 | `session::storage::jsonl::tests::workflow_restore_rejects_symlinks_and_caps_run_count` | `read_dir` 顺序不确定 + 截断在 sort 前，symlink 抢占合法 run 槽位 | 生产代码：sort 前移到 truncate 前（`jsonl/mod.rs`） |
+
+## 6. 已修用例索引（2026-07-23，`xai-grok-pager`）
+
+同类问题在 pager crate 的 17 个预置失败，按根因分四组修完（全量 lib 测试现 0 失败）：
+
+| 测试组 | 失败原因 | 修复 |
+|------|----------|------|
+| `views::agents_modal::tests::*`（6 个） | `merge_persona_lists` 直读 `OnceLock`-cached `grok_home()`，开发者真实 `~/.grok/personas` 泄漏进断言 | 生产代码拆出 `merge_persona_lists_in(bundle, cwd, grok_home)` 注入路径；测试改传 temp home（§2.3 债务的测试侧规避） |
+| `slash::commands::tests::shell_collision_contract_*` | 新增 `/providers` 命令与 `provider` 别名未登记 `SHELL_RESERVED` | 补登记（真实 test-vs-code drift，测试在尽职） |
+| `diagnostics::fix::tests::shell_aliases_*` | 交互 bash 读用户真实 `~/.bashrc`，其中 `export PATH="$HOME/.grok/bin:$PATH"` 使真 grok 二进制抢占测试 shim | 别名改用 shim 绝对路径（绕过 PATH/函数查找） |
+| 主题/颜色断言（`scrollback::blocks::user::*` ×9、`views::picker`、`app::modals`、`settings_modal`、`workflow`、`edit_highlight_worker` 等） | 运行环境 `NO_COLOR=1`/`TERM=dumb` ⇒ `color_support::detect()` 的 `OnceLock` 缓存为 `ColorLevel::None`，颜色全部退化为 `Reset`；且读-改-读缓存对与并行写者撕裂 | `xai-grok-pager-render` 新增 `color_support::force_level_for_test`（逐调用覆盖，绕过 OnceLock）；`test_util::pin_theme()` RAII guard 统一持 `test_lock` + 钉 GrokNight + 强制 TrueColor；全模块测试统一点位（`scrollback/blocks/user.rs` 41 个测试全钉），两个无锁 `cache::set` 写者（`text_selection.rs`、`bg_task.rs`）一并改持锁 |
+
+规约补充：**凡断言颜色/样式/主题缓存的测试，必须 `let _theme = crate::test_util::pin_theme();` 持锁**——既防环境污染，也防并行写者撕裂读-改-读对。残留的 `mermaid_worker` / `app_view` 动画时序 flake 属负载敏感的既有问题，与本组无关。

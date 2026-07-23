@@ -78,12 +78,37 @@ static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 /// Capped at [`ColorLevel::Basic`] while the terminal-native lock is
 /// engaged.
 pub fn detect() -> ColorLevel {
+    // Test-only per-call override, consulted BEFORE the OnceLock-cached
+    // environment detection (which cannot be reset between tests).
+    #[cfg(any(test, feature = "test-support"))]
+    match FORCE_LEVEL_FOR_TEST.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => return ColorLevel::None,
+        1 => return ColorLevel::Basic,
+        2 => return ColorLevel::Ansi256,
+        3 => return ColorLevel::TrueColor,
+        _ => {}
+    }
     let raw = detect_raw();
     if crate::theme::cache::terminal_native_locked() {
         return raw.min(ColorLevel::Basic);
     }
     raw
 }
+
+/// Test-only per-call [`detect`] override. The environment detection is
+/// cached in a `OnceLock` on first use and cannot be reset between tests,
+/// so theme-sensitive tests force the level here instead (restored by
+/// `xai_grok_pager::test_util::PinnedThemeGuard`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_level_for_test(level: Option<ColorLevel>) {
+    FORCE_LEVEL_FOR_TEST.store(
+        level.map_or(-1, |l| l as i8),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static FORCE_LEVEL_FOR_TEST: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
 
 /// The raw cached detection, without the terminal-native lock cap.
 fn detect_raw() -> ColorLevel {

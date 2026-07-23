@@ -424,7 +424,11 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
 
     if let Some(bash) = find_on_path("bash") {
         let rc = temp.path().join("bashrc");
-        std::fs::write(&rc, "alias ssh='grok wrap ssh'\n").unwrap();
+        // Absolute shim path in the alias: an interactive shell sources the
+        // user's real rc files, which can prepend a real `grok` binary to
+        // PATH (e.g. `~/.grok/bin`) or define same-named functions — either
+        // would shadow a bare `grok` shim and leak to the real binary.
+        std::fs::write(&rc, format!("alias ssh='{} wrap ssh'\n", grok.display())).unwrap();
         let command = format!(
             "source '{}'; source '{}'; eval 'ssh -p 2222 host'",
             rc.display(),
@@ -455,7 +459,8 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     }
     if let Some(zsh) = find_on_path("zsh") {
         let rc = temp.path().join("zshrc");
-        std::fs::write(&rc, "alias ssh='grok wrap ssh'\n").unwrap();
+        // See the bash arm: absolute shim path, immune to PATH shadowing.
+        std::fs::write(&rc, format!("alias ssh='{} wrap ssh'\n", grok.display())).unwrap();
         let command = format!(
             "source '{}'; source '{}'; eval 'ssh -p 2222 host'",
             rc.display(),
