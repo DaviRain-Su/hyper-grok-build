@@ -2,6 +2,8 @@
 
 <h1>Hyper (<code>hyper</code>)</h1>
 
+<img src="docs/assets/hyper-banner.jpg" alt="Hyper — terminal AI coding agent" width="720">
+
 **Hyper** is an unofficial multi-provider community build of
 [Grok Build](https://github.com/xai-org/grok-build) — a terminal-based AI
 coding agent with first-class support for xAI Grok, Kimi Code / Moonshot,

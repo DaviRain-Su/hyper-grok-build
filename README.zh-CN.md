@@ -2,6 +2,8 @@
 
 <h1>Hyper(<code>hyper</code>)</h1>
 
+<img src="docs/assets/hyper-banner.jpg" alt="Hyper —— 终端 AI 编码代理" width="720">
+
 **Hyper** 是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
 一个基于终端的 AI 编码代理,对 xAI Grok、Kimi Code / Moonshot、
 ChatGPT Codex、OpenAI、Anthropic、Z.AI、Ollama Cloud 等平台提供一流支持。
