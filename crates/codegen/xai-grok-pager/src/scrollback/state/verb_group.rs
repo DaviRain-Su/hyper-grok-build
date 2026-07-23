@@ -382,20 +382,28 @@ impl<'e> BucketAccumulator<'e> {
             } else {
                 bucket.sources.len()
             };
-            let segment = format!(
-                "{}{} {} {}",
-                if i == 0 { "" } else { ", " },
-                bucket.kind.verb(self.running),
-                count,
-                bucket.kind.noun(count)
-            );
+            let segment = rust_i18n::t!(
+                "verbgroup.segment",
+                verb = bucket.kind.verb_l10n(self.running),
+                count = count,
+                noun = bucket.kind.noun_l10n(count)
+            )
+            .into_owned();
+            if i > 0 {
+                let joiner = rust_i18n::t!("verbgroup.joiner");
+                text.push_str(&joiner);
+                spans.push(Span::styled(joiner.into_owned(), text_style));
+            }
             text.push_str(&segment);
             spans.push(Span::styled(segment, text_style));
         }
         if self.failed_count > 0 {
-            let suffix = format!(" · {} failed", self.failed_count);
+            let suffix = rust_i18n::t!("verbgroup.failed_suffix", count = self.failed_count);
             text.push_str(&suffix);
-            spans.push(Span::styled(suffix, theme.fg(theme.accent_error)));
+            spans.push(Span::styled(
+                suffix.into_owned(),
+                theme.fg(theme.accent_error),
+            ));
         }
 
         VerbGroupHeaderLabel {

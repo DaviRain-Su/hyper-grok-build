@@ -36,7 +36,7 @@ pub fn render_prompt(
         chrome: true,
         chrome_pad_left: pad_left,
         chrome_pad_right: pad_right,
-        placeholder_override: Some("Type a message..."),
+        placeholder_override: Some(rust_i18n::t!("welcome.prompt_placeholder")),
         ..PromptStyle::default()
     };
 

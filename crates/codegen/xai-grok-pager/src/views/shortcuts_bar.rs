@@ -107,10 +107,10 @@ pub struct CompactConfig {
 }
 
 /// Info needed to render the "press again" hint.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PendingHint {
     pub shortcut: KeyShortcut,
-    pub label: &'static str,
+    pub label: Cow<'static, str>,
 }
 
 impl<'a> ShortcutsBar<'a> {
@@ -181,7 +181,7 @@ impl Widget for ShortcutsBar<'_> {
         // If pending confirmation, show only "press again to {label}"
         if let Some(pending) = &self.pending_confirmation {
             let key_text = pending.shortcut.display();
-            let label = format!("press again to {}", pending.label);
+            let label = rust_i18n::t!("shortcuts.press_again", label = &pending.label);
 
             let mut x = area.x;
 
@@ -194,7 +194,7 @@ impl Widget for ShortcutsBar<'_> {
             buf.set_span(x, area.y, &colon, 1);
             x += 1;
 
-            let action_span = Span::styled(&label, action_style);
+            let action_span = Span::styled(label.as_ref(), action_style);
             let action_width = label.width() as u16;
             buf.set_span(x, area.y, &action_span, action_width);
             let _ = x + action_width; // suppress unused

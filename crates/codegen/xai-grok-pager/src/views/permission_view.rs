@@ -555,9 +555,9 @@ pub fn render_permission_view(
             .fg(theme.text_secondary)
             .add_modifier(Modifier::DIM);
         let hint_line = Line::from(vec![
-            Span::styled("Use ", hint_style),
+            Span::styled(rust_i18n::t!("permission.scope_hint_a"), hint_style),
             Span::styled("\u{2190} \u{2192}", hint_style),
-            Span::styled(" to choose permission scope", hint_style),
+            Span::styled(rust_i18n::t!("permission.scope_hint_b"), hint_style),
         ]);
         buf.set_line(content_x, y, &hint_line, content_width);
         y += 1;

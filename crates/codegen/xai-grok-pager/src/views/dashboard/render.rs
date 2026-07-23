@@ -3274,7 +3274,7 @@ fn render_footer(
             .unwrap_or_else(|| key!('x', CONTROL));
         let pending = PendingHint {
             shortcut: stop_key,
-            label: "close this session",
+            label: rust_i18n::t!("hints.close_session"),
         };
         ShortcutsBar::new(&[])
             .with_pending(Some(pending))

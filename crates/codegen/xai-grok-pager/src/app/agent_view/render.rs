@@ -142,15 +142,23 @@ impl AgentView {
                         let n = perm.options.len().min(9) as u8;
                         let last_ch = char::from(b'0' + n.max(1));
                         let last_key = KeyShortcut::new(KeyCode::Char(last_ch), KeyModifiers::NONE);
-                        let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
+                        let mut hints = vec![HintItem::paired(
+                            key!('1'),
+                            last_key,
+                            rust_i18n::t!("hints.select"),
+                        )];
                         if perm.has_adjustable_scope() {
-                            hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
+                            hints.push(HintItem::paired(
+                                key!(Left),
+                                key!(Right),
+                                rust_i18n::t!("hints.scope"),
+                            ));
                         }
                         if !perm.description.is_empty() {
                             let label = if perm.args_expanded {
-                                "collapse"
+                                rust_i18n::t!("hints.collapse")
                             } else {
-                                "expand"
+                                rust_i18n::t!("hints.expand")
                             };
                             hints.push(HintItem::new(key!('f', CONTROL), label));
                         }
@@ -798,14 +806,14 @@ impl AgentView {
                 .prompt_input_mode
                 .placeholder_override(self.multiline_mode)
             {
-                Some(ph)
+                Some(ph.into())
             } else if casual_commenting
                 || self
                     .plan_approval_view
                     .as_ref()
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting)
             {
-                Some("Type your comment...")
+                Some(rust_i18n::t!("hints.type_comment"))
             } else {
                 None
             },
@@ -1738,7 +1746,7 @@ impl AgentView {
         }
         if let Some(msg) = self.active_toast_message() {
             let sb = layout.scrollback;
-            if let Some(toast_text) = fit_toast_text(msg, sb.width) {
+            if let Some(toast_text) = fit_toast_text(&msg, sb.width) {
                 let w = toast_text.chars().count() as u16;
                 if sb.height > 0 {
                     let x = sb.right().saturating_sub(w + 1);
@@ -3087,15 +3095,23 @@ impl AgentView {
                         let n = perm.options.len().min(9) as u8;
                         let last_ch = char::from(b'0' + n.max(1));
                         let last_key = KeyShortcut::new(KeyCode::Char(last_ch), KeyModifiers::NONE);
-                        let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
+                        let mut hints = vec![HintItem::paired(
+                            key!('1'),
+                            last_key,
+                            rust_i18n::t!("hints.select"),
+                        )];
                         if perm.has_adjustable_scope() {
-                            hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
+                            hints.push(HintItem::paired(
+                                key!(Left),
+                                key!(Right),
+                                rust_i18n::t!("hints.scope"),
+                            ));
                         }
                         if !perm.description.is_empty() {
                             let label = if perm.args_expanded {
-                                "collapse"
+                                rust_i18n::t!("hints.collapse")
                             } else {
-                                "expand"
+                                rust_i18n::t!("hints.expand")
                             };
                             hints.push(HintItem::new(key!('f', CONTROL), label));
                         }

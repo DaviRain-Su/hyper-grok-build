@@ -639,34 +639,38 @@ impl ActiveModal {
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
-    pub fn message(&self, drain_blocked: bool) -> &str {
+    pub fn message(&self, drain_blocked: bool) -> std::borrow::Cow<'static, str> {
         match self {
             ActiveModal::EditConfirm { .. } => {
                 if drain_blocked {
-                    "Save and send?"
+                    rust_i18n::t!("modal.title.save_and_send")
                 } else {
-                    "Save changes?"
+                    rust_i18n::t!("modal.title.save_changes")
                 }
             }
-            ActiveModal::CommandPalette { .. } => "Commands",
-            ActiveModal::SessionPicker { .. } => "Resume session",
+            ActiveModal::CommandPalette { .. } => rust_i18n::t!("modal.title.commands"),
+            ActiveModal::SessionPicker { .. } => rust_i18n::t!("modal.title.resume_session"),
             ActiveModal::ArgPicker {
                 command,
                 args_query,
                 ..
             } => match command.as_str() {
-                "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                "model" | "m" => "Pick model",
-                "theme" | "t" => "Pick theme",
-                _ => "Pick option",
+                "model" | "m" if !args_query.is_empty() => {
+                    rust_i18n::t!("modal.title.pick_effort")
+                }
+                "model" | "m" => rust_i18n::t!("modal.title.pick_model"),
+                "theme" | "t" => rust_i18n::t!("modal.title.pick_theme"),
+                _ => rust_i18n::t!("modal.title.pick_option"),
             },
-            ActiveModal::DocPicker { .. } => "How-to Guides",
-            ActiveModal::DocViewer { title, .. } => title.as_str(),
-            ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
-            ActiveModal::MemoryBrowser { .. } => "Memory",
-            ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
-            ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
-            ActiveModal::RememberNoteReview { .. } => "Memory Note",
+            ActiveModal::DocPicker { .. } => rust_i18n::t!("modal.title.howto_guides"),
+            ActiveModal::DocViewer { title, .. } => title.clone().into(),
+            ActiveModal::ShortcutsHelp { .. } => rust_i18n::t!("modal.title.keyboard_shortcuts"),
+            ActiveModal::MemoryBrowser { .. } => rust_i18n::t!("modal.title.memory"),
+            ActiveModal::Settings { .. } => rust_i18n::t!("modal.title.settings"),
+            ActiveModal::ResetSettingsConfirm { .. } => {
+                rust_i18n::t!("modal.title.reset_setting")
+            }
+            ActiveModal::RememberNoteReview { .. } => rust_i18n::t!("modal.title.memory_note"),
         }
     }
 }
@@ -683,11 +687,14 @@ pub fn reset_confirm_prompt(modal: &ActiveModal) -> Option<String> {
     };
     let meta = settings_state.registry.find(key)?;
     let default = crate::settings::default_value_for(meta);
-    Some(format!(
-        "Reset '{}' to default ({})?",
-        meta.label,
-        format_default_for_prompt(&meta.kind, &default),
-    ))
+    Some(
+        rust_i18n::t!(
+            "settings_modal.reset_prompt",
+            label = meta.label_l10n(),
+            default = format_default_for_prompt(meta, &default)
+        )
+        .into_owned(),
+    )
 }
 /// Abbreviated title breadcrumb for the reset-confirm dialog, e.g. "Reset 'Compact mode'".
 pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
@@ -700,22 +707,22 @@ pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
         return None;
     };
     let meta = settings_state.registry.find(key)?;
-    Some(format!("Reset '{}'", meta.label))
+    Some(rust_i18n::t!("settings_modal.reset_breadcrumb", label = meta.label_l10n()).into_owned())
 }
 /// Format a `SettingValue` for the prompt's `(<default>)` display.
 fn format_default_for_prompt(
-    kind: &crate::settings::SettingKind,
+    meta: &crate::settings::SettingMeta,
     value: &crate::settings::SettingValue,
 ) -> String {
     use crate::settings::{SettingKind, SettingValue};
     match value {
-        SettingValue::Bool(true) => "on".to_owned(),
-        SettingValue::Bool(false) => "off".to_owned(),
+        SettingValue::Bool(true) => rust_i18n::t!("settings_modal.value_on").into_owned(),
+        SettingValue::Bool(false) => rust_i18n::t!("settings_modal.value_off").into_owned(),
         SettingValue::Enum(canonical) => {
-            if let SettingKind::Enum { choices, .. } = kind {
+            if let SettingKind::Enum { choices, .. } = &meta.kind {
                 for c in *choices {
                     if c.canonical == *canonical {
-                        return c.display.to_owned();
+                        return c.display_l10n(meta.key).into_owned();
                     }
                 }
             }
@@ -785,7 +792,7 @@ pub fn render_modal_overlay(
         .fg(theme.text_primary)
         .bg(bar_bg)
         .add_modifier(Modifier::BOLD);
-    let msg_span = Span::styled(msg, msg_style);
+    let msg_span = Span::styled(msg.clone(), msg_style);
     buf.set_span(bar_area.x, bar_area.y, &msg_span, bar_area.width);
     let mut x = bar_area.x + msg.width() as u16 + 2;
     let btn_bg = theme.bg_dark;

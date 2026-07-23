@@ -175,7 +175,8 @@ pub struct PromptStyle {
     /// Override the placeholder text shown when the textarea is empty.
     /// When `Some(text)`, uses this instead of the default `"Build anything"`.
     /// Used for feedback mode (`"Type your feedback..."`).
-    pub placeholder_override: Option<&'static str>,
+    /// `Cow` so localized (`t!`) strings can flow through without leaking.
+    pub placeholder_override: Option<std::borrow::Cow<'static, str>>,
     /// Compact mode (currently unused for info_block sizing).
     pub compact: bool,
     /// Show the accent line (`┃`) on the left edge of the chrome.
@@ -3125,7 +3126,10 @@ impl PromptWidget {
             && !style.focused
             && !voice_interim_shown
         {
-            let placeholder = style.placeholder_override.unwrap_or("Build anything");
+            let placeholder = style
+                .placeholder_override
+                .as_deref()
+                .unwrap_or("Build anything");
             buf.set_string(
                 ta_area.x,
                 ta_area.y,

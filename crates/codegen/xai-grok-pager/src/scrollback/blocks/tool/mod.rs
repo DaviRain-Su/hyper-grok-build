@@ -148,6 +148,45 @@ impl VerbGroupKind {
         };
         if count == 1 { one } else { many }
     }
+
+    /// Stable slug for i18n keys (`verbgroup.verb.{slug}.*`).
+    fn slug(self) -> &'static str {
+        match self {
+            VerbGroupKind::File => "file",
+            VerbGroupKind::Skill => "skill",
+            VerbGroupKind::Search => "search",
+            VerbGroupKind::Dir => "dir",
+            VerbGroupKind::WebFetch => "web_fetch",
+            VerbGroupKind::WebSearch => "web_search",
+            VerbGroupKind::MemorySearch => "memory_search",
+            VerbGroupKind::IntegrationSearch => "integration_search",
+            VerbGroupKind::McpCall => "mcp_call",
+            VerbGroupKind::Subagent => "subagent",
+            VerbGroupKind::Command => "command",
+            VerbGroupKind::OtherTool => "other_tool",
+            VerbGroupKind::EditFile => "edit_file",
+        }
+    }
+
+    /// Localized [`Self::verb`] (`verbgroup.verb.{slug}.{past|present}`),
+    /// falling back to the English source.
+    pub fn verb_l10n(self, running: bool) -> std::borrow::Cow<'static, str> {
+        let tense = if running { "present" } else { "past" };
+        crate::i18n::tr_or(
+            &format!("verbgroup.verb.{}.{tense}", self.slug()),
+            self.verb(running),
+        )
+    }
+
+    /// Localized [`Self::noun`] (`verbgroup.noun.{slug}.{one|other}`),
+    /// falling back to the English source.
+    pub fn noun_l10n(self, count: usize) -> std::borrow::Cow<'static, str> {
+        let plural = if count == 1 { "one" } else { "other" };
+        crate::i18n::tr_or(
+            &format!("verbgroup.noun.{}.{plural}", self.slug()),
+            self.noun(count),
+        )
+    }
 }
 
 /// Tool call block - a sum type for different tool types.

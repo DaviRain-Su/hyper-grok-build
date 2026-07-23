@@ -80,6 +80,13 @@ obfstr = { workspace = true }
 # Fuzzy matching (history search daemon)
 nucleo = { workspace = true }
 
+# Internationalization: translations are embedded at compile time from
+# `locales/*.yml`; `sys-locale` detects the OS language for `language = "auto"`.
+# Direct (non-workspace) deps on purpose — the workspace root Cargo.toml is
+# generated from the monorepo and must stay untouched.
+rust-i18n = "4"
+sys-locale = "0.3"
+
 # Prompt text input
 xai-ratatui-textarea = { workspace = true }
 xai-ratatui-inline = { workspace = true }

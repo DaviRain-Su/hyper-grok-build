@@ -628,6 +628,9 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned render_mermaid (Appearance,
             // declared after the theme enums).
             "render_mermaid",
+            // SHELL-owned language (Appearance, declared right after
+            // render_mermaid; live-applied via rust_i18n).
+            "language",
             // Int in Appearance category.
             "max_thoughts_width",
             // SHELL-owned show_thinking_blocks (Appearance; live cache).
@@ -2623,6 +2626,7 @@ fn picker_renders_choices_in_order() {
 /// low-contrast theme compatibility (parity with `cancel_turn_panel`).
 #[test]
 fn picker_highlights_current_choice() {
+    let _theme = crate::test_util::pin_theme();
     let mut s = picker_test_state();
     // Focus the second choice (index 1).
     s.transition_to_picking_enum("test_enum", 1, SettingValue::Enum("first"), true);

@@ -864,7 +864,7 @@ pub fn render_peek_panel(
         vpad_top: 0,
         chrome: false,
         bg_override: Some(theme.bg_base),
-        placeholder_override: Some("reply\u{2026}"),
+        placeholder_override: Some(rust_i18n::t!("hints.reply_placeholder")),
         image_preview: false,
         ..PromptStyle::default()
     };

@@ -17,6 +17,7 @@ pub mod export_cmd;
 pub mod git_info;
 pub mod headless;
 pub mod hyperlink_route;
+pub mod i18n;
 pub mod inline_media_ffmpeg;
 pub mod input;
 pub mod input_log;
@@ -76,3 +77,8 @@ pub mod worktree_cmd;
 
 #[cfg(test)]
 pub mod test_util;
+
+// Load the embedded translation bundles (`locales/*.yml`) and generate the
+// per-crate `t!` backend. English is the fallback for missing keys/locales.
+// The active locale is set at startup via `i18n::init` (see `app/event_loop`).
+rust_i18n::i18n!("locales", fallback = "en");

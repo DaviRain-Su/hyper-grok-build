@@ -1098,6 +1098,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "language" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("language", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_language(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         "voice_capture_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("voice_capture_mode", "Enum", &value));

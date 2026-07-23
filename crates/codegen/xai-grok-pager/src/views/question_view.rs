@@ -863,7 +863,7 @@ impl QuestionViewState {
             // these as separate elements so downstream cursor-shape
             // resolvers do not have to re-split a comma-joined string.
             let label_vec: Vec<String> = if labels.is_empty() && has_freeform {
-                vec!["Other".to_string()]
+                vec![rust_i18n::t!("question.other").into_owned()]
             } else {
                 labels
             };

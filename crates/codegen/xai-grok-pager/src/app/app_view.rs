@@ -343,9 +343,9 @@ impl VoiceState {
     /// it). `/voice` and toggle-style starts leave this false.
     pub(crate) fn hold(&self) -> bool {
         matches!(
-            self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
-if * hold
-        )
+                    self, Self::ColdStart { hold, .. } | Self::Recording { hold, .. }
+        if * hold
+                )
     }
 }
 /// Entry in the session picker list on the welcome screen.
@@ -452,7 +452,7 @@ pub enum InputOutcome {
     ArmPending {
         action: Action,
         shortcut: KeyShortcut,
-        label: Option<&'static str>,
+        label: Option<std::borrow::Cow<'static, str>>,
         ttl: Duration,
     },
     /// Something changed visually (prompt text, scroll). Redraw needed.
@@ -486,7 +486,8 @@ pub struct PendingAction {
     /// The specific key that was pressed (narrowed from the binding).
     pub shortcut: KeyShortcut,
     /// When `Some`, shortcuts bar shows "press again to {label}".
-    pub label: Option<&'static str>,
+    /// Localized at arm time (`actions.{id}.label` via `tr_or`).
+    pub label: Option<std::borrow::Cow<'static, str>>,
     /// When this pending action expires.
     pub expires_at: Instant,
 }
@@ -494,8 +495,12 @@ impl PendingAction {
     pub const TTL: Duration = Duration::from_millis(1000);
     /// Double-press timeout for idle Esc clear / rewind arms.
     pub const ESC_DOUBLE_PRESS_TTL: Duration = Duration::from_millis(800);
-    pub fn new(action: Action, shortcut: KeyShortcut, label: &'static str) -> Self {
-        Self::with_ttl(action, shortcut, Some(label), Self::TTL)
+    pub fn new(
+        action: Action,
+        shortcut: KeyShortcut,
+        label: impl Into<std::borrow::Cow<'static, str>>,
+    ) -> Self {
+        Self::with_ttl(action, shortcut, Some(label.into()), Self::TTL)
     }
     /// Like [`Self::new`] but with an explicit confirm window. Used by
     /// the dashboard-overlay stop (Ctrl+X), which mirrors the
@@ -504,7 +509,7 @@ impl PendingAction {
     pub fn with_ttl(
         action: Action,
         shortcut: KeyShortcut,
-        label: Option<&'static str>,
+        label: Option<std::borrow::Cow<'static, str>>,
         ttl: Duration,
     ) -> Self {
         Self {
@@ -2330,7 +2335,7 @@ impl AppView {
                                 self.pending_action = Some(PendingAction::with_ttl(
                                     Action::DashboardOverlayStop,
                                     KeyShortcut::from(*key),
-                                    Some("close this session"),
+                                    Some(rust_i18n::t!("hints.close_session")),
                                     crate::views::dashboard::state::STOP_CONFIRM_WINDOW,
                                 ));
                                 return InputOutcome::Changed;
@@ -2665,8 +2670,11 @@ impl AppView {
                         git_ref: git_ref.clone(),
                     };
                     let shortcut = KeyShortcut::from(*key);
-                    self.pending_action =
-                        Some(PendingAction::new(action, shortcut, "new in worktree"));
+                    self.pending_action = Some(PendingAction::new(
+                        action,
+                        shortcut,
+                        rust_i18n::t!("hints.new_in_worktree"),
+                    ));
                     return InputOutcome::Changed;
                 }
                 _ => unreachable!(),
@@ -2681,7 +2689,11 @@ impl AppView {
                 } else {
                     def.default_key
                 };
-                self.pending_action = Some(PendingAction::new(action, shortcut, def.label));
+                self.pending_action = Some(PendingAction::new(
+                    action,
+                    shortcut,
+                    crate::i18n::tr_or(&format!("actions.{}.label", def.id.i18n_key()), def.label),
+                ));
                 return InputOutcome::Changed;
             }
         }
@@ -2706,7 +2718,7 @@ impl AppView {
             self.pending_action = Some(PendingAction::new(
                 Action::Quit,
                 KeyShortcut::from(*key),
-                "quit",
+                crate::i18n::tr_or("actions.quit.label", "quit"),
             ));
             return InputOutcome::Changed;
         }
@@ -2743,7 +2755,11 @@ impl AppView {
             } else {
                 action
             };
-            self.pending_action = Some(PendingAction::new(action, shortcut, def.label));
+            self.pending_action = Some(PendingAction::new(
+                action,
+                shortcut,
+                crate::i18n::tr_or(&format!("actions.{}.label", def.id.i18n_key()), def.label),
+            ));
             InputOutcome::Changed
         } else {
             InputOutcome::Action(action)
@@ -2763,7 +2779,11 @@ impl AppView {
         };
         if def.requires_confirmation {
             let shortcut = KeyShortcut::from(*key);
-            self.pending_action = Some(PendingAction::new(Action::Quit, shortcut, def.label));
+            self.pending_action = Some(PendingAction::new(
+                Action::Quit,
+                shortcut,
+                crate::i18n::tr_or(&format!("actions.{}.label", def.id.i18n_key()), def.label),
+            ));
             InputOutcome::Changed
         } else {
             InputOutcome::Action(Action::Quit)
@@ -2783,8 +2803,11 @@ impl AppView {
         };
         if def.requires_confirmation {
             let shortcut = KeyShortcut::from(*key);
-            self.pending_action =
-                Some(PendingAction::new(Action::ExitSession, shortcut, def.label));
+            self.pending_action = Some(PendingAction::new(
+                Action::ExitSession,
+                shortcut,
+                crate::i18n::tr_or(&format!("actions.{}.label", def.id.i18n_key()), def.label),
+            ));
             InputOutcome::Changed
         } else {
             InputOutcome::Action(Action::ExitSession)
@@ -3029,12 +3052,13 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         );
         let entry_count = entry_map.len();
         let non_selectable_flags: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
+        let picker_sc = crate::views::picker::picker_shortcuts();
         let config = PickerConfig {
             title: Some("Resume session"),
             show_search_hint: true,
             expandable: true,
             esc_clears_query: true,
-            shortcuts: Some(crate::views::picker::picker_shortcuts()),
+            shortcuts: Some(&picker_sc),
             pending_hint: None,
             non_selectable: &non_selectable_flags,
             non_selectable_clickable: &[],
@@ -3923,6 +3947,7 @@ impl AppView {
             .filter(|p| !p.expired())
             .and_then(|p| {
                 p.label
+                    .clone()
                     .map(|label| crate::views::shortcuts_bar::PendingHint {
                         shortcut: p.shortcut,
                         label,
@@ -7545,7 +7570,10 @@ pub(crate) mod tests {
             "first Ctrl+D should set pending quit, got: {outcome:?}",
         );
         assert!(app.pending_action.is_some());
-        assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().label.as_deref(),
+            Some("quit")
+        );
         let outcome = app.handle_input(&ctrl_d());
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
         assert!(app.pending_action.is_none());
@@ -7570,7 +7598,10 @@ pub(crate) mod tests {
             "first Ctrl+D should set pending quit, got: {outcome:?}",
         );
         assert!(app.pending_action.is_some());
-        assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().label.as_deref(),
+            Some("quit")
+        );
         let outcome = app.handle_input(&ctrl_d());
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
         assert!(app.pending_action.is_none());
@@ -7581,7 +7612,10 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&ctrl_q());
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(app.pending_action.is_some());
-        assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().label.as_deref(),
+            Some("quit")
+        );
     }
     #[test]
     fn ctrl_q_double_press_quits() {
@@ -7629,7 +7663,7 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&ctrl_n());
         assert!(matches!(outcome, InputOutcome::Changed));
         let pending = app.pending_action.as_ref().expect("pending action");
-        assert_eq!(pending.label, Some("new"));
+        assert_eq!(pending.label.as_deref(), Some("new"));
     }
     #[test]
     fn second_ctrl_n_opens_new_session_mode_question_when_mode_is_ask() {
@@ -7677,14 +7711,17 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&ctrl_c());
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(app.pending_action.is_some());
-        assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().label.as_deref(),
+            Some("quit")
+        );
     }
     fn assert_pending_quit(app: &AppView) {
         let pending = app
             .pending_action
             .as_ref()
             .expect("expected pending action");
-        assert_eq!(pending.label, Some("quit"));
+        assert_eq!(pending.label.as_deref(), Some("quit"));
         assert!(matches!(pending.action, Action::Quit));
     }
     #[test]
@@ -7876,7 +7913,7 @@ pub(crate) mod tests {
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
         let pending = app.pending_action.as_ref().expect("arm clear");
-        assert_eq!(pending.label, Some("clear"));
+        assert_eq!(pending.label.as_deref(), Some("clear"));
         assert!(matches!(pending.action, Action::ClearPrompt));
         let outcome = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::ClearPrompt)));
@@ -8136,7 +8173,7 @@ pub(crate) mod tests {
             "expired first Esc must not clear"
         );
         let pending = app.pending_action.as_ref().expect("re-arm clear");
-        assert_eq!(pending.label, Some("clear"));
+        assert_eq!(pending.label.as_deref(), Some("clear"));
     }
     #[test]
     fn idle_images_only_double_esc_arms_clear() {
@@ -9843,7 +9880,7 @@ pub(crate) mod tests {
             "a drafted overlay prompt Esc must NOT back out, got {outcome:?}",
         );
         let pending = app.pending_action.as_ref().expect("clear arm");
-        assert_eq!(pending.label, Some("clear"));
+        assert_eq!(pending.label.as_deref(), Some("clear"));
     }
     /// A Bash/Remember/Feedback empty prompt keeps Esc as its mode-exit even in
     /// an overlay — the back-out is gated to `PromptInputMode::Normal`, so the
@@ -10687,7 +10724,7 @@ pub(crate) mod tests {
             matches!(pending.action, Action::DashboardOverlayStop),
             "pending action must be the overlay stop",
         );
-        assert_eq!(pending.label, Some("close this session"));
+        assert_eq!(pending.label.as_deref(), Some("close this session"));
         assert!(
             !pending.expired(),
             "the confirm window must still be live right after arming",

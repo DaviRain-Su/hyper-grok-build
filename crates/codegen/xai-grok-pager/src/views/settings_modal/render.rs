@@ -64,8 +64,11 @@ pub fn render_settings_modal(
         match &state.state.mode {
             SettingsMode::PickingEnum { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned =
-                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
+                    breadcrumb_owned = format!(
+                        "{MODAL_TITLE} {} {}",
+                        crate::glyphs::chevron(),
+                        meta.label_l10n()
+                    );
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -74,8 +77,11 @@ pub fn render_settings_modal(
 
             SettingsMode::EditingString { key, .. } | SettingsMode::EditingInt { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned =
-                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
+                    breadcrumb_owned = format!(
+                        "{MODAL_TITLE} {} {}",
+                        crate::glyphs::chevron(),
+                        meta.label_l10n()
+                    );
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -83,8 +89,11 @@ pub fn render_settings_modal(
             }
             SettingsMode::PickingGroup { key, .. } => {
                 if let Some(meta) = state.registry.find(key) {
-                    breadcrumb_owned =
-                        format!("{MODAL_TITLE} {} {}", crate::glyphs::chevron(), meta.label);
+                    breadcrumb_owned = format!(
+                        "{MODAL_TITLE} {} {}",
+                        crate::glyphs::chevron(),
+                        meta.label_l10n()
+                    );
                     &breadcrumb_owned
                 } else {
                     MODAL_TITLE
@@ -432,10 +441,9 @@ pub(super) fn render_row_list_with_search_bar(
 }
 
 pub(super) fn render_docs_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
-    const LONG: &str =
-        "Tip · Ask Grok: \"change theme to grokday\" or \"what does compact mode do?\"";
-    const SHORT: &str = "Tip · Ask Grok to change a setting";
-    let text = modal_window::fit_tip_line(&[LONG, SHORT], area.width as usize);
+    let long = rust_i18n::t!("settings_modal.docs_tip_long").to_string();
+    let short = rust_i18n::t!("settings_modal.docs_tip_short").to_string();
+    let text = modal_window::fit_tip_line(&[long.as_str(), short.as_str()], area.width as usize);
     modal_window::render_centered_tip_footer(buf, area, theme, text.as_ref());
 }
 
@@ -468,7 +476,7 @@ pub(super) fn render_rows(
     // Empty filter — show "No matches for <query>".
     if total_visible == 0 {
         if !state.query().is_empty() {
-            let prefix = "No matches for ";
+            let prefix = rust_i18n::t!("settings_modal.no_matches").to_string();
             let suffix_quote_w = 2u16; // surrounding "" chars
             let available_for_query = (area.width as usize)
                 .saturating_sub(prefix.width())
@@ -591,7 +599,7 @@ pub(super) fn render_rows(
 
         match row {
             RowEntry::Header { category } => {
-                let label = category.label();
+                let label = category.label_l10n();
                 let header_style = Style::default()
                     .fg(theme.gray)
                     .bg(theme.bg_base)
@@ -672,25 +680,25 @@ pub(super) fn render_rows(
                 let value_display = match value {
                     SettingValue::Bool(b) => {
                         if *b {
-                            "on".to_string()
+                            rust_i18n::t!("settings_modal.value_on").to_string()
                         } else {
-                            "off".to_string()
+                            rust_i18n::t!("settings_modal.value_off").to_string()
                         }
                     }
                     SettingValue::String(s) => {
                         if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                            "(no override)".to_string()
+                            rust_i18n::t!("settings_modal.no_override").to_string()
                         } else {
                             s.clone()
                         }
                     }
-                    SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+                    SettingValue::Enum(e) => display_for_enum_canonical_l10n(meta, e).to_string(),
                     SettingValue::Int(i) => i.to_string(),
                 };
                 let show_restart_pill_for_layout = meta.restart_required && is_expanded;
                 let layout_decision = row_layout(
                     area.width,
-                    meta.label,
+                    &meta.label_l10n(),
                     &value_display,
                     show_restart_pill_for_layout,
                 );
@@ -837,23 +845,28 @@ fn compute_filtered_row_heights(state: &SettingsModalState, area_width: u16) -> 
                 let value_display = match &value {
                     SettingValue::Bool(b) => {
                         if *b {
-                            "on".to_string()
+                            rust_i18n::t!("settings_modal.value_on").to_string()
                         } else {
-                            "off".to_string()
+                            rust_i18n::t!("settings_modal.value_off").to_string()
                         }
                     }
                     SettingValue::String(s) => {
                         if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                            "(no override)".to_string()
+                            rust_i18n::t!("settings_modal.no_override").to_string()
                         } else {
                             s.clone()
                         }
                     }
-                    SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e).to_string(),
+                    SettingValue::Enum(e) => display_for_enum_canonical_l10n(meta, e).to_string(),
                     SettingValue::Int(i) => i.to_string(),
                 };
                 let show_restart_pill = meta.restart_required && is_expanded;
-                let layout = row_layout(area_width, meta.label, &value_display, show_restart_pill);
+                let layout = row_layout(
+                    area_width,
+                    &meta.label_l10n(),
+                    &value_display,
+                    show_restart_pill,
+                );
                 let mut h: u16 = match layout {
                     RowLayout::OneLine => 1,
                     RowLayout::TwoLine | RowLayout::TwoLineWithLabelTruncation => 2,
@@ -877,7 +890,7 @@ fn wrapped_description_height(meta: &SettingMeta, area_width: u16, cap: u16) -> 
     if wrap_w == 0 {
         return 0;
     }
-    let line = Line::from(Span::raw(meta.description));
+    let line = Line::from(Span::raw(meta.description_l10n()));
     let wrapped = crate::render::wrapping::word_wrap_line(&line, wrap_w as usize);
     (wrapped.len() as u16).min(cap)
 }
@@ -988,8 +1001,8 @@ pub(super) fn render_picking_enum(
                 .into_iter()
                 .map(|c| OwnedEnumChoice {
                     canonical: c.canonical.to_string(),
-                    display: c.display.to_string(),
-                    description: c.description.to_string(),
+                    display: c.display_l10n(setting_key).into_owned(),
+                    description: c.description_l10n(setting_key).into_owned(),
                 })
                 .collect()
         }
@@ -1004,7 +1017,14 @@ pub(super) fn render_picking_enum(
     }
 
     // Choosers need title + gap (2) before the description renders.
-    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 2);
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        &meta.label_l10n(),
+        &meta.description_l10n(),
+        2,
+    );
     if area.height <= header_rows {
         return;
     }
@@ -1293,8 +1313,8 @@ fn render_picking_group(
         buf,
         area,
         theme,
-        group_meta.label,
-        group_meta.description,
+        &group_meta.label_l10n(),
+        &group_meta.description_l10n(),
         2,
     );
     if area.height <= header_rows {
@@ -1345,7 +1365,11 @@ fn render_picking_group(
 
         // Value read live from the snapshot (refreshed after each toggle).
         let on = matches!(state.value_for(child_key), Some(SettingValue::Bool(true)));
-        let value_text = if on { "on" } else { "off" };
+        let value_text = if on {
+            rust_i18n::t!("settings_modal.value_on")
+        } else {
+            rust_i18n::t!("settings_modal.value_off")
+        };
         let value_style = if on {
             Style::default().fg(theme.accent_user).bg(bg)
         } else {
@@ -1374,10 +1398,11 @@ fn render_picking_group(
             .max(label_x);
         if value_x > label_x {
             let label_room = (value_x - label_x).saturating_sub(1) as usize;
-            let label_text: std::borrow::Cow<'_, str> = if child_meta.label.width() <= label_room {
-                std::borrow::Cow::Borrowed(child_meta.label)
+            let child_label = child_meta.label_l10n();
+            let label_text: std::borrow::Cow<'_, str> = if child_label.width() <= label_room {
+                child_label
             } else {
-                std::borrow::Cow::Owned(truncate_str(child_meta.label, label_room))
+                std::borrow::Cow::Owned(truncate_str(&child_label, label_room))
             };
             let label_w = (label_text.width() as u16).min((value_x - label_x).saturating_sub(1));
             buf.set_span(
@@ -1616,7 +1641,14 @@ pub(super) fn render_editing_value(
     };
 
     // Editors reserve title + gap + the input row (3) before the description.
-    let header_rows = render_sub_pane_header(buf, area, theme, meta.label, meta.description, 3);
+    let header_rows = render_sub_pane_header(
+        buf,
+        area,
+        theme,
+        &meta.label_l10n(),
+        &meta.description_l10n(),
+        3,
+    );
     if area.height <= header_rows {
         return;
     }
@@ -1663,18 +1695,22 @@ pub(super) fn render_editing_value(
     if buffer.is_empty() {
         let placeholder = match &meta.kind {
             SettingKind::String { validator, .. } => match validator {
-                StringValidator::KnownModel => "<empty — use shell default>",
-                StringValidator::NonEmptyToken => "<type a value>",
-                StringValidator::Any => "<type a value>",
+                StringValidator::KnownModel => {
+                    rust_i18n::t!("settings_modal.placeholder_shell_default")
+                }
+                StringValidator::NonEmptyToken => {
+                    rust_i18n::t!("settings_modal.placeholder_type_value")
+                }
+                StringValidator::Any => rust_i18n::t!("settings_modal.placeholder_type_value"),
             },
-            _ => "",
+            _ => "".into(),
         };
         if !placeholder.is_empty() && visible_buffer_w > 0 {
             let placeholder_text: std::borrow::Cow<'_, str> =
                 if placeholder.width() <= visible_buffer_w {
-                    std::borrow::Cow::Borrowed(placeholder)
+                    placeholder
                 } else {
-                    std::borrow::Cow::Owned(truncate_str(placeholder, visible_buffer_w))
+                    std::borrow::Cow::Owned(truncate_str(&placeholder, visible_buffer_w))
                 };
             let placeholder_w = (placeholder_text.width() as u16).min(visible_buffer_w as u16);
             let placeholder_style = Style::default().fg(theme.gray_dim).bg(input_bg);
@@ -2181,17 +2217,22 @@ fn compute_settings_max_label_w(metas: &[SettingMeta], content_w: u16) -> u16 {
 /// `display_name_for_canonical`'s pattern).
 ///
 /// Look up the display name for an Enum canonical via the registry.
-fn display_for_enum_canonical<'a>(kind: &'a SettingKind, canonical: &'a str) -> &'a str {
-    if let SettingKind::Enum { choices, .. } = kind {
+/// Looks up the choice's translated display name
+/// (`settings.{key}.choice.{canonical}.display`), falling back to the English
+/// source when the locale bundle has no entry. The plain-English variant was
+/// removed once every render site switched to this one.
+fn display_for_enum_canonical_l10n(
+    meta: &SettingMeta,
+    canonical: &str,
+) -> std::borrow::Cow<'static, str> {
+    if let SettingKind::Enum { choices, .. } = &meta.kind {
         for c in *choices {
             if c.canonical == canonical {
-                return c.display;
+                return c.display_l10n(meta.key);
             }
         }
     }
-    // Fallback: render the canonical verbatim. Defensive — catches a
-    // schema-vs-renderer drift without crashing the modal.
-    canonical
+    canonical.to_string().into()
 }
 
 /// Word-wrap a description string. Returns owned lines for re-styling.
@@ -2329,25 +2370,25 @@ pub(super) fn render_setting_row(
 
     // Enum rows display the user-friendly name, not the canonical.
     let value_text_owned;
-    let value_text: &str = match value {
+    let value_text: std::borrow::Cow<'_, str> = match value {
         SettingValue::Bool(b) => {
             if *b {
-                "on"
+                rust_i18n::t!("settings_modal.value_on")
             } else {
-                "off"
+                rust_i18n::t!("settings_modal.value_off")
             }
         }
         SettingValue::String(s) => {
             if s.is_empty() && matches!(meta.kind, SettingKind::DynamicEnum { .. }) {
-                "(no override)"
+                rust_i18n::t!("settings_modal.no_override")
             } else {
-                s.as_str()
+                s.as_str().into()
             }
         }
-        SettingValue::Enum(e) => display_for_enum_canonical(&meta.kind, e),
+        SettingValue::Enum(e) => display_for_enum_canonical_l10n(meta, e),
         SettingValue::Int(i) => {
             value_text_owned = i.to_string();
-            &value_text_owned
+            value_text_owned.as_str().into()
         }
     };
 
@@ -2395,7 +2436,12 @@ pub(super) fn render_setting_row(
     );
 
     // Fall back to one-line if only 1 line was allocated.
-    let layout_decision = row_layout(area.width, meta.label, value_text, show_restart_pill);
+    let layout_decision = row_layout(
+        area.width,
+        &meta.label_l10n(),
+        &value_text,
+        show_restart_pill,
+    );
     let layout = if area.height < 2 {
         // Only 1 line available — collapse to a one-line render and
         // accept that the label might collide with the value column.
@@ -2597,7 +2643,7 @@ fn render_expanded_description(buf: &mut Buffer, area: Rect, meta: &SettingMeta,
         .fg(theme.gray)
         .bg(theme.bg_base)
         .add_modifier(Modifier::ITALIC);
-    let desc_src: &str = meta.description;
+    let desc_src = meta.description_l10n();
     // Indent 4 cols to nest under the label.
     let indent = 4u16.min(area.width);
     let wrap_w = area.width.saturating_sub(indent);
@@ -2641,10 +2687,11 @@ fn render_setting_row_no_value(
         .add_modifier(Modifier::BOLD);
 
     let label_max_w = max_label_w;
-    let label_truncated: std::borrow::Cow<'_, str> = if meta.label.width() <= label_max_w as usize {
-        std::borrow::Cow::Borrowed(meta.label)
+    let label_l10n = meta.label_l10n();
+    let label_truncated: std::borrow::Cow<'_, str> = if label_l10n.width() <= label_max_w as usize {
+        label_l10n
     } else {
-        std::borrow::Cow::Owned(truncate_str(meta.label, label_max_w as usize))
+        std::borrow::Cow::Owned(truncate_str(&label_l10n, label_max_w as usize))
     };
     let text = format!(" !   {label_truncated} (no read mapping)");
     let w = text.width() as u16;

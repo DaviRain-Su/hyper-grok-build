@@ -693,12 +693,13 @@ impl AgentView {
             }
         }
 
+        let picker_sc = crate::views::picker::picker_shortcuts();
         let config = PickerConfig {
             title: None,
             show_search_hint: false,
             expandable: false,
             esc_clears_query: false,
-            shortcuts: Some(crate::views::picker::picker_shortcuts()),
+            shortcuts: Some(&picker_sc),
             pending_hint: None,
             non_selectable: &[],
             non_selectable_clickable: &[],
@@ -861,12 +862,13 @@ impl AgentView {
                     .collect();
                 let entry_count = filtered.len();
 
+                let picker_sc = crate::views::picker::picker_shortcuts();
                 let config = PickerConfig {
                     title: None,
                     show_search_hint: false,
                     expandable: false,
                     esc_clears_query: true,
-                    shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                    shortcuts: Some(&picker_sc),
                     pending_hint: None,
                     non_selectable: &non_sel,
                     non_selectable_clickable: &[],
@@ -1149,12 +1151,13 @@ impl AgentView {
                 // Chat-mode picker lists conversations only: the Local/Remote
                 // source filter and local-disk delete are dead weight there.
                 let chat_mode = self.app_chat_mode;
+                let picker_sc = crate::views::picker::picker_shortcuts();
                 let config = PickerConfig {
                     title: Some("Resume session"),
                     show_search_hint: true,
                     expandable: true,
                     esc_clears_query: false, // Esc returns to palette or closes
-                    shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                    shortcuts: Some(&picker_sc),
                     pending_hint: None,
                     non_selectable: &non_sel,
                     non_selectable_clickable: &[],
@@ -1466,12 +1469,13 @@ impl AgentView {
                     })
                 })
                 .collect();
+            let picker_sc = crate::views::picker::picker_shortcuts();
             let config = PickerConfig {
                 title: Some("How-to Guides"),
                 show_search_hint: false,
                 expandable: false,
                 esc_clears_query: true,
-                shortcuts: Some(crate::views::picker::picker_shortcuts()),
+                shortcuts: Some(&picker_sc),
                 pending_hint: None,
                 non_selectable: &non_sel,
                 non_selectable_clickable: &[],
@@ -2534,9 +2538,13 @@ impl AgentView {
             ) {
                 // Render settings modal with reset-confirm overlay.
                 let prompt = crate::views::modal::reset_confirm_prompt(active_modal)
-                    .unwrap_or_else(|| "Reset setting to default?".to_owned());
+                    .unwrap_or_else(|| {
+                        rust_i18n::t!("settings_modal.reset_prompt_fallback").into_owned()
+                    });
                 let breadcrumb = crate::views::modal::reset_confirm_breadcrumb(active_modal)
-                    .unwrap_or_else(|| "Reset setting".to_owned());
+                    .unwrap_or_else(|| {
+                        rust_i18n::t!("settings_modal.reset_breadcrumb_fallback").into_owned()
+                    });
                 if let modal::ActiveModal::ResetSettingsConfirm { settings_state, .. } =
                     active_modal
                 {
@@ -3165,6 +3173,7 @@ mod command_palette_vim_input_tests {
     // — the path the bug was on — and asserts the cursor tracks focus.
     #[test]
     fn command_palette_search_bar_cursor_only_when_focused() {
+        let _theme = crate::test_util::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

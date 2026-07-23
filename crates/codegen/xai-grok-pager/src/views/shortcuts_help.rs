@@ -46,7 +46,9 @@ pub enum ExpandKey {
 /// bindings and are selectable / dispatchable on Enter.
 pub enum ShortcutsHelpEntry {
     SectionHeader {
-        label: &'static str,
+        /// Translated at build time (`shortcuts_help.category.{slug}`);
+        /// `Cow` so the English source can stay borrowed.
+        label: std::borrow::Cow<'static, str>,
         category_idx: usize,
         entry_count: usize,
     },
@@ -157,7 +159,7 @@ pub fn build_entries(
         }
         let header_idx = entries.len();
         entries.push(ShortcutsHelpEntry::SectionHeader {
-            label,
+            label: crate::i18n::tr_or(&format!("shortcuts_help.category.{}", cat.slug()), label),
             category_idx: cat_idx,
             entry_count: 0,
         });
@@ -254,8 +256,8 @@ pub fn build_entries(
         // Scrollback search (`/`) has no registered ActionDef yet — vim-only,
         // handled inline; surface it here for discoverability.
         if vim_mode && cat == Category::ConversationNav {
-            let mut item = HintItem::new(crate::key!('/'), "search");
-            item.description = Some("Search scrollback".into());
+            let mut item = HintItem::new(crate::key!('/'), rust_i18n::t!("hints.search"));
+            item.description = Some(rust_i18n::t!("shortcuts_help.search_scrollback"));
             let dimmed = !active_contexts.contains(&When::ScrollbackFocused);
             entries.push(ShortcutsHelpEntry::Hint {
                 item,
@@ -268,8 +270,8 @@ pub fn build_entries(
         // Windows also Alt+V as a fallback. Super/Cmd omitted — many terminals
         // swallow it. Lit on the agent prompt and the dashboard (both paste).
         if cat == Category::Input {
-            let mut item = HintItem::new(crate::key!('v', CONTROL), "paste");
-            item.description = Some("Paste images (and text) from the clipboard".into());
+            let mut item = HintItem::new(crate::key!('v', CONTROL), rust_i18n::t!("hints.paste"));
+            item.description = Some(rust_i18n::t!("shortcuts_help.paste_desc"));
             #[cfg(target_os = "windows")]
             item.keys.push(crate::key!('v', ALT));
             let dimmed = !active_contexts.contains(&When::PromptFocused)
@@ -557,11 +559,19 @@ pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode
                 .join(" / ")
         });
     // Body prefers long_help; falls back to the one-line description.
-    let body = long_help
-        .as_deref()
-        .or(item.description.as_deref())
-        .unwrap_or(item.label.as_ref())
-        .to_string();
+    let body = match (long_help.as_deref(), action_id) {
+        // Registry rows: per-action `actions.{id}.long_help` bundle key.
+        (Some(lh), Some(id)) => {
+            crate::i18n::tr_or(&format!("actions.{}.long_help", id.i18n_key()), lh).into_owned()
+        }
+        // Pseudo-rows (paste is the only one shipping long_help today).
+        (Some(lh), None) => crate::i18n::tr_or("shortcuts_help.paste_long_help", lh).into_owned(),
+        _ => item
+            .description
+            .as_deref()
+            .unwrap_or(item.label.as_ref())
+            .to_string(),
+    };
     Some(ShortcutsHelpMode::Detail {
         title,
         keys_line,
@@ -653,7 +663,7 @@ pub fn render_detail_body<'a>(
     if dimmed_note {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "(not active in current context)",
+            rust_i18n::t!("shortcuts_help.dimmed_note"),
             Style::default().fg(theme.gray_dim),
         )));
     }
@@ -689,8 +699,9 @@ pub fn render_detail(
         return;
     };
     let footer = modal_footer_detail();
+    let modal_title = rust_i18n::t!("modal.title.keyboard_shortcuts").to_string();
     let modal_config = mw::ModalWindowConfig {
-        title: "Keyboard Shortcuts",
+        title: modal_title.as_str(),
         tabs: None,
         shortcuts: &footer,
         sizing: modal_sizing(compact),
@@ -712,11 +723,26 @@ pub fn render_detail(
 
 /// Help line(s) shown under an expanded hint: prefers the action's `long_help`,
 /// falling back to the palette description. Callers split on `\n` for multi-line.
-pub fn hint_inline_help(entry: &ShortcutsHelpEntry) -> Option<&str> {
+pub fn hint_inline_help(entry: &ShortcutsHelpEntry) -> Option<std::borrow::Cow<'static, str>> {
     match entry {
         ShortcutsHelpEntry::Hint {
-            item, long_help, ..
-        } => long_help.as_deref().or(item.description.as_deref()),
+            item,
+            long_help,
+            action_id,
+            ..
+        } => {
+            if let (Some(lh), Some(id)) = (long_help, action_id) {
+                return Some(crate::i18n::tr_or(
+                    &format!("actions.{}.long_help", id.i18n_key()),
+                    lh,
+                ));
+            }
+            if let Some(lh) = long_help {
+                // Pseudo-rows (paste): no registry action — dedicated key.
+                return Some(crate::i18n::tr_or("shortcuts_help.paste_long_help", lh));
+            }
+            item.description.clone()
+        }
         _ => None,
     }
 }
@@ -1475,7 +1501,7 @@ mod tests {
 
     fn header(label: &'static str, idx: usize, count: usize) -> ShortcutsHelpEntry {
         ShortcutsHelpEntry::SectionHeader {
-            label,
+            label: label.into(),
             category_idx: idx,
             entry_count: count,
         }
@@ -1664,7 +1690,7 @@ mod tests {
         let headers: Vec<&str> = entries
             .iter()
             .filter_map(|e| match e {
-                ShortcutsHelpEntry::SectionHeader { label, .. } => Some(*label),
+                ShortcutsHelpEntry::SectionHeader { label, .. } => Some(label.as_ref()),
                 _ => None,
             })
             .collect();
@@ -1712,8 +1738,8 @@ if item.label == "mouse reporting"
         for entry in &entries {
             match entry {
                 ShortcutsHelpEntry::SectionHeader { label, .. } => {
-                    in_panels = *label == "Panels";
-                    in_essentials = *label == "Essentials";
+                    in_panels = label.as_ref() == "Panels";
+                    in_essentials = label.as_ref() == "Essentials";
                 }
                 ShortcutsHelpEntry::Hint { item, .. } => {
                     if item.label == "mouse reporting" {
@@ -3519,7 +3545,7 @@ if item.label == "paste"
         item.description = Some("Quit the app".into());
         let entries = vec![
             ShortcutsHelpEntry::SectionHeader {
-                label: "Essentials",
+                label: "Essentials".into(),
                 category_idx: 0,
                 entry_count: 1,
             },
@@ -3581,7 +3607,7 @@ if item.label == "paste"
         item.description = Some("Quit the app".into());
         let entries = vec![
             ShortcutsHelpEntry::SectionHeader {
-                label: "Essentials",
+                label: "Essentials".into(),
                 category_idx: 0,
                 entry_count: 1,
             },
@@ -3615,7 +3641,7 @@ if item.label == "paste"
         let item = HintItem::new(key!('q', CONTROL), "quit");
         let entries = vec![
             ShortcutsHelpEntry::SectionHeader {
-                label: "Essentials",
+                label: "Essentials".into(),
                 category_idx: 0,
                 entry_count: 1,
             },

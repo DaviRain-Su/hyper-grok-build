@@ -9,6 +9,14 @@ use super::{AgentPane, test_fixtures};
 use crate::app::actions::Action;
 use std::time::Instant;
 
+/// Localized display name for a session-mode literal (`mode.plan`, `mode.auto`,
+/// `mode.normal`, `mode.always_approve`), falling back to the literal for
+/// anything else (test fixtures like "PlanMode", future modes).
+fn mode_label_l10n(mode: &str) -> std::borrow::Cow<'_, str> {
+    let slug = mode.to_lowercase().replace('-', "_");
+    crate::i18n::tr_or(&format!("mode.{slug}"), mode)
+}
+
 impl AgentView {
     /// Show a brief toast message (e.g., "Copied!").
     ///
@@ -231,20 +239,29 @@ impl AgentView {
 
     /// Message currently drawn in the toast slot: transient wins while active,
     /// otherwise sticky status (if any).
-    pub(super) fn active_toast_message(&self) -> Option<&str> {
+    pub(super) fn active_toast_message(&self) -> Option<std::borrow::Cow<'_, str>> {
         if let Some((ref msg, _)) = self.toast {
-            return Some(msg.as_str());
+            return Some(msg.as_str().into());
         }
         let sticky = self.sticky_toast.as_deref()?;
         // The mouse-off banner advertises how to re-enable. `Ctrl+R` only works
         // from scrollback, so when the prompt is focused show the
         // `/toggle-mouse-reporting` command instead (it toggles from any pane).
-        // Storage keeps the scrollback form; swap the displayed text here.
-        if sticky == crate::app::MOUSE_OFF_HINT_SCROLLBACK && self.active_pane == ActivePane::Prompt
-        {
-            return Some(crate::app::MOUSE_OFF_HINT_PROMPT);
+        // Storage keeps the scrollback form (the `MOUSE_OFF_HINT_SCROLLBACK`
+        // const doubles as a semantic marker); swap + translate at display time.
+        if sticky == crate::app::MOUSE_OFF_HINT_SCROLLBACK {
+            if self.active_pane == ActivePane::Prompt {
+                return Some(crate::i18n::tr_or(
+                    "notices.mouse_off_prompt",
+                    crate::app::MOUSE_OFF_HINT_PROMPT,
+                ));
+            }
+            return Some(crate::i18n::tr_or(
+                "notices.mouse_off_scrollback",
+                crate::app::MOUSE_OFF_HINT_SCROLLBACK,
+            ));
         }
-        Some(sticky)
+        Some(sticky.into())
     }
 
     /// Show a transient "Switched to mode: ..." banner above the prompt.
@@ -252,7 +269,8 @@ impl AgentView {
     /// Triggered on Shift+Tab mode cycles.
     /// Renders at full visibility for 2 s, then fades out over the final 0.3 s.
     pub fn show_mode_switch_banner(&mut self, mode_name: &str) {
-        let msg = format!("Switched to mode: {}", mode_name);
+        let msg =
+            rust_i18n::t!("notices.mode_switch", mode = mode_label_l10n(mode_name)).into_owned();
         self.mode_switch_banner = Some((msg, MODE_BANNER_TOTAL_TICKS));
     }
 
@@ -307,10 +325,10 @@ impl AgentView {
             return true;
         }
         let msg = match crate::terminal::terminal_context().graphics_protocol_skip_reason() {
-            Some("tmux") => "Inline images disabled within tmux.",
-            _ => "Image rendering not supported in this terminal",
+            Some("tmux") => rust_i18n::t!("notices.images_tmux"),
+            _ => rust_i18n::t!("notices.images_unsupported"),
         };
-        self.show_toast_ticks(msg, 60);
+        self.show_toast_ticks(msg.as_ref(), 60);
         false
     }
 
@@ -355,7 +373,7 @@ impl AgentView {
                 // Best-effort clipboard so SSH/VM users can paste into a
                 // browser on another machine without selecting TUI text.
                 let _ = crate::clipboard::SystemClipboard::try_set(url);
-                self.show_toast("Browser unavailable - URL shown above");
+                self.show_toast(&rust_i18n::t!("notices.browser_unavailable"));
             }
         }
     }
@@ -374,20 +392,20 @@ mod mouse_off_banner_tests {
         // Scrollback focus: Ctrl+R works there, so advertise it.
         view.active_pane = AgentPane::Scrollback;
         assert_eq!(
-            view.active_toast_message(),
+            view.active_toast_message().as_deref(),
             Some(crate::app::MOUSE_OFF_HINT_SCROLLBACK)
         );
 
         // Prompt focus: the toggle chord is scrollback-only, so advertise the command.
         view.active_pane = AgentPane::Prompt;
         assert_eq!(
-            view.active_toast_message(),
+            view.active_toast_message().as_deref(),
             Some(crate::app::MOUSE_OFF_HINT_PROMPT)
         );
 
         // A transient toast still wins over the sticky banner, regardless of pane.
         view.show_toast("Copied!");
-        assert_eq!(view.active_toast_message(), Some("Copied!"));
+        assert_eq!(view.active_toast_message().as_deref(), Some("Copied!"));
     }
 
     #[test]
@@ -395,6 +413,6 @@ mod mouse_off_banner_tests {
         let mut view = make_running_agent();
         view.set_sticky_toast(Some("Reconnecting"));
         view.active_pane = AgentPane::Prompt;
-        assert_eq!(view.active_toast_message(), Some("Reconnecting"));
+        assert_eq!(view.active_toast_message().as_deref(), Some("Reconnecting"));
     }
 }

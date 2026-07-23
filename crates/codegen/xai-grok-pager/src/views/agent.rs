@@ -937,16 +937,24 @@ pub fn build_hints(
             let mut hints = Vec::new();
             hints.push(HintItem::new(
                 crate::key!('h'),
-                if show_done { "hide done" } else { "show done" },
+                if show_done {
+                    rust_i18n::t!("hints.hide_done")
+                } else {
+                    rust_i18n::t!("hints.show_done")
+                },
             ));
             hints
         }
         ActivePane::Queue => {
             let mut hints = vec![
-                HintItem::new(crate::key!('x'), "delete row"),
-                HintItem::new(crate::key!('e'), "edit"),
-                HintItem::paired(crate::key!('J'), crate::key!('K'), "reorder"),
-                HintItem::new(crate::key!('y'), "copy"),
+                HintItem::new(crate::key!('x'), rust_i18n::t!("hints.delete_row")),
+                HintItem::new(crate::key!('e'), rust_i18n::t!("hints.edit")),
+                HintItem::paired(
+                    crate::key!('J'),
+                    crate::key!('K'),
+                    rust_i18n::t!("hints.reorder"),
+                ),
+                HintItem::new(crate::key!('y'), rust_i18n::t!("hints.copy")),
             ];
             if is_turn_running && let Some(def) = registry.find(ActionId::InterjectPrompt) {
                 hints.push(def.hint());
@@ -956,9 +964,15 @@ pub fn build_hints(
         ActivePane::Prompt if is_editing_queued => {
             let mut hints = Vec::new();
             if prompt.can_send() {
-                hints.push(HintItem::new(crate::key!(Enter), "save"));
+                hints.push(HintItem::new(
+                    crate::key!(Enter),
+                    rust_i18n::t!("hints.save"),
+                ));
             }
-            hints.push(HintItem::new(crate::key!(Esc), "cancel"));
+            hints.push(HintItem::new(
+                crate::key!(Esc),
+                rust_i18n::t!("hints.cancel"),
+            ));
             hints
         }
         ActivePane::Prompt if prompt.history_search.is_active() => {
@@ -968,15 +982,21 @@ pub fn build_hints(
                 HintItem::paired(
                     KeyShortcut::key(KeyCode::Up),
                     KeyShortcut::key(KeyCode::Down),
-                    "nav",
+                    rust_i18n::t!("hints.nav"),
                 ),
                 HintItem::paired(
                     KeyShortcut::key(KeyCode::PageUp),
                     KeyShortcut::key(KeyCode::PageDown),
-                    "page",
+                    rust_i18n::t!("hints.page"),
                 ),
-                HintItem::new(KeyShortcut::key(KeyCode::Enter), "select"),
-                HintItem::new(KeyShortcut::key(KeyCode::Esc), "cancel"),
+                HintItem::new(
+                    KeyShortcut::key(KeyCode::Enter),
+                    rust_i18n::t!("hints.select"),
+                ),
+                HintItem::new(
+                    KeyShortcut::key(KeyCode::Esc),
+                    rust_i18n::t!("hints.cancel"),
+                ),
             ]
         }
         ActivePane::Prompt => {
@@ -986,31 +1006,48 @@ pub fn build_hints(
             } else {
                 crate::key!(Enter, SHIFT)
             };
-            let submit_label = if is_turn_running { "queue" } else { "send" };
+            let submit_label = if is_turn_running {
+                rust_i18n::t!("hints.queue")
+            } else {
+                rust_i18n::t!("hints.send")
+            };
             if let Some(key) = registry.key_for(ActionId::SendPrompt) {
                 if prompt.paste_element_at_cursor().is_some() {
-                    hints.push(HintItem::new(key, "expand"));
+                    hints.push(HintItem::new(key, rust_i18n::t!("hints.expand")));
                 } else if multiline_mode && prompt.can_send() {
                     hints.push(HintItem::new(newline_key, submit_label));
                 } else if prompt.can_send() {
                     hints.push(HintItem::new(key, submit_label));
                 } else if is_turn_running && has_queued_follow_up {
-                    hints.push(HintItem::new(key, "send now"));
+                    hints.push(HintItem::new(key, rust_i18n::t!("hints.send_now")));
                 }
             }
             if shift_enter_unavailable && !multiline_mode && prompt.can_send() {
-                hints.push(HintItem::new(crate::key!(Enter, ALT), "newline"));
+                hints.push(HintItem::new(
+                    crate::key!(Enter, ALT),
+                    rust_i18n::t!("hints.newline"),
+                ));
             }
             if prompt.file_ref_near_cursor() {
-                hints.push(HintItem::new(crate::key!(':'), "lines"));
+                hints.push(HintItem::new(
+                    crate::key!(':'),
+                    rust_i18n::t!("hints.lines"),
+                ));
             }
             if prompt.prompt_suggestion_visible() {
                 hints.push(
-                    HintItem::paired(crate::key!(Tab), crate::key!(Right), "accept suggestion")
-                        .pinned(),
+                    HintItem::paired(
+                        crate::key!(Tab),
+                        crate::key!(Right),
+                        rust_i18n::t!("hints.accept_suggestion"),
+                    )
+                    .pinned(),
                 );
             }
-            hints.push(HintItem::new(crate::key!(BackTab), "mode"));
+            hints.push(HintItem::new(
+                crate::key!(BackTab),
+                rust_i18n::t!("hints.mode"),
+            ));
             for def in registry.hints(&[When::PromptFocused, When::AgentScreen, When::Always]) {
                 if def.id == ActionId::SendPrompt
                     || def.id == ActionId::CommandPalette
@@ -1028,17 +1065,27 @@ pub fn build_hints(
         ActivePane::Tasks => {
             let mut hints = Vec::new();
             if selected_supports_fullscreen {
-                hints.push(HintItem::new(crate::key!(Enter), "view"));
+                hints.push(HintItem::new(
+                    crate::key!(Enter),
+                    rust_i18n::t!("hints.view"),
+                ));
             }
             if selected_supports_copy {
-                hints.push(HintItem::new(crate::key!('y'), "copy output"));
+                hints.push(HintItem::new(
+                    crate::key!('y'),
+                    rust_i18n::t!("hints.copy_output"),
+                ));
             }
             if selected_can_kill {
-                hints.push(HintItem::new(crate::key!('x'), "kill"));
+                hints.push(HintItem::new(crate::key!('x'), rust_i18n::t!("hints.kill")));
             }
             hints.push(HintItem::new(
                 crate::key!('h'),
-                if show_done { "hide done" } else { "show done" },
+                if show_done {
+                    rust_i18n::t!("hints.hide_done")
+                } else {
+                    rust_i18n::t!("hints.show_done")
+                },
             ));
             hints
         }
@@ -1047,12 +1094,12 @@ pub fn build_hints(
             let mut hints = Vec::new();
             if vim_mode {
                 if scrollback_search.is_some_and(|s| s.is_composing()) {
-                    hints.push(HintItem::new(crate::key!(Enter), "go"));
+                    hints.push(HintItem::new(crate::key!(Enter), rust_i18n::t!("hints.go")));
                 } else {
                     hints.push(HintItem::paired(
                         crate::key!('n'),
                         crate::key!('N'),
-                        "next/prev",
+                        rust_i18n::t!("hints.next_prev"),
                     ));
                 }
             } else {
@@ -1061,10 +1108,13 @@ pub fn build_hints(
                 hints.push(HintItem::paired(
                     KeyShortcut::key(KeyCode::Down),
                     KeyShortcut::key(KeyCode::Up),
-                    "next/prev",
+                    rust_i18n::t!("hints.next_prev"),
                 ));
             }
-            hints.push(HintItem::new(crate::key!(Esc), "cancel"));
+            hints.push(HintItem::new(
+                crate::key!(Esc),
+                rust_i18n::t!("hints.cancel"),
+            ));
             hints
         }
         ActivePane::Scrollback => {
@@ -1080,7 +1130,7 @@ pub fn build_hints(
             }
             if selected_is_credit_limit {
                 if let Some(key) = registry.key_for(ActionId::OpenBlockViewer) {
-                    hints.push(HintItem::new(key, "open"));
+                    hints.push(HintItem::new(key, rust_i18n::t!("hints.open")));
                 }
                 hints.push(space_prompt_hint());
             }
@@ -1089,7 +1139,7 @@ pub fn build_hints(
                     && selected_supports_copy
                     && let Some(key) = registry.key_for(ActionId::CopyBlockContent)
                 {
-                    hints.push(HintItem::new(key, "copy"));
+                    hints.push(HintItem::new(key, rust_i18n::t!("hints.copy")));
                 }
                 hints.push(space_prompt_hint());
             }
@@ -1100,11 +1150,11 @@ pub fn build_hints(
                         .key_for_mode(ActionId::ToggleFold, vim_mode)
                         .or_else(|| registry.key_for_mode(ActionId::Expand, vim_mode));
                     if let Some(key) = key {
-                        hints.push(HintItem::new(key, "expand"));
+                        hints.push(HintItem::new(key, rust_i18n::t!("hints.expand")));
                     }
                 }
                 if let Some(key) = registry.key_for(ActionId::ExpandAllThinking) {
-                    hints.push(HintItem::new(key, thinking_label));
+                    hints.push(HintItem::new(key, fold_hint_label_l10n(thinking_label)));
                 }
                 if !user_collapsed {
                     hints.push(space_prompt_hint());
@@ -1126,14 +1176,14 @@ pub fn build_hints(
                     .key_for_mode(ActionId::ToggleFold, vim_mode)
                     .or_else(|| registry.key_for_mode(directional, vim_mode));
                 if let Some(key) = key {
-                    hints.push(HintItem::new(key, label));
+                    hints.push(HintItem::new(key, fold_hint_label_l10n(label)));
                 }
             }
             if group_header_label.is_none()
                 && selected_supports_fullscreen
                 && let Some(key) = registry.key_for(ActionId::OpenBlockViewer)
             {
-                hints.push(HintItem::new(key, "open"));
+                hints.push(HintItem::new(key, rust_i18n::t!("hints.open")));
             }
             if vim_mode
                 && let (Some(j), Some(k)) = (
@@ -1141,7 +1191,7 @@ pub fn build_hints(
                     registry.key_for(ActionId::SelectPrev),
                 )
             {
-                hints.push(HintItem::paired(j, k, "nav").pinned());
+                hints.push(HintItem::paired(j, k, rust_i18n::t!("hints.nav")).pinned());
             }
             if vim_mode
                 && let (Some(h), Some(l)) = (
@@ -1149,14 +1199,14 @@ pub fn build_hints(
                     registry.key_for(ActionId::NextTurn),
                 )
             {
-                let mut hint = HintItem::paired(l, h, "turn").pinned();
+                let mut hint = HintItem::paired(l, h, rust_i18n::t!("hints.turn")).pinned();
                 hint.custom_display = Some("Shift+l/h");
                 hints.push(hint);
             }
             if !selected_is_user_prompt
                 && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)
             {
-                hints.push(HintItem::new(key, thinking_label));
+                hints.push(HintItem::new(key, fold_hint_label_l10n(thinking_label)));
             }
             if vim_mode
                 && let (Some(g), Some(bg)) = (
@@ -1164,14 +1214,14 @@ pub fn build_hints(
                     registry.key_for(ActionId::GotoBottom),
                 )
             {
-                hints.push(HintItem::paired(g, bg, "top/btm"));
+                hints.push(HintItem::paired(g, bg, rust_i18n::t!("hints.top_btm")));
             }
             if vim_mode
                 && !selected_is_agent_message
                 && selected_supports_copy
                 && let Some(key) = registry.key_for(ActionId::CopyBlockContent)
             {
-                hints.push(HintItem::new(key, "copy"));
+                hints.push(HintItem::new(key, rust_i18n::t!("hints.copy")));
             }
             if vim_mode
                 && let Some(label) = selected_meta_label
@@ -1180,10 +1230,14 @@ pub fn build_hints(
                 hints.push(HintItem::new(key, label));
             }
             if selected_can_kill {
-                hints.push(HintItem::new(crate::key!('x'), "kill"));
+                hints.push(HintItem::new(crate::key!('x'), rust_i18n::t!("hints.kill")));
             }
             if is_subagent_view {
-                hints.push(HintItem::paired(crate::key!('q'), crate::key!(Esc), "back"));
+                hints.push(HintItem::paired(
+                    crate::key!('q'),
+                    crate::key!(Esc),
+                    rust_i18n::t!("hints.back"),
+                ));
             }
             hints
         }
@@ -1202,9 +1256,23 @@ pub fn build_hints(
         && !is_subagent_view
         && let Some(key) = registry.key_for(ActionId::SendToBackground)
     {
-        hints.push(HintItem::new(key, "send to bg"));
+        hints.push(HintItem::new(key, rust_i18n::t!("hints.send_to_bg")));
     }
     hints
+}
+
+/// Map a semantic fold/thinking label to its localized display text.
+/// Scrollback accessors return `&'static str` that doubles as a semantic
+/// marker (`fold_label == Some("expand")` picks the directional action), so
+/// translation happens here at display time, never at the source.
+fn fold_hint_label_l10n(label: &'static str) -> std::borrow::Cow<'static, str> {
+    match label {
+        "expand" => rust_i18n::t!("hints.expand"),
+        "collapse" => rust_i18n::t!("hints.collapse"),
+        "expand thinking" => rust_i18n::t!("hints.expand_thinking"),
+        "collapse thinking" => rust_i18n::t!("hints.collapse_thinking"),
+        other => other.into(),
+    }
 }
 #[cfg(test)]
 mod tests {

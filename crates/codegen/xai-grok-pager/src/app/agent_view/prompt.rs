@@ -792,7 +792,7 @@ impl AgentView {
             return Some(InputOutcome::ArmPending {
                 action: Action::ClearPrompt,
                 shortcut: crate::input::key::KeyShortcut::from(*key),
-                label: Some("clear"),
+                label: Some(crate::i18n::tr_or("hints.clear", "clear")),
                 ttl: crate::app::app_view::esc_double_press_ttl(),
             });
         }

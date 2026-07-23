@@ -1417,6 +1417,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "screen_mode" => {
             let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
         }
+        "language" => {
+            let _ = dispatch(Action::SetLanguage("zh-CN".to_string()), app);
+        }
         "voice_capture_mode" => {
             let _ = dispatch(Action::SetVoiceCaptureMode("toggle".to_string()), app);
         }

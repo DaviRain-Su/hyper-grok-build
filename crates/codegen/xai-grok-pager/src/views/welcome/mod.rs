@@ -50,7 +50,10 @@ fn quit_hint_spans(theme: &Theme) -> Vec<Span<'static>> {
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  quit", Style::default().fg(theme.gray)),
+        Span::styled(
+            format!("  {}", rust_i18n::t!("welcome.quit_hint")),
+            Style::default().fg(theme.gray),
+        ),
     ]
 }
 
@@ -421,14 +424,14 @@ pub(super) fn render_version_badge(
         } = &mode
     {
         spans.push(Span::styled(
-            format!("Tier: {tier}"),
+            rust_i18n::t!("version.tier", tier = tier).to_string(),
             Style::default().fg(theme.gray),
         ));
         spans.push(sep.clone());
     }
     if show_api_key && is_api_key_auth {
         spans.push(Span::styled(
-            "Logged in with API key",
+            rust_i18n::t!("version.api_key"),
             Style::default().fg(theme.gray),
         ));
         spans.push(sep);
@@ -543,7 +546,7 @@ fn render_prompt_and_version(
             .add_modifier(Modifier::BOLD);
         let action_style = Style::default().fg(theme.gray);
         let key_text = pending.shortcut.display();
-        let label = format!("press again to {}", pending.label);
+        let label = rust_i18n::t!("shortcuts.press_again", label = pending.label);
         let line = Line::from(vec![
             Span::styled(format!("  {key_text}"), key_style),
             Span::styled(":", action_style),
@@ -688,8 +691,9 @@ pub fn render_welcome(
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
             let label = params.login_label.unwrap_or("grok.com");
-            let login_text = format!("Login with {}", label);
-            let menu = [("l", login_text.as_str()), ("q", "Quit")];
+            let login_text = rust_i18n::t!("welcome.login_with", label = label).to_string();
+            let quit_text = rust_i18n::t!("welcome.quit").to_string();
+            let menu = [("l", login_text.as_str()), ("q", quit_text.as_str())];
             let msg = error.as_deref().map(|e| (e, theme.accent_error));
             let info = PromptInfo {
                 model_name: params.model_name,
@@ -759,14 +763,14 @@ pub fn render_welcome(
             }
         }
         AuthState::Done if params.is_zdr_blocked => {
-            let menu = [("l", "Switch account"), ("q", "Quit")];
+            let switch_text = rust_i18n::t!("welcome.switch_account").to_string();
+            let quit_text = rust_i18n::t!("welcome.quit").to_string();
+            let menu = [("l", switch_text.as_str()), ("q", quit_text.as_str())];
+            let zdr_msg = rust_i18n::t!("welcome.zdr_blocked").to_string();
             let (menu_rects, post_flush_escapes) = render_welcome_blocked(
                 content_area,
                 buf,
-                Some((
-                    "Grok Build is not yet available for this account.",
-                    theme.gray_bright,
-                )),
+                Some((zdr_msg.as_str(), theme.gray_bright)),
                 &menu,
                 params.selected,
                 None,
@@ -935,10 +939,12 @@ fn render_welcome_trust(
     h_margin: u16,
     compact: bool,
 ) -> WelcomeRenderResult {
-    let menu_items = [("y", "Yes, proceed"), ("n", "No, quit")];
+    let yes_text = rust_i18n::t!("welcome.trust_yes").to_string();
+    let no_text = rust_i18n::t!("welcome.trust_no").to_string();
+    let menu_items = [("y", yes_text.as_str()), ("n", no_text.as_str())];
     let lines = vec![
         Line::from(Span::styled(
-            "Do you trust the contents of this directory?",
+            rust_i18n::t!("welcome.trust_question"),
             Style::default().fg(theme.gray_bright),
         ))
         .alignment(Alignment::Center),
@@ -951,12 +957,12 @@ fn render_welcome_trust(
         // Two lines so the warning never clips at narrow / compact widths
         // (a single ~78-char line would truncate "...posing security risks").
         Line::from(Span::styled(
-            "Grok Build may run or modify contents in this directory,",
+            rust_i18n::t!("welcome.trust_warning_1"),
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
         Line::from(Span::styled(
-            "posing security risks.",
+            rust_i18n::t!("welcome.trust_warning_2"),
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
@@ -1820,7 +1826,7 @@ fn render_welcome_done(
                 state: session_picker_state,
                 sessions: p.session_picker,
                 loading: p.session_picker_loading,
-                pending_hint: p.pending_hint,
+                pending_hint: p.pending_hint.clone(),
                 shortcuts_area: None,
                 content_results: p.session_picker_content_results,
                 content_loading: p.session_picker_content_loading,
@@ -2131,7 +2137,7 @@ fn render_welcome_done(
             p.team_name,
             h_margin,
             p.compact,
-            p.pending_hint,
+            p.pending_hint.clone(),
             p.is_api_key_auth,
             layout.has_hero_box(),
         )
@@ -2387,7 +2393,7 @@ pub(crate) fn render_session_picker(
         expandable: true,
         esc_clears_query: true,
         shortcuts: Some(&default_shortcuts),
-        pending_hint: ctx.pending_hint,
+        pending_hint: ctx.pending_hint.clone(),
         non_selectable: &non_selectable_indices,
         non_selectable_clickable: &[],
         shortcuts_area: ctx.shortcuts_area,
@@ -3644,6 +3650,42 @@ mod tests {
         assert!(
             fallback_rect.is_some(),
             "device arm must expose a show-full-URL hit-rect"
+        );
+    }
+
+    /// The folder-trust screen resolves its strings through the i18n bundle
+    /// (`t!` + `en.yml`); in the default locale the English text must render
+    /// verbatim. Guards the `t!` wiring in `render_welcome_trust` — the
+    /// zh-CN resolution itself is covered by `crate::i18n` unit tests (which
+    /// use explicit `locale =` args to stay race-free).
+    #[test]
+    fn trust_screen_renders_bundled_strings() {
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::current();
+
+        render_welcome_trust(
+            area,
+            &mut buf,
+            &theme,
+            std::path::Path::new("/tmp/demo-workspace"),
+            None,
+            2,
+            false,
+        );
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Do you trust the contents of this directory?"),
+            "trust question must render, got:\n{text}"
+        );
+        assert!(
+            text.contains("Yes, proceed"),
+            "yes menu item must render, got:\n{text}"
+        );
+        assert!(
+            text.contains("No, quit"),
+            "no menu item must render, got:\n{text}"
         );
     }
 

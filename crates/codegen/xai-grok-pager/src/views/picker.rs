@@ -18,7 +18,6 @@
 //!    etc. are used by both paths above.
 
 use std::collections::HashSet;
-use std::sync::LazyLock;
 
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -1770,22 +1769,21 @@ pub struct PickerConfig<'a> {
 
 /// Standard picker shortcuts: navigate, select, close.
 ///
-/// Returns a static reference — no per-call allocation.
-pub fn picker_shortcuts() -> &'static [HintItem] {
-    static SHORTCUTS: LazyLock<Vec<HintItem>> = LazyLock::new(|| {
-        vec![
-            HintItem {
-                keys: vec![],
-                label: "nav".into(),
-                custom_display: Some("\u{2191}/\u{2193}"),
-                description: None,
-                pinned: false,
-            },
-            HintItem::new(crate::key!(Enter), "select"),
-            HintItem::new(crate::key!(Esc), "close"),
-        ]
-    });
-    &SHORTCUTS
+/// Rebuilt per call so runtime language switches (Settings › Language) take
+/// effect — the old `LazyLock<Vec<HintItem>>` static froze the startup
+/// locale. Three items per call is negligible next to a picker render.
+pub fn picker_shortcuts() -> Vec<HintItem> {
+    vec![
+        HintItem {
+            keys: vec![],
+            label: rust_i18n::t!("hints.nav"),
+            custom_display: Some("\u{2191}/\u{2193}"),
+            description: None,
+            pinned: false,
+        },
+        HintItem::new(crate::key!(Enter), rust_i18n::t!("hints.select")),
+        HintItem::new(crate::key!(Esc), rust_i18n::t!("hints.close")),
+    ]
 }
 
 /// What happened after processing an input event.
@@ -2454,7 +2452,10 @@ pub fn render_picker(
         }
         // Surface `i` in vim nav mode so users discover how to start typing.
         if config.vim_normal_first && !state.search_active {
-            all_hints.push(HintItem::new(crate::key!('i'), "search"));
+            all_hints.push(HintItem::new(
+                crate::key!('i'),
+                rust_i18n::t!("hints.search"),
+            ));
         }
         // Expandable: add e=expand and y=copy hints.
         if config.expandable && !config.compact_bottom_bar {
@@ -2503,7 +2504,7 @@ pub fn render_picker(
             // Inset by 1 cell so hints don't hug the left border.
             let shortcuts_rect = Rect::new(shortcuts_x + 1, sy, shortcuts_w.saturating_sub(1), 1);
             ShortcutsBar::new(&all_hints)
-                .with_pending(config.pending_hint)
+                .with_pending(config.pending_hint.clone())
                 .render(shortcuts_rect, buf);
         }
     }
@@ -3324,6 +3325,7 @@ mod tests {
 
     #[test]
     fn search_bar_cursor_visible_only_when_search_active() {
+        let _theme = crate::test_util::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

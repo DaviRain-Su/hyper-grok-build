@@ -635,12 +635,13 @@ impl AgentView {
             Self::extensions_modal_non_selectable_clickable_mask(state, entry_count);
         let non_selectable_clickable = &clickable_owned;
 
+        let picker_sc = crate::views::picker::picker_shortcuts();
         let config = crate::views::picker::PickerConfig {
             title: None,
             show_search_hint: true,
             expandable: true,
             esc_clears_query: true,
-            shortcuts: Some(crate::views::picker::picker_shortcuts()),
+            shortcuts: Some(&picker_sc),
             pending_hint: None,
             shortcuts_area: None,
             non_selectable,
@@ -1017,12 +1018,13 @@ impl AgentView {
             Self::extensions_modal_non_selectable_clickable_mask(state, entry_count);
         let non_selectable_clickable = &clickable_owned;
 
+        let picker_sc = crate::views::picker::picker_shortcuts();
         let config = crate::views::picker::PickerConfig {
             title: None,
             show_search_hint: true,
             expandable: true,
             esc_clears_query: true,
-            shortcuts: Some(crate::views::picker::picker_shortcuts()),
+            shortcuts: Some(&picker_sc),
             pending_hint: None,
             shortcuts_area: None,
             non_selectable,
