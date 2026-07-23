@@ -32,9 +32,22 @@ Português、Français、Deutsch、Русский),并可在设置中实时切�
 [与官方 <code>grok</code> 共存](#与官方-grok-共存) ·
 [许可证](#许可证)
 
-**English: [README.md](README.md)**
+**English: [README.md](README.md)** ·
+**中文用户指南: [docs/user-guide-zh-CN/](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)**
 
 </div>
+
+---
+
+## 界面截图
+
+真实 TUI(在 PTY 中用仓库内置的
+[`tui_shot`](crates/codegen/xai-grok-pager-pty-harness/examples/tui_shot.rs)
+工具捕获),展示 10 种 UI 语言中的两种:
+
+| English | 简体中文 |
+| ------- | -------- |
+| ![Hyper TUI in English](docs/assets/screenshot-welcome-en.png) | ![中文界面的 Hyper TUI](docs/assets/screenshot-welcome-zh.png) |
 
 ---
 

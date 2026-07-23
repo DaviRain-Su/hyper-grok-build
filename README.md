@@ -34,9 +34,22 @@ Agent Client Protocol (ACP). The UI is localized in 10 languages
 [Coexistence with official <code>grok</code>](#coexistence-with-official-grok) ·
 [License](#license)
 
-**中文文档: [README.zh-CN.md](README.zh-CN.md)**
+**中文文档: [README.zh-CN.md](README.zh-CN.md)** ·
+**中文用户指南: [docs/user-guide-zh-CN/](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)**
 
 </div>
+
+---
+
+## Screenshots
+
+The real TUI (captured in a PTY with the in-repo
+[`tui_shot`](crates/codegen/xai-grok-pager-pty-harness/examples/tui_shot.rs)
+harness), in two of the ten UI locales:
+
+| English | 简体中文 |
+| ------- | -------- |
+| ![Hyper TUI in English](docs/assets/screenshot-welcome-en.png) | ![中文界面的 Hyper TUI](docs/assets/screenshot-welcome-zh.png) |
 
 ---
 
