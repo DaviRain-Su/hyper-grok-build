@@ -2,11 +2,25 @@
 
 All notable changes to **Hyper** (`hyper` binary) are documented here.
 
-## Unreleased
+## [0.2.110] — 2026-07-23
 
 ### Added
 - Add `hyper dashboard --web`, a loopback-only, read-only web observability UI built with Axum and Leptos SSR.
 - Add session overview, filtering, detail, timeline, chat, charts, active-process memory, unified-log, JSON API, and live SSE views over existing `~/.grok` artifacts.
+- Add runtime-selectable TUI localization with ten language bundles and complete Simplified Chinese user-guide and hooks documentation.
+- Add the built-in `xdotcom` subagent for X.com content workflows.
+
+### Changed
+- Sync the community build with the upstream `0.2.110` monorepo line.
+- Refresh the project storefront with Hyper branding, real TUI screenshots, badges, and updated Oracle/modes design guidance.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.110
+```
 
 ## [0.2.109] — 2026-07-22
 

@@ -3,7 +3,7 @@
 Living list of fork-specific gaps, fixed items, and intentional limits.
 Update this file when closing an issue or shipping a release.
 
-Last reviewed: 2026-07-22 (v0.2.109 wire-compat release).
+Last reviewed: 2026-07-23 (v0.2.110 release).
 
 ## Fixed in v0.2.109
 
@@ -11,9 +11,9 @@ Last reviewed: 2026-07-22 (v0.2.109 wire-compat release).
   `GROK_VERSION` from the root `VERSION` file into the binary. The `v0.1.0`
   marketing tag set that header to `0.1.0`, which production rejects
   (minimum **0.1.202**). Releases must use the monorepo lockstep version
-  (currently `0.2.109`). Upgrade with a fresh `install.sh` run.
+  (currently `0.2.110`). Upgrade with a fresh `install.sh` run.
 
-## Open (accepted for v0.2.109)
+## Open (accepted for v0.2.110)
 
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
