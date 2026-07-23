@@ -127,6 +127,10 @@ pub enum LocalQuestionKind {
         model_id: agent_client_protocol::ModelId,
         effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
     },
+    DoctorFix {
+        target: crate::app::actions::DoctorFixTarget,
+        plan: Box<crate::diagnostics::FixPlan>,
+    },
 }
 
 // ── State ──────────────────────────────────────────────────────────────

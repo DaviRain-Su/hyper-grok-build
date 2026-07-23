@@ -1,12 +1,18 @@
 //! Layer 1: PTY management — spawn, inject keys, resize, drain output.
 
-use std::io::{Read, Write};
+use std::ffi::OsStr;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
+use xai_grok_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+
+const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
+const PTY_REAP_POLL: Duration = Duration::from_millis(10);
+const PENDING_STATUS_ERROR: &str = "exit observed but status unavailable";
 
 /// Raw key byte constants for terminal input injection.
 pub mod keys {
@@ -24,6 +30,31 @@ pub mod keys {
     pub const ESC: &[u8] = b"\x1b";
 }
 
+/// One explicit environment mutation applied after the TestSandbox baseline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvOp<'a> {
+    Set(&'a OsStr, &'a OsStr),
+    Remove(&'a OsStr),
+}
+
+impl<'a> EnvOp<'a> {
+    pub fn set(key: &'a str, value: &'a str) -> Self {
+        Self::Set(OsStr::new(key), OsStr::new(value))
+    }
+
+    pub const fn set_os(key: &'a OsStr, value: &'a OsStr) -> Self {
+        Self::Set(key, value)
+    }
+
+    pub fn remove(key: &'a str) -> Self {
+        Self::Remove(OsStr::new(key))
+    }
+
+    pub const fn remove_os(key: &'a OsStr) -> Self {
+        Self::Remove(key)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum PtyRead {
     Chunk(Vec<u8>),
@@ -35,6 +66,17 @@ pub(crate) enum PtyRead {
 /// methods to inject input, resize, and drain output.
 pub struct PtyController {
     child: Box<dyn portable_pty::Child + Send>,
+    process_tree: Option<TestProcessTree>,
+    exit_status: Option<ExitStatus>,
+    exit_observed: bool,
+    spawn_pid: Option<u32>,
+    // portable-pty's Unix kill may reap and cache status through Child::try_wait.
+    #[cfg(unix)]
+    portable_kill_may_have_reaped: bool,
+    #[cfg(test)]
+    status_cache_count: usize,
+    #[cfg(test)]
+    tree_release_count: usize,
     writer: Box<dyn Write + Send>,
     reader_rx: mpsc::Receiver<Vec<u8>>,
     #[allow(dead_code)] // Kept alive to hold the PTY open; used by resize().
@@ -42,25 +84,40 @@ pub struct PtyController {
 }
 
 impl PtyController {
-    /// Spawn a binary inside a PTY with the given terminal size.
-    ///
-    /// `env` is a list of `(key, value)` pairs to set on the child process.
-    pub fn spawn(
-        binary: &Path,
-        size: PtySize,
-        args: &[&str],
-        env: &[(&str, &str)],
-    ) -> Result<Self> {
-        Self::spawn_in_dir(binary, size, args, env, None)
-    }
-
-    /// Like [`spawn`](Self::spawn), with an optional child working directory.
-    pub fn spawn_in_dir(
+    /// Inherit the parent environment for terminal-brand probes, grok-wrap
+    /// tests, and other fixtures that test inherited host env. Content-backed
+    /// pager launches must use [`Self::spawn_in_sandbox`].
+    pub fn spawn_inherited_env(
         binary: &Path,
         size: PtySize,
         args: &[&str],
         env: &[(&str, &str)],
         cwd: Option<&Path>,
+    ) -> Result<Self> {
+        let operations = set_operations(env);
+        Self::spawn_inner(binary, size, args, &operations, cwd, None)
+    }
+
+    /// Spawn from a [`TestSandbox`] baseline plus typed per-process Set/Remove
+    /// operations. The sandbox remains owned by the caller.
+    pub fn spawn_in_sandbox(
+        binary: &Path,
+        size: PtySize,
+        args: &[&str],
+        sandbox: &TestSandbox,
+        env: &[EnvOp<'_>],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
+        Self::spawn_inner(binary, size, args, env, cwd, Some(sandbox))
+    }
+
+    fn spawn_inner(
+        binary: &Path,
+        size: PtySize,
+        args: &[&str],
+        env: &[EnvOp<'_>],
+        cwd: Option<&Path>,
+        sandbox: Option<&TestSandbox>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size)?;
@@ -72,9 +129,21 @@ impl PtyController {
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
-        apply_child_env(&mut cmd, env);
+        apply_child_env(&mut cmd, sandbox, env);
 
+        // portable-pty calls setsid on Unix. Windows Job enrollment is a
+        // best-effort post-spawn attachment, so a very short-lived descendant
+        // may escape before enrollment; diagnostics preserve that downgrade.
         let child = pair.slave.spawn_command(cmd)?;
+        #[cfg(unix)]
+        let process_pid = child
+            .process_id()
+            .or_else(|| pair.master.process_group_leader().map(|pid| pid as u32));
+        #[cfg(windows)]
+        let process_pid = child.process_id();
+        let process_tree = process_pid.map(|pid| TestProcessTree::attach(pid, "grok PTY child"));
+        // Attachment failures remain recorded by TestProcessTree and are
+        // surfaced through process_tree_diagnostics() on every harness timeout.
         // Drop the slave so we get EOF when the child exits.
         drop(pair.slave);
 
@@ -84,6 +153,16 @@ impl PtyController {
 
         Ok(Self {
             child,
+            process_tree,
+            exit_status: None,
+            exit_observed: false,
+            spawn_pid: process_pid,
+            #[cfg(unix)]
+            portable_kill_may_have_reaped: false,
+            #[cfg(test)]
+            status_cache_count: 0,
+            #[cfg(test)]
+            tree_release_count: 0,
             writer,
             reader_rx,
             master: pair.master,
@@ -137,17 +216,18 @@ impl PtyController {
         let _ = self.inject_keys(keys::Q);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            match self.child.try_wait()? {
-                Some(_) => return Ok(()),
-                None if std::time::Instant::now() >= deadline => {
-                    self.child.kill()?;
-                    self.child
-                        .wait()
-                        .context("failed to wait for pager child after kill")?;
-                    return Ok(());
-                }
-                None => std::thread::sleep(Duration::from_millis(50)),
+            if is_quit_complete(self.poll_exit_code())? {
+                return Ok(());
             }
+            if std::time::Instant::now() >= deadline {
+                self.cleanup_descendants();
+                self.kill_portable_child()?;
+                self.wait_child_bounded(Duration::from_secs(1))
+                    .context("failed to wait for pager child after kill")?
+                    .context("pager child did not exit within 1s after kill")?;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -162,46 +242,43 @@ impl PtyController {
         }
     }
 
-    /// Check whether the child process is still running.
-    pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    /// Return true only while the child is live; pending status is non-running.
+    pub fn is_running(&mut self) -> Result<bool> {
+        self.poll_exit_code()
+            .map(|state| state == PtyExitPoll::Running)
     }
 
-    /// Poll child status once, preserving process-query errors.
-    pub(crate) fn try_exit_code(&mut self) -> Result<Option<u32>> {
-        self.child
-            .try_wait()
-            .map(|status| status.map(|status| status.exit_code()))
-            .context("failed to query PTY child status")
+    /// Poll once without collapsing pending status, liveness, or query errors.
+    /// Repeated calls return cached exit status without querying a reaped child.
+    pub fn poll_exit_code(&mut self) -> Result<PtyExitPoll<u32>> {
+        let poll = self
+            .poll_exit_status()
+            .map(|status| status.map(|status| status.exit_code()));
+        classify_exit_poll(poll, self.exit_observed)
     }
 
-    /// Wait up to `timeout` for the child to exit, returning its exit code
-    /// (`None` if it's still running at the deadline). Call once and cache the
-    /// result — `try_wait` reaps the child, so the status isn't re-readable.
-    pub fn wait_exit_code(&mut self, timeout: Duration) -> Option<u32> {
+    /// Poll until exit or `timeout` without collapsing lifecycle states.
+    /// Returns [`PtyExitPoll::PendingStatus`] immediately because the child is
+    /// already non-running; [`PtyExitPoll::Running`] is returned only when the
+    /// deadline expires while the child remains live.
+    pub fn wait_exit_code(&mut self, timeout: Duration) -> Result<PtyExitPoll<u32>> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return Some(status.exit_code()),
-                Ok(None) if std::time::Instant::now() >= deadline => return None,
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => return None,
+            if let Some(state) =
+                resolve_wait_poll(self.poll_exit_code(), std::time::Instant::now() >= deadline)?
+            {
+                return Ok(state);
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
-    /// Child PID, falling back to the PTY's foreground process group.
-    #[cfg(unix)]
+    /// Child PID while the direct child is live. Once reaped, returns `None` so
+    /// callers cannot signal a recycled PID.
     pub fn child_pid(&self) -> Option<u32> {
-        self.child
-            .process_id()
-            .or_else(|| self.master.process_group_leader().map(|p| p as u32))
-    }
-
-    /// Child PID (no foreground-group fallback — ConPTY has no process groups).
-    #[cfg(windows)]
-    pub fn child_pid(&self) -> Option<u32> {
-        self.child.process_id()
+        (!self.exit_observed && self.exit_status.is_none())
+            .then_some(self.spawn_pid)
+            .flatten()
     }
 
     /// Deliver a signal directly to the child (unix), bypassing the PTY line
@@ -219,13 +296,233 @@ impl PtyController {
         }
         Ok(())
     }
+
+    fn poll_exit_status(&mut self) -> Result<Option<ExitStatus>> {
+        if let Some(status) = self.exit_status.clone() {
+            return Ok(Some(status));
+        }
+        #[cfg(unix)]
+        {
+            if let Some(pid) = self.spawn_pid {
+                match observe_exit_before_reap(
+                    process_has_exited_without_reap(pid, "PTY child"),
+                    self.exit_observed,
+                    self.portable_kill_may_have_reaped,
+                ) {
+                    Ok(ExitObservation::Running) => return Ok(None),
+                    Ok(ExitObservation::Exited) => self.observe_exit_and_cleanup_tree(),
+                    Ok(ExitObservation::StatusAlreadyConsumed) => {
+                        self.observe_exit_and_cleanup_tree();
+                        return self.recover_consumed_status();
+                    }
+                    Err(error) => {
+                        return Err(error).context("failed to observe PTY child exit");
+                    }
+                }
+            }
+        }
+        self.try_wait_and_cache()
+    }
+
+    fn try_wait_and_cache(&mut self) -> Result<Option<ExitStatus>> {
+        let status = self
+            .child
+            .try_wait()
+            .context("failed to query PTY child status")?;
+        if let Some(status) = status {
+            #[cfg(windows)]
+            self.cleanup_descendants();
+            self.cache_reaped_status(status.clone());
+            return Ok(Some(status));
+        }
+        Ok(None)
+    }
+
+    fn cache_reaped_status(&mut self, status: ExitStatus) {
+        if self.exit_status.is_none() {
+            self.release_process_tree();
+            cache_exit_status(
+                &mut self.exit_status,
+                &mut self.exit_observed,
+                &mut self.spawn_pid,
+                status,
+            );
+            #[cfg(test)]
+            {
+                self.status_cache_count += 1;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn observe_exit_and_cleanup_tree(&mut self) {
+        if !self.exit_observed {
+            self.exit_observed = true;
+            self.cleanup_descendants();
+        }
+    }
+
+    #[cfg(unix)]
+    fn recover_consumed_status(&mut self) -> Result<Option<ExitStatus>> {
+        let status = recover_consumed_status(self.child.try_wait())
+            .context("failed to recover PTY child status after it was consumed")?;
+        self.cache_reaped_status(status.clone());
+        Ok(Some(status))
+    }
+
+    fn kill_portable_child(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.portable_kill_may_have_reaped = true;
+        }
+        self.child.kill()
+    }
+
+    /// Process-group/job enrollment state.
+    pub fn process_tree_diagnostics(&self) -> String {
+        self.process_tree
+            .as_ref()
+            .map(TestProcessTree::diagnostic_summary)
+            .unwrap_or_else(|| "tree_unavailable=true".to_owned())
+    }
+
+    fn kill_tree_best_effort(&self) {
+        if let Some(tree) = &self.process_tree {
+            let _ = tree.kill();
+        }
+    }
+
+    fn release_process_tree(&mut self) {
+        if let Some(mut tree) = self.process_tree.take() {
+            tree.release();
+            #[cfg(test)]
+            {
+                self.tree_release_count += 1;
+            }
+        }
+    }
+
+    fn cleanup_descendants(&mut self) {
+        self.kill_tree_best_effort();
+        self.release_process_tree();
+    }
+
+    fn wait_child_bounded(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.poll_exit_status()? {
+                return Ok(Some(status));
+            }
+            if std::time::Instant::now() >= deadline {
+                if self.exit_observed {
+                    anyhow::bail!(PENDING_STATUS_ERROR);
+                }
+                return Ok(None);
+            }
+            std::thread::sleep(PTY_REAP_POLL);
+        }
+    }
 }
 
 impl Drop for PtyController {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.exit_status.is_none() {
+            self.cleanup_descendants();
+            let _ = self.kill_portable_child();
+            let _ = self.wait_child_bounded(PTY_DROP_REAP_TIMEOUT);
+        }
+        self.release_process_tree();
     }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Eq, PartialEq)]
+enum ExitObservation {
+    Running,
+    Exited,
+    StatusAlreadyConsumed,
+}
+
+#[cfg(unix)]
+fn observe_exit_before_reap(
+    observation: io::Result<bool>,
+    exit_observed: bool,
+    portable_kill_may_have_reaped: bool,
+) -> io::Result<ExitObservation> {
+    match observation {
+        Ok(false) => Ok(ExitObservation::Running),
+        Ok(true) => Ok(ExitObservation::Exited),
+        Err(error)
+            if error.raw_os_error() == Some(libc::ECHILD)
+                && (exit_observed || portable_kill_may_have_reaped) =>
+        {
+            Ok(ExitObservation::StatusAlreadyConsumed)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn recover_consumed_status(status: io::Result<Option<ExitStatus>>) -> io::Result<ExitStatus> {
+    status?.ok_or_else(|| io::Error::other("PTY child status was consumed without being cached"))
+}
+
+/// Typed result of polling a PTY child's lifecycle.
+///
+/// Only [`Self::Running`] means the process is live. [`Self::PendingStatus`]
+/// means exit was already observed, descendants were cleaned, and the PID was
+/// hidden, but portable-pty has not yet yielded the final status.
+#[must_use = "PTY exit state and poll errors must be handled explicitly"]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PtyExitPoll<T> {
+    /// The child exited and its cached terminal status is available.
+    Exited(T),
+    /// The child is non-running, but its portable-pty status is not yet available.
+    PendingStatus,
+    /// The child is still live.
+    Running,
+}
+
+fn classify_exit_poll<T, E>(
+    poll: std::result::Result<Option<T>, E>,
+    exit_observed: bool,
+) -> std::result::Result<PtyExitPoll<T>, E> {
+    match poll {
+        Ok(Some(status)) => Ok(PtyExitPoll::Exited(status)),
+        Ok(None) if exit_observed => Ok(PtyExitPoll::PendingStatus),
+        Ok(None) => Ok(PtyExitPoll::Running),
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_wait_poll<T, E>(
+    poll: std::result::Result<PtyExitPoll<T>, E>,
+    deadline_reached: bool,
+) -> std::result::Result<Option<PtyExitPoll<T>>, E> {
+    match poll? {
+        PtyExitPoll::Running if !deadline_reached => Ok(None),
+        state => Ok(Some(state)),
+    }
+}
+
+fn is_quit_complete<T, E>(
+    poll: std::result::Result<PtyExitPoll<T>, E>,
+) -> std::result::Result<bool, E> {
+    match poll? {
+        PtyExitPoll::Exited(_) | PtyExitPoll::PendingStatus => Ok(true),
+        PtyExitPoll::Running => Ok(false),
+    }
+}
+
+fn cache_exit_status(
+    exit_status: &mut Option<ExitStatus>,
+    exit_observed: &mut bool,
+    spawn_pid: &mut Option<u32>,
+    status: ExitStatus,
+) {
+    *exit_status = Some(status);
+    *exit_observed = true;
+    *spawn_pid = None;
 }
 
 const CLIPBOARD_SINK_ENV_VARS: &[&str] = &["GROK_OSC52_SINK", "LC_GROK_OSC52_SINK"];
@@ -281,14 +578,21 @@ const HOST_TERMINAL_ENV_VARS: &[&str] = &[
     "INSIDE_EMACS",
 ];
 
-/// Prepare the child environment: fixed `TERM`, color and host-terminal
-/// hygiene strips, then the caller's `env` pairs.
-///
-/// Strips run BEFORE the caller env is applied, preserving the contract
-/// that tests may re-inject any marker (e.g. `TERM_PROGRAM=vscode`, or a
-/// fake `NVIM` socket) to simulate that host — see
-/// `tests/pty_e2e/doubled_lines_out_of_band_repro.rs` in the pager crate.
-fn apply_child_env(cmd: &mut CommandBuilder, env: &[(&str, &str)]) {
+fn set_operations<'a>(env: &'a [(&'a str, &'a str)]) -> Vec<EnvOp<'a>> {
+    env.iter()
+        .map(|(key, value)| EnvOp::set(key, value))
+        .collect()
+}
+
+/// Prepare the child environment. Content-backed callers provide a
+/// [`xai_grok_test_support::TestSandbox`], which always clears inheritance.
+/// The explicitly named inherited-env path is reserved for terminal probing and
+/// grok-wrap fixtures. Caller overrides are always applied last.
+fn apply_child_env(cmd: &mut CommandBuilder, sandbox: Option<&TestSandbox>, env: &[EnvOp<'_>]) {
+    if let Some(sandbox) = sandbox {
+        cmd.env_clear();
+        sandbox.apply_to_command_builder(cmd);
+    }
     // Set TERM so the pager renders with full color support.
     cmd.env("TERM", "xterm-256color");
     // Strip inherited color opt-outs/overrides for the same reason: a
@@ -320,8 +624,11 @@ fn apply_child_env(cmd: &mut CommandBuilder, env: &[(&str, &str)]) {
     for term_var in HOST_TERMINAL_ENV_VARS {
         cmd.env_remove(term_var);
     }
-    for &(key, val) in env {
-        cmd.env(key, val);
+    for operation in env {
+        match operation {
+            EnvOp::Set(key, value) => cmd.env(key, value),
+            EnvOp::Remove(key) => cmd.env_remove(key),
+        }
     }
 }
 
@@ -353,6 +660,270 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn exit_poll_distinguishes_pending_running_and_errors() {
+        assert_eq!(
+            classify_exit_poll::<u32, &'static str>(Ok(None), true),
+            Ok(PtyExitPoll::PendingStatus)
+        );
+        assert_eq!(
+            classify_exit_poll::<u32, &'static str>(Ok(None), false),
+            Ok(PtyExitPoll::Running)
+        );
+        assert_eq!(
+            classify_exit_poll::<u32, &'static str>(Err("poll failed"), false),
+            Err("poll failed")
+        );
+    }
+
+    #[test]
+    fn wait_deadline_preserves_pending_running_and_errors() {
+        assert_eq!(
+            resolve_wait_poll::<u32, &'static str>(Ok(PtyExitPoll::PendingStatus), false),
+            Ok(Some(PtyExitPoll::PendingStatus))
+        );
+        assert_eq!(
+            resolve_wait_poll::<u32, &'static str>(Ok(PtyExitPoll::PendingStatus), true),
+            Ok(Some(PtyExitPoll::PendingStatus))
+        );
+        assert_eq!(
+            resolve_wait_poll::<u32, &'static str>(Ok(PtyExitPoll::Running), false),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_wait_poll::<u32, &'static str>(Ok(PtyExitPoll::Running), true),
+            Ok(Some(PtyExitPoll::Running))
+        );
+        assert_eq!(
+            resolve_wait_poll::<u32, &'static str>(Err("poll failed"), true),
+            Err("poll failed")
+        );
+    }
+
+    #[test]
+    fn quit_completion_accepts_non_running_states_and_propagates_errors() {
+        assert_eq!(
+            is_quit_complete::<u32, &'static str>(Ok(PtyExitPoll::Exited(0))),
+            Ok(true)
+        );
+        assert_eq!(
+            is_quit_complete::<u32, &'static str>(Ok(PtyExitPoll::PendingStatus)),
+            Ok(true)
+        );
+        assert_eq!(
+            is_quit_complete::<u32, &'static str>(Ok(PtyExitPoll::Running)),
+            Ok(false)
+        );
+        assert_eq!(
+            is_quit_complete::<u32, &'static str>(Err("poll failed")),
+            Err("poll failed")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observed_exit_echild_is_typed_only_after_portable_reap_capability() {
+        let echild = || io::Error::from_raw_os_error(libc::ECHILD);
+        let unrelated = io::Error::other("unrelated poll failure");
+
+        assert_eq!(
+            observe_exit_before_reap(Err(echild()), false, true).unwrap(),
+            ExitObservation::StatusAlreadyConsumed
+        );
+        assert_eq!(
+            observe_exit_before_reap(Err(echild()), true, false).unwrap(),
+            ExitObservation::StatusAlreadyConsumed
+        );
+        assert_eq!(
+            observe_exit_before_reap(Err(echild()), false, false)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert_eq!(
+            observe_exit_before_reap(Err(unrelated), true, true)
+                .unwrap_err()
+                .to_string(),
+            "unrelated poll failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn consumed_status_recovery_requires_a_cached_status() {
+        let status = ExitStatus::with_exit_code(0);
+        assert_eq!(
+            recover_consumed_status(Ok(Some(status.clone())))
+                .unwrap()
+                .exit_code(),
+            0
+        );
+        assert!(recover_consumed_status(Ok(None)).is_err());
+        assert_eq!(
+            recover_consumed_status(Err(io::Error::other("real status failure")))
+                .unwrap_err()
+                .to_string(),
+            "real status failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observed_exit_then_echild_recovers_cached_status_once() {
+        let sandbox = TestSandbox::new();
+        let mut controller = PtyController::spawn_in_sandbox(
+            Path::new("/bin/sh"),
+            PtySize {
+                rows: 8,
+                cols: 40,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &["-c", "exit 7"],
+            &sandbox,
+            &[],
+            None,
+        )
+        .expect("spawn PTY exit fixture");
+        let pid = controller.child_pid().expect("live child pid");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !process_has_exited_without_reap(pid, "PTY exit fixture").expect("observe child exit")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        controller.observe_exit_and_cleanup_tree();
+        controller
+            .kill_portable_child()
+            .expect("portable kill consumes the exited child status");
+        assert!(controller.portable_kill_may_have_reaped);
+        assert_eq!(controller.tree_release_count, 1);
+        assert_eq!(
+            process_has_exited_without_reap(pid, "PTY exit fixture")
+                .expect_err("consumed status must produce ECHILD")
+                .raw_os_error(),
+            Some(libc::ECHILD)
+        );
+
+        assert_eq!(
+            controller
+                .poll_exit_status()
+                .expect("recover cached portable status")
+                .expect("cached status")
+                .exit_code(),
+            7
+        );
+        assert_eq!(controller.status_cache_count, 1);
+        assert_eq!(controller.tree_release_count, 1);
+        assert_eq!(
+            controller.poll_exit_status().unwrap().unwrap().exit_code(),
+            7
+        );
+        assert_eq!(controller.status_cache_count, 1);
+        assert_eq!(controller.tree_release_count, 1);
+        assert_eq!(controller.child_pid(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_waits_are_idempotent_and_pid_is_hidden_after_reap() {
+        let sandbox = TestSandbox::new();
+        let mut controller = PtyController::spawn_in_sandbox(
+            Path::new("/bin/sh"),
+            PtySize {
+                rows: 8,
+                cols: 40,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &["-c", "exit 7"],
+            &sandbox,
+            &[],
+            None,
+        )
+        .expect("spawn PTY exit fixture");
+        assert!(controller.child_pid().is_some());
+        assert_eq!(
+            controller.wait_exit_code(Duration::from_secs(2)).unwrap(),
+            PtyExitPoll::Exited(7)
+        );
+        assert_eq!(
+            controller.wait_exit_code(Duration::ZERO).unwrap(),
+            PtyExitPoll::Exited(7)
+        );
+        assert_eq!(controller.poll_exit_code().unwrap(), PtyExitPoll::Exited(7));
+        assert!(!controller.is_running().unwrap());
+        assert_eq!(controller.status_cache_count, 1);
+        assert_eq!(controller.tree_release_count, 1);
+        assert_eq!(controller.child_pid(), None);
+        assert!(controller.send_signal(libc::SIGTERM).is_err());
+    }
+
+    #[cfg(unix)]
+    fn pid_is_alive(pid: u32) -> bool {
+        // SAFETY: signal 0 performs an existence/permission check only.
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_drop_tree_cleanup_is_bounded_and_reaps_grandchild() {
+        let sandbox = TestSandbox::new();
+        let pid_file = sandbox.temp_dir().join("pty-grandchild.pid");
+        let pid_path = pid_file.to_string_lossy().into_owned();
+        let controller = PtyController::spawn_in_sandbox(
+            Path::new("/bin/sh"),
+            PtySize {
+                rows: 8,
+                cols: 40,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            &["-c", "sleep 1000 & echo $! > \"$PID_FILE\"; wait"],
+            &sandbox,
+            &[EnvOp::set("PID_FILE", &pid_path)],
+            None,
+        )
+        .expect("spawn PTY tree fixture");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let grandchild_pid = loop {
+            if let Ok(raw) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = raw.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "pid file timeout");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let started = std::time::Instant::now();
+        drop(controller);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "PTY Drop exceeded its bounded wait"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while pid_is_alive(grandchild_pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !pid_is_alive(grandchild_pid),
+            "PTY grandchild leaked after controller Drop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_tree_diagnostics_surface_enrollment_state() {
+        let tree = TestProcessTree::attach(u32::MAX, "invalid PTY fixture");
+        let diagnostics = tree.diagnostic_summary();
+        assert!(diagnostics.contains("tree_label=\"invalid PTY fixture\""));
+        assert!(diagnostics.contains("tree_attached=false"));
+        assert!(diagnostics.contains("tree_attach_error=Some"));
+    }
+
     /// Every host-terminal marker the pager's detection chain reads must be
     /// stripped from the child env — polluted entries are seeded via
     /// `cmd.env` (same `CommandBuilder` map that inherited base-env entries
@@ -373,10 +944,12 @@ mod tests {
         for sink_var in CLIPBOARD_SINK_ENV_VARS {
             cmd.env(sink_var, "polluted");
         }
-        // Unrelated vars must survive the hygiene pass untouched.
+        // Sandboxed launches remove unrelated inherited variables before
+        // re-applying the baseline and explicit overrides.
         cmd.env("GROK_SCROLL_LOG", "/tmp/scroll.jsonl");
+        let sandbox = TestSandbox::new();
 
-        apply_child_env(&mut cmd, &[]);
+        apply_child_env(&mut cmd, Some(&sandbox), &[]);
 
         for var in HOST_TERMINAL_ENV_VARS {
             assert!(
@@ -408,14 +981,71 @@ mod tests {
         );
         assert_eq!(
             cmd.get_env("GROK_SCROLL_LOG").and_then(|v| v.to_str()),
-            Some("/tmp/scroll.jsonl"),
-            "hygiene must not touch unrelated vars"
+            None,
+            "hermetic baseline must remove unrelated inherited vars"
+        );
+        assert_eq!(
+            cmd.get_env("GROK_HOME").and_then(|v| v.to_str()),
+            sandbox.grok_home().to_str()
         );
     }
 
-    /// The documented override contract: strips run BEFORE the caller env,
-    /// so tests can re-inject any marker to simulate a specific host
-    /// (e.g. the fake-nvim wrapper repro or the xtversion brand fixtures).
+    #[test]
+    fn apply_child_env_uses_sandbox_baseline() {
+        let sandbox = TestSandbox::new();
+        let mut cmd = CommandBuilder::new("true");
+
+        apply_child_env(&mut cmd, Some(&sandbox), &[]);
+
+        assert_eq!(
+            cmd.get_env("HOME").and_then(|v| v.to_str()),
+            sandbox.home().to_str()
+        );
+        assert_eq!(
+            cmd.get_env("GROK_HOME").and_then(|v| v.to_str()),
+            sandbox.grok_home().to_str()
+        );
+        assert_eq!(cmd.get_env("GROK_LEADER_SOCKET"), None);
+    }
+
+    #[test]
+    fn apply_child_env_remove_deletes_sandbox_credential() {
+        let sandbox = TestSandbox::builder()
+            .mock_url("http://127.0.0.1:43123/v1")
+            .build();
+        let mut cmd = CommandBuilder::new("true");
+
+        apply_child_env(&mut cmd, Some(&sandbox), &[EnvOp::remove("XAI_API_KEY")]);
+
+        assert_eq!(cmd.get_env("XAI_API_KEY"), None);
+        assert_eq!(
+            cmd.get_env("GROK_XAI_API_BASE_URL")
+                .and_then(|v| v.to_str()),
+            Some("http://127.0.0.1:43123/v1")
+        );
+    }
+
+    #[test]
+    fn inherited_env_projection_is_set_only_and_preserves_unrelated_ambient_vars() {
+        let operations = set_operations(&[("EXPLICIT_MARKER", "set")]);
+        assert_eq!(operations, [EnvOp::set("EXPLICIT_MARKER", "set")]);
+
+        let mut cmd = CommandBuilder::new("true");
+        cmd.env("AMBIENT_MARKER", "inherited");
+        apply_child_env(&mut cmd, None, &operations);
+
+        assert_eq!(
+            cmd.get_env("AMBIENT_MARKER")
+                .and_then(|value| value.to_str()),
+            Some("inherited")
+        );
+        assert_eq!(
+            cmd.get_env("EXPLICIT_MARKER")
+                .and_then(|value| value.to_str()),
+            Some("set")
+        );
+    }
+
     #[test]
     fn apply_child_env_caller_env_overrides_survive_strips() {
         let mut cmd = CommandBuilder::new("true");
@@ -424,11 +1054,12 @@ mod tests {
 
         apply_child_env(
             &mut cmd,
+            None,
             &[
-                ("TERM_PROGRAM", "vscode"),
-                ("NVIM", "/tmp/fake-nvim.sock"),
-                ("TERM", "xterm-kitty"),
-                ("GROK_OSC52_SINK", "1"),
+                EnvOp::set("TERM_PROGRAM", "vscode"),
+                EnvOp::set("NVIM", "/tmp/fake-nvim.sock"),
+                EnvOp::set("TERM", "xterm-kitty"),
+                EnvOp::set("GROK_OSC52_SINK", "1"),
             ],
         );
 

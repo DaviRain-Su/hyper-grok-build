@@ -2,11 +2,15 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// Mid-turn Esc from the SCROLLBACK pane is a swallowed no-op: it must NOT
-/// cancel the running turn. Cancel remains on Ctrl+C / palette / etc.
+/// **1× Esc from the SCROLLBACK pane cancels a running turn** in the default
+/// (non-vim) config. The policy treats Prompt and Scrollback identically while
+/// a turn runs, so a user reading the transcript can interrupt without first
+/// returning to the prompt. Tab (not Esc) is used to leave the prompt; the
+/// footer's "Space:prompt" hint confirms the scrollback owns keys before the
+/// cancel Esc is sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn esc_mid_turn_from_scrollback_is_swallowed() {
+async fn esc_cancels_running_turn_from_scrollback() {
     let content = ContentController::start().await.expect("start content");
     let long_response = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",
@@ -31,31 +35,30 @@ async fn esc_mid_turn_from_scrollback_is_swallowed() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("stream started");
 
-    // Leave the prompt with a SINGLE Tab, then wait for the footer to prove the
-    // scrollback owns keys. Tab TOGGLES focus, so re-pressing it could bounce
-    // focus back to the prompt — press once and poll the render instead.
+    // Leave the prompt with a SINGLE Tab (Esc is reserved for cancel/clear/
+    // rewind), then wait for the footer to prove the scrollback owns keys. Tab
+    // TOGGLES focus, so re-pressing it could bounce focus back to the prompt —
+    // press once and poll the render instead (mirrors `drive_to_scrollback_with_turn`).
     harness.inject_keys(b"\t").expect("tab to scrollback");
     harness
         .wait_for_text("Space:prompt", Duration::from_secs(10))
-        .expect("scrollback must own keys before the mid-turn Esc");
+        .expect("scrollback must own keys before the cancel Esc");
 
-    // 1× Esc from scrollback must swallow (not cancel).
+    // 1× Esc from scrollback cancels the running turn.
     harness.inject_keys(keys::ESC).expect("press esc");
-    harness.update(Duration::from_millis(1000));
-    let screen = harness.screen_contents();
-    assert!(
-        !screen.contains("Turn cancelled by user"),
-        "mid-turn Esc from scrollback must NOT cancel\nscreen:\n{screen}"
-    );
+    harness.update(Duration::from_millis(200));
 
-    // Positive tail: prove the turn was still alive at Esc-time (the negative
-    // check above would false-pass on an already-finished turn) and that
-    // Ctrl+C — the replacement cancel gesture — works from the scrollback pane.
-    harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
     harness
         .wait_for_text("Turn cancelled by user", Duration::from_secs(15))
-        .expect("Ctrl+C from scrollback must cancel the still-running turn");
+        .expect("turn cancelled marker (from scrollback)");
 
+    harness.update(Duration::from_millis(600));
+    let screen = harness.screen_contents();
+    assert_eq!(
+        screen.matches("Turn cancelled by user").count(),
+        1,
+        "'Turn cancelled' must appear exactly once\nscreen:\n{screen}"
+    );
     assert!(
         !harness.contains_text("panicked"),
         "pager panicked\nscreen:\n{}",

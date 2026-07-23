@@ -244,8 +244,8 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
     crate::voice::handle_voice_event(
         &mut app,
         xai_grok_voice::VoiceEvent::Error {
-            message: "microphone delivered only silence".into(),
-            hint: Some("grant your terminal app microphone access".into()),
+            message: "no speech detected".into(),
+            hint: Some("allow terminal mic access in system settings".into()),
         },
     );
     let agent = app.agents.get(&id).unwrap();
@@ -259,8 +259,8 @@ fn voice_error_hint_lands_in_bound_agent_scrollback() {
         other => panic!("expected system hint block, got {other:?}"),
     };
     assert!(
-        text.contains("microphone delivered only silence")
-            && text.contains("grant your terminal app microphone access"),
+        text.contains("no speech detected")
+            && text.contains("allow terminal mic access in system settings"),
         "scrollback should carry short message + long hint, got {text:?}"
     );
 
@@ -296,8 +296,8 @@ fn voice_error_hint_dropped_for_dashboard_dispatch() {
     crate::voice::handle_voice_event(
         &mut app,
         xai_grok_voice::VoiceEvent::Error {
-            message: "microphone delivered only silence".into(),
-            hint: Some("grant your terminal app microphone access".into()),
+            message: "no speech detected".into(),
+            hint: Some("allow terminal mic access in system settings".into()),
         },
     );
     assert_eq!(

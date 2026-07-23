@@ -87,7 +87,7 @@ async fn leader_n_clients_shared_session() {
     for (i, v) in viewers.iter_mut().enumerate() {
         v.update(Duration::from_secs(3));
         assert!(
-            v.is_running(),
+            v.is_running().expect("poll pager liveness"),
             "viewer {i} exited after the driver quit\nscreen:\n{}",
             v.screen_contents()
         );

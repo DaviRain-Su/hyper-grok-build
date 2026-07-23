@@ -103,8 +103,13 @@ async fn background_task_reaped_on_quit() {
     // Both the graceful-quit teardown and the hard-exit tail reap spawned
     // children via the process-global ProcessScope, so the orphan dies either way.
     harness.send_signal(libc::SIGINT).expect("send SIGINT");
-    let code = harness.wait_exit_code(Duration::from_secs(15));
-    assert!(code.is_some(), "pager did not exit after SIGINT");
+    let exit = harness
+        .wait_exit_code(Duration::from_secs(15))
+        .expect("wait after SIGINT");
+    assert!(
+        matches!(exit, PtyExitPoll::Exited(_) | PtyExitPoll::PendingStatus),
+        "pager did not exit after SIGINT: {exit:?}"
+    );
 
     // The fix: no orphaned background process survives the quit. Without it the
     // setsid-detached sleep reparents to init and keeps running -> this times out.

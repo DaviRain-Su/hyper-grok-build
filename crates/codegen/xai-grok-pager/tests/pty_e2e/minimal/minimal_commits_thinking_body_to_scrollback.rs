@@ -42,11 +42,10 @@ async fn minimal_commits_thinking_body_to_scrollback() {
     )
     .expect("write config");
 
-    let env = content.env_for_pager();
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, &env_refs)
-        .expect("spawn minimal pager");
+    let mut harness =
+        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, MINIMAL_ARGS)
+            .expect("spawn minimal pager");
     harness.set_respond_to_queries(true);
 
     wait_minimal_ready(&mut harness);

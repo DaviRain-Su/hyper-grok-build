@@ -74,8 +74,9 @@ async fn scroll_debug_hud_env_shows_hud_and_tracks_flood() {
     );
     harness.update(Duration::from_millis(300));
 
+    let running = harness.is_running().expect("poll pager liveness");
     assert!(
-        harness.is_running() && !harness.contains_text("panicked"),
+        running && !harness.contains_text("panicked"),
         "pager broke during the HUD flood\nscreen:\n{}",
         harness.screen_contents()
     );
@@ -160,8 +161,9 @@ async fn debug_scroll_command_toggles_hud_live() {
         "HUD must clear after the second /debug scroll\nscreen:\n{}",
         harness.screen_contents()
     );
+    let running = harness.is_running().expect("poll pager liveness");
     assert!(
-        harness.is_running() && !harness.contains_text("panicked"),
+        running && !harness.contains_text("panicked"),
         "pager broke during the /debug scroll round trip\nscreen:\n{}",
         harness.screen_contents()
     );

@@ -26,8 +26,7 @@ impl AgentView {
         // the editing lock (see queue_edit.rs ordering invariant).
         if matches!(
             self.prompt_mode,
-            PromptMode::EditingQueued { id: editing_id, server_id: None, .. }
-if editing_id == id
+            PromptMode::EditingQueued { id: editing_id, server_id: None, .. } if editing_id == id
         ) {
             self.exit_editing_mode();
         }

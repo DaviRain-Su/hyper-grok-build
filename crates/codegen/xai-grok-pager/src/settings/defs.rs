@@ -1604,8 +1604,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "SSH wrap",
-            description: "At session load over SSH, recommend `grok wrap ssh` for \
-                          clipboard forwarding and terminal restore.",
+            description: "Show a `/doctor` tip when an SSH session is not using `grok wrap`.",
             keywords: &[
                 "ssh",
                 "wrap",

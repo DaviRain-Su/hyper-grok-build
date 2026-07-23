@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use crate::notifications::NotificationCondition;
 use crate::notifications::protocol::NotificationProtocol;
+use crate::notifications::{NotificationCondition, NotificationMethod};
 use crate::terminal::{ByobuBackend, MultiplexerKind, TerminalContext, TerminalName};
 use crate::theme::color_support::ColorLevel;
 
@@ -17,13 +17,23 @@ pub mod probes;
 mod view;
 
 pub use doctor_format::format_doctor;
-pub(crate) use fix::human_fix_command;
+#[cfg(test)]
+pub(crate) use fix::test_fix_plan;
 pub use fix::{
     AutomaticRemediation, FixError, FixOutcome, FixPlan, FixRequest, FixStatus, PlannedChange,
     SSH_WRAP_FIX_COMMAND, SSH_WRAP_ID, SSH_WRAP_ONE_OFF, ShellKind, apply_fix, configured_report,
     managed_alias_configured, plan_fix, resolve_fix_id, ssh_wrap_automatic_remediation,
 };
+pub(crate) use fix::{
+    format_applicable_automatic_fixes, format_fix_preview, human_fix_command, select_fix_plan,
+};
 pub(crate) use model::probe_requires_live_tui;
+pub(crate) use model::{
+    CLIPBOARD_DELIVERY_UNAVAILABLE_ID, CLIPBOARD_DELIVERY_UNVERIFIED_ID,
+    FOCUS_TRACKING_UNAVAILABLE_ID, ITERM2_CLIPBOARD_PERMISSION_ID, NEWLINE_FALLBACK_ID,
+    NOTIFICATION_PROTOCOL_FALLBACK_ID, SANDBOX_PROFILE_CONFLICT_ID, VOICE_NO_INPUT_DEVICE_ID,
+    VSCODE_SSH_NON_ASCII_ID,
+};
 pub use model::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
     DiagnosticReport, FindingDisposition, KeyboardFact, ManualRemediation, NewlineFact, ProbeNote,
@@ -31,11 +41,12 @@ pub use model::{
 };
 pub use view::{DiagnosticSnapshot, view};
 
-/// Passive input-device probe for doctor / `/terminal-setup`.
+/// Passive input-device probe for `grok doctor` / `/doctor`.
 ///
 /// Does not open a capture stream (no macOS mic-permission prompt). When
-/// `emit_missing_issue` is true and no device exists, appends an issue finding
-/// (TUI with voice on). Doctor passes false so headless hosts only show a fact.
+/// `emit_missing_issue` is true and no device exists, appends an issue finding.
+/// The TUI passes true only while voice mode is enabled; standalone doctor uses
+/// the same finding whenever this build supports capture and the probe is missing.
 pub fn apply_voice_probe(report: &mut DiagnosticReport, emit_missing_issue: bool) {
     if !xai_grok_voice::AUDIO_SUPPORTED {
         return;
@@ -56,20 +67,26 @@ pub fn apply_voice_probe(report: &mut DiagnosticReport, emit_missing_issue: bool
                 error: error.clone(),
             });
             if emit_missing_issue {
-                report.findings.push(DiagnosticFinding {
-                    id: DiagnosticId::new("voice", "no-input-device"),
-                    disposition: FindingDisposition::Issue,
-                    message: format!("Voice dictation can't capture audio — {error}"),
-                    remediation: None,
-                    automatic_remediation: None,
-                    note: Some(
-                        "Connect or select an input device in your system sound settings, then \
-                         re-run /terminal-setup or grok doctor."
-                            .to_owned(),
-                    ),
-                });
+                report.findings.push(voice_missing_finding(error));
             }
         }
+    }
+}
+
+fn voice_missing_finding(error: String) -> DiagnosticFinding {
+    DiagnosticFinding {
+        id: VOICE_NO_INPUT_DEVICE_ID,
+        disposition: FindingDisposition::Issue,
+        message: format!("Voice dictation is unavailable: {error}"),
+        remediation: None,
+        automatic_remediation: None,
+        note: Some(
+            "Connect or select a microphone in your system sound settings. On Linux, install a \
+             supported audio recorder if none was found on PATH. Then run `/doctor` or `grok \
+             doctor` again. Doctor can't detect denied macOS microphone access when the system \
+             returns silence; follow the message shown when dictation fails."
+                .to_owned(),
+        ),
     }
 }
 
@@ -135,7 +152,7 @@ pub struct TerminalWarning {
 
 impl TerminalWarning {
     /// Create a new warning with all fields.
-    fn new(
+    pub(crate) fn new(
         category: WarningCategory,
         message: &str,
         fix: Option<&str>,
@@ -161,15 +178,17 @@ pub fn summarize_warnings(
     warnings: &[TerminalWarning],
     is_ssh: bool,
 ) -> Option<crate::startup::StartupWarning> {
+    actionable_warning_summary(warnings, is_ssh)
+        .map(crate::startup::ActionableStartupWarning::into_warning)
+}
+
+fn actionable_warning_summary(
+    warnings: &[TerminalWarning],
+    is_ssh: bool,
+) -> Option<crate::startup::ActionableStartupWarning> {
     if !is_ssh {
         return None;
     }
-    summarize_warnings_inner(warnings)
-}
-
-fn summarize_warnings_inner(
-    warnings: &[TerminalWarning],
-) -> Option<crate::startup::StartupWarning> {
     // Allow-list of categories where detection is a direct tmux subprocess
     // query that only triggers on an explicit non-good value, and the fix is
     // a single config line. Other categories stay suppressed until their
@@ -180,11 +199,20 @@ fn summarize_warnings_inner(
             WarningCategory::TmuxExtendedKeysOff | WarningCategory::DcsPassthrough
         )
     })?;
-    Some(crate::startup::StartupWarning {
-        severity: crate::startup::WarningSeverity::Warning,
-        message: "Clipboard may be unreachable.".to_string(),
-        action: Some("See /terminal-setup for potential fixes.".to_string()),
-    })
+    let ids = warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning.category,
+                WarningCategory::TmuxExtendedKeysOff | WarningCategory::DcsPassthrough
+            )
+        })
+        .filter_map(|warning| view::id_for(warning.category));
+    Some(crate::startup::ActionableStartupWarning::new(
+        crate::startup::WarningSeverity::Warning,
+        "Clipboard may be unreachable.",
+        ids,
+    ))
 }
 
 /// Collect all applicable startup warnings for the current terminal context.
@@ -210,23 +238,35 @@ pub(crate) fn collect_startup_warnings_from(
     // Apple Terminal.app does not support OSC 52. Over SSH, this means
     // clipboard writes can never reach the user's local machine.
     if ctx.brand == TerminalName::AppleTerminal && ctx.is_ssh {
-        warnings.push(TerminalWarning::new(
+        let mut warning = TerminalWarning::new(
             WarningCategory::UnsupportedTerminal,
-            "macOS Terminal does not support clipboard escape sequences (OSC 52) \
-             -- copy over SSH will not work.",
+            "Apple Terminal doesn't support OSC 52, so clipboard copy over SSH is unavailable",
             None,
             None,
-        ));
+        );
+        warning.note = Some(
+            "Grok also saves each copy to the backup file shown in the copy message. To copy \
+             directly, run `grok wrap ssh <host>` on your local computer or use a terminal that \
+             supports OSC 52. You can also use `/copy <file>` or `/minimal`."
+                .to_owned(),
+        );
+        warnings.push(warning);
     }
 
     // Byobu-on-screen: best-effort warning, no further tmux-specific checks.
     if ctx.byobu == Some(ByobuBackend::Screen) {
-        warnings.push(TerminalWarning::new(
+        let mut warning = TerminalWarning::new(
             WarningCategory::ByobuScreen,
-            "Byobu with GNU screen backend -- clipboard and display support is best-effort",
+            "Byobu is using GNU screen, which has limited clipboard and display support",
             None,
             None,
-        ));
+        );
+        warning.note = Some(
+            "Switch Byobu to its tmux backend, then restart or reattach the session. \
+             tmux-specific fixes apply only after you switch backends."
+                .to_owned(),
+        );
+        warnings.push(warning);
         return warnings;
     }
 
@@ -237,18 +277,17 @@ pub(crate) fn collect_startup_warnings_from(
     if ctx.is_tmux_backed() && matches!(tmux.control_mode, probes::TmuxProbeResult::Available(true))
     {
         let message = match fullscreen_active {
-            Some(true) => {
-                "tmux control mode detected -- fullscreen may be unreliable in control mode"
-            }
-            Some(false) => "tmux control mode detected -- running in degraded inline mode",
-            None => "tmux control mode detected -- terminal display may be degraded",
+            Some(true) => "Fullscreen may be unreliable in tmux control mode",
+            Some(false) => "Grok is using inline mode because tmux control mode limits fullscreen",
+            None => "Display may be limited in tmux control mode",
         };
-        warnings.push(TerminalWarning::new(
-            WarningCategory::ControlMode,
-            message,
-            None,
-            None,
-        ));
+        let mut warning = TerminalWarning::new(WarningCategory::ControlMode, message, None, None);
+        warning.note = Some(
+            "If display problems continue, connect with a regular tmux client instead of \
+             control mode."
+                .to_owned(),
+        );
+        warnings.push(warning);
     }
 
     // Resolve tmux config path once for all tmux-related warnings below.
@@ -262,16 +301,14 @@ pub(crate) fn collect_startup_warnings_from(
     if ctx.kitty_skip_reason() == Some("tmux_extended_keys_off") {
         let mut warning = TerminalWarning::new(
             WarningCategory::TmuxExtendedKeysOff,
-            "tmux extended-keys is off -- modifier key combinations may not reach the pager",
+            "`extended-keys` is off in tmux, so some shortcuts may not work",
             Some("set -g extended-keys on"),
             Some(&config_path),
         );
         // Existing tmux sessions cache the option; without an explicit
         // reload the user will edit the config, see no change, and
         // conclude the fix is broken.
-        warning.note = Some(format!(
-            "Then reload tmux: `tmux source-file {config_path}` (or detach and reattach)."
-        ));
+        warning.note = Some(tmux_reload_note(&config_path));
         warnings.push(warning);
     }
 
@@ -346,27 +383,27 @@ pub(crate) fn wezterm_kitty_keyboard_warning_from(
     if shape == WezTermShape::SshXtversion {
         let mut warning = TerminalWarning::new(
             WarningCategory::WezTermKittyKeyboardOff,
-            "WezTerm over SSH: Shift+Enter can't insert newlines",
+            "Shift+Enter can't insert a newline in WezTerm over SSH",
             None,
             None,
         );
         warning.note = Some(
-            "Type `\\` then Enter to insert a newline. The pager doesn't negotiate the \
-             kitty keyboard protocol over SSH yet; `enable_kitty_keyboard = true` in \
-             wezterm.lua fixes local WezTerm sessions only."
+            "For this session, type `\\` and then press Enter. Grok can't negotiate the Kitty \
+             keyboard protocol over SSH yet. `enable_kitty_keyboard = true` applies only to \
+             local WezTerm sessions."
                 .to_string(),
         );
         return Some(warning);
     }
     let mut warning = TerminalWarning::new(
         WarningCategory::WezTermKittyKeyboardOff,
-        "WezTerm: Shift+Enter can't insert newlines (kitty keyboard protocol is off)",
+        "Shift+Enter can't insert a newline because WezTerm's Kitty keyboard protocol is off",
         Some("config.enable_kitty_keyboard = true"),
         Some("~/.config/wezterm/wezterm.lua"),
     );
     warning.note = Some(
-        "Restart WezTerm after the change. Until then, type `\\` then Enter to insert \
-         a newline."
+        "Restart WezTerm after changing this setting. Until then, type `\\` and then press \
+         Enter to insert a newline."
             .to_string(),
     );
     Some(warning)
@@ -388,11 +425,16 @@ fn sandbox_profile_conflict_warning_from(conflicts: Vec<String>) -> Option<Termi
     Some(TerminalWarning {
         category: WarningCategory::SandboxProfileConflict,
         message: format!(
-            "Your project sandbox profile conflicts with user config.\nProfile: {profiles}\nProject config: .grok/sandbox.toml\nUser config: ~/.grok/sandbox.toml"
+            "Project and user sandbox settings define these profiles differently: {profiles}"
         ),
-        fix: Some("Using the user profile instead.".to_string()),
+        fix: None,
         config_path: None,
-        note: None,
+        note: Some(format!(
+            "Grok is using the user profile. Compare `.grok/sandbox.toml` with {}, then rename \
+             or remove the conflicting project profile. Project settings can add profile names \
+             but can't redefine a user profile.",
+            crate::util::display_user_grok_path("sandbox.toml")
+        )),
     })
 }
 
@@ -415,9 +457,9 @@ fn sandbox_profile_conflict_warning_from(conflicts: Vec<String>) -> Option<Termi
 ///   not a plain ssh terminal the user could wrap.
 ///
 /// This detector describes environment shape only; the
-/// `[ui.contextual_hints].ssh_wrap` policy gate is applied by the ephemeral
-/// tip's trigger (`AppView::maybe_trigger_ssh_wrap_tip`), while
-/// `/doctor` deliberately lists the recommendation unconditionally.
+/// `[ui.contextual_hints].ssh_wrap` policy gate controls the redirected
+/// ephemeral `/doctor` tip, while explicit `/doctor` lists the recommendation
+/// unconditionally.
 /// All inputs are injected so tests never touch ambient env (pattern:
 /// [`diagnose_wayland_data_control`]).
 pub fn ssh_wrap_hint(
@@ -430,16 +472,13 @@ pub fn ssh_wrap_hint(
     }
     let mut warning = TerminalWarning::new(
         WarningCategory::SshWithoutWrap,
-        "Running over SSH without `grok wrap` -- clipboard copies depend on the \
-         terminal's escape-sequence support, and a dropped connection can leave \
-         your local terminal in a bad state",
+        "Use local SSH wrapping for more reliable clipboard copy and terminal recovery",
         Some("grok wrap ssh <host>"),
         None,
     );
     warning.note = Some(
-        "Run it on your local machine in place of plain `ssh` -- it forwards \
-         clipboard copies to your local system and restores terminal modes if \
-         the connection drops."
+        "Run this on your local computer instead of plain `ssh`. It forwards copies to your \
+         local clipboard and restores terminal modes if the connection drops."
             .to_string(),
     );
     Some(warning)
@@ -456,41 +495,55 @@ pub fn ssh_wrap_hint(
 /// — [`summarize_warnings`] is SSH-gated — but after WezTerm: broken input
 /// outranks focus-dependent copies). Keeping the banner copy here (instead of
 /// at the call site) ties it to the warnings so the surfaces can't drift.
+fn actionable_assembled_warnings(
+    wezterm_warning: Option<&TerminalWarning>,
+    wayland_clipboard_warning: Option<&TerminalWarning>,
+    sandbox_profile_warning: Option<&TerminalWarning>,
+) -> Vec<crate::startup::ActionableStartupWarning> {
+    let mut warnings = Vec::new();
+    if sandbox_profile_warning.is_some() {
+        warnings.push(crate::startup::ActionableStartupWarning::new(
+            crate::startup::WarningSeverity::Warning,
+            "Project sandbox settings conflict with your settings.",
+            [SANDBOX_PROFILE_CONFLICT_ID],
+        ));
+    }
+    if wayland_clipboard_warning.is_some() {
+        warnings.insert(
+            0,
+            crate::startup::ActionableStartupWarning::new(
+                crate::startup::WarningSeverity::Warning,
+                "Copies need this terminal to stay focused.",
+                [DiagnosticId::new("terminal", "wayland-data-control")],
+            ),
+        );
+    }
+    if wezterm_warning.is_some() {
+        warnings.insert(
+            0,
+            crate::startup::ActionableStartupWarning::new(
+                crate::startup::WarningSeverity::Warning,
+                "Shift+Enter can't insert newlines in WezTerm.",
+                [DiagnosticId::new("terminal", "wezterm-kitty")],
+            ),
+        );
+    }
+    warnings
+}
+
 pub fn assemble_startup_warnings(
     wezterm_warning: Option<&TerminalWarning>,
     wayland_clipboard_warning: Option<&TerminalWarning>,
     sandbox_profile_warning: Option<&TerminalWarning>,
     mut summarized: Vec<crate::startup::StartupWarning>,
 ) -> Vec<crate::startup::StartupWarning> {
-    if let Some(w) = sandbox_profile_warning {
-        summarized.insert(
-            0,
-            crate::startup::StartupWarning {
-                severity: crate::startup::WarningSeverity::Warning,
-                message: w.message.clone(),
-                action: w.fix.clone(),
-            },
-        );
-    }
-    if wayland_clipboard_warning.is_some() {
-        summarized.insert(
-            0,
-            crate::startup::StartupWarning {
-                severity: crate::startup::WarningSeverity::Warning,
-                message: "Copies need this terminal to stay focused.".to_string(),
-                action: Some("See /terminal-setup for details.".to_string()),
-            },
-        );
-    }
-    if wezterm_warning.is_some() {
-        summarized.insert(
-            0,
-            crate::startup::StartupWarning {
-                severity: crate::startup::WarningSeverity::Warning,
-                message: "Shift+Enter newlines need a WezTerm config change.".to_string(),
-                action: Some("See /terminal-setup for the fix.".to_string()),
-            },
-        );
+    let actionable = actionable_assembled_warnings(
+        wezterm_warning,
+        wayland_clipboard_warning,
+        sandbox_profile_warning,
+    );
+    for warning in actionable.into_iter().rev() {
+        summarized.insert(0, warning.into_warning());
     }
     summarized
 }
@@ -511,17 +564,45 @@ pub fn collect_notification_warnings(
     protocol: NotificationProtocol,
     condition: NotificationCondition,
 ) -> Vec<TerminalWarning> {
+    collect_notification_warnings_with_method(
+        snapshot,
+        NotificationMethod::Auto,
+        protocol,
+        condition,
+    )
+}
+
+pub(crate) fn collect_notification_warnings_with_method(
+    snapshot: &probes::ProbeSnapshot<'_>,
+    method: NotificationMethod,
+    protocol: NotificationProtocol,
+    condition: NotificationCondition,
+) -> Vec<TerminalWarning> {
     let ctx = snapshot.terminal;
     let mut warnings = Vec::new();
 
+    if method == NotificationMethod::None {
+        return warnings;
+    }
+
     // Protocol fallback: BEL selected for an unknown terminal in auto mode.
-    if protocol == NotificationProtocol::Bel && ctx.brand == TerminalName::Unknown {
-        warnings.push(TerminalWarning::new(
+    if method == NotificationMethod::Auto
+        && protocol == NotificationProtocol::Bel
+        && ctx.brand == TerminalName::Unknown
+    {
+        let mut warning = TerminalWarning::new(
             WarningCategory::NotificationProtocolFallback,
-            "notification protocol fell back to BEL -- terminal not recognized",
+            "Grok is using the terminal bell because the terminal was not recognized",
             None,
             None,
+        );
+        warning.note = Some(format!(
+            "If the bell works for you, no change is needed. Otherwise, set `method` in \
+             `[ui.notifications]` in {} to a protocol your terminal supports. Set it to `none` \
+             to turn off terminal notifications.",
+            crate::util::display_user_grok_path("config.toml")
         ));
+        warnings.push(warning);
     }
 
     // tmux + OSC protocol: allow-passthrough must be on or OSC notification
@@ -535,27 +616,85 @@ pub fn collect_notification_warnings(
         && !matches!(val.as_str(), "on" | "all")
     {
         let config_path = ctx.tmux_config_path();
-        warnings.push(TerminalWarning::new(
+        let mut warning = TerminalWarning::new(
             WarningCategory::DcsPassthrough,
-            "tmux allow-passthrough is off -- OSC notifications will not reach the terminal",
+            "`allow-passthrough` is off in tmux, so terminal notifications are blocked",
             Some("set -g allow-passthrough on"),
             Some(&config_path),
-        ));
+        );
+        warning.note = Some(tmux_reload_note(&config_path));
+        warnings.push(warning);
     }
 
     // Focus tracking: if the terminal doesn't support it and the condition
     // is "unfocused", notifications will never fire because the pager will
     // always think the window is focused.
     if condition == NotificationCondition::Unfocused && !supports_focus_tracking(ctx.brand) {
-        warnings.push(TerminalWarning::new(
+        let mut warning = TerminalWarning::new(
             WarningCategory::FocusTrackingUnavailable,
-            "focus tracking may not be supported -- unfocused notifications may not fire",
-            Some("set condition = \"always\" in [ui.notifications]"),
-            None,
-        ));
+            "This terminal may not report focus changes, so notifications set to `unfocused` may not appear",
+            Some("condition = \"always\" in [ui.notifications]"),
+            Some(&crate::util::display_user_grok_path("config.toml")),
+        );
+        warning.note = Some(
+            "Use `always` to notify whether or not the terminal is focused. Use `never` or \
+             `method = \"none\"` to turn notifications off."
+                .to_owned(),
+        );
+        warnings.push(warning);
     }
 
     warnings
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TuiRuntimeRequest<'a> {
+    pub workspace: &'a Path,
+    pub notification_method: NotificationMethod,
+    pub notification_protocol: NotificationProtocol,
+    pub notification_condition: NotificationCondition,
+}
+
+/// Interpret current TUI-only notification and sandbox evidence as findings.
+pub(crate) fn collect_tui_runtime_findings(
+    snapshot: &probes::ProbeSnapshot<'_>,
+    method: NotificationMethod,
+    protocol: NotificationProtocol,
+    condition: NotificationCondition,
+    workspace: &Path,
+) -> Vec<DiagnosticFinding> {
+    collect_notification_warnings_with_method(snapshot, method, protocol, condition)
+        .into_iter()
+        .filter_map(view::finding_from_warning)
+        .chain(sandbox_profile_conflict_warning(workspace).and_then(view::finding_from_warning))
+        .collect()
+}
+
+pub(crate) fn merge_tui_runtime_findings(
+    report: &mut DiagnosticReport,
+    runtime_findings: impl IntoIterator<Item = DiagnosticFinding>,
+) {
+    for runtime_finding in runtime_findings {
+        if let Some(existing) = report
+            .findings
+            .iter_mut()
+            .find(|finding| finding.id == runtime_finding.id)
+        {
+            if existing.id == DiagnosticId::new("terminal", "dcs-passthrough") {
+                existing.message = runtime_finding.message;
+                existing.note = Some(match existing.note.take() {
+                    Some(note) => format!("{note} OSC terminal notifications are also blocked."),
+                    None => "OSC terminal notifications are also blocked.".to_owned(),
+                });
+            }
+        } else {
+            report.findings.push(runtime_finding);
+        }
+    }
+}
+
+fn tmux_reload_note(config_path: &str) -> String {
+    format!("Reload tmux with `tmux source-file {config_path}`, or detach and reattach.")
 }
 
 fn diagnose_clipboard_from_facts(
@@ -613,12 +752,14 @@ pub fn diagnose_clipboard_from_values(
     if let Some(val) = set_clipboard
         && !matches!(val, "on" | "external")
     {
-        warnings.push(TerminalWarning::new(
+        let mut warning = TerminalWarning::new(
             WarningCategory::Clipboard,
-            "OSC 52 clipboard passthrough is disabled",
+            "`set-clipboard` is off in tmux, so OSC 52 clipboard copies are blocked",
             Some("set -g set-clipboard on"),
             Some(config_path),
-        ));
+        );
+        warning.note = Some(tmux_reload_note(config_path));
+        warnings.push(warning);
     }
 
     // allow-passthrough: needed for DCS passthrough of OSC 52 in nested tmux.
@@ -630,12 +771,14 @@ pub fn diagnose_clipboard_from_values(
         && let Some(val) = allow_passthrough
         && !matches!(val, "on" | "all")
     {
-        warnings.push(TerminalWarning::new(
+        let mut warning = TerminalWarning::new(
             WarningCategory::DcsPassthrough,
-            "DCS passthrough is disabled (needed for nested clipboard)",
+            "`allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions",
             Some("set -g allow-passthrough on"),
             Some(config_path),
-        ));
+        );
+        warning.note = Some(tmux_reload_note(config_path));
+        warnings.push(warning);
     }
 
     warnings
@@ -659,15 +802,19 @@ pub fn diagnose_wayland_data_control(
     if !is_wayland || data_control {
         return None;
     }
-    let fix = (!wl_copy_available)
-        .then_some("sudo apt install wl-clipboard  (or your distro's equivalent)");
-    Some(TerminalWarning::new(
+    let fix = (!wl_copy_available).then_some("sudo apt install wl-clipboard");
+    let mut warning = TerminalWarning::new(
         WarningCategory::WaylandNoDataControl,
-        "Wayland compositor without the data-control clipboard protocol -- \
-         keep the terminal focused while copying until the copy toast confirms",
+        "Clipboard copies may fail if you switch away from this Wayland terminal",
         fix,
         None,
-    ))
+    );
+    warning.note = Some(
+        "Keep this terminal focused until the copy message appears. If your distribution does \
+         not use apt, install the `wl-clipboard` package with its package manager."
+            .to_owned(),
+    );
+    Some(warning)
 }
 
 pub fn diagnose_wayland_data_control_from_snapshot(
@@ -764,21 +911,7 @@ pub fn format_clipboard_diagnostics(input: ClipboardDiagnosticsInput<'_>) -> Cli
         ClipboardDelivery::Unverified => "unverified",
         ClipboardDelivery::Failed => "unavailable",
     };
-    let fix = match delivery {
-        ClipboardDelivery::Confirmed => None,
-        ClipboardDelivery::Unverified if input.is_ssh => {
-            Some("grok wrap <ssh command> or /minimal")
-        }
-        ClipboardDelivery::Unverified if input.container_no_display => {
-            Some("grok wrap <command> or /minimal")
-        }
-        ClipboardDelivery::Unverified => Some("grok wrap or /minimal"),
-        ClipboardDelivery::Failed if input.is_ssh => Some("grok wrap <ssh command> or /minimal"),
-        ClipboardDelivery::Failed if input.container_no_display => {
-            Some("grok wrap <command> or /minimal")
-        }
-        ClipboardDelivery::Failed => Some("/minimal"),
-    };
+    let has_issue = !delivery.is_confirmed();
 
     let mut out = String::from("Clipboard\n");
     out.push_str(&format!("  native       {native}\n"));
@@ -796,12 +929,12 @@ pub fn format_clipboard_diagnostics(input: ClipboardDiagnosticsInput<'_>) -> Cli
         ));
     }
     out.push_str(&format!("  status       {status}\n"));
-    if let Some(fix) = fix {
-        out.push_str(&format!("  fix          {fix}\n"));
+    if has_issue {
+        out.push_str("  action       Run /doctor for details and fixes\n");
     }
     ClipboardDiagnostics {
         text: out,
-        has_issue: !delivery.is_confirmed(),
+        has_issue,
     }
 }
 
@@ -822,11 +955,11 @@ pub fn color_support_warning(
     if level == ColorLevel::None {
         let mut warning = TerminalWarning::new(
             WarningCategory::LimitedColorSupport,
-            "NO_COLOR set -- themed colors disabled",
+            "Colors are off because `NO_COLOR` is set",
             None,
             None,
         );
-        warning.note = Some("Unset NO_COLOR and restart Grok.".to_string());
+        warning.note = Some("Unset `NO_COLOR`, then restart Grok.".to_string());
         return Some(warning);
     }
 
@@ -835,41 +968,44 @@ pub fn color_support_warning(
     if brand == TerminalName::AppleTerminal {
         let mut warning = TerminalWarning::new(
             WarningCategory::LimitedColorSupport,
-            "Terminal.app is 256-color -- truecolor themes unavailable",
+            "Apple Terminal supports 256 colors, so truecolor themes are unavailable",
             None,
             None,
         );
-        warning.note = Some("Switch to a truecolor terminal (e.g. Ghostty).".to_string());
+        warning.note = Some("Use a terminal that supports truecolor, such as Ghostty.".to_string());
         return Some(warning);
     }
 
     if is_tmux_backed {
         let mut warning = TerminalWarning::new(
             WarningCategory::LimitedColorSupport,
-            &format!("Color level is {level_label} -- truecolor themes unavailable"),
+            &format!(
+                "This terminal reports {level_label} color, so truecolor themes are unavailable"
+            ),
             Some("set -as terminal-features \",*:RGB\""),
             Some(tmux_config_path),
         );
         warning.note = Some(format!(
-            "Also: set -g default-terminal \"tmux-256color\"; export COLORTERM=truecolor; \
-             then `tmux source-file {tmux_config_path}`."
+            "In the same tmux config, also add `set -g default-terminal \"tmux-256color\"`. Add \
+             `export COLORTERM=truecolor` to your shell startup file. Then reload tmux with \
+             `tmux source-file {tmux_config_path}`, or detach and reattach, and restart Grok."
         ));
         return Some(warning);
     }
 
     let mut warning = TerminalWarning::new(
         WarningCategory::LimitedColorSupport,
-        &format!("Color level is {level_label} -- truecolor themes unavailable"),
+        &format!("This terminal reports {level_label} color, so truecolor themes are unavailable"),
         Some("export COLORTERM=truecolor"),
         None,
     );
-    warning.note = Some("Persist in ~/.zshrc / ~/.bashrc and restart Grok.".to_string());
+    warning.note = Some(
+        "Add this export to your shell startup file, such as `~/.zshrc` or `~/.bashrc`, then \
+         restart Grok."
+            .to_string(),
+    );
     Some(warning)
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1022,12 +1158,14 @@ mod tests {
 
     fn collect_notification_warnings(
         ctx: &TerminalContext,
+        method: NotificationMethod,
         protocol: NotificationProtocol,
         condition: NotificationCondition,
         query: &dyn probes::TmuxOptionQuery,
     ) -> Vec<TerminalWarning> {
-        super::collect_notification_warnings(
+        super::collect_notification_warnings_with_method(
             &test_snapshot(ctx, query, false, true, false, None),
+            method,
             protocol,
             condition,
         )
@@ -1131,7 +1269,7 @@ mod tests {
             "osc 52       unknown",
             "wrap         off",
             "status       unverified",
-            "fix          grok wrap <ssh command> or /minimal",
+            "action       Run /doctor for details and fixes",
         ] {
             assert!(
                 diagnostics.text.contains(expected),
@@ -1155,7 +1293,7 @@ mod tests {
         assert!(
             unsupported
                 .text
-                .contains("fix          grok wrap <ssh command> or /minimal")
+                .contains("action       Run /doctor for details and fixes")
         );
         assert!(unsupported.has_issue);
 
@@ -1230,7 +1368,7 @@ mod tests {
         assert!(
             container
                 .text
-                .contains("fix          grok wrap <command> or /minimal")
+                .contains("action       Run /doctor for details and fixes")
         );
 
         let remote_container = format_clipboard_diagnostics(ClipboardDiagnosticsInput {
@@ -1245,7 +1383,7 @@ mod tests {
         assert!(
             remote_container
                 .text
-                .contains("fix          grok wrap <ssh command> or /minimal")
+                .contains("action       Run /doctor for details and fixes")
         );
     }
 
@@ -1343,7 +1481,7 @@ mod tests {
     fn wayland_no_data_control_warns() {
         let w = diagnose_wayland_data_control(true, false, true).expect("must warn");
         assert_eq!(w.category, WarningCategory::WaylandNoDataControl);
-        assert!(w.message.contains("focused"));
+        assert!(w.message.contains("switch away"));
         assert!(w.fix.is_none(), "wl-copy present: nothing to install");
     }
 
@@ -1455,7 +1593,7 @@ mod tests {
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].category, WarningCategory::ControlMode);
         assert!(
-            w[0].message.contains("degraded inline"),
+            w[0].message.contains("inline mode"),
             "Inline control-mode should mention degraded inline mode"
         );
     }
@@ -1473,7 +1611,7 @@ mod tests {
             "Fullscreen control-mode should warn about unreliable fullscreen"
         );
         assert!(
-            !w[0].message.contains("degraded inline"),
+            !w[0].message.contains("inline mode"),
             "Fullscreen control-mode should NOT mention degraded inline mode"
         );
     }
@@ -1829,7 +1967,7 @@ mod tests {
         assert!(
             w.note
                 .as_deref()
-                .is_some_and(|n| n.starts_with("Type `\\`")),
+                .is_some_and(|n| n.starts_with("For this session, type `\\`")),
             "SSH note must lead with the backslash+Enter workaround"
         );
     }
@@ -1881,11 +2019,12 @@ mod tests {
     // -- assemble_startup_warnings: banner ordering ----------------------------
 
     fn clipboard_banner() -> crate::startup::StartupWarning {
-        crate::startup::StartupWarning {
-            severity: crate::startup::WarningSeverity::Warning,
-            message: "Clipboard may be unreachable.".to_string(),
-            action: None,
-        }
+        crate::startup::ActionableStartupWarning::new(
+            crate::startup::WarningSeverity::Warning,
+            "Clipboard may be unreachable.",
+            [DiagnosticId::new("terminal", "dcs-passthrough")],
+        )
+        .into_warning()
     }
 
     #[test]
@@ -1942,12 +2081,85 @@ mod tests {
 
         let w = sandbox_profile_conflict_warning_from(vec!["dev".to_string()]).unwrap();
         assert_eq!(w.category, WarningCategory::SandboxProfileConflict);
-        assert!(
-            w.message
-                .starts_with("Your project sandbox profile conflicts with user config.")
+        assert_eq!(
+            w.message,
+            "Project and user sandbox settings define these profiles differently: 'dev'"
         );
-        assert!(w.message.contains("Profile: 'dev'"));
-        assert_eq!(w.fix.as_deref(), Some("Using the user profile instead."));
+        assert!(w.fix.is_none());
+        assert!(w.config_path.is_none());
+        assert!(w.note.as_deref().is_some_and(|note| {
+            note.contains("rename or remove")
+                && note.contains(".grok/sandbox.toml")
+                && note.contains(&crate::util::display_user_grok_path("sandbox.toml"))
+                && note.contains("can't redefine")
+        }));
+    }
+
+    #[test]
+    fn actionable_startup_banners_keep_severity_order_and_share_doctor_cta() {
+        let wezterm = wezterm_kitty_keyboard_warning(&wezterm_ctx(), false, None).unwrap();
+        let wayland = diagnose_wayland_data_control(true, false, true).unwrap();
+        let sandbox = sandbox_profile_conflict_warning_from(vec!["dev".to_string()]).unwrap();
+        let out = assemble_startup_warnings(
+            Some(&wezterm),
+            Some(&wayland),
+            Some(&sandbox),
+            vec![clipboard_banner()],
+        );
+
+        assert_eq!(
+            out.iter()
+                .map(|warning| warning.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Shift+Enter can't insert newlines in WezTerm.",
+                "Copies need this terminal to stay focused.",
+                "Project sandbox settings conflict with your settings.",
+                "Clipboard may be unreachable.",
+            ]
+        );
+        assert!(
+            out.iter().all(|warning| {
+                warning.action.as_deref() == Some(crate::startup::DOCTOR_ACTION)
+            })
+        );
+
+        let tmux = [
+            TerminalWarning::new(
+                WarningCategory::DcsPassthrough,
+                "DCS passthrough is disabled",
+                Some("set -g allow-passthrough on"),
+                Some("~/.tmux.conf"),
+            ),
+            TerminalWarning::new(
+                WarningCategory::TmuxExtendedKeysOff,
+                "tmux extended-keys is off",
+                Some("set -g extended-keys on"),
+                Some("~/.tmux.conf"),
+            ),
+        ];
+        let mut actionable =
+            actionable_assembled_warnings(Some(&wezterm), Some(&wayland), Some(&sandbox));
+        actionable.push(actionable_warning_summary(&tmux, true).unwrap());
+        let report_findings = [wezterm, wayland, sandbox]
+            .into_iter()
+            .chain(tmux)
+            .filter_map(view::finding_from_warning)
+            .collect::<Vec<_>>();
+        for warning in actionable {
+            for id in warning.ids() {
+                let finding = report_findings
+                    .iter()
+                    .find(|finding| finding.id == *id)
+                    .unwrap_or_else(|| panic!("{id} missing from live doctor findings"));
+                assert!(
+                    finding.remediation.is_some()
+                        || finding.automatic_remediation.is_some()
+                        || finding.note.is_some(),
+                    "{id} has no useful content"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1956,13 +2168,13 @@ mod tests {
 
         let out = assemble_startup_warnings(None, None, Some(&sandbox), vec![]);
         assert_eq!(out.len(), 1);
-        assert!(out[0].message.contains("sandbox profile"));
+        assert!(out[0].message.contains("sandbox settings"));
 
         let wez = wezterm_kitty_keyboard_warning(&wezterm_ctx(), false, None).unwrap();
         let out = assemble_startup_warnings(Some(&wez), None, Some(&sandbox), vec![]);
         assert_eq!(out.len(), 2);
         assert!(out[0].message.contains("WezTerm"));
-        assert!(out[1].message.contains("sandbox profile"));
+        assert!(out[1].message.contains("sandbox settings"));
     }
 
     // -- ssh_wrap_hint: `grok wrap ssh` recommendation --------------------------
@@ -1980,7 +2192,7 @@ mod tests {
         assert!(
             w.note
                 .as_deref()
-                .is_some_and(|n| n.contains("local machine")),
+                .is_some_and(|n| n.contains("local computer")),
             "note must say where to run the command, got: {:?}",
             w.note
         );
@@ -2112,7 +2324,7 @@ mod tests {
         let extended = warnings.first().expect("warning must fire");
         assert_eq!(
             extended.message,
-            "tmux extended-keys is off -- modifier key combinations may not reach the pager"
+            "`extended-keys` is off in tmux, so some shortcuts may not work"
         );
         assert_eq!(extended.fix.as_deref(), Some("set -g extended-keys on"));
         assert_eq!(extended.config_path.as_deref(), Some("~/.tmux.conf"));
@@ -2148,12 +2360,12 @@ mod tests {
     fn summarize_warnings_surfaces_extended_keys_off() {
         let ctx = extended_keys_ctx(plain_tmux_ctx(), Some("off"));
         let warnings = collect_extended_keys_warnings(&ctx);
-        let summary = summarize_warnings_inner(&warnings).expect("welcome banner must surface");
+        let summary = summarize_warnings(&warnings, true).expect("welcome banner must surface");
         assert_eq!(summary.severity, crate::startup::WarningSeverity::Warning);
         assert_eq!(summary.message, "Clipboard may be unreachable.");
         assert_eq!(
             summary.action.as_deref(),
-            Some("See /terminal-setup for potential fixes.")
+            Some(crate::startup::DOCTOR_ACTION)
         );
     }
 
@@ -2161,12 +2373,12 @@ mod tests {
     fn summarize_warnings_surfaces_dcs_passthrough_off() {
         let warnings =
             diagnose_clipboard_from_values(Some("on"), true, Some("off"), "~/.tmux.conf");
-        let summary = summarize_warnings_inner(&warnings).expect("welcome banner must surface");
+        let summary = summarize_warnings(&warnings, true).expect("welcome banner must surface");
         assert_eq!(summary.severity, crate::startup::WarningSeverity::Warning);
         assert_eq!(summary.message, "Clipboard may be unreachable.");
         assert_eq!(
             summary.action.as_deref(),
-            Some("See /terminal-setup for potential fixes.")
+            Some(crate::startup::DOCTOR_ACTION)
         );
     }
 
@@ -2180,7 +2392,7 @@ mod tests {
             !warnings.is_empty(),
             "fixture sanity: clipboard warnings must fire"
         );
-        assert!(summarize_warnings_inner(&warnings).is_none());
+        assert!(summarize_warnings(&warnings, true).is_none());
     }
 
     #[test]
@@ -2193,13 +2405,13 @@ mod tests {
             warnings.len() >= 2,
             "fixture sanity: multiple warnings must fire"
         );
-        let summary = summarize_warnings_inner(&warnings).expect("surfaces allowed warning");
+        let summary = summarize_warnings(&warnings, true).expect("surfaces allowed warning");
         assert_eq!(summary.message, "Clipboard may be unreachable.");
     }
 
     #[test]
     fn summarize_warnings_empty_input_returns_none() {
-        assert!(summarize_warnings_inner(&[]).is_none());
+        assert!(summarize_warnings(&[], true).is_none());
     }
 
     #[test]
@@ -2220,8 +2432,8 @@ mod tests {
     // collect_notification_warnings
     // =====================================================================
 
-    use crate::notifications::NotificationCondition;
     use crate::notifications::protocol::NotificationProtocol;
+    use crate::notifications::{NotificationCondition, NotificationMethod};
 
     #[test]
     fn notification_bel_fallback_for_unknown_terminal() {
@@ -2233,13 +2445,177 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Always,
             &query,
         );
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].category, WarningCategory::NotificationProtocolFallback);
-        assert!(w[0].message.contains("BEL"));
+        assert!(w[0].message.contains("terminal bell"));
+    }
+
+    #[test]
+    fn notification_runtime_findings_map_to_visible_useful_doctor_entries() {
+        let ctx = TerminalContext {
+            brand: TerminalName::Unknown,
+            ..Default::default()
+        };
+        let query = FakeTmuxQuery::healthy_modern();
+        let snapshot = test_snapshot(&ctx, &query, false, true, false, None);
+        let workspace = tempfile::tempdir().unwrap();
+        let findings = collect_tui_runtime_findings(
+            &snapshot,
+            NotificationMethod::Auto,
+            NotificationProtocol::Bel,
+            NotificationCondition::Unfocused,
+            workspace.path(),
+        );
+
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.id)
+                .collect::<Vec<_>>(),
+            [
+                NOTIFICATION_PROTOCOL_FALLBACK_ID,
+                FOCUS_TRACKING_UNAVAILABLE_ID,
+            ]
+        );
+        assert!(
+            findings[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("bell"))
+        );
+        assert!(findings[1].remediation.as_ref().is_some_and(|remediation| {
+            remediation.fix.contains("condition = \"always\"")
+                && remediation.config_path.as_deref()
+                    == Some(crate::util::display_user_grok_path("config.toml").as_str())
+        }));
+    }
+
+    #[test]
+    fn every_production_warning_detector_maps_to_stable_useful_doctor_content() {
+        let config_path = "~/.tmux.conf";
+        let mut terminal = plain_tmux_ctx();
+        terminal.tmux_extended_keys = Some("off".to_owned());
+        let tmux = probes::TmuxProbeFacts {
+            version: probes::TmuxProbeResult::Available("tmux 3.4".to_owned()),
+            extended_keys: probes::TmuxProbeResult::Available("off".to_owned()),
+            set_clipboard: probes::TmuxProbeResult::Available("off".to_owned()),
+            allow_passthrough_support: probes::TmuxProbeResult::Available(()),
+            allow_passthrough: probes::TmuxProbeResult::Available("off".to_owned()),
+            control_mode: probes::TmuxProbeResult::Available(true),
+        };
+        let mut warnings = collect_startup_warnings_from(&terminal, &tmux, Some(false));
+        warnings.push(wezterm_kitty_keyboard_warning_from(&wezterm_ctx(), false, None).unwrap());
+        warnings.push(diagnose_wayland_data_control(true, false, false).unwrap());
+        warnings.push(
+            color_support_warning(
+                ColorLevel::Ansi256,
+                TerminalName::Unknown,
+                true,
+                config_path,
+            )
+            .unwrap(),
+        );
+        warnings.extend(collect_notification_warnings_with_method(
+            &test_snapshot(
+                &terminal,
+                &FakeTmuxQuery::healthy_modern(),
+                false,
+                true,
+                false,
+                None,
+            ),
+            NotificationMethod::Auto,
+            NotificationProtocol::Bel,
+            NotificationCondition::Unfocused,
+        ));
+        warnings.push(sandbox_profile_conflict_warning_from(vec!["dev".to_owned()]).unwrap());
+        warnings.push(ssh_wrap_hint(true, false, false).unwrap());
+
+        for warning in warnings {
+            let expected_disposition = view::disposition_for(warning.category);
+            let finding = view::finding_from_warning(warning)
+                .expect("production warning has a canonical finding");
+            assert_eq!(finding.disposition, expected_disposition, "{}", finding.id);
+            assert!(!finding.message.trim().is_empty(), "{}", finding.id);
+            assert!(
+                finding.remediation.is_some()
+                    || finding.automatic_remediation.is_some()
+                    || finding
+                        .note
+                        .as_ref()
+                        .is_some_and(|note| !note.trim().is_empty()),
+                "{} has no useful fix or note",
+                finding.id
+            );
+        }
+    }
+
+    #[test]
+    fn voice_missing_finding_has_stable_id_and_manual_remediation() {
+        let finding = voice_missing_finding(
+            "no microphone recorder found on PATH: install pipewire (pw-record)".to_owned(),
+        );
+        assert_eq!(finding.id, VOICE_NO_INPUT_DEVICE_ID);
+        assert_eq!(finding.disposition, FindingDisposition::Issue);
+        assert!(finding.message.contains("no microphone recorder"));
+        assert!(finding.remediation.is_none());
+        assert!(finding.automatic_remediation.is_none());
+        assert!(finding.note.as_deref().is_some_and(|note| {
+            note.contains("install a supported audio recorder")
+                && note.contains("grok doctor")
+                && note.contains("can't detect denied macOS microphone access")
+        }));
+    }
+
+    #[test]
+    fn notification_explicit_bel_unknown_terminal_is_intentional() {
+        let ctx = TerminalContext {
+            brand: TerminalName::Unknown,
+            ..Default::default()
+        };
+        let query = FakeTmuxQuery::healthy_modern();
+        let warnings = collect_notification_warnings(
+            &ctx,
+            NotificationMethod::Bel,
+            NotificationProtocol::Bel,
+            NotificationCondition::Unfocused,
+            &query,
+        );
+
+        assert!(
+            warnings.iter().all(|warning| {
+                warning.category != WarningCategory::NotificationProtocolFallback
+            })
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| { warning.category == WarningCategory::FocusTrackingUnavailable })
+        );
+    }
+
+    #[test]
+    fn notification_explicit_none_unknown_terminal_is_quiet() {
+        let ctx = TerminalContext {
+            brand: TerminalName::Unknown,
+            ..Default::default()
+        };
+        let query = FakeTmuxQuery::healthy_modern();
+        assert!(
+            collect_notification_warnings(
+                &ctx,
+                NotificationMethod::None,
+                NotificationProtocol::None,
+                NotificationCondition::Unfocused,
+                &query,
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2251,6 +2627,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Always,
             &query,
@@ -2264,6 +2641,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Osc99,
             NotificationProtocol::Osc99,
             NotificationCondition::Always,
             &query,
@@ -2280,6 +2658,7 @@ mod tests {
         };
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Osc9,
             NotificationProtocol::Osc9,
             NotificationCondition::Always,
             &query,
@@ -2291,11 +2670,59 @@ mod tests {
     }
 
     #[test]
+    fn runtime_findings_deduplicate_general_and_notification_dcs() {
+        let ctx = plain_tmux_ctx();
+        let query = FakeTmuxQuery {
+            allow_passthrough: Some("off".to_owned()),
+            ..FakeTmuxQuery::healthy_modern()
+        };
+        let snapshot = test_snapshot(&ctx, &query, false, true, false, None);
+        let doctor_snapshot = DiagnosticSnapshot::from_parts(
+            test_snapshot(&ctx, &query, false, true, false, None),
+            probes::ClipboardProbeFacts {
+                route: crate::clipboard::resolve_clipboard_route(&ctx),
+                native_tool: "pbcopy",
+                osc52_sink_active: false,
+            },
+            crate::host::HostOs::Macos,
+            crate::host::DisplayServer::Unknown,
+            false,
+            ColorLevel::TrueColor,
+            snapshot.runtime.into(),
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime_findings = collect_tui_runtime_findings(
+            &snapshot,
+            NotificationMethod::Osc9,
+            NotificationProtocol::Osc9,
+            NotificationCondition::Always,
+            workspace.path(),
+        );
+        let mut report = view::view(doctor_snapshot);
+        merge_tui_runtime_findings(&mut report, runtime_findings);
+
+        let dcs = report
+            .findings
+            .iter()
+            .filter(|finding| finding.id == DiagnosticId::new("terminal", "dcs-passthrough"))
+            .collect::<Vec<_>>();
+        assert_eq!(dcs.len(), 1);
+        assert!(dcs[0].message.contains("notifications are blocked"));
+        assert!(
+            dcs[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("notifications are also blocked"))
+        );
+    }
+
+    #[test]
     fn notification_tmux_passthrough_on_no_warning() {
         let ctx = plain_tmux_ctx();
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Osc9,
             NotificationProtocol::Osc9,
             NotificationCondition::Always,
             &query,
@@ -2312,6 +2739,7 @@ mod tests {
         };
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Always,
             &query,
@@ -2328,6 +2756,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Unfocused,
             &query,
@@ -2337,7 +2766,7 @@ mod tests {
             .filter(|w| w.category == WarningCategory::FocusTrackingUnavailable)
             .collect();
         assert_eq!(focus_warnings.len(), 1);
-        assert!(focus_warnings[0].message.contains("focus tracking"));
+        assert!(focus_warnings[0].message.contains("focus changes"));
         assert!(focus_warnings[0].fix.as_deref().unwrap().contains("always"));
     }
 
@@ -2347,6 +2776,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Unfocused,
             &query,
@@ -2367,6 +2797,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Always,
             &query,
@@ -2384,6 +2815,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Osc777,
             NotificationProtocol::Osc777,
             NotificationCondition::Unfocused,
             &query,
@@ -2415,6 +2847,7 @@ mod tests {
         // (BEL doesn't use passthrough, so no passthrough warning)
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Auto,
             NotificationProtocol::Bel,
             NotificationCondition::Unfocused,
             &query,
@@ -2433,6 +2866,7 @@ mod tests {
         };
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Osc9,
             NotificationProtocol::Osc9,
             NotificationCondition::Always,
             &query,
@@ -2447,6 +2881,7 @@ mod tests {
         let query = FakeTmuxQuery::unavailable();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::Osc99,
             NotificationProtocol::Osc99,
             NotificationCondition::Always,
             &query,
@@ -2466,6 +2901,7 @@ mod tests {
         let query = FakeTmuxQuery::healthy_modern();
         let w = collect_notification_warnings(
             &ctx,
+            NotificationMethod::None,
             NotificationProtocol::None,
             NotificationCondition::Unfocused,
             &query,
@@ -2529,12 +2965,12 @@ mod tests {
         )
         .expect("warn");
         assert_eq!(w.category, WarningCategory::LimitedColorSupport);
-        assert!(w.message.contains("Terminal.app"));
+        assert!(w.message.contains("Apple Terminal"));
         assert!(w.fix.is_none());
         assert!(
             w.note
                 .as_deref()
-                .is_some_and(|n| n.contains("e.g. Ghostty"))
+                .is_some_and(|n| n.contains("such as Ghostty"))
         );
     }
 
@@ -2579,6 +3015,6 @@ mod tests {
             "~/.tmux.conf",
         )
         .expect("fixture");
-        assert!(summarize_warnings_inner(&[w]).is_none());
+        assert!(summarize_warnings(&[w], true).is_none());
     }
 }

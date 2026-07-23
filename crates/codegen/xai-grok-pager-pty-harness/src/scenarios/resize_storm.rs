@@ -23,7 +23,7 @@ pub async fn run(harness: &mut PtyHarness, _content: &ContentController) -> Resu
         let (rows, cols) = if i % 2 == 0 { (35, 100) } else { (55, 160) };
         harness.resize(rows, cols)?;
         harness.update(RESIZE_INTERVAL);
-        if !harness.is_running() {
+        if !harness.is_running()? {
             return Err(anyhow!("pager exited during resize_storm at iter {i}"));
         }
     }

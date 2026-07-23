@@ -30,13 +30,23 @@ async fn out_of_band_stale_row_heals_on_focus_gained() {
 
     // Mock-auth env + pretend we're inside a neovim `:terminal` (sets the
     // embedded-editor context the doubled-line fix gates on).
-    let mut env = content.env_for_pager();
-    env.push(("NVIM".into(), "/tmp/grok-pty-harness-fake-nvim.sock".into()));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let overrides: Vec<(String, String)> =
+        vec![("NVIM".into(), "/tmp/grok-pty-harness-fake-nvim.sock".into())];
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut h =
-        PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn pager");
+    let mut h = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        &env_refs,
+    )
+    .expect("spawn pager");
 
     h.wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome screen");

@@ -534,7 +534,7 @@ pub async fn kill_stale_reachable_leaders(reason: &'static str) {
     crate::unified_log::info(
         "leader.startup_kill.begin",
         None,
-        Some(serde_json::json!({ "reason" : reason, "discovered" : discovered })),
+        Some(serde_json::json!({ "reason": reason, "discovered": discovered })),
     );
     let mut killed = 0usize;
     let mut failed = 0usize;
@@ -547,25 +547,25 @@ pub async fn kill_stale_reachable_leaders(reason: &'static str) {
                     crate::unified_log::warn(
                         "leader.startup_kill.killed",
                         None,
-                        Some(serde_json::json!(
-                            { "pid" : * pid, "dead_leader_ver" : dead_leader_ver,
-                            "reason" : reason, "killer_ver" : xai_grok_version::VERSION,
-                            }
-                        )),
+                        Some(serde_json::json!({
+                            "pid": *pid,
+                            "dead_leader_ver": dead_leader_ver,
+                            "reason": reason,
+                            "killer_ver": xai_grok_version::VERSION,
+                        })),
                     );
                 }
                 Err(e) => {
                     failed += 1;
-                    warn!(
-                        pid = * pid, error = % e, "failed to kill stale leader"
-                    );
+                    warn!(pid = *pid, error = %e, "failed to kill stale leader");
                     crate::unified_log::warn(
                         "leader.startup_kill.failed",
                         None,
-                        Some(serde_json::json!(
-                            { "pid" : * pid, "dead_leader_ver" : dead_leader_ver,
-                            "error" : e.to_string(), }
-                        )),
+                        Some(serde_json::json!({
+                            "pid": *pid,
+                            "dead_leader_ver": dead_leader_ver,
+                            "error": e.to_string(),
+                        })),
                     );
                 }
             }
@@ -576,10 +576,13 @@ pub async fn kill_stale_reachable_leaders(reason: &'static str) {
     crate::unified_log::info(
         "leader.startup_kill.done",
         None,
-        Some(serde_json::json!(
-            { "reason" : reason, "discovered" : discovered, "killed" : killed,
-            "failed" : failed, "timed_out" : timed_out, }
-        )),
+        Some(serde_json::json!({
+            "reason": reason,
+            "discovered": discovered,
+            "killed": killed,
+            "failed": failed,
+            "timed_out": timed_out,
+        })),
     );
 }
 fn resolve_target_from_descriptors(
@@ -1047,7 +1050,7 @@ impl LeaderReconnector {
                     return Ok(conn.into_channels_with_disconnect());
                 }
                 Err(e) => {
-                    warn!(attempt, error = % e, "Reconnection attempt failed");
+                    warn!(attempt, error = %e, "Reconnection attempt failed");
                     if let ReconnectPolicy::Bounded { max_attempts } = policy
                         && attempt >= max_attempts
                     {
@@ -1060,9 +1063,13 @@ impl LeaderReconnector {
                 }
             }
             tokio::select! {
-                _ = cancel.cancelled() => { let _ = self.status_tx
-                .send(ConnectionStatus::Failed { error : "Cancelled".into(), }); return
-                Err(ConnectionError::Cancelled); } _ = tokio::time::sleep(delay) => {}
+                _ = cancel.cancelled() => {
+                    let _ = self.status_tx.send(ConnectionStatus::Failed {
+                        error: "Cancelled".into(),
+                    });
+                    return Err(ConnectionError::Cancelled);
+                }
+                _ = tokio::time::sleep(delay) => {}
             }
             delay = std::cmp::min(delay * 2, RECONNECT_MAX_DELAY);
         }
@@ -1119,7 +1126,7 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
             Ok(Ok(ControlPayload::RelaunchDeclined { .. })) => "declined",
             Ok(Ok(_)) | Ok(Err(_)) => "send_failed",
             Err(e) => {
-                debug!(error = % e, "Relaunch request to stale leader failed");
+                debug!(error = %e, "Relaunch request to stale leader failed");
                 "send_failed"
             }
         };
@@ -1129,7 +1136,7 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
             Some(pid) => match crate::util::kill_process_by_pid(pid) {
                 Ok(()) => "signaled",
                 Err(e) => {
-                    warn!(error = % e, pid, "Failed to signal stale leader to exit");
+                    warn!(error = %e, pid, "Failed to signal stale leader to exit");
                     "signal_failed"
                 }
             },
@@ -1140,11 +1147,13 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
     xai_grok_telemetry::unified_log::warn(
         "leader.evict.vacate_requested",
         None,
-        Some(serde_json::json!(
-            { "method" : method, "outcome" : outcome, "leader_pid" : pid,
-            "leader_version" : leader_version, "client_version" :
-            CLIENT_LEADER_VERSION, }
-        )),
+        Some(serde_json::json!({
+            "method": method,
+            "outcome": outcome,
+            "leader_pid": pid,
+            "leader_version": leader_version,
+            "client_version": CLIENT_LEADER_VERSION,
+        })),
     );
 }
 /// Evict a below-floor leader that holds the socket but NOT the flock (the caller
@@ -1162,7 +1171,7 @@ async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
         if !crate::util::is_process_alive(pid) {
             "exited"
         } else if let Err(e) = crate::util::kill_process_by_pid(pid) {
-            warn!(error = % e, pid, "Failed to force-kill stale leader");
+            warn!(error = %e, pid, "Failed to force-kill stale leader");
             "timed_out"
         } else {
             wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
@@ -1178,11 +1187,13 @@ async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
     xai_grok_telemetry::unified_log::warn(
         "leader.evict.completed",
         None,
-        Some(serde_json::json!(
-            { "outcome" : outcome, "leader_pid" : pid, "leader_version" :
-            leader_version, "client_version" : CLIENT_LEADER_VERSION, "waited_ms" :
-            wait_start.elapsed().as_millis() as u64, }
-        )),
+        Some(serde_json::json!({
+            "outcome": outcome,
+            "leader_pid": pid,
+            "leader_version": leader_version,
+            "client_version": CLIENT_LEADER_VERSION,
+            "waited_ms": wait_start.elapsed().as_millis() as u64,
+        })),
     );
 }
 /// Connect to existing leader or spawn a new one.
@@ -1239,7 +1250,7 @@ pub async fn connect_or_spawn(
                     replacing_stale = true;
                 }
                 Err(e) => {
-                    debug!(error = % e, "Connection to existing socket failed");
+                    debug!(error = %e, "Connection to existing socket failed");
                 }
             }
         }
@@ -1254,9 +1265,7 @@ pub async fn connect_or_spawn(
                 {
                     if !should_evict_conn(&conn) {
                         if let Err(e) = lock.release() {
-                            warn!(
-                                error = % e, "Failed to release lock after adopting leader"
-                            );
+                            warn!(error = %e, "Failed to release lock after adopting leader");
                         }
                         let elapsed_ms = start.elapsed().as_millis() as u64;
                         info!(
@@ -1266,12 +1275,15 @@ pub async fn connect_or_spawn(
                         xai_grok_telemetry::unified_log::info(
                             "leader.spawn.sibling_adopted",
                             None,
-                            Some(serde_json::json!(
-                                { "leader_pid" : lock.read_pid(), "leader_version" : conn
-                                .registration().leader_binary_version.as_deref(),
-                                "client_version" : CLIENT_LEADER_VERSION, "elapsed_ms" :
-                                elapsed_ms, }
-                            )),
+                            Some(serde_json::json!({
+                                "leader_pid": lock.read_pid(),
+                                "leader_version": conn
+                                    .registration()
+                                    .leader_binary_version
+                                    .as_deref(),
+                                "client_version": CLIENT_LEADER_VERSION,
+                                "elapsed_ms": elapsed_ms,
+                            })),
                         );
                         return Ok(conn);
                     }
@@ -1280,12 +1292,12 @@ pub async fn connect_or_spawn(
                 }
                 info!("Acquired lock, spawning leader subprocess");
                 if let Err(e) = lock.cleanup_socket() {
-                    warn!(error = % e, "Failed to clean up stale socket");
+                    warn!(error = %e, "Failed to clean up stale socket");
                 }
                 spawn_leader_subprocess(env_urls)?;
                 wait_for_listener_ready(&sock_path).await?;
                 if let Err(e) = lock.release() {
-                    warn!(error = % e, "Failed to release lock");
+                    warn!(error = %e, "Failed to release lock");
                 }
                 let conn = connect_to_leader(&sock_path, client_type, mode, capabilities).await?;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -1294,10 +1306,11 @@ pub async fn connect_or_spawn(
                     xai_grok_telemetry::unified_log::info(
                         "leader.spawn.replacement",
                         None,
-                        Some(serde_json::json!(
-                            { "reason" : "version_floor", "client_version" :
-                            CLIENT_LEADER_VERSION, "elapsed_ms" : elapsed_ms, }
-                        )),
+                        Some(serde_json::json!({
+                            "reason": "version_floor",
+                            "client_version": CLIENT_LEADER_VERSION,
+                            "elapsed_ms": elapsed_ms,
+                        })),
                     );
                 }
                 return Ok(conn);
@@ -1417,7 +1430,7 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
             cmd.stderr(std::process::Stdio::from(log_file));
         }
         Err(e) => {
-            warn!(error = % e, "Failed to create leader log file, using /dev/null");
+            warn!(error = %e, "Failed to create leader log file, using /dev/null");
             cmd.stderr(std::process::Stdio::null());
         }
     }
@@ -1486,7 +1499,7 @@ pub(crate) async fn wait_for_socket_connectable(
             match connect_to_leader(sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => return Ok(conn),
                 Err(e) => {
-                    debug!(error = % e, "Connection attempt failed, retrying");
+                    debug!(error = %e, "Connection attempt failed, retrying");
                     last_error = Some(e);
                 }
             }
@@ -1698,9 +1711,13 @@ mod tests {
             None
         };
         let mut cases: Vec<(Option<String>, bool)> = vec![
+            // Same version as this client → keep.
             (Some(CLIENT_LEADER_VERSION.to_string()), false),
+            // Newer than this client → keep (never downgrade).
             (Some(newer), false),
+            // Dev build reports "unknown" → keep (unparseable is left alone).
             (Some("unknown".to_string()), false),
+            // Legacy leader without version metadata → keep (safe fallback).
             (None, false),
         ];
         if let Some(older) = older {

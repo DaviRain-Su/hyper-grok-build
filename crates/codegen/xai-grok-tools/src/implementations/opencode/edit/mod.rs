@@ -79,15 +79,13 @@ pub struct EditInput {
     )]
     pub new_string: String,
 
-    /// When true, replace every occurrence of `old_string` (default false).
+    /// When true, replace every occurrence of `old_string`.
     #[serde(
         default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
+        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
-    #[schemars(
-        description = "Replace all occurrences of ${{ params.edit.oldString }} (default false)"
-    )]
-    pub replace_all: Option<bool>,
+    #[schemars(description = "Replace all occurrences of ${{ params.edit.oldString }}")]
+    pub replace_all: bool,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -197,7 +195,7 @@ impl xai_tool_runtime::Tool for EditTool {
         };
         let tool_call_id = ctx.call_id.as_str().to_owned();
 
-        let replace_all = input.replace_all.unwrap_or(false);
+        let replace_all = input.replace_all;
 
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
@@ -521,8 +519,28 @@ mod tests {
             file_path: file_path.to_string(),
             old_string: old_string.to_string(),
             new_string: new_string.to_string(),
-            replace_all: None,
+            replace_all: false,
         }
+    }
+
+    #[test]
+    fn replace_all_defaults_false_and_schema_is_boolean() {
+        let missing: EditInput =
+            serde_json::from_str(r#"{"filePath":"/f","oldString":"a","newString":"b"}"#).unwrap();
+        assert!(!missing.replace_all);
+
+        let nullv: EditInput = serde_json::from_str(
+            r#"{"filePath":"/f","oldString":"a","newString":"b","replaceAll":null}"#,
+        )
+        .unwrap();
+        assert!(!nullv.replace_all);
+
+        let schema = serde_json::to_value(schemars::schema_for!(EditInput)).unwrap();
+        // rename_all = camelCase → replaceAll
+        let p = &schema["properties"]["replaceAll"];
+        assert_eq!(p["type"], "boolean", "schema: {schema}");
+        assert_eq!(p["default"], false, "schema: {schema}");
+        assert!(p.get("anyOf").is_none(), "schema: {schema}");
     }
 
     // ── Tool metadata ───────────────────────────────────────────────
@@ -560,7 +578,7 @@ mod tests {
         assert_eq!(input.file_path, "src/main.rs");
         assert_eq!(input.old_string, "hello");
         assert_eq!(input.new_string, "goodbye");
-        assert_eq!(input.replace_all, Some(true));
+        assert!(input.replace_all);
     }
 
     #[test]
@@ -572,7 +590,7 @@ mod tests {
         });
         let input: EditInput = serde_json::from_value(json).unwrap();
         assert_eq!(input.file_path, "test.txt");
-        assert_eq!(input.replace_all, None);
+        assert!(!input.replace_all);
     }
 
     // ── Validation ──────────────────────────────────────────────────
@@ -816,7 +834,7 @@ mod tests {
             file_path: "test.txt".to_string(),
             old_string: "aaa".to_string(),
             new_string: "ccc".to_string(),
-            replace_all: Some(true),
+            replace_all: true,
         };
         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await
@@ -990,7 +1008,7 @@ mod tests {
             file_path: "test.txt".to_string(),
             old_string: "foo".to_string(),
             new_string: "qux".to_string(),
-            replace_all: Some(true),
+            replace_all: true,
         };
         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await

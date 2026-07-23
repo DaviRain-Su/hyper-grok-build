@@ -27,6 +27,7 @@ impl AgentView {
     /// outright).
     pub(crate) fn bind_session_id(&mut self, session_id: agent_client_protocol::SessionId) {
         if self.session.session_id.as_ref() != Some(&session_id) {
+            self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.last_seen_event_id = None;
             self.last_applied_event_seq = None;
             self.last_applied_xai_event_seq = None;
@@ -37,6 +38,7 @@ impl AgentView {
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
         if self.session.session_id.take().is_some() {
+            self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.clear_minimal_btw_lifecycle();
         }
     }
@@ -79,6 +81,7 @@ impl AgentView {
         let prompt = PromptWidget::new_with_cwd(&session.cwd);
         let mut view = Self {
             session,
+            session_binding_epoch: 0,
             scrollback,
             prompt,
             tip_typing_dismissed: false,
@@ -263,6 +266,7 @@ impl AgentView {
             permission_queue: VecDeque::new(),
             next_perm_req_id: 0,
             permission_stashed_prompt: None,
+            permission_stashed_pane: None,
             plan_approval_view: None,
             latest_inline_plan_content: None,
             plan_comments: Vec::new(),
@@ -292,6 +296,7 @@ impl AgentView {
             billing_surface_visible: false,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
+            rewind_suppress_deadline: None,
             pending_first_prompt: None,
             pending_fork_banner: None,
             loading_placeholder_id: None,
@@ -1051,9 +1056,10 @@ mod resolve_turn_activity_tests {
         view.session.handle_update(
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from("wait-1")),
-                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!(
-                    { "task_ids" : ["bg-1"], "timeout_ms" : 30_000, }
-                ))),
+                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-1"],
+                    "timeout_ms": 30_000,
+                }))),
             )),
             &meta,
             &mut view.scrollback,
@@ -1113,9 +1119,10 @@ mod resolve_turn_activity_tests {
                     .kind(acp::ToolKind::Other)
                     .status(acp::ToolCallStatus::Pending)
                     .content(vec![])
-                    .raw_input(Some(serde_json::json!(
-                        { "task_ids" : ["bg-2"], "timeout_ms" : 5_000, }
-                    )))
+                    .raw_input(Some(serde_json::json!({
+                        "task_ids": ["bg-2"],
+                        "timeout_ms": 5_000,
+                    })))
                     .locations(vec![]),
             ),
             &meta,
@@ -1170,10 +1177,10 @@ mod resolve_turn_activity_tests {
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)
                 .content(vec![])
-                .raw_input(Some(serde_json::json!(
-                    { "task_ids" : ["bg-a", "missing-b", "missing-c"],
-                    "timeout_ms" : 5_000, }
-                )))
+                .raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-a", "missing-b", "missing-c"],
+                    "timeout_ms": 5_000,
+                })))
                 .locations(vec![]),
             ),
             &meta,
@@ -1234,10 +1241,10 @@ mod resolve_turn_activity_tests {
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)
                 .content(vec![])
-                .raw_input(Some(serde_json::json!(
-                    { "task_ids" : ["bg-long", "missing-b"], "timeout_ms" :
-                    5_000, }
-                )))
+                .raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-long", "missing-b"],
+                    "timeout_ms": 5_000,
+                })))
                 .locations(vec![]),
             ),
             &meta,
@@ -1324,9 +1331,10 @@ mod resolve_turn_activity_tests {
                 .kind(acp::ToolKind::Other)
                 .status(acp::ToolCallStatus::Pending)
                 .content(vec![])
-                .raw_input(Some(serde_json::json!(
-                    { "task_ids" : ["sub-id-42"], "timeout_ms" : 10_000, }
-                )))
+                .raw_input(Some(serde_json::json!({
+                    "task_ids": ["sub-id-42"],
+                    "timeout_ms": 10_000,
+                })))
                 .locations(vec![]),
             ),
             &meta,
@@ -1383,9 +1391,10 @@ mod resolve_turn_activity_tests {
                     .kind(acp::ToolKind::Other)
                     .status(acp::ToolCallStatus::Pending)
                     .content(vec![])
-                    .raw_input(Some(serde_json::json!(
-                        { "task_ids" : ["bg-3"], "timeout_ms" : 5_000, }
-                    )))
+                    .raw_input(Some(serde_json::json!({
+                        "task_ids": ["bg-3"],
+                        "timeout_ms": 5_000,
+                    })))
                     .locations(vec![]),
             ),
             &meta,

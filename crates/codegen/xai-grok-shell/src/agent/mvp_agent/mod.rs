@@ -267,7 +267,7 @@ fn chat_new_session_model_state(
         && !state.available_models.iter().any(|m| m.model_id.0.as_ref() == requested)
     {
         tracing::warn!(
-            requested_model = % requested,
+            requested_model = %requested,
             "chat session/new _meta.modelId not in the /rest/modes catalog; \
              reporting it as current anyway (picker may diverge from catalog)"
         );
@@ -294,7 +294,7 @@ pub(crate) fn parse_session_plugin_dirs(
     let mut dirs = Vec::new();
     for entry in entries {
         let Some(raw) = entry.as_str() else {
-            tracing::warn!(? entry, "pluginDirs entry is not a string; skipping");
+            tracing::warn!(?entry, "pluginDirs entry is not a string; skipping");
             continue;
         };
         let path = std::path::PathBuf::from(raw);
@@ -427,6 +427,8 @@ pub(crate) struct PromptResponseMeta {
     pub structured_output: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
 }
 /// Inputs for [`build_prompt_response_meta`]. A struct (not positional args)
 /// so call sites are self-documenting and adding a field can't silently
@@ -441,6 +443,7 @@ pub(crate) struct PromptResponseMetaArgs<'a> {
     pub cancellation_category: Option<String>,
     pub cancel_trigger: Option<String>,
     pub structured_output: Option<Result<serde_json::Value, String>>,
+    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
 }
 /// Build the `_meta` JSON for `PromptResponse`. Includes baseline
 /// session/prompt/model identifiers plus optional per-turn token counts
@@ -458,6 +461,7 @@ pub(crate) fn build_prompt_response_meta(
         cancellation_category,
         cancel_trigger,
         structured_output,
+        tool_overrides,
     } = args;
     let (structured_output, structured_output_error) = match structured_output {
         Some(Ok(value)) => (Some(value), None),
@@ -479,6 +483,7 @@ pub(crate) fn build_prompt_response_meta(
         cancel_trigger,
         structured_output,
         structured_output_error,
+        tool_overrides,
     };
     serde_json::to_value(meta).expect("PromptResponseMeta is always serializable")
 }
@@ -491,6 +496,8 @@ pub(crate) fn build_prompt_response_meta(
 struct SettingsUpdateNotification {
     show_resolved_model: Option<bool>,
     sharing_enabled: Option<bool>,
+    privacy_notice_rollout: Option<bool>,
+    privacy_banner_reshow_days: Option<u64>,
     session_picker_grouped: Option<bool>,
     tips: Option<Vec<String>>,
     announcements: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
@@ -1268,8 +1275,12 @@ fn emit_login_span(
     error_category: Option<&str>,
 ) {
     let span = tracing::info_span!(
-        "auth.lifecycle", action = "login", success, auth_method, user_id =
-        tracing::field::Empty, error_category = tracing::field::Empty,
+        "auth.lifecycle",
+        action = "login",
+        success,
+        auth_method,
+        user_id = tracing::field::Empty,
+        error_category = tracing::field::Empty,
     );
     if let Some(uid) = user_id
         .filter(|u| !u.is_empty() && !u.eq_ignore_ascii_case("unknown"))
@@ -1317,7 +1328,7 @@ impl MvpAgent {
         let env = match serde_json::from_str::<RawLinePeek<'_>>(line) {
             Ok(e) => e,
             Err(e) => {
-                tracing::debug!(? e, "replay: skipping unparseable JSONL line");
+                tracing::debug!(?e, "replay: skipping unparseable JSONL line");
                 return;
             }
         };
@@ -1348,9 +1359,7 @@ impl MvpAgent {
                 let Ok(mut params) = serde_json::from_str::<
                     serde_json::Value,
                 >(raw_params.get()) else {
-                    tracing::debug!(
-                        "replay: skipping xAI update with unparseable params"
-                    );
+                    tracing::debug!("replay: skipping xAI update with unparseable params");
                     return;
                 };
                 if let Some(obj) = params.as_object_mut() {
@@ -1393,8 +1402,8 @@ impl MvpAgent {
             match &mut notification.update {
                 acp::SessionUpdate::ToolCall(tc) => {
                     let is_pre_completed = matches!(
-                        tc.status, acp::ToolCallStatus::Completed |
-                        acp::ToolCallStatus::Failed
+                        tc.status,
+                        acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
                     );
                     if is_pre_completed {} else {
                         pending_tool_calls.insert(tc.tool_call_id.clone(), tc.clone());
@@ -1445,13 +1454,11 @@ impl MvpAgent {
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
     ) -> Result<(u64, u64, Vec<(String, String)>), acp::Error> {
-        let mut replay_timer = crate::instrumentation_timer!(
-            "session.load_session_replay"
-        );
+        let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
         let Some(updates_path) = updates_file_path.clone() else {
-            tracing::warn!(session_id = % session_id.0, "replay: no updates file path");
+            tracing::warn!(session_id = %session_id.0, "replay: no updates file path");
             return Ok((0, 0, Vec::new()));
         };
         let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
@@ -1469,13 +1476,15 @@ impl MvpAgent {
             let sending = prepared.lines.len();
             if prepared.mark_replay {
                 tracing::warn!(
-                    session_id = % session_id.0,
+                    session_id = %session_id.0,
                     "replay: cursor not found, falling back to full replay"
                 );
             } else {
                 tracing::info!(
-                    session_id = % session_id.0, skipped = prepared.total_live - sending,
-                    remaining = sending, "replay: cursor found, skipping events"
+                    session_id = %session_id.0,
+                    skipped = prepared.total_live - sending,
+                    remaining = sending,
+                    "replay: cursor found, skipping events"
                 );
             }
         }
@@ -1510,15 +1519,16 @@ impl MvpAgent {
             );
         }
         {
-            let _timer = crate::instrumentation_timer!(
-                "session.replay.drain_completions"
-            );
+            let _timer = crate::instrumentation_timer!("session.replay.drain_completions");
             for rx in completions {
                 let _ = rx.await;
             }
         }
         tracing::info!(
-            session_id = % session_id.0, updates_count, end_offset, file_size,
+            session_id = %session_id.0,
+            updates_count,
+            end_offset,
+            file_size,
             "replay: completed"
         );
         replay_timer.with_field("updates_count", updates_count);
@@ -1579,7 +1589,9 @@ impl MvpAgent {
         }
         if delta_count > 0 {
             tracing::info!(
-                session_id = % session_id.0, delta_count, from_offset,
+                session_id = %session_id.0,
+                delta_count,
+                from_offset,
                 "Delta replay enqueued updates (drain pending)"
             );
         }
@@ -1702,7 +1714,8 @@ impl MvpAgent {
         }
         if !completions.is_empty() {
             tracing::info!(
-                session_id = % session_id.0, stale_count = completions.len(),
+                session_id = %session_id.0,
+                stale_count = completions.len(),
                 "Emitted task_completed for stale background tasks"
             );
         }
@@ -1745,7 +1758,7 @@ impl MvpAgent {
             .unwrap_or(0);
         if result == 0 {
             tracing::warn!(
-                path = % updates_path.display(),
+                path = %updates_path.display(),
                 "extract_initial_tokens: no totalTokens found in updates tail, \
                  token tracking will rely on conversation estimate until first model response"
             );
@@ -1805,15 +1818,17 @@ impl MvpAgent {
             .await;
         if let Some(unblocked) = result {
             tracing::info!(
-                new_tier = % unblocked.new_tier, "subscription detected, lifting gate"
+                new_tier = %unblocked.new_tier,
+                "subscription detected, lifting gate"
             );
             xai_grok_telemetry::unified_log::info(
                 "paywall_check_gate_lifting",
                 None,
                 Some(
-                    serde_json::json!(
-                        { "user_id" : user_id, "new_tier" : unblocked.new_tier, }
-                    ),
+                    serde_json::json!({
+                    "user_id": user_id,
+                    "new_tier": unblocked.new_tier,
+                }),
                 ),
             );
             if let Some(settings) = unblocked.settings {
@@ -1836,16 +1851,17 @@ impl MvpAgent {
                 && !settings_allow_access(self.cfg.borrow().remote_settings.as_ref())
             {
                 tracing::info!(
-                    new_tier = % unblocked.new_tier,
+                    new_tier = %unblocked.new_tier,
                     "subscription detected but allow_access still false, keeping gate"
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "paywall_check_gate_kept_allow_access_false",
                     None,
                     Some(
-                        serde_json::json!(
-                            { "user_id" : user_id, "new_tier" : unblocked.new_tier, }
-                        ),
+                        serde_json::json!({
+                        "user_id": user_id,
+                        "new_tier": unblocked.new_tier,
+                    }),
                     ),
                 );
                 return;
@@ -1864,23 +1880,21 @@ impl MvpAgent {
                     xai_grok_telemetry::unified_log::info(
                         "paywall_check_jwt_refreshed",
                         None,
-                        Some(serde_json::json!({ "user_id" : user_id })),
+                        Some(serde_json::json!({ "user_id": user_id })),
                     );
                     true
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        error = % e,
-                        "post-unblock: JWT refresh failed, user may need to re-login on next restart"
-                    );
+                    tracing::warn!(error = %e, "post-unblock: JWT refresh failed, user may need to re-login on next restart");
                     xai_grok_telemetry::unified_log::warn(
                         "paywall_check_error",
                         None,
                         Some(
-                            serde_json::json!(
-                                { "user_id" : user_id, "kind" :
-                                "post_unblock_refresh_failed", "detail" : e.to_string(), }
-                            ),
+                            serde_json::json!({
+                            "user_id": user_id,
+                            "kind": "post_unblock_refresh_failed",
+                            "detail": e.to_string(),
+                        }),
                         ),
                     );
                     false
@@ -1906,28 +1920,34 @@ impl MvpAgent {
                         "model catalog: post_subscription_unblock refresh",
                         None,
                         Some(
-                            serde_json::json!(
-                                { "user_id" : user_id_log, "new_tier" : new_tier,
-                                "refresh_ok" : refresh_ok, "jwt_claim" : jwt_claim_log,
-                                "jwt_matches_new_tier" : true, }
-                            ),
+                            serde_json::json!({
+                            "user_id": user_id_log,
+                            "new_tier": new_tier,
+                            "refresh_ok": refresh_ok,
+                            "jwt_claim": jwt_claim_log,
+                            "jwt_matches_new_tier": true,
+                        }),
                         ),
                     );
                     models_manager.on_auth_changed().await;
                 });
             } else {
                 tracing::warn!(
-                    refresh_ok, jwt_claim = ? jwt_claim, new_tier = % unblocked.new_tier,
+                    refresh_ok,
+                    jwt_claim = ?jwt_claim,
+                    new_tier = %unblocked.new_tier,
                     "post-unblock: JWT tier claim missing or stale vs live tier; deferring model catalog refresh with retry"
                 );
                 xai_grok_telemetry::unified_log::warn(
                     "model catalog: post_subscription_unblock deferred (jwt tier missing or stale)",
                     None,
                     Some(
-                        serde_json::json!(
-                            { "user_id" : user_id, "new_tier" : unblocked.new_tier,
-                            "refresh_ok" : refresh_ok, "jwt_claim" : jwt_claim, }
-                        ),
+                        serde_json::json!({
+                        "user_id": user_id,
+                        "new_tier": unblocked.new_tier,
+                        "refresh_ok": refresh_ok,
+                        "jwt_claim": jwt_claim,
+                    }),
                     ),
                 );
                 spawn_post_unblock_jwt_and_catalog_retry(
@@ -1942,7 +1962,9 @@ impl MvpAgent {
             xai_grok_telemetry::unified_log::info(
                 "paywall_check_no_subscription",
                 None,
-                Some(serde_json::json!({ "user_id" : user_id, })),
+                Some(serde_json::json!({
+                    "user_id": user_id,
+                })),
             );
         }
     }
@@ -2053,7 +2075,7 @@ impl MvpAgent {
             if let Err(e) = xai_fast_worktree::WorktreeDb::open_default()
                 .and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &opts))
             {
-                tracing::warn!(error = % e, "auto worktree gc failed");
+                tracing::warn!(error = %e, "auto worktree gc failed");
             }
         });
     }
@@ -2065,6 +2087,9 @@ impl MvpAgent {
             SettingsUpdateNotification {
                 show_resolved_model: rs.and_then(|s| s.show_resolved_model),
                 sharing_enabled: rs.and_then(|s| s.sharing_enabled),
+                privacy_notice_rollout: rs.and_then(|s| s.privacy_notice_rollout),
+                privacy_banner_reshow_days: rs
+                    .and_then(|s| s.privacy_banner_reshow_days),
                 session_picker_grouped: rs.and_then(|s| s.session_picker_grouped),
                 tips: rs.and_then(|s| s.tips.clone()),
                 announcements: rs.and_then(|s| s.announcements.clone()),
@@ -2190,9 +2215,7 @@ impl MvpAgent {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            tracing::debug!(
-                "proactive bundle sync skipped: another sync is already in flight"
-            );
+            tracing::debug!("proactive bundle sync skipped: another sync is already in flight");
             return;
         }
         let proxy_base_url = self.cli_chat_proxy_base_url();
@@ -2215,15 +2238,18 @@ impl MvpAgent {
             match result {
                 Ok(Some(res)) => {
                     tracing::info!(
-                        version = % res.version, personas = res.personas_count, roles =
-                        res.roles_count, agents = res.agents_count, skills = res
-                        .skills_count, "proactive bundle sync complete"
+                        version = %res.version,
+                        personas = res.personas_count,
+                        roles = res.roles_count,
+                        agents = res.agents_count,
+                        skills = res.skills_count,
+                        "proactive bundle sync complete"
                     );
                     Self::broadcast_refresh_skill_baseline(senders);
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    tracing::warn!(error = % err, "proactive bundle sync failed");
+                    tracing::warn!(error = %err, "proactive bundle sync failed");
                 }
             }
         });
@@ -2247,7 +2273,8 @@ async fn handle_synthetic_turn_trace(
         };
         let Some(info) = session_info else {
             tracing::debug!(
-                session_id = % request.session_id.0, prompt_id = % request.prompt_id,
+                session_id = %request.session_id.0,
+                prompt_id = %request.prompt_id,
                 "Synthetic trace: session not found, skipping",
             );
             return;
@@ -2283,7 +2310,8 @@ async fn handle_synthetic_turn_trace(
     let trace_context = this.get_trace_context(&info, turn_number).await;
     let Some(ctx) = trace_context else {
         tracing::info!(
-            session_id = % request.session_id.0, prompt_id = % request.prompt_id,
+            session_id = %request.session_id.0,
+            prompt_id = %request.prompt_id,
             "Synthetic trace: trace uploads disabled, skipping",
         );
         return;
@@ -2323,16 +2351,21 @@ async fn handle_synthetic_turn_trace(
         "synthetic_before_uploads",
         async move {
             futures::join!(
-                upload_session_state(& before_ctx, "before", request
-                .before_session_copy_rx, UploadWait::Confirm,), upload_metadata(&
-                before_ctx, metadata),
-            );
+            upload_session_state(
+                &before_ctx,
+                "before",
+                request.before_session_copy_rx,
+                UploadWait::Confirm,
+            ),
+            upload_metadata(&before_ctx, metadata),
+        );
         },
     );
     let turn_result = request.completion_rx.await;
     let Ok(prompt_result) = turn_result else {
         tracing::debug!(
-            session_id = % request.session_id.0, prompt_id = % request.prompt_id,
+            session_id = %request.session_id.0,
+            prompt_id = %request.prompt_id,
             "Synthetic trace: turn completion channel dropped, skipping",
         );
         return;
@@ -2417,9 +2450,7 @@ async fn handle_synthetic_turn_trace(
         .send(SessionCommand::CopyFile {
             respond_to: session_copy_tx,
         });
-    let synthetic_committed = matches!(
-        & prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn)
-    );
+    let synthetic_committed = matches!(&prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn));
     let streaming_partial = crate::upload::turn::take_streaming_partial(
             &ctx.session_handle.cmd_tx,
             request.prompt_id.clone(),
@@ -2464,8 +2495,9 @@ async fn handle_synthetic_turn_trace(
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(
-                        error = % e, "Synthetic turn trace upload failed (non-fatal)",
-                    );
+                    error = %e,
+                    "Synthetic turn trace upload failed (non-fatal)",
+                );
                 }
             }
         },
@@ -2513,7 +2545,10 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
         xai_grok_telemetry::unified_log::info(
             "model catalog: post_subscription_unblock jwt retry skipped (already in flight)",
             None,
-            Some(serde_json::json!({ "user_id" : user_id, "new_tier" : new_tier, })),
+            Some(serde_json::json!({
+                "user_id": user_id,
+                "new_tier": new_tier,
+            })),
         );
         return;
     }
@@ -2549,14 +2584,10 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             let detail = match (&refresh_result, &jwt_claim) {
                                 (Ok(_), None) => "refresh_ok but no tier claim".to_string(),
                                 (Ok(_), Some(c)) => {
-                                    format!(
-                                        "refresh_ok but stale tier claim={c} (want {new_tier})"
-                                    )
+                                    format!("refresh_ok but stale tier claim={c} (want {new_tier})")
                                 }
                                 (Err(e), Some(c)) => {
-                                    format!(
-                                        "refresh_err={e}; stale tier claim={c} (want {new_tier})"
-                                    )
+                                    format!("refresh_err={e}; stale tier claim={c} (want {new_tier})")
                                 }
                                 (Err(e), None) => e.to_string(),
                             };
@@ -2572,11 +2603,13 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                             "model catalog: post_subscription_unblock jwt retry scheduled",
                             None,
                             Some(
-                                serde_json::json!(
-                                    { "user_id" : user_id, "new_tier" : new_tier, "attempt" :
-                                    attempt, "max_retries" : max_retries, "delay_ms" : delay
-                                    .as_millis() as u64, }
-                                ),
+                                serde_json::json!({
+                            "user_id": user_id,
+                            "new_tier": new_tier,
+                            "attempt": attempt,
+                            "max_retries": max_retries,
+                            "delay_ms": delay.as_millis() as u64,
+                        }),
                             ),
                         );
                     }
@@ -2589,9 +2622,10 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                     "model catalog: post_subscription_unblock refresh (after jwt retry)",
                     None,
                     Some(
-                        serde_json::json!(
-                            { "user_id" : user_id, "new_tier" : new_tier, }
-                        ),
+                        serde_json::json!({
+                        "user_id": user_id,
+                        "new_tier": new_tier,
+                    }),
                     ),
                 );
                 models_manager.on_auth_changed().await;
@@ -2601,10 +2635,11 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
                     "model catalog: post_subscription_unblock jwt retry exhausted",
                     None,
                     Some(
-                        serde_json::json!(
-                            { "user_id" : user_id, "new_tier" : new_tier, "error" : e
-                            .to_string(), }
-                        ),
+                        serde_json::json!({
+                        "user_id": user_id,
+                        "new_tier": new_tier,
+                        "error": e.to_string(),
+                    }),
                     ),
                 );
             }

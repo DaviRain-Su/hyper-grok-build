@@ -11,7 +11,7 @@
   },
   {
     "category": "features",
-    "description": "**grok doctor** now shows standalone terminal, tmux, clipboard, and keyboard diagnostics without starting the TUI.",
+    "description": "**grok doctor** checks terminal, tmux, clipboard, and keyboard setup without opening the TUI.",
     "breaking_change": false
   },
   {

@@ -2,23 +2,24 @@
 //!
 //! Runs the grok binary as a subprocess with the mock server, captures output.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use tempfile::TempDir;
 use tokio::io::AsyncReadExt as _;
 
-use crate::env::{grok_binary, test_env_cmd_tokio};
+use crate::env::grok_binary;
 use crate::mock_server::MockInferenceServer;
+use crate::process::{TestOutput, TestProcess, TestProcessConfig};
+use crate::sandbox::TestSandbox;
 
 pub struct HeadlessResult {
     pub status: ExitStatus,
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
-    /// Wall time of the grok invocation; logged so CI timeout budgets can be
-    /// tuned against observed durations.
+    /// Wall time of the headless command invocation; logged so CI timeout
+    /// budgets can be tuned against observed durations.
     pub elapsed: Duration,
 }
 
@@ -28,8 +29,10 @@ fn headless_timeout() -> Duration {
     crate::scaled(Duration::from_secs(60))
 }
 
-/// Run `grok` with the given args against the mock server, bounded by
-/// [`headless_timeout_secs`]. Uses an isolated HOME and disables telemetry.
+const HEADLESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Run `grok` with the given args against the mock server, bounded by the
+/// scaled headless timeout. Uses an isolated HOME and disables telemetry.
 pub async fn run_headless(
     server: &MockInferenceServer,
     args: &[&str],
@@ -39,91 +42,185 @@ pub async fn run_headless(
 }
 
 /// Like [`run_headless`], but with extra environment variables applied after the
-/// shared defaults so they take precedence — e.g. to re-enable a feature the
-/// defaults turn off.
+/// sandbox baseline so they take precedence — e.g. to re-enable a feature the
+/// baseline turns off.
 pub async fn run_headless_with_env(
     server: &MockInferenceServer,
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
 ) -> HeadlessResult {
-    let home = TempDir::new().expect("create temp home");
+    let sandbox = TestSandbox::builder().mock_url(server.url()).build();
     let mut cmd = tokio::process::Command::new(grok_binary());
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
-    cmd.envs(env.iter().copied());
-    run_headless_with_cmd(cmd).await
+    cmd.args(args).current_dir(cwd);
+    run_headless_with_cmd_and_sandbox(cmd, &sandbox, env).await
 }
 
-pub async fn run_headless_with_cmd(mut cmd: tokio::process::Command) -> HeadlessResult {
-    let binary = grok_binary();
+/// Apply and retain one [`TestSandbox`] while running a custom headless command.
+pub async fn run_headless_in_sandbox(
+    cmd: tokio::process::Command,
+    sandbox: TestSandbox,
+) -> HeadlessResult {
+    run_headless_in_sandbox_with_env(cmd, sandbox, &[]).await
+}
+
+pub async fn run_headless_in_sandbox_with_env(
+    cmd: tokio::process::Command,
+    sandbox: TestSandbox,
+    overrides: &[(&str, &str)],
+) -> HeadlessResult {
+    run_headless_in_sandbox_borrowed_with_env(cmd, &sandbox, overrides).await
+}
+
+/// Run a custom headless command while leaving the caller's sandbox available
+/// for post-run artifact inspection.
+pub async fn run_headless_in_sandbox_borrowed(
+    cmd: tokio::process::Command,
+    sandbox: &TestSandbox,
+) -> HeadlessResult {
+    run_headless_in_sandbox_borrowed_with_env(cmd, sandbox, &[]).await
+}
+
+pub async fn run_headless_in_sandbox_borrowed_with_env(
+    cmd: tokio::process::Command,
+    sandbox: &TestSandbox,
+    overrides: &[(&str, &str)],
+) -> HeadlessResult {
+    run_headless_with_cmd_and_sandbox(cmd, sandbox, overrides).await
+}
+
+async fn run_headless_with_cmd_and_sandbox(
+    cmd: tokio::process::Command,
+    sandbox: &TestSandbox,
+    overrides: &[(&str, &str)],
+) -> HeadlessResult {
+    let program = PathBuf::from(cmd.as_std().get_program());
     let started = std::time::Instant::now();
-    let mut child = cmd
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn grok binary at {}: {e}", binary.display()));
+    let mut process = TestProcess::spawn(
+        cmd,
+        sandbox,
+        TestProcessConfig::new()
+            .label(format!("headless command {}", program.display()))
+            .stdout(TestOutput::Piped)
+            .stderr(TestOutput::Piped)
+            .envs(overrides.iter().copied()),
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "failed to spawn headless command at {}: {error}\n{}",
+            program.display(),
+            sandbox.diagnostic_summary(),
+        )
+    });
 
-    let stdout = child.stdout.take().expect("child stdout missing");
-    let stderr = child.stderr.take().expect("child stderr missing");
-
+    let mut stdout = process.take_stdout().expect("child stdout missing");
     let stdout_handle = tokio::spawn(async move {
-        let mut stdout = stdout;
-        let mut stdout_buf = Vec::new();
-        stdout.read_to_end(&mut stdout_buf).await?;
-        Ok::<Vec<u8>, std::io::Error>(stdout_buf)
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        Ok::<Vec<u8>, std::io::Error>(bytes)
     });
+    let mut stderr = process.take_stderr().expect("child stderr missing");
     let stderr_handle = tokio::spawn(async move {
-        let mut stderr = stderr;
-        let mut stderr_buf = Vec::new();
-        stderr.read_to_end(&mut stderr_buf).await?;
-        Ok::<Vec<u8>, std::io::Error>(stderr_buf)
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await?;
+        Ok::<Vec<u8>, std::io::Error>(bytes)
     });
 
-    let (status, timed_out) = match tokio::time::timeout(headless_timeout(), child.wait()).await {
-        Ok(result) => (
-            result.unwrap_or_else(|e| {
-                panic!("failed to wait for grok binary {}: {e}", binary.display())
-            }),
-            false,
-        ),
-        Err(_) => {
-            let _ = child.kill().await;
-            let status = child.wait().await.unwrap_or_else(|e| {
+    let (status, timed_out) = match process
+        .wait_with_deadline(headless_timeout())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to wait for headless command {}: {error}\n{}",
+                program.display(),
+                process.diagnostic_summary(),
+            )
+        }) {
+        Some(status) => (status, false),
+        None => {
+            let status = process.kill().await.unwrap_or_else(|error| {
                 panic!(
-                    "failed to kill timed out grok binary {}: {e}",
-                    binary.display()
+                    "failed to kill timed out headless command {}: {error}\n{}",
+                    program.display(),
+                    process.diagnostic_summary(),
                 )
             });
             (status, true)
         }
     };
 
-    let stdout_bytes = match stdout_handle.await {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(err)) => panic!("failed to read stdout from {}: {err}", binary.display()),
-        Err(err) => panic!("stdout task join failed for {}: {err}", binary.display()),
-    };
-    let stderr_bytes = match stderr_handle.await {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(err)) => panic!("failed to read stderr from {}: {err}", binary.display()),
-        Err(err) => panic!("stderr task join failed for {}: {err}", binary.display()),
-    };
+    let stdout = finish_output_drain(
+        stdout_handle,
+        process.stdout_tail().text,
+        "stdout",
+        &program,
+        &process,
+    )
+    .await;
+    let stderr = finish_output_drain(
+        stderr_handle,
+        process.stderr_tail().text,
+        "stderr",
+        &program,
+        &process,
+    )
+    .await;
 
     let elapsed = started.elapsed();
     // Timing breadcrumb for tuning CI timeout budgets against observed
     // durations (visible with --nocapture).
-    eprintln!("[harness-timing] headless grok run: {elapsed:?} (timed_out={timed_out})");
+    eprintln!(
+        "[harness-timing] headless command {}: {elapsed:?} (timed_out={timed_out})",
+        program.display()
+    );
 
     HeadlessResult {
         status,
-        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        stdout,
+        stderr,
         timed_out,
         elapsed,
+    }
+}
+
+async fn finish_output_drain(
+    mut handle: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+    partial_tail: String,
+    stream: &str,
+    program: &Path,
+    process: &TestProcess,
+) -> String {
+    match tokio::time::timeout(HEADLESS_DRAIN_TIMEOUT, &mut handle).await {
+        Ok(Ok(Ok(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(
+                %stream,
+                program = %program.display(),
+                %error,
+                "headless output drain failed; returning captured partial tail"
+            );
+            partial_tail
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %stream,
+                program = %program.display(),
+                %error,
+                "headless output task failed; returning captured partial tail"
+            );
+            partial_tail
+        }
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+            tracing::warn!(
+                %stream,
+                program = %program.display(),
+                diagnostics = %process.diagnostic_summary(),
+                "headless output drain timed out; returning captured partial tail"
+            );
+            partial_tail
+        }
     }
 }
 
@@ -172,6 +269,93 @@ pub fn assert_no_crashes(stderr: &str) {
             !lower.contains(&pattern.to_lowercase()),
             "stderr contains crash indicator '{pattern}':\n{}",
             stderr_tail(stderr, 500)
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn borrowed_runner_keeps_sandbox_artifacts_available() {
+        let sandbox = TestSandbox::new();
+        let artifact = sandbox.temp_dir().join("borrowed-headless.txt");
+        let script = format!("printf kept > '{}'", artifact.display());
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.args(["-c", &script]);
+
+        let result = run_headless_in_sandbox_borrowed(cmd, &sandbox).await;
+
+        assert!(result.status.success(), "stderr: {}", result.stderr);
+        assert_eq!(std::fs::read_to_string(artifact).unwrap(), "kept");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_drain_timeout_returns_partial_capture() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _keep_open = tx;
+            let _ = rx.await;
+            Ok::<Vec<u8>, std::io::Error>(b"complete".to_vec())
+        });
+        let sandbox = TestSandbox::new();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let mut process = TestProcess::spawn(
+            command,
+            &sandbox,
+            TestProcessConfig::new().label("headless-drain-test"),
+        )
+        .expect("spawn drain fixture");
+        process
+            .wait_with_deadline(Duration::from_secs(2))
+            .await
+            .expect("wait fixture")
+            .expect("fixture exits");
+
+        let output = finish_output_drain(
+            handle,
+            "partial".to_owned(),
+            "stdout",
+            Path::new("fixture"),
+            &process,
+        )
+        .await;
+        assert_eq!(output, "partial");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn custom_headless_env_is_explicit_and_wins_after_sandbox_baseline() {
+        let sandbox = TestSandbox::new();
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "printf '%s|%s|%s|%s' \"${AMBIENT_ONLY-unset}\" \"$GROK_PROMPT_SUGGESTIONS\" \"$FEATURE_TEST_VAR\" \"$HOME\"",
+        ])
+        .env("AMBIENT_ONLY", "discarded")
+        .env("GROK_PROMPT_SUGGESTIONS", "command-level-discarded");
+
+        let result = run_headless_in_sandbox_borrowed_with_env(
+            cmd,
+            &sandbox,
+            &[
+                ("GROK_PROMPT_SUGGESTIONS", "explicit-override"),
+                ("FEATURE_TEST_VAR", "enabled"),
+            ],
+        )
+        .await;
+
+        assert!(result.status.success(), "stderr: {}", result.stderr);
+        assert_eq!(
+            result.stdout,
+            format!(
+                "unset|explicit-override|enabled|{}",
+                sandbox.home().display()
+            )
         );
     }
 }

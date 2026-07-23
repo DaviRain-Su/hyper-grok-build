@@ -219,11 +219,18 @@ pub(super) fn do_cancel_turn(app: &mut AppView, cancel_subagents: bool) -> Vec<E
         Some(stashed) => agent.scrollback.is_committed(stashed.scrollback_entry),
         None => false,
     };
+    // The rewind REPLACES the composer with the stashed in-flight prompt.
+    // Esc (and the mouse stop / palette cancel) fire with the draft intact —
+    // unlike keyboard Ctrl+C, which only cancels on an empty prompt — so a
+    // non-empty composer holds a NEWER draft the rewind would clobber.
+    // Trigger-agnostic on purpose: fall back to the standard cancel.
+    let composer_has_draft = !agent.prompt.text().is_empty() || !agent.prompt.images.is_empty();
     let rewinding = agent.shared_queue.is_empty()
         && app.cancel_rewind_enabled
         && agent.session.in_flight_prompt.is_some()
         && agent.session.pending_prompts.is_empty()
-        && !in_flight_committed;
+        && !in_flight_committed
+        && !composer_has_draft;
     if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
         if let Some(pid) = agent.session.current_prompt_id.clone() {
             agent.note_rewound_prompt(&pid);

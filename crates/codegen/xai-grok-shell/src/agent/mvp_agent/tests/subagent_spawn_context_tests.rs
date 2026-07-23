@@ -1,6 +1,6 @@
 //! Subagent spawn-context inheritance: a child session must inherit the parent's
-//! permission handle and goal-loop gate so policy and run-state can't be bypassed
-//! by delegating to a subagent.
+//! permission handle, goal-loop gate, and configured tool-overrides cutoff so policy,
+//! run-state, and a backtest bound can't be bypassed by delegating to a subagent.
 
 use super::{build_minimal_agent_for_tests, make_test_handle};
 use agent_client_protocol as acp;
@@ -131,5 +131,45 @@ async fn subagent_spawn_context_inherits_parent_ask_user_question_gate() {
     assert!(
         ctx_on.ask_user_question_enabled,
         "subagent must inherit the parent's enabled ask_user_question gate"
+    );
+}
+
+#[tokio::test]
+async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
+    let agent = build_minimal_agent_for_tests();
+
+    let cutoff = xai_grok_sampling_types::ToolOverrides {
+        x_search: Some(xai_grok_sampling_types::XSearchOptions {
+            date_bound: Some(
+                xai_grok_sampling_types::SearchDateBound::new(None, Some("2020-01-01".to_string()))
+                    .unwrap(),
+            ),
+        }),
+        web_search: None,
+    };
+
+    let sid = acp::SessionId::new("parent-cutoff");
+    let handle = make_test_handle("test-model", false, None);
+    handle
+        .resolved_tool_overrides
+        .store(Some(std::sync::Arc::new(cutoff.clone())));
+    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    assert_eq!(
+        ctx.inherited_tool_overrides,
+        Some(cutoff),
+        "subagent context must inherit the parent's configured cutoff for its first-turn update"
+    );
+
+    // A parent with no configured cutoff must not fabricate one for the child.
+    let sid_none = acp::SessionId::new("parent-unbounded");
+    agent.sessions.borrow_mut().insert(
+        sid_none.clone(),
+        make_test_handle("test-model", false, None),
+    );
+    let ctx_none = agent.build_subagent_spawn_context(sid_none.0.as_ref());
+    assert!(
+        ctx_none.inherited_tool_overrides.is_none(),
+        "an unbounded parent must not hand a subagent a cutoff"
     );
 }

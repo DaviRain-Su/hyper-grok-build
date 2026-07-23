@@ -13,10 +13,16 @@ async fn undo_tip_session_cap_blocks_fourth_show() {
     let content = ContentController::start().await.expect("start content");
     let binary = pager_binary().expect("resolve pager binary");
     // Contextual hints ship default-OFF; opt in explicitly so the tip shows.
-    let env = contextual_hints_env(&content);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut harness =
-        PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn");
+    let env_refs = CONTEXTUAL_HINTS_ENV;
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        env_refs,
+    )
+    .expect("spawn");
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome");

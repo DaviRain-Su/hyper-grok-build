@@ -155,49 +155,17 @@ impl JsonlStorageAdapter {
     /// Returns the path to each session directory (not the summary file).
     /// Shared by both `list_sessions` (full scan) and `list_sessions_recent`
     /// (mtime-based tail).
-    fn scan_session_dirs(&self, cwd: Option<&str>) -> Vec<PathBuf> {
+    fn scan_session_dirs(&self, cwd: Option<&str>) -> io::Result<Vec<PathBuf>> {
         let root_dir = match &self.dir_mode {
-            SessionDirMode::FromRoot(root) => root.clone(),
-            SessionDirMode::Explicit(_) => return Vec::new(),
+            SessionDirMode::FromRoot(root) => root,
+            SessionDirMode::Explicit(_) => return Ok(Vec::new()),
         };
-        let sessions_root = root_dir.join("sessions");
-        if !sessions_root.exists() {
-            return Vec::new();
-        }
-        let mut scan_cwds: Vec<PathBuf> = Vec::new();
-        if let Some(cwd_str) = cwd {
-            let enc = crate::util::grok_home::encode_cwd_dirname(cwd_str);
-            scan_cwds.push(sessions_root.join(enc));
-        } else {
-            match std::fs::read_dir(&sessions_root) {
-                Ok(it) => {
-                    for entry in it.flatten() {
-                        let p = entry.path();
-                        if p.is_dir() {
-                            scan_cwds.push(p);
-                        }
-                    }
-                }
-                Err(_) => return Vec::new(),
-            }
-        }
-        let mut session_dirs = Vec::new();
-        for cwd_dir in scan_cwds {
-            let it = match std::fs::read_dir(&cwd_dir) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for entry in it.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    session_dirs.push(path);
-                }
-            }
-        }
-        session_dirs
+        crate::session::storage::relocation::RelocationView::load(root_dir)
+            .and_then(|view| view.session_dirs(cwd))
+            .map_err(io::Error::other)
     }
     fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
-        let session_dirs = self.scan_session_dirs(cwd);
+        let session_dirs = self.scan_session_dirs(cwd)?;
         let mut summaries = Vec::new();
         for session_dir in session_dirs {
             let summary_path = session_dir.join(super::SUMMARY_FILE);
@@ -229,7 +197,7 @@ impl JsonlStorageAdapter {
     /// this reduces cold-boot `workspace_list` from ~3s to ~200ms.
     /// Final order among candidates uses `last_active_at` else `updated_at`.
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
-        let session_dirs = self.scan_session_dirs(None);
+        let session_dirs = self.scan_session_dirs(None)?;
         let mut candidates: Vec<(PathBuf, std::time::SystemTime)> =
             Vec::with_capacity(session_dirs.len());
         for session_dir in session_dirs {
@@ -341,7 +309,7 @@ impl JsonlStorageAdapter {
                 file.read_exact(&mut last)?;
                 if last[0] != b'\n' {
                     tracing::warn!(
-                        path = % path.display(),
+                        path = %path.display(),
                         "jsonl file has a torn trailing line (previous append crashed mid-write?); terminating it before appending"
                     );
                     line.insert(0, b'\n');
@@ -613,7 +581,8 @@ impl JsonlStorageAdapter {
                     skipped_lines += 1;
                     if skipped_lines == 1 {
                         tracing::warn!(
-                            error = % error, path = % path.display(),
+                            error = %error,
+                            path = %path.display(),
                             "skipping unparseable updates.jsonl line (torn append?)"
                         );
                     }
@@ -622,7 +591,9 @@ impl JsonlStorageAdapter {
         }
         if skipped_lines > 0 {
             tracing::warn!(
-                skipped = skipped_lines, loaded = updates.len(), path = % path.display(),
+                skipped = skipped_lines,
+                loaded = updates.len(),
+                path = %path.display(),
                 "skipped unparseable session update lines"
             );
         }
@@ -704,7 +675,8 @@ impl JsonlStorageAdapter {
         entries.truncate(MAX_RESTORED_WORKFLOW_RUNS);
         if entries_truncated {
             tracing::warn!(
-                path = % workflows_dir.display(), limit = MAX_RESTORED_WORKFLOW_RUNS,
+                path = %workflows_dir.display(),
+                limit = MAX_RESTORED_WORKFLOW_RUNS,
                 "workflow restore run-count cap reached; ignoring remaining entries"
             );
         }
@@ -733,10 +705,7 @@ impl JsonlStorageAdapter {
                 Ok(manifest) => manifest,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    tracing::warn!(
-                        path = % manifest_path.display(), % error,
-                        "skipping invalid workflow manifest"
-                    );
+                    tracing::warn!(path = %manifest_path.display(), %error, "skipping invalid workflow manifest");
                     continue;
                 }
             };
@@ -748,10 +717,7 @@ impl JsonlStorageAdapter {
                 || run_dir.file_name().and_then(|name| name.to_str())
                     != Some(manifest.state.run_id.as_str())
             {
-                tracing::warn!(
-                    path = % manifest_path.display(),
-                    "skipping unsupported or mismatched workflow manifest"
-                );
+                tracing::warn!(path = %manifest_path.display(), "skipping unsupported or mismatched workflow manifest");
                 continue;
             }
             let script_path = crate::session::workflow::store::script_revision_path(
@@ -768,28 +734,23 @@ impl JsonlStorageAdapter {
             }) {
                 Ok(script) => script,
                 Err(error) => {
-                    tracing::warn!(
-                        path = % script_path.display(), % error,
-                        "skipping workflow with missing immutable script"
-                    );
+                    tracing::warn!(path = %script_path.display(), %error, "skipping workflow with missing immutable script");
                     continue;
                 }
             };
             let args_path = run_dir.join("args.json");
-            let args =
-                match read_bounded_nofollow(&args_path, MAX_WORKFLOW_ARGS_BYTES).and_then(|bytes| {
+            let args = match read_bounded_nofollow(&args_path, MAX_WORKFLOW_ARGS_BYTES).and_then(
+                |bytes| {
                     serde_json::from_slice(&bytes)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-                }) {
-                    Ok(args) => args,
-                    Err(error) => {
-                        tracing::warn!(
-                            path = % args_path.display(), % error,
-                            "skipping workflow with missing immutable args"
-                        );
-                        continue;
-                    }
-                };
+                },
+            ) {
+                Ok(args) => args,
+                Err(error) => {
+                    tracing::warn!(path = %args_path.display(), %error, "skipping workflow with missing immutable args");
+                    continue;
+                }
+            };
             restored.push(crate::session::workflow::store::RestoredWorkflowRun {
                 manifest,
                 script,
@@ -918,15 +879,19 @@ impl JsonlStorageAdapter {
                 && let Err(e) = std::fs::copy(&path, &quarantine)
             {
                 tracing::warn!(
-                    error = % e, path = % quarantine.display(),
+                    error = %e,
+                    path = %quarantine.display(),
                     "failed to write chat history quarantine copy"
                 );
             }
         }
         if let Some((first_line, first_error)) = first_skipped {
             tracing::warn!(
-                skipped = skipped_lines, loaded = items.len(), first_line, first_error =
-                % first_error, path = % path.display(),
+                skipped = skipped_lines,
+                loaded = items.len(),
+                first_line,
+                first_error = %first_error,
+                path = %path.display(),
                 "skipped unparseable chat history lines (torn or interleaved \
                  append — crashed mid-write or concurrent writer?); loading \
                  the session without them, original preserved as *.corrupt"
@@ -934,7 +899,8 @@ impl JsonlStorageAdapter {
         }
         if stripped > 0 {
             tracing::warn!(
-                count = stripped, path = % path.display(),
+                count = stripped,
+                path = %path.display(),
                 "stripped invalid images from loaded chat history, original \
                  preserved as *.corrupt"
             );
@@ -997,9 +963,13 @@ fn transform_session_id_in_update(
 }
 fn is_orchestration_projection_update(update: &super::SessionUpdate) -> bool {
     matches!(
-        update, super::SessionUpdate::Xai(notification) if matches!(& notification
-        .update, crate ::extensions::notification::SessionUpdate::WorkflowUpdated { .. }
-        | crate ::extensions::notification::SessionUpdate::GoalUpdated { .. })
+        update,
+        super::SessionUpdate::Xai(notification)
+            if matches!(
+                &notification.update,
+                crate::extensions::notification::SessionUpdate::WorkflowUpdated { .. }
+                    | crate::extensions::notification::SessionUpdate::GoalUpdated { .. }
+            )
     )
 }
 /// Apply fork-safety filtering to chat history before copying.
@@ -1100,6 +1070,20 @@ impl JsonlStorageAdapter {
         } else {
             updates_to_copy.retain(|update| !is_orchestration_projection_update(update));
         }
+        let checkpoint_files: std::collections::BTreeSet<String> = updates_to_copy
+            .iter()
+            .filter_map(|update| {
+                let super::SessionUpdate::Xai(notification) = update else {
+                    return None;
+                };
+                let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =
+                    &notification.update
+                else {
+                    return None;
+                };
+                Some(info.checkpoint_file.clone())
+            })
+            .collect();
         for target in [
             self.workflows_dir(target_info),
             self.goal_mode_state_file(target_info)
@@ -1248,7 +1232,8 @@ impl JsonlStorageAdapter {
             } else {
                 if tool_state_path.is_dir() {
                     tracing::warn!(
-                        ? tool_state_path, session_id = % source_info.id,
+                        ?tool_state_path,
+                        session_id = %source_info.id,
                         "tool_state.json is a directory (not a file); skipping copy",
                     );
                 }
@@ -1293,6 +1278,74 @@ impl JsonlStorageAdapter {
         } else {
             0
         };
+        let mut compaction_checkpoints_copied = 0usize;
+        let source_session_dir = self.session_dir(source_info);
+        let checkpoint_dir_usable = if checkpoint_files.is_empty() {
+            false
+        } else {
+            match std::fs::symlink_metadata(source_session_dir.join("compaction_checkpoints")) {
+                Ok(meta) if meta.file_type().is_dir() => true,
+                Ok(meta) => {
+                    tracing::warn!(
+                        file_type = ?meta.file_type(),
+                        session_id = %source_info.id,
+                        "compaction_checkpoints is not a real directory; skipping checkpoint copy",
+                    );
+                    false
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        session_id = %source_info.id,
+                        "compaction_checkpoints directory missing; skipping checkpoint copy",
+                    );
+                    false
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if checkpoint_dir_usable {
+            for checkpoint_file in &checkpoint_files {
+                let relative = Path::new(checkpoint_file);
+                let well_formed = relative.parent() == Some(Path::new("compaction_checkpoints"))
+                    && relative.extension() == Some("json".as_ref());
+                if !well_formed {
+                    tracing::warn!(
+                        checkpoint_file = %checkpoint_file,
+                        session_id = %source_info.id,
+                        "skipping compaction checkpoint with unexpected path during copy",
+                    );
+                    continue;
+                }
+                let src = source_session_dir.join(relative);
+                match std::fs::symlink_metadata(&src) {
+                    Ok(meta) if meta.file_type().is_file() => {}
+                    Ok(meta) => {
+                        tracing::warn!(
+                            path = %src.display(),
+                            file_type = ?meta.file_type(),
+                            session_id = %source_info.id,
+                            "compaction checkpoint source is not a regular file; skipping copy",
+                        );
+                        continue;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        tracing::warn!(
+                            path = %src.display(),
+                            session_id = %source_info.id,
+                            "compaction checkpoint file missing from source; skipping copy",
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+                let dst = target_dir.join(relative);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&src, &dst)?;
+                compaction_checkpoints_copied += 1;
+            }
+        }
         Ok(super::CopySessionResult {
             chat_messages_copied: num_chat_messages,
             updates_copied: num_messages,
@@ -1302,6 +1355,7 @@ impl JsonlStorageAdapter {
             tool_state_copied,
             announcement_state_copied,
             compaction_segments_copied,
+            compaction_checkpoints_copied,
         })
     }
 }
@@ -1545,8 +1599,9 @@ impl StorageAdapter for JsonlStorageAdapter {
             && on_disk.state.revision > manifest.state.revision
         {
             tracing::debug!(
-                run_id = % manifest.state.run_id, on_disk_revision = on_disk.state
-                .revision, incoming_revision = manifest.state.revision,
+                run_id = %manifest.state.run_id,
+                on_disk_revision = on_disk.state.revision,
+                incoming_revision = manifest.state.revision,
                 "skipping stale workflow manifest write"
             );
             return Ok(());
@@ -1624,11 +1679,14 @@ impl StorageAdapter for JsonlStorageAdapter {
             workflow_runs,
         };
         tracing::info!(
-            session_id = % info.id, num_chat_messages = result.chat_history.len(),
-            num_updates = result.updates.len(), has_plan = result.plan_state.is_some(),
-            has_signals = result.signals.is_some(), num_rewind_points = result
-            .rewind_points.len(), chat_format_version = result.summary
-            .chat_format_version, "Session data loaded successfully from JSONL"
+            session_id = %info.id,
+            num_chat_messages = result.chat_history.len(),
+            num_updates = result.updates.len(),
+            has_plan = result.plan_state.is_some(),
+            has_signals = result.signals.is_some(),
+            num_rewind_points = result.rewind_points.len(),
+            chat_format_version = result.summary.chat_format_version,
+            "Session data loaded successfully from JSONL"
         );
         Ok(result)
     }
@@ -1672,9 +1730,11 @@ impl StorageAdapter for JsonlStorageAdapter {
             workflow_runs,
         };
         tracing::info!(
-            session_id = % info.id, num_chat_messages = result.chat_history.len(),
-            has_plan = result.plan_state.is_some(), has_signals = result.signals
-            .is_some(), chat_format_version = result.summary.chat_format_version,
+            session_id = %info.id,
+            num_chat_messages = result.chat_history.len(),
+            has_plan = result.plan_state.is_some(),
+            has_signals = result.signals.is_some(),
+            chat_format_version = result.summary.chat_format_version,
             "Session data loaded (without updates, rewind points deferred) from JSONL"
         );
         Ok(result)

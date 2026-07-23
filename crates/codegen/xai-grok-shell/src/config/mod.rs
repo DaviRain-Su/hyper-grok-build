@@ -283,7 +283,7 @@ impl SubagentsConfig {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
-                tracing::debug!(error = % e, "Failed to read personas directory");
+                tracing::debug!(error = %e, "Failed to read personas directory");
                 return;
             }
         };
@@ -303,20 +303,15 @@ impl SubagentsConfig {
                     Ok(mut persona) => {
                         persona.source_dir = path.parent().map(|p| p.to_path_buf());
                         persona.source_path = Some(path.display().to_string());
-                        tracing::debug!(
-                            persona = % name, "Loaded persona from file"
-                        );
+                        tracing::debug!(persona = %name, "Loaded persona from file");
                         self.personas.insert(name, persona);
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            persona = % name, error = % e,
-                            "Failed to parse persona file"
-                        );
+                        tracing::warn!(persona = %name, error = %e, "Failed to parse persona file");
                     }
                 },
                 Err(e) => {
-                    tracing::warn!(error = % e, "Failed to read persona file");
+                    tracing::warn!(error = %e, "Failed to read persona file");
                 }
             }
         }
@@ -328,7 +323,7 @@ impl SubagentsConfig {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
-                tracing::debug!(error = % e, "Failed to read roles directory");
+                tracing::debug!(error = %e, "Failed to read roles directory");
                 return;
             }
         };
@@ -341,29 +336,30 @@ impl SubagentsConfig {
                 continue;
             };
             if self.roles.contains_key(&name) {
-                tracing::debug!(
-                    role = % name,
-                    "Skipping file-based role, higher-priority config takes precedence"
-                );
+                tracing::debug!(role = %name, "Skipping file-based role, higher-priority config takes precedence");
                 continue;
             }
             match std::fs::read_to_string(&path) {
                 Ok(content) => match toml::from_str::<SubagentRole>(&content) {
                     Ok(mut role) => {
                         role.source_dir = path.parent().map(|p| p.to_path_buf());
-                        tracing::debug!(role = % name, "Loaded role from file");
+                        tracing::debug!(role = %name, "Loaded role from file");
                         self.roles.insert(name, role);
                     }
                     Err(e) => {
                         tracing::warn!(
-                            role = % name, path = % path.display(), error = % e,
+                            role = %name,
+                            path = %path.display(),
+                            error = %e,
                             "Failed to parse role file"
                         );
                     }
                 },
                 Err(e) => {
                     tracing::warn!(
-                        path = % path.display(), error = % e, "Failed to read role file"
+                        path = %path.display(),
+                        error = %e,
+                        "Failed to read role file"
                     );
                 }
             }
@@ -774,15 +770,15 @@ impl ToolsConfig {
                     Ok(cfg) if cfg.is_valid() => Some(cfg),
                     Ok(_) => {
                         tracing::warn!(
-                            "tools.zdr_video_output_s3 is present but incomplete; ignoring ZDR video output config"
-                        );
+                                "tools.zdr_video_output_s3 is present but incomplete; ignoring ZDR video output config"
+                            );
                         None
                     }
                     Err(e) => {
                         tracing::warn!(
-                            error = % e,
-                            "tools.zdr_video_output_s3 failed to parse; ignoring ZDR video output config"
-                        );
+                                error = %e,
+                                "tools.zdr_video_output_s3 failed to parse; ignoring ZDR video output config"
+                            );
                         None
                     }
                 }),
@@ -1092,7 +1088,7 @@ fn apply_requirements_inner(
     pin_feature!(tool_search);
     pin_feature!(web_fetch);
     pin_feature!(ask_user_question);
-    pin_requirement_only!(image_gen);
+    pin_feature!(image_gen);
     pin_requirement_only!(image_edit);
     pin_feature!(video_gen);
     pin_feature!(write_file);
@@ -1270,8 +1266,8 @@ fn apply_requirements_inner(
     }
     if !enforced.is_empty() {
         tracing::info!(
-            enforced = ? enforced.iter().map(| e | e.to_string()).collect::< Vec < _ >>
-            (), "deployment requirements enforced"
+            enforced = ?enforced.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+            "deployment requirements enforced"
         );
     }
     enforced

@@ -185,7 +185,7 @@ From the modal you can:
 - Expand a server to view the tools it provides
 - Refresh the list with `r` after you edit `config.toml`
 - Authenticate an OAuth server with `i`
-- Add a server with `a`, or remove one with `x`
+- Add a server with `a`, or remove a local server with `x` (the modal asks for confirmation; press lowercase `y` to remove, or any other key to cancel)
 
 ### Tool Discovery
 

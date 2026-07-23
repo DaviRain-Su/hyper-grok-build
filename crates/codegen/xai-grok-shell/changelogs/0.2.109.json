@@ -11,7 +11,7 @@
   },
   {
     "category": "features",
-    "description": "**grok doctor fix terminal.ssh-wrap** can install the recommended SSH wrapper alias.",
+    "description": "**grok doctor fix ssh-wrap** can set up `grok wrap ssh` automatically for Bash, zsh, and fish.",
     "breaking_change": false
   },
   {
@@ -46,7 +46,7 @@
   },
   {
     "category": "features",
-    "description": "**/doctor** is now the main slash command for terminal, tmux, clipboard and keyboard diagnostics.",
+    "description": "**/doctor** is now the main in-app command for checking terminal, tmux, clipboard, and keyboard setup.",
     "breaking_change": false
   },
   {

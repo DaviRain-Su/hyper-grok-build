@@ -5,10 +5,10 @@ use crate::common::*;
 /// Minimal mode guards the documented `in_flight_committed` dogfood
 /// double-show: a promoted queued prompt's "❯ " block commits (prints) into
 /// native scrollback immediately, so cancelling its turn pre-first-token
-/// (minimal's cancel gesture is Ctrl+C; Esc is swallowed) must SKIP the
-/// composer rewind — a rewind would leave the printed block on screen AND
-/// refill the composer, showing the prompt twice. Standard cancel instead:
-/// the block renders exactly once and the cancel marker is visible.
+/// (via Ctrl+C here) must SKIP the composer rewind — a rewind would leave the
+/// printed block on screen AND refill the composer, showing the prompt twice.
+/// Standard cancel instead: the block renders exactly once and the cancel
+/// marker is visible.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_double_esc_committed_queued_prompt_single_render() {

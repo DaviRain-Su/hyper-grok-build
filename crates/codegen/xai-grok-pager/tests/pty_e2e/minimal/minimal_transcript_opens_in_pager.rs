@@ -17,12 +17,21 @@ async fn minimal_transcript_opens_in_pager() {
 
     // Minimal env + PAGER=cat (non-interactive). Response forwarding on so the
     // inline-viewport cursor probe completes (see spawn_minimal).
-    let mut env = content.env_for_pager();
-    env.push(("PAGER".to_string(), "cat".to_string()));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let overrides: Vec<(String, String)> = vec![("PAGER".to_string(), "cat".to_string())];
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, &env_refs)
-        .expect("spawn minimal pager");
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        MINIMAL_ARGS,
+        &env_refs,
+    )
+    .expect("spawn minimal pager");
     harness.set_respond_to_queries(true);
 
     wait_minimal_ready(&mut harness);

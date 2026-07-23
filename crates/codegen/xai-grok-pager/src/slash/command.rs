@@ -28,6 +28,13 @@ pub struct ScheduledTaskPreview {
     pub tag: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DoctorRequest {
+    Report,
+    ListFixes,
+    Fix(crate::diagnostics::DiagnosticId),
+}
+
 /// Result of running a slash command.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -38,6 +45,8 @@ pub enum CommandResult {
     /// Command handled but was a no-op (e.g., model already selected).
     /// Included for TUI parity. Dispatch treats it identically to Handled.
     HandledNoOp,
+    /// Build or act on TUI doctor state from live app/session inputs.
+    Doctor(DoctorRequest),
     /// Command failed with an error message.
     Error(String),
     /// Command produced a user-visible message.

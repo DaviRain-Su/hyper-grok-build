@@ -444,8 +444,8 @@ impl SessionActor {
         drop_startup_skill_reminder: bool,
     ) {
         let is_prefix_slot = matches!(
-            conversation.get(1), Some(ConversationItem::User(u)) if u.synthetic_reason
-            .is_none()
+            conversation.get(1),
+            Some(ConversationItem::User(u)) if u.synthetic_reason.is_none()
         );
         if is_prefix_slot {
             conversation[1] = ConversationItem::user(new_prefix);
@@ -456,8 +456,10 @@ impl SessionActor {
         if drop_startup_skill_reminder {
             conversation.retain(|item| {
                 !matches!(
-                    item, ConversationItem::User(u) if u.synthetic_reason ==
-                    Some(xai_grok_sampling_types::SyntheticReason::SystemReminder)
+                    item,
+                    ConversationItem::User(u)
+                        if u.synthetic_reason
+                            == Some(xai_grok_sampling_types::SyntheticReason::SystemReminder)
                 )
             });
         }
@@ -476,6 +478,7 @@ impl SessionActor {
             .definition()
             .user_message_template
             .clone();
+        let mut prefix_carries_fallback_date = false;
         #[allow(unused_mut)]
         let mut out = if !matches!(template, UserMessageTemplate::Default) {
             if let Some(rendered) = self
@@ -487,6 +490,7 @@ impl SessionActor {
                 tracing::warn!(
                     "templated user message render failed; falling back to legacy prefix"
                 );
+                prefix_carries_fallback_date = !template.surfaces_local_date();
                 if self.startup_hints.skip_git_status {
                     construct_user_message_minimal(cwd, None)
                 } else {
@@ -500,6 +504,8 @@ impl SessionActor {
         };
         self.last_announced_local_date
             .set(chrono::Local::now().date_naive());
+        self.prefix_carries_fallback_date
+            .set(prefix_carries_fallback_date);
         out
     }
     /// Build the custom-templated first user message.
@@ -636,9 +642,10 @@ impl SessionActor {
         )> = {
             let state = self.mcp_state.lock().await;
             tracing::debug!(
-                session_id = % self.session_info.id.0, client_count = state.owned_clients
-                .len() + state.shared_clients.len(), initializing_count = state
-                .handshaking_servers_count(), finished_init = state.has_finished_init(),
+                session_id = %self.session_info.id.0,
+                client_count = state.owned_clients.len() + state.shared_clients.len(),
+                initializing_count = state.handshaking_servers_count(),
+                finished_init = state.has_finished_init(),
                 config_count = state.configs.len(),
                 "gather_mcp_servers: snapshotting MCP state for user preamble render"
             );
@@ -854,8 +861,10 @@ impl SessionActor {
         let skip_count = persisted.len().saturating_sub(limit);
         if skip_count > 0 {
             tracing::info!(
-                session_id = % self.session_info.id, total = persisted.len(), skipped =
-                skip_count, limit,
+                session_id = %self.session_info.id,
+                total = persisted.len(),
+                skipped = skip_count,
+                limit,
                 "image transcription: skipping oldest images due to processing limit",
             );
         }

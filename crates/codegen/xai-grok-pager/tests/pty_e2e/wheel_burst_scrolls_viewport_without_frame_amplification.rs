@@ -60,7 +60,7 @@ async fn wheel_burst_scrolls_viewport_without_frame_amplification() {
     harness.update(Duration::from_millis(600));
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during the wheel burst\nscreen:\n{}",
         harness.screen_contents()
     );
@@ -121,8 +121,9 @@ async fn wheel_burst_scrolls_viewport_without_frame_amplification() {
         BURST_INTERVAL,
     );
     harness.update(Duration::from_millis(300));
+    let running = harness.is_running().expect("poll pager liveness");
     assert!(
-        harness.is_running() && !harness.contains_text("panicked"),
+        running && !harness.contains_text("panicked"),
         "pager broke on a mixed-direction wheel sequence\nscreen:\n{}",
         harness.screen_contents()
     );

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -29,6 +30,12 @@ enum LoopFireOutcome {
     Spawned(String),
     Foreground,
     Skipped,
+}
+
+enum ExpiryPersistenceOutcome {
+    Committed,
+    NotCommitted(std::io::Error),
+    Unknown(SchedulerError),
 }
 
 pub(crate) struct PendingDurableRemoval {
@@ -97,6 +104,7 @@ pub struct SchedulerActor {
     pub(crate) cancel_token: CancellationToken,
     pub(crate) clock: SchedulerClock,
     pub(crate) pending_removal: Option<PendingDurableRemoval>,
+    pub(crate) blocked_expiries: HashSet<String>,
 }
 
 impl SchedulerActor {
@@ -141,11 +149,18 @@ impl SchedulerActor {
 
     async fn complete_pending_removal(&mut self) -> Result<bool, SchedulerError> {
         if self.notification_handle.durable_targets() == DurableNotificationTargets::None {
-            // Immutable targets cannot recover; abandon only the uncommitted reservation.
-            self.pending_removal = None;
+            // Targets are immutable, so retaining the reservation would wedge all later commands.
+            let task_id = self
+                .pending_removal
+                .take()
+                .expect("pending durable removal exists")
+                .task_id;
+            tracing::error!(%task_id, "Durable scheduler removal unavailable");
             return Err(SchedulerError::NoDurableNotificationConsumer);
         }
+
         self.persist_resources().await?;
+
         let (task_id, version) = {
             let pending = self
                 .pending_removal
@@ -188,13 +203,11 @@ impl SchedulerActor {
             }
         }
 
-        let task_ids = {
-            let mut res = self.resources.lock().await;
-            res.get_or_default::<State<SchedulerState>>()
-                .tasks
-                .drain(..)
-                .map(|task| task.id)
-                .collect::<Vec<_>>()
+        let task_ids: Vec<String> = {
+            let res = self.resources.lock().await;
+            res.get::<State<SchedulerState>>()
+                .map(|state| state.tasks.iter().map(|task| task.id.clone()).collect())
+                .unwrap_or_default()
         };
         if task_ids.is_empty() {
             return;
@@ -246,7 +259,8 @@ impl SchedulerActor {
             .map(|s| {
                 s.tasks
                     .iter()
-                    .map(|t| t.next_fire_at())
+                    .filter(|task| !self.blocked_expiries.contains(&task.id))
+                    .map(ScheduledTask::next_fire_at)
                     .min()
                     .map(|next| {
                         let now = Utc::now();
@@ -266,7 +280,9 @@ impl SchedulerActor {
         let now = Utc::now();
         let mut res = self.resources.lock().await;
         let state = res.get_or_default::<State<SchedulerState>>();
-        let idx = state.tasks.iter().position(|t| t.next_fire_at() <= now);
+        let idx = state.tasks.iter().position(|task| {
+            task.next_fire_at() <= now && !self.blocked_expiries.contains(&task.id)
+        });
 
         let Some(idx) = idx else {
             return;
@@ -278,6 +294,7 @@ impl SchedulerActor {
         let should_remove = !task.recurring;
         let prompt = task.prompt.clone();
         let human_schedule = interval_to_human(task.interval_secs);
+        let is_durable = task.durable;
         let foreground = task.foreground;
         let last_subagent_id = task.last_subagent_id.clone();
         let iterations_since_fresh = task.iterations_since_fresh;
@@ -290,6 +307,89 @@ impl SchedulerActor {
             1
         };
         let transition = if is_expired { "expiry" } else { "fire" };
+
+        if is_expired && is_durable {
+            if self.notification_handle.durable_targets() == DurableNotificationTargets::None {
+                tracing::error!(%task_id, "Durable scheduler expiry unavailable");
+                self.blocked_expiries.insert(task_id);
+                return;
+            }
+            let mut reservation = self.clock.prepare_transition(1);
+            let expired_task = state.tasks.remove(idx);
+            let acknowledgement = self
+                .resources_persistence
+                .enqueue_save_and_flush(res.serialize());
+            drop(res);
+            tracing::info!(task_id = %task_id, "Scheduled task expired; removing without firing");
+
+            let persistence = match acknowledgement {
+                Ok(acknowledgement) => {
+                    let deadline = tokio::time::Instant::now() + DURABILITY_BARRIER_TIMEOUT;
+                    tokio::select! {
+                        _ = self.cancel_token.cancelled() => {
+                            ExpiryPersistenceOutcome::Unknown(SchedulerError::Cancelled)
+                        }
+                        result = tokio::time::timeout_at(deadline, acknowledgement) => {
+                            match result {
+                                Ok(Ok(Ok(()))) => ExpiryPersistenceOutcome::Committed,
+                                Ok(Ok(Err(error))) => {
+                                    ExpiryPersistenceOutcome::NotCommitted(error)
+                                }
+                                Ok(Err(_)) => ExpiryPersistenceOutcome::Unknown(
+                                    SchedulerError::Persistence(std::io::Error::new(
+                                        std::io::ErrorKind::BrokenPipe,
+                                        "resources persistence writer dropped acknowledgement",
+                                    )),
+                                ),
+                                Err(_) => {
+                                    ExpiryPersistenceOutcome::Unknown(SchedulerError::Timeout)
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => ExpiryPersistenceOutcome::NotCommitted(error),
+            };
+            match persistence {
+                ExpiryPersistenceOutcome::Committed => {}
+                ExpiryPersistenceOutcome::NotCommitted(error) => {
+                    tracing::warn!(
+                        %task_id,
+                        %error,
+                        "Durable scheduler expiry was not persisted"
+                    );
+                    let mut resources = self.resources.lock().await;
+                    resources
+                        .get_or_default::<State<SchedulerState>>()
+                        .tasks
+                        .insert(idx, expired_task);
+                    self.blocked_expiries.insert(task_id);
+                    return;
+                }
+                ExpiryPersistenceOutcome::Unknown(error) => {
+                    tracing::warn!(
+                        %task_id,
+                        %error,
+                        "Durable scheduler expiry persistence outcome is unknown"
+                    );
+                    return;
+                }
+            }
+
+            let version = reservation.version_at(0);
+            if let Err(error) = self.publish_durable_removal(task_id.clone(), version).await {
+                tracing::warn!(
+                    %task_id,
+                    %error,
+                    "Failed to acknowledge durable scheduler expiry"
+                );
+                return;
+            }
+            let commit = reservation.commit_next(&mut self.clock);
+            log_rollover(transition, Some(&task_id), commit.rollover);
+            return;
+        }
+
         let mut reservation = self.clock.prepare_transition(transition_count);
 
         if is_expired {
@@ -825,6 +925,7 @@ mod tests {
                 cancel_token: cancel_token.clone(),
                 clock: SchedulerClock::new(),
                 pending_removal: None,
+                blocked_expiries: HashSet::new(),
             }
             .run(),
         );
@@ -850,6 +951,22 @@ mod tests {
             .await
             .expect("notification timeout")
             .expect("notification channel closed")
+    }
+
+    fn expired_task(id: &str, durable: bool) -> ScheduledTask {
+        let mut task = ScheduledTask::new(1, id.into(), true, durable);
+        task.id = id.into();
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        task.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        task.foreground = true;
+        task
+    }
+
+    fn due_one_shot(id: &str) -> ScheduledTask {
+        let mut task = ScheduledTask::new(1, id.into(), false, false);
+        task.id = id.into();
+        task.created_at = Utc::now() - chrono::Duration::seconds(10);
+        task
     }
 
     fn auto_acknowledged_notifications() -> (
@@ -889,6 +1006,7 @@ mod tests {
                 cancel_token: CancellationToken::new(),
                 clock: SchedulerClock::at_revision_for_test(revision),
                 pending_removal: None,
+                blocked_expiries: HashSet::new(),
             },
             notifications,
         )
@@ -915,6 +1033,7 @@ mod tests {
             cancel_token: cancel_token.clone(),
             clock: SchedulerClock::new(),
             pending_removal: None,
+            blocked_expiries: HashSet::new(),
         };
 
         tokio::spawn(actor.run());
@@ -1232,6 +1351,7 @@ mod tests {
             cancel_token: cancel_token.clone(),
             clock: SchedulerClock::new(),
             pending_removal: None,
+            blocked_expiries: HashSet::new(),
         };
 
         tokio::spawn(actor.run());
@@ -1318,6 +1438,7 @@ mod tests {
             cancel_token: cancel_token.clone(),
             clock: SchedulerClock::new(),
             pending_removal: None,
+            blocked_expiries: HashSet::new(),
         };
         tokio::spawn(actor.run());
 
@@ -1523,7 +1644,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_sends_removed_for_remaining_tasks_and_drains_state() {
+    async fn cancel_sends_removed_for_remaining_tasks_without_draining_state() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
 
@@ -1548,6 +1669,7 @@ mod tests {
             cancel_token: cancel_token.clone(),
             clock: SchedulerClock::new(),
             pending_removal: None,
+            blocked_expiries: HashSet::new(),
         };
 
         let handle = tokio::spawn(actor.run());
@@ -1568,14 +1690,15 @@ mod tests {
         }
         removed_ids.sort();
         assert_eq!(removed_ids, vec!["cancel-A", "cancel-B"]);
-        assert!(
+        assert_eq!(
             shared
                 .lock()
                 .await
                 .get::<State<SchedulerState>>()
                 .unwrap()
                 .tasks
-                .is_empty()
+                .len(),
+            2
         );
     }
 
@@ -1611,6 +1734,7 @@ mod tests {
             cancel_token: cancel_token.clone(),
             clock: SchedulerClock::at_revision_for_test(revision),
             pending_removal: None,
+            blocked_expiries: HashSet::new(),
         };
         tokio::spawn(actor.run());
 
@@ -2091,6 +2215,7 @@ mod tests {
                 cancel_token: cancel_token.clone(),
                 clock: SchedulerClock::new(),
                 pending_removal: None,
+                blocked_expiries: HashSet::new(),
             }
             .run(),
         );
@@ -2434,6 +2559,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_expiry_persists_before_ack_and_commits_version() {
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let mut actor = make_boundary_actor(vec![expired_task("expired", true)], 0).0;
+        actor.resources_persistence = Arc::new(persistence);
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        actor.notification_handle = notification_handle;
+
+        {
+            let expiry = actor.fire_next_task();
+            tokio::pin!(expiry);
+            let (snapshot, persisted) = tokio::select! {
+                _ = expiry.as_mut() => panic!("expiry must wait for resource persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            assert_eq!(
+                snapshot["state"]["grok_build.Scheduler"]["tasks"],
+                serde_json::json!([])
+            );
+            assert!(notifications.try_recv().is_err());
+            persisted.send(Ok(())).unwrap();
+            let delivery = tokio::select! {
+                _ = expiry.as_mut() => panic!("expiry must wait for tombstone acknowledgement"),
+                delivery = next_acknowledged(&mut notifications) => delivery,
+            };
+            let removed = notification!(delivery.notification, ScheduledTaskRemoved);
+            assert_eq!(removed.revision, 1);
+            delivery.acknowledgement.unwrap().send(Ok(())).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), expiry.as_mut())
+                .await
+                .unwrap();
+        }
+        assert_eq!(actor.clock.snapshot().revision(), 1);
+        assert!(
+            actor
+                .resources
+                .lock()
+                .await
+                .get::<State<SchedulerState>>()
+                .unwrap()
+                .tasks
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn expiry_persistence_failure_restores_and_blocks_while_plain_task_fires() {
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let tasks = vec![expired_task("expired", true), due_one_shot("plain")];
+        let (mut actor, mut notifications) = make_boundary_actor(tasks, 0);
+        actor.resources_persistence = Arc::new(persistence);
+
+        {
+            let expiry = actor.fire_next_task();
+            tokio::pin!(expiry);
+            let (_, persisted) = tokio::select! {
+                _ = expiry.as_mut() => panic!("expiry must wait for resource persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            persisted
+                .send(Err(std::io::Error::other("disk unavailable")))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), expiry.as_mut())
+                .await
+                .unwrap();
+        }
+        assert!(actor.blocked_expiries.contains("expired"));
+        assert_eq!(actor.clock.snapshot().revision(), 0);
+        assert!(notifications.try_recv().is_err());
+
+        actor.fire_next_task().await;
+        assert_eq!(
+            (
+                notification!(notifications.try_recv().unwrap(), ScheduledTaskFired).task_id,
+                notification!(notifications.try_recv().unwrap(), ScheduledTaskRemoved).task_id,
+            ),
+            ("plain".to_string(), "plain".to_string())
+        );
+        actor.fire_next_task().await;
+        assert!(saves.try_recv().is_err());
+        assert!(notifications.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn expiry_without_durable_target_blocks_only_expiry() {
+        let tasks = vec![expired_task("expired", true), due_one_shot("plain")];
+        let (mut actor, _) = make_boundary_actor(tasks, 0);
+        let (notification_handle, mut notifications) = ToolNotificationHandle::channel();
+        actor.notification_handle = notification_handle;
+
+        actor.fire_next_task().await;
+        assert!(actor.blocked_expiries.contains("expired"));
+        assert!(notifications.try_recv().is_err());
+        actor.fire_next_task().await;
+        assert_eq!(
+            (
+                notification!(notifications.try_recv().unwrap(), ScheduledTaskFired).task_id,
+                notification!(notifications.try_recv().unwrap(), ScheduledTaskRemoved).task_id,
+            ),
+            ("plain".to_string(), "plain".to_string())
+        );
+        actor.fire_next_task().await;
+        assert!(notifications.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn expiry_ack_failure_leaves_absent_and_continues_without_version_commit() {
+        let tasks = vec![expired_task("expired", true), due_one_shot("plain")];
+        let mut actor = make_boundary_actor(tasks, 0).0;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("resources_state.json");
+        actor.resources_persistence = Arc::new(crate::persistence::ResourcesPersistence::new(
+            state_path.clone(),
+        ));
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        actor.notification_handle = notification_handle;
+
+        let removed_revision = {
+            let expiry = actor.fire_next_task();
+            tokio::pin!(expiry);
+            let delivery = tokio::select! {
+                _ = expiry.as_mut() => panic!("expiry must wait for tombstone acknowledgement"),
+                delivery = next_acknowledged(&mut notifications) => delivery,
+            };
+            let removed = notification!(delivery.notification, ScheduledTaskRemoved);
+            let removed_revision = removed.revision;
+            delivery
+                .acknowledgement
+                .unwrap()
+                .send(Err("append failed".into()))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), expiry.as_mut())
+                .await
+                .unwrap();
+            removed_revision
+        };
+        assert_eq!(actor.clock.snapshot().revision(), 0);
+        assert!(
+            actor
+                .resources
+                .lock()
+                .await
+                .get::<State<SchedulerState>>()
+                .unwrap()
+                .tasks
+                .iter()
+                .all(|task| task.id != "expired")
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+        assert!(
+            persisted["state"]["grok_build.Scheduler"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|task| task["id"] != "expired")
+        );
+
+        actor.fire_next_task().await;
+        assert_eq!(
+            notification!(
+                next_acknowledged(&mut notifications).await.notification,
+                ScheduledTaskFired
+            )
+            .task_id,
+            "plain"
+        );
+        let plain_removed = next_acknowledged(&mut notifications).await;
+        assert!(plain_removed.acknowledgement.is_none());
+        assert_eq!(
+            notification!(plain_removed.notification, ScheduledTaskRemoved).revision,
+            removed_revision + 1
+        );
+        actor.fire_next_task().await;
+        assert!(notifications.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn expiry_persistence_cancellation_leaves_absent_and_stops_actor() {
+        let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        resources.get_or_default::<State<SchedulerState>>().tasks =
+            vec![expired_task("expired", true)];
+        let shared = Arc::new(Mutex::new(resources));
+        let (notification_handle, mut notifications) =
+            ToolNotificationHandle::acknowledged_channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: shared.clone(),
+            resources_persistence: Arc::new(persistence),
+            notification_handle,
+            cmd_rx,
+            cancel_token: cancel_token.clone(),
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+        let actor_task = tokio::spawn(actor.run());
+        let (_, _withheld) = next_event(&mut saves).await;
+        let announced = next_acknowledged(&mut notifications).await;
+        assert!(announced.acknowledgement.is_none());
+        assert!(matches!(
+            announced.notification,
+            ToolNotification::ScheduledTaskCreated(_)
+        ));
+        assert!(!actor_task.is_finished());
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), actor_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            shared
+                .lock()
+                .await
+                .get::<State<SchedulerState>>()
+                .unwrap()
+                .tasks
+                .is_empty()
+        );
+        assert!(notifications.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn cancel_with_no_tasks_sends_no_removed() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
@@ -2451,6 +2803,7 @@ mod tests {
             cancel_token: cancel_token.clone(),
             clock: SchedulerClock::new(),
             pending_removal: None,
+            blocked_expiries: HashSet::new(),
         };
 
         let handle = tokio::spawn(actor.run());

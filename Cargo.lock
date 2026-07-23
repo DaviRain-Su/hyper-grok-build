@@ -13352,7 +13352,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "0.2.109"
+version = "0.2.110"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -13446,7 +13446,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "0.2.109"
+version = "0.2.110"
 dependencies = [
  "anyhow",
  "clap",
@@ -13591,13 +13591,13 @@ dependencies = [
  "dirs 5.0.1",
  "dunce",
  "fs2",
- "git2",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "wait-timeout",
  "xai-grok-agent",
  "xai-grok-config",
  "xai-hooks-plugins-types",
@@ -13633,8 +13633,10 @@ version = "0.1.0"
 dependencies = [
  "assert_matches",
  "async-openai",
+ "chrono",
  "indexmap",
  "reqwest 0.12.24",
+ "schemars 1.0.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13710,7 +13712,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "0.2.109"
+version = "0.2.110"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -13973,6 +13975,7 @@ dependencies = [
  "clap",
  "futures-util",
  "libc",
+ "portable-pty",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
@@ -13982,8 +13985,10 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "xai-acp-lib",
  "xai-grok-models",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -14104,7 +14109,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "0.2.109"
+version = "0.2.110"
 dependencies = [
  "semver",
 ]
@@ -14126,6 +14131,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "xai-tty-utils",
 ]
 
 [[package]]

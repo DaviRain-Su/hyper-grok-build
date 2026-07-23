@@ -14,7 +14,7 @@ use super::common::*;
 
 /// Running-turn keybar hint; absent while the parked look is active.
 #[cfg(unix)]
-const CANCEL_HINT: &str = "Ctrl+c:cancel";
+const CANCEL_HINT: &str = "Esc:cancel";
 
 /// Between-parks sentinel: collapsed execute blocks render "Run
 /// <description>", not the command's stdout.

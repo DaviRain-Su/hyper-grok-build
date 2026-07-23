@@ -72,7 +72,7 @@ async fn auto_compact_top_row() {
         .expect("resize short");
     harness.update(Duration::from_millis(900));
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during resize\nscreen:\n{}",
         harness.screen_contents()
     );

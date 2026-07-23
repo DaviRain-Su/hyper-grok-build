@@ -503,6 +503,17 @@ mod tests {
         render_dropdown(&mut buf, area, &snap, Some(1), &theme);
     }
 
+    #[test]
+    fn fuzzy_indices_render_with_theme_accent() {
+        let theme = Theme::default();
+        let normal = Style::default().fg(theme.text_primary);
+        let matched = Style::default().fg(theme.fuzzy_accent);
+        let spans = build_highlighted_spans("ssh-wrap", &[0, 1, 2], normal, matched);
+        assert_eq!(spans[0].content.as_ref(), "ssh");
+        assert_eq!(spans[0].style.fg, Some(theme.fuzzy_accent));
+        assert_eq!(spans[1].style.fg, Some(theme.text_primary));
+    }
+
     fn row(display: &str, description: &str) -> SuggestionRow {
         SuggestionRow {
             display: display.into(),

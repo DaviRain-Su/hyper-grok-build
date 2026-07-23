@@ -145,24 +145,27 @@ async fn drain_batches_monitor_notifications_into_formatted_block() {
                 .await;
             let monitor_notif = |task: &str, line: &str| PendingNotification {
                 prompt_id: format!("monitor-{task}"),
-                prompt_blocks: vec![
-                    agent_client_protocol::ContentBlock::Text(agent_client_protocol::TextContent::new(format!("<monitor-event description=\"watch\" task_id=\"{task}\">\n{line}\n</monitor-event>")),)
-                ],
+                prompt_blocks: vec![agent_client_protocol::ContentBlock::Text(
+                    agent_client_protocol::TextContent::new(format!(
+                            "<monitor-event description=\"watch\" task_id=\"{task}\">\n{line}\n</monitor-event>"
+                        )),
+                )],
                 priority: NotificationPriority::Next,
                 source: NotificationSource::MonitorEvent {
                     task_id: task.to_string(),
                 },
             };
             let mut bash = bash_completed_notification("bg-1");
-            bash.prompt_blocks = vec![
-                agent_client_protocol::ContentBlock::Text(agent_client_protocol::TextContent::new("Background task \"bg-1\" completed."),)
-            ];
+            bash.prompt_blocks = vec![agent_client_protocol::ContentBlock::Text(
+                agent_client_protocol::TextContent::new("Background task \"bg-1\" completed."),
+            )];
             let mut state = actor.state.lock().await;
             let drained = SessionActor::drain_notifications_into_turn(
                 &mut state,
                 vec![
-                    monitor_notif("mon-1", "tick 1"), bash, monitor_notif("mon-1",
-                    "tick 2"),
+                    monitor_notif("mon-1", "tick 1"),
+                    bash,
+                    monitor_notif("mon-1", "tick 2"),
                 ],
                 "get_task_output",
             );
@@ -182,12 +185,14 @@ async fn drain_batches_monitor_notifications_into_formatted_block() {
                 "monitor entries must collapse into one formatted batch: {text}"
             );
             assert!(
-                text
-                .contains("<monitor description=\"watch\" task_id=\"mon-1\">\n[1] tick 1\n[2] tick 2"),
+                text.contains(
+                    "<monitor description=\"watch\" task_id=\"mon-1\">\n[1] tick 1\n[2] tick 2"
+                ),
                 "batch must group + label the ticks: {text}"
             );
             assert_eq!(
-                text.matches("<monitor-event").count(), 0,
+                text.matches("<monitor-event").count(),
+                0,
                 "raw per-event wrappers must not survive the drain: {text}"
             );
             assert!(
@@ -195,7 +200,8 @@ async fn drain_batches_monitor_notifications_into_formatted_block() {
                 "non-monitor notification keeps its raw block: {text}"
             );
             assert_eq!(
-                text.matches("---").count(), 1,
+                text.matches("---").count(),
+                1,
                 "one separator between the batch and the bash block: {text}"
             );
         })
@@ -255,11 +261,13 @@ async fn cancel_barrier_rejects_task_completion_wake_without_reporting_it() {
             let state = actor.state.lock().await;
             assert!(state.running_task.is_none());
             assert!(state.pending_inputs.is_empty());
-            assert!(
-                matches!(state.pending_notifications.as_slice(), [PendingNotification {
-                source : NotificationSource::BashTaskCompleted { task_id }, .. }] if
-                task_id == "bg-suppressed")
-            );
+            assert!(matches!(
+                state.pending_notifications.as_slice(),
+                [PendingNotification {
+                    source: NotificationSource::BashTaskCompleted { task_id },
+                    ..
+                }] if task_id == "bg-suppressed"
+            ));
             drop(state);
             assert!(reservations.contains("bg-suppressed"));
             let res = resources.lock().await;
@@ -310,11 +318,13 @@ async fn closed_admission_ack_stores_fallback_before_prompt_rejection() {
                     .is_none()
             );
             let state = actor.state.lock().await;
-            assert!(
-                matches!(state.pending_notifications.as_slice(), [PendingNotification {
-                source : NotificationSource::MonitorCompleted { task_id }, .. }] if
-                task_id == "mon-timeout")
-            );
+            assert!(matches!(
+                state.pending_notifications.as_slice(),
+                [PendingNotification {
+                    source: NotificationSource::MonitorCompleted { task_id },
+                    ..
+                }] if task_id == "mon-timeout"
+            ));
         })
         .await;
 }
@@ -355,9 +365,12 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
-                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                xai_acp_lib::AcpClientMessage,
+            >();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                PersistenceMsg,
+            >();
             let actor = std::sync::Arc::new(
                 create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
             );
@@ -395,6 +408,7 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                     None,
                     false,
                     Some(fallback),
+                    None,
                     respond_to,
                     None,
                     None,
@@ -402,11 +416,10 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                 .await;
             let state = actor.state.lock().await;
             assert_eq!(state.pending_inputs.len(), 1);
-            assert!(
-                matches!(state.pending_inputs.front().map(| item | & item.origin),
-                Some(crate ::session::PromptOrigin::TaskCompleted { task_id }) if task_id
-                == "bg-normal")
-            );
+            assert!(matches!(
+                state.pending_inputs.front().map(|item| &item.origin),
+                Some(crate::session::PromptOrigin::TaskCompleted { task_id }) if task_id == "bg-normal"
+            ));
             drop(state);
             let resources = actor
                 .agent
@@ -443,16 +456,19 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                     )
                     .await
             });
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    if already_reported(&actor, "bg-normal").await {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("synthetic turn marked completion reported");
+            tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    async {
+                        loop {
+                            if already_reported(&actor, "bg-normal").await {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    },
+                )
+                .await
+                .expect("synthetic turn marked completion reported");
             turn.abort();
             assert!(
                 already_reported(&actor, "bg-normal").await,
@@ -674,18 +690,18 @@ async fn same_id_bash_completion_does_not_suppress_monitor_event() {
                 .await;
             let monitor = PendingNotification {
                 prompt_id: "monitor-shared".to_string(),
-                prompt_blocks: vec![
-                    acp::ContentBlock::Text(acp::TextContent::new("<monitor-event description=\"watch\" task_id=\"shared\">\nstdout\n</monitor-event>",))
-                ],
+                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    "<monitor-event description=\"watch\" task_id=\"shared\">\nstdout\n</monitor-event>",
+                ))],
                 priority: NotificationPriority::Next,
                 source: NotificationSource::MonitorEvent {
                     task_id: "shared".to_string(),
                 },
             };
             let mut bash = bash_completed_notification("shared");
-            bash.prompt_blocks = vec![
-                acp::ContentBlock::Text(acp::TextContent::new("Background task shared completed.",))
-            ];
+            bash.prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "Background task shared completed.",
+            ))];
             let mut state = actor.state.lock().await;
             SessionActor::drain_notifications_into_turn(
                 &mut state,
@@ -842,6 +858,7 @@ async fn user_prompt_preempt_keeps_running_synthetic_slot() {
                     false,
                     None,
                     false,
+                    None,
                     None,
                     respond_to,
                     None,
@@ -1511,6 +1528,7 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                         *captured_task.lock().unwrap() = req.suppress_ids.clone();
                         let mk = |id: &str| SubagentCompletionSummary {
                             subagent_id: id.into(),
+                            owner_session_id: String::new(),
                             subagent_type: "general-purpose".into(),
                             description: format!("desc {id}"),
                             success: true,

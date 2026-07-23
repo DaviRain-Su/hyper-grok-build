@@ -25,6 +25,38 @@
             session.in_flight_prompt.is_none(),
             "compaction start implies server activity — cancel must not rewind prompt"
         );
+        assert_eq!(
+            session.compact_held_prompt.as_ref().map(|p| p.text.as_str()),
+            Some("hi"),
+            "hold prompt text for re-auth auto-resubmit if compact fails with auth"
+        );
+    }
+
+    /// Compact failure keeps the hold; PromptResponse reauth gate decides stash.
+    #[test]
+    fn apply_compaction_failed_keeps_held_prompt() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.compact_held_prompt = Some(InFlightPrompt {
+            text: "retry after login".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        for error in [
+            "authentication problem — re-authenticate using /login and retry.",
+            "this conversation is too large to compact.",
+        ] {
+            let update = XaiSessionUpdate::AutoCompactFailed {
+                error: error.into(),
+            };
+            assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+            assert_eq!(
+                session.compact_held_prompt.as_ref().map(|p| p.text.as_str()),
+                Some("retry after login"),
+            );
+        }
     }
 
     /// `ImageDropped` joins notes with `\n` and pushes a system block.

@@ -51,16 +51,19 @@ fn info_override_json() -> String {
 
 fn spawn_with_announcements(content: &ContentController, override_json: &str) -> PtyHarness {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut env = content.env_for_pager();
-    env.push((
+    let overrides: Vec<(String, String)> = vec![(
         "GROK_ANNOUNCEMENTS_OVERRIDE".into(),
         override_json.to_owned(),
-    ));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    PtyHarness::new_in_dir(
+    )];
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        content,
         &[],
         &env_refs,
         Some(content.home()),
@@ -883,18 +886,14 @@ fn spawn_with_announcements_and_env(
     extra_env: &[(&str, &str)],
 ) -> PtyHarness {
     let binary = pager_binary().expect("resolve pager binary");
-    let mut env = content.env_for_pager();
-    env.push((
-        "GROK_ANNOUNCEMENTS_OVERRIDE".into(),
-        override_json.to_owned(),
-    ));
-    let mut env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let announcement = ("GROK_ANNOUNCEMENTS_OVERRIDE", override_json);
+    let mut env_refs = vec![announcement];
     env_refs.extend_from_slice(extra_env);
-    PtyHarness::new_in_dir(
+    PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        content,
         &[],
         &env_refs,
         Some(content.home()),

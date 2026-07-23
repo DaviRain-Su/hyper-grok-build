@@ -17,6 +17,9 @@
 
 use std::future::Future;
 
+#[cfg(unix)]
+mod common;
+
 use agent_client_protocol as acp;
 use xai_grok_test_support::*;
 
@@ -71,11 +74,11 @@ async fn test_refusal_turn_completes_with_single_messages_request() {
     with_local_set(|| async {
         let server = refusal_messages_server().await;
         let workdir = git_workdir();
-        let client = GrokStdioClient::spawn(&server, workdir.path()).await;
+        let client = GrokStdioClient::spawn(&server, workdir.workspace()).await;
 
         client.initialize_with_timeout().await;
         let session_id = client
-            .create_session_with_model_timeout(workdir.path(), "messages-compatible-model")
+            .create_session_with_model_timeout(workdir.workspace(), "messages-compatible-model")
             .await;
 
         let result = client.prompt_with_timeout(&session_id, "say hello").await;
@@ -122,10 +125,10 @@ mod leader {
 
     use agent_client_protocol as acp;
 
-    use xai_grok_test_support::leader::{LeaderStdioClient, wait_for_live_leader};
+    use xai_grok_test_support::leader::{LeaderFixture, wait_for_live_leader};
     use xai_grok_test_support::*;
 
-    use super::{refusal_messages_server, turn_messages_request_count, with_local_set};
+    use super::{common, refusal_messages_server, turn_messages_request_count, with_local_set};
 
     /// Leader-mode variant of the regression: the refusal-terminated turn
     /// must complete cleanly (single request, prompt response delivered)
@@ -136,60 +139,81 @@ mod leader {
         with_local_set(|| async {
             let server = refusal_messages_server().await;
             let workdir = git_workdir();
-            let home = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(home.path().join(".grok")).unwrap();
-
-            let client = LeaderStdioClient::spawn(&server, workdir.path(), home.path()).await;
-            client.initialize().await;
-            let session_id = client
-                .create_session_with_model(workdir.path(), "messages-compatible-model")
-                .await;
-
-            let result = client.prompt(&session_id, "say hello").await;
-
-            // Prove the session is leader-hosted: a live leader process,
-            // distinct from the client subprocess, holds the lock.
-            let leader_pid = wait_for_live_leader(home.path(), Duration::from_secs(5))
+            let sandbox = TestSandbox::new();
+            let fixture = LeaderFixture::start(&server, workdir.workspace(), &sandbox)
                 .await
-                .unwrap_or_else(|| {
-                    panic!(
-                        "no live leader PID in lock file — turn did not run under the leader\nstderr:\n{}",
-                        client.stderr_text()
-                    )
-                });
-            assert_ne!(
-                Some(leader_pid),
-                client.child.id(),
-                "leader must be a separate process from the stdio client"
-            );
-            let response = result.unwrap_or_else(|e| {
-                panic!(
-                    "leader-hosted refusal turn must complete, got error: {e:?}\nrequest log:\n{}\nstderr:\n{}",
-                    server.request_log_summary(),
-                    client.stderr_text()
-                )
-            });
-            assert_eq!(
-                response.stop_reason,
-                acp::StopReason::EndTurn,
-                "refusal must end the turn cleanly under the leader"
-            );
-            assert!(
-                client.captured_text().contains("Echo:"),
-                "streamed response text must reach the client through the leader, got: {:?}",
-                client.captured_text()
-            );
-            assert_eq!(
-                turn_messages_request_count(&server),
-                1,
-                "exactly one turn request to /v1/messages (no retry storm)\nrequest log:\n{}",
-                server.request_log_summary()
-            );
-            assert!(
-                server.messages_request_count() <= 2,
-                "at most turn + title-generation requests\nrequest log:\n{}",
-                server.request_log_summary()
-            );
+                .expect("start persistent leader fixture");
+            let mut clients = Vec::new();
+            common::leader::run_with_cleanup(
+                &fixture,
+                &mut clients,
+                |fixture, clients| {
+                    Box::pin(async move {
+                        clients.push(
+                            fixture
+                                .spawn_client(&server, workdir.workspace(), &sandbox)
+                                .await
+                                .expect("spawn leader client"),
+                        );
+                        let client = &clients[0];
+                        client.initialize().await;
+                        let session_id = client
+                            .create_session_with_model(
+                                workdir.workspace(),
+                                "messages-compatible-model",
+                            )
+                            .await;
+
+                        let result = client.prompt(&session_id, "say hello").await;
+
+                        // Prove the session is leader-hosted: a live leader process,
+                        // distinct from the client subprocess, holds the lock.
+                        let leader_pid =
+                            wait_for_live_leader(sandbox.home(), Duration::from_secs(5))
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "no live leader PID in lock file — turn did not run under the leader\nstderr:\n{}",
+                                        client.stderr_text()
+                                    )
+                                });
+                        assert_ne!(
+                            Some(leader_pid),
+                            client.child_pid(),
+                            "leader must be a separate process from the stdio client"
+                        );
+                        let response = result.unwrap_or_else(|e| {
+                            panic!(
+                                "leader-hosted refusal turn must complete, got error: {e:?}\nrequest log:\n{}\nstderr:\n{}",
+                                server.request_log_summary(),
+                                client.stderr_text()
+                            )
+                        });
+                        assert_eq!(
+                            response.stop_reason,
+                            acp::StopReason::EndTurn,
+                            "refusal must end the turn cleanly under the leader"
+                        );
+                        assert!(
+                            client.captured_text().contains("Echo:"),
+                            "streamed response text must reach the client through the leader, got: {:?}",
+                            client.captured_text()
+                        );
+                        assert_eq!(
+                            turn_messages_request_count(&server),
+                            1,
+                            "exactly one turn request to /v1/messages (no retry storm)\nrequest log:\n{}",
+                            server.request_log_summary()
+                        );
+                        assert!(
+                            server.messages_request_count() <= 2,
+                            "at most turn + title-generation requests\nrequest log:\n{}",
+                            server.request_log_summary()
+                        );
+                    })
+                },
+            )
+            .await;
         })
         .await;
     }

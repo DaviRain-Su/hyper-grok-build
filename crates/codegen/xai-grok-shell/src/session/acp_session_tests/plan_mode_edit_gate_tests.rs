@@ -19,6 +19,7 @@ async fn build_gate_actor() -> SessionActor {
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+        // search_replace's requirements demand a Read tool in the same toolset.
         ToolConfig::from_id("GrokBuild:read_file"),
         ToolConfig::from_id("GrokBuild:search_replace"),
         ToolConfig::for_tool::<EnterPlanModeTool>(),

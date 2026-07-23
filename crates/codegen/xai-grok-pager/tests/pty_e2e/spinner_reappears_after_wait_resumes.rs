@@ -15,7 +15,7 @@ use super::common::*;
 /// Running-turn keybar hint; absent while the parked look is active
 /// (see `wait_for_turn_idle` in common.rs for the same sentinel).
 #[cfg(unix)]
-const CANCEL_HINT: &str = "Ctrl+c:cancel";
+const CANCEL_HINT: &str = "Esc:cancel";
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

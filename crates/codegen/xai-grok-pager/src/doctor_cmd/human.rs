@@ -5,17 +5,17 @@ use crate::diagnostics::{
 };
 use crate::host::{DisplayServer, HostOs};
 
-const LIVE_TUI_PROBE_CTA: &str = "Run /doctor inside Grok.";
+const LIVE_TUI_PROBE_CTA: &str = "Some checks only run in Grok. Start Grok and run /doctor.";
 
 pub(super) fn format(report: &DiagnosticReport) -> String {
     let facts = &report.facts;
-    let mut out = String::from("Grok Doctor\n\nTerminal\n");
+    let mut out = String::from("Grok Doctor\n\nEnvironment\n");
 
     fact(&mut out, "terminal", &facts.terminal.to_string());
     match &facts.xtversion {
-        RuntimeFact::Available(value) => fact(&mut out, "xtversion", value),
-        RuntimeFact::NoReply => unavailable(&mut out, "xtversion", "no reply"),
-        RuntimeFact::Unavailable => unavailable(&mut out, "xtversion", "unavailable"),
+        RuntimeFact::Available(value) => fact(&mut out, "terminal version", value),
+        RuntimeFact::NoReply => unavailable(&mut out, "terminal version", "no reply"),
+        RuntimeFact::Unavailable => unavailable(&mut out, "terminal version", "unavailable"),
     }
     fact(&mut out, "multiplexer", &facts.multiplexer.to_string());
     if let Some(byobu) = facts.byobu {
@@ -95,7 +95,7 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
     );
     fact(
         &mut out,
-        "wrap",
+        "SSH wrap",
         if clipboard.wrap_sink { "on" } else { "off" },
     );
     if clipboard.display_server == DisplayServer::Wayland {
@@ -125,9 +125,6 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
         ClipboardDelivery::Failed => "unavailable",
     };
     fact(&mut out, "status", status);
-    if let Some(fix) = &clipboard.fix {
-        fact(&mut out, "fix", fix);
-    }
 
     if let Some(voice) = &facts.voice {
         out.push_str("\nVoice\n");
@@ -154,7 +151,7 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
         .filter(|note| !fact_already_shows_probe(note.probe));
     let mut notes = visible_notes.peekable();
     if notes.peek().is_some() {
-        out.push_str("\nProbe notes\n");
+        out.push_str("\nChecks not completed\n");
         for note in notes {
             let message = match &note.message {
                 Some(message) => format!("{}: {message}", probe_status(note.status)),
@@ -169,7 +166,7 @@ pub(super) fn format(report: &DiagnosticReport) -> String {
         .iter()
         .any(crate::diagnostics::probe_requires_live_tui)
     {
-        out.push_str("\nLive TUI evidence\n");
+        out.push_str("\nNeeds a running session\n");
         out.push_str(&format!("  {LIVE_TUI_PROBE_CTA}\n"));
     }
 
@@ -220,7 +217,7 @@ fn format_finding(out: &mut String, finding: &DiagnosticFinding) {
         let instruction = match (&remediation.config_path, &finding.automatic_remediation) {
             (Some(path), _) => format!("Add `{}` to {path}", remediation.fix),
             (None, Some(_)) => format!("One-off: `{}`", remediation.fix),
-            (None, None) => format!("Run `{}`", remediation.fix),
+            (None, None) => format!("Run: `{}`", remediation.fix),
         };
         out.push_str(&format!("    → {instruction}\n"));
     }

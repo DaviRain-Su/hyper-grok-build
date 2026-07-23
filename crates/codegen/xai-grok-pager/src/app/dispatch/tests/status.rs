@@ -781,28 +781,159 @@ fn scrub_error_for_toast_unit() {
     );
 }
 
-/// The no-agent path
-/// returns empty cleanly — no toast (the show_toast call would
-/// no-op anyway), no panic, no Effect emitted. A "✗ No active
-/// session" toast would be dead UX (no agent = no toast surface
-/// to render on), so this path emits a tracing::warn! instead.
+/// Synthetic AgentId(0) when no agents (welcome banner Accept path).
 #[test]
-fn set_coding_data_sharing_no_agents_returns_empty_without_panic() {
+fn set_coding_data_sharing_no_agents_still_emits_effect() {
     let mut app = test_app_with_agent();
-    // Remove every agent so the dispatcher hits the no-agent path.
     app.agents.clear();
-    // Force the view off Agent so the dispatcher falls through to
-    // app.agents.keys().next() which is now empty.
     app.active_view = ActiveView::Welcome;
-    let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
-    assert!(
-        effects.is_empty(),
-        "no-agent path must return empty (no Effect to fire)",
-    );
-    // State unchanged (we never reach the optimistic mutation).
+    app.coding_data_retention_opt_out = true;
+    let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+    assert_eq!(effects.len(), 1, "no-agent path must still emit Effect");
     assert!(
         !app.coding_data_retention_opt_out,
-        "no-agent path must NOT mutate state",
+        "optimistic opt-in must apply without agents",
+    );
+}
+
+fn privacy_banner_ready_app() -> AppView {
+    let mut app = test_app_with_agent();
+    app.active_view = ActiveView::Welcome;
+    app.auth_state = AuthState::Done;
+    app.trust_state = TrustState::Done;
+    app.privacy_notice_rollout = true;
+    app.privacy_banner_acked = None;
+    app.privacy_banner_reshow_days = None;
+    app.privacy_banner_accept_inflight = false;
+    app.is_zdr = false;
+    app.team_name = None;
+    app.coding_data_retention_opt_out = true;
+    app
+}
+
+#[test]
+fn privacy_banner_should_show_respects_gates() {
+    let mut app = privacy_banner_ready_app();
+    assert!(app.privacy_banner_should_show());
+
+    app.coding_data_retention_opt_out = false;
+    assert!(!app.privacy_banner_should_show(), "already opted in");
+    app.coding_data_retention_opt_out = true;
+
+    app.is_zdr = true;
+    assert!(!app.privacy_banner_should_show(), "enterprise ZDR");
+    app.is_zdr = false;
+
+    app.privacy_banner_acked = Some("2099-01-01T00:00:00Z".into());
+    assert!(
+        !app.privacy_banner_should_show(),
+        "recently acked, no reshow"
+    );
+
+    app.privacy_banner_reshow_days = Some(30);
+    app.privacy_banner_acked = Some("2020-01-01T00:00:00Z".into());
+    assert!(
+        app.privacy_banner_should_show(),
+        "acked long ago + reshow_days"
+    );
+
+    app.privacy_notice_rollout = false;
+    assert!(!app.privacy_banner_should_show(), "rollout off");
+}
+
+/// Accept success: ACP confirmation acks the banner.
+#[test]
+fn privacy_banner_accept_success_acks() {
+    let mut app = privacy_banner_ready_app();
+    let effects = dispatch(Action::PrivacyBannerAccept, &mut app);
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(
+        &effects[0],
+        Effect::SetCodingDataSharing { opted_in: true, .. }
+    ));
+    assert!(app.privacy_banner_accept_inflight);
+    assert!(!app.coding_data_retention_opt_out);
+    assert!(app.privacy_banner_acked.is_none());
+
+    let ack_effects = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+            agent_id: AgentId(0),
+            opted_in: true,
+        }),
+        &mut app,
+    );
+    assert!(!app.privacy_banner_accept_inflight);
+    assert!(app.privacy_banner_acked.is_some());
+    assert!(
+        ack_effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "success must persist ack: {ack_effects:?}"
+    );
+}
+
+/// Accept failure: no ack; welcome toast carries the error.
+#[test]
+fn privacy_banner_accept_failure_no_ack_sets_welcome_toast() {
+    let mut app = privacy_banner_ready_app();
+    let effects = dispatch(Action::PrivacyBannerAccept, &mut app);
+    assert_eq!(effects.len(), 1);
+    assert!(app.privacy_banner_accept_inflight);
+
+    let fail_effects = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingFailed {
+            agent_id: AgentId(0),
+            error: "server error".into(),
+            rollback_to_opted_in: false,
+        }),
+        &mut app,
+    );
+    assert!(fail_effects.is_empty());
+    assert!(!app.privacy_banner_accept_inflight);
+    assert!(app.privacy_banner_acked.is_none());
+    assert!(
+        app.coding_data_retention_opt_out,
+        "rollback restores opt-out"
+    );
+    let toast = app
+        .welcome_toast
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or("");
+    assert!(
+        toast.contains("coding data sharing"),
+        "welcome toast on Accept failure: {toast}"
+    );
+    assert!(toast.contains("server error"), "error in toast: {toast}");
+}
+
+/// Customize while an Accept ACP call is inflight must be a no-op: an
+/// eager ack would survive the Accept-failure rollback and hide the
+/// banner forever.
+#[test]
+fn privacy_banner_customize_noop_while_accept_inflight() {
+    let mut app = privacy_banner_ready_app();
+    let _ = dispatch(Action::PrivacyBannerAccept, &mut app);
+    assert!(app.privacy_banner_accept_inflight);
+
+    let effects = dispatch(Action::PrivacyBannerCustomize, &mut app);
+    assert!(
+        effects.is_empty(),
+        "customize during inflight accept must be a no-op: {effects:?}"
+    );
+    assert!(app.privacy_banner_acked.is_none(), "no ack while inflight");
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::CodingDataSharingFailed {
+            agent_id: AgentId(0),
+            error: "server error".into(),
+            rollback_to_opted_in: false,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.privacy_banner_should_show(),
+        "failed Accept must keep the banner even after a raced Customize"
     );
 }
 

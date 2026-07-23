@@ -43,16 +43,25 @@ async fn minimal_transcript_pager_restore_no_artifacts() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} transcript body."));
 
-    let mut env = content.env_for_pager();
-    env.push(("PAGER".to_string(), "less".to_string()));
-    env.push((
+    let mut overrides: Vec<(String, String)> = vec![("PAGER".to_string(), "less".to_string())];
+    overrides.push((
         "GROK_TEST_FRAME_WRITE_DELAY_MS".to_string(),
         FRAME_DELAY_MS.to_string(),
     ));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, &env_refs)
-        .expect("spawn minimal pager");
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        MINIMAL_ARGS,
+        &env_refs,
+    )
+    .expect("spawn minimal pager");
     harness.set_respond_to_queries(true);
 
     wait_minimal_ready(&mut harness);

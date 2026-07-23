@@ -14,7 +14,7 @@ mod minimal_committed_content_survives_overlay_grow;
 mod minimal_continue_reprints_transcript;
 mod minimal_ctrl_c_arms_and_quits;
 mod minimal_double_esc_committed_queued_prompt_single_render;
-mod minimal_esc_mid_turn_is_swallowed;
+mod minimal_esc_cancels_running_turn;
 mod minimal_external_editor_round_trip;
 mod minimal_flush_left_no_hpad;
 mod minimal_help_opens_command_palette;

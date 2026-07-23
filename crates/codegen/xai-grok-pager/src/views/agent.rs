@@ -200,7 +200,9 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
-        let mut constraints = vec![Constraint::Length(1)];
+        let mut constraints = vec![
+            Constraint::Length(1), // StatusBar
+        ];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
@@ -925,6 +927,7 @@ pub fn build_hints(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
+    esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
     selected_is_agent_message: bool,
@@ -1243,7 +1246,11 @@ pub fn build_hints(
         }
     };
     if is_turn_running && let Some(def) = registry.find(ActionId::CancelTurn) {
-        hints.push(def.hint());
+        let mut hint = def.hint();
+        if esc_would_cancel_turn {
+            hint.keys = vec![crate::key!(Esc)];
+        }
+        hints.push(hint);
     }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
     if matches!(active_pane, ActivePane::Prompt)
@@ -1327,6 +1334,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             selected_is_user_prompt,
             selected_is_agent_message,
             false,
@@ -1363,6 +1371,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
         );
         let hint = hints
@@ -1390,6 +1399,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -1561,6 +1571,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         )
     }
@@ -1664,6 +1675,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
         );
         assert!(
@@ -1703,6 +1715,7 @@ mod tests {
             true,
             false,
             is_turn_running,
+            false,
             false,
             false,
             false,
@@ -1762,6 +1775,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 true,
                 false,
                 false,
@@ -1776,6 +1790,159 @@ mod tests {
                  (multiline={multiline}); got {labels:?}"
             );
         }
+    }
+    /// Running-turn cancel hint key tracks `esc_would_cancel_turn` — the
+    /// input-routing predicate computed by the caller: Esc when a bare press
+    /// would reach the policy's mid-turn cancel, the registry Ctrl+C binding
+    /// otherwise. (The predicate itself — gate, panes, and higher-priority
+    /// Esc consumers — is pinned by `esc_would_cancel_turn_tests` in
+    /// `agent_view::input`.)
+    #[test]
+    fn running_turn_cancel_hint_key_tracks_esc_predicate() {
+        let prompt = PromptWidget::default();
+        let registry = ActionRegistry::defaults();
+        for (esc_would_cancel_turn, expected) in
+            [(true, crate::key!(Esc)), (false, crate::key!('c', CONTROL))]
+        {
+            let hints = build_hints(
+                ActivePane::Prompt,
+                &prompt,
+                &registry,
+                false,
+                None,
+                None,
+                "expand thinking",
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                esc_would_cancel_turn,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            let cancel = hints
+                .iter()
+                .find(|h| h.label == "cancel")
+                .expect("running turn must surface the cancel hint");
+            assert_eq!(
+                cancel.keys,
+                vec![expected],
+                "cancel hint key for esc_would_cancel_turn={esc_would_cancel_turn}"
+            );
+        }
+    }
+    /// Running turn + open scrollback search: the search's own `Esc cancel`
+    /// hint stays the ONLY Esc hint — the CancelTurn hint keeps Ctrl+C (the
+    /// caller's predicate is false while the search would steal Esc), so the
+    /// bar never shows two different `Esc cancel` meanings at once.
+    #[test]
+    fn running_turn_with_scrollback_search_keeps_ctrl_c_cancel_hint() {
+        let registry = ActionRegistry::defaults();
+        let search = ScrollbackSearchState::open();
+        let hints = build_hints(
+            ActivePane::Scrollback,
+            &PromptWidget::default(),
+            &registry,
+            false,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(&search),
+        );
+        let esc_cancels: Vec<&HintItem> = hints
+            .iter()
+            .filter(|h| h.label == "cancel" && h.keys == vec![crate::key!(Esc)])
+            .collect();
+        assert_eq!(
+            esc_cancels.len(),
+            1,
+            "exactly one Esc:cancel hint (the search's own dismiss)"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.label == "cancel" && h.keys == vec![crate::key!('c', CONTROL)]),
+            "CancelTurn hint must stay on Ctrl+C while the search owns Esc"
+        );
+    }
+    /// Running turn + editing a queued prompt: the edit's own `Esc cancel`
+    /// (discard) hint is the ONLY Esc-keyed row — the CancelTurn hint keeps
+    /// Ctrl+C (the caller's predicate is false while the edit owns Esc), so
+    /// the bar never shows two contradictory `Esc cancel` rows.
+    #[test]
+    fn running_turn_editing_queued_keeps_ctrl_c_cancel_hint() {
+        let registry = ActionRegistry::defaults();
+        let mut prompt = PromptWidget::default();
+        prompt.textarea.insert_str("edited row");
+        let hints = build_hints(
+            ActivePane::Prompt,
+            &prompt,
+            &registry,
+            true,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        let esc_rows: Vec<&HintItem> = hints
+            .iter()
+            .filter(|h| h.keys.contains(&crate::key!(Esc)))
+            .collect();
+        assert_eq!(
+            esc_rows.len(),
+            1,
+            "exactly one Esc-keyed hint (the edit's discard), got {:?}",
+            hints.iter().map(|h| h.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert_eq!(esc_rows[0].label, "cancel");
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.label == "cancel" && h.keys == vec![crate::key!('c', CONTROL)]),
+            "CancelTurn hint must stay on Ctrl+C while the edit owns Esc"
+        );
     }
     #[test]
     fn prompt_legacy_vte_adds_alt_enter_newline_hint() {

@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 const assert = require('assert');
 
 let passed = 0;
@@ -36,14 +37,16 @@ function cleanup(dir) {
 
 // ─── Extracted logic (mirrors postinstall.js and bin/grok exactly) ─────
 
-/** Semver-aware descending sort for "grok-X.Y.Z" filenames. */
-function semverSortDescending(a, b) {
-    const pa = a.slice(5).split('.').map(Number);
-    const pb = b.slice(5).split('.').map(Number);
-    for (let i = 0; i < 3; i++) {
-        if ((pa[i] || 0) !== (pb[i] || 0)) return (pb[i] || 0) - (pa[i] || 0);
-    }
-    return 0;
+/** Comparator: sort "<prefix>X.Y.Z" filenames by version, newest first. */
+function byVersionDescending(prefix) {
+    return (a, b) => {
+        const pa = a.slice(prefix.length).split('.').map(Number);
+        const pb = b.slice(prefix.length).split('.').map(Number);
+        for (let i = 0; i < 3; i++) {
+            if ((pa[i] || 0) !== (pb[i] || 0)) return (pb[i] || 0) - (pa[i] || 0);
+        }
+        return 0;
+    };
 }
 
 /** Install a versioned binary + atomic symlink (same as postinstall.js). */
@@ -78,12 +81,66 @@ function cleanupOldVersions(canonicalDir, currentVersionedName) {
     const entries = fs.readdirSync(canonicalDir);
     const versionedBinaries = entries
         .filter(e => e.startsWith('grok-') && !e.includes('.tmp.') && !e.includes('.link.') && e !== currentVersionedName)
-        .sort(semverSortDescending);
+        .sort(byVersionDescending('grok-'));
     // Keep the most recent old version, remove anything older.
     for (const old of versionedBinaries.slice(1)) {
         try { fs.unlinkSync(path.join(canonicalDir, old)); } catch {}
     }
     return versionedBinaries;
+}
+
+/** Grok bin dir resolution (mirrors postinstall.js and bin/grok). */
+function resolveGrokBinDir(env, homedir) {
+    const grokHome = env.GROK_HOME ?? path.join(homedir, '.grok');
+    return path.join(grokHome, 'bin');
+}
+
+/** Materialize the vendored binary at destPath (mirrors writeVendorBinary). */
+function writeVendorBinary(brPath, rawPath, destPath) {
+    const tmp = destPath + `.tmp.${process.pid}`;
+    try {
+        if (fs.existsSync(brPath)) {
+            fs.writeFileSync(tmp, zlib.brotliDecompressSync(fs.readFileSync(brPath)));
+        } else if (fs.existsSync(rawPath)) {
+            fs.copyFileSync(rawPath, tmp);
+        } else {
+            return false;
+        }
+        fs.chmodSync(tmp, 0o755);
+        fs.renameSync(tmp, destPath);
+        return true;
+    } catch {
+        return false;
+    } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+    }
+}
+
+/** Decompress a brotli payload into the canonical dir (mirrors installBinary). */
+function installBinaryFromBrotli(brPath, version, canonicalDir) {
+    fs.mkdirSync(canonicalDir, { recursive: true });
+    const versionedName = `grok-${version}`;
+    const versionedPath = path.join(canonicalDir, versionedName);
+    const canonicalPath = path.join(canonicalDir, 'grok');
+
+    if (!fs.existsSync(versionedPath)) {
+        const tmpPath = versionedPath + `.tmp.${process.pid}`;
+        try {
+            const decompressed = zlib.brotliDecompressSync(fs.readFileSync(brPath));
+            fs.writeFileSync(tmpPath, decompressed);
+            fs.chmodSync(tmpPath, 0o755);
+            fs.renameSync(tmpPath, versionedPath);
+        } finally {
+            try { fs.unlinkSync(tmpPath); } catch {}
+        }
+    }
+
+    const tmpLink = canonicalPath + `.link.${process.pid}`;
+    try { fs.unlinkSync(tmpLink); } catch {}
+    fs.symlinkSync(versionedName, tmpLink);
+    fs.renameSync(tmpLink, canonicalPath);
+
+    return { canonicalPath, versionedPath, versionedName };
 }
 
 /** Bootstrap canonical from vendored (same as bin/grok trampoline). */
@@ -458,9 +515,9 @@ test('semver sort: minor version boundary (0.1.x vs 0.2.x)', () => {
     }
 });
 
-test('semverSortDescending: unit test comparator directly', () => {
+test('byVersionDescending: unit test comparator directly', () => {
     const input = ['grok-0.1.9', 'grok-0.1.10', 'grok-0.1.2', 'grok-1.0.0', 'grok-0.2.0'];
-    const sorted = [...input].sort(semverSortDescending);
+    const sorted = [...input].sort(byVersionDescending('grok-'));
     assert.deepStrictEqual(sorted, [
         'grok-1.0.0',
         'grok-0.2.0',
@@ -674,14 +731,7 @@ function cleanupOldVersionsNamed(canonicalDir, binName, version) {
             const suffix = e.slice(prefix.length);
             return /^\d/.test(suffix);
         })
-        .sort((a, b) => {
-            const pa = a.slice(prefix.length).split('.').map(Number);
-            const pb = b.slice(prefix.length).split('.').map(Number);
-            for (let i = 0; i < 3; i++) {
-                if ((pa[i] || 0) !== (pb[i] || 0)) return (pb[i] || 0) - (pa[i] || 0);
-            }
-            return 0;
-        });
+        .sort(byVersionDescending(prefix));
     for (const old of versionedBinaries.slice(1)) {
         try { fs.unlinkSync(path.join(canonicalDir, old)); } catch {}
     }
@@ -972,6 +1022,58 @@ test('canonical pager from non-npm install is preserved on Linux', () => {
         assert.ok(fs.existsSync(pagerCanonical), 'canonical pager should survive');
         assert.ok(fs.existsSync(pagerVersioned), 'versioned pager should survive');
         assert.strictEqual(fs.readlinkSync(pagerCanonical), 'grok-pager-0.1.150');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+console.log('\ngrok home + brotli install tests\n');
+
+test('resolveGrokBinDir honors $GROK_HOME, else falls back to <home>/.grok/bin', () => {
+    assert.strictEqual(
+        resolveGrokBinDir({ GROK_HOME: '/fast/local/.grok' }, '/home/alice'),
+        path.join('/fast/local/.grok', 'bin'),
+    );
+    assert.strictEqual(
+        resolveGrokBinDir({}, '/home/alice'),
+        path.join('/home/alice', '.grok', 'bin'),
+    );
+    assert.strictEqual(resolveGrokBinDir({ GROK_HOME: '' }, '/home/alice'), path.join('', 'bin'));
+});
+
+test('writeVendorBinary returns false (not true) when the destination cannot be written', () => {
+    const dir = makeTmpDir();
+    try {
+        const brPath = path.join(dir, 'grok.br');
+        fs.writeFileSync(brPath, zlib.brotliCompressSync(Buffer.from('binary')));
+
+        // A non-empty directory at destPath makes the final rename fail.
+        const dest = path.join(dir, 'dest');
+        fs.mkdirSync(dest);
+        fs.writeFileSync(path.join(dest, 'child'), 'x');
+
+        assert.strictEqual(writeVendorBinary(brPath, path.join(dir, 'raw'), dest), false);
+        assert.ok(!fs.existsSync(`${dest}.tmp.${process.pid}`), 'temp file is cleaned up on failure');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('decompresses brotli into the canonical dir without duplicating into node_modules', () => {
+    const dir = makeTmpDir();
+    try {
+        const vendorBin = path.join(dir, 'node_modules', 'bin');
+        fs.mkdirSync(vendorBin, { recursive: true });
+        const brPath = path.join(vendorBin, 'grok.br');
+        fs.writeFileSync(brPath, zlib.brotliCompressSync(Buffer.from('native-binary-bytes')));
+
+        const binDir = path.join(dir, '.grok', 'bin');
+        const result = installBinaryFromBrotli(brPath, '0.1.220', binDir);
+
+        assert.ok(fs.lstatSync(result.canonicalPath).isSymbolicLink());
+        assert.strictEqual(fs.readFileSync(result.canonicalPath, 'utf8'), 'native-binary-bytes');
+        assert.ok(!fs.existsSync(path.join(vendorBin, 'grok')), 'no uncompressed binary in node_modules');
+        assert.ok(fs.existsSync(brPath), 'compressed .br payload is preserved');
     } finally {
         cleanup(dir);
     }

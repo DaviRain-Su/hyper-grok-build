@@ -36,12 +36,16 @@ async fn minimal_external_editor_round_trip() {
         format!("'{}'", script.display())
     };
 
-    let mut env = content.env_for_pager();
-    env.push(("VISUAL".to_owned(), editor));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, &env_refs)
-        .expect("spawn minimal pager");
+    let mut harness = PtyHarness::spawn_with_content_env_ops(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        MINIMAL_ARGS,
+        &[EnvOp::set("VISUAL", &editor)],
+    )
+    .expect("spawn minimal pager");
     harness.set_respond_to_queries(true);
 
     wait_minimal_ready(&mut harness);

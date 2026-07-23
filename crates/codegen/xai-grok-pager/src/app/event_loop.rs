@@ -865,6 +865,29 @@ pub(crate) async fn run(
         .as_ref()
         .and_then(|s| s.sharing_enabled)
         .unwrap_or(false);
+    app.privacy_notice_rollout = xai_grok_config::env_bool("GROK_PRIVACY_NOTICE_ROLLOUT")
+        .or_else(|| {
+            remote_settings
+                .as_ref()
+                .and_then(|s| s.privacy_notice_rollout)
+        })
+        .unwrap_or(false);
+    app.privacy_banner_reshow_days = std::env::var("GROK_PRIVACY_BANNER_RESHOW_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .or_else(|| {
+            remote_settings
+                .as_ref()
+                .and_then(|s| s.privacy_banner_reshow_days)
+        });
+    // Local dismiss timestamp for the coding-data privacy banner.
+    app.privacy_banner_acked = xai_grok_shell::config::load_from_disk()
+        .ok()
+        .and_then(|root| {
+            xai_grok_shell::util::config::load_config_from_toml(&root)
+                .privacy
+                .privacy_banner_acked
+        });
     app.plugin_cta_enabled = xai_grok_config::env_bool("GROK_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);
@@ -1191,8 +1214,9 @@ pub(crate) async fn run(
         );
         let mut warnings = crate::diagnostics::collect_startup_warnings(&snapshot);
         warnings.extend(crate::diagnostics::diagnose_wayland_data_control_from_snapshot(&snapshot));
-        let notif_warnings = crate::diagnostics::collect_notification_warnings(
+        let notif_warnings = crate::diagnostics::collect_notification_warnings_with_method(
             &snapshot,
+            app.notification_service.config().method,
             app.notification_service.protocol(),
             app.notification_service.config().condition,
         );
@@ -1816,7 +1840,7 @@ pub(crate) async fn run(
             } else if app.voice_cmd_tx.is_none() {
                 app.voice_state = VoiceState::Idle;
                 app.voice_ui_active = false;
-                app.show_toast("Voice pipeline could not start — restart grok");
+                app.show_toast("Voice could not start. Restart Grok.");
             } else {
                 // Defensive: a queued start with the pipeline already up (which
                 // shouldn't occur) — drop it so we don't re-enter every tick.
@@ -2702,7 +2726,7 @@ pub(crate) async fn run(
                         // Pipeline is gone: drop any session/interim entirely.
                         app.voice_reset();
                         if was_listening {
-                            app.show_toast("Voice stopped — pipeline ended");
+                            app.show_toast("Voice stopped unexpectedly. Try again.");
                         }
                         presenter.request(false);
                     }

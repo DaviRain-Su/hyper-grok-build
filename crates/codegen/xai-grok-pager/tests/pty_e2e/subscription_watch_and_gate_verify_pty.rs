@@ -181,22 +181,21 @@ fn seed_fake_oauth_local_issuer(content: &ContentController, user: &str) {
 fn spawn_subscription_pager(
     content: &ContentController,
     oauth_user: &str,
-    extra_env: &[(&str, &str)],
+    extra_env: &[EnvOp<'_>],
 ) -> PtyHarness {
     seed_fake_oauth_local_issuer(content, oauth_user);
-    let env = oauth_env_for_pager(content);
-    let mut env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    env_refs.push(("GROK_LOCAL_AUTH", "1"));
-    env_refs.extend_from_slice(extra_env);
+    let mut overrides = Vec::from(oauth_credential_ops());
+    overrides.push(EnvOp::set("GROK_LOCAL_AUTH", "1"));
+    overrides.extend_from_slice(extra_env);
 
     let binary = pager_binary().expect("resolve pager binary");
-    PtyHarness::new_in_dir(
+    PtyHarness::spawn_with_content_env_ops_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        content,
         &[],
-        &env_refs,
+        &overrides,
         Some(content.home()),
     )
     .expect("spawn pager with subscription session auth")
@@ -207,7 +206,7 @@ fn spawn_subscription_pager(
 fn spawn_subscription_session(
     content: &ContentController,
     oauth_user: &str,
-    extra_env: &[(&str, &str)],
+    extra_env: &[EnvOp<'_>],
 ) -> PtyHarness {
     let mut harness = spawn_subscription_pager(content, oauth_user, extra_env);
     harness
@@ -241,7 +240,7 @@ async fn subscription_watch_polls_free_tier_then_goes_dormant_after_upgrade() {
     let mut harness = spawn_subscription_session(
         &content,
         "pty-subwatch",
-        &[("GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS", "1")],
+        &[EnvOp::set("GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS", "1")],
     );
 
     // While free, the watch fires repeatedly at the (test-shrunk) cadence.
@@ -388,7 +387,7 @@ async fn stale_gate_push_never_flashes_paywall_for_subscribed_user() {
     let mut harness = spawn_subscription_session(
         &content,
         "pty-subgate-paid",
-        &[("GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS", "0")],
+        &[EnvOp::set("GROK_SUBSCRIPTION_WATCH_INTERVAL_SECS", "0")],
     );
 
     // Let startup fetches fully settle so the scripted one-shot below can

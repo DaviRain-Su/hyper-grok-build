@@ -23,6 +23,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use futures::FutureExt;
@@ -516,13 +517,13 @@ impl ToolHarnessBuilder {
                     last_seq: self.last_seq,
                 },
             };
-            connection
-                .call_request(request_id, &req)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "session_open failed during harness build");
-                    e
-                })?;
+            if let Err(e) = connection.call_request(request_id, &req).await {
+                // Roll back the local track so a later successful harness for
+                // this session can still reach the last-borrower untrack edge.
+                let _ = connection.untrack_session(&session);
+                tracing::warn!(error = %e, "session_open failed during harness build");
+                return Err(e);
+            }
         }
 
         let inner = Arc::new(ToolHarnessInner {
@@ -534,6 +535,7 @@ impl ToolHarnessBuilder {
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
+            session_inbox_tx: parking_lot::Mutex::new(None),
             pending_bind: None,
             hook_request_handler: Arc::new(parking_lot::Mutex::new(None)),
         });
@@ -555,12 +557,12 @@ pub struct SessionBindReport {
 
 /// Harness attached to a pooled [`HubConnection`].
 ///
-/// `ToolHarness` is `Clone`-cheap (`Arc` bump). Cooperative teardown
-/// via [`Self::shutdown`] is preferred; the `Drop` impl schedules a
-/// best-effort asynchronous cleanup as a fallback when no explicit
-/// shutdown ran. Cleanup fires at most once across all clones — the
-/// first drop (or shutdown) to flip the underlying `torn_down` flag
-/// wins; subsequent drops no-op.
+/// `ToolHarness` is `Clone`-cheap (`Arc` bump). Cooperative teardown via
+/// [`Self::shutdown`] is preferred. Cleanup is **synchronous** and runs at
+/// most once across all clones via a shared CAS: `shutdown()`, wrapper
+/// `Drop` (best-effort while other clones exist), and `ToolHarnessInner::Drop`
+/// (at true refcount-zero) all call the same path. No Tokio runtime is
+/// required for Drop teardown.
 pub struct ToolHarness {
     inner: Arc<ToolHarnessInner>,
 }
@@ -580,7 +582,7 @@ fn spawn_pending_bind<F>(bind: F) -> PendingBind
 where
     F: std::future::Future<Output = Result<ToolHarness, Arc<str>>> + Send + 'static,
 {
-    let task = tokio::spawn(bind);
+    let task = xai_tracing::tokio::spawn_traced(bind);
     async move {
         match task.await {
             Ok(result) => result,
@@ -636,6 +638,11 @@ struct ToolHarnessInner {
     remote_tools: arc_swap::ArcSwap<Vec<ToolDescription>>,
     last_bind_report: arc_swap::ArcSwapOption<SessionBindReport>,
     discovery_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Weak handle to the demux session-inbox sender this harness registered.
+    /// Identity-guarded unregister uses this without holding a strong sender
+    /// that would keep the inbox alive after a peer rebind replaces it.
+    session_inbox_tx:
+        parking_lot::Mutex<Option<tokio::sync::mpsc::WeakSender<crate::demux::InboundFrame>>>,
     /// Deferred server bind (prompt-before-bind): set when this local-only harness
     /// resolves to a server-connected one once the bind completes. Eager variant
     /// races sampling; lazy variant defers provisioning to the first remote
@@ -643,7 +650,8 @@ struct ToolHarnessInner {
     pending_bind: Option<DeferredBind>,
     /// Optional sink for inbound reverse-direction hook requests. Held in
     /// its own `Arc` so the inbox loop can clone this slot — not the whole
-    /// `inner` — keeping the `Drop` strong-count teardown gate intact.
+    /// `inner` — a long-lived `inner` clone would pin the harness forever and
+    /// prevent both the wrapper Drop gate and `ToolHarnessInner::Drop`.
     hook_request_handler: Arc<parking_lot::Mutex<Option<HookRequestHandler>>>,
 }
 
@@ -679,29 +687,80 @@ impl ToolHarnessInner {
         let borrow = self.borrow.as_ref().ok_or_else(|| {
             ClientError::InvalidConfig("local-only harness has no server connection".to_owned())
         })?;
-        let connection = borrow.connection();
-        let request_id = connection.try_alloc_request_id()?;
-        let params = xai_tool_protocol::ToolsListParams {
-            session_id: self.session.clone(),
-            mode: xai_tool_protocol::ToolDefinitionMode::Full,
+        let tools = list_remote_tools(borrow.connection().as_ref(), &self.session).await?;
+        self.remote_tools.store(Arc::new(tools.clone()));
+        Ok(tools)
+    }
+
+    /// Wins `begin_teardown` then runs cleanup. Idempotent. Synchronous so
+    /// Drop cannot strand cleanup on an unpolled spawn.
+    fn finish_teardown(&self) {
+        let Some(borrow) = self.borrow.as_ref() else {
+            return;
         };
-        let req = JsonRpcRequest {
-            jsonrpc: JsonRpcVersion,
-            id: JsonRpcId::from_request_id(&request_id),
-            session_id: Some(self.session.clone()),
-            method: Method::ToolsList.as_wire_str().to_owned(),
-            params,
-        };
-        let resp = connection.call_request(request_id, &req).await?;
-        match resp.outcome {
-            ResponseOutcome::Result(value) => {
-                let result: xai_tool_protocol::ToolsListResult =
-                    serde_json::from_value(value).map_err(|e| ClientError::Serde(e.to_string()))?;
-                self.remote_tools.store(Arc::new(result.tools.clone()));
-                Ok(result.tools)
-            }
-            ResponseOutcome::Error(err) => Err(ClientError::from_jsonrpc_error(err)),
+        if !borrow.begin_teardown() {
+            return;
         }
+        if let Some(h) = self.discovery_handle.lock().take() {
+            h.abort();
+        }
+        borrow.shutdown_token().cancel();
+        let inbox_tx = self.session_inbox_tx.lock().take();
+        release_session_binding(borrow.connection(), &self.session, inbox_tx.as_ref());
+    }
+}
+
+/// Bound `tools.list` so discovery cannot pin a connection on a hung RPC.
+const TOOLS_LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn list_remote_tools(
+    connection: &HubConnection,
+    session: &SessionId,
+) -> Result<Vec<ToolDescription>, ClientError> {
+    let request_id = connection.try_alloc_request_id()?;
+    let params = xai_tool_protocol::ToolsListParams {
+        session_id: session.clone(),
+        mode: xai_tool_protocol::ToolDefinitionMode::Full,
+    };
+    let req = JsonRpcRequest {
+        jsonrpc: JsonRpcVersion,
+        id: JsonRpcId::from_request_id(&request_id),
+        session_id: Some(session.clone()),
+        method: Method::ToolsList.as_wire_str().to_owned(),
+        params,
+    };
+    let resp = connection
+        .call_request_with_timeout(request_id, &req, TOOLS_LIST_TIMEOUT)
+        .await?;
+    match resp.outcome {
+        ResponseOutcome::Result(value) => {
+            let result: xai_tool_protocol::ToolsListResult =
+                serde_json::from_value(value).map_err(|e| ClientError::Serde(e.to_string()))?;
+            Ok(result.tools)
+        }
+        ResponseOutcome::Error(err) => Err(ClientError::from_jsonrpc_error(err)),
+    }
+}
+
+/// Untrack; if last borrower, identity-unregister our inbox only.
+fn release_session_binding(
+    connection: &HubConnection,
+    session: &SessionId,
+    inbox_tx: Option<&tokio::sync::mpsc::WeakSender<crate::demux::InboundFrame>>,
+) {
+    if connection.untrack_session(session) != Some(0) {
+        return;
+    }
+    if let Some(weak) = inbox_tx {
+        let _ = connection
+            .demux()
+            .unregister_session_inbox_if_weak(session, weak);
+    }
+}
+
+impl Drop for ToolHarnessInner {
+    fn drop(&mut self) {
+        self.finish_teardown();
     }
 }
 
@@ -743,6 +802,7 @@ impl ToolHarness {
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
+            session_inbox_tx: parking_lot::Mutex::new(None),
             pending_bind: None,
             hook_request_handler: Arc::new(parking_lot::Mutex::new(None)),
         });
@@ -772,6 +832,7 @@ impl ToolHarness {
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
+            session_inbox_tx: parking_lot::Mutex::new(None),
             pending_bind: Some(DeferredBind::Eager(pending)),
             hook_request_handler: Arc::new(parking_lot::Mutex::new(None)),
         });
@@ -807,6 +868,7 @@ impl ToolHarness {
             remote_tools: arc_swap::ArcSwap::from_pointee(Vec::new()),
             last_bind_report: arc_swap::ArcSwapOption::empty(),
             discovery_handle: parking_lot::Mutex::new(None),
+            session_inbox_tx: parking_lot::Mutex::new(None),
             pending_bind: Some(DeferredBind::Lazy(lazy)),
             hook_request_handler: Arc::new(parking_lot::Mutex::new(None)),
         });
@@ -1158,6 +1220,12 @@ impl ToolHarness {
     #[doc(hidden)]
     pub fn seed_remote_tools_for_tests(&self, tools: Vec<ToolDescription>) {
         self.inner.remote_tools.store(Arc::new(tools));
+    }
+
+    /// Test-only: whether `start_tool_discovery` installed a background task.
+    #[doc(hidden)]
+    pub fn discovery_task_started_for_tests(&self) -> bool {
+        self.inner.discovery_handle.lock().is_some()
     }
 
     /// Tool descriptions from the local registry only.
@@ -1545,11 +1613,34 @@ impl ToolHarness {
         &self,
     ) -> Result<mpsc::Receiver<crate::notification::HubNotification>, ClientError> {
         let connection = self.require_connection()?;
+        if self.inner.borrow.as_ref().is_some_and(|b| b.is_torn_down()) {
+            return Err(ClientError::InvalidConfig(
+                "harness already torn down".to_owned(),
+            ));
+        }
 
         let (inbox_tx, mut inbox_rx) = mpsc::channel::<crate::demux::InboundFrame>(64);
+        // Weak only — a strong clone would keep the channel open after a peer
+        // rebind replaces the demux entry and would block the prior discovery
+        // task from seeing EOF. Keep a stack-local weak for undo: concurrent
+        // finish_teardown may take the mutex slot without demux-unregistering
+        // (non-last untrack), so undo must not rely on that take.
+        let inbox_weak = inbox_tx.downgrade();
         connection
             .demux()
             .register_session_inbox(self.inner.session.clone(), inbox_tx);
+        *self.inner.session_inbox_tx.lock() = Some(inbox_weak.clone());
+
+        // Teardown may have won between the check and register — undo.
+        if self.inner.borrow.as_ref().is_some_and(|b| b.is_torn_down()) {
+            let _ = connection
+                .demux()
+                .unregister_session_inbox_if_weak(&self.inner.session, &inbox_weak);
+            *self.inner.session_inbox_tx.lock() = None;
+            return Err(ClientError::InvalidConfig(
+                "harness already torn down".to_owned(),
+            ));
+        }
 
         let (event_tx, event_rx) = mpsc::channel::<crate::notification::HubNotification>(64);
         // Clone only the handler slot (a standalone `Arc`), never `inner`:
@@ -1586,30 +1677,58 @@ impl ToolHarness {
     /// Start background tool discovery: populate the cache, then
     /// re-query on every `ToolsChanged` notification.
     pub async fn start_tool_discovery(&self) {
+        if self.inner.borrow.as_ref().is_some_and(|b| b.is_torn_down()) {
+            return;
+        }
+
         let Ok(mut rx) = self.subscribe_notifications().await else {
             tracing::warn!("tool discovery: failed to subscribe to notifications");
             return;
         };
+        // Local weak for post-install undo if finish_teardown steals the mutex.
+        let inbox_weak = self.inner.session_inbox_tx.lock().clone();
 
         if let Err(e) = self.query_remote_tools().await {
             tracing::warn!(error = %e, "tool discovery: initial query failed");
         }
 
-        // Clone only the inner Arc, not a full ToolHarness — dropping
-        // a ToolHarness triggers begin_teardown which unregisters sessions.
-        let inner = self.inner.clone();
+        // Capture a Weak so the discovery task never pins ToolHarnessInner
+        // (a strong Arc would form a cycle via demux inbox → task → Arc →
+        // ConnectionBorrow → HubConnection → demux and defeat Drop teardown).
+        let weak = Arc::downgrade(&self.inner);
         let handle = tokio::spawn(async move {
             while let Some(notification) = rx.recv().await {
+                let Some(inner) = weak.upgrade() else {
+                    break; // harness gone — exit without extending its lifetime
+                };
                 match notification {
                     crate::notification::HubNotification::ToolsChanged { .. } => {
-                        if let Err(e) = inner.refresh_remote_tools().await {
-                            tracing::warn!(error = %e, "tool discovery: refresh after ToolsChanged failed");
+                        // Drop the strong Arc before awaiting so stuck RPCs
+                        // cannot re-form the pin cycle and block Inner Drop.
+                        let (connection, session) = match inner.borrow.as_ref() {
+                            Some(b) => (b.connection().clone(), inner.session.clone()),
+                            None => continue,
+                        };
+                        drop(inner);
+                        match list_remote_tools(connection.as_ref(), &session).await {
+                            Ok(tools) => {
+                                if let Some(inner) = weak.upgrade() {
+                                    inner.remote_tools.store(Arc::new(tools));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "tool discovery: refresh after ToolsChanged failed"
+                                );
+                            }
                         }
                     }
                     crate::notification::HubNotification::ToolServerStatusChanged {
                         session_id,
                         status,
                     } if status.status == ToolServerLifecycleStatus::Disconnected => {
+                        // Sync path — Arc is released at end of match arm.
                         inner.fail_inflight_calls_on_disconnect(&session_id);
                     }
                     _ => {}
@@ -1617,18 +1736,29 @@ impl ToolHarness {
             }
         });
         *self.inner.discovery_handle.lock() = Some(handle);
+
+        // Teardown may have won between subscribe and handle install: abort
+        // the handle we just published (finish_teardown would have missed it).
+        if self.inner.borrow.as_ref().is_some_and(|b| b.is_torn_down()) {
+            if let Some(h) = self.inner.discovery_handle.lock().take() {
+                h.abort();
+            }
+            if let (Some(borrow), Some(weak)) = (self.inner.borrow.as_ref(), inbox_weak.as_ref()) {
+                let _ = borrow
+                    .connection()
+                    .demux()
+                    .unregister_session_inbox_if_weak(&self.inner.session, weak);
+            }
+            *self.inner.session_inbox_tx.lock() = None;
+        }
     }
 
-    /// Cooperatively release the harness's session refcount.
+    /// Cooperatively tear down this harness's connection borrow.
     ///
-    /// Marks the harness as torn down (atomic `compare_exchange` on the
-    /// shared `torn_down` flag) and refcount-decrements the bound
-    /// session through the underlying [`HubConnection`]. The wire-level
-    /// `unregister_session` only fires when this is the LAST borrower
-    /// of the session id; otherwise the binding stays live for the
-    /// remaining peers. Idempotent across all clones — the first
-    /// caller wins the `compare_exchange`; later callers return
-    /// `Ok(())` without sending any frames.
+    /// Shared with both Drop paths via an at-most-once CAS inside
+    /// `finish_teardown`. Aborts tool discovery, cancels the borrow token,
+    /// untracks the session, and identity-unregisters this harness's demux
+    /// inbox when last borrower. Idempotent across clones.
     ///
     /// **In-flight `call(...)` futures are NOT cancelled** by
     /// `shutdown`. The harness owns no run-loop — the underlying
@@ -1639,17 +1769,7 @@ impl ToolHarness {
     /// and surfaces every parked waiter as `NetworkError`) or drop
     /// the per-call stream.
     pub async fn shutdown(&self) -> Result<(), ClientError> {
-        let Some(ref borrow) = self.inner.borrow else {
-            return Ok(()); // local-only: nothing to tear down
-        };
-        if !borrow.begin_teardown() {
-            return Ok(());
-        }
-        if let Some(h) = self.inner.discovery_handle.lock().take() {
-            h.abort();
-        }
-        borrow.shutdown_token().cancel();
-        borrow.connection().untrack_session(&self.inner.session);
+        self.inner.finish_teardown();
         Ok(())
     }
 }
@@ -1845,38 +1965,14 @@ impl Drop for ObservedToolStream {
 
 impl Drop for ToolHarness {
     fn drop(&mut self) {
-        let Some(ref borrow) = self.inner.borrow else {
-            return; // local-only: nothing to tear down
-        };
-        // Skip teardown when other ToolHarness clones still exist. The
-        // harness is cloned into ObservedToolStream by `call()`; that
-        // internal clone's Drop must NOT race the user-held harness
-        // into begin_teardown (which is at-most-once and would cause a
-        // premature unregister_session while the user is still calling).
-        // strong_count == 1 means this is the last Arc reference.
+        // Best-effort fast path: skip while other ToolHarness clones still
+        // exist (e.g. ObservedToolStream's internal clone during `call`).
+        // Correctness does not depend on this gate — `ToolHarnessInner::Drop`
+        // runs the same cleanup at true refcount-zero if this path skips.
         if Arc::strong_count(&self.inner) > 1 {
             return;
         }
-        if !borrow.begin_teardown() {
-            return;
-        }
-        // Abort the discovery loop (matches shutdown() behavior).
-        // Lock is safe: only held briefly for take(); no async work under lock.
-        if let Some(h) = self.inner.discovery_handle.lock().take() {
-            h.abort();
-        }
-        let inner = self.inner.clone();
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
-                // Best-effort cleanup; a closed server WebSocket will
-                // surface as an error here — that is expected and
-                // must not panic.
-                if let Some(ref borrow) = inner.borrow {
-                    borrow.shutdown_token().cancel();
-                    borrow.connection().untrack_session(&inner.session);
-                }
-            });
-        }
+        self.inner.finish_teardown();
     }
 }
 
@@ -2936,5 +3032,379 @@ mod tests {
             result: Value::Null,
         };
         assert!(harness.try_send_hook_reply(reply).is_err());
+    }
+
+    // --- discovery / teardown lifecycle (connection-leak regression) ---
+
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::extract::WebSocketUpgrade;
+    use axum::extract::ws::{Message, WebSocket};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    use crate::auth::AuthCredential;
+    use crate::pool::HubConnectionPool;
+
+    async fn spawn_discovery_mock_hub() -> SocketAddr {
+        let app = Router::new().route("/v1/tools", get(discovery_ws_upgrade));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app.into_make_service()).await;
+        });
+        tokio::task::yield_now().await;
+        addr
+    }
+
+    async fn discovery_ws_upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
+        ws.on_upgrade(discovery_handle_socket)
+    }
+
+    async fn discovery_handle_socket(mut socket: WebSocket) {
+        let _ = socket.recv().await;
+        let ack = json!({
+            "connection_id": "discovery-mock",
+            "user_id": "test",
+            "computer_hub_version": "test",
+            "supported_protocol_versions": ["1.0.0"],
+        });
+        let _ = socket.send(Message::Text(ack.to_string().into())).await;
+        while let Some(Ok(Message::Text(text))) = socket.recv().await {
+            let Ok(value) = serde_json::from_str::<Value>(text.as_ref()) else {
+                continue;
+            };
+            let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = value.get("id").cloned().unwrap_or(Value::Null);
+            match method {
+                "session_open" => {
+                    let resp = json!({ "jsonrpc": "2.0", "id": id, "result": {} });
+                    let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                }
+                "tools.list" => {
+                    let resp = json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [] } });
+                    let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn build_connected_harness(
+        session: &str,
+    ) -> (ToolHarness, Arc<HubConnectionPool>, Arc<HubConnection>) {
+        let addr = spawn_discovery_mock_hub().await;
+        let url = Url::parse(&format!("ws://{addr}/v1/tools")).expect("valid url");
+        let pool = HubConnectionPool::new();
+        let harness = ToolHarnessBuilder::default()
+            .pool(pool.clone())
+            .url(url)
+            .auth(AuthCredential::bearer("ignored"))
+            .session(SessionId::new(session).expect("valid"))
+            .build()
+            .await
+            .expect("build harness");
+        let conn = harness.connection().expect("connected").clone();
+        (harness, pool, conn)
+    }
+
+    async fn poll_until(mut pred: impl FnMut() -> bool, label: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if pred() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for: {label}");
+    }
+
+    #[tokio::test]
+    async fn discovery_task_exits_when_inbox_closes_after_drop() {
+        let (harness, _pool, conn) = build_connected_harness("weak-exit-eof").await;
+        harness.start_tool_discovery().await;
+        assert!(harness.discovery_task_started_for_tests());
+
+        // Steal the JoinHandle before Drop aborts it so we can observe exit.
+        let handle = harness
+            .inner
+            .discovery_handle
+            .lock()
+            .take()
+            .expect("discovery handle installed");
+
+        drop(harness);
+        poll_until(
+            || conn.bound_session_count() == 0,
+            "session untracked after harness drop",
+        )
+        .await;
+
+        // Last-borrower unregister closes the demux inbox → event rx EOF.
+        let join = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            join.is_ok(),
+            "discovery task must complete once harness strong refs are gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_task_exits_on_weak_upgrade_failure() {
+        let (harness, _pool, conn) = build_connected_harness("weak-upgrade-exit").await;
+        let session = harness.session().clone();
+        harness.start_tool_discovery().await;
+        assert!(harness.discovery_task_started_for_tests());
+
+        // Steal handle so Drop's abort cannot complete the task for us.
+        let handle = harness
+            .inner
+            .discovery_handle
+            .lock()
+            .take()
+            .expect("discovery handle installed");
+
+        // Extra session track so Drop is not last → does not unregister inbox.
+        // Discovery keeps waiting on a live rx with only a dead Weak.
+        conn.track_session(session.clone());
+        drop(harness);
+        assert_eq!(
+            conn.bound_session_count(),
+            1,
+            "peer track keeps the session binding (and demux inbox) alive"
+        );
+
+        // Force the upgrade-failure branch (not EOF): deliver a notification
+        // while no strong ToolHarnessInner remains.
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "session_id": session.as_str(),
+            "method": "tools_changed",
+            "params": {
+                "session_id": session.as_str(),
+                "added": [],
+                "removed": [],
+            }
+        });
+        let outcome = conn.demux().route(frame);
+        assert!(
+            matches!(outcome, crate::demux::RouteOutcome::Session),
+            "notification must reach the still-registered session inbox, got {outcome:?}"
+        );
+
+        let join = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            join.is_ok(),
+            "discovery task must exit via weak.upgrade() == None on a post-drop notification"
+        );
+
+        let _ = conn.untrack_session(&session);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inner_drop_teardown_runs_under_racing_clones() {
+        let (harness, pool, conn) = build_connected_harness("race-drop").await;
+        harness.start_tool_discovery().await;
+
+        // Peer track: a double-untrack regression would zero this out.
+        let peer_session = SessionId::new("race-drop-peer").expect("valid");
+        conn.track_session(peer_session.clone());
+        assert_eq!(conn.bound_session_count(), 2);
+
+        let n = 16;
+        let barrier = Arc::new(tokio::sync::Barrier::new(n));
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let clone = harness.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                drop(clone);
+            }));
+        }
+        drop(harness);
+        for h in handles {
+            h.await.expect("join dropper");
+        }
+
+        poll_until(
+            || conn.bound_session_count() == 1,
+            "harness session untracked; peer track remains",
+        )
+        .await;
+        assert_eq!(
+            conn.untrack_session(&peer_session),
+            Some(0),
+            "peer track must still be exactly 1 after racing drops (no double-untrack)"
+        );
+
+        let weak = Arc::downgrade(&conn);
+        drop(conn);
+        poll_until(
+            || pool.sweep_idle(Duration::ZERO) == 1 || weak.upgrade().is_none(),
+            "connection becomes pool-evictable",
+        )
+        .await;
+        // Either sweep already took it, or a second sweep is a no-op once gone.
+        let _ = pool.sweep_idle(Duration::ZERO);
+        assert!(
+            weak.upgrade().is_none(),
+            "connection must be fully released after racing clone drops"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_inner_upgrade_does_not_skip_teardown() {
+        let (harness, pool, conn) = build_connected_harness("transient-upgrade").await;
+        harness.start_tool_discovery().await;
+
+        // Hold a transient strong Arc of the inner (simulates discovery
+        // upgrade mid-notification) while dropping every ToolHarness.
+        let transient = harness.inner.clone();
+        drop(harness);
+
+        // Wrapper Drop sees strong_count > 1 and skips; cleanup must still
+        // run when the transient ref drops (ToolHarnessInner::Drop).
+        assert_eq!(
+            conn.bound_session_count(),
+            1,
+            "session still tracked while transient inner Arc is held"
+        );
+        drop(transient);
+
+        poll_until(
+            || conn.bound_session_count() == 0,
+            "session untracked after transient inner drop",
+        )
+        .await;
+
+        let weak = Arc::downgrade(&conn);
+        drop(conn);
+        poll_until(
+            || {
+                let _ = pool.sweep_idle(Duration::ZERO);
+                weak.upgrade().is_none()
+            },
+            "connection released after transient upgrade race",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn same_session_rebind_replaces_prior_inbox() {
+        let addr = spawn_discovery_mock_hub().await;
+        let url = Url::parse(&format!("ws://{addr}/v1/tools")).expect("valid url");
+        let pool = HubConnectionPool::new();
+        let session = SessionId::new("rebind-session").expect("valid");
+        let cred = AuthCredential::bearer("ignored");
+
+        let first = ToolHarnessBuilder::default()
+            .pool(pool.clone())
+            .url(url.clone())
+            .auth(cred.clone())
+            .session(session.clone())
+            .build()
+            .await
+            .expect("first harness");
+        first.start_tool_discovery().await;
+        let first_handle = first
+            .inner
+            .discovery_handle
+            .lock()
+            .take()
+            .expect("first discovery handle");
+
+        let second = ToolHarnessBuilder::default()
+            .pool(pool.clone())
+            .url(url)
+            .auth(cred)
+            .session(session)
+            .build()
+            .await
+            .expect("second harness");
+        second.start_tool_discovery().await;
+        assert!(second.discovery_task_started_for_tests());
+
+        // register_session_inbox replaces the prior sender → first rx EOFs.
+        let join = tokio::time::timeout(Duration::from_secs(5), first_handle).await;
+        assert!(
+            join.is_ok(),
+            "first discovery task must exit when second harness rebinds the inbox"
+        );
+
+        // Last-borrower gate: dropping first must not unregister second's inbox.
+        let conn = second.connection().expect("connected").clone();
+        let second_session = second.session().clone();
+        drop(first);
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "session_id": second_session.as_str(),
+            "method": "tools_changed",
+            "params": {
+                "session_id": second_session.as_str(),
+                "added": [],
+                "removed": [],
+            }
+        });
+        let outcome = conn.demux().route(frame);
+        assert!(
+            matches!(outcome, crate::demux::RouteOutcome::Session),
+            "second's demux inbox must remain after first drop, got {outcome:?}"
+        );
+        assert!(
+            !second
+                .inner
+                .discovery_handle
+                .lock()
+                .as_ref()
+                .expect("second discovery handle still installed")
+                .is_finished(),
+            "second discovery must survive first harness drop"
+        );
+
+        drop(second);
+        poll_until(
+            || conn.bound_session_count() == 0,
+            "session fully released after last harness drop",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_unregisters_session_inbox() {
+        let (harness, pool, conn) = build_connected_harness("shutdown-inbox").await;
+        let session = harness.session().clone();
+        harness.start_tool_discovery().await;
+        assert_eq!(conn.bound_session_count(), 1);
+
+        harness.shutdown().await.expect("shutdown");
+        assert_eq!(conn.bound_session_count(), 0);
+
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "session_id": session.as_str(),
+            "method": "tools_changed",
+            "params": {
+                "session_id": session.as_str(),
+                "added": [],
+                "removed": [],
+            }
+        });
+        let outcome = conn.demux().route(frame);
+        assert!(
+            !matches!(outcome, crate::demux::RouteOutcome::Session),
+            "shutdown must unregister the demux inbox, got {outcome:?}"
+        );
+
+        let weak = Arc::downgrade(&conn);
+        drop(harness);
+        drop(conn);
+        assert_eq!(pool.sweep_idle(Duration::ZERO), 1);
+        assert!(weak.upgrade().is_none());
     }
 }

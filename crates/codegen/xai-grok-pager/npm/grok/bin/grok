@@ -1,17 +1,15 @@
 #!/usr/bin/env node
-// Thin trampoline: resolves the grok binary from the matching per-platform
-// optional dependency package and execs it.
+// Thin trampoline: resolves the grok binary and execs it.
 //
-// Falls back to bootstrapping the canonical ~/.grok/bin/grok-<version> symlink
-// layout if postinstall hasn't run (e.g. npx, or postinstall failure).
+// Resolution order:
+//   1. $GROK_HOME/bin/grok — canonical versioned symlink (installed by postinstall.js)
+//   2. bootstrap it from the per-platform @xai-official/grok-<platform> package,
+//      decompressing the brotli payload straight into $GROK_HOME/bin
+//   3. last resort (no resolvable version or an unwritable home): decompress the
+//      payload in place under node_modules and exec that
 //
-// Binary location strategy (in priority order):
-//   1. ~/.grok/bin/grok        — canonical versioned symlink (postinstall.js)
-//   2. @xai-official/grok-<platform>/bin/grok[.exe]      — decompressed sibling
-//   3. @xai-official/grok-<platform>/bin/grok[.exe].br   — brotli-compressed
-//
-// Per-platform binaries are shipped brotli-compressed to stay well under
-// npm's ~200 MB tarball ceiling. See sibling packages @xai-official/grok-*.
+// Per-platform binaries ship brotli-compressed to stay under npm's ~200 MB
+// tarball ceiling. See sibling packages @xai-official/grok-*.
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -22,7 +20,14 @@ const pkgName = '@xai-official/grok';
 const IS_WINDOWS = process.platform === 'win32';
 const EXE = IS_WINDOWS ? '.exe' : '';
 const BIN_NAME = `grok${EXE}`;
-const CANONICAL_DIR = path.join(os.homedir(), '.grok', 'bin');
+// $GROK_HOME/bin (else ~/.grok/bin), matching the Rust grok_home(), including
+// its canonicalized-home default (so a symlinked $HOME resolves the same way).
+function defaultGrokHome() {
+    const home = os.homedir();
+    try { return path.join(fs.realpathSync(home), '.grok'); } catch { return path.join(home, '.grok'); }
+}
+const GROK_HOME = process.env.GROK_HOME ?? defaultGrokHome();
+const CANONICAL_DIR = path.join(GROK_HOME, 'bin');
 const CANONICAL_PATH = path.join(CANONICAL_DIR, BIN_NAME);
 
 function readLocalVersion() {
@@ -41,53 +46,63 @@ function resolvePlatformPackageDir() {
     }
 }
 
-// Decompress a brotli-compressed binary to a sibling path. Atomic via tmp+rename.
-function decompressBrotli(brPath, outPath) {
-    const compressed = fs.readFileSync(brPath);
-    const decompressed = zlib.brotliDecompressSync(compressed);
-    const tmp = outPath + `.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, decompressed);
-    if (!IS_WINDOWS) fs.chmodSync(tmp, 0o755);
-    try { fs.renameSync(tmp, outPath); } catch {}
+function writeVendorBinary(brPath, rawPath, destPath) {
+    const tmp = destPath + `.tmp.${process.pid}`;
+    try {
+        if (fs.existsSync(brPath)) {
+            fs.writeFileSync(tmp, zlib.brotliDecompressSync(fs.readFileSync(brPath)));
+        } else if (fs.existsSync(rawPath)) {
+            fs.copyFileSync(rawPath, tmp);
+        } else {
+            return false;
+        }
+        if (!IS_WINDOWS) fs.chmodSync(tmp, 0o755);
+        fs.renameSync(tmp, destPath);
+        return true;
+    } catch {
+        return false;
+    } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+    }
 }
 
-// Bootstrap the canonical versioned-symlink layout from a source binary.
-// Returns the canonical path on success, or the source path on failure.
-function bootstrapCanonical(sourceBinPath, version) {
+function swapCanonical(versionedName, versionedPath) {
+    if (!IS_WINDOWS) {
+        const tmpLink = CANONICAL_PATH + `.link.${process.pid}`;
+        try { fs.unlinkSync(tmpLink); } catch {}
+        fs.symlinkSync(versionedName, tmpLink);
+        fs.renameSync(tmpLink, CANONICAL_PATH);
+        return;
+    }
+    const oldPath = CANONICAL_PATH + '.old';
+    try { fs.unlinkSync(oldPath); } catch {}
+    try {
+        try { fs.unlinkSync(CANONICAL_PATH); } catch {}
+        fs.copyFileSync(versionedPath, CANONICAL_PATH);
+    } catch {
+        fs.renameSync(CANONICAL_PATH, oldPath);
+        try {
+            fs.copyFileSync(versionedPath, CANONICAL_PATH);
+        } catch {
+            try { fs.renameSync(oldPath, CANONICAL_PATH); } catch {}
+            throw new Error('locked');
+        }
+    }
+}
+
+function bootstrapCanonical(brPath, rawPath, version) {
     try {
         fs.mkdirSync(CANONICAL_DIR, { recursive: true });
         const versionedName = `grok-${version}${EXE}`;
         const versionedPath = path.join(CANONICAL_DIR, versionedName);
-        if (!fs.existsSync(versionedPath)) {
-            const tmpPath = versionedPath + `.tmp.${process.pid}`;
-            fs.copyFileSync(sourceBinPath, tmpPath);
-            if (!IS_WINDOWS) fs.chmodSync(tmpPath, 0o755);
-            fs.renameSync(tmpPath, versionedPath);
+        if (!fs.existsSync(versionedPath) && !writeVendorBinary(brPath, rawPath, versionedPath)) {
+            return null;
         }
-        if (IS_WINDOWS) {
-            const oldPath = CANONICAL_PATH + '.old';
-            try { fs.unlinkSync(oldPath); } catch {}
-            try {
-                try { fs.unlinkSync(CANONICAL_PATH); } catch {}
-                fs.copyFileSync(versionedPath, CANONICAL_PATH);
-            } catch {
-                fs.renameSync(CANONICAL_PATH, oldPath);
-                try {
-                    fs.copyFileSync(versionedPath, CANONICAL_PATH);
-                } catch {
-                    try { fs.renameSync(oldPath, CANONICAL_PATH); } catch {}
-                    throw new Error('locked');
-                }
-            }
-        } else {
-            const tmpLink = CANONICAL_PATH + `.link.${process.pid}`;
-            try { fs.unlinkSync(tmpLink); } catch {}
-            fs.symlinkSync(versionedName, tmpLink);
-            fs.renameSync(tmpLink, CANONICAL_PATH);
-        }
-        return CANONICAL_PATH;
+        swapCanonical(versionedName, versionedPath);
+        // null on a broken wire-up so the caller falls back to in-place launch.
+        return fs.existsSync(CANONICAL_PATH) ? CANONICAL_PATH : null;
     } catch {
-        return sourceBinPath;
+        return null;
     }
 }
 
@@ -105,21 +120,19 @@ function resolveBinary() {
 
     const rawPath = path.join(platformDir, 'bin', BIN_NAME);
     const brPath = rawPath + '.br';
+    const version = readLocalVersion();
 
-    // Decompress on first use if needed (atomic via tmp+rename).
-    if (!fs.existsSync(rawPath)) {
-        if (fs.existsSync(brPath)) {
-            decompressBrotli(brPath, rawPath);
-        }
+    // Prefer the canonical layout, decompressing straight into CANONICAL_DIR so
+    // no second uncompressed copy lands under node_modules.
+    if (version) {
+        const bootstrapped = bootstrapCanonical(brPath, rawPath, version);
+        if (bootstrapped) return bootstrapped;
     }
-    if (!fs.existsSync(rawPath)) {
+
+    // Fallback (unresolved version or unwritable home): materialize in place.
+    if (!fs.existsSync(rawPath) && !writeVendorBinary(brPath, rawPath, rawPath)) {
         console.error(`${pkgName}: missing binary at ${rawPath}`);
         process.exit(1);
-    }
-
-    const version = readLocalVersion();
-    if (version) {
-        return bootstrapCanonical(rawPath, version);
     }
     return rawPath;
 }

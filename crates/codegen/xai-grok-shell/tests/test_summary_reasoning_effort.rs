@@ -59,9 +59,8 @@ async fn test_fresh_session_persists_reasoning_effort() {
         // Configure the mock catalog's model with an explicit effort via the
         // user config override (the same path a remote settings catalog entry or
         // `--effort` would populate).
-        let home = tempfile::TempDir::new().expect("create temp home");
-        let grok_dir = home.path().join(".grok");
-        std::fs::create_dir_all(&grok_dir).expect("create .grok dir");
+        let sandbox = TestSandbox::new();
+        let grok_dir = sandbox.grok_home();
         std::fs::write(
             grok_dir.join("config.toml"),
             r#"
@@ -72,13 +71,16 @@ reasoning_effort = "high"
         )
         .expect("write config.toml");
 
-        let client = GrokStdioClient::spawn_with_home(&server, workdir.path(), home).await;
+        let client =
+            GrokStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
         client.initialize_with_timeout().await;
-        let session_id = client.create_session_with_timeout(workdir.path()).await;
+        let session_id = client
+            .create_session_with_timeout(workdir.workspace())
+            .await;
         let result = client.prompt_with_timeout(&session_id, "say hello").await;
         assert!(result.is_ok(), "prompt failed: {:?}", result.err());
 
-        let summary = read_summary(client.home_path(), &session_id.0);
+        let summary = read_summary(client.sandbox().home(), &session_id.0);
         assert_eq!(
             summary.get("reasoning_effort").and_then(|v| v.as_str()),
             Some("high"),
@@ -98,14 +100,16 @@ async fn test_fresh_session_without_effort_omits_field() {
             .await
             .expect("start mock server");
         let workdir = git_workdir();
-        let client = GrokStdioClient::spawn(&server, workdir.path()).await;
+        let client = GrokStdioClient::spawn(&server, workdir.workspace()).await;
 
         client.initialize_with_timeout().await;
-        let session_id = client.create_session_with_timeout(workdir.path()).await;
+        let session_id = client
+            .create_session_with_timeout(workdir.workspace())
+            .await;
         let result = client.prompt_with_timeout(&session_id, "say hello").await;
         assert!(result.is_ok(), "prompt failed: {:?}", result.err());
 
-        let summary = read_summary(client.home_path(), &session_id.0);
+        let summary = read_summary(client.sandbox().home(), &session_id.0);
         assert_eq!(
             summary.get("reasoning_effort"),
             None,

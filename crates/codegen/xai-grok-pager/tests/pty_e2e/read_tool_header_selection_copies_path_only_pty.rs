@@ -26,21 +26,24 @@ async fn read_tool_header_selection_copies_path_only_pty() {
     let _read_turn = seed_read_file_tool_call(&content, &abs_path);
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut env = content.env_for_pager();
-    env.push((
+    let overrides: Vec<(String, String)> = vec![(
         "SSH_CONNECTION".into(),
         "scripted-test 1 127.0.0.1 2".into(),
-    ));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    )];
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     // The invariant under test is the RAW `Read {path}` header's selectable
     // span; with verb-group folding on (default), even a lone read folds into
     // the aggregated "Read 1 file" label and the path row never renders.
     seed_ui_config(&content, "group_tool_verbs = false");
 
-    let mut harness = PtyHarness::new_in_dir(
+    let mut harness = PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        &content,
         &[],
         &env_refs,
         Some(content.home()),

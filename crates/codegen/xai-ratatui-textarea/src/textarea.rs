@@ -2008,8 +2008,7 @@ impl TextArea {
                 code: KeyCode::Char('Z'),
                 modifiers,
                 ..
-            }
-if modifiers.contains(KeyModifiers::CONTROL)
+            } if modifiers.contains(KeyModifiers::CONTROL)
                 || modifiers.contains(KeyModifiers::SUPER) =>
             {
                 // Ctrl/Cmd-Shift-Z → redo (terminals that report uppercase Z + Shift)

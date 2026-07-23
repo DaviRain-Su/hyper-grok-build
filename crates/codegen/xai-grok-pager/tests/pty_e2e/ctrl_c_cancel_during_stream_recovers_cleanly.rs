@@ -9,7 +9,7 @@ use super::common::*;
 /// and the `prompt_complete` broadcast (which arms the lost-response
 /// reconcile), and a double-finish would render two markers — and (b) leave
 /// the pane usable: no `TurnCancelling` latch, the next typed prompt runs.
-/// Cancel is via Ctrl+C (Esc no longer cancels mid-turn).
+/// Cancel is via Ctrl+C, which works in every mode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn ctrl_c_cancel_during_stream_recovers_cleanly() {

@@ -53,11 +53,16 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
     // structurally unreachable (see `spawn_polling_session`'s doc).
     seed_fake_oauth(&content, "pty-campaign-remote");
     let binary = pager_binary().expect("resolve pager binary");
-    let env = oauth_env_for_pager(&content);
     let spawn = || -> PtyHarness {
-        let env_refs: Vec<(&str, &str)> =
-            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn pager")
+        PtyHarness::spawn_with_content_env_ops(
+            &binary,
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            &content,
+            &[],
+            &oauth_credential_ops(),
+        )
+        .expect("spawn pager")
     };
 
     // ── Phase 1+2: the campaign applies to a new session; a pick dismisses. ──

@@ -18,7 +18,7 @@ pub(crate) async fn apply(
     xai_grok_telemetry::unified_log::info(
         "model changed",
         Some(args.session_id.0.as_ref()),
-        Some(serde_json::json!({ "model" : args.model_id.0.as_ref() })),
+        Some(serde_json::json!({"model": args.model_id.0.as_ref()})),
     );
     tracing::debug!("session_session_model::mvp_agent: {:?}", &args);
     let effort_override = parse_reasoning_effort_meta(args.meta.as_ref());
@@ -58,14 +58,21 @@ pub(crate) async fn apply(
             .as_ref()
             .is_some_and(|active| !harnesses_are_compatible(active, required));
         tracing::info!(
-            session_id = % session_id.0, model_id = % model_id.0, ? required_agent_type,
-            ? active_agent_type, turn_count, is_mismatch,
+            session_id = %session_id.0,
+            model_id = %model_id.0,
+            ?required_agent_type,
+            ?active_agent_type,
+            turn_count,
+            is_mismatch,
             "set_session_model: agent type compatibility check"
         );
         if is_mismatch && turn_count > 0 {
             tracing::warn!(
-                session_id = % session_id.0, model_id = % model_id.0, active_agent = ?
-                active_agent_type, required_agent = % required, turn_count,
+                session_id = %session_id.0,
+                model_id = %model_id.0,
+                active_agent = ?active_agent_type,
+                required_agent = %required,
+                turn_count,
                 "set_session_model: agent type mismatch rejected"
             );
             xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::ModelSwitched {
@@ -96,16 +103,19 @@ pub(crate) async fn apply(
             match resolved {
                 Some(def) => {
                     tracing::info!(
-                        session_id = % session_id.0, model_id = % model_id.0,
-                        required_agent_type = % required, agent_def_name = % def.name,
+                        session_id = %session_id.0,
+                        model_id = %model_id.0,
+                        required_agent_type = %required,
+                        agent_def_name = %def.name,
                         "set_session_model: zero-turn harness switch — queued agent rebuild"
                     );
                     pending_rebuild_definition = Some(def);
                 }
                 None => {
                     tracing::warn!(
-                        session_id = % session_id.0, model_id = % model_id.0,
-                        required_agent_type = % required,
+                        session_id = %session_id.0,
+                        model_id = %model_id.0,
+                        required_agent_type = %required,
                         "set_session_model: zero-turn harness switch — could not resolve agent definition; proceeding with stale harness"
                     );
                 }
@@ -120,13 +130,16 @@ pub(crate) async fn apply(
             .model_supports_reasoning_effort(model_id.0.as_ref())
         {
             tracing::info!(
-                session_id = % session_id.0, effort = % eff,
+                session_id = %session_id.0,
+                effort = %eff,
                 "set_session_model: applying reasoning_effort override from meta"
             );
             model_sampling.reasoning_effort = Some(eff);
         } else {
             tracing::warn!(
-                session_id = % session_id.0, model_id = % model_id.0, effort = % eff,
+                session_id = %session_id.0,
+                model_id = %model_id.0,
+                effort = %eff,
                 "set_session_model: ignoring reasoning_effort override — model does not support it"
             );
         }
@@ -138,7 +151,8 @@ pub(crate) async fn apply(
     let apply_prompt_override = !gate_closed;
     if gate_closed {
         tracing::info!(
-            session_id = % session_id.0, model_id = % model_id.0,
+            session_id = %session_id.0,
+            model_id = %model_id.0,
             "set_session_model: gateway gate closed, prompt override suppressed"
         );
         pending_rebuild_definition = None;
@@ -158,7 +172,9 @@ pub(crate) async fn apply(
             Ok(()) => true,
             Err(e) => {
                 tracing::error!(
-                    session_id = % session_id.0, model_id = % model_id.0, error = ? e,
+                    session_id = %session_id.0,
+                    model_id = %model_id.0,
+                    error = ?e,
                     "set_session_model: zero-turn harness rebuild failed; aborting model switch"
                 );
                 xai_grok_telemetry::session_ctx::log_event(
@@ -230,9 +246,11 @@ pub(crate) async fn apply(
     }
     agent.sync_process_static_api_key(Some(model_id.0.as_ref()));
     Ok(acp::SetSessionModelResponse::new().meta(
-        serde_json::json!({ "model" : updated_model, })
-            .as_object()
-            .cloned(),
+        serde_json::json!({
+            "model": updated_model,
+        })
+        .as_object()
+        .cloned(),
     ))
 }
 /// Broadcast a `ModelChanged` to every client subscribed to this session so

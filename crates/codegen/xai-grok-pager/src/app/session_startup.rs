@@ -66,10 +66,12 @@ pub fn fork_session_params(
     let parent_cwd_str = parent_cwd.to_string_lossy().into_owned();
     let source_cwd = xai_grok_shell::session::resolve_local_session_any_cwd(parent_session_id)
         .unwrap_or_else(|| parent_cwd_str.clone());
-    let mut payload = serde_json::json!(
-        { "sourceSessionId" : parent_session_id, "sourceCwd" : source_cwd, "newCwd" :
-        parent_cwd_str.clone(), "sessionKind" : "fork", }
-    );
+    let mut payload = serde_json::json!({
+        "sourceSessionId": parent_session_id,
+        "sourceCwd": source_cwd,
+        "newCwd": parent_cwd_str.clone(),
+        "sessionKind": "fork",
+    });
     if let Some(nid) = new_session_id {
         payload["newSessionId"] = serde_json::Value::String(nid.to_string());
     }
@@ -572,9 +574,7 @@ async fn resolve_existing_session(
     cwd: &str,
 ) -> anyhow::Result<ResolvedExisting> {
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {
-        tracing::info!(
-            session_id = % session_id, local_id = % local_id, "Session found locally"
-        );
+        tracing::info!(session_id = %session_id, local_id = %local_id, "Session found locally");
         return Ok(ResolvedExisting {
             id: local_id,
             original_cwd: None,
@@ -583,7 +583,8 @@ async fn resolve_existing_session(
     }
     if let Some(original_cwd) = xai_grok_shell::session::resolve_local_session_any_cwd(session_id) {
         tracing::info!(
-            session_id = % session_id, original_cwd = % original_cwd,
+            session_id = %session_id,
+            original_cwd = %original_cwd,
             "Session found locally under different CWD"
         );
         eprintln!(
@@ -598,7 +599,7 @@ async fn resolve_existing_session(
     }
     if ctx.has_worktree {
         tracing::info!(
-            session_id = % session_id,
+            session_id = %session_id,
             "Session not found locally; deferring restore to worktree resume handler"
         );
         eprintln!(

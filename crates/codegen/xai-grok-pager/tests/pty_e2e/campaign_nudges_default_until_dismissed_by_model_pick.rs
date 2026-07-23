@@ -44,11 +44,20 @@ async fn campaign_nudges_default_until_dismissed_by_model_pick() {
     let binary = pager_binary().expect("resolve pager binary");
 
     let spawn = |extra: &(String, String)| -> PtyHarness {
-        let mut env = content.env_for_pager();
-        env.push(extra.clone());
-        let env_refs: Vec<(&str, &str)> =
-            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn pager")
+        let overrides: Vec<(String, String)> = vec![extra.clone()];
+        let env_refs: Vec<(&str, &str)> = overrides
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        PtyHarness::spawn_with_content_env(
+            &binary,
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            &content,
+            &[],
+            &env_refs,
+        )
+        .expect("spawn pager")
     };
 
     // ── Phase 1: a fresh boot shows the campaign model, not the config one. ──

@@ -16,7 +16,7 @@ pub use self::fork::{ForkSessionRequest, ForkSessionResponse, fork_session};
 pub use self::handle::*;
 pub use self::persistence::{
     LocalFeedbackEntry, UserFeedbackEntry, find_local_child_for_remote, resolve_local_session,
-    resolve_local_session_any_cwd, session_exists_by_id, session_exists_for_cwd,
+    resolve_local_session_any_cwd, session_exists_for_cwd,
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
@@ -358,7 +358,7 @@ pub(crate) mod telemetry;
 pub mod tool_index;
 pub(crate) mod turn_completion;
 pub mod unified_list;
-mod user_message;
+pub(crate) mod user_message;
 pub(crate) mod wire_tags;
 pub(crate) mod workflow;
 pub mod worktree;

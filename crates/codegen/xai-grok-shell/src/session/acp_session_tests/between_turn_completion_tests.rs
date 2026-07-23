@@ -11,6 +11,7 @@ fn summary(
 ) -> SubagentCompletionSummary {
     SubagentCompletionSummary {
         subagent_id: id.into(),
+        owner_session_id: String::new(),
         subagent_type: typ.into(),
         description: desc.into(),
         success,

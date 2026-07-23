@@ -120,6 +120,9 @@ pub struct WelcomeRenderResult {
     pub announcement_rect: Option<Rect>,
     /// Hit-test rect for the promo upgrade CTA `[label]` button (click → open).
     pub upgrade_cta_rect: Option<Rect>,
+    pub privacy_banner_accept_rect: Option<Rect>,
+    pub privacy_banner_customize_rect: Option<Rect>,
+    pub privacy_banner_legal_rect: Option<Rect>,
 }
 
 use hero_box::HERO_BOX_MIN_WIDTH;
@@ -651,6 +654,8 @@ pub struct WelcomeRenderParams<'a> {
     /// drives both the reserved row height and the `[label]` button. `None` = no
     /// CTA on the welcome screen.
     pub upgrade_cta: Option<&'a str>,
+    /// Non-blocking welcome privacy banner above the prompt.
+    pub privacy_banner: bool,
 }
 
 /// Render the welcome screen.
@@ -728,6 +733,9 @@ pub fn render_welcome(
                 announcement_truncated: false,
                 announcement_rect: None,
                 upgrade_cta_rect: None,
+                privacy_banner_accept_rect: None,
+                privacy_banner_customize_rect: None,
+                privacy_banner_legal_rect: None,
             }
         }
         AuthState::Authenticating { auth_url, mode, .. } => {
@@ -760,6 +768,9 @@ pub fn render_welcome(
                 announcement_truncated: false,
                 announcement_rect: None,
                 upgrade_cta_rect: None,
+                privacy_banner_accept_rect: None,
+                privacy_banner_customize_rect: None,
+                privacy_banner_legal_rect: None,
             }
         }
         AuthState::Done if params.is_zdr_blocked => {
@@ -793,6 +804,9 @@ pub fn render_welcome(
                 announcement_truncated: false,
                 announcement_rect: None,
                 upgrade_cta_rect: None,
+                privacy_banner_accept_rect: None,
+                privacy_banner_customize_rect: None,
+                privacy_banner_legal_rect: None,
             }
         }
         // Folder-trust question: shown after auth, before any session is
@@ -1711,9 +1725,16 @@ fn render_welcome_done(
     });
     let has_update_tip = p.pending_update_version.is_some();
     let has_resume_tip = !has_update_tip && p.foreign_resume_hint.is_some();
+    // Tip slot precedence: pending update > privacy banner (2 rows) > resume
+    // hint > random tip. The update outranks the upsell so a ready update is
+    // never invisible; the banner takes the slot back once it's applied.
     let tip_height = if !show_picker {
-        if has_update_tip || has_resume_tip {
-            1u16 // update/resume tips are short, always 1 row
+        if has_update_tip {
+            1u16
+        } else if p.privacy_banner {
+            2u16
+        } else if has_resume_tip {
+            1u16
         } else if let Some(tip_text) = p.tip {
             let inset = prompt::prompt_inset(welcome_compact);
             let tip_width = content_area.width.saturating_sub(inset * 2);
@@ -1917,6 +1938,9 @@ fn render_welcome_done(
     // shortcuts are rendered inside the picker content area.
     let mut refresh_hit_rect: Option<Rect> = None;
     let mut gate_url_hit_rect: Option<Rect> = None;
+    let mut privacy_banner_accept_rect: Option<Rect> = None;
+    let mut privacy_banner_customize_rect: Option<Rect> = None;
+    let mut privacy_banner_legal_rect: Option<Rect> = None;
     let (cursor_pos, post_flush_escapes) = if show_picker {
         (None, None)
     } else if !p.has_access {
@@ -2026,13 +2050,32 @@ fn render_welcome_done(
         );
         (None, None)
     } else {
-        // When a background update is available, show the update
-        // notification in the tip area instead of the random tip.
-
-        // Render the update notification with accent styling when present.
-        if let Some(ver) = p.pending_update_version
+        // Privacy banner owns the tip slot when visible (above the prompt),
+        // except a pending-update notification, which outranks it.
+        if p.privacy_banner && p.pending_update_version.is_none() && layout.tip.height > 0 {
+            let [_, tip_centered, _] = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(content_area.width),
+                Constraint::Min(0),
+            ])
+            .flex(Flex::Center)
+            .areas(layout.tip);
+            let inset = prompt::prompt_inset(p.compact);
+            let tip_inset = Rect {
+                x: tip_centered.x + inset,
+                y: tip_centered.y,
+                width: tip_centered.width.saturating_sub(inset * 2),
+                height: tip_centered.height,
+            };
+            let (accept_r, customize_r, legal_r) =
+                render_privacy_banner(tip_inset, buf, theme, p.mouse_pos);
+            privacy_banner_accept_rect = Some(accept_r);
+            privacy_banner_customize_rect = Some(customize_r);
+            privacy_banner_legal_rect = Some(legal_r);
+        } else if let Some(ver) = p.pending_update_version
             && layout.tip.height > 0
         {
+            // Background update notification in the tip area.
             let [_, tip_centered, _] = Layout::horizontal([
                 Constraint::Min(0),
                 Constraint::Length(content_area.width),
@@ -2067,7 +2110,8 @@ fn render_welcome_done(
 
         // Recent foreign session: offer a one-click resume in the tip area
         // (only when no update is pending — the update shares ctrl+u and wins).
-        if p.pending_update_version.is_none()
+        if !p.privacy_banner
+            && p.pending_update_version.is_none()
             && let Some(hint) = p.foreign_resume_hint
             && layout.tip.height > 0
         {
@@ -2128,8 +2172,11 @@ fn render_welcome_done(
             p.prompt_focus,
             prompt,
             &usage_info,
-            if p.pending_update_version.is_some() || p.foreign_resume_hint.is_some() {
-                // Update/resume tip already rendered above with custom styling.
+            if p.privacy_banner
+                || p.pending_update_version.is_some()
+                || p.foreign_resume_hint.is_some()
+            {
+                // Banner/update/resume tip already rendered above with custom styling.
                 None
             } else {
                 p.tip
@@ -2163,7 +2210,151 @@ fn render_welcome_done(
         announcement_truncated,
         announcement_rect,
         upgrade_cta_rect,
+        privacy_banner_accept_rect,
+        privacy_banner_customize_rect,
+        privacy_banner_legal_rect,
     }
+}
+
+/// Legal line copy — used for both render spans and mouse hit width.
+const PRIVACY_BANNER_LEGAL: &str = "Learn more and read Terms and Privacy Policy.";
+
+/// Welcome privacy banner: copy left, `[Customize in settings]` / `[Accept]` right.
+/// Returns (accept_rect, customize_rect, legal_rect) for mouse hit-testing.
+fn render_privacy_banner(
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    mouse_pos: Option<(u16, u16)>,
+) -> (Rect, Rect, Rect) {
+    let customize_label = "[Customize in settings]";
+    let accept_label = "[Accept]";
+    let right_w = (customize_label.len() + 1 + accept_label.len()) as u16;
+    // Buttons render whole or not at all: a clipped/overflowing [Accept]
+    // must never leave a click target in the blank margin (a stray click
+    // there would silently opt the user in).
+    let buttons_fit = area.width > right_w;
+    let left_w = if buttons_fit {
+        area.width - right_w - 1
+    } else {
+        area.width
+    };
+
+    let left = Rect {
+        x: area.x,
+        y: area.y,
+        width: left_w,
+        height: area.height.min(2),
+    };
+    let right = Rect {
+        x: area.x + left_w + 1,
+        y: area.y,
+        width: right_w,
+        height: 1,
+    };
+
+    let hovered = |r: Rect| {
+        mouse_pos.is_some_and(|(mx, my)| r.contains(ratatui::layout::Position::new(mx, my)))
+    };
+
+    let legal_w = if left.width as usize >= PRIVACY_BANNER_LEGAL.len() {
+        PRIVACY_BANNER_LEGAL.len()
+    } else {
+        "Learn more".len().min(left.width as usize)
+    };
+    // The legal line only exists when the slot really has a second row —
+    // otherwise its rect would make the blank row below clickable.
+    let legal_rect = if area.height >= 2 {
+        Rect {
+            x: left.x,
+            y: left.y.saturating_add(1),
+            width: legal_w as u16,
+            height: 1,
+        }
+    } else {
+        Rect::default()
+    };
+
+    // Figma node 8698:3806: title fg/primary, description fg/secondary,
+    // legal line fg/tertiary with underlined links in the same color.
+    // The whole legal line is one click target, so its links brighten together.
+    let link_fg = if hovered(legal_rect) {
+        theme.gray_bright
+    } else {
+        theme.gray
+    };
+    let link = Style::default()
+        .fg(link_fg)
+        .add_modifier(Modifier::UNDERLINED);
+    let gray = Style::default().fg(theme.gray);
+    let title = Span::styled("Help improve Grok", Style::default().fg(theme.text_primary));
+    let desc = "Allow your sessions to improve SpaceXAI's models.";
+    // Drop trailing spans whole rather than clipping mid-word when narrow.
+    let line1 = if left.width as usize >= "Help improve Grok  ".len() + desc.len() {
+        Line::from(vec![
+            title,
+            Span::raw("  "),
+            Span::styled(desc, Style::default().fg(theme.gray_bright)),
+        ])
+    } else {
+        Line::from(title)
+    };
+    // Span pieces must reassemble to PRIVACY_BANNER_LEGAL.
+    let line2 = if left.width as usize >= PRIVACY_BANNER_LEGAL.len() {
+        Line::from(vec![
+            Span::styled("Learn more", link),
+            Span::styled(" and read ", gray),
+            Span::styled("Terms", link),
+            Span::styled(" and ", gray),
+            Span::styled("Privacy Policy", link),
+            Span::styled(".", gray),
+        ])
+    } else {
+        Line::from(Span::styled("Learn more", link))
+    };
+    Paragraph::new(vec![line1, line2]).render(left, buf);
+
+    if !buttons_fit {
+        return (Rect::default(), Rect::default(), legal_rect);
+    }
+    let customize_rect = Rect {
+        x: right.x,
+        y: right.y,
+        width: customize_label.len() as u16,
+        height: 1,
+    };
+    let accept_rect = Rect {
+        x: right.x + customize_label.len() as u16 + 1,
+        y: right.y,
+        width: accept_label.len() as u16,
+        height: 1,
+    };
+    // Hover treatment mirrors the plugin CTA buttons.
+    let customize_style = if hovered(customize_rect) {
+        Style::default().fg(theme.text_primary).bg(theme.bg_hover)
+    } else {
+        Style::default().fg(theme.gray_bright)
+    };
+    let accept_style = if hovered(accept_rect) {
+        Style::default().fg(theme.link_fg).bg(theme.bg_hover)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    buf.set_stringn(
+        customize_rect.x,
+        customize_rect.y,
+        customize_label,
+        customize_rect.width as usize,
+        customize_style,
+    );
+    buf.set_stringn(
+        accept_rect.x,
+        accept_rect.y,
+        accept_label,
+        accept_rect.width as usize,
+        accept_style,
+    );
+    (accept_rect, customize_rect, legal_rect)
 }
 
 /// Context for session picker rendering.
@@ -2473,9 +2664,8 @@ fn render_auth_input_box(
 /// kitty-keyboard banner is prepended ahead of `summarize_warnings()`
 /// output — see `diagnostics::assemble_startup_warnings`), but only one is
 /// rendered — the severity-aware pick from `startup::banner_warning`, so a
-/// runtime-pushed Warning displaces an earlier Info entry; all of them point
-/// at `/terminal-setup`, which remains an alias and lists every issue. One
-/// message line, one optional action line, plus a buffer row for spacing.
+/// runtime-pushed Warning displaces an earlier Info entry. One message line,
+/// one optional action line, plus a buffer row for spacing.
 /// Severity controls color (yellow for `Warning`, dim for `Info`).
 fn render_startup_warnings(
     area: Rect,
@@ -2726,6 +2916,7 @@ mod tests {
             changelog_has_full_notes: false,
             welcome_announcement_expanded: false,
             upgrade_cta: None,
+            privacy_banner: false,
         }
     }
 

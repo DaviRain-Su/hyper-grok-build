@@ -21,6 +21,15 @@ use super::system_appearance;
 /// `load_from_disk()`, then kept in sync by `set()`.
 static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::GrokNight as u8);
 static LOADED: AtomicBool = AtomicBool::new(false);
+/// Serializes lazy disk-load publication against explicit `set()`/reset
+/// writes. Without it, a disk load started while `LOADED == false` can
+/// finish AFTER an explicit `set()` and overwrite it with a stale theme
+/// (the lost-update race that made parallel theme tests flaky — and that
+/// could equally fire in production when an explicit theme update overlaps
+/// first initialization). NOT the same mutex as `TEST_LOCK`: pinned tests
+/// hold `TEST_LOCK` while calling `Theme::current()`, so reusing it would
+/// deadlock.
+static STATE_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(any(test, feature = "test-support"))]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -81,13 +90,17 @@ pub fn current_kind() -> ThemeKind {
         return ThemeKind::GrokNight;
     }
     if !LOADED.load(Ordering::Acquire) {
-        // Two threads racing into the seed path is harmless — the
-        // disk read is idempotent and `store` is atomic. Worst case
-        // both threads call `load_from_disk` once.
-        if let Some(kind) = load_from_disk() {
-            CURRENT.store(kind as u8, Ordering::Relaxed);
+        // Slow path, serialized with `set()`/`reset_for_test()`: a disk load
+        // that started before an explicit `set()` must not publish after it.
+        let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Recheck under the lock: `set()` (or another loader) may have
+        // published while we were waiting on the mutex.
+        if !LOADED.load(Ordering::Acquire) {
+            if let Some(kind) = load_from_disk() {
+                CURRENT.store(kind as u8, Ordering::Relaxed);
+            }
+            LOADED.store(true, Ordering::Release);
         }
-        LOADED.store(true, Ordering::Release);
     }
     theme_kind_from_u8(CURRENT.load(Ordering::Relaxed))
 }
@@ -98,6 +111,8 @@ pub fn current_kind() -> ThemeKind {
 /// by the live-preview path during the picker. Disk-write happens via
 /// `Effect::PersistSetting`, NOT here.
 pub fn set(kind: ThemeKind) {
+    // Serialize with the lazy disk-load publication (see STATE_LOCK).
+    let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     CURRENT.store(kind as u8, Ordering::Relaxed);
     LOADED.store(true, Ordering::Release);
 }
@@ -235,6 +250,19 @@ pub fn resolve_initial_theme_no_osc11() -> ThemeKind {
 /// Checks `[ui].theme` first (the canonical location), then falls back
 /// to a top-level `theme` key for backwards compatibility.
 fn load_from_disk() -> Option<ThemeKind> {
+    // Test seam: a deterministic disk kind (and optional pause) so the
+    // lazy-load lost-update regression test doesn't depend on the host's
+    // real config.toml.
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let v = DISK_KIND_OVERRIDE_FOR_TEST.load(Ordering::Relaxed);
+        if v != u8::MAX {
+            while PAUSE_IN_LOAD_FOR_TEST.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
+            return Some(theme_kind_from_u8(v));
+        }
+    }
     let root = xai_grok_config::load_effective_config_disk_only().ok()?;
     let table = root.as_table()?;
     // Canonical: [ui] section
@@ -276,7 +304,29 @@ fn load_auto_theme_config() -> AutoThemeConfig {
 // -- Test support ------------------------------------------------------------
 
 #[cfg(any(test, feature = "test-support"))]
+static DISK_KIND_OVERRIDE_FOR_TEST: AtomicU8 = AtomicU8::new(u8::MAX);
+#[cfg(any(test, feature = "test-support"))]
+static PAUSE_IN_LOAD_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+/// Test seam for the lazy-load race regression test: override the theme
+/// "read from disk" so the lost-update scenario doesn't depend on the
+/// host's real config.toml. `None` restores the real disk read.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_disk_kind_override_for_test(kind: Option<ThemeKind>) {
+    DISK_KIND_OVERRIDE_FOR_TEST.store(kind.map_or(u8::MAX, |k| k as u8), Ordering::Relaxed);
+}
+
+/// Test seam for the same regression test: park `load_from_disk` mid-read
+/// so a lazy load provably starts before an explicit `set()`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_load_pause_for_test(paused: bool) {
+    PAUSE_IN_LOAD_FOR_TEST.store(paused, Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_for_test() {
+    // Serialize with the lazy disk-load publication (see STATE_LOCK).
+    let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool
     // pair is safe to reset without any cross-thread coordination.
     CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
@@ -331,6 +381,48 @@ mod tests {
         system_appearance::clear_mock();
         f();
         system_appearance::clear_mock();
+        reset_for_test();
+    }
+
+    /// Regression test for the lazy-load lost update: an explicit `set()`
+    /// must always win over a concurrent lazy disk load, in both
+    /// interleavings. Order A is deterministic (stale kind published first,
+    /// explicit set after); order B (set first, loader rechecks and skips)
+    /// is covered statistically by the loop.
+    #[test]
+    fn explicit_set_wins_over_concurrent_lazy_load() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..20 {
+            reset_for_test(); // LOADED = false
+            set_disk_kind_override_for_test(Some(ThemeKind::TokyoNight));
+            let loader = std::thread::spawn(current_kind);
+            set(ThemeKind::GrokNight);
+            loader.join().expect("loader thread");
+            assert_eq!(
+                current_kind(),
+                ThemeKind::GrokNight,
+                "an in-flight disk load must never overwrite the explicit set"
+            );
+        }
+        set_disk_kind_override_for_test(None);
+        reset_for_test();
+    }
+
+    /// Deterministic order A: the stale kind lands first, the explicit set
+    /// still owns the final state.
+    #[test]
+    fn explicit_set_after_published_lazy_load_owns_final_state() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        set_disk_kind_override_for_test(Some(ThemeKind::TokyoNight));
+        set_load_pause_for_test(true);
+        let loader = std::thread::spawn(current_kind);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        set_load_pause_for_test(false);
+        assert_eq!(loader.join().expect("loader thread"), ThemeKind::TokyoNight);
+        set(ThemeKind::GrokNight);
+        assert_eq!(current_kind(), ThemeKind::GrokNight);
+        set_disk_kind_override_for_test(None);
         reset_for_test();
     }
 

@@ -94,7 +94,7 @@ async fn new_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path) ->
         RPC_TIMEOUT,
         conn.new_session(
             acp::NewSessionRequest::new(cwd.to_path_buf())
-                .meta(json!({ "modelId" : "test-model" }).as_object().cloned()),
+                .meta(json!({ "modelId": "test-model" }).as_object().cloned()),
         ),
     )
     .await
@@ -126,7 +126,7 @@ async fn close_session(conn: &acp::ClientSideConnection, session_id: &acp::Sessi
     let resp = ext_method(
         conn,
         "x.ai/session/close",
-        json!({ "sessionId" : session_id.0.as_ref() }),
+        json!({ "sessionId": session_id.0.as_ref() }),
     )
     .await;
     assert_eq!(
@@ -183,12 +183,15 @@ async fn connect_and_auth() -> acp::ClientSideConnection {
                         .terminal(false),
                 )
                 .meta(
-                    json!(
-                        { "startupHints" : { "nonInteractive" : true,
-                        "skipGitStatus" : true, "skipProjectLayout" : true, },
-                        "clientType" : "registry-churn-test", "clientVersion" :
-                        "0.0-test", }
-                    )
+                    json!({
+                        "startupHints": {
+                            "nonInteractive": true,
+                            "skipGitStatus": true,
+                            "skipProjectLayout": true,
+                        },
+                        "clientType": "registry-churn-test",
+                        "clientVersion": "0.0-test",
+                    })
                     .as_object()
                     .cloned(),
                 ),
@@ -206,7 +209,7 @@ async fn connect_and_auth() -> acp::ClientSideConnection {
         RPC_TIMEOUT,
         client_conn.authenticate(
             acp::AuthenticateRequest::new(method.id().clone())
-                .meta(json!({ "headless" : true }).as_object().cloned()),
+                .meta(json!({ "headless": true }).as_object().cloned()),
         ),
     )
     .await

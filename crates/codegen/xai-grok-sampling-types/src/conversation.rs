@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::rs;
+use crate::tool_overrides::{ToolOverrides, WebSearchOptions, XSearchOptions, drop_empty};
 use crate::types::{
     ApiBackend, ChatCompletionRequest, ChatContentBlock, ChatRequestMessage, ChatResponseMessage,
     FinishReason, ImageUrl, MessageContent, Role, ToolCallRequest, ToolChoice, ToolDefinition,
@@ -530,30 +531,52 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
-/// A tool that the backend executes server-side during inference.
-/// The client sends these as native Responses API tool types (not Function).
-/// The backend's agentic sampler handles execution and streams results back.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedTool {
-    /// Web search executed server-side by the backend's agentic sampler.
-    WebSearch {
-        /// Optional domain allowlist for search results.
-        allowed_domains: Option<Vec<String>>,
-    },
-    /// X (Twitter) search executed server-side by the backend's agentic sampler.
-    /// This is xAI-specific — not part of the OpenAI Responses API, so it's
-    /// injected as raw JSON into the request body by the sampler client.
-    XSearch,
+    WebSearch { options: Option<WebSearchOptions> },
+    XSearch { options: Option<XSearchOptions> },
 }
 
 impl HostedTool {
-    /// The name the backend registers this tool under server-side.
     pub fn wire_name(&self) -> &'static str {
         match self {
             HostedTool::WebSearch { .. } => "web_search",
-            HostedTool::XSearch => "x_search",
+            HostedTool::XSearch { .. } => "x_search",
         }
     }
+}
+
+/// Resolve `overrides` onto the hosted tools in place so the serialized request matches the returned
+/// echo. Empty options normalize to absent (via `drop_empty`), so a stray `{}` never clears a seeded
+/// bound. Returns the applied overrides.
+pub fn apply_tool_overrides(
+    tools: &mut [HostedTool],
+    overrides: Option<&ToolOverrides>,
+) -> ToolOverrides {
+    let mut applied = ToolOverrides::default();
+    for tool in tools.iter_mut() {
+        match tool {
+            HostedTool::XSearch { options } => {
+                if let Some(x) = drop_empty(
+                    overrides.and_then(|o| o.x_search.clone()),
+                    XSearchOptions::is_empty,
+                ) {
+                    *options = Some(x);
+                }
+                applied.x_search = drop_empty(options.clone(), XSearchOptions::is_empty);
+            }
+            HostedTool::WebSearch { options } => {
+                if let Some(w) = drop_empty(
+                    overrides.and_then(|o| o.web_search.clone()),
+                    WebSearchOptions::is_empty,
+                ) {
+                    *options = Some(w);
+                }
+                applied.web_search = drop_empty(options.clone(), WebSearchOptions::is_empty);
+            }
+        }
+    }
+    applied
 }
 
 impl From<ToolDefinition> for ToolSpec {
@@ -2775,11 +2798,14 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
 
     for hosted in &req.hosted_tools {
         match hosted {
-            HostedTool::WebSearch { allowed_domains } => {
-                let filters = allowed_domains
+            HostedTool::WebSearch { options } => {
+                // An empty allowlist is unbounded, so it emits no filter.
+                let filters = options
                     .as_ref()
+                    .and_then(|o| o.allowed_domains.as_deref())
+                    .filter(|domains| !domains.is_empty())
                     .map(|domains| rs::WebSearchToolFilters {
-                        allowed_domains: Some(domains.clone()),
+                        allowed_domains: Some(domains.to_vec()),
                     });
                 tools.push(rs::Tool::WebSearch(rs::WebSearchTool {
                     filters,
@@ -2788,7 +2814,7 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
             }
             // XSearch is xAI-specific — not in async_openai's rs::Tool enum.
             // Injected as raw JSON by the sampler client after serialization.
-            HostedTool::XSearch => {}
+            HostedTool::XSearch { .. } => {}
         }
     }
 
@@ -2800,19 +2826,21 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
 ///
 /// The sampler client injects these into the serialized request body's
 /// `tools` array before sending to the API.
-pub fn extra_raw_tools(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value> {
-    let mut raw = Vec::new();
+pub fn extra_tool_entries(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value> {
+    let mut entries = Vec::new();
     for tool in hosted_tools {
         match tool {
-            // WebSearch is handled natively via rs::Tool::WebSearch in
-            // build_responses_tools() — no raw JSON injection needed.
+            // WebSearch ships natively (rs::Tool::WebSearch), so no JSON entry here.
             HostedTool::WebSearch { .. } => {}
-            HostedTool::XSearch => {
-                raw.push(serde_json::json!({"type": "x_search"}));
+            HostedTool::XSearch { options } => {
+                entries.push(match options {
+                    Some(o) => o.to_tool_entry(),
+                    None => XSearchOptions::default().to_tool_entry(),
+                });
             }
         }
     }
-    raw
+    entries
 }
 
 // ============================================================================
@@ -3987,6 +4015,7 @@ mod compaction_item_bridge_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_overrides::*;
     use assert_matches::assert_matches;
 
     #[test]
@@ -4126,9 +4155,7 @@ mod tests {
                     parameters: serde_json::json!({"type": "object"}),
                 },
             ]);
-        req.hosted_tools = vec![HostedTool::WebSearch {
-            allowed_domains: None,
-        }];
+        req.hosted_tools = vec![HostedTool::WebSearch { options: None }];
 
         let responses_req: rs::CreateResponse = (&req).into();
         let tools = responses_req.tools.expect("tools should be set");
@@ -4163,13 +4190,166 @@ mod tests {
                 description: None,
                 parameters: serde_json::json!({"type": "object"}),
             }]);
-        req.hosted_tools = vec![HostedTool::XSearch];
+        req.hosted_tools = vec![HostedTool::XSearch { options: None }];
 
         let responses_req: rs::CreateResponse = (&req).into();
         let tools = responses_req.tools.unwrap_or_default();
         assert!(tools.is_empty(), "expected no tools, got: {tools:?}");
-        let raw = extra_raw_tools(&req.hosted_tools);
-        assert_eq!(raw, vec![serde_json::json!({"type": "x_search"})]);
+        let entries = extra_tool_entries(&req.hosted_tools);
+        assert_eq!(entries, vec![serde_json::json!({"type": "x_search"})]);
+    }
+
+    #[test]
+    fn x_search_serializes_to_the_tool_entry() {
+        // A full bound reaches the flat snake_case entry; an empty or `None` bound emits the bare entry.
+        let dated = extra_tool_entries(&[HostedTool::XSearch {
+            options: Some(XSearchOptions {
+                date_bound: Some(
+                    SearchDateBound::new(Some("2024-01-01".into()), Some("2024-03-15".into()))
+                        .unwrap(),
+                ),
+            }),
+        }]);
+        assert_eq!(
+            dated,
+            vec![serde_json::json!({
+                "type": "x_search",
+                "from_date": "2024-01-01",
+                "to_date": "2024-03-15",
+            })]
+        );
+        let bare = vec![serde_json::json!({"type": "x_search"})];
+        assert_eq!(
+            extra_tool_entries(&[HostedTool::XSearch {
+                options: Some(XSearchOptions {
+                    date_bound: Some(SearchDateBound::new(None, None).unwrap()),
+                }),
+            }]),
+            bare
+        );
+        assert_eq!(
+            extra_tool_entries(&[HostedTool::XSearch { options: None }]),
+            bare
+        );
+    }
+
+    #[test]
+    fn tool_overrides_update_apply_merges_tristate() {
+        let x = XSearchOptions {
+            date_bound: Some(SearchDateBound::new(None, Some("2024-03-15".into())).unwrap()),
+        };
+        let w = WebSearchOptions {
+            allowed_domains: Some(vec!["x.com".into()]),
+        };
+
+        // set: an object sets that tool's options.
+        let base = ToolOverridesUpdate {
+            x_search: Some(Some(x.clone())),
+            web_search: None,
+        }
+        .apply(None);
+        assert_eq!(
+            base.as_ref().and_then(|o| o.x_search.clone()),
+            Some(x.clone())
+        );
+
+        // leave: an absent field keeps the base's entry; a set field updates only itself.
+        let merged = ToolOverridesUpdate {
+            x_search: None,
+            web_search: Some(Some(w.clone())),
+        }
+        .apply(base.clone());
+        assert_eq!(merged.as_ref().and_then(|o| o.x_search.clone()), Some(x));
+        assert_eq!(merged.and_then(|o| o.web_search), Some(w));
+
+        // clear: `null` clears just that tool; clearing the last remaining tool
+        // empties the override to `None`.
+        let cleared = ToolOverridesUpdate {
+            x_search: Some(None),
+            web_search: None,
+        }
+        .apply(base);
+        assert!(cleared.is_none());
+    }
+
+    #[test]
+    fn empty_per_turn_override_never_clears_a_seeded_cutoff() {
+        use serde_json::json;
+        // A stray empty `{}` carries no instruction, so a definition-seeded cutoff must survive it
+        // (only an explicit bound changes the window; `null` reverts to the seed).
+        let update = ToolOverridesUpdate::parse(&json!({"xSearch": {}}))
+            .unwrap()
+            .apply(None);
+        let mut tools = vec![HostedTool::XSearch {
+            options: Some(XSearchOptions {
+                date_bound: Some(SearchDateBound::new(None, Some("2024-01-01".into())).unwrap()),
+            }),
+        }];
+        let applied = apply_tool_overrides(&mut tools, update.as_ref());
+        assert_eq!(
+            applied
+                .x_search
+                .and_then(|x| x.date_bound)
+                .and_then(|b| b.to_date().map(str::to_owned)),
+            Some("2024-01-01".to_string()),
+            "an empty override must not widen a seeded cutoff"
+        );
+
+        let mut tools = vec![HostedTool::XSearch {
+            options: Some(XSearchOptions {
+                date_bound: Some(SearchDateBound::new(None, Some("2024-01-01".into())).unwrap()),
+            }),
+        }];
+        let direct = ToolOverrides::parse(&json!({"xSearch": {}})).unwrap();
+        let applied = apply_tool_overrides(&mut tools, Some(&direct));
+        assert_eq!(
+            applied
+                .x_search
+                .and_then(|x| x.date_bound)
+                .and_then(|b| b.to_date().map(str::to_owned)),
+            Some("2024-01-01".to_string()),
+            "an empty override leaves the seeded bound, which stays attested"
+        );
+    }
+
+    #[test]
+    fn search_date_bound_validation() {
+        // Non-canonical dates: unpadded is NotZeroPadded; a five-digit year and year 0 (below the
+        // minimum year 1) are InvalidDate; a valid padded window is accepted.
+        assert!(matches!(
+            SearchDateBound::new(Some("2024-3-5".into()), None),
+            Err(SearchDateBoundError::NotZeroPadded { .. })
+        ));
+        assert!(matches!(
+            SearchDateBound::new(Some("10000-01-01".into()), None),
+            Err(SearchDateBoundError::InvalidDate { .. })
+        ));
+        assert!(matches!(
+            SearchDateBound::new(Some("0000-01-01".into()), None),
+            Err(SearchDateBoundError::InvalidDate { .. })
+        ));
+        assert!(SearchDateBound::new(Some("0001-01-01".into()), Some("0099-12-31".into())).is_ok());
+
+        // Inverted window is rejected with the typed error; equal and ordered windows are accepted.
+        assert!(matches!(
+            SearchDateBound::new(Some("2024-03-15".into()), Some("2024-01-01".into())),
+            Err(SearchDateBoundError::InvertedWindow { .. })
+        ));
+        assert!(SearchDateBound::new(Some("2024-01-01".into()), Some("2024-01-01".into())).is_ok());
+        assert!(SearchDateBound::new(Some("2024-01-01".into()), Some("2024-01-02".into())).is_ok());
+
+        // The rejection also holds through parse and the composed aggregate wire type, so a client
+        // cannot smuggle an inverted window past the outer types.
+        let inverted = serde_json::json!({"fromDate": "2024-03-15", "toDate": "2024-01-01"});
+        let err = SearchDateBound::parse(&inverted)
+            .expect_err("inverted window must fail parse")
+            .to_string();
+        assert!(err.contains("on or before"), "unhelpful error: {err}");
+        assert!(
+            ToolOverridesUpdate::parse(&serde_json::json!({"xSearch": {"dateBound": &inverted}}))
+                .is_err(),
+            "inverted window must fail through the aggregate wire type"
+        );
     }
 
     #[test]
@@ -4264,20 +4444,18 @@ mod tests {
         };
         assert_eq!(u.content.len(), 2);
         assert_matches!(
-                    &u.content[1],
-                    ContentPart::Image { url }
-        if url.as_ref() == "https://example.com/image.png"
-                );
+            &u.content[1],
+            ContentPart::Image { url } if url.as_ref() == "https://example.com/image.png"
+        );
 
         // Convert to chat request and verify
         let chat_msg = conversation_item_to_chat_message(user);
         let blocks = chat_msg.content.blocks();
         assert_eq!(blocks.len(), 2);
         assert_matches!(
-                    &blocks[1],
-                    ChatContentBlock::ImageUrl { image_url }
-        if image_url.url == "https://example.com/image.png"
-                );
+            &blocks[1],
+            ChatContentBlock::ImageUrl { image_url } if image_url.url == "https://example.com/image.png"
+        );
     }
 
     #[test]

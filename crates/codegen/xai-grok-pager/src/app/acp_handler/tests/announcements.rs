@@ -94,8 +94,7 @@
         assert!(
             app.pending_effects.iter().any(|e| matches!(
                 e,
-                Effect::PersistAnnouncementsHidden { hidden_ids }
-if hidden_ids == &expected
+                Effect::PersistAnnouncementsHidden { hidden_ids } if hidden_ids == &expected
             )),
             "prune must persist the shrunken set, got {:?}",
             app.pending_effects

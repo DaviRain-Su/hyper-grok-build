@@ -333,7 +333,7 @@ Press `Ctrl+L` on non–VS Code family terminals to open the Extensions modal (P
 |-----|--------|
 | `r` | Reload all hooks from disk |
 | `a` | Add a custom hook by path |
-| `x` | Remove the selected hook |
+| `x` | Remove the selected hook source (asks for confirmation; press lowercase `y` to confirm) |
 | `Space` | Enable or disable the selected hook |
 | `f` | Cycle the status filter (All / Enabled / Disabled) |
 

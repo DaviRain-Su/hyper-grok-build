@@ -368,7 +368,9 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
                 });
                 agent.plugin_cta.phase = CtaPhase::Hidden;
                 if let Some(session_id) = session_id.clone() {
-                    effects.extend(extensions_modal_tab_fetches(agent_id, session_id));
+                    if let Some(modal) = agent.extensions_modal.as_mut() {
+                        effects.extend(extensions_modal_tab_fetches(modal, agent_id, session_id));
+                    }
                 } else {
                     agent.pending_extensions_fetch = true;
                 }

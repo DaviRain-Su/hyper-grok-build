@@ -119,8 +119,9 @@ async fn wheel_overscroll_at_bottom_reengages_follow_mid_stream() {
         Duration::ZERO,
     );
     harness.update(Duration::from_millis(800));
+    let running = harness.is_running().expect("poll pager liveness");
     assert!(
-        harness.is_running() && !harness.contains_text("panicked"),
+        running && !harness.contains_text("panicked"),
         "pager broke during the wheel dance\nscreen:\n{}",
         harness.screen_contents()
     );

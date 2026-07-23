@@ -1510,6 +1510,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             }
             dispatch(action, app)
         }
+        CommandResult::Doctor(_) => {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.dispatch.set_text("");
+                d.set_error_toast("Open a session to run /doctor.");
+            }
+            vec![]
+        }
         CommandResult::QueueCommand(_)
         | CommandResult::InjectSkill { .. }
         | CommandResult::PassThrough(_) => {

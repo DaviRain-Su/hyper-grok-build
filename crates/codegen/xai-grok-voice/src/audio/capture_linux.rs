@@ -18,19 +18,15 @@
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc as async_mpsc;
 
+use super::pipe::{self, READ_CHUNK};
 use crate::error::VoiceError;
-
-/// PCM read size from the recorder's stdout (bytes) — ~64 ms at 16 kHz mono
-/// PCM16. Small enough to stream responsively, large enough to avoid syscall
-/// churn on the reader thread.
-const READ_CHUNK: usize = 2048;
 
 /// How long to wait after spawning before deciding the recorder started cleanly.
 /// A missing device or a stopped audio server makes the recorder exit within a
@@ -142,11 +138,15 @@ fn require_recorder() -> Result<Recorder, VoiceError> {
 fn spawn_recorder(sample_rate: u32) -> Result<(Recorder, Child), VoiceError> {
     let recorder = require_recorder()?;
 
-    let mut child = Command::new(recorder.program())
-        .args(recorder.args(sample_rate))
+    let mut cmd = Command::new(recorder.program());
+    cmd.args(recorder.args(sample_rate))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // setsid detach via the sanctioned helper (workspace subprocess rule): the
+    // recorder writes to a pipe and must not share the pager's controlling TTY.
+    xai_tty_utils::detach_std_command(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| VoiceError::Config(format!("failed to start {}: {e}", recorder.program())))?;
 
@@ -177,61 +177,7 @@ fn spawn_recorder(sample_rate: u32) -> Result<(Recorder, Child), VoiceError> {
 }
 
 /// Stop handle for the recorder subprocess (owns the child + reader thread).
-pub struct CaptureHandle {
-    /// `Some` until `stop()` or `Drop` consumes it (kill + reap).
-    child: Option<Child>,
-    stop: Arc<AtomicBool>,
-    reader: Option<JoinHandle<()>>,
-    peak: Arc<AtomicU16>,
-}
-
-impl CaptureHandle {
-    /// Session peak of recorder-delivered PCM (metered before load-shed).
-    pub fn peak_meter(&self) -> Arc<AtomicU16> {
-        Arc::clone(&self.peak)
-    }
-
-    /// Stop capture: kill the recorder, reap it, and join the reader thread so
-    /// the input device is released before returning.
-    ///
-    /// Dropping a `CaptureHandle` also kills and reaps the recorder (see
-    /// `Drop`), but without joining the reader; call `stop()` when you must be
-    /// sure the device is freed before continuing.
-    pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-    }
-}
-
-impl Drop for CaptureHandle {
-    fn drop(&mut self) {
-        // Always kill the recorder so the mic is released even when `stop()` was
-        // never called — e.g. the STT session ended on its own (server close /
-        // error). Killing closes the child's stdout, so the reader thread's
-        // blocking `read` returns 0 and it exits. `Drop` must never block (it
-        // may run on an async executor), so the reap happens on a detached
-        // thread — without it every drop-path teardown (session supersede, STT
-        // error, connect failure) would leave a zombie until the pager exits.
-        self.stop.store(true, Ordering::Release);
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            // `Builder::spawn` (not `thread::spawn`) so spawn failure under
-            // thread exhaustion degrades to kill-without-reap instead of a
-            // panic — a panicking `Drop` during unwind would abort.
-            let _ = thread::Builder::new()
-                .name("voice-capture-reap".into())
-                .spawn(move || {
-                    let _ = child.wait();
-                });
-        }
-    }
-}
+pub use super::pipe::ChildCaptureHandle as CaptureHandle;
 
 /// Spawn subprocess capture; PCM16 LE chunks are forwarded to `pcm_tx`.
 pub fn spawn_pcm_capture(
@@ -239,20 +185,21 @@ pub fn spawn_pcm_capture(
     pcm_tx: async_mpsc::Sender<Vec<u8>>,
 ) -> Result<CaptureHandle, VoiceError> {
     let (recorder, mut child) = spawn_recorder(sample_rate)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VoiceError::Config(format!("{} produced no stdout", recorder.program())))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(VoiceError::Config(format!(
+            "{} produced no stdout",
+            recorder.program()
+        )));
+    };
 
-    drain_stderr(&mut child, recorder.program());
+    pipe::drain_stderr(&mut child, recorder.program());
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_reader = Arc::clone(&stop);
-    let peak = Arc::new(AtomicU16::new(0));
-    let peak_reader = Arc::clone(&peak);
     let device = recorder.program();
-    let reader =
-        thread::spawn(move || forward_pcm(stdout, pcm_tx, stop_reader, peak_reader, device));
+    let reader = thread::spawn(move || pipe::forward_pcm(stdout, pcm_tx, stop_reader, device));
 
     tracing::info!(
         recorder = recorder.program(),
@@ -260,82 +207,7 @@ pub fn spawn_pcm_capture(
         "voice capture stream (subprocess)"
     );
 
-    Ok(CaptureHandle {
-        child: Some(child),
-        stop,
-        reader: Some(reader),
-        peak,
-    })
-}
-
-/// Drain the recorder's stderr to EOF on a detached thread so a chatty recorder
-/// (xrun/underrun warnings, etc.) can't fill the pipe buffer and block its own
-/// writes — which would stall capture, since the hot path never reads stderr.
-/// Non-empty output is logged at debug for diagnostics. The thread ends on its
-/// own when the child exits (EOF), so it is not joined.
-fn drain_stderr(child: &mut Child, device: &'static str) {
-    let Some(mut stderr) = child.stderr.take() else {
-        return;
-    };
-    thread::spawn(move || {
-        let mut buf = String::new();
-        if stderr.read_to_string(&mut buf).is_ok() {
-            let msg = buf.trim();
-            if !msg.is_empty() {
-                tracing::debug!(device, stderr = msg, "voice recorder stderr");
-            }
-        }
-    });
-}
-
-/// Forward raw PCM from the recorder's stdout to the async STT sender until the
-/// recorder stops (EOF on kill), the consumer goes away, or `stop` is set.
-/// Generic over the reader for tests; production passes the child's stdout.
-fn forward_pcm(
-    mut stdout: impl Read,
-    pcm_tx: async_mpsc::Sender<Vec<u8>>,
-    stop: Arc<AtomicBool>,
-    peak: Arc<AtomicU16>,
-    device: &'static str,
-) {
-    let mut buf = vec![0u8; READ_CHUNK];
-    let mut dropped = 0u64;
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        match stdout.read(&mut buf) {
-            // EOF: the recorder closed stdout (killed by teardown or exited).
-            Ok(0) => break,
-            Ok(n) => {
-                // Before try_send: shed chunks must still move the peak meter.
-                peak.fetch_max(crate::pcm::peak_abs_i16_le(&buf[..n]), Ordering::Relaxed);
-                // Never park this thread on the channel: `stop()` joins it, so a
-                // send that waits on a stalled STT consumer would turn teardown
-                // into a hang. Shed load instead when the consumer is behind —
-                // the same strategy as the cpal backend's real-time callback.
-                // (`read` itself is unblocked by the kill-on-stop path: killing
-                // the recorder closes stdout, so a waiting `read` returns 0.)
-                match pcm_tx.try_send(buf[..n].to_vec()) {
-                    Ok(()) => {}
-                    Err(async_mpsc::error::TrySendError::Full(_)) => dropped += 1,
-                    // Consumer is gone: the session ended; stop capturing.
-                    Err(async_mpsc::error::TrySendError::Closed(_)) => break,
-                }
-            }
-            Err(e) => {
-                tracing::warn!(device, error = %e, "voice capture read error");
-                break;
-            }
-        }
-    }
-    if dropped > 0 {
-        tracing::warn!(
-            device,
-            dropped,
-            "voice capture dropped PCM chunks (slow consumer)"
-        );
-    }
+    Ok(CaptureHandle::new(child, stop, reader))
 }
 
 /// Recorder that would be spawned, without recording ([`crate::probe::input_device_info`]).
@@ -353,11 +225,15 @@ pub fn capture_pcm_for_duration(
     seconds: u32,
 ) -> Result<(Vec<u8>, u32), VoiceError> {
     let (recorder, mut child) = spawn_recorder(sample_rate)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VoiceError::Config(format!("{} produced no stdout", recorder.program())))?;
-    drain_stderr(&mut child, recorder.program());
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(VoiceError::Config(format!(
+            "{} produced no stdout",
+            recorder.program()
+        )));
+    };
+    pipe::drain_stderr(&mut child, recorder.program());
 
     let duration = Duration::from_secs(seconds.max(1) as u64);
     let deadline = Instant::now() + duration;
@@ -406,30 +282,6 @@ pub fn capture_pcm_for_duration(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn forward_pcm_meters_shed_chunks() {
-        // One loud sample per READ_CHUNK read; capacity 1 forces the second
-        // read to shed. Both must register in the peak meter.
-        let mut pcm = vec![0u8; 2 * READ_CHUNK];
-        pcm[..2].copy_from_slice(&5_000i16.to_le_bytes());
-        pcm[READ_CHUNK..READ_CHUNK + 2].copy_from_slice(&(-9_000i16).to_le_bytes());
-
-        let (tx, mut rx) = async_mpsc::channel::<Vec<u8>>(1);
-        let peak = Arc::new(AtomicU16::new(0));
-        forward_pcm(
-            std::io::Cursor::new(pcm),
-            tx,
-            Arc::new(AtomicBool::new(false)),
-            Arc::clone(&peak),
-            "test",
-        );
-
-        assert_eq!(peak.load(Ordering::Relaxed), 9_000);
-        let first = rx.try_recv().expect("first chunk forwarded");
-        assert_eq!(crate::pcm::peak_abs_i16_le(&first), 5_000);
-        assert!(rx.try_recv().is_err(), "second chunk shed (channel full)");
-    }
 
     #[test]
     fn arecord_args_are_raw_s16_mono() {

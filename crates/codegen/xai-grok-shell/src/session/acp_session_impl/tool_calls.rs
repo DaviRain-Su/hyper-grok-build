@@ -440,12 +440,20 @@ impl SessionActor {
                     let result = if interruptible {
                         let _wait_guard = BlockingWaitGuard::enter(blocking_wait_depth.clone());
                         tokio::select! {
-                            biased; result = call_with_auth_retry(am.as_ref(), Some(&
-                            shared_recovery), & prepared.tool_name, run_tool,) => result,
-                            _ = wait_for_pending_interjection(& pending_interjections) =>
-                            { tracing::info!(tool = % prepared.tool_name,
-                            "abort wait tool: interjection pending");
-                            Ok(interrupted_wait_tool_result(& prepared.parsed_args)) }
+                            biased;
+                            result = call_with_auth_retry(
+                                am.as_ref(),
+                                Some(&shared_recovery),
+                                &prepared.tool_name,
+                                run_tool,
+                            ) => result,
+                            _ = wait_for_pending_interjection(&pending_interjections) => {
+                                tracing::info!(
+                                    tool = %prepared.tool_name,
+                                    "abort wait tool: interjection pending"
+                                );
+                                Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                            }
                         }
                     } else {
                         call_with_auth_retry(
@@ -463,11 +471,11 @@ impl SessionActor {
                     xai_grok_telemetry::unified_log::info(
                         "shell.tool.exec_done",
                         Some(session_id.as_ref()),
-                        Some(serde_json::json!(
-                            { "tool_name" : prepared.tool_name.as_str(), "elapsed_ms" :
-                            exec_start.elapsed().as_millis() as u64, "success" :
-                            success, }
-                        )),
+                        Some(serde_json::json!({
+                            "tool_name": prepared.tool_name.as_str(),
+                            "elapsed_ms": exec_start.elapsed().as_millis() as u64,
+                            "success": success,
+                        })),
                     );
                     (idx, result)
                 }
@@ -687,20 +695,24 @@ impl SessionActor {
                 },
             );
             tracing::info_span!(
-                "tool.execution", tool_name = % prepared.tool_name, tool_use_id = %
-                prepared.call_id, tool_input_size_bytes = prepared.raw_arguments.len() as
-                i64, tool_result_size_bytes = tool_result_size_bytes, success =
-                matches!(tool_outcome, crate ::session::events::ToolOutcome::Success),
-                outcome = <&'static str >::from(tool_outcome),
+                "tool.execution",
+                tool_name = %prepared.tool_name,
+                tool_use_id = %prepared.call_id,
+                tool_input_size_bytes = prepared.raw_arguments.len() as i64,
+                tool_result_size_bytes = tool_result_size_bytes,
+                success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
+                outcome = <&'static str>::from(tool_outcome),
             )
             .in_scope(|| {});
             if let Some(artifact) = compaction_artifact_read(&prepared.parsed_args) {
                 tracing::info_span!(
-                    "compaction.segment_read", session_id = % self.session_info.id.0,
-                    tool_name = % prepared.tool_name, artifact = % artifact,
-                    segment_index = artifact.segment_index().map(| i | i as i64), success
-                    = matches!(tool_outcome, crate
-                    ::session::events::ToolOutcome::Success),
+                    "compaction.segment_read",
+                    session_id = %self.session_info.id.0,
+                    tool_name = %prepared.tool_name,
+                    artifact = %artifact,
+                    // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
+                    segment_index = artifact.segment_index().map(|i| i as i64),
+                    success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
                 )
                 .in_scope(|| {});
             }
@@ -831,7 +843,7 @@ impl SessionActor {
                 ) {
                     let total_count = objects.len();
                     if objects.is_empty() {
-                        json!({ "raw" : call.function.arguments.clone() })
+                        json!({ "raw": call.function.arguments.clone() })
                     } else {
                         let best_match = objects[0].clone();
                         let mut selected_index = 0;
@@ -849,8 +861,10 @@ impl SessionActor {
                             }
                         }
                         tracing::warn!(
-                            tool_name = % call.function.name, call_id = % call.id,
-                            total_objects = total_count, selected_index,
+                            tool_name = %call.function.name,
+                            call_id = %call.id,
+                            total_objects = total_count,
+                            selected_index,
                             matched_named_tool = matched_tool,
                             "Detected concatenated JSON in tool arguments — \
                             extracting best matching object (index {selected_index}/{total_count}). \
@@ -865,7 +879,7 @@ impl SessionActor {
                         "Failed to parse arguments as JSON ({}), wrapping in 'raw' field",
                         e
                     );
-                    json!({ "raw" : call.function.arguments.clone() })
+                    json!({ "raw": call.function.arguments.clone() })
                 }
             }
         };
@@ -894,8 +908,12 @@ impl SessionActor {
         let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
-                "tool.decision", tool_name = % call.function.name, tool_use_id = % call
-                .id, decision = "deny", source = "plan_mode", wait_ms = 0_i64,
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "deny",
+                source = "plan_mode",
+                wait_ms = 0_i64,
             )
             .in_scope(|| {});
             let msg = self.plan_mode_edit_rejected_message().await;
@@ -978,8 +996,12 @@ impl SessionActor {
         };
         if plan_file_auto_approve {
             tracing::info_span!(
-                "tool.decision", tool_name = % call.function.name, tool_use_id = % call
-                .id, decision = "allow", source = "config", wait_ms = 0_i64,
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "allow",
+                source = "config",
+                wait_ms = 0_i64,
             )
             .in_scope(|| {});
         }
@@ -1129,10 +1151,15 @@ impl SessionActor {
                 ),
             };
             tracing::info_span!(
-                "tool.decision", tool_name = % call.function.name, tool_use_id = % call
-                .id, decision = decision_outcome.as_str(), source = crate
-                ::session::telemetry::permission_decision_source(& decision, self
-                .permissions.is_yolo_mode(),), wait_ms = wait_ms as i64,
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = decision_outcome.as_str(),
+                source = crate::session::telemetry::permission_decision_source(
+                    &decision,
+                    self.permissions.is_yolo_mode(),
+                ),
+                wait_ms = wait_ms as i64,
             )
             .in_scope(|| {});
             xai_grok_telemetry::session_ctx::log_event(
@@ -1223,7 +1250,8 @@ impl SessionActor {
                     && e.kind() != std::io::ErrorKind::NotFound
                 {
                     tracing::warn!(
-                        path = % plan_file_path.display(), error = % e,
+                        path = %plan_file_path.display(),
+                        error = %e,
                         "[exit_plan_mode] plan file unreadable; intercepting anyway"
                     );
                 }
@@ -1243,9 +1271,10 @@ impl SessionActor {
             &plan_read,
         ) {
             tracing::info!(
-                tool_call_id = % tool_call_id, cursor_create_plan =
-                is_cursor_create_plan, cursor_switch_to_agent =
-                is_cursor_switch_to_agent, has_plan_content = plan_content.is_some(),
+                tool_call_id = %tool_call_id,
+                cursor_create_plan = is_cursor_create_plan,
+                cursor_switch_to_agent = is_cursor_switch_to_agent,
+                has_plan_content = plan_content.is_some(),
                 "[exit_plan_mode] intercepted, sending ext_method to client"
             );
             let resp = self
@@ -1302,12 +1331,10 @@ impl SessionActor {
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
-                        tracing::debug!(
-                            % err, "exit_plan_mode: no client wired; executing tool"
-                        );
+                        tracing::debug!(%err, "exit_plan_mode: no client wired; executing tool");
                     } else {
                         tracing::info!(
-                            % err,
+                            %err,
                             "exit_plan_mode: client disconnected mid-approval; plan mode stays active"
                         );
                         let message = "Plan approval could not be completed because the \
@@ -1322,7 +1349,7 @@ impl SessionActor {
             }
         } else if is_cursor_switch_to_agent {
             tracing::info!(
-                tool_call_id = % tool_call_id,
+                tool_call_id = %tool_call_id,
                 "[exit_plan_mode] cursor SwitchMode(agent) with empty plan — skipping intercept"
             );
         }
@@ -1476,7 +1503,7 @@ impl SessionActor {
             format!("exit-plan-mode-resume-{}", self.session_info.id.0).as_str(),
         ));
         tracing::info!(
-            tool_call_id = % tool_call_id,
+            tool_call_id = %tool_call_id,
             "[exit_plan_mode] re-parking approval after resume"
         );
         let parsed = match self
@@ -1485,7 +1512,7 @@ impl SessionActor {
         {
             Ok(parsed) => parsed,
             Err(err) => {
-                tracing::debug!(% err, "resume exit_plan_mode reverse-request failed");
+                tracing::debug!(%err, "resume exit_plan_mode reverse-request failed");
                 return;
             }
         };
@@ -1533,6 +1560,7 @@ impl SessionActor {
             false,
             None,
             false,
+            None,
             None,
             respond_to,
             None,
@@ -1602,17 +1630,22 @@ impl SessionActor {
                 Some(bash_tool.description.as_str()),
                 self.tool_context.cwd.as_path(),
             ),
-            ToolInput::ReadFile(read_file) => (
-                format!("Read `{}`", read_file.path.clone()),
-                acp::ToolKind::Read,
-                vec![
-                    acp::ToolCallLocation::new(read_file.path).line(
-                        xai_grok_tools::normalization::norm_offset_i64(read_file.offset)
-                            .map(|l| l as u32),
-                    ),
-                ],
-                Vec::new(),
-            ),
+            ToolInput::ReadFile(read_file) => {
+                (
+                    format!("Read `{}`", read_file.path.clone()),
+                    acp::ToolKind::Read,
+                    vec![
+                        acp::ToolCallLocation::new(read_file.path)
+                            // Same normalization as the canonical `_meta` input, so one
+                            // event can't show two start lines.
+                            .line(
+                                xai_grok_tools::normalization::norm_offset_i64(read_file.offset)
+                                    .map(|l| l as u32),
+                            ),
+                    ],
+                    Vec::new(),
+                )
+            }
             ToolInput::TodoWrite(_) => (
                 "Updating plan".to_string(),
                 acp::ToolKind::Think,
@@ -1695,8 +1728,9 @@ impl SessionActor {
                     },
                 );
                 tracing::info_span!(
-                    "skill.activated", skill_name = % skill.skill, invocation_trigger =
-                    "skill_tool",
+                    "skill.activated",
+                    skill_name = %skill.skill,
+                    invocation_trigger = "skill_tool",
                 )
                 .in_scope(|| {});
                 (
@@ -1901,8 +1935,11 @@ impl SessionActor {
         model_id: &str,
     ) -> Result<(), acp::Error> {
         tracing::error!(
-            session_id = % self.session_info.id.0, tool_name = function_name, model_id =
-            model_id, error_kind = "parse_failure", error_message = % err,
+            session_id = %self.session_info.id.0,
+            tool_name = function_name,
+            model_id = model_id,
+            error_kind = "parse_failure",
+            error_message = %err,
             "tool_error: parse_failure"
         );
         self.signals_handle().record_tool_failure(function_name);
@@ -1974,7 +2011,9 @@ impl SessionActor {
         }
         if dropped_inputs > 0 || dropped_notifications > 0 {
             tracing::info!(
-                dropped_inputs, dropped_notifications, consumed_ids = ? consumed_ids,
+                dropped_inputs,
+                dropped_notifications,
+                consumed_ids = ?consumed_ids,
                 "auto-wake: dropped queued synthetic items for consumed completions"
             );
         }
@@ -2115,9 +2154,11 @@ impl SessionActor {
         {
             if tool_update.fields.status == Some(acp::ToolCallStatus::Failed) {
                 tracing::error!(
-                    session_id = % self.session_info.id.0, tool_name =
-                    requested_tool_name, effective_tool_name = effective_tool_name,
-                    model_id = model_id, error_kind = "tool_output_error",
+                    session_id = %self.session_info.id.0,
+                    tool_name = requested_tool_name,
+                    effective_tool_name = effective_tool_name,
+                    model_id = model_id,
+                    error_kind = "tool_output_error",
                     "tool_error: tool_output_error"
                 );
                 self.signals_handle()
@@ -2263,7 +2304,9 @@ impl SessionActor {
         if !extracted_images.is_empty() {
             let count = extracted_images.len();
             tracing::info!(
-                session_id = % self.session_info.id, tool = requested_tool_name, count,
+                session_id = %self.session_info.id,
+                tool = requested_tool_name,
+                count,
                 "base64 images extracted from tool result",
             );
             let acp_images: Vec<agent_client_protocol::ImageContent> = extracted_images
@@ -2278,8 +2321,8 @@ impl SessionActor {
             .await;
             if !norm_result.re_encode_fallbacks.is_empty() {
                 tracing::warn!(
-                    session_id = % self.session_info.id, notes = % norm_result
-                    .re_encode_fallbacks.join(" "),
+                    session_id = %self.session_info.id,
+                    notes = %norm_result.re_encode_fallbacks.join(" "),
                     "Extracted tool image kept original after re-encode failure",
                 );
             }
@@ -2317,9 +2360,13 @@ impl SessionActor {
         model_id: &str,
     ) -> Vec<ConversationItem> {
         tracing::error!(
-            session_id = % self.session_info.id.0, tool_name = requested_tool_name,
-            effective_tool_name = effective_tool_name, model_id = model_id, error_kind =
-            "execution_failure", error_message = % err, "tool_error: execution_failure"
+            session_id = %self.session_info.id.0,
+            tool_name = requested_tool_name,
+            effective_tool_name = effective_tool_name,
+            model_id = model_id,
+            error_kind = "execution_failure",
+            error_message = %err,
+            "tool_error: execution_failure"
         );
         self.signals_handle()
             .record_tool_failure(requested_tool_name);
@@ -2342,9 +2389,10 @@ impl SessionActor {
                     .content(Some(vec![acp::ToolCallContent::from(
                         acp::ContentBlock::Text(acp::TextContent::new(message.clone())),
                     )]))
-                    .raw_output(Some(json!(
-                        { "error" : "tool_execution_failed", "message" : err_str, }
-                    ))),
+                    .raw_output(Some(json!({
+                        "error": "tool_execution_failed",
+                        "message": err_str,
+                    }))),
             )),
             None,
         )
@@ -2541,11 +2589,13 @@ impl SessionActor {
                 xai_grok_telemetry::unified_log::warn(
                     "shell.turn.inference_retry",
                     Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!(
-                        { "sampler_request_id" : request_id.as_str(), "attempt" :
-                        attempt, "max_retries" : max_retries, "kind" : kind.as_str(),
-                        "reason" : crate ::util::truncate(& reason, 300), }
-                    )),
+                    Some(serde_json::json!({
+                        "sampler_request_id": request_id.as_str(),
+                        "attempt": attempt,
+                        "max_retries": max_retries,
+                        "kind": kind.as_str(),
+                        "reason": crate::util::truncate(&reason, 300),
+                    })),
                 );
                 self.send_xai_notification(XaiSessionUpdate::RetryState(
                     crate::extensions::notification::RetryState::Retrying {
@@ -2560,20 +2610,23 @@ impl SessionActor {
                 xai_grok_telemetry::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!(
-                        { "sampler_request_id" : request_id.as_str(), "kind" : error
-                        .kind.as_str(), "status_code" : error.status_code,
-                        "is_retryable" : error.is_retryable, "message" : crate
-                        ::util::truncate(& error.message, 300), }
-                    )),
+                    Some(serde_json::json!({
+                        "sampler_request_id": request_id.as_str(),
+                        "kind": error.kind.as_str(),
+                        "status_code": error.status_code,
+                        "is_retryable": error.is_retryable,
+                        "message": crate::util::truncate(&error.message, 300),
+                    })),
                 );
                 self.signals_handle()
                     .record_error_typed(error.kind.as_str());
                 if let Some(ref ctx) = error.empty_response_context {
                     tracing::info!(
-                        empty_response = true, empty_reason = ctx.reason.as_str(),
-                        had_reasoning = ctx.had_reasoning, finish_reason = ctx
-                        .finish_reason_str(), model = % ctx.model,
+                        empty_response = true,
+                        empty_reason = ctx.reason.as_str(),
+                        had_reasoning = ctx.had_reasoning,
+                        finish_reason = ctx.finish_reason_str(),
+                        model = %ctx.model,
                         "sampler reported empty response (will retry if retryable)",
                     );
                 }
@@ -2592,7 +2645,7 @@ impl SessionActor {
                         .content(vec![])
                         .locations(vec![])
                         .raw_input(Some(raw_input))
-                        .meta(serde_json::json!({ "backend" : true }).as_object().cloned()),
+                        .meta(serde_json::json!({"backend": true}).as_object().cloned()),
                     ),
                     None,
                 )
@@ -2987,8 +3040,9 @@ mod wait_interrupt_tests {
         let buf: InterjectionBuffer<agent_client_protocol::ImageContent> =
             InterjectionBuffer::default();
         let out = tokio::select! {
-            biased; r = async { "wait-result" } => r, _ = wait_for_pending_interjection(&
-            buf) => "aborted",
+            biased;
+            r = async { "wait-result" } => r,
+            _ = wait_for_pending_interjection(&buf) => "aborted",
         };
         assert_eq!(out, "wait-result");
         buf.push(PendingInterjection {
@@ -2996,14 +3050,18 @@ mod wait_interrupt_tests {
             attachments: Vec::new(),
         });
         let out = tokio::select! {
-            biased; r = async { tokio::time::sleep(std::time::Duration::from_secs(3600)).
-            await; "wait-result" } => r, _ = wait_for_pending_interjection(& buf) =>
-            "aborted",
+            biased;
+            r = async {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                "wait-result"
+            } => r,
+            _ = wait_for_pending_interjection(&buf) => "aborted",
         };
         assert_eq!(out, "aborted");
         let out = tokio::select! {
-            biased; r = async { "wait-result" } => r, _ = wait_for_pending_interjection(&
-            buf) => "aborted",
+            biased;
+            r = async { "wait-result" } => r,
+            _ = wait_for_pending_interjection(&buf) => "aborted",
         };
         assert_eq!(out, "wait-result");
     }
@@ -3011,33 +3069,31 @@ mod wait_interrupt_tests {
     fn interruptible_wait_tool_only_when_timeout_positive() {
         assert!(is_interruptible_wait_tool(
             "get_command_or_subagent_output",
-            &serde_json::json!({ "task_ids" : ["t"], "timeout_ms" : 120_000 })
+            &serde_json::json!({"task_ids": ["t"], "timeout_ms": 120_000})
         ));
         assert!(!is_interruptible_wait_tool(
             "get_task_output",
-            &serde_json::json!({
-            "task_ids" : ["t"], "timeout_ms" : 0 })
+            &serde_json::json!({"task_ids": ["t"], "timeout_ms": 0})
         ));
         assert!(!is_interruptible_wait_tool(
             "get_task_output",
-            &serde_json::json!({
-            "task_ids" : ["t"] })
+            &serde_json::json!({"task_ids": ["t"]})
         ));
         assert!(is_interruptible_wait_tool(
             "wait_commands_or_subagents",
-            &serde_json::json!({ "task_ids" : ["t"] })
+            &serde_json::json!({"task_ids": ["t"]})
         ));
         assert!(!is_interruptible_wait_tool(
             "read_file",
-            &serde_json::json!({ "target_file"
-            : "/tmp/x" })
+            &serde_json::json!({"target_file": "/tmp/x"})
         ));
     }
     #[test]
     fn interrupted_wait_result_is_cancelled_not_error() {
-        let r = interrupted_wait_tool_result(
-            &serde_json::json!({ "task_ids" : ["bg-9"], "timeout_ms" : 60_000 }),
-        );
+        let r = interrupted_wait_tool_result(&serde_json::json!({
+            "task_ids": ["bg-9"],
+            "timeout_ms": 60_000
+        }));
         assert!(
             r.prompt_text
                 .contains("Wait interrupted: the user sent a message.")

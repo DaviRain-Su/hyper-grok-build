@@ -122,7 +122,7 @@ fn available_runtime() -> DiagnosticRuntimeEvidence<'static> {
 }
 
 #[test]
-fn terminal_finding_ids_are_stable() {
+fn warning_category_ids_are_stable() {
     let ids = [
         WarningCategory::Clipboard,
         WarningCategory::DcsPassthrough,
@@ -134,8 +134,11 @@ fn terminal_finding_ids_are_stable() {
         WarningCategory::WezTermKittyKeyboardOff,
         WarningCategory::LimitedColorSupport,
         WarningCategory::SshWithoutWrap,
+        WarningCategory::NotificationProtocolFallback,
+        WarningCategory::FocusTrackingUnavailable,
+        WarningCategory::SandboxProfileConflict,
     ]
-    .map(|category| id_for(category).expect("terminal setup category must have an ID"))
+    .map(|category| id_for(category).expect("diagnostic category must have an ID"))
     .map(|id| id.to_string());
 
     assert_eq!(
@@ -151,6 +154,9 @@ fn terminal_finding_ids_are_stable() {
             "terminal.wezterm-kitty",
             "terminal.limited-color",
             "terminal.ssh-wrap",
+            "notifications.protocol-fallback",
+            "notifications.focus-tracking-unavailable",
+            "sandbox.profile-conflict",
         ]
     );
 }
@@ -178,7 +184,27 @@ fn findings_have_stable_semantic_ids_and_dispositions() {
         false,
     ));
 
-    assert_eq!(report.findings.len(), 2);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .map(|finding| (finding.id, finding.disposition))
+            .collect::<Vec<_>>(),
+        [
+            (
+                DiagnosticId::new("terminal", "tmux-clipboard"),
+                FindingDisposition::Issue,
+            ),
+            (
+                crate::diagnostics::ITERM2_CLIPBOARD_PERMISSION_ID,
+                FindingDisposition::Recommendation,
+            ),
+            (
+                DiagnosticId::new("terminal", "ssh-wrap"),
+                FindingDisposition::Recommendation,
+            ),
+        ]
+    );
     assert_eq!(
         report.facts.clipboard.delivery,
         crate::clipboard::ClipboardDelivery::Confirmed
@@ -187,21 +213,13 @@ fn findings_have_stable_semantic_ids_and_dispositions() {
         report.facts.clipboard.native_preflight,
         crate::clipboard::NativeClipboardPreflight::RemoteOnly
     );
+    let ssh_wrap = report
+        .findings
+        .iter()
+        .find(|finding| finding.id == crate::diagnostics::SSH_WRAP_ID)
+        .expect("SSH wrap recommendation");
     assert_eq!(
-        report.findings[0].id,
-        DiagnosticId::new("terminal", "tmux-clipboard")
-    );
-    assert_eq!(report.findings[0].disposition, FindingDisposition::Issue);
-    assert_eq!(
-        report.findings[1].id,
-        DiagnosticId::new("terminal", "ssh-wrap")
-    );
-    assert_eq!(
-        report.findings[1].disposition,
-        FindingDisposition::Recommendation
-    );
-    assert_eq!(
-        report.findings[1].automatic_remediation,
+        ssh_wrap.automatic_remediation,
         Some(crate::diagnostics::ssh_wrap_automatic_remediation())
     );
     assert!(report.findings[0].automatic_remediation.is_none());
@@ -246,7 +264,7 @@ fn unavailable_runtime_evidence_is_honest_and_fail_open() {
         .expect("control-mode finding");
     assert_eq!(
         control_mode.message,
-        "tmux control mode detected -- terminal display may be degraded"
+        "Display may be limited in tmux control mode"
     );
     assert_eq!(
         report
@@ -388,6 +406,177 @@ fn non_wezterm_without_kitty_evidence_keeps_ordinary_fallback() {
             terminal: TerminalName::VsCode,
         })
     );
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.id == crate::diagnostics::NEWLINE_FALLBACK_ID)
+        .expect("newline fallback finding");
+    assert_eq!(finding.disposition, FindingDisposition::Recommendation);
+    assert!(
+        finding
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("Alt+Enter"))
+    );
+}
+
+#[test]
+fn clipboard_delivery_findings_own_remediation_while_fix_fact_stays_compatible() {
+    let cases = [
+        (
+            crate::terminal::TerminalContext {
+                is_ssh: true,
+                ..Default::default()
+            },
+            crate::host::HostOs::Linux,
+            crate::host::DisplayServer::Unknown,
+            crate::clipboard::ClipboardRoute {
+                native: true,
+                tmux_buffer: false,
+                osc52: true,
+                osc52_tmux_passthrough: false,
+            },
+            crate::clipboard::ClipboardDelivery::Unverified,
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNVERIFIED_ID,
+            "grok wrap <ssh command> or /minimal",
+        ),
+        (
+            TerminalContext {
+                brand: TerminalName::Vte,
+                env_brand: TerminalName::Vte,
+                ..Default::default()
+            },
+            crate::host::HostOs::Other,
+            crate::host::DisplayServer::Unknown,
+            crate::clipboard::ClipboardRoute {
+                native: false,
+                tmux_buffer: false,
+                osc52: false,
+                osc52_tmux_passthrough: false,
+            },
+            crate::clipboard::ClipboardDelivery::Failed,
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+            "/minimal",
+        ),
+    ];
+
+    for (terminal, host_os, display_server, route, delivery, id, compatible_fix) in cases {
+        let mut snapshot = snapshot_for_host(
+            &terminal,
+            plain_tmux(),
+            runtime(
+                RuntimeEvidence::Available(true),
+                RuntimeEvidence::Available(None),
+            ),
+            false,
+            host_os,
+        );
+        snapshot.display_server = display_server;
+        snapshot.clipboard.route = route;
+        let report = view(snapshot);
+        assert_eq!(report.facts.clipboard.delivery, delivery);
+        assert_eq!(
+            report.facts.clipboard.fix.as_deref(),
+            Some(compatible_fix),
+            "JSON compatibility fact"
+        );
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.id == id)
+            .expect("named clipboard finding");
+        assert!(
+            finding
+                .note
+                .as_ref()
+                .is_some_and(|note| !note.trim().is_empty())
+        );
+        assert!(!crate::diagnostics::format_doctor(&report).contains("  fix          "));
+    }
+}
+
+#[test]
+fn iterm2_and_vscode_clipboard_caveats_are_named_recommendations() {
+    let cases = [
+        (
+            TerminalName::Iterm2,
+            crate::diagnostics::ITERM2_CLIPBOARD_PERMISSION_ID,
+            "Settings",
+        ),
+        (
+            TerminalName::VsCode,
+            crate::diagnostics::VSCODE_SSH_NON_ASCII_ID,
+            "/minimal",
+        ),
+        (
+            TerminalName::Cursor,
+            crate::diagnostics::VSCODE_SSH_NON_ASCII_ID,
+            "/minimal",
+        ),
+        (
+            TerminalName::Windsurf,
+            crate::diagnostics::VSCODE_SSH_NON_ASCII_ID,
+            "/minimal",
+        ),
+        (
+            TerminalName::Zed,
+            crate::diagnostics::VSCODE_SSH_NON_ASCII_ID,
+            "/minimal",
+        ),
+    ];
+    for (brand, id, expected_guidance) in cases {
+        let terminal = TerminalContext {
+            brand,
+            env_brand: brand,
+            is_ssh: true,
+            ..Default::default()
+        };
+        let report = view(snapshot_for_host(
+            &terminal,
+            plain_tmux(),
+            runtime(
+                RuntimeEvidence::Available(true),
+                RuntimeEvidence::Available(None),
+            ),
+            false,
+            crate::host::HostOs::Linux,
+        ));
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.id == id)
+            .expect("named clipboard caveat");
+        assert_eq!(finding.disposition, FindingDisposition::Recommendation);
+        assert!(
+            finding
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains(expected_guidance))
+        );
+    }
+
+    let terminal = TerminalContext {
+        brand: TerminalName::Ghostty,
+        env_brand: TerminalName::Ghostty,
+        is_ssh: true,
+        ..Default::default()
+    };
+    let report = view(snapshot_for_host(
+        &terminal,
+        plain_tmux(),
+        runtime(
+            RuntimeEvidence::Available(true),
+            RuntimeEvidence::Available(None),
+        ),
+        false,
+        crate::host::HostOs::Linux,
+    ));
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.id != crate::diagnostics::VSCODE_SSH_NON_ASCII_ID)
+    );
 }
 
 #[test]
@@ -409,7 +598,7 @@ fn available_wezterm_evidence_retains_finding_and_backslash_note() {
         finding
             .note
             .as_deref()
-            .is_some_and(|note| note.contains("type `\\` then Enter"))
+            .is_some_and(|note| note.contains("type `\\` and then press Enter"))
     );
 }
 

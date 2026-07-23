@@ -111,7 +111,13 @@ pub fn view(snapshot: DiagnosticSnapshot<'_>) -> DiagnosticReport {
         ));
     }
 
-    let mut findings = warnings.into_iter().filter_map(issue).collect::<Vec<_>>();
+    let (facts, clipboard_recovery) = facts(&snapshot, suppress_newline);
+    let mut findings = warnings
+        .into_iter()
+        .filter_map(finding_from_warning)
+        .collect::<Vec<_>>();
+    findings.extend(clipboard_findings(&facts, ctx, clipboard_recovery));
+    findings.extend(newline_finding(&facts));
     findings.extend(
         super::ssh_wrap_hint(
             ctx.is_ssh,
@@ -122,7 +128,7 @@ pub fn view(snapshot: DiagnosticSnapshot<'_>) -> DiagnosticReport {
     );
 
     DiagnosticReport {
-        facts: facts(&snapshot, suppress_newline),
+        facts,
         findings,
         probe_notes: probe_notes(&snapshot),
     }
@@ -158,7 +164,10 @@ fn runtime_xtversion(evidence: RuntimeEvidence<Option<&str>>) -> Option<&str> {
     }
 }
 
-fn facts(snapshot: &DiagnosticSnapshot<'_>, suppress_newline: bool) -> DiagnosticFacts {
+fn facts(
+    snapshot: &DiagnosticSnapshot<'_>,
+    suppress_newline: bool,
+) -> (DiagnosticFacts, ClipboardRecovery) {
     let ctx = snapshot.common.terminal;
     let available_themes = match snapshot.color_level {
         RuntimeEvidence::Available(color_level) => crate::theme::ThemeKind::ALL
@@ -203,40 +212,83 @@ fn facts(snapshot: &DiagnosticSnapshot<'_>, suppress_newline: bool) -> Diagnosti
             TmuxProbeResult::Error(_) => DataControlFact::Error,
         }
     };
-    let clipboard = clipboard_facts(snapshot, data_control);
+    let (clipboard, clipboard_recovery) = clipboard_facts(snapshot, data_control);
 
-    DiagnosticFacts {
-        terminal: ctx.brand,
-        xtversion: match snapshot.runtime.xtversion {
-            RuntimeEvidence::Available(Some(xtversion)) => {
-                RuntimeFact::Available(xtversion.to_owned())
-            }
-            RuntimeEvidence::Available(None) => RuntimeFact::NoReply,
-            RuntimeEvidence::Unavailable => RuntimeFact::Unavailable,
-        },
-        multiplexer: ctx.multiplexer,
-        byobu: ctx.byobu,
-        ssh: ctx.is_ssh,
-        color: ColorFacts {
-            level: match snapshot.color_level {
-                RuntimeEvidence::Available(level) => RuntimeFact::Available(level),
+    (
+        DiagnosticFacts {
+            terminal: ctx.brand,
+            xtversion: match snapshot.runtime.xtversion {
+                RuntimeEvidence::Available(Some(xtversion)) => {
+                    RuntimeFact::Available(xtversion.to_owned())
+                }
+                RuntimeEvidence::Available(None) => RuntimeFact::NoReply,
                 RuntimeEvidence::Unavailable => RuntimeFact::Unavailable,
             },
-            available_themes,
-            total_themes: crate::theme::ThemeKind::ALL.len(),
+            multiplexer: ctx.multiplexer,
+            byobu: ctx.byobu,
+            ssh: ctx.is_ssh,
+            color: ColorFacts {
+                level: match snapshot.color_level {
+                    RuntimeEvidence::Available(level) => RuntimeFact::Available(level),
+                    RuntimeEvidence::Unavailable => RuntimeFact::Unavailable,
+                },
+                available_themes,
+                total_themes: crate::theme::ThemeKind::ALL.len(),
+            },
+            keyboard,
+            newline,
+            clipboard,
+            voice: None,
         },
-        keyboard,
-        newline,
-        clipboard,
-        voice: None,
+        clipboard_recovery,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClipboardRecovery {
+    Confirmed,
+    UnverifiedSsh,
+    UnverifiedContainer,
+    UnverifiedOther,
+    UnavailableSsh,
+    UnavailableContainer,
+    UnavailableLocal,
+}
+
+impl ClipboardRecovery {
+    fn classify(delivery: crate::clipboard::ClipboardDelivery, ssh: bool, container: bool) -> Self {
+        use crate::clipboard::ClipboardDelivery;
+        match (delivery, ssh, container) {
+            (ClipboardDelivery::Confirmed, _, _) => Self::Confirmed,
+            (ClipboardDelivery::Unverified, true, _) => Self::UnverifiedSsh,
+            (ClipboardDelivery::Unverified, false, true) => Self::UnverifiedContainer,
+            (ClipboardDelivery::Unverified, false, false) => Self::UnverifiedOther,
+            (ClipboardDelivery::Failed, true, _) => Self::UnavailableSsh,
+            (ClipboardDelivery::Failed, false, true) => Self::UnavailableContainer,
+            (ClipboardDelivery::Failed, false, false) => Self::UnavailableLocal,
+        }
+    }
+
+    fn legacy_fix(self) -> Option<&'static str> {
+        match self {
+            Self::Confirmed => None,
+            Self::UnverifiedSsh | Self::UnavailableSsh => {
+                Some("grok wrap <ssh command> or /minimal")
+            }
+            Self::UnverifiedContainer | Self::UnavailableContainer => {
+                Some("grok wrap <command> or /minimal")
+            }
+            Self::UnverifiedOther => Some("grok wrap or /minimal"),
+            Self::UnavailableLocal => Some("/minimal"),
+        }
     }
 }
 
 fn clipboard_facts(
     snapshot: &DiagnosticSnapshot<'_>,
     data_control: DataControlFact,
-) -> ClipboardFacts {
-    use crate::clipboard::{ClipboardDelivery, ClipboardEnvironment, expected_delivery};
+) -> (ClipboardFacts, ClipboardRecovery) {
+    use crate::clipboard::{ClipboardEnvironment, expected_delivery};
 
     let route = &snapshot.clipboard.route;
     let environment = ClipboardEnvironment {
@@ -259,44 +311,191 @@ fn clipboard_facts(
         route.osc52,
         environment,
     );
-    let fix = match delivery {
-        ClipboardDelivery::Confirmed => None,
-        ClipboardDelivery::Unverified | ClipboardDelivery::Failed
-            if snapshot.common.terminal.is_ssh =>
-        {
-            Some("grok wrap <ssh command> or /minimal")
-        }
-        ClipboardDelivery::Unverified | ClipboardDelivery::Failed
-            if snapshot.container_no_display =>
-        {
-            Some("grok wrap <command> or /minimal")
-        }
-        ClipboardDelivery::Unverified => Some("grok wrap or /minimal"),
-        ClipboardDelivery::Failed => Some("/minimal"),
-    };
-
-    ClipboardFacts {
-        native_route: route.native,
-        native_tool: snapshot.clipboard.native_tool.to_owned(),
-        native_preflight,
-        tmux_route: route.tmux_buffer,
-        osc52_route: route.osc52,
-        osc52_capability: environment.osc52_capability(),
-        wrap_sink: snapshot.clipboard.osc52_sink_active,
-        display_server: snapshot.display_server,
-        container_no_display: snapshot.container_no_display,
-        data_control,
+    let recovery = ClipboardRecovery::classify(
         delivery,
-        fix: fix.map(str::to_owned),
-    }
+        snapshot.common.terminal.is_ssh,
+        snapshot.container_no_display,
+    );
+
+    (
+        ClipboardFacts {
+            native_route: route.native,
+            native_tool: snapshot.clipboard.native_tool.to_owned(),
+            native_preflight,
+            tmux_route: route.tmux_buffer,
+            osc52_route: route.osc52,
+            osc52_capability: environment.osc52_capability(),
+            wrap_sink: snapshot.clipboard.osc52_sink_active,
+            display_server: snapshot.display_server,
+            container_no_display: snapshot.container_no_display,
+            data_control,
+            delivery,
+            fix: recovery.legacy_fix().map(str::to_owned),
+        },
+        recovery,
+    )
 }
 
-fn issue(warning: TerminalWarning) -> Option<DiagnosticFinding> {
-    finding(warning, FindingDisposition::Issue)
+pub(crate) fn finding_from_warning(warning: TerminalWarning) -> Option<DiagnosticFinding> {
+    let disposition = disposition_for(warning.category);
+    finding(warning, disposition)
+}
+
+pub(crate) const fn disposition_for(category: WarningCategory) -> FindingDisposition {
+    match category {
+        WarningCategory::SshWithoutWrap => FindingDisposition::Recommendation,
+        _ => FindingDisposition::Issue,
+    }
 }
 
 fn recommendation(warning: TerminalWarning) -> Option<DiagnosticFinding> {
     finding(warning, FindingDisposition::Recommendation)
+}
+
+fn manual_finding(
+    id: DiagnosticId,
+    disposition: FindingDisposition,
+    message: impl Into<String>,
+    note: impl Into<String>,
+) -> DiagnosticFinding {
+    DiagnosticFinding {
+        id,
+        disposition,
+        message: message.into(),
+        remediation: None,
+        automatic_remediation: None,
+        note: Some(note.into()),
+    }
+}
+
+fn clipboard_findings(
+    facts: &DiagnosticFacts,
+    ctx: &crate::terminal::TerminalContext,
+    recovery: ClipboardRecovery,
+) -> Vec<DiagnosticFinding> {
+    let mut findings = Vec::new();
+    match recovery {
+        ClipboardRecovery::Confirmed => {}
+        ClipboardRecovery::UnverifiedSsh => findings.push(manual_finding(
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNVERIFIED_ID,
+            FindingDisposition::Issue,
+            "Grok can't verify this clipboard route across the remote boundary",
+            "When you copy, Grok sends OSC 52 but can't confirm that the outer terminal accepted \
+             it. Each copy is also saved to a backup file; the copy message shows the path. If \
+             paste fails, run `grok wrap ssh <host>` on your local computer or use `/minimal`. \
+             For repeated SSH sessions, run `grok doctor fix ssh-wrap` on your local computer.",
+        )),
+        ClipboardRecovery::UnverifiedContainer => findings.push(manual_finding(
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNVERIFIED_ID,
+            FindingDisposition::Issue,
+            "Grok can't verify this clipboard route across the container boundary",
+            "When you copy, Grok sends OSC 52 but can't confirm that the outer terminal accepted \
+             it. Each copy is also saved to a backup file; the copy message shows the path. If \
+             paste fails, start the container command with local `grok wrap <command>`, or use \
+             `/minimal`.",
+        )),
+        ClipboardRecovery::UnverifiedOther => findings.push(manual_finding(
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNVERIFIED_ID,
+            FindingDisposition::Issue,
+            "Grok can't verify this clipboard route",
+            "Each copy is also saved to a backup file; the copy message shows the path. For a \
+             remote or container command, use local `grok wrap <command>`. You can also use \
+             `/minimal` to select text in the terminal.",
+        )),
+        ClipboardRecovery::UnavailableSsh => findings.push(manual_finding(
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+            FindingDisposition::Issue,
+            "This clipboard route can't reach the target clipboard",
+            "When you copy, Grok saves the text to the backup file shown in the copy message. To \
+             copy directly, run `grok wrap ssh <host>` on your local computer. For repeated SSH \
+             sessions, run `grok doctor fix ssh-wrap` there. You can also use `/copy <file>` or \
+             `/minimal`.",
+        )),
+        ClipboardRecovery::UnavailableContainer => findings.push(manual_finding(
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+            FindingDisposition::Issue,
+            "This clipboard route can't reach the target clipboard",
+            "When you copy, Grok saves the text to the backup file shown in the copy message. \
+             Start the container command with local `grok wrap <command>`, use `/copy <file>`, or \
+             use `/minimal`.",
+        )),
+        ClipboardRecovery::UnavailableLocal => findings.push(manual_finding(
+            crate::diagnostics::CLIPBOARD_DELIVERY_UNAVAILABLE_ID,
+            FindingDisposition::Issue,
+            "This clipboard route can't reach the target clipboard",
+            "When you copy, Grok saves the text to the backup file shown in the copy message. Use \
+             `/copy <file>` or `/minimal`, then check the native clipboard tool listed above.",
+        )),
+    }
+
+    if ctx.brand.is_vscode_family()
+        && ctx.is_ssh
+        && facts.clipboard.osc52_route
+        && !facts.clipboard.wrap_sink
+    {
+        findings.push(manual_finding(
+            crate::diagnostics::VSCODE_SSH_NON_ASCII_ID,
+            FindingDisposition::Recommendation,
+            "This remote editor may change non-ASCII text copied with OSC 52",
+            "If pasted non-ASCII text is incorrect, use `/minimal` and select text in the \
+             terminal. ASCII copy and the backup file shown after the copy remain available.",
+        ));
+    }
+
+    if ctx.brand == TerminalName::Iterm2
+        && (ctx.is_ssh
+            || facts.clipboard.native_preflight
+                != crate::clipboard::NativeClipboardPreflight::LocalAvailable)
+        && facts.clipboard.osc52_route
+        && !facts.clipboard.wrap_sink
+    {
+        findings.push(manual_finding(
+            crate::diagnostics::ITERM2_CLIPBOARD_PERMISSION_ID,
+            FindingDisposition::Recommendation,
+            "iTerm2 may block OSC 52 clipboard access",
+            "In iTerm2, open Settings → General → Selection and turn on “Applications in \
+             terminal may access clipboard.” Grok can't read this setting, so check it there if \
+             copies don't paste.",
+        ));
+    }
+    findings
+}
+
+fn newline_finding(facts: &DiagnosticFacts) -> Option<DiagnosticFinding> {
+    let newline = facts.newline.as_ref()?;
+    let (message, note) = match newline {
+        NewlineFact::Vte { version } => (
+            "Shift+Enter can't insert a newline in this VTE terminal",
+            match version {
+                Some(version) => format!(
+                    "Use Alt+Enter to insert a newline. This terminal reports VTE {version}. \
+                     Upgrade to VTE 0.82 or later to use Shift+Enter."
+                ),
+                None => "Use Alt+Enter to insert a newline. Upgrade to VTE 0.82 or later to use \
+                         Shift+Enter."
+                    .to_owned(),
+            },
+        ),
+        NewlineFact::XtermJs { terminal } => (
+            "Shift+Enter can't insert a newline in this xterm.js terminal",
+            format!(
+                "Use Alt+Enter to insert a newline in {terminal}. xterm.js sends Shift+Enter as \
+                 Enter in this setup."
+            ),
+        ),
+        NewlineFact::NoKittyKeyboardProtocol => (
+            "Shift+Enter can't insert a newline because the keyboard protocol is unavailable",
+            "Use Alt+Enter to insert a newline. If your terminal supports the Kitty keyboard \
+             protocol, enable it and restart Grok."
+                .to_owned(),
+        ),
+    };
+    Some(manual_finding(
+        crate::diagnostics::NEWLINE_FALLBACK_ID,
+        FindingDisposition::Recommendation,
+        message,
+        note,
+    ))
 }
 
 fn finding(warning: TerminalWarning, disposition: FindingDisposition) -> Option<DiagnosticFinding> {
@@ -327,9 +526,15 @@ pub(crate) const fn id_for(category: WarningCategory) -> Option<DiagnosticId> {
         WarningCategory::WezTermKittyKeyboardOff => "wezterm-kitty",
         WarningCategory::LimitedColorSupport => "limited-color",
         WarningCategory::SshWithoutWrap => "ssh-wrap",
-        WarningCategory::NotificationProtocolFallback
-        | WarningCategory::FocusTrackingUnavailable
-        | WarningCategory::SandboxProfileConflict => return None,
+        WarningCategory::NotificationProtocolFallback => {
+            return Some(crate::diagnostics::NOTIFICATION_PROTOCOL_FALLBACK_ID);
+        }
+        WarningCategory::FocusTrackingUnavailable => {
+            return Some(crate::diagnostics::FOCUS_TRACKING_UNAVAILABLE_ID);
+        }
+        WarningCategory::SandboxProfileConflict => {
+            return Some(crate::diagnostics::SANDBOX_PROFILE_CONFLICT_ID);
+        }
     };
     Some(DiagnosticId::new("terminal", item))
 }

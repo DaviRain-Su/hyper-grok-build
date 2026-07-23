@@ -247,6 +247,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             load_session_id: Some(parent_session_id.0.to_string()),
             label: None,
             git_ref: None,
+            // Fork resumes the parent session, which carries its own model.
             model_id: None,
             preferred_session_id: None,
             chat_kind: parent_chat_kind,
@@ -312,10 +313,9 @@ pub(in crate::app::dispatch) fn dispatch_project_selected(
     crate::unified_log::info(
         "project_picker.selected",
         None,
-        Some(serde_json::json!(
-            { "path" : path.display().to_string(), "prompt_len" : stashed_prompt
-            .len(), "disable_picker" : disable_picker }
-        )),
+        Some(
+            serde_json::json!({"path": path.display().to_string(), "prompt_len": stashed_prompt.len(), "disable_picker": disable_picker}),
+        ),
     );
     app.mark_project_picker_done();
     let mut effects = Vec::new();
@@ -414,6 +414,7 @@ fn build_fork_placeholder(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         },
@@ -600,7 +601,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_failed(
     agent_id: AgentId,
     error: String,
 ) -> Vec<Effect> {
-    tracing::error!(agent = ? agent_id, error = % error, "Fork session failed");
+    tracing::error!(agent = ?agent_id, error = %error, "Fork session failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.pending_extensions_fetch = false;
         agent.session.finish_command();

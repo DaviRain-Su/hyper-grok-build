@@ -178,7 +178,7 @@ pub(crate) async fn write_upload_manifest(ctx: &PromptTraceContext, manifest: &U
     let bytes = match serde_json::to_vec_pretty(manifest) {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!(error = % e, "Failed to serialize upload manifest");
+            tracing::warn!(error = %e, "Failed to serialize upload manifest");
             return;
         }
     };

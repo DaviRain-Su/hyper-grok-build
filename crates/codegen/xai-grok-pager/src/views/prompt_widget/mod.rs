@@ -1642,8 +1642,9 @@ impl PromptWidget {
 
         // ── Normal key handling ─────────────────────────────────────────
 
-        // Newline: Shift-Enter or Alt-Enter
-        if key!(Enter, SHIFT).matches(key) || key!(Enter, ALT).matches(key) {
+        // Newline: Shift/Alt+Enter, or Apple Terminal bare Enter with a
+        // newline modifier held (CoreGraphics rescue inside is_mod_enter).
+        if crate::input::is_mod_enter(key) {
             self.textarea.insert_str("\n");
             self.update_file_search_context();
             return PromptEvent::Edited;

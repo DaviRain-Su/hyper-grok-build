@@ -30,7 +30,7 @@ pub async fn run(harness: &mut PtyHarness, content: &ContentController) -> Resul
     let start = Instant::now();
     while start.elapsed() < STREAM_WINDOW {
         harness.update(Duration::from_millis(100));
-        if !harness.is_running() {
+        if !harness.is_running()? {
             break;
         }
     }

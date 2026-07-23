@@ -150,8 +150,8 @@ pub(crate) async fn normalize_images_in(
                 re_encode_fallbacks
                     .push(
                         format!(
-                            "Image {one_based} could not be re-encoded under the {LIMIT_LABEL} limit; the original attachment was kept."
-                        ),
+                    "Image {one_based} could not be re-encoded under the {LIMIT_LABEL} limit; the original attachment was kept."
+                ),
                     );
                 out.push(c);
             }
@@ -459,7 +459,9 @@ fn compute_normalized_blocking(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
-                index, bytes = original_bytes, error = % e,
+                index,
+                bytes = original_bytes,
+                error = %e,
                 "image re-encode failed; keeping original attachment"
             );
             return Ok(NormalizedEntry::ReEncodingOversized {

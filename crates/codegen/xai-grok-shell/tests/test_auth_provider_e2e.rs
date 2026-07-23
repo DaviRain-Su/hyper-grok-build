@@ -22,10 +22,12 @@ async fn provider_backed_model_sends_minted_token_on_the_wire() {
     let server = MockInferenceServer::start()
         .await
         .expect("start mock server");
-    let workdir = git_workdir();
-    let home = tempfile::TempDir::new().unwrap();
+    let mut sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
+    // The baseline already omits the leader socket; keep the test's explicit
+    // fresh-process intent at the typed sandbox layer that survives env_clear().
+    sandbox.remove_env("GROK_LEADER_SOCKET");
 
-    let grok_home = home.path().join(".grok");
+    let grok_home = sandbox.grok_home().to_path_buf();
     std::fs::create_dir_all(&grok_home).expect("create .grok home");
 
     let counter = grok_home.join("mint-count");
@@ -77,17 +79,14 @@ auth_provider = "gateway"
         "json",
     ])
     .arg("--cwd")
-    .arg(workdir.path())
-    .current_dir(workdir.path())
+    .arg(sandbox.workspace())
+    .current_dir(sandbox.workspace())
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .kill_on_drop(true);
-    xai_grok_test_support::env::test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
-    // Don't attach to a developer's ambient leader; spawn fresh against the mock.
-    cmd.env_remove("GROK_LEADER_SOCKET");
 
-    let result = run_headless_with_cmd(cmd).await;
+    let result = run_headless_in_sandbox_borrowed(cmd, &sandbox).await;
     assert_headless_success(&result, "auth provider e2e", Some(&server));
 
     let runs = std::fs::read_to_string(&counter)
@@ -142,10 +141,12 @@ async fn undefined_provider_fails_closed_and_never_leaks_session_key() {
     )
     .await
     .expect("start mock server");
-    let workdir = git_workdir();
-    let home = tempfile::TempDir::new().unwrap();
+    let mut sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
+    // The baseline already omits the leader socket; keep the test's explicit
+    // fresh-process intent at the typed sandbox layer that survives env_clear().
+    sandbox.remove_env("GROK_LEADER_SOCKET");
 
-    let grok_home = home.path().join(".grok");
+    let grok_home = sandbox.grok_home().to_path_buf();
     std::fs::create_dir_all(&grok_home).expect("create .grok home");
 
     // Model references `gateway`, but no `[auth_provider.gateway]` table exists.
@@ -176,18 +177,16 @@ auth_provider = "gateway"
         "json",
     ])
     .arg("--cwd")
-    .arg(workdir.path())
-    .current_dir(workdir.path())
+    .arg(sandbox.workspace())
+    .current_dir(sandbox.workspace())
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .kill_on_drop(true);
-    xai_grok_test_support::env::test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
-    cmd.env_remove("GROK_LEADER_SOCKET");
 
     // The turn is expected to fail (the mock 401s the unauthenticated request);
     // we assert on the wire, not the exit code.
-    let _ = run_headless_with_cmd(cmd).await;
+    let _ = run_headless_in_sandbox(cmd, sandbox).await;
 
     let requests = server.requests();
     // Non-vacuity: the model was actually exercised.
@@ -220,10 +219,12 @@ async fn provider_with_args_and_json_output_sends_minted_token() {
     let server = MockInferenceServer::start()
         .await
         .expect("start mock server");
-    let workdir = git_workdir();
-    let home = tempfile::TempDir::new().unwrap();
+    let mut sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
+    // The baseline already omits the leader socket; keep the test's explicit
+    // fresh-process intent at the typed sandbox layer that survives env_clear().
+    sandbox.remove_env("GROK_LEADER_SOCKET");
 
-    let grok_home = home.path().join(".grok");
+    let grok_home = sandbox.grok_home().to_path_buf();
     std::fs::create_dir_all(&grok_home).expect("create .grok home");
 
     // The helper records the args it was invoked with (proving direct exec, no
@@ -279,16 +280,14 @@ auth_provider = "gateway"
         "json",
     ])
     .arg("--cwd")
-    .arg(workdir.path())
-    .current_dir(workdir.path())
+    .arg(sandbox.workspace())
+    .current_dir(sandbox.workspace())
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .kill_on_drop(true);
-    xai_grok_test_support::env::test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
-    cmd.env_remove("GROK_LEADER_SOCKET");
 
-    let result = run_headless_with_cmd(cmd).await;
+    let result = run_headless_in_sandbox_borrowed(cmd, &sandbox).await;
     assert_headless_success(&result, "auth provider args/json e2e", Some(&server));
 
     let args = std::fs::read_to_string(&seen_args).expect("helper must have run");

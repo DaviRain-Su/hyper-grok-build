@@ -86,15 +86,15 @@ pub async fn render_file_reference(file_ref: FileReference, is_cursor: bool) -> 
             };
             if estimate_tokens(&file_content) > MAX_FILE_TOKENS {
                 return format!(
-                    r#"<file_contents path="{path}" {attrs} skipped="true" reason="file too large (~{} estimated tokens, limit {MAX_FILE_TOKENS}). Use read_file tool to read specific sections."/>"#,
-                    estimate_tokens(& file_content),
-                );
+                r#"<file_contents path="{path}" {attrs} skipped="true" reason="file too large (~{} estimated tokens, limit {MAX_FILE_TOKENS}). Use read_file tool to read specific sections."/>"#,
+                estimate_tokens(&file_content),
+            );
             }
             format!(
-                r#"<file_contents path="{path}" {attrs}>
+            r#"<file_contents path="{path}" {attrs}>
 {file_content}
 </file_contents>"#
-            )
+        )
         })
 }
 const FILE_REGEX: &str = r"^(?:file://)?([^#]+)(?:#L(\d+)-L?(\d+))?$";
@@ -328,26 +328,32 @@ mod tests {
                 "@Users/test/bar:1-12",
                 file_reference("Users/test/bar", Some(1), Some(12)),
             ),
+            // Absolute path, L prefix on start only
             (
                 "@/asdf/asdf/asdf/asdf/asdf:L1-12",
                 file_reference("/asdf/asdf/asdf/asdf/asdf", Some(1), Some(12)),
             ),
+            // Trailing slash in the path, L prefix on both
             (
                 "@ssasdf/asdf/dsa/fsda/f/sdf/:L1-L12",
                 file_reference("ssasdf/asdf/dsa/fsda/f/sdf/", Some(1), Some(12)),
             ),
+            // Absolute path without @ prefix
             (
                 "/home/user/project/src/main.rs",
                 file_reference("/home/user/project/src/main.rs", None, None),
             ),
+            // No @ prefix with line range
             (
                 "src/lib.rs:10-20",
                 file_reference("src/lib.rs", Some(10), Some(20)),
             ),
+            // Dots in path and extension, L-prefixed range
             (
                 "@my.project/src/file.test.rs:L100-L200",
                 file_reference("my.project/src/file.test.rs", Some(100), Some(200)),
             ),
+            // Single-line range (start == end)
             ("@foo.rs:L5-L5", file_reference("foo.rs", Some(5), Some(5))),
         ];
         for (input, expected) in data {

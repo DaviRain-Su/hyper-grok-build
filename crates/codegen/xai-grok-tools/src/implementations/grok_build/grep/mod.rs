@@ -93,16 +93,13 @@ pub struct GrepSearchInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<usize>,
 
-    #[schemars(
-        rename = "-i",
-        description = "Case insensitive search (rg -i). Defaults to false."
-    )]
+    #[schemars(rename = "-i", description = "Case insensitive search (rg -i).")]
     #[serde(
         rename = "-i",
         default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool"
+        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
-    pub case_insensitive: Option<bool>,
+    pub case_insensitive: bool,
 
     #[schemars(
         description = "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types."
@@ -117,14 +114,13 @@ pub struct GrepSearchInput {
     pub head_limit: Option<usize>,
 
     #[schemars(
-        description = "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."
+        description = "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall)."
     )]
     #[serde(
         default,
-        deserialize_with = "crate::types::schema::deserialize_lenient_option_bool",
-        skip_serializing_if = "Option::is_none"
+        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
-    pub multiline: Option<bool>,
+    pub multiline: bool,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -766,7 +762,7 @@ async fn prepare_grep(
         .arg("1000")
         .arg("--max-columns-preview");
 
-    if input.case_insensitive.unwrap_or(false) {
+    if input.case_insensitive {
         cmd.arg("--ignore-case");
     }
 
@@ -792,7 +788,7 @@ async fn prepare_grep(
         cmd.arg("--type").arg(t);
     }
 
-    if input.multiline.unwrap_or(false) {
+    if input.multiline {
         cmd.arg("-U").arg("--multiline-dotall");
     }
 
@@ -1483,11 +1479,53 @@ mod tests {
             before_context: None,
             after_context: None,
             context: None,
-            case_insensitive: None,
+            case_insensitive: false,
             r#type: None,
             head_limit: None,
-            multiline: None,
+            multiline: false,
         }
+    }
+
+    /// Boolean flags must be non-optional in the model-facing schema so the
+    /// default is unambiguous (`false`, not `null` + "Default: false" prose).
+    #[test]
+    fn grep_bool_flags_schema_is_plain_boolean_with_default_false() {
+        let schema = serde_json::to_value(schemars::schema_for!(GrepSearchInput)).unwrap();
+        let props = &schema["properties"];
+
+        // Field is renamed to "-i" for the model-facing name.
+        let case = &props["-i"];
+        assert_eq!(case["type"], "boolean", "case_insensitive schema: {case}");
+        assert_eq!(case["default"], false, "case_insensitive schema: {case}");
+        assert!(
+            case.get("anyOf").is_none(),
+            "must not use nullable anyOf: {case}"
+        );
+
+        let multi = &props["multiline"];
+        assert_eq!(multi["type"], "boolean", "multiline schema: {multi}");
+        assert_eq!(multi["default"], false, "multiline schema: {multi}");
+        assert!(
+            multi.get("anyOf").is_none(),
+            "must not use nullable anyOf: {multi}"
+        );
+    }
+
+    #[test]
+    fn grep_bool_flags_deserialize_missing_and_null_as_false() {
+        let missing: GrepSearchInput = serde_json::from_str(r#"{"pattern":"foo"}"#).unwrap();
+        assert!(!missing.case_insensitive);
+        assert!(!missing.multiline);
+
+        let nulls: GrepSearchInput =
+            serde_json::from_str(r#"{"pattern":"foo","-i":null,"multiline":null}"#).unwrap();
+        assert!(!nulls.case_insensitive);
+        assert!(!nulls.multiline);
+
+        let truths: GrepSearchInput =
+            serde_json::from_str(r#"{"pattern":"foo","-i":"yes","multiline":1}"#).unwrap();
+        assert!(truths.case_insensitive);
+        assert!(truths.multiline);
     }
 
     #[test]
@@ -2049,10 +2087,10 @@ mod tests {
                     before_context: None,
                     after_context: None,
                     context: None,
-                    case_insensitive: None,
+                    case_insensitive: false,
                     r#type: None,
                     head_limit: None,
-                    multiline: None,
+                    multiline: false,
                 }
             },
         )
@@ -2087,10 +2125,10 @@ mod tests {
                     before_context: None,
                     after_context: None,
                     context: None,
-                    case_insensitive: None,
+                    case_insensitive: false,
                     r#type: None,
                     head_limit: None,
-                    multiline: None,
+                    multiline: false,
                 }
             },
         )
@@ -2123,10 +2161,10 @@ mod tests {
                 before_context: None,
                 after_context: None,
                 context: None,
-                case_insensitive: None,
+                case_insensitive: false,
                 r#type: None,
                 head_limit: None,
-                multiline: None,
+                multiline: false,
             },
         )
         .await

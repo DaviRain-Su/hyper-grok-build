@@ -41,7 +41,7 @@ async fn minimal_resize_preserves_committed_scrollback() {
     harness.update(Duration::from_millis(800));
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during resize\nscreen:\n{}",
         harness.screen_contents()
     );

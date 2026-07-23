@@ -97,8 +97,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
     assert_eq!(effects.len(), 1);
     assert!(matches!(
         &effects[0],
-        Effect::LoadSession { session_id, .. }
-if session_id == "forked-sess-2"
+        Effect::LoadSession { session_id, .. } if session_id == "forked-sess-2"
     ));
     // Scrollback should contain the restore summary.
     let has_restore_msg = app.agents[&id]
@@ -1292,14 +1291,15 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         qv.local_kind.is_none(),
         "ACP-driven question must not have local_kind set"
     );
-    // The displaced local modal triggered a "/fork cancelled by
-    // model question" system block on the agent's scrollback.
+    // The displaced local modal explains why the question disappeared.
     let last = app.agents[&id]
         .scrollback
         .get(app.agents[&id].scrollback.len() - 1)
         .expect("scrollback should have a new entry");
     match &last.block {
-        RenderBlock::System(sys) => assert_eq!(sys.text, "/fork cancelled by model question"),
+        RenderBlock::System(sys) => {
+            assert_eq!(sys.text, "/fork cancelled because another question opened.")
+        }
         other => panic!("expected System block, got {other:?}"),
     }
     assert_eq!(

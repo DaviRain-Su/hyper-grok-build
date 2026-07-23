@@ -13,13 +13,14 @@ use super::router::dispatch;
 use super::session::fork::open_project_question;
 use super::session::lifecycle::skip_picker_and_create_session;
 use super::voice::voice_stop_on_submit;
-use crate::app::actions::{Action, Effect};
+use crate::app::actions::{Action, DoctorFixTarget, Effect};
 use crate::app::agent::{AgentId, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
+use crate::slash::command::DoctorRequest;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
 
@@ -52,6 +53,118 @@ pub(crate) fn dispatch_initial_prompt(app: &mut AppView, prompt: String) -> Vec<
     }
     effects.extend(dispatch(Action::SendPrompt(prompt), app));
     effects
+}
+
+pub(super) fn collect_live_doctor_report(
+    app: &AppView,
+    agent_id: AgentId,
+) -> Option<crate::diagnostics::DiagnosticReport> {
+    let agent = app.agents.get(&agent_id)?;
+    let mut report = crate::slash::commands::doctor::DoctorCommand::report(
+        app.screen_mode,
+        crate::diagnostics::TuiRuntimeRequest {
+            workspace: &agent.session.cwd,
+            notification_method: app.notification_service.config().method,
+            notification_protocol: app.notification_service.protocol(),
+            notification_condition: app.notification_service.config().condition,
+        },
+    );
+    if crate::app::voice_mode_enabled() {
+        crate::diagnostics::apply_voice_probe(&mut report, true);
+    }
+    Some(report)
+}
+
+fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
+    DoctorFixTarget {
+        agent_id: agent.session.id,
+        session_id: agent.session.session_id.clone(),
+        session_binding_epoch: agent.session_binding_epoch,
+        cwd: agent.session.cwd.clone(),
+    }
+}
+
+pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(report) = collect_live_doctor_report(app, agent_id) else {
+        return vec![];
+    };
+
+    match request {
+        DoctorRequest::Report => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.scrollback.push_block(RenderBlock::system(
+                    crate::diagnostics::format_doctor(&report),
+                ));
+            }
+        }
+        DoctorRequest::ListFixes | DoctorRequest::Fix(_) => {
+            let Some(agent) = app.agents.get(&agent_id) else {
+                return vec![];
+            };
+            let target = doctor_fix_target(agent);
+            return vec![Effect::PlanDoctorFix {
+                target,
+                report: Box::new(report),
+                terminal: crate::terminal::terminal_context().clone(),
+                request,
+            }];
+        }
+    }
+    vec![]
+}
+
+pub(super) fn open_doctor_fix_question(
+    app: &mut AppView,
+    target: DoctorFixTarget,
+    plan: Box<crate::diagnostics::FixPlan>,
+) {
+    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+    use xai_grok_tools::implementations::grok_build::ask_user_question::{
+        Question, QuestionOption,
+    };
+
+    let Some(agent) = app.agents.get_mut(&target.agent_id) else {
+        return;
+    };
+    if agent.question_view.is_some() {
+        agent.scrollback.push_block(RenderBlock::system(
+            "Close the current question before applying this fix.",
+        ));
+        return;
+    }
+    let preview = crate::diagnostics::format_fix_preview(&plan);
+    agent
+        .scrollback
+        .push_block(RenderBlock::system(preview.clone()));
+    let question = Question {
+        question: "Apply this fix?".to_owned(),
+        options: vec![
+            QuestionOption {
+                label: "Apply".to_owned(),
+                description: "Make the changes shown above.".to_owned(),
+                preview: Some(preview),
+                id: None,
+            },
+            QuestionOption {
+                label: "Cancel".to_owned(),
+                description: "Do not change your shell configuration.".to_owned(),
+                preview: None,
+                id: None,
+            },
+        ],
+        multi_select: Some(false),
+        id: None,
+    };
+    let stashed = agent.prompt.stash();
+    agent.question_view = Some(
+        QuestionViewState::new("doctor-fix".to_owned(), vec![question], stashed)
+            .with_local_kind(LocalQuestionKind::DoctorFix { target, plan })
+            .with_no_freeform(),
+    );
+    agent.prompt.set_text("");
 }
 
 pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effect> {
@@ -152,14 +265,7 @@ pub(in crate::app) fn show_small_screen_tip(app: &mut AppView) {
     }
 }
 
-/// Show the one-shot "Over SSH? Run `grok wrap ssh <host>` locally…" hint at
-/// the first stable agent-view draw of an unwrapped SSH session (environment
-/// gates live in `AppView::maybe_trigger_ssh_wrap_tip`). Gated by the per-tip
-/// `contextual_hints.ssh_wrap` gate (default ON). Seen-gated in-memory via
-/// `app.tip_seen_counts`; nothing persists to disk.
-///
-/// Called directly from the draw-path trigger — not routed as an `Action`,
-/// so it returns `()` and "no effects from draw" holds structurally.
+/// Show the existing one-shot SSH discovery tip, redirected to `/doctor`.
 pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
     if !app.contextual_hints.ssh_wrap {
         return;
@@ -170,7 +276,6 @@ pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
     };
-    // Impression only when the tip actually takes the slot (mirrors undo/plan).
     if agent.show_ephemeral_tip(
         crate::tips::ssh_wrap::ssh_wrap_tip(),
         &mut app.tip_seen_counts,
@@ -332,7 +437,7 @@ pub(super) fn dispatch_send_prompt_inner(
     // no intervening key (mouse send, follow-up chip click `SubmitFollowUp`,
     // `SendSlashCommandPreservingDraft`) would otherwise leave a stale arm
     // (e.g. an idle-Esc `ClearPrompt`) that shadows the next Esc — firing stale
-    // ClearPrompt|Rewind instead of the mid-turn swallow until TTL. Cleared in
+    // ClearPrompt|Rewind instead of the mid-turn Esc policy until TTL. Cleared in
     // the common funnel so every submit path is covered, before any early-return
     // guard below.
     app.pending_action = None;
@@ -538,6 +643,12 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
                 agent.scrollback.push_block(RenderBlock::system(msg));
                 return vec![];
+            }
+            CommandResult::Doctor(request) => {
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                return dispatch_doctor(request, app);
             }
             CommandResult::Action(Action::ExitSession) => {
                 if consume_input {
@@ -1153,12 +1264,17 @@ pub(super) fn handle_prompt_response(
         if credit_limit_blocked {
             agent.credit_limit_stashed_prompt = agent.session.in_flight_prompt.clone();
         }
-        // Likewise, stash the prompt from a turn that failed on an
-        // expired login (401 / re-auth). The AuthComplete handler
-        // auto-resubmits it after a successful mid-session re-auth.
-        // A non-rewindable turn (None) must not clobber an earlier stash.
-        if reauth_prompted && let Some(prompt) = agent.session.in_flight_prompt.as_ref() {
-            agent.reauth_stashed_prompt = Some(prompt.clone());
+        // Stash for AuthComplete after 401. Prefer in_flight; fall back to
+        // compact_held (cleared for cancel-rewind during auto-compact). Skip if both None.
+        if reauth_prompted {
+            let held = agent
+                .session
+                .in_flight_prompt
+                .clone()
+                .or_else(|| agent.session.compact_held_prompt.clone());
+            if let Some(prompt) = held {
+                agent.reauth_stashed_prompt = Some(prompt);
+            }
         }
 
         // qtrace: turn end on this client. This clears current_prompt_id

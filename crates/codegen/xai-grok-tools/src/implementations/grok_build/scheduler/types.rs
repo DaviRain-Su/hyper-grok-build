@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SchedulerVersion {
     generation: uuid::Uuid,
     revision: u64,
@@ -15,6 +16,18 @@ impl SchedulerVersion {
 
     pub(super) fn revision(self) -> u64 {
         self.revision
+    }
+
+    pub(super) fn generation_id(self) -> uuid::Uuid {
+        self.generation
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_parts(generation: uuid::Uuid, revision: u64) -> Self {
+        Self {
+            generation,
+            revision,
+        }
     }
 }
 
@@ -279,7 +292,14 @@ impl ScheduledTask {
 /// Persisted state for the scheduler, stored via Resources + ResourcesPersistence.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SchedulerState {
+    #[serde(default)]
     pub tasks: Vec<ScheduledTask>,
+    #[serde(
+        default,
+        rename = "occurrenceJournal",
+        skip_serializing_if = "super::occurrence_journal::OccurrenceJournal::is_empty"
+    )]
+    pub(crate) occurrence_journal: super::occurrence_journal::OccurrenceJournal,
 }
 
 crate::register_resource!("grok_build", "Scheduler", SchedulerState);

@@ -19,7 +19,7 @@ fn prompt_mode_from_session_mode_id_uses_acp_session_mode() {
     );
 }
 fn fn_def(name: &str) -> ToolDefinition {
-    ToolDefinition::function(name, None::<&str>, serde_json::json!({ "type" : "object" }))
+    ToolDefinition::function(name, None::<&str>, serde_json::json!({"type": "object"}))
 }
 fn names(defs: &[ToolDefinition]) -> Vec<&str> {
     defs.iter().map(|d| d.function.name.as_str()).collect()

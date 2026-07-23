@@ -443,7 +443,7 @@ impl WorkspaceSession {
                 .with_label_values(&["swap"])
                 .inc();
             tracing::error!(
-                session_id = % self.session_id,
+                session_id = %self.session_id,
                 "toolset swap: outgoing toolset's terminal backend is not the \
                  session-owned one — its background tasks die with the old toolset"
             );
@@ -652,7 +652,7 @@ impl WorkspaceShared {
             Ok(typed) => typed,
             Err(e) => {
                 tracing::warn!(
-                    error = % e,
+                    error = %e,
                     "workspace: malformed server_metadata; salvaging sandbox_id field-wise"
                 );
                 crate::config::WorkspaceServerMetadata {
@@ -787,7 +787,8 @@ impl WorkspaceShared {
                     Ok(g) => g,
                     Err(_) => {
                         tracing::trace!(
-                            session = % sid, source = % source,
+                            session = %sid,
+                            source = %source,
                             "skipping rebuild: session update_lock held"
                         );
                         continue;
@@ -806,7 +807,8 @@ impl WorkspaceShared {
                         SwapAction::Skipped(reason),
                     );
                     tracing::warn!(
-                        session = % sid, source = % source,
+                        session = %sid,
+                        source = %source,
                         "skipping rebuild: toolset terminal backend is externally \
                          owned (local bind)"
                     );
@@ -819,7 +821,9 @@ impl WorkspaceShared {
                         "snapshot rebuild produced a non-rebuild decision: {decision:?}"
                     );
                     tracing::error!(
-                        session = % sid, source = % source, ? decision,
+                        session = %sid,
+                        source = %source,
+                        ?decision,
                         "skipping rebuild: snapshot rebuild policy returned a \
                          non-rebuild decision (policy regression)"
                     );
@@ -870,7 +874,9 @@ impl WorkspaceShared {
                         SwapAction::ApplyFailed,
                     );
                     tracing::warn!(
-                        session = % sid, source = % source, error = % e,
+                        session = %sid,
+                        source = %source,
+                        error = %e,
                         "snapshot rebuild failed for session"
                     );
                 }
@@ -907,7 +913,9 @@ pub(crate) fn get_or_open_session_writer(
     let dir = workspace_home.join("sessions").join(session_id);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(
-            session_id = % session_id, dir = % dir.display(), error = % e,
+            session_id = %session_id,
+            dir = %dir.display(),
+            error = %e,
             "failed to create session event dir; events.jsonl disabled for this session (will retry on next use)"
         );
         return EventWriter::noop();

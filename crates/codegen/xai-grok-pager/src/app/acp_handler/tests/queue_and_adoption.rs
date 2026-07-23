@@ -1991,12 +1991,15 @@
         agent.last_applied_event_seq = Some(7);
         agent.last_applied_xai_event_seq = Some(8);
 
+        let epoch = agent.session_binding_epoch;
         agent.bind_session_id(acp::SessionId::new("sess-a"));
+        assert_eq!(agent.session_binding_epoch, epoch);
         assert_eq!(agent.last_seen_event_id.as_deref(), Some("sess-a-7"));
         assert_eq!(agent.last_applied_event_seq, Some(7));
         assert_eq!(agent.last_applied_xai_event_seq, Some(8));
 
         agent.bind_session_id(acp::SessionId::new("sess-b"));
+        assert_eq!(agent.session_binding_epoch, epoch.wrapping_add(1));
         assert_eq!(
             agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
             Some("sess-b")
@@ -2007,6 +2010,18 @@
         );
         assert!(agent.last_applied_event_seq.is_none());
         assert!(agent.last_applied_xai_event_seq.is_none());
+    }
+
+    #[test]
+    fn session_binding_epoch_counts_bind_and_unbind_transitions() {
+        let mut agent = make_agent(None);
+        assert_eq!(agent.session_binding_epoch, 0);
+        agent.bind_session_id(acp::SessionId::new("a"));
+        assert_eq!(agent.session_binding_epoch, 1);
+        agent.unbind_session_id();
+        assert_eq!(agent.session_binding_epoch, 2);
+        agent.bind_session_id(acp::SessionId::new("a"));
+        assert_eq!(agent.session_binding_epoch, 3);
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod doom_loop;
 pub mod error;
 pub mod messages;
 pub mod serde_helpers;
+pub mod tool_overrides;
 pub mod types;
 
 pub use self::conversation::*;
@@ -21,6 +22,10 @@ pub use self::doom_loop::{
 pub use self::error::{
     EmptyReason, EmptyResponseContext, ResponseModelMetadata, Result, SamplingError,
     is_context_length_error, status_user_message, user_facing_api_error_message,
+};
+pub use self::tool_overrides::{
+    ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,
+    WebSearchOptions, XSearchOptions,
 };
 pub use self::types::*;
 

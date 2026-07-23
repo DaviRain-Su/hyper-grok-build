@@ -2,11 +2,13 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Mid-turn Esc in minimal mode is a swallowed no-op (the prompt is always
-/// focused). Esc must NOT cancel; cancel remains on Ctrl+C.
+/// Esc cancels a running turn in minimal mode (the prompt is always focused, so
+/// the turn-running Esc branch wins; minimal enables the Esc-cancel gate
+/// regardless of vim mode). The cancellation marker is finalized and committed
+/// to native scrollback like any other block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn minimal_esc_mid_turn_is_swallowed() {
+async fn minimal_esc_cancels_running_turn() {
     let content = ContentController::start().await.expect("start content");
     // Paced, long stream so the turn is provably still running when Esc lands.
     let long = format!(
@@ -26,27 +28,13 @@ async fn minimal_esc_mid_turn_is_swallowed() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("turn streaming in the live tail");
 
-    harness.inject_keys(keys::ESC).expect("press esc");
-    harness.update(Duration::from_millis(1000));
+    harness.inject_keys(keys::ESC).expect("press esc to cancel");
 
     // Full-text: minimal commits the cancel marker to native scrollback, so it
     // may sit above the pinned viewport — check scrollback + screen.
-    assert!(
-        !harness.contains_full_text("Turn cancelled by user"),
-        "mid-turn Esc must NOT cancel in minimal mode\nfull contents:\n{}",
-        harness.full_text()
-    );
-
-    // Positive tail: prove the turn was still alive at Esc-time (the negative
-    // check above would false-pass on an already-finished turn) and that
-    // Ctrl+C — the replacement cancel gesture — works in minimal mode. The
-    // prompt is empty and the turn is running, so Ctrl+C cancels (the minimal
-    // quit arm applies only to an idle empty prompt).
-    harness.inject_keys(keys::CTRL_C).expect("press ctrl+c");
     harness
         .wait_for_full_text("Turn cancelled by user", Duration::from_secs(15))
-        .expect("Ctrl+C must cancel the still-running turn in minimal mode");
-
+        .expect("cancellation marker committed to scrollback");
     assert!(
         !harness.contains_text("panicked"),
         "pager panicked\nscreen:\n{}",

@@ -29,10 +29,16 @@ async fn small_screen_tip_survives_slow_turn() {
     content.set_chunk_delay(Some(Duration::from_millis(400)));
 
     let binary = pager_binary().expect("resolve pager binary");
-    let env = contextual_hints_env(&content);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut harness =
-        PtyHarness::new(&binary, BAND_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn");
+    let env_refs = CONTEXTUAL_HINTS_ENV;
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        BAND_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        env_refs,
+    )
+    .expect("spawn");
 
     // The prompt marker paints at every height; the first char promotes the
     // welcome prompt to the agent view, where the tip fires.
@@ -49,7 +55,7 @@ async fn small_screen_tip_survives_slow_turn() {
     harness.update(Duration::from_millis(1500));
     let mid_turn = harness.screen_contents();
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited mid-turn\nscreen:\n{mid_turn}"
     );
     assert!(

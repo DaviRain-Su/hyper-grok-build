@@ -134,22 +134,15 @@ pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<
             return vec![];
         }
     }
-    // ── Guard 3: an agent must exist to thread the ACP call through ──
+    // Synthetic AgentId(0) when no agents (welcome banner Accept).
     let agent_id = match app.active_view {
         crate::app::app_view::ActiveView::Agent(id) => id,
-        _ => match app.agents.keys().next().copied() {
-            Some(id) => id,
-            None => {
-                tracing::warn!(
-                    target: "settings",
-                    key = "coding_data_sharing",
-                    opted_in,
-                    "set_coding_data_sharing called with no agents — unreachable in \
-                     practice; returning empty (no toast: app.show_toast would no-op)",
-                );
-                return vec![];
-            }
-        },
+        _ => app
+            .agents
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(crate::app::agent::AgentId(0)),
     };
 
     let prev = !app.coding_data_retention_opt_out;
@@ -438,14 +431,13 @@ pub(super) fn handle_coding_data_sharing_updated(
     agent_id: AgentId,
     opted_in: bool,
 ) -> Vec<Effect> {
-    // Re-anchor mirror to server-confirmed value (defense-in-
-    // depth against server reshaping the boolean). `agent_id`
-    // discarded — privacy is app-level, not per-agent.
+    // Re-anchor mirror to server-confirmed value (defense-in-depth against
+    // server reshaping the boolean). `agent_id` discarded — privacy is
+    // app-level, not per-agent.
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
-    // Re-toast on confirmation. Without this, a slow ACP
-    // round-trip would leave the user with only the
-    // optimistic toast (already faded) and no
+    // Re-toast on confirmation. Without this, a slow ACP round-trip would
+    // leave the user with only the optimistic toast (already faded) and no
     // server-confirmed feedback.
     app.show_toast(&coding_data_sharing_toast(opted_in));
     tracing::info!(
@@ -455,7 +447,15 @@ pub(super) fn handle_coding_data_sharing_updated(
         opted_in,
         "ACP update confirmed; mirror re-anchored",
     );
-    vec![]
+    let mut effects = vec![];
+    // Ack only after successful opt-in from the privacy banner Accept path.
+    if app.privacy_banner_accept_inflight {
+        app.privacy_banner_accept_inflight = false;
+        if opted_in {
+            effects.extend(ack_privacy_banner(app));
+        }
+    }
+    effects
 }
 
 pub(super) fn handle_coding_data_sharing_failed(
@@ -464,9 +464,8 @@ pub(super) fn handle_coding_data_sharing_failed(
     error: String,
     rollback_to_opted_in: bool,
 ) -> Vec<Effect> {
-    // Revert optimistic mutation: inner → refresh → toast.
-    //
-    // `agent_id` discarded — privacy is global.
+    // Revert optimistic mutation: inner → refresh → toast. `agent_id`
+    // discarded — privacy is global.
     set_coding_data_sharing_inner(app, rollback_to_opted_in);
     refresh_open_settings_modals(app);
     // Scrub long/unsafe error strings before toasting.
@@ -482,7 +481,44 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed; reverted optimistic mutation",
     );
+    // Accept failure: no ack; clear inflight so the banner stays.
+    app.privacy_banner_accept_inflight = false;
     vec![]
+}
+
+/// Stamp `[privacy].privacy_banner_acked` (in-memory + disk).
+pub(in crate::app::dispatch) fn ack_privacy_banner(app: &mut AppView) -> Vec<Effect> {
+    let acked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    app.privacy_banner_acked = Some(acked_at.clone());
+    vec![Effect::PersistPrivacyBannerAcked { acked_at }]
+}
+
+/// Accept: opt-in via settings path; ack only after ACP success.
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_accept(app: &mut AppView) -> Vec<Effect> {
+    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+        return vec![];
+    }
+    let effects = set_coding_data_sharing(app, true);
+    // should_show guarantees opted-out + unguarded, so effects is only empty
+    // if a guard regresses; leaving inflight false keeps Accept clickable.
+    app.privacy_banner_accept_inflight = !effects.is_empty();
+    effects
+}
+
+/// Customize: ack, then open settings on coding_data_sharing
+/// (creates/switches agent when opened from welcome).
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_customize(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+        return vec![];
+    }
+    let mut effects = ack_privacy_banner(app);
+    effects.extend(super::settings::ui::dispatch_open_settings(
+        app,
+        Some("coding_data_sharing"),
+    ));
+    effects
 }
 
 pub(super) fn handle_context_info_complete(

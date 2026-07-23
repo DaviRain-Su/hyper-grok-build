@@ -31,6 +31,27 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
+/// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
+/// view cannot see itself (the voice pipeline and app-level Esc ownership).
+/// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
+/// fact extends this struct instead of every `draw` call site; tests take
+/// `Default` and override only what they exercise.
+#[derive(Default)]
+pub struct AppRenderParams<'a> {
+    /// Voice feature available (shows the mic affordances).
+    pub voice_available: bool,
+    /// Mic open and streaming on the active surface — drives the recording
+    /// row and the prompt voice overlay.
+    pub voice_listening: bool,
+    /// Interim transcript for the prompt overlay while dictating.
+    pub voice_interim: Option<&'a str>,
+    /// App-level Esc ownership snapshot — single producer
+    /// `AppView::esc_owned_before_agent` (voice listening / cold-start,
+    /// focused dev tracing pane, cloud / import-Claude modals, dashboard
+    /// attached-agent popup). Feeds the hint path so the bar never
+    /// advertises `Esc cancel` while an app-level owner would consume it.
+    pub esc_owned_before_agent: bool,
+}
 impl AgentView {
     pub(crate) fn update_scrollback_selection_state(
         &mut self,
@@ -122,7 +143,15 @@ impl AgentView {
     /// draw returns early and the child renders its own bar; Current on the parent
     /// still reflects parent context (documented limitation, pre-existing before
     /// this change).
-    pub fn current_shortcut_hints(&self, registry: &ActionRegistry) -> Vec<HintItem> {
+    ///
+    /// `esc_owned_before_agent`: app-level Esc ownership snapshot
+    /// (`AppView::esc_owned_before_agent`); the draw path passes its param
+    /// of the same name.
+    pub fn current_shortcut_hints(
+        &self,
+        registry: &ActionRegistry,
+        esc_owned_before_agent: bool,
+    ) -> Vec<HintItem> {
         use crate::views::shortcuts_bar::HintItem;
         if let Some(ref viewer) = self.block_viewer {
             viewer.shortcuts_hints()
@@ -229,13 +258,17 @@ impl AgentView {
                 HintItem::new(key!(Tab), "scrollback"),
             ]
         } else {
-            self.normal_pane_hints(registry)
+            self.normal_pane_hints(registry, esc_owned_before_agent)
         }
     }
     /// Shared "normal pane" hints: flag computation + `build_hints` + queue hint.
     /// Single source of truth for the two former duplicated blocks in
     /// `current_shortcut_hints` and `draw`.
-    fn normal_pane_hints(&self, registry: &ActionRegistry) -> Vec<HintItem> {
+    fn normal_pane_hints(
+        &self,
+        registry: &ActionRegistry,
+        esc_owned_before_agent: bool,
+    ) -> Vec<HintItem> {
         let fold_label = self.selected_fold_label();
         let is_editing = matches!(self.prompt_mode, PromptMode::EditingQueued { .. });
         let selected_entry = self
@@ -364,6 +397,7 @@ impl AgentView {
             self.vim_mode,
             self.is_subagent_view,
             self.session.state.is_turn_running() && !self.renders_parked(),
+            self.esc_would_cancel_turn(esc_owned_before_agent),
             !self.visible_queue_is_empty(),
             selected_is_user_prompt,
             selected_is_agent_message,
@@ -630,9 +664,7 @@ impl AgentView {
                 bundle_state,
                 false,
                 &mut Vec::new(),
-                false,
-                false,
-                None,
+                AppRenderParams::default(),
             );
             child_post_flush = post_flush;
         }
@@ -668,13 +700,17 @@ impl AgentView {
         bundle_state: &crate::app::bundle::BundleState,
         in_dashboard_overlay: bool,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
-        voice_available: bool,
-        voice_listening: bool,
-        voice_interim: Option<&str>,
+        app_params: AppRenderParams<'_>,
     ) -> (
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
+        let AppRenderParams {
+            voice_available,
+            voice_listening,
+            voice_interim,
+            esc_owned_before_agent,
+        } = app_params;
         self.in_dashboard_overlay = in_dashboard_overlay;
         self.session_banner_active = crate::views::announcements::first_session_announcement(
             banner_announcements,
@@ -1924,10 +1960,11 @@ impl AgentView {
                     crate::unified_log::debug(
                         "turn.phase_transition",
                         sid,
-                        Some(serde_json::json!(
-                            { "from" : prev_label, "to" : next_label, "phase_elapsed_ms"
-                            : phase_ms, }
-                        )),
+                        Some(serde_json::json!({
+                            "from": prev_label,
+                            "to": next_label,
+                            "phase_elapsed_ms": phase_ms,
+                        })),
                     );
                 }
                 self.activity_started_at = Some(Instant::now());
@@ -3200,7 +3237,7 @@ impl AgentView {
                 .with_pending(pending_hint)
                 .render(layout.shortcuts, buf);
         } else {
-            let mut hints = self.normal_pane_hints(registry);
+            let mut hints = self.normal_pane_hints(registry, esc_owned_before_agent);
             if in_dashboard_overlay {
                 use crate::views::shortcuts_bar::HintItem;
                 hints.insert(
@@ -3967,8 +4004,8 @@ impl AgentView {
                             .push((rect, path.clone()));
                         if button_visible {
                             let is_playing = matches!(
-                                self.inline_video, Some(ref vid) if vid.path == * path && !
-                                vid.finished
+                                self.inline_video,
+                                Some(ref vid) if vid.path == *path && !vid.finished
                             );
                             let play_label: String = if is_playing {
                                 let vid = self.inline_video.as_ref().unwrap();
@@ -4350,9 +4387,11 @@ mod voice_recording_overlay_tests {
             &BundleState::default(),
             false,
             &mut Vec::new(),
-            listening,
-            listening,
-            None,
+            super::AppRenderParams {
+                voice_available: listening,
+                voice_listening: listening,
+                ..Default::default()
+            },
         );
         (0..area.height)
             .map(|y| {
@@ -4415,9 +4454,7 @@ mod overlay_post_flush_tests {
                 &BundleState::default(),
                 false,
                 &mut Vec::new(),
-                false,
-                false,
-                None,
+                super::AppRenderParams::default(),
             )
             .1
     }

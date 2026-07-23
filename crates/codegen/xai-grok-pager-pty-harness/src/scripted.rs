@@ -553,17 +553,11 @@ impl ScriptedScenarioRunner {
                 .context("write scenario config.toml")?;
         }
 
-        let mut env = content.env_for_pager();
-        env.extend(
-            scenario
-                .environment
-                .env
-                .iter()
-                .map(|v| (v.key.clone(), v.value.clone())),
-        );
-        let env_refs: Vec<(&str, &str)> = env
+        let env_refs: Vec<(&str, &str)> = scenario
+            .environment
+            .env
             .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .map(|v| (v.key.as_str(), v.value.as_str()))
             .collect();
         let args: Vec<&str> = scenario
             .environment
@@ -576,16 +570,17 @@ impl ScriptedScenarioRunner {
         // init) and run the pager there. Bound for the whole run so the dir
         // outlives the pager process; `None` inherits the test process cwd.
         let workspace_dir = match scenario.workspace.as_ref() {
-            Some(ws) => Some(materialize_workspace(ws)?),
+            Some(ws) => Some(materialize_workspace(ws, content.sandbox())?),
             None => None,
         };
         let workspace_cwd = workspace_dir.as_ref().map(|dir| dir.path());
 
-        let mut harness = PtyHarness::new_in_dir(
+        let mut harness = PtyHarness::new_in_sandbox(
             &self.config.binary,
             scenario.terminal.rows,
             scenario.terminal.cols,
             &args,
+            content.sandbox(),
             &env_refs,
             workspace_cwd,
         )
@@ -636,7 +631,7 @@ impl ScriptedScenarioRunner {
             }
         }
 
-        if !harness.is_running() {
+        if !harness.is_running()? {
             report.bugs.push(BugFinding {
                 step: scenario.steps.len(),
                 severity: BugSeverity::Bug,
@@ -690,7 +685,10 @@ impl ScriptedScenarioRunner {
 /// Create a temp dir for a scenario [`WorkspaceConfig`]: write its files
 /// (creating parent dirs) and optionally `git init` it. The returned `TempDir`
 /// must be held for the whole run so the directory outlives the pager process.
-fn materialize_workspace(workspace: &WorkspaceConfig) -> Result<tempfile::TempDir> {
+fn materialize_workspace(
+    workspace: &WorkspaceConfig,
+    sandbox: &xai_grok_test_support::TestSandbox,
+) -> Result<tempfile::TempDir> {
     let dir = tempfile::tempdir().context("create scenario workspace temp dir")?;
     for (rel_path, contents) in &workspace.files {
         // Fail closed: a `files` key must be a relative path that stays inside
@@ -718,20 +716,22 @@ fn materialize_workspace(workspace: &WorkspaceConfig) -> Result<tempfile::TempDi
             .with_context(|| format!("write workspace file {}", path.display()))?;
     }
     if workspace.git_init {
-        // A real repo root makes `workspace_key` / repo-local discovery
-        // deterministic regardless of where the system temp dir lives. Shelled
-        // out (not `git2`) because this harness crate has no `git2` dependency;
-        // the subprocess is careful — nulled streams + `status.success()` check
-        // + `bail!` on failure.
-        let status = std::process::Command::new("git")
+        // A real repo root keeps repo-local discovery independent of the
+        // system temp path.
+        let mut cmd = sandbox.git_command();
+        let output = cmd
             .args(["init", "-q"])
             .current_dir(dir.path())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+            .stderr(std::process::Stdio::piped())
+            .output()
             .context("run `git init` for scenario workspace")?;
-        if !status.success() {
-            bail!("`git init` for scenario workspace failed: {status}");
+        if !output.status.success() {
+            bail!(
+                "`git init` for scenario workspace failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
     Ok(dir)
@@ -1057,7 +1057,7 @@ fn run_step(
             ));
         }
         ScenarioStep::AssertRunning => {
-            if !harness.is_running() {
+            if !harness.is_running()? {
                 bail!("pager process is not running");
             }
         }
@@ -2062,7 +2062,8 @@ mod tests {
             git_init: false,
             files: BTreeMap::from([(".mcp.json".to_string(), "{}".to_string())]),
         };
-        assert!(materialize_workspace(&ok).is_ok());
+        let sandbox = xai_grok_test_support::TestSandbox::new();
+        assert!(materialize_workspace(&ok, &sandbox).is_ok());
 
         // Absolute and `..`-traversing keys are rejected before any write.
         for bad in ["/etc/evil", "../escape", "sub/../../escape"] {
@@ -2070,12 +2071,44 @@ mod tests {
                 git_init: false,
                 files: BTreeMap::from([(bad.to_string(), "x".to_string())]),
             };
-            let err = materialize_workspace(&ws).unwrap_err().to_string();
+            let err = materialize_workspace(&ws, &sandbox)
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains("must be relative and within the workspace"),
                 "path {bad:?} must be rejected, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn workspace_git_init_materializes_a_real_repository() {
+        let workspace = WorkspaceConfig {
+            git_init: true,
+            files: std::collections::BTreeMap::from([(
+                "nested/fixture.txt".to_string(),
+                "fixture\n".to_string(),
+            )]),
+        };
+
+        let sandbox = xai_grok_test_support::TestSandbox::new();
+        let dir = materialize_workspace(&workspace, &sandbox).expect("materialize git workspace");
+        assert!(dir.path().join(".git").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("nested/fixture.txt")).unwrap(),
+            "fixture\n"
+        );
+        let mut cmd = sandbox.git_command();
+        let output = cmd
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(dir.path())
+            .output()
+            .expect("query materialized repository");
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

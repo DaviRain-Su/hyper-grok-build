@@ -29,6 +29,12 @@ pub struct ResourcesPersistence {
     noop: bool,
 }
 
+#[cfg(test)]
+pub(crate) type ControlledSave = (
+    serde_json::Value,
+    tokio::sync::oneshot::Sender<io::Result<()>>,
+);
+
 enum ResourcesPersistenceCommand {
     /// Write this serialized Resources value to disk
     Save(serde_json::Value),
@@ -49,6 +55,37 @@ impl ResourcesPersistence {
             tx,
             noop: true,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn controlled() -> (Self, tokio::sync::mpsc::UnboundedReceiver<ControlledSave>) {
+        let (tx, mut commands) =
+            tokio::sync::mpsc::unbounded_channel::<ResourcesPersistenceCommand>();
+        let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = commands.recv().await {
+                match command {
+                    ResourcesPersistenceCommand::Save(_) => {}
+                    ResourcesPersistenceCommand::SaveAndFlush {
+                        snapshot,
+                        respond_to,
+                    } => {
+                        let _ = observed_tx.send((snapshot, respond_to));
+                    }
+                    ResourcesPersistenceCommand::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                state_path: PathBuf::from("/dev/null"),
+                tx,
+                noop: false,
+            },
+            observed_rx,
+        )
     }
 
     /// Create a new persistence handle and spawn the background writer task.

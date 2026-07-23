@@ -122,9 +122,6 @@ pub fn format_doctor(report: &DiagnosticReport) -> String {
         ClipboardDelivery::Failed => "unavailable",
     };
     out.push_str(&format!("  status       {status}\n"));
-    if let Some(fix) = &clipboard.fix {
-        out.push_str(&format!("  fix          {fix}\n"));
-    }
 
     if let Some(voice) = &facts.voice {
         out.push_str("\nVoice\n");
@@ -149,51 +146,60 @@ fn format_findings(report: &DiagnosticReport, out: &mut String) {
         .filter(|finding| finding.disposition == FindingDisposition::Issue)
         .collect::<Vec<_>>();
     if issues.is_empty() {
-        if report.facts.clipboard.delivery == ClipboardDelivery::Confirmed {
+        if report.issue_count() == 0 {
             out.push_str("\nNo issues found.\n");
+        } else {
+            out.push_str("\nAn issue is shown in the Clipboard status above.\n");
         }
     } else {
-        out.push_str(&format!("\n{} additional issue(s)\n", issues.len()));
+        out.push_str(&format!("\nIssues ({})\n", issues.len()));
         for finding in issues {
-            out.push_str(&format!("\n  [!] {}\n", finding.message));
-            if let Some(remediation) = &finding.remediation {
-                if let Some(path) = &remediation.config_path {
-                    out.push_str(&format!(
-                        "      Fix: place `{}` in {}\n",
-                        remediation.fix, path
-                    ));
-                } else {
-                    out.push_str(&format!("      Fix: run `{}`\n", remediation.fix));
-                }
-            }
-            if let Some(note) = &finding.note {
-                out.push_str(&format!("      Note: {}\n", note));
-            }
+            format_finding(out, finding);
         }
     }
 
-    for finding in report
+    let recommendations = report
         .findings
         .iter()
         .filter(|finding| finding.disposition == FindingDisposition::Recommendation)
-    {
-        out.push_str(&format!("\nRecommendation\n\n  {}\n", finding.message));
-        if let Some(automatic) = finding.automatic_remediation {
-            let command = super::human_fix_command(automatic.fix_id)
-                .unwrap_or_else(|| automatic.command.to_owned());
-            out.push_str(&format!("      Automatic setup: `{command}`\n"));
+        .collect::<Vec<_>>();
+    if !recommendations.is_empty() {
+        out.push_str("\nRecommendations\n");
+        for finding in recommendations {
+            format_finding(out, finding);
         }
-        if let Some(remediation) = &finding.remediation {
-            let label = if finding.automatic_remediation.is_some() {
-                "One-off"
-            } else {
-                "Run"
-            };
-            out.push_str(&format!("      {label}: `{}`\n", remediation.fix));
+    }
+}
+
+fn format_finding(out: &mut String, finding: &super::DiagnosticFinding) {
+    let marker = match finding.disposition {
+        FindingDisposition::Issue => "!",
+        FindingDisposition::Recommendation => "i",
+    };
+    out.push_str(&format!(
+        "\n  {marker} {}  {}\n",
+        finding.id, finding.message
+    ));
+    if let Some(automatic) = finding.automatic_remediation {
+        let command = super::human_fix_command(automatic.fix_id)
+            .unwrap_or_else(|| automatic.command.to_owned());
+        out.push_str(&format!("      Automatic setup: `{command}`\n"));
+    }
+    if let Some(remediation) = &finding.remediation {
+        match (&remediation.config_path, &finding.automatic_remediation) {
+            (Some(path), _) => {
+                out.push_str(&format!("      Add `{}` to {path}\n", remediation.fix));
+            }
+            (None, Some(_)) => {
+                out.push_str(&format!("      One-off: `{}`\n", remediation.fix));
+            }
+            (None, None) => {
+                out.push_str(&format!("      Run: `{}`\n", remediation.fix));
+            }
         }
-        if let Some(note) = &finding.note {
-            out.push_str(&format!("      Note: {}\n", note));
-        }
+    }
+    if let Some(note) = &finding.note {
+        out.push_str(&format!("      Note: {note}\n"));
     }
 }
 

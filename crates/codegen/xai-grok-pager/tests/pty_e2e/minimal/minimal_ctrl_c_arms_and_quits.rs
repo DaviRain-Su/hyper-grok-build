@@ -27,10 +27,12 @@ async fn minimal_ctrl_c_arms_and_quits() {
 
     // Second Ctrl+C within the confirm window exits the process.
     harness.inject_keys(b"\x03").expect("inject Ctrl+C again");
-    let code = harness.wait_exit_code(Duration::from_secs(5));
+    let exit = harness
+        .wait_exit_code(Duration::from_secs(5))
+        .expect("wait for minimal pager exit");
     assert!(
-        code.is_some(),
-        "second Ctrl+C should quit minimal\nscreen:\n{}",
+        matches!(exit, PtyExitPoll::Exited(_) | PtyExitPoll::PendingStatus),
+        "second Ctrl+C should quit minimal, got {exit:?}\nscreen:\n{}",
         harness.screen_contents()
     );
 }

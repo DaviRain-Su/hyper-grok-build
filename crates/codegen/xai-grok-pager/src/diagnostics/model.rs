@@ -38,14 +38,40 @@ pub struct DiagnosticReport {
     pub probe_notes: Vec<ProbeNote>,
 }
 
+pub(crate) const NOTIFICATION_PROTOCOL_FALLBACK_ID: DiagnosticId =
+    DiagnosticId::new("notifications", "protocol-fallback");
+pub(crate) const FOCUS_TRACKING_UNAVAILABLE_ID: DiagnosticId =
+    DiagnosticId::new("notifications", "focus-tracking-unavailable");
+pub(crate) const SANDBOX_PROFILE_CONFLICT_ID: DiagnosticId =
+    DiagnosticId::new("sandbox", "profile-conflict");
+pub(crate) const CLIPBOARD_DELIVERY_UNVERIFIED_ID: DiagnosticId =
+    DiagnosticId::new("clipboard", "delivery-unverified");
+pub(crate) const CLIPBOARD_DELIVERY_UNAVAILABLE_ID: DiagnosticId =
+    DiagnosticId::new("clipboard", "delivery-unavailable");
+pub(crate) const NEWLINE_FALLBACK_ID: DiagnosticId =
+    DiagnosticId::new("terminal", "newline-fallback");
+pub(crate) const ITERM2_CLIPBOARD_PERMISSION_ID: DiagnosticId =
+    DiagnosticId::new("terminal", "iterm2-clipboard-permission");
+pub(crate) const VSCODE_SSH_NON_ASCII_ID: DiagnosticId =
+    DiagnosticId::new("clipboard", "vscode-ssh-non-ascii");
+pub(crate) const VOICE_NO_INPUT_DEVICE_ID: DiagnosticId =
+    DiagnosticId::new("voice", "no-input-device");
+
 impl DiagnosticReport {
     pub fn issue_count(&self) -> usize {
-        usize::from(!self.facts.clipboard.delivery.is_confirmed())
-            + self
-                .findings
-                .iter()
-                .filter(|finding| finding.disposition == FindingDisposition::Issue)
-                .count()
+        self.findings
+            .iter()
+            .filter(|finding| finding.disposition == FindingDisposition::Issue)
+            .count()
+            + usize::from(
+                !self.facts.clipboard.delivery.is_confirmed()
+                    && !self.findings.iter().any(|finding| {
+                        matches!(
+                            finding.id,
+                            CLIPBOARD_DELIVERY_UNVERIFIED_ID | CLIPBOARD_DELIVERY_UNAVAILABLE_ID
+                        )
+                    }),
+            )
     }
 
     pub fn recommendation_count(&self) -> usize {
@@ -114,6 +140,8 @@ pub struct ClipboardFacts {
     pub container_no_display: bool,
     pub data_control: DataControlFact,
     pub delivery: ClipboardDelivery,
+    /// Compatibility projection for compact status/JSON consumers. Detailed
+    /// policy and remediation live in named findings.
     pub fix: Option<String>,
 }
 

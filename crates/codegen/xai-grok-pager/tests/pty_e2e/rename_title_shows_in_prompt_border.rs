@@ -109,8 +109,13 @@ fn quit_gracefully(mut harness: PtyHarness) {
     harness.inject_keys(b"\x11").expect("ctrl-q arm");
     harness.update(Duration::from_millis(200));
     harness.inject_keys(b"\x11").expect("ctrl-q confirm");
-    let code = harness.wait_exit_code(Duration::from_secs(10));
-    assert_eq!(code, Some(0), "graceful quit should exit 0, got {code:?}");
+    let exit = wait_for_exit_status(&mut harness, Duration::from_secs(10))
+        .expect("wait for graceful quit");
+    assert_eq!(
+        exit,
+        PtyExitPoll::Exited(0),
+        "graceful quit should exit 0, got {exit:?}"
+    );
 }
 
 /// Spawn a pager in `project` against `content`, submit one turn, and settle.

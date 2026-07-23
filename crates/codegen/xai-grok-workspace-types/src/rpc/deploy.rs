@@ -9,6 +9,14 @@ pub enum DeployError {
     DeploymentNotInBuildingState,
     UnsupportedProjectType,
     ProviderUnavailable,
+    /// The user already owns the maximum number of projects (apps); distinct
+    /// from the generic `ResourceExhausted` so clients can tell "too many
+    /// apps" apart from "deploying too fast".
+    ProjectLimitExceeded,
+    /// The user exceeded the per-minute deploy rate limit; retry after the
+    /// window passes. Distinct from the generic `ResourceExhausted` so clients
+    /// can render the retry hint.
+    RateLimited,
     Internal,
     Unauthenticated,
     InvalidArgument,
@@ -19,7 +27,7 @@ pub enum DeployError {
 }
 impl DeployError {
     /// Every kind, for exhaustive iteration in tests.
-    pub const ALL: [DeployError; 15] = [
+    pub const ALL: [DeployError; 17] = [
         Self::UrlConflict,
         Self::UrlModeration,
         Self::IdempotencyConflict,
@@ -28,6 +36,8 @@ impl DeployError {
         Self::DeploymentNotInBuildingState,
         Self::UnsupportedProjectType,
         Self::ProviderUnavailable,
+        Self::ProjectLimitExceeded,
+        Self::RateLimited,
         Self::Internal,
         Self::Unauthenticated,
         Self::InvalidArgument,
@@ -47,6 +57,8 @@ impl DeployError {
             Self::DeploymentNotInBuildingState => "deploy_not_in_building_state",
             Self::UnsupportedProjectType => "deploy_unsupported_project_type",
             Self::ProviderUnavailable => "deploy_provider_unavailable",
+            Self::ProjectLimitExceeded => "deploy_project_limit_exceeded",
+            Self::RateLimited => "deploy_rate_limited",
             Self::Internal => "deploy_internal",
             Self::Unauthenticated => "deploy_unauthenticated",
             Self::InvalidArgument => "deploy_invalid_argument",
@@ -68,6 +80,8 @@ impl DeployError {
             "deploy_not_in_building_state" => Self::DeploymentNotInBuildingState,
             "deploy_unsupported_project_type" => Self::UnsupportedProjectType,
             "deploy_provider_unavailable" => Self::ProviderUnavailable,
+            "deploy_project_limit_exceeded" => Self::ProjectLimitExceeded,
+            "deploy_rate_limited" => Self::RateLimited,
             "deploy_internal" => Self::Internal,
             "deploy_unauthenticated" => Self::Unauthenticated,
             "deploy_invalid_argument" => Self::InvalidArgument,

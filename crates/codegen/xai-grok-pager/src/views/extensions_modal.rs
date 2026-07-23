@@ -1020,20 +1020,27 @@ pub enum McpSetupOutcome {
     Submit,
 }
 
-/// Modal message overlay (errors, confirmations).
-#[derive(Debug, Clone)]
+/// Concrete action to run after the user presses `y` on a confirmation overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmationAction {
+    /// Replay a hooks action (e.g. remove a hook source directory).
+    Hooks(xai_hooks_plugins_types::HooksAction),
+    /// Replay a plugins action (e.g. uninstall; may still be `confirmed: false`
+    /// so multi-plugin repos can return a second server-owned prompt).
+    Plugins(xai_hooks_plugins_types::PluginsAction),
+    /// Replay a marketplace action (uninstall plugin or remove source).
+    Marketplace(xai_hooks_plugins_types::MarketplaceAction),
+    /// Delete a removable (local) MCP server by name.
+    DeleteMcpServer { server_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalMessage {
-    /// An error message from a failed action. Any key dismisses.
     Error(String),
-    /// A confirmation prompt. Stores the action to replay with confirmed=true.
     Confirmation {
         message: String,
-        action: xai_hooks_plugins_types::PluginsAction,
-    },
-    /// A confirmation prompt for a marketplace action (install/uninstall/update).
-    MarketplaceConfirmation {
-        message: String,
-        action: xai_hooks_plugins_types::MarketplaceAction,
+        action: ConfirmationAction,
+        pending_entry_index: Option<usize>,
     },
 }
 
@@ -1723,6 +1730,13 @@ pub struct ExtensionsModalState {
     pub plugins_scroll: usize,
     /// Marketplace tab state.
     pub marketplace_data: TabDataState<xai_hooks_plugins_types::MarketplaceListResponse>,
+    /// A marketplace list fetch is in flight. Overlapping list calls
+    /// serialize on the shell's per-source cache lock and each re-scans
+    /// every git source, so duplicates multiply the slowest source's latency.
+    pub marketplace_fetch_inflight: bool,
+    /// A refetch arrived while one was in flight; it runs when the current
+    /// fetch lands so post-action results stay fresh.
+    pub marketplace_refetch_queued: bool,
     pub marketplace_selected: usize,
     pub marketplace_scroll: usize,
     /// Skills tab state.
@@ -1811,6 +1825,8 @@ impl ExtensionsModalState {
             hooks_scroll: 0,
             plugins_scroll: 0,
             marketplace_data: TabDataState::Loading,
+            marketplace_fetch_inflight: false,
+            marketplace_refetch_queued: false,
             marketplace_selected: 0,
             marketplace_scroll: 0,
             skills_data: TabDataState::Loading,
@@ -3258,9 +3274,7 @@ pub fn render_extensions_modal(
     // The overlay above is shortened to leave the footer line visible.
     let modal_msg_kind = state.modal_message.as_ref().map(|m| match m {
         ModalMessage::Error(_) => ModalMsgKind::Error,
-        ModalMessage::Confirmation { .. } | ModalMessage::MarketplaceConfirmation { .. } => {
-            ModalMsgKind::Confirm
-        }
+        ModalMessage::Confirmation { .. } => ModalMsgKind::Confirm,
     });
     let mut shortcuts: Vec<Shortcut<'_>> = Vec::new();
     if modal_msg_kind.is_some() {
@@ -3517,7 +3531,8 @@ pub fn render_extensions_modal(
                     badge: entry_badge_text.get(i).map(|s| s.as_str()).unwrap_or(""),
                     badge_color: entry_badge_color.get(i).copied().flatten(),
                     collapsible: is_collapsible,
-                    underline_last_desc: group_key.is_some_and(|k| *k == managed_section_key),
+                    underline_last_desc: state.modal_message.is_none()
+                        && group_key.is_some_and(|k| *k == managed_section_key),
                 })
             }
         })
@@ -3615,22 +3630,21 @@ pub fn render_extensions_modal(
                 msg_content_width,
                 msg_content_height,
             );
+            // Buffer::set_string merges styles; Style::reset clears UNDERLINED/BOLD
+            // left by the list underneath (e.g. Managed connectors URL).
+            let clear_style = Style::reset().bg(theme.bg_base);
+            let text_style = Style::reset().fg(theme.accent_tool).bg(theme.bg_base);
             for y in msg_area.y..msg_area.y + msg_area.height {
                 buf.set_string(
                     msg_area.x,
                     y,
                     " ".repeat(msg_area.width as usize),
-                    Style::default().bg(theme.bg_base),
+                    clear_style,
                 );
             }
             let msg_y = msg_area.y + msg_area.height / 2;
             let msg_x = msg_area.x + msg_area.width.saturating_sub(display.width() as u16) / 2;
-            buf.set_string(
-                msg_x,
-                msg_y,
-                &display,
-                Style::default().fg(theme.accent_tool).bg(theme.bg_base),
-            );
+            buf.set_string(msg_x, msg_y, &display, text_style);
         }
     }
 
@@ -3638,10 +3652,7 @@ pub fn render_extensions_modal(
     if let Some(ref msg) = state.modal_message {
         let (text, fg) = match msg {
             ModalMessage::Error(e) => (e.as_str(), theme.accent_error),
-            ModalMessage::Confirmation { message, .. }
-            | ModalMessage::MarketplaceConfirmation { message, .. } => {
-                (message.as_str(), theme.accent_tool)
-            }
+            ModalMessage::Confirmation { message, .. } => (message.as_str(), theme.accent_tool),
         };
         if let Some(popup_rect) = state.window.popup_area {
             let msg_content_y = popup_rect.y + 2;
@@ -3659,12 +3670,14 @@ pub fn render_extensions_modal(
                     msg_content_width,
                     msg_content_height,
                 );
+                let clear_style = Style::reset().bg(theme.bg_base);
+                let text_style = Style::reset().fg(fg).bg(theme.bg_base);
                 for y in msg_area.y..msg_area.y + msg_area.height {
                     buf.set_string(
                         msg_area.x,
                         y,
                         " ".repeat(msg_area.width as usize),
-                        Style::default().bg(theme.bg_base),
+                        clear_style,
                     );
                 }
                 let pad = 2u16;
@@ -3673,12 +3686,7 @@ pub fn render_extensions_modal(
                 let msg_height = wrapped_lines.len().min(msg_area.height as usize);
                 let msg_y = msg_area.y + (msg_area.height.saturating_sub(msg_height as u16)) / 2;
                 for (i, wline) in wrapped_lines.iter().enumerate().take(msg_height) {
-                    buf.set_string(
-                        msg_area.x + pad,
-                        msg_y + i as u16,
-                        wline,
-                        Style::default().fg(fg).bg(theme.bg_base),
-                    );
+                    buf.set_string(msg_area.x + pad, msg_y + i as u16, wline, text_style);
                 }
                 // Dismissal hints (for both errors and confirmations)
                 // are rendered into the footer below, not inline.
@@ -7026,6 +7034,86 @@ mod tests {
             buffer_count(&expanded_buf, "contents shown after install"),
             1,
             "expanded view shows the install hint placeholder exactly once"
+        );
+    }
+
+    #[test]
+    fn confirmation_overlay_suppresses_managed_url_underline() {
+        use crate::views::mcps_modal::McpWireSource;
+
+        // Tall list so the Managed connectors URL sits above the centered
+        // confirmation text (not only cells the message string overwrites).
+        let mut managed = Vec::new();
+        for i in 0..20 {
+            managed.push(make_mcp_server_for_rows(
+                &format!("grok_com_srv_{i}"),
+                McpWireSource::Managed,
+                vec![],
+            ));
+        }
+        managed.push(make_mcp_server_for_rows(
+            "local-grafana",
+            McpWireSource::Local,
+            vec![],
+        ));
+
+        let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        state.mcps_data = TabDataState::Loaded(managed);
+        state.session_team_id = Some("team-1".into());
+
+        let area = Rect::new(0, 0, 100, 40);
+        let mut open_buf = Buffer::empty(area);
+        render_extensions_modal(&mut open_buf, area, &mut state, None, false, 0);
+
+        let underlined = |buf: &Buffer| -> usize {
+            let mut n = 0usize;
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    if buf
+                        .cell((x, y))
+                        .is_some_and(|c| c.modifier.contains(Modifier::UNDERLINED))
+                    {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        assert!(
+            underlined(&open_buf) > 0,
+            "precondition: managed connectors URL paints UNDERLINED cells"
+        );
+        assert!(
+            state.picker_state.link_band.is_some(),
+            "precondition: link hit band recorded for connectors URL"
+        );
+
+        state.modal_message = Some(ModalMessage::Confirmation {
+            message: "Remove MCP server \"local-grafana\"?".into(),
+            action: ConfirmationAction::DeleteMcpServer {
+                server_name: "local-grafana".into(),
+            },
+            pending_entry_index: Some(0),
+        });
+        state.picker_state.link_band = None;
+
+        let mut confirm_buf = Buffer::empty(area);
+        render_extensions_modal(&mut confirm_buf, area, &mut state, None, false, 0);
+
+        assert_eq!(
+            buffer_count(&confirm_buf, "Remove MCP server \"local-grafana\"?"),
+            1,
+            "confirmation message must be painted"
+        );
+        assert_eq!(
+            underlined(&confirm_buf),
+            0,
+            "confirmation must not paint UNDERLINED under the full overlay"
+        );
+        assert!(
+            state.picker_state.link_band.is_none(),
+            "confirmation must not record a connectors link hit band"
         );
     }
 }

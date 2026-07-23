@@ -41,13 +41,13 @@ pub use content::{
 };
 pub use env::pager_binary;
 pub use flows::{
-    inference_request_count, oauth_env_for_pager, seed_fake_oauth, submit_turn,
+    inference_request_count, oauth_credential_ops, seed_fake_oauth, submit_turn,
     wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
 pub use host_clipboard::HostClipboardTextGuard;
 pub use leader::LeaderCluster;
 use pty::PtyRead;
-pub use pty::{PtyController, keys};
+pub use pty::{EnvOp, PtyController, PtyExitPoll, keys};
 pub use results::{BenchResults, compare_baseline};
 pub use scenarios::Scenario;
 pub use screen::ScreenTracker;
@@ -107,21 +107,10 @@ pub struct PtyHarness {
 }
 
 impl PtyHarness {
-    /// Spawn the pager in a PTY and create a new harness.
-    ///
-    /// Both `rows` and `cols` follow terminal convention: `(rows, cols)`.
-    pub fn new(
-        binary: &Path,
-        rows: u16,
-        cols: u16,
-        args: &[&str],
-        env: &[(&str, &str)],
-    ) -> Result<Self> {
-        Self::new_in_dir(binary, rows, cols, args, env, None)
-    }
-
-    /// Like [`new`](Self::new), with an explicit working directory (`None` inherits).
-    pub fn new_in_dir(
+    /// Inherit the parent environment for terminal/shell behavior tests
+    /// (XTVERSION probes and grok wrap). Content-backed launches must use
+    /// [`Self::new_in_sandbox`].
+    pub fn new_inherited_env(
         binary: &Path,
         rows: u16,
         cols: u16,
@@ -135,10 +124,52 @@ impl PtyHarness {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let pty = PtyController::spawn_in_dir(binary, size, args, env, cwd)
+        let pty = PtyController::spawn_inherited_env(binary, size, args, env, cwd)
             .context("failed to spawn pager in PTY")?;
+        Ok(Self::from_pty(pty, rows, cols))
+    }
 
-        Ok(Self {
+    /// Spawn from a canonical [`xai_grok_test_support::TestSandbox`] baseline
+    /// plus Set-only convenience overrides.
+    pub fn new_in_sandbox(
+        binary: &Path,
+        rows: u16,
+        cols: u16,
+        args: &[&str],
+        sandbox: &xai_grok_test_support::TestSandbox,
+        env: &[(&str, &str)],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
+        let operations: Vec<_> = env
+            .iter()
+            .map(|(key, value)| EnvOp::set(key, value))
+            .collect();
+        Self::new_in_sandbox_ops(binary, rows, cols, args, sandbox, &operations, cwd)
+    }
+
+    /// Spawn from a canonical sandbox baseline plus typed Set/Remove operations.
+    pub fn new_in_sandbox_ops(
+        binary: &Path,
+        rows: u16,
+        cols: u16,
+        args: &[&str],
+        sandbox: &xai_grok_test_support::TestSandbox,
+        operations: &[EnvOp<'_>],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let pty = PtyController::spawn_in_sandbox(binary, size, args, sandbox, operations, cwd)
+            .context("failed to spawn pager in PTY")?;
+        Ok(Self::from_pty(pty, rows, cols))
+    }
+
+    fn from_pty(pty: PtyController, rows: u16, cols: u16) -> Self {
+        Self {
             pty,
             screen: ScreenTracker::new(rows, cols),
             timing: FrameTimingParser::new(),
@@ -147,7 +178,7 @@ impl PtyHarness {
             cast_events: Vec::new(),
             cast_size: (cols, rows),
             respond_to_queries: false,
-        })
+        }
     }
 
     /// Enable (or disable) forwarding terminal-generated replies back to the
@@ -185,7 +216,7 @@ impl PtyHarness {
         content: &ContentController,
         extra_args: &[&str],
     ) -> Result<Self> {
-        Self::spawn_with_content_in_dir(binary, rows, cols, content, extra_args, None)
+        Self::spawn_with_content_env_in_dir(binary, rows, cols, content, extra_args, &[], None)
     }
 
     /// Like [`spawn_with_content`](Self::spawn_with_content), with an explicit working directory.
@@ -197,10 +228,80 @@ impl PtyHarness {
         extra_args: &[&str],
         cwd: Option<&Path>,
     ) -> Result<Self> {
-        let env = content.env_for_pager();
-        let env_refs: Vec<(&str, &str)> =
-            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        Self::new_in_dir(binary, rows, cols, extra_args, &env_refs, cwd)
+        Self::spawn_with_content_env_in_dir(binary, rows, cols, content, extra_args, &[], cwd)
+    }
+
+    /// Content-backed spawn with Set-only convenience overrides applied after
+    /// the sandbox baseline. Duplicate keys are last-wins.
+    pub fn spawn_with_content_env(
+        binary: &Path,
+        rows: u16,
+        cols: u16,
+        content: &ContentController,
+        extra_args: &[&str],
+        overrides: &[(&str, &str)],
+    ) -> Result<Self> {
+        Self::spawn_with_content_env_in_dir(
+            binary, rows, cols, content, extra_args, overrides, None,
+        )
+    }
+
+    pub fn spawn_with_content_env_in_dir(
+        binary: &Path,
+        rows: u16,
+        cols: u16,
+        content: &ContentController,
+        extra_args: &[&str],
+        overrides: &[(&str, &str)],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
+        let operations: Vec<_> = overrides
+            .iter()
+            .map(|(key, value)| EnvOp::set(key, value))
+            .collect();
+        Self::spawn_with_content_env_ops_in_dir(
+            binary,
+            rows,
+            cols,
+            content,
+            extra_args,
+            &operations,
+            cwd,
+        )
+    }
+
+    /// Content-backed spawn with typed Set/Remove operations.
+    pub fn spawn_with_content_env_ops(
+        binary: &Path,
+        rows: u16,
+        cols: u16,
+        content: &ContentController,
+        extra_args: &[&str],
+        operations: &[EnvOp<'_>],
+    ) -> Result<Self> {
+        Self::spawn_with_content_env_ops_in_dir(
+            binary, rows, cols, content, extra_args, operations, None,
+        )
+    }
+
+    pub fn spawn_with_content_env_ops_in_dir(
+        binary: &Path,
+        rows: u16,
+        cols: u16,
+        content: &ContentController,
+        extra_args: &[&str],
+        operations: &[EnvOp<'_>],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
+        Self::new_in_sandbox_ops(
+            binary,
+            rows,
+            cols,
+            extra_args,
+            content.sandbox(),
+            operations,
+            cwd,
+        )
     }
 
     // ── PTY control ──────────────────────────────────────────────────
@@ -271,8 +372,8 @@ impl PtyHarness {
         self.screen.feed(bytes);
     }
 
-    /// Check whether the child process is still running.
-    pub fn is_running(&mut self) -> bool {
+    /// Return true only while the child is live; pending status is non-running.
+    pub fn is_running(&mut self) -> Result<bool> {
         self.pty.is_running()
     }
 
@@ -322,8 +423,9 @@ impl PtyHarness {
             if remaining.is_zero() {
                 anyhow::bail!(
                     "timed out after {timeout:?} waiting for {description}\n\
-                     process running: {}\nscreen contents:\n{}",
-                    self.pty.is_running(),
+                     process running: {}\nprocess tree: {}\nscreen contents:\n{}",
+                    self.pty.is_running()?,
+                    self.pty.process_tree_diagnostics(),
                     self.screen.contents()
                 );
             }
@@ -368,8 +470,9 @@ impl PtyHarness {
             if remaining.is_zero() {
                 anyhow::bail!(
                     "timed out after {timeout:?} waiting for {description} to remain true for \
-                     {hold:?}\nprocess running: {}\nscreen contents:\n{}",
-                    self.pty.is_running(),
+                     {hold:?}\nprocess running: {}\nprocess tree: {}\nscreen contents:\n{}",
+                    self.pty.is_running()?,
+                    self.pty.process_tree_diagnostics(),
                     self.screen.contents()
                 );
             }
@@ -574,10 +677,10 @@ impl PtyHarness {
         self.pty.quit()
     }
 
-    /// Wait up to `timeout` for the child to exit, returning its exit code
-    /// (`None` if it's still running at the deadline). Call once and cache the
-    /// result — the underlying `try_wait` reaps the child.
-    pub fn wait_exit_code(&mut self, timeout: Duration) -> Option<u32> {
+    /// Wait without collapsing exit, pending-status, liveness, or poll errors.
+    /// Returns [`PtyExitPoll::PendingStatus`] immediately for an already-exited
+    /// child and [`PtyExitPoll::Running`] only when the live-child deadline expires.
+    pub fn wait_exit_code(&mut self, timeout: Duration) -> Result<PtyExitPoll<u32>> {
         self.pty.wait_exit_code(timeout)
     }
 
@@ -592,14 +695,25 @@ impl PtyHarness {
     ) -> Result<u32> {
         let exit_deadline = Instant::now() + exit_timeout;
         let exit_code = loop {
-            if let Some(code) = self.pty.try_exit_code()? {
+            let exit = self.pty.poll_exit_code()?;
+            if let PtyExitPoll::Exited(code) = exit {
                 break code;
             }
             let remaining = exit_deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                if exit == PtyExitPoll::PendingStatus {
+                    anyhow::bail!(
+                        "exit observed but status unavailable after {exit_timeout:?}\n\
+                         process tree: {}\nscreen contents:\n{}\nraw output:\n{}",
+                        self.pty.process_tree_diagnostics(),
+                        self.screen.contents(),
+                        String::from_utf8_lossy(&self.raw_output)
+                    );
+                }
                 anyhow::bail!(
                     "timed out after {exit_timeout:?} waiting for child exit\n\
-                     process running: true\nscreen contents:\n{}\nraw output:\n{}",
+                     process running: true\nprocess tree: {}\nscreen contents:\n{}\nraw output:\n{}",
+                    self.pty.process_tree_diagnostics(),
                     self.screen.contents(),
                     String::from_utf8_lossy(&self.raw_output)
                 );
@@ -628,6 +742,11 @@ impl PtyHarness {
     /// Child PID (see [`PtyController::child_pid`]).
     pub fn child_pid(&self) -> Option<u32> {
         self.pty.child_pid()
+    }
+
+    /// Process-group/job enrollment state for failure diagnostics.
+    pub fn process_tree_diagnostics(&self) -> String {
+        self.pty.process_tree_diagnostics()
     }
 
     /// Deliver a signal to the child (unix). See [`PtyController::send_signal`].

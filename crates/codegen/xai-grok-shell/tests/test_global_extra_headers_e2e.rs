@@ -29,10 +29,9 @@ async fn global_models_config_reaches_inference_request() {
         .await
         .expect("start mock server");
     let workdir = git_workdir();
-    let home = tempfile::TempDir::new().unwrap();
+    let sandbox = TestSandbox::builder().mock_url(server.url()).build();
 
-    let grok_home = home.path().join(".grok");
-    std::fs::create_dir_all(&grok_home).expect("create .grok home");
+    let grok_home = sandbox.grok_home().to_path_buf();
     std::fs::write(
         grok_home.join("config.toml"),
         r#"[models]
@@ -50,18 +49,14 @@ stream_tool_calls = true
     let mut cmd = tokio::process::Command::new(grok_binary());
     cmd.args(["-p", "say hi", "--yolo", "--output-format", "json"])
         .arg("--cwd")
-        .arg(workdir.path())
-        .current_dir(workdir.path())
+        .arg(workdir.workspace())
+        .current_dir(workdir.workspace())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    xai_grok_test_support::env::test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
-    cmd.env("GROK_HOME", grok_home);
-    // Don't attach to a developer's ambient leader; spawn fresh against the mock.
-    cmd.env_remove("GROK_LEADER_SOCKET");
 
-    let result = run_headless_with_cmd(cmd).await;
+    let result = run_headless_in_sandbox(cmd, sandbox).await;
     assert_headless_success(&result, "global models config e2e", Some(&server));
 
     let requests = server.requests();

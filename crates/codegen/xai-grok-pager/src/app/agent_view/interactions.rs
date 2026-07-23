@@ -133,7 +133,7 @@ impl AgentView {
                 if let Some(opt) = perm.options.get(perm.active_idx)
                     && opt.kind == agent_client_protocol::PermissionOptionKind::RejectOnce
                     && crate::input::key::is_text_input_key(key)
-                    && matches!(key.code, KeyCode::Char(c) if ! c.is_ascii_digit())
+                    && matches!(key.code, KeyCode::Char(c) if !c.is_ascii_digit())
                 {
                     perm.focus = PermissionFocus::FollowupInput;
                     let _ = self.prompt.handle_key(key);
@@ -174,6 +174,7 @@ impl AgentView {
                 InputOutcome::Action(Action::CancelTurnChoice(choice))
             }
             KeyCode::Esc => {
+                self.suppress_rewind_arm(std::time::Instant::now());
                 InputOutcome::Action(Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun))
             }
             _ => InputOutcome::Unchanged,
@@ -271,8 +272,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if key!('y', CONTROL).matches(key) {
-                    self.dismiss_question_view();
-                    return InputOutcome::Changed;
+                    return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
                     qv.focus = QuestionFocus::Navigation;
@@ -333,8 +333,7 @@ impl AgentView {
             }
             QuestionFocus::Navigation => {
                 if key!('y', CONTROL).matches(key) {
-                    self.dismiss_question_view();
-                    return InputOutcome::Changed;
+                    return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
                     return self.submit_question_answers(true);
@@ -1036,14 +1035,22 @@ impl AgentView {
     /// Restores the original prompt text that was stashed when the question
     /// view opened, so typed "additional context" doesn't leak into the
     /// main prompt. Also clears any stashed (tab-hidden) question view.
-    fn dismiss_question_view(&mut self) {
+    fn dismiss_question_view(&mut self) -> InputOutcome {
+        let is_doctor_fix = self.question_view.as_ref().is_some_and(|qv| {
+            matches!(
+                qv.local_kind,
+                Some(crate::views::question_view::LocalQuestionKind::DoctorFix { .. })
+            )
+        });
+        if is_doctor_fix {
+            return self.submit_question_answers(true);
+        }
         if let Some(qv) = self.question_view.take() {
             self.turn_paused_duration += qv.opened_at.elapsed();
             self.prompt.restore(qv.stashed_prompt);
         }
-        self.hovered_question_item = None;
-        self.inline_prompt_area = None;
-        self.last_question_click = None;
+        self.cleanup_question_state();
+        InputOutcome::Changed
     }
     /// Retract an interaction modal (permission / question / plan-approval) that
     /// another connected client already resolved.
@@ -1063,7 +1070,7 @@ impl AgentView {
             .as_ref()
             .is_some_and(|qv| qv.tool_call_id == tool_call_id)
         {
-            self.dismiss_question_view();
+            let _ = self.dismiss_question_view();
             return true;
         }
         if self
@@ -1106,6 +1113,10 @@ impl AgentView {
     pub(crate) fn submit_question_answers_for_test(&mut self, skipped: bool) -> InputOutcome {
         self.submit_question_answers(skipped)
     }
+    #[cfg(test)]
+    pub(crate) fn handle_question_key_for_test(&mut self, key: &KeyEvent) -> InputOutcome {
+        self.handle_question_key(key)
+    }
     fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
         self.swap_question_freeform();
@@ -1114,7 +1125,19 @@ impl AgentView {
         };
         self.turn_paused_duration += qv.opened_at.elapsed();
         if let Some(kind) = qv.local_kind.take() {
-            let outcome = translate_local_submit(&qv, kind, skipped);
+            let is_doctor_fix = matches!(
+                kind,
+                crate::views::question_view::LocalQuestionKind::DoctorFix { .. }
+            );
+            let outcome = if skipped && is_doctor_fix {
+                let crate::views::question_view::LocalQuestionKind::DoctorFix { target, .. } = kind
+                else {
+                    unreachable!("doctor fix checked above")
+                };
+                InputOutcome::Action(Action::DoctorFixCancelled(target))
+            } else {
+                translate_local_submit(&qv, kind, skipped)
+            };
             self.prompt.restore(qv.stashed_prompt);
             self.cleanup_question_state();
             return outcome;
@@ -1281,6 +1304,7 @@ mod cancel_turn_mouse_tests {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
+                compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
             },
@@ -1376,6 +1400,28 @@ mod cancel_turn_mouse_tests {
         let mut agent = make_agent();
         let outcome = agent.handle_cancel_turn_mouse(&down(10, 10));
         assert!(matches!(outcome, InputOutcome::Unchanged));
+    }
+    #[test]
+    fn esc_confirm_refreshes_expired_rewind_grace() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::Instant;
+        let mut agent = make_agent();
+        agent.session.state = AgentState::TurnRunning;
+        setup_panel(&mut agent);
+        agent.rewind_suppress_deadline = Some(Instant::now());
+        let outcome =
+            agent.handle_cancel_turn_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::CancelTurnChoice(CancelTurnChoice::ContinueToRun))
+            ),
+            "panel Esc must confirm the parent-turn cancel, got {outcome:?}"
+        );
+        assert!(
+            agent.rewind_arm_suppressed(Instant::now()),
+            "the Esc-confirmed cancel must refresh the post-cancel grace"
+        );
     }
 }
 #[cfg(test)]
@@ -1673,9 +1719,7 @@ mod question_no_freeform_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
     }
     fn down(col: u16, row: u16) -> MouseEvent {

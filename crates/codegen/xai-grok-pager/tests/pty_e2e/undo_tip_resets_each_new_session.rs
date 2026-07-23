@@ -16,16 +16,22 @@ async fn undo_tip_resets_each_new_session() {
     let binary = pager_binary().expect("resolve pager binary");
     // Same env (same $HOME TempDir) for both spawns. Contextual hints ship
     // default-OFF, so opt in explicitly or the undo tip never shows.
-    let env = contextual_hints_env(&content);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env_refs = CONTEXTUAL_HINTS_ENV;
 
     // Run 1: drive the in-memory seen count to its cap (3 TTL-spaced shows),
     // so the count is exhausted before quitting. Each new show needs the
     // previous banner to expire via its ~3s TTL first — re-wiping while it is
     // still visible only refreshes the TTL without incrementing the count.
     {
-        let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs)
-            .expect("spawn run 1");
+        let mut harness = PtyHarness::spawn_with_content_env(
+            &binary,
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            &content,
+            &[],
+            env_refs,
+        )
+        .expect("spawn run 1");
         harness
             .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
             .expect("welcome run 1");
@@ -56,8 +62,15 @@ async fn undo_tip_resets_each_new_session() {
     // Run 2: SAME $HOME. A persisted cap would suppress the tip here;
     // per-session in-memory state means it shows again.
     {
-        let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs)
-            .expect("spawn run 2");
+        let mut harness = PtyHarness::spawn_with_content_env(
+            &binary,
+            DEFAULT_ROWS,
+            DEFAULT_COLS,
+            &content,
+            &[],
+            env_refs,
+        )
+        .expect("spawn run 2");
         harness
             .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
             .expect("welcome run 2");

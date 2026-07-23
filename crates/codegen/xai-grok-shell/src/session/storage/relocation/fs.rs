@@ -147,15 +147,67 @@ fn copy_symlink(source: &Path, target: &Path, file_type: &fs::FileType) -> Resul
 }
 
 pub(super) fn remove_dir_durable(path: &Path) -> Result<()> {
+    remove_dir(path)?;
     let parent = path.parent().ok_or_else(|| {
         RelocationError::Inconsistent(format!("directory has no parent: {}", path.display()))
     })?;
-    match fs::remove_dir_all(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_error("remove", path, e)),
-    }
     sync_dir(parent).map_err(|e| io_error("sync", parent, e))
+}
+
+fn remove_dir(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_error("remove", path, e)),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn remove_dir_with_barrier_fault(path: &Path) -> Result<()> {
+    remove_dir(path)?;
+    Err(RelocationError::Inconsistent(
+        "injected directory removal barrier failure".into(),
+    ))
+}
+
+pub(super) fn write_new_durable(
+    path: &Path,
+    bytes: &[u8],
+    fault: Option<AtomicWriteFault>,
+) -> std::result::Result<(), WriteFailure> {
+    let parent = path.parent().ok_or_else(|| {
+        WriteFailure::NotCommitted(RelocationError::Inconsistent(format!(
+            "path has no parent: {}",
+            path.display()
+        )))
+    })?;
+    let temp_path = temp_sibling(path);
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut temp = options
+            .open(&temp_path)
+            .map_err(|e| WriteFailure::NotCommitted(io_error("create", &temp_path, e)))?;
+        temp.write_all(bytes)
+            .and_then(|()| super::super::sync_file_durable(&temp))
+            .map_err(|e| WriteFailure::NotCommitted(io_error("write", &temp_path, e)))?;
+        if fault == Some(AtomicWriteFault::BeforeRename) {
+            return Err(WriteFailure::NotCommitted(RelocationError::Inconsistent(
+                "injected pre-rename failure".into(),
+            )));
+        }
+        rename_no_replace(&temp_path, path).map_err(WriteFailure::NotCommitted)?;
+        if fault == Some(AtomicWriteFault::AfterRename) {
+            return Err(WriteFailure::Committed(RelocationError::Inconsistent(
+                "injected directory barrier failure".into(),
+            )));
+        }
+        sync_dir(parent).map_err(|e| WriteFailure::Committed(io_error("sync", parent, e)))
+    })();
+    let _ = fs::remove_file(&temp_path);
+    result
 }
 
 pub(super) fn write_atomic_durable(

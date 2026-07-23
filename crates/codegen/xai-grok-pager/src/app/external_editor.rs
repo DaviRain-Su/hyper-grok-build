@@ -582,8 +582,7 @@ mod tests {
             PendingEditorRequest::PromptDraft {
                 agent_id: AgentId(7),
                 ref original_text,
-            }
-if original_text == "sensitive draft"
+            } if original_text == "sensitive draft"
         ));
         drop(request);
     }

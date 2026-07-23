@@ -41,12 +41,15 @@ async fn bracketed_ime_paste_skips_clipboard_image_macos() {
     let content = ContentController::start().await.expect("start content");
     let binary = pager_binary().expect("resolve pager binary");
     // The payload-origin gate only runs under Otty (TERM_PROGRAM=otty).
-    let mut env = content.env_for_pager();
-    env.push(("TERM_PROGRAM".into(), "otty".into()));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut harness =
-        PtyHarness::new_in_dir(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs, None)
-            .expect("spawn pager");
+    let mut harness = PtyHarness::spawn_with_content_env_ops(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        &[EnvOp::set("TERM_PROGRAM", "otty")],
+    )
+    .expect("spawn pager");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)

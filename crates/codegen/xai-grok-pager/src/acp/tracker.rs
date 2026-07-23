@@ -567,8 +567,9 @@ impl AcpUpdateTracker {
     /// Whether `block` is a successful Edit with hunks (worth a full-file HL job).
     fn edit_wants_file_hl(block: &RenderBlock) -> bool {
         matches!(
-            block, RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) if edit.error
-            .is_none() && ! edit.hunks.is_empty()
+            block,
+            RenderBlock::ToolCall(ToolCallBlock::Edit(edit))
+                if edit.error.is_none() && !edit.hunks.is_empty()
         )
     }
     /// Stash `entry_id` for live successful Edits with hunks. Skips replay
@@ -745,8 +746,10 @@ impl AcpUpdateTracker {
     ) -> bool {
         if !meta.is_replay {
             debug!(
-                target : crate ::tracing::ACP_UPDATE_TARGET, "[acp] {} | {}",
-                update_summary(& update), meta_summary(meta),
+                target: crate::tracing::ACP_UPDATE_TARGET,
+                "[acp] {} | {}",
+                update_summary(&update),
+                meta_summary(meta),
             );
         }
         if self.retry_activity.is_some() {
@@ -859,7 +862,7 @@ impl AcpUpdateTracker {
     fn finish_thinking(&mut self, scrollback: &mut ScrollbackState) {
         if let Some(thinking_id) = self.current_thinking.take() {
             let is_empty = scrollback.get_by_id(thinking_id).is_some_and(
-                |e| matches!(& e.block, RenderBlock::Thinking(t) if t.text().is_empty()),
+                |e| matches!(&e.block, RenderBlock::Thinking(t) if t.text().is_empty()),
             );
             if is_empty {
                 scrollback.remove_entry(thinking_id);
@@ -919,7 +922,7 @@ impl AcpUpdateTracker {
         }
         if self.current_agent_msg.is_none() && text.trim().is_empty() {
             tracing::warn!(
-                text = % text.escape_debug(),
+                text = %text.escape_debug(),
                 "ignoring whitespace-only agent message chunk (no prior content)"
             );
             return false;
@@ -1185,7 +1188,8 @@ impl AcpUpdateTracker {
             };
             if let Some((deferred_id, description, keep_in_pending)) = defer_as_bg {
                 tracing::debug!(
-                    tool_call_id = % deferred_id, keep_in_pending,
+                    tool_call_id = %deferred_id,
+                    keep_in_pending,
                     "Deferring is_background=true tool to bg_deferred_tools"
                 );
                 if !keep_in_pending {
@@ -2105,17 +2109,13 @@ fn content_text(tc: &acp::ToolCall) -> String {
 fn is_bg_plumbing_tool(tc: &acp::ToolCall) -> bool {
     matches!(
         tc.title.as_str(),
-        "get_command_or_subagent_output"
-            | "kill_command_or_subagent"
-            | "wait_commands_or_subagents"
-            | "get_task_output"
-            | "kill_task"
-            | "wait_tasks"
-            | "get_task_or_subagent_output"
-            | "kill_task_or_subagent"
-            | "wait_tasks_or_subagents"
-            | "AwaitShell"
-            | "Await"
+        // Current names (post-rename)
+        "get_command_or_subagent_output" | "kill_command_or_subagent" | "wait_commands_or_subagents"
+        // Old names (persisted sessions / replay)
+        | "get_task_output" | "kill_task" | "wait_tasks"
+        // Intermediate names (mid-rename sessions)
+        | "get_task_or_subagent_output" | "kill_task_or_subagent" | "wait_tasks_or_subagents"
+        | "AwaitShell" | "Await"
     ) || tc.title.starts_with("Await:")
         || tc.title.starts_with("Sleep ")
         || tc.title.starts_with("Wait tasks:")
@@ -2715,33 +2715,27 @@ mod tests {
         };
         assert!(is_workflow_tool(&wf(
             "Workflow: deep-research",
-            serde_json::json!({
-            "variant" : "Workflow", "name" : "deep-research" }),
+            serde_json::json!({ "variant": "Workflow", "name": "deep-research" }),
         )));
         assert!(is_workflow_tool(&wf(
             "Workflow: resume run",
-            serde_json::json!({ "variant" :
-            "Workflow", "resume_from_run_id" : "wf_1" }),
+            serde_json::json!({ "variant": "Workflow", "resume_from_run_id": "wf_1" }),
         )));
         assert!(!is_workflow_tool(&wf(
             "Validating workflow 'triage'",
-            serde_json::json!({
-            "variant" : "Workflow", "script" : "let meta = ...", "validate_only" : true
-            }),
+            serde_json::json!({ "variant": "Workflow", "script": "let meta = ...", "validate_only": true }),
         )));
         assert!(is_workflow_tool(&wf(
             "Creating workflow 'triage'",
-            serde_json::json!({
-            "variant" : "Workflow", "script" : "let meta = ..." }),
+            serde_json::json!({ "variant": "Workflow", "script": "let meta = ..." }),
         )));
         assert!(!is_workflow_tool(&wf(
             "workflow",
-            serde_json::json!({ "validate_only" :
-            true }),
+            serde_json::json!({ "validate_only": true }),
         )));
         assert!(is_workflow_tool(&wf(
             "workflow",
-            serde_json::json!({ "name" : "goal" }),
+            serde_json::json!({ "name": "goal" }),
         )));
     }
     fn tool_call(id: &str, kind: acp::ToolKind, title: &str) -> acp::SessionUpdate {
@@ -3169,11 +3163,7 @@ mod tests {
             acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
                 "real prompt".to_string(),
             )))
-            .meta(
-                serde_json::json!({ "promptIndex" : 3 })
-                    .as_object()
-                    .cloned(),
-            ),
+            .meta(serde_json::json!({ "promptIndex": 3 }).as_object().cloned()),
         );
         assert!(
             !tracker.handle_update(echo, &meta(), &mut sb),
@@ -3503,9 +3493,10 @@ mod tests {
             .kind(acp::ToolKind::Execute)
             .status(acp::ToolCallStatus::Completed)
             .content(vec![])
-            .raw_input(Some(serde_json::json!(
-                { "command" : command, "description" : description, }
-            )))
+            .raw_input(Some(serde_json::json!({
+                "command": command,
+                "description": description,
+            })))
             .locations(vec![]),
         )
     }
@@ -3730,10 +3721,10 @@ mod tests {
             .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
                 acp::TextContent::new("Running Python script".to_string()),
             ))])
-            .raw_input(Some(json!(
-                { "command" : "python tmp/test.py", "description" :
-                "Running Python script" }
-            )))
+            .raw_input(Some(json!({
+                "command": "python tmp/test.py",
+                "description": "Running Python script"
+            })))
             .locations(vec![]),
         );
         tracker.handle_update(tc, &meta(), &mut sb);
@@ -3926,10 +3917,11 @@ mod tests {
             acp::ToolCallUpdateFields::new()
                 .kind(Some(acp::ToolKind::Search))
                 .title(Some("fn main".to_string()))
-                .raw_input(Some(serde_json::json!(
-                    { "variant" : "Grep", "pattern" : "fn main", "path" :
-                    "src/", }
-                ))),
+                .raw_input(Some(serde_json::json!({
+                    "variant": "Grep",
+                    "pattern": "fn main",
+                    "path": "src/",
+                }))),
         ));
         tracker.handle_update(in_progress, &meta(), &mut scrollback);
         assert_eq!(scrollback.len(), 1, "should still be 1 entry");
@@ -4040,7 +4032,7 @@ mod tests {
                 acp::ToolCallUpdateFields::new()
                     .kind(Some(acp::ToolKind::Edit))
                     .title(Some("foo.rs".to_string()))
-                    .raw_input(Some(serde_json::json!({ "file_path" : "foo.rs" }))),
+                    .raw_input(Some(serde_json::json!({ "file_path": "foo.rs" }))),
             ));
             tracker.handle_update(in_progress, &meta(), &mut sb);
             let entry = sb.get(0).expect("entry exists");
@@ -4065,7 +4057,7 @@ mod tests {
                 acp::ToolCallUpdateFields::new()
                     .kind(Some(acp::ToolKind::Edit))
                     .title(Some("foo.rs".to_string()))
-                    .raw_input(Some(serde_json::json!({ "file_path" : "foo.rs" })))
+                    .raw_input(Some(serde_json::json!({ "file_path": "foo.rs" })))
                     .status(Some(acp::ToolCallStatus::Completed)),
             ));
             tracker.handle_update(completed, &meta(), &mut sb);
@@ -4126,7 +4118,7 @@ mod tests {
             acp::ToolCallUpdateFields::new()
                 .kind(Some(acp::ToolKind::Edit))
                 .title(Some("foo.rs".to_string()))
-                .raw_input(Some(serde_json::json!({ "file_path" : "foo.rs" })))
+                .raw_input(Some(serde_json::json!({ "file_path": "foo.rs" })))
                 .content(Some(vec![acp::ToolCallContent::Diff(
                     acp::Diff::new("foo.rs", "let x = 2;\n".to_string())
                         .old_text(Some("let x = 1;\n".to_string())),
@@ -4178,7 +4170,7 @@ mod tests {
             )
             .kind(acp::ToolKind::Edit)
             .status(acp::ToolCallStatus::Completed)
-            .raw_input(Some(serde_json::json!({ "file_path" : "a.rs" })))
+            .raw_input(Some(serde_json::json!({ "file_path": "a.rs" })))
             .content(vec![
                 diff("a.rs", "a1\n", "a2\n"),
                 diff("b.rs", "b1\n", "b2\n"),
@@ -4209,7 +4201,7 @@ mod tests {
             acp::Diff::new(path, format!("new_{line}"))
                 .old_text(Some(format!("old_{line}")))
                 .meta(
-                    serde_json::json!({ "old_line" : line, "new_line" : line })
+                    serde_json::json!({ "old_line": line, "new_line": line })
                         .as_object()
                         .cloned(),
                 ),
@@ -4222,7 +4214,7 @@ mod tests {
             acp::ToolCallUpdateFields::new()
                 .kind(Some(acp::ToolKind::Edit))
                 .title(Some(path.to_string()))
-                .raw_input(Some(serde_json::json!({ "file_path" : path })))
+                .raw_input(Some(serde_json::json!({ "file_path": path })))
                 .content(Some(vec![edit_diff_content(path, line)]))
                 .status(Some(acp::ToolCallStatus::Completed)),
         ))
@@ -4245,7 +4237,7 @@ mod tests {
             acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), path.to_string())
                 .kind(acp::ToolKind::Edit)
                 .status(acp::ToolCallStatus::Completed)
-                .raw_input(Some(serde_json::json!({ "file_path" : path })))
+                .raw_input(Some(serde_json::json!({ "file_path": path })))
                 .content(vec![edit_diff_content(path, line)])
                 .locations(vec![]),
         )
@@ -4427,7 +4419,7 @@ mod tests {
                     acp::ToolCallId::new(Arc::from("e2")),
                     acp::ToolCallUpdateFields::new()
                         .kind(Some(acp::ToolKind::Edit))
-                        .raw_input(Some(serde_json::json!({ "file_path" : "foo.rs" })))
+                        .raw_input(Some(serde_json::json!({ "file_path": "foo.rs" })))
                         .status(Some(acp::ToolCallStatus::Failed)),
                 )),
                 &meta(),
@@ -4466,7 +4458,7 @@ mod tests {
                 acp::ToolCall::new(acp::ToolCallId::new(Arc::from("e2")), "foo.rs".to_string())
                     .kind(acp::ToolKind::Edit)
                     .status(acp::ToolCallStatus::Completed)
-                    .raw_input(Some(serde_json::json!({ "file_path" : "foo.rs" })))
+                    .raw_input(Some(serde_json::json!({ "file_path": "foo.rs" })))
                     .content(vec![
                         edit_diff_content("foo.rs", 40),
                         edit_diff_content("bar.rs", 7),
@@ -4832,10 +4824,10 @@ mod tests {
                 .kind(acp::ToolKind::Execute)
                 .status(acp::ToolCallStatus::Pending)
                 .content(vec![])
-                .raw_input(Some(serde_json::json!(
-                    { "command" : "sleep 5 && echo done", "description" :
-                    "Wait 5 seconds then print done", }
-                )))
+                .raw_input(Some(serde_json::json!({
+                    "command": "sleep 5 && echo done",
+                    "description": "Wait 5 seconds then print done",
+                })))
                 .locations(vec![]),
             ),
             &meta(),
@@ -4862,7 +4854,7 @@ mod tests {
                 .status(acp::ToolCallStatus::Pending)
                 .content(vec![])
                 .raw_input(Some(
-                    serde_json::json!({ "command" : "gt stack submit --no-edit" }),
+                    serde_json::json!({ "command": "gt stack submit --no-edit" }),
                 ))
                 .locations(vec![]),
         );
@@ -4890,7 +4882,7 @@ mod tests {
             .kind(acp::ToolKind::Execute)
             .status(acp::ToolCallStatus::Pending)
             .content(vec![])
-            .raw_input(Some(serde_json::json!({ "command" : command })))
+            .raw_input(Some(serde_json::json!({ "command": command })))
             .locations(vec![]),
         );
         tracker.handle_update(tc, &meta(), &mut sb);
@@ -4917,7 +4909,7 @@ mod tests {
             .kind(acp::ToolKind::Execute)
             .status(acp::ToolCallStatus::Pending)
             .content(vec![])
-            .raw_input(Some(serde_json::json!({ "command" : command })))
+            .raw_input(Some(serde_json::json!({ "command": command })))
             .locations(vec![]),
         );
         tracker.handle_update(tc, &meta(), &mut sb);
@@ -4936,7 +4928,7 @@ mod tests {
             .status(acp::ToolCallStatus::Completed)
             .content(vec![])
             .raw_input(Some(
-                serde_json::json!({ "command" : "cd /proj && echo hi" }),
+                serde_json::json!({ "command": "cd /proj && echo hi" }),
             ))
             .locations(vec![]);
         let block = tool_call_to_block(&tc, Some(Path::new("/proj")));
@@ -5135,7 +5127,7 @@ mod tests {
         acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from(id)),
             acp::ToolCallUpdateFields::new()
-                .raw_input(Some(serde_json::json!({ "timeout_ms" : timeout_ms }))),
+                .raw_input(Some(serde_json::json!({ "timeout_ms": timeout_ms }))),
         ))
     }
     /// A blocking-wait reason is dropped when the suppressed tool completes, so
@@ -5219,9 +5211,10 @@ mod tests {
         tracker.handle_update(
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from("t1")),
-                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!(
-                    { "task_ids" : ["bg-1"], "timeout_ms" : 180_000, }
-                ))),
+                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-1"],
+                    "timeout_ms": 180_000,
+                }))),
             )),
             &m,
             &mut sb,
@@ -5260,10 +5253,10 @@ mod tests {
         tracker.handle_update(
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from("t1")),
-                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!(
-                    { "task_ids" : ["bg-123", "bg-456"], "timeout_ms" : 30_000,
-                    }
-                ))),
+                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!({
+                    "task_ids": ["bg-123", "bg-456"],
+                    "timeout_ms": 30_000,
+                }))),
             )),
             &meta(),
             &mut sb,
@@ -5297,12 +5290,12 @@ mod tests {
             other => panic!("expected TaskOutput, got {other:?}"),
         };
         assert!(!waits(None), "missing raw_input defaults to instant poll");
-        assert!(!waits(Some(serde_json::json!({ "task_ids" : ["a"] }))));
+        assert!(!waits(Some(serde_json::json!({ "task_ids": ["a"] }))));
         assert!(!waits(Some(
-            serde_json::json!({ "task_ids" : ["a"], "timeout_ms" : 0 })
+            serde_json::json!({ "task_ids": ["a"], "timeout_ms": 0 })
         )));
         assert!(waits(Some(
-            serde_json::json!({ "task_ids" : ["a"], "timeout_ms" : 1 })
+            serde_json::json!({ "task_ids": ["a"], "timeout_ms": 1 })
         )));
     }
     #[test]
@@ -5426,10 +5419,11 @@ mod tests {
         );
         let bg_update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("t1")),
-            acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!(
-                { "variant" : "Task", "task_id" : "sa1", "run_in_background"
-                : true }
-            ))),
+            acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!({
+                "variant": "Task",
+                "task_id": "sa1",
+                "run_in_background": true
+            }))),
         ));
         tracker.handle_update(bg_update, &meta(), &mut sb);
         assert_eq!(tracker.activity(), None);
@@ -5487,19 +5481,42 @@ mod tests {
     }
     #[test]
     fn parse_search_tool_results_grouped_format() {
-        let json = serde_json::json!(
-            { "results" : [{ "server" : "linear", "tools" : [{ "tool_name" :
-            "linear__save_issue", "description" : "Create an issue", "score" : 0.8,
-            "parameters" : ["stale_param_a", "stale_param_b"], "input_schema" : { "type"
-            : "object", "properties" : { "title" : { "type" : "string" }, "team" : {
-            "type" : "string" } }, "required" : ["title"] } }, { "tool_name" :
-            "linear__list_issues", "description" : "List issues", "score" : 0.5,
-            "parameters" : ["stale_query"], "input_schema" : { "type" : "object",
-            "properties" : { "query" : { "type" : "string" } } } }] }, { "server" :
-            "slack", "tools" : [{ "tool_name" : "slack__send_message", "description" :
-            "Send a message", "score" : 0.3, "input_schema" : {} }] }],
-            "total_hidden_tools" : 10, "status" : "ready" }
-        );
+        let json = serde_json::json!({
+            "results": [
+                {
+                    "server": "linear",
+                    "tools": [
+                        {
+                            "tool_name": "linear__save_issue",
+                            "description": "Create an issue",
+                            "score": 0.8,
+                            "parameters": ["stale_param_a", "stale_param_b"],
+                            "input_schema": {"type": "object", "properties": {"title": {"type": "string"}, "team": {"type": "string"}}, "required": ["title"]}
+                        },
+                        {
+                            "tool_name": "linear__list_issues",
+                            "description": "List issues",
+                            "score": 0.5,
+                            "parameters": ["stale_query"],
+                            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}
+                        }
+                    ]
+                },
+                {
+                    "server": "slack",
+                    "tools": [
+                        {
+                            "tool_name": "slack__send_message",
+                            "description": "Send a message",
+                            "score": 0.3,
+                            "input_schema": {}
+                        }
+                    ]
+                }
+            ],
+            "total_hidden_tools": 10,
+            "status": "ready"
+        });
         let content = serde_json::to_string_pretty(&json).unwrap();
         let results = parse_search_tool_results(&content);
         assert_eq!(results.len(), 3);
@@ -5514,10 +5531,16 @@ mod tests {
     }
     #[test]
     fn parse_search_tool_results_old_flat_format_returns_empty() {
-        let json = serde_json::json!(
-            { "results" : [{ "tool_name" : "linear__save_issue", "server_name" :
-            "linear", "description" : "Create an issue", "score" : 0.8 }] }
-        );
+        let json = serde_json::json!({
+            "results": [
+                {
+                    "tool_name": "linear__save_issue",
+                    "server_name": "linear",
+                    "description": "Create an issue",
+                    "score": 0.8
+                }
+            ]
+        });
         let content = serde_json::to_string_pretty(&json).unwrap();
         let results = parse_search_tool_results(&content);
         assert!(
@@ -5535,7 +5558,7 @@ mod tests {
                 "loop".to_string(),
             )])
             .meta(
-                serde_json::json!({ "tools" : ["scheduler_create", "read_file"] })
+                serde_json::json!({"tools": ["scheduler_create", "read_file"]})
                     .as_object()
                     .cloned(),
             ),
@@ -5558,20 +5581,20 @@ mod tests {
     #[test]
     fn parse_tools_meta_handles_shape_variants() {
         assert_eq!(
-            parse_tools_meta(serde_json::json!({ "tools" : ["a", "b"] }).as_object()),
+            parse_tools_meta(serde_json::json!({"tools": ["a", "b"]}).as_object()),
             Some(vec!["a".to_string(), "b".to_string()]),
         );
         assert_eq!(parse_tools_meta(None), None);
         assert_eq!(
-            parse_tools_meta(serde_json::json!({ "other" : 1 }).as_object()),
+            parse_tools_meta(serde_json::json!({"other": 1}).as_object()),
             None,
         );
         assert_eq!(
-            parse_tools_meta(serde_json::json!({ "tools" : "nope" }).as_object()),
+            parse_tools_meta(serde_json::json!({"tools": "nope"}).as_object()),
             None,
         );
         assert_eq!(
-            parse_tools_meta(serde_json::json!({ "tools" : ["a", 1, true, "b"] }).as_object()),
+            parse_tools_meta(serde_json::json!({"tools": ["a", 1, true, "b"]}).as_object()),
             Some(vec!["a".to_string(), "b".to_string()]),
         );
     }
@@ -5607,7 +5630,7 @@ mod tests {
         assert_eq!(json_size_hint(&serde_json::json!("abcd")), "str(4B)");
         assert_eq!(json_size_hint(&serde_json::json!([1, 2, 3])), "arr(3)");
         assert_eq!(
-            json_size_hint(&serde_json::json!({ "output" : [1, 2], "cmd" : "ls" })),
+            json_size_hint(&serde_json::json!({"output": [1, 2], "cmd": "ls"})),
             "obj(2 keys, ~4B)"
         );
     }
@@ -5630,7 +5653,7 @@ mod tests {
     #[test]
     fn build_and_parse_tools_meta_round_trip() {
         let names = vec!["scheduler_create".to_string(), "image_gen".to_string()];
-        let wire = serde_json::json!({ "tools" : names });
+        let wire = serde_json::json!({ "tools": names });
         assert_eq!(parse_tools_meta(wire.as_object()), Some(names));
     }
     #[test]
@@ -5651,7 +5674,7 @@ mod tests {
                 "loop".to_string(),
             )])
             .meta(
-                serde_json::json!({ "tools" : ["scheduler_create"] })
+                serde_json::json!({"tools": ["scheduler_create"]})
                     .as_object()
                     .cloned(),
             ),
@@ -5669,7 +5692,7 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let with_tools = acp::SessionUpdate::AvailableCommandsUpdate(
             acp::AvailableCommandsUpdate::new(vec![]).meta(
-                serde_json::json!({ "tools" : ["scheduler_create"] })
+                serde_json::json!({"tools": ["scheduler_create"]})
                     .as_object()
                     .cloned(),
             ),
@@ -5696,7 +5719,7 @@ mod tests {
     fn is_task_tool_recognizes_grok_build_variant() {
         assert!(is_task_tool(&initial_tool_call("tc1", "task")));
         let mut with_variant = initial_tool_call("tc2", "anything");
-        with_variant.raw_input = Some(serde_json::json!({ "variant" : "Task" }));
+        with_variant.raw_input = Some(serde_json::json!({"variant": "Task"}));
         assert!(is_task_tool(&with_variant));
     }
     #[test]
@@ -5705,7 +5728,7 @@ mod tests {
         assert!(!is_task_tool(&initial_tool_call("tc2", "Read")));
         assert!(!is_task_tool(&initial_tool_call("tc3", "todo_write")));
         let mut with_variant = initial_tool_call("tc4", "anything");
-        with_variant.raw_input = Some(serde_json::json!({ "variant" : "Bash" }));
+        with_variant.raw_input = Some(serde_json::json!({"variant": "Bash"}));
         assert!(!is_task_tool(&with_variant));
     }
     #[test]
@@ -5743,7 +5766,7 @@ mod tests {
         assert!(is_bg_plumbing_tool(&initial_tool_call("t10", "AwaitShell")));
         assert!(is_bg_plumbing_tool(&initial_tool_call("t10b", "Await")));
         let mut with_variant = initial_tool_call("t11", "anything");
-        with_variant.raw_input = Some(serde_json::json!({ "variant" : "WaitTasks" }));
+        with_variant.raw_input = Some(serde_json::json!({"variant": "WaitTasks"}));
         assert!(is_bg_plumbing_tool(&with_variant));
         assert!(!is_bg_plumbing_tool(&initial_tool_call("t12", "read_file")));
         assert!(!is_bg_plumbing_tool(&initial_tool_call(
@@ -5815,10 +5838,11 @@ mod tests {
             acp::ToolCallUpdateFields::new()
                 .status(Some(acp::ToolCallStatus::InProgress))
                 .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok())
-                .raw_input(Some(serde_json::json!(
-                    { "command" : "sleep 9999", "is_background" : true,
-                    "description" : "long running task" }
-                ))),
+                .raw_input(Some(serde_json::json!({
+                    "command": "sleep 9999",
+                    "is_background": true,
+                    "description": "long running task"
+                }))),
         ))
     }
     /// Regression: is_bg_tool() detected on first InProgress defers the tool
@@ -5881,10 +5905,10 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc1")),
             acp::ToolCallUpdateFields::new()
                 .status(Some(acp::ToolCallStatus::InProgress))
-                .raw_input(Some(serde_json::json!(
-                    { "is_background" : true, "description" :
-                    "long running task" }
-                ))),
+                .raw_input(Some(serde_json::json!({
+                    "is_background": true,
+                    "description": "long running task"
+                }))),
         ));
         assert!(!tracker.handle_update(update, &meta(), &mut sb));
         assert_eq!(sb.len(), 0, "placeholder dropped on deferral");
@@ -5943,9 +5967,10 @@ mod tests {
             acp::ToolCallId::new(Arc::from("tc1")),
             acp::ToolCallUpdateFields::new()
                 .status(Some(acp::ToolCallStatus::InProgress))
-                .raw_input(Some(serde_json::json!(
-                    { "command" : "", "description" : "still loading" }
-                ))),
+                .raw_input(Some(serde_json::json!({
+                    "command": "",
+                    "description": "still loading"
+                }))),
         ));
         tracker.handle_update(update, &meta(), &mut sb);
         assert_eq!(sb.len(), 1);
@@ -5972,10 +5997,11 @@ mod tests {
             acp::ToolCallUpdateFields::new()
                 .status(Some(acp::ToolCallStatus::InProgress))
                 .kind(Some(acp::ToolKind::Execute))
-                .raw_input(Some(serde_json::json!(
-                    { "command" : "bash", "is_background" : true, "description"
-                    : "start a shell" }
-                ))),
+                .raw_input(Some(serde_json::json!({
+                    "command": "bash",
+                    "is_background": true,
+                    "description": "start a shell"
+                }))),
         ));
         tracker.handle_update(update, &meta(), &mut sb);
         assert_eq!(
@@ -6014,7 +6040,7 @@ mod tests {
         .kind(acp::ToolKind::Other)
         .status(acp::ToolCallStatus::Completed)
         .content(vec![])
-        .raw_input(Some(serde_json::json!({ "command" : "echo hi" })))
+        .raw_input(Some(serde_json::json!({ "command": "echo hi" })))
         .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok())
         .locations(vec![]);
         match tool_call_to_block(&tc, None) {
@@ -6611,7 +6637,7 @@ mod tests {
         .kind(acp::ToolKind::Other)
         .status(acp::ToolCallStatus::Completed)
         .content(vec![])
-        .raw_input(Some(serde_json::json!({ "variant" : "ImageToVideo" })))
+        .raw_input(Some(serde_json::json!({ "variant": "ImageToVideo" })))
         .raw_output(serde_json::to_value(output).ok())
         .locations(vec![]);
         assert!(
@@ -6637,7 +6663,7 @@ mod tests {
         .content(vec![acp::ToolCallContent::Content(acp::Content::new(
             acp::ContentBlock::Text(acp::TextContent::new(upsell)),
         ))])
-        .raw_input(Some(serde_json::json!({ "variant" : "ImageGen" })))
+        .raw_input(Some(serde_json::json!({ "variant": "ImageGen" })))
         .raw_output(serde_json::to_value(output).ok())
         .locations(vec![]);
         let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&tc, None)

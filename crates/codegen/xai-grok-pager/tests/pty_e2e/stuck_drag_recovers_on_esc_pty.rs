@@ -119,7 +119,10 @@ async fn stuck_drag_recovers_on_esc_pty() {
         "pager panicked\nscreen:\n{}",
         harness.screen_contents()
     );
-    assert!(harness.is_running(), "pager should still be running");
+    assert!(
+        harness.is_running().expect("poll pager liveness"),
+        "pager should still be running"
+    );
 
     harness.quit().expect("clean quit");
 }

@@ -535,6 +535,7 @@ pub(crate) const KNOWN_CLIENT_IDENTIFIERS: &[&str] = &[
     "grok-web",
     "grok-desktop",
     "grok-code-extension",
+    "grok-agent-sdk",
     "nebula",
     "zed",
 ];

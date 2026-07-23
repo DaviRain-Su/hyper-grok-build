@@ -74,7 +74,7 @@ async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
         .is_some_and(|root| xai_grok_workspace::session::git::detect_vcs_kind(&root).is_jj());
     if is_jj {
         if let Err(e) = remove_jj_workspace(worktree_path).await {
-            tracing::warn!(error = % e, "failed to clean up jj workspace after failure");
+            tracing::warn!(error = %e, "failed to clean up jj workspace after failure");
         }
     } else {
         let wt_path = wt.to_path_buf();
@@ -83,16 +83,11 @@ async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::warn!(
-                    error = % e, "fast remove_worktree failed during cleanup, trying rm"
-                );
+                tracing::warn!(error = %e, "fast remove_worktree failed during cleanup, trying rm");
                 let _ = tokio::fs::remove_dir_all(wt).await;
             }
             Err(e) => {
-                tracing::warn!(
-                    error = % e,
-                    "remove_worktree task panicked during cleanup, trying rm"
-                );
+                tracing::warn!(error = %e, "remove_worktree task panicked during cleanup, trying rm");
                 let _ = tokio::fs::remove_dir_all(wt).await;
             }
         }
@@ -171,17 +166,21 @@ pub async fn resume_session_in_worktree(
 ) -> Result<ResumeSessionInWorktreeResponse> {
     use xai_grok_workspace::session::git::effective_worktree_path;
     tracing::info!(
-        target : WORKTREE_LOG, session_id = % req.session_id, restore_code = ? req
-        .restore_code, restore_code_default, effective_restore_code = req.restore_code
-        .unwrap_or(restore_code_default),
+        target: WORKTREE_LOG,
+        session_id = %req.session_id,
+        restore_code = ?req.restore_code,
+        restore_code_default,
+        effective_restore_code = req.restore_code.unwrap_or(restore_code_default),
         "RESTORE_CODE_DEBUG: resume_session_in_worktree entry"
     );
     let cwd_path = std::path::Path::new(req.source_cwd.as_str());
     let local_resolution = resolve_session_repo_wide(&req.session_id, cwd_path);
     if let Ok(Some(resolved)) = local_resolution {
         tracing::info!(
-            target : WORKTREE_LOG, session_id = % req.session_id, resolved_cwd = %
-            resolved.cwd, kind = ? resolved.resolution_kind,
+            target: WORKTREE_LOG,
+            session_id = %req.session_id,
+            resolved_cwd = %resolved.cwd,
+            kind = ?resolved.resolution_kind,
             "RESUME_LOCAL_RESOLVED: session found via repo-wide lookup"
         );
         return resume_local_session_in_worktree(
@@ -205,7 +204,7 @@ pub async fn resume_session_in_worktree(
         )
     })?;
     tracing::info!(
-        session_id = % req.session_id,
+        session_id = %req.session_id,
         "Restoring remote session: creating worktree first to keep source clean"
     );
     let worktree_type = req
@@ -309,10 +308,13 @@ async fn resume_local_session_in_worktree(
     )
     .await?;
     tracing::info!(
-        target : WORKTREE_LOG, restore_code = ? req.restore_code, restore_code_default,
-        effective = req.restore_code.unwrap_or(restore_code_default), git_ref = req
-        .git_ref.as_deref(), resolved_session_id, worktree_path = % wt_resp
-        .worktree_path,
+        target: WORKTREE_LOG,
+        restore_code = ?req.restore_code,
+        restore_code_default,
+        effective = req.restore_code.unwrap_or(restore_code_default),
+        git_ref = req.git_ref.as_deref(),
+        resolved_session_id,
+        worktree_path = %wt_resp.worktree_path,
         "RESTORE_CODE_DEBUG: resume_local_session_in_worktree, about to check restore_code"
     );
     let mut decision = WorktreeRestoreDecision {
@@ -345,8 +347,9 @@ async fn resume_local_session_in_worktree(
                 })
                 .and_then(|s| s.head_commit);
             tracing::info!(
-                target : WORKTREE_LOG, head_commit = ? head_commit, summary_path = %
-                summary_path.display(),
+                target: WORKTREE_LOG,
+                head_commit = ?head_commit,
+                summary_path = %summary_path.display(),
                 "RESTORE_CODE_DEBUG: loaded head_commit from summary"
             );
             let outcome = checkout_persisted_head_in_worktree(
@@ -433,7 +436,8 @@ pub async fn rehydrate_session_in_worktree(
         .exists();
     if worktree_path.exists() && session_summary_exists {
         tracing::info!(
-            session_id = % req.session_id, worktree_path = % worktree_path_str,
+            session_id = %req.session_id,
+            worktree_path = %worktree_path_str,
             "rehydrate: worktree and session state already exist, skipping"
         );
         return Ok(RehydrateSessionResponse {
@@ -447,10 +451,7 @@ pub async fn rehydrate_session_in_worktree(
         });
     }
     if !worktree_path.exists() {
-        tracing::info!(
-            session_id = % req.session_id, % worktree_path_str,
-            "rehydrate: creating worktree"
-        );
+        tracing::info!(session_id = %req.session_id, %worktree_path_str, "rehydrate: creating worktree");
         if let Some(parent) = worktree_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }

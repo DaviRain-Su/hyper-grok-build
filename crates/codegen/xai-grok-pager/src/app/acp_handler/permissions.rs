@@ -149,6 +149,15 @@ fn enqueue_permission(
         agent.prompt.set_text("");
     }
 
+    // Permissions bypass the interceptor in Scrollback, so focus Prompt for the first queued request.
+    if agent.permission_queue.is_empty()
+        && agent.active_pane == AgentPane::Scrollback
+        && agent.permission_stashed_pane.is_none()
+    {
+        agent.permission_stashed_pane = Some(AgentPane::Scrollback);
+        agent.set_active_pane(AgentPane::Prompt, true);
+    }
+
     // 6. Clone options before moving perm into the struct.
     let options = perm.request.options.clone();
 

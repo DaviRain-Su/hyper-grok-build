@@ -492,9 +492,7 @@ async fn dashboard_change_location_valid_updates_cwd_and_closes_modal() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetWorkingDir { path }
-if path == &
-        target))
+            .any(|e| matches!(e, Effect::SetWorkingDir { path } if path == &target))
     );
     assert!(
         app.dashboard.as_ref().unwrap().location_picker.is_none(),
@@ -1197,10 +1195,10 @@ fn dashboard_second_stash_does_not_overwrite_first() {
     );
     let reply_sent = effects.iter().any(|e| {
         matches!(
-            e, Effect::SendPromptBlocks { agent_id, blocks, .. }
-if * agent_id ==
-            AgentId(0) && blocks.iter().any(| b | matches!(b,
-            acp::ContentBlock::Image(_)))
+            e,
+            Effect::SendPromptBlocks { agent_id, blocks, .. }
+                if *agent_id == AgentId(0)
+                    && blocks.iter().any(|b| matches!(b, acp::ContentBlock::Image(_)))
         )
     });
     assert!(
@@ -1997,12 +1995,10 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     assert_eq!(app.agents.len(), 1);
     let new_id = *app.agents.keys().next().unwrap();
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { model_id : Some(m),
-        .. } if * m == model_id))
-    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
+    )));
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
@@ -2040,12 +2036,10 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
     let effects = dispatch(Action::DashboardCreateNewAgentWithDetail, &mut app);
     assert_eq!(app.agents.len(), 1);
     let new_id = *app.agents.keys().next().unwrap();
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { model_id : Some(m),
-        .. } if * m == model_id))
-    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
+    )));
     let agent = &app.agents[&new_id];
     assert_eq!(
         agent.session.deferred_model_switch,
@@ -2087,8 +2081,7 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::SetSessionMode { session_id : s, ..
-        } if * s == session_id)),
+            .any(|e| matches!(e, Effect::SetSessionMode { session_id: s, .. } if *s == session_id)),
         "SessionCreated must emit SetSessionMode for the deferred plan mode"
     );
 }
@@ -2431,7 +2424,7 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
     );
     assert!(
         !parent_view.subagent_views[&child_sid]
-            .current_shortcut_hints(&app.registry)
+            .current_shortcut_hints(&app.registry, false)
             .iter()
             .any(|hint| hint.label == "send to bg")
     );
@@ -2453,9 +2446,7 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
         &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
-        false,
-        false,
-        None,
+        crate::app::agent_view::AppRenderParams::default(),
     );
     assert!(child.hit_bg_button.rect.is_none());
     let parent_tool = parent_view
@@ -2507,6 +2498,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
         .join(urlencoding::encode("/tmp").as_ref())
         .join(&child_sid);
     std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
     let tool_line = format!(
         r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
     );
@@ -3654,10 +3646,11 @@ fn dashboard_rename_end_to_end_top_level_row() {
     );
     let effects = dispatch(Action::DashboardCommitRename, &mut app);
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::RenameSession { agent_id, title, ..
-        } if * agent_id == id && title == "My renamed session")),
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::RenameSession { agent_id, title, .. }
+                if *agent_id == id && title == "My renamed session"
+        )),
         "commit must emit a RenameSession effect, got {effects:?}",
     );
     assert_eq!(
@@ -3952,8 +3945,7 @@ fn dashboard_state_preserved_across_reopen() {
         "dispatch text must survive reopen",
     );
     assert!(
-        matches!(d.filter, crate ::views::dashboard::Filter::Substring(ref s) if s ==
-        "foo"),
+        matches!(d.filter, crate::views::dashboard::Filter::Substring(ref s) if s == "foo"),
         "filter must survive reopen, got {:?}",
         d.filter
     );
@@ -4490,10 +4482,10 @@ fn dashboard_stop_subagent_emits_kill_subagent_effect() {
         });
     }
     let effects = dispatch_dashboard_stop(&mut app);
-    assert!(
-        matches!(effects.as_slice(), [Effect::KillSubagent { subagent_id, .. }] if
-        subagent_id == "sa-xyz")
-    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-xyz"
+    ));
     assert!(app.dashboard.as_ref().unwrap().stop_confirm.is_none());
 }
 /// Happy path — matching ids → no panic, queue popped.
@@ -4632,11 +4624,7 @@ fn dashboard_peek_reply_to_idle_agent_sends() {
         false,
     );
     assert_eq!(effects.len(), 1);
-    assert!(
-        matches!(& effects[0], Effect::SendPrompt { text, .. }
-if text ==
-        "please continue")
-    );
+    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "please continue"));
     assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
     assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
     assert!(app.dashboard.as_ref().unwrap().peek_reply.text().is_empty());
@@ -5291,8 +5279,15 @@ fn dashboard_attach_conversation_roster_row_loads_as_chat() {
         },
     );
     assert!(
-        matches!(& effects[..], [Effect::LoadSession { session_id, session_cwd : None,
-        chat_kind : true, .. }] if session_id == "conv-dash-1"),
+        matches!(
+            &effects[..],
+            [Effect::LoadSession {
+                session_id,
+                session_cwd: None,
+                chat_kind: true,
+                ..
+            }] if session_id == "conv-dash-1"
+        ),
         "expected direct chat LoadSession, got {effects:?}"
     );
 }
@@ -5309,9 +5304,15 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
         },
     );
     assert!(
-        matches!(& effects[..], [Effect::LoadSession { session_id, session_cwd :
-        Some(cwd), chat_kind : false, .. }] if session_id == "build-dash-1" && cwd ==
-        std::path::Path::new("/repo")),
+        matches!(
+            &effects[..],
+            [Effect::LoadSession {
+                session_id,
+                session_cwd: Some(cwd),
+                chat_kind: false,
+                ..
+            }] if session_id == "build-dash-1" && cwd == std::path::Path::new("/repo")
+        ),
         "expected Build disk resume with roster cwd, got {effects:?}"
     );
 }

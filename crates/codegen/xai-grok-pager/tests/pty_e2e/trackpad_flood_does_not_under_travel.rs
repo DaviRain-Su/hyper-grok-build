@@ -111,7 +111,7 @@ async fn trackpad_flood_does_not_under_travel() {
     harness.update(Duration::from_millis(800));
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during the trackpad flood\nscreen:\n{}",
         harness.screen_contents()
     );

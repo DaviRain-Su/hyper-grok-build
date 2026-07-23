@@ -181,8 +181,8 @@ pub enum MarketplaceCommand {
     },
     /// Remove a marketplace source and uninstall its plugins
     Remove {
-        /// Git URL or local path of the source to remove.
-        url: String,
+        /// Name, git URL, or local path of the source to remove.
+        source: String,
     },
     /// Refresh marketplace source(s) and sync git caches
     Update {
@@ -795,7 +795,7 @@ async fn run_marketplace(cmd: MarketplaceCommand) -> Result<()> {
     match cmd {
         MarketplaceCommand::List { json } => marketplace_list(&sources, json),
         MarketplaceCommand::Add { url } => marketplace_add(&sources, &url),
-        MarketplaceCommand::Remove { url } => marketplace_remove(&sources, &url),
+        MarketplaceCommand::Remove { source } => marketplace_remove(&sources, &source),
         MarketplaceCommand::Update { name } => marketplace_update(&sources, name.as_deref()),
     }
 }
@@ -937,26 +937,40 @@ fn marketplace_add(
     Ok(())
 }
 
-fn marketplace_remove(
-    sources: &[xai_grok_plugin_marketplace::MarketplaceSource],
-    url: &str,
-) -> Result<()> {
-    let url = url.trim();
-    if url.is_empty() {
-        bail!("URL cannot be empty.");
+/// Resolve `remove` input to a source: exact name match first, then the same
+/// URL/path matching `marketplace add` uses.
+fn find_removal_source<'a>(
+    sources: &'a [xai_grok_plugin_marketplace::MarketplaceSource],
+    input: &str,
+    cwd: &Path,
+) -> Result<&'a xai_grok_plugin_marketplace::MarketplaceSource, String> {
+    let mut by_name = sources.iter().filter(|s| s.name == input);
+    if let Some(first) = by_name.next() {
+        if by_name.next().is_some() {
+            let identities: Vec<String> = sources
+                .iter()
+                .filter(|s| s.name == input)
+                .map(source_identity)
+                .collect();
+            return Err(format!(
+                "Multiple sources are named \"{input}\"; remove by URL/path instead: {}",
+                identities.join(", ")
+            ));
+        }
+        return Ok(first);
     }
-    let expanded = plugin::normalize_git_url(url);
-    let norm = url.trim_end_matches(".git");
+
+    let expanded = plugin::normalize_git_url(input);
+    let norm = input.trim_end_matches(".git");
     let exp_norm = expanded.trim_end_matches(".git");
     // Loaded local sources carry expanded paths, so expand `~`/relative inputs
     // the same way `marketplace add` does before comparing.
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let local_input = match plugin::classify_marketplace_add_input(url, &cwd) {
+    let local_input = match plugin::classify_marketplace_add_input(input, cwd) {
         xai_grok_shell::plugin::MarketplaceAddInput::LocalPath(p) => Some(p),
         _ => None,
     };
 
-    let source = sources
+    sources
         .iter()
         .find(|s| match &s.kind {
             SourceKind::Git { url: u, .. } => {
@@ -964,10 +978,33 @@ fn marketplace_remove(
                 un == norm || un == exp_norm
             }
             SourceKind::Local { path } => {
-                path.display().to_string() == url || local_input.as_ref().is_some_and(|p| p == path)
+                path.display().to_string() == input
+                    || local_input.as_ref().is_some_and(|p| p == path)
             }
         })
-        .ok_or_else(|| anyhow::anyhow!("Marketplace source \"{url}\" not found."))?;
+        .ok_or_else(|| {
+            let names: Vec<&str> = sources.iter().map(|s| s.name.as_str()).collect();
+            if names.is_empty() {
+                format!("Marketplace source \"{input}\" not found; no sources are configured.")
+            } else {
+                format!(
+                    "Marketplace source \"{input}\" not found. Configured sources: {}",
+                    names.join(", ")
+                )
+            }
+        })
+}
+
+fn marketplace_remove(
+    sources: &[xai_grok_plugin_marketplace::MarketplaceSource],
+    name_or_url: &str,
+) -> Result<()> {
+    let input = name_or_url.trim();
+    if input.is_empty() {
+        bail!("Provide the source name, git URL, or local path to remove.");
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let source = find_removal_source(sources, input, &cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let identity = source_identity(source);
 
@@ -994,7 +1031,7 @@ fn marketplace_remove(
     }
 
     if uninstalled.is_empty() {
-        println!("Removed marketplace source: {url}");
+        println!("Removed marketplace source: {} ({identity})", source.name);
     } else {
         println!(
             "Removed marketplace source and uninstalled {} plugin(s): {}",
@@ -1074,6 +1111,84 @@ fn marketplace_update_with_cache_root(
 mod tests {
     use super::*;
     use xai_grok_plugin_marketplace::MarketplaceSource;
+
+    fn removal_fixture() -> Vec<MarketplaceSource> {
+        vec![
+            MarketplaceSource {
+                name: "jira".into(),
+                kind: SourceKind::Git {
+                    url: "https://nova.example.com:4466/mcp/jira".into(),
+                    branch: None,
+                },
+            },
+            MarketplaceSource {
+                name: "official".into(),
+                kind: SourceKind::Git {
+                    url: "https://github.com/xai-org/plugin-marketplace.git".into(),
+                    branch: None,
+                },
+            },
+            MarketplaceSource {
+                name: "local".into(),
+                kind: SourceKind::Local {
+                    path: "/tmp/my-marketplace".into(),
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn find_removal_source_matches_by_name() {
+        let sources = removal_fixture();
+        let found = find_removal_source(&sources, "jira", Path::new("/")).unwrap();
+        assert_eq!(found.name, "jira");
+    }
+
+    #[test]
+    fn find_removal_source_matches_by_url_ignoring_git_suffix() {
+        let sources = removal_fixture();
+        let found = find_removal_source(
+            &sources,
+            "https://github.com/xai-org/plugin-marketplace",
+            Path::new("/"),
+        )
+        .unwrap();
+        assert_eq!(found.name, "official");
+    }
+
+    #[test]
+    fn find_removal_source_matches_local_path() {
+        let sources = removal_fixture();
+        let found = find_removal_source(&sources, "/tmp/my-marketplace", Path::new("/")).unwrap();
+        assert_eq!(found.name, "local");
+    }
+
+    #[test]
+    fn find_removal_source_not_found_lists_names() {
+        let sources = removal_fixture();
+        let err = find_removal_source(&sources, "nope", Path::new("/")).unwrap_err();
+        assert!(err.contains("\"nope\" not found"), "{err}");
+        assert!(err.contains("jira, official, local"), "{err}");
+    }
+
+    #[test]
+    fn find_removal_source_duplicate_names_require_url() {
+        let mut sources = removal_fixture();
+        sources.push(MarketplaceSource {
+            name: "jira".into(),
+            kind: SourceKind::Git {
+                url: "https://other.example.com/jira.git".into(),
+                branch: None,
+            },
+        });
+        let err = find_removal_source(&sources, "jira", Path::new("/")).unwrap_err();
+        assert!(err.contains("Multiple sources are named \"jira\""), "{err}");
+        assert!(
+            err.contains("https://nova.example.com:4466/mcp/jira"),
+            "{err}"
+        );
+        assert!(err.contains("https://other.example.com/jira.git"), "{err}");
+    }
 
     #[test]
     fn trust_prompt_marketplace_has_no_error_framing() {

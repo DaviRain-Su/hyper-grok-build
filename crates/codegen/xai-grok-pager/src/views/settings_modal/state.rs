@@ -254,6 +254,21 @@ impl SettingsModalState {
         }
     }
 
+    /// Focus a setting by registry key (Browse mode). Returns whether the
+    /// key was found; no-op if missing.
+    pub fn focus_key(&mut self, key: &str) -> bool {
+        if let Some(idx) = self
+            .rows
+            .iter()
+            .position(|r| matches!(r, RowEntry::Setting { key: k, .. } if *k == key))
+        {
+            self.selected = idx;
+            self.clamp_selected_to_visible();
+            return true;
+        }
+        false
+    }
+
     /// Filtered row indices in render order.
     pub fn filtered_indices(&self) -> &[usize] {
         &self.filtered_cache

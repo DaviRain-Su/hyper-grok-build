@@ -100,6 +100,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         )),
         telemetry_enabled: false,
         supports_backend_search: std::cell::Cell::new(false),
+        tool_overrides: std::cell::RefCell::new(None),
+        resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         compactions_remaining: std::cell::Cell::new(None),
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
@@ -221,6 +223,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         deferred_prefix: TaskSlot::new(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
+        prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
@@ -442,7 +445,8 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
                 tokio::task::yield_now().await;
             }
             assert_eq!(
-                sent.lock(). await .len(), 2,
+                sent.lock().await.len(),
+                2,
                 "both updates must be forwarded to the live client (command palette must stay current)",
             );
             let mut persisted = vec![];
@@ -454,7 +458,8 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
                 }
             }
             assert_eq!(
-                persisted.len(), 1,
+                persisted.len(),
+                1,
                 "exactly one update must be persisted; available_commands_update must be skipped",
             );
             assert!(

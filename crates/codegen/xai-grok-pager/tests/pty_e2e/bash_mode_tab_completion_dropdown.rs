@@ -22,12 +22,12 @@ const TYPED_PREFIX: &str = "!cat SUGGEST";
 /// as-you-type pipeline OFF hermetically (the PTY child inherits the parent
 /// env, so a dev shell exporting the flag must not turn it on here); the
 /// shell-history tier is pinned to the seeded file.
-fn suggestions_env(content: &ContentController, histfile: &Path) -> Vec<(String, String)> {
-    let mut env = content.env_for_pager();
-    env.push(("SHELL".into(), "/bin/bash".into()));
-    env.push(("GROK_SUGGESTIONS".into(), "0".into()));
-    env.push(("HISTFILE".into(), histfile.to_string_lossy().into_owned()));
-    env
+fn suggestions_env(histfile: &Path) -> Vec<(String, String)> {
+    vec![
+        ("SHELL".into(), "/bin/bash".into()),
+        ("GROK_SUGGESTIONS".into(), "0".into()),
+        ("HISTFILE".into(), histfile.to_string_lossy().into_owned()),
+    ]
 }
 
 fn seed_history(content: &ContentController) -> std::path::PathBuf {
@@ -63,13 +63,17 @@ async fn bash_mode_tab_accepts_dropdown_item_in_place() {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} session up."));
     let histfile = seed_history(&content);
 
-    let env = suggestions_env(&content, &histfile);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env = suggestions_env(&histfile);
+    let env_refs: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new_in_dir(
+    let mut harness = PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        &content,
         &[],
         &env_refs,
         Some(&cwd),

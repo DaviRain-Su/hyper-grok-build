@@ -350,23 +350,18 @@ impl AgentView {
             if let Some(ref mut state) = self.extensions_modal {
                 use crate::views::extensions_modal::ModalMessage;
                 match (&state.modal_message, key.code) {
-                    // Confirmation: y confirms, anything else dismisses.
-                    (Some(ModalMessage::Confirmation { action, .. }), KeyCode::Char('y')) => {
-                        let action = action.clone();
-                        state.modal_message = None;
-                        return self.execute_modal_button_action(
-                            crate::views::extensions_modal::ButtonAction::PluginsAction(action),
-                        );
-                    }
                     (
-                        Some(ModalMessage::MarketplaceConfirmation { action, .. }),
+                        Some(ModalMessage::Confirmation {
+                            action,
+                            pending_entry_index,
+                            ..
+                        }),
                         KeyCode::Char('y'),
                     ) => {
                         let action = action.clone();
+                        let pending_entry_index = *pending_entry_index;
                         state.modal_message = None;
-                        return self.execute_modal_button_action(
-                            crate::views::extensions_modal::ButtonAction::MarketplaceAction(action),
-                        );
+                        return self.confirm_extensions_modal_action(action, pending_entry_index);
                     }
                     _ => {
                         // Dismissing the error/confirmation also clears
@@ -382,9 +377,9 @@ impl AgentView {
         }
 
         // Block all action keys while an action is in-flight (no error
-        // overlay is showing — that case is handled above). Esc clears
-        // the pending indicator (auth continues in background) but keeps
-        // the modal open so the user can navigate or retry.
+        // overlay is showing — that case is handled above). Esc closes the
+        // modal so a hung list/refresh cannot trap the user; background
+        // work (auth, refresh) continues without the UI lock.
         if self
             .extensions_modal
             .as_ref()
@@ -392,10 +387,7 @@ impl AgentView {
         {
             return match key.code {
                 KeyCode::Esc => {
-                    if let Some(ref mut state) = self.extensions_modal {
-                        state.pending_action = None;
-                        state.pending_entry_index = None;
-                    }
+                    self.extensions_modal = None;
                     InputOutcome::Changed
                 }
                 _ => InputOutcome::Changed,
@@ -1589,13 +1581,12 @@ impl AgentView {
                         }
                         InputOutcome::Changed
                     }
-                    Some(Ok(server_name)) => {
-                        if let Some(ref mut s) = self.extensions_modal {
-                            s.pending_action = Some("removing...".into());
-                            s.pending_entry_index = Some(s.picker_state.selected);
-                        }
-                        InputOutcome::Action(Action::DeleteMcpServer { server_name })
-                    }
+                    Some(Ok(server_name)) => self.prompt_extensions_confirm(
+                        format!("Remove MCP server \"{server_name}\"?"),
+                        crate::views::extensions_modal::ConfirmationAction::DeleteMcpServer {
+                            server_name,
+                        },
+                    ),
                     None => InputOutcome::Changed,
                 }
             }
@@ -1617,6 +1608,10 @@ impl AgentView {
                         xai_hooks_plugins_types::MarketplaceAction::AddSource { .. } => {
                             state.pending_action = Some("Adding source...".into());
                         }
+                        xai_hooks_plugins_types::MarketplaceAction::Uninstall { .. } => {
+                            state.pending_action = Some("Uninstalling...".into());
+                            state.pending_entry_index = Some(state.picker_state.selected);
+                        }
                         _ => {
                             state.pending_action = Some("Processing...".into());
                             state.pending_entry_index = Some(state.picker_state.selected);
@@ -1626,7 +1621,6 @@ impl AgentView {
                 InputOutcome::Action(Action::ExecuteMarketplaceAction(marketplace_action))
             }
             ButtonAction::RemoveSelectedHook => {
-                // Remove the hook source_dir of the currently selected hook.
                 if let Some(ref state) = self.extensions_modal {
                     use crate::views::extensions_modal::TabDataState;
                     if let TabDataState::Loaded(ref data) = state.hooks_data
@@ -1634,8 +1628,10 @@ impl AgentView {
                         && let Some(hook) = data.hooks.get(idx)
                     {
                         let path = hook.source_dir.clone();
-                        return self.execute_modal_button_action(
-                            crate::views::extensions_modal::ButtonAction::HooksAction(
+                        let (label, _) = crate::views::extensions_modal::derive_source_label(&path);
+                        return self.prompt_extensions_confirm(
+                            format!("Remove hook source \"{label}\"?"),
+                            crate::views::extensions_modal::ConfirmationAction::Hooks(
                                 xai_hooks_plugins_types::HooksAction::Remove { path },
                             ),
                         );
@@ -1722,17 +1718,24 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ButtonAction::UninstallSelectedPlugin => {
-                if let Some(ref mut state) = self.extensions_modal
+                if let Some(ref state) = self.extensions_modal
                     && let crate::views::extensions_modal::TabDataState::Loaded(ref data) =
                         state.plugins_data
                     && let Some(idx) = state.selected_data_index()
                     && let Some(plugin) = data.plugins.get(idx)
                 {
-                    let action = xai_hooks_plugins_types::PluginsAction::Uninstall {
-                        plugin_id: plugin.id.clone(),
-                        confirmed: false,
-                    };
-                    return self.execute_modal_button_action(ButtonAction::PluginsAction(action));
+                    let plugin_id = plugin.id.clone();
+                    let name = plugin.name.clone();
+                    return self.prompt_extensions_confirm(
+                        format!("Uninstall plugin \"{name}\"?"),
+                        crate::views::extensions_modal::ConfirmationAction::Plugins(
+                            xai_hooks_plugins_types::PluginsAction::Uninstall {
+                                plugin_id,
+                                // Server owns multi-plugin cascade text when count > 1.
+                                confirmed: false,
+                            },
+                        ),
+                    );
                 }
                 InputOutcome::Changed
             }
@@ -1918,44 +1921,104 @@ impl AgentView {
                 }
                 InputOutcome::Changed
             }
-            ButtonAction::UninstallSelectedMarketplacePlugin => self
-                .execute_selected_marketplace_plugin_action(
-                    "Uninstalling...",
-                    |source_url_or_path, plugin_relative_path| {
-                        xai_hooks_plugins_types::MarketplaceAction::Uninstall {
-                            source_url_or_path,
-                            plugin_relative_path,
-                        }
-                    },
-                ),
+            ButtonAction::UninstallSelectedMarketplacePlugin => {
+                if let Some(ref state) = self.extensions_modal {
+                    use crate::views::extensions_modal::TabDataState;
+                    if let TabDataState::Loaded(ref response) = state.marketplace_data
+                        && let Some((si, Some(pi))) =
+                            state.resolve_marketplace_selection(&response.sources)
+                    {
+                        let source = &response.sources[si];
+                        let plugin = &source.plugins[pi];
+                        return self.prompt_extensions_confirm(
+                            format!("Uninstall marketplace plugin \"{}\"?", plugin.name),
+                            crate::views::extensions_modal::ConfirmationAction::Marketplace(
+                                xai_hooks_plugins_types::MarketplaceAction::Uninstall {
+                                    source_url_or_path: source.source_url_or_path.clone(),
+                                    plugin_relative_path: plugin.relative_path.clone(),
+                                },
+                            ),
+                        );
+                    }
+                }
+                InputOutcome::Changed
+            }
             ButtonAction::RemoveSelectedMarketplaceSource => {
-                if let Some(ref mut state) = self.extensions_modal {
+                if let Some(ref state) = self.extensions_modal {
                     use crate::views::extensions_modal::TabDataState;
                     if let TabDataState::Loaded(ref response) = state.marketplace_data {
                         let source = state
                             .resolve_marketplace_selection(&response.sources)
                             .and_then(|(si, _)| response.sources.get(si));
                         if let Some(source) = source {
-                            let msg = format!(
-                                "Remove source \"{}\" and uninstall all its plugins?",
-                                source.source_name
+                            return self.prompt_extensions_confirm(
+                                format!(
+                                    "Remove source \"{}\" and uninstall all its plugins?",
+                                    source.source_name
+                                ),
+                                crate::views::extensions_modal::ConfirmationAction::Marketplace(
+                                    xai_hooks_plugins_types::MarketplaceAction::RemoveSource {
+                                        source_url_or_path: source.source_url_or_path.clone(),
+                                    },
+                                ),
                             );
-                            state.modal_message = Some(
-                                crate::views::extensions_modal::ModalMessage::MarketplaceConfirmation {
-                                    message: msg,
-                                    action:
-                                        xai_hooks_plugins_types::MarketplaceAction::RemoveSource {
-                                            source_url_or_path: source.source_url_or_path.clone(),
-                                        },
-                                },
-                            );
-                            return InputOutcome::Changed;
                         }
                     }
                 }
                 InputOutcome::Changed
             }
         }
+    }
+
+    fn prompt_extensions_confirm(
+        &mut self,
+        message: String,
+        action: crate::views::extensions_modal::ConfirmationAction,
+    ) -> InputOutcome {
+        if let Some(ref mut state) = self.extensions_modal {
+            let pending_entry_index = Some(state.picker_state.selected);
+            state.modal_message =
+                Some(crate::views::extensions_modal::ModalMessage::Confirmation {
+                    message,
+                    action,
+                    pending_entry_index,
+                });
+            state.pending_action = None;
+            state.pending_entry_index = None;
+            state.picker_state.link_band = None;
+        }
+        InputOutcome::Changed
+    }
+
+    fn confirm_extensions_modal_action(
+        &mut self,
+        action: crate::views::extensions_modal::ConfirmationAction,
+        pending_entry_index: Option<usize>,
+    ) -> InputOutcome {
+        use crate::views::extensions_modal::{ButtonAction, ConfirmationAction};
+
+        let outcome = match action {
+            ConfirmationAction::Hooks(hooks_action) => {
+                self.execute_modal_button_action(ButtonAction::HooksAction(hooks_action))
+            }
+            ConfirmationAction::Plugins(plugins_action) => {
+                self.execute_modal_button_action(ButtonAction::PluginsAction(plugins_action))
+            }
+            ConfirmationAction::Marketplace(marketplace_action) => self
+                .execute_modal_button_action(ButtonAction::MarketplaceAction(marketplace_action)),
+            ConfirmationAction::DeleteMcpServer { server_name } => {
+                if let Some(ref mut s) = self.extensions_modal {
+                    s.pending_action = Some("removing...".into());
+                }
+                InputOutcome::Action(Action::DeleteMcpServer { server_name })
+            }
+        };
+        // Low-level arms stamp picker_state.selected; overwrite with the row
+        // captured when the prompt opened (scroll can move selection under the overlay).
+        if let Some(ref mut state) = self.extensions_modal {
+            state.pending_entry_index = pending_entry_index;
+        }
+        outcome
     }
 
     fn execute_selected_marketplace_plugin_action(
@@ -2855,5 +2918,417 @@ mod editor_paste_routing_tests {
             Some("https://example.test")
         );
         assert_eq!(agent.prompt.text(), "hidden prompt");
+    }
+}
+
+#[cfg(test)]
+mod extensions_modal_confirmation_tests {
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::extensions_modal::{
+        ButtonAction, ConfirmationAction, ExtensionsModalState, ExtensionsTab, ModalMessage,
+        TabDataState,
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn plugin_info(name: &str) -> xai_hooks_plugins_types::PluginInfo {
+        xai_hooks_plugins_types::PluginInfo {
+            name: name.into(),
+            id: format!("user/abcd1234/{name}"),
+            root: "/tmp/p".into(),
+            scope: xai_hooks_plugins_types::PluginScope::User,
+            trusted: true,
+            enabled: true,
+            version: None,
+            description: None,
+            skill_count: 0,
+            skill_names: Vec::new(),
+            agent_count: 0,
+            agent_names: Vec::new(),
+            hook_status: xai_hooks_plugins_types::HookStatus::None,
+            hook_count: 0,
+            mcp_server_count: 0,
+            mcp_status: xai_hooks_plugins_types::McpStatus::None,
+            marketplace_source: None,
+            origin: None,
+            conflict: None,
+        }
+    }
+
+    fn server_info(
+        name: &str,
+        wire_source: crate::views::mcps_modal::McpWireSource,
+    ) -> crate::views::mcps_modal::McpServerInfo {
+        crate::views::mcps_modal::McpServerInfo {
+            name: name.into(),
+            display_name: None,
+            status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
+            tool_count: 0,
+            auth_required: false,
+            setup_required: false,
+            setup: None,
+            setup_values: std::collections::HashMap::new(),
+            tools: Vec::new(),
+            enabled: true,
+            source: "local".into(),
+            wire_source,
+            plugin_name: None,
+            is_managed_gateway: false,
+        }
+    }
+
+    fn hook_info(name: &str, source_dir: &str) -> xai_hooks_plugins_types::HookInfo {
+        xai_hooks_plugins_types::HookInfo {
+            name: name.into(),
+            event: xai_hooks_plugins_types::HookEvent::PreToolUse,
+            handler_type: xai_hooks_plugins_types::HookHandlerType::Command,
+            matcher: None,
+            command: None,
+            url: None,
+            timeout_ms: 0,
+            source_dir: source_dir.into(),
+            disabled: false,
+        }
+    }
+
+    fn marketplace_loaded() -> TabDataState<xai_hooks_plugins_types::MarketplaceListResponse> {
+        TabDataState::Loaded(xai_hooks_plugins_types::MarketplaceListResponse {
+            sources: vec![xai_hooks_plugins_types::MarketplaceScanResult {
+                source_name: "test-source".into(),
+                source_kind: "git".into(),
+                source_url_or_path: "https://example.com/plugins.git".into(),
+                plugins: vec![
+                    super::marketplace_modal_action_tests::marketplace_plugin(
+                        "plug-a",
+                        "plugins/plug-a",
+                    ),
+                    super::marketplace_modal_action_tests::marketplace_plugin(
+                        "plug-b",
+                        "plugins/plug-b",
+                    ),
+                ],
+                error: None,
+            }],
+        })
+    }
+
+    fn assert_prompt(
+        state: &ExtensionsModalState,
+        message_sub: &str,
+        expected: &ConfirmationAction,
+        row: usize,
+    ) {
+        match &state.modal_message {
+            Some(ModalMessage::Confirmation {
+                message,
+                action,
+                pending_entry_index,
+            }) => {
+                assert!(
+                    message.contains(message_sub),
+                    "message {message:?} missing {message_sub:?}"
+                );
+                assert_eq!(action, expected);
+                assert_eq!(*pending_entry_index, Some(row));
+            }
+            other => panic!("expected Confirmation, got {other:?}"),
+        }
+        assert!(state.pending_action.is_none());
+        assert!(state.pending_entry_index.is_none());
+    }
+
+    fn assert_no_action(outcome: InputOutcome) {
+        assert!(
+            matches!(outcome, InputOutcome::Changed | InputOutcome::Unchanged),
+            "expected no dispatch, got {outcome:?}"
+        );
+    }
+
+    struct PromptCase {
+        modal: ExtensionsModalState,
+        button: ButtonAction,
+        message_sub: String,
+        expected: ConfirmationAction,
+        row: usize,
+    }
+
+    fn all_prompt_cases() -> Vec<PromptCase> {
+        let mut mcp = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        mcp.mcps_data = TabDataState::Loaded(vec![
+            server_info("alpha", crate::views::mcps_modal::McpWireSource::Local),
+            server_info("beta", crate::views::mcps_modal::McpWireSource::Local),
+        ]);
+        mcp.entry_data_indices = vec![Some(0), Some(1)];
+        mcp.entry_group_keys = vec![None, None];
+        mcp.picker_state.selected = 0;
+
+        let mut plugins = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        plugins.plugins_data = TabDataState::Loaded(xai_hooks_plugins_types::PluginsListResponse {
+            plugins: vec![plugin_info("my-plugin")],
+        });
+        plugins.entry_data_indices = vec![Some(0)];
+        plugins.entry_group_keys = vec![None];
+        plugins.picker_state.selected = 0;
+
+        let mut market_plugin = ExtensionsModalState::new(ExtensionsTab::Marketplace);
+        market_plugin.marketplace_data = marketplace_loaded();
+        market_plugin.entry_labels_cache =
+            vec!["test-source".into(), "plug-a".into(), "plug-b".into()];
+        market_plugin.entry_group_keys = vec![Some("0".into()), None, None];
+        market_plugin.entry_data_indices = vec![None, Some(0), Some(1)];
+        market_plugin.picker_state.selected = 1;
+
+        let mut market_source = ExtensionsModalState::new(ExtensionsTab::Marketplace);
+        market_source.marketplace_data = marketplace_loaded();
+        market_source.entry_labels_cache = vec!["test-source".into(), "plug-a".into()];
+        market_source.entry_group_keys = vec![Some("0".into()), None];
+        market_source.entry_data_indices = vec![None, Some(0)];
+        market_source.picker_state.selected = 0;
+
+        let source = "/tmp/my-hooks-dir";
+        let mut hooks = ExtensionsModalState::new(ExtensionsTab::Hooks);
+        hooks.hooks_data = TabDataState::Loaded(xai_hooks_plugins_types::HooksListResponse {
+            hooks: vec![hook_info("hook-a", source)],
+            project_trusted: true,
+            load_errors: Vec::new(),
+        });
+        hooks.entry_data_indices = vec![Some(0)];
+        hooks.entry_group_keys = vec![None];
+        hooks.picker_state.selected = 0;
+        let hook_label = crate::views::extensions_modal::derive_source_label(source).0;
+
+        vec![
+            PromptCase {
+                modal: mcp,
+                button: ButtonAction::RemoveSelectedMcpServer,
+                message_sub: "Remove MCP server \"alpha\"?".into(),
+                expected: ConfirmationAction::DeleteMcpServer {
+                    server_name: "alpha".into(),
+                },
+                row: 0,
+            },
+            PromptCase {
+                modal: plugins,
+                button: ButtonAction::UninstallSelectedPlugin,
+                message_sub: "Uninstall plugin \"my-plugin\"?".into(),
+                expected: ConfirmationAction::Plugins(
+                    xai_hooks_plugins_types::PluginsAction::Uninstall {
+                        plugin_id: "user/abcd1234/my-plugin".into(),
+                        confirmed: false,
+                    },
+                ),
+                row: 0,
+            },
+            PromptCase {
+                modal: market_plugin,
+                button: ButtonAction::UninstallSelectedMarketplacePlugin,
+                message_sub: "Uninstall marketplace plugin \"plug-a\"?".into(),
+                expected: ConfirmationAction::Marketplace(
+                    xai_hooks_plugins_types::MarketplaceAction::Uninstall {
+                        source_url_or_path: "https://example.com/plugins.git".into(),
+                        plugin_relative_path: "plugins/plug-a".into(),
+                    },
+                ),
+                row: 1,
+            },
+            PromptCase {
+                modal: market_source,
+                button: ButtonAction::RemoveSelectedMarketplaceSource,
+                message_sub: "Remove source \"test-source\" and uninstall all its plugins?".into(),
+                expected: ConfirmationAction::Marketplace(
+                    xai_hooks_plugins_types::MarketplaceAction::RemoveSource {
+                        source_url_or_path: "https://example.com/plugins.git".into(),
+                    },
+                ),
+                row: 0,
+            },
+            PromptCase {
+                modal: hooks,
+                button: ButtonAction::RemoveSelectedHook,
+                message_sub: format!("Remove hook source \"{hook_label}\"?"),
+                expected: ConfirmationAction::Hooks(xai_hooks_plugins_types::HooksAction::Remove {
+                    path: source.into(),
+                }),
+                row: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn all_destructive_actions_prompt_without_dispatching() {
+        for case in all_prompt_cases() {
+            let mut agent = super::test_fixtures::make_agent();
+            agent.extensions_modal = Some(case.modal);
+            let outcome = agent.execute_modal_button_action(case.button);
+            assert_no_action(outcome);
+            assert_prompt(
+                agent.extensions_modal.as_ref().unwrap(),
+                &case.message_sub,
+                &case.expected,
+                case.row,
+            );
+        }
+    }
+
+    #[test]
+    fn y_dispatches_captured_target_after_selection_moves() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        modal.mcps_data = TabDataState::Loaded(vec![
+            server_info("alpha", crate::views::mcps_modal::McpWireSource::Local),
+            server_info("beta", crate::views::mcps_modal::McpWireSource::Local),
+        ]);
+        modal.entry_data_indices = vec![Some(0), Some(1)];
+        modal.entry_group_keys = vec![None, None];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        assert_no_action(agent.execute_modal_button_action(ButtonAction::RemoveSelectedMcpServer));
+        agent
+            .extensions_modal
+            .as_mut()
+            .unwrap()
+            .picker_state
+            .selected = 1;
+
+        match agent.handle_extensions_modal_key(&key(KeyCode::Char('y'))) {
+            InputOutcome::Action(Action::DeleteMcpServer { server_name }) => {
+                assert_eq!(server_name, "alpha");
+            }
+            other => panic!("expected DeleteMcpServer alpha, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert_eq!(state.pending_action.as_deref(), Some("removing..."));
+        assert_eq!(state.pending_entry_index, Some(0));
+        assert!(state.modal_message.is_none());
+    }
+
+    #[test]
+    fn plugin_y_sends_confirmed_false_so_server_can_gate_multi() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        modal.plugins_data = TabDataState::Loaded(xai_hooks_plugins_types::PluginsListResponse {
+            plugins: vec![plugin_info("my-plugin")],
+        });
+        modal.entry_data_indices = vec![Some(0)];
+        modal.entry_group_keys = vec![None];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        assert_no_action(agent.execute_modal_button_action(ButtonAction::UninstallSelectedPlugin));
+        match agent.handle_extensions_modal_key(&key(KeyCode::Char('y'))) {
+            InputOutcome::Action(Action::ExecutePluginsAction(
+                xai_hooks_plugins_types::PluginsAction::Uninstall {
+                    plugin_id,
+                    confirmed: false,
+                },
+            )) => assert_eq!(plugin_id, "user/abcd1234/my-plugin"),
+            other => panic!("expected unconfirmed uninstall, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert_eq!(
+            state.last_plugins_action,
+            Some(xai_hooks_plugins_types::PluginsAction::Uninstall {
+                plugin_id: "user/abcd1234/my-plugin".into(),
+                confirmed: false,
+            })
+        );
+        assert!(state.modal_message.is_none());
+    }
+
+    #[test]
+    fn marketplace_y_keeps_uninstalling_label_on_captured_row() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Marketplace);
+        modal.marketplace_data = marketplace_loaded();
+        modal.entry_labels_cache = vec!["test-source".into(), "plug-a".into(), "plug-b".into()];
+        modal.entry_group_keys = vec![Some("0".into()), None, None];
+        modal.entry_data_indices = vec![None, Some(0), Some(1)];
+        modal.picker_state.selected = 1;
+        agent.extensions_modal = Some(modal);
+
+        assert_no_action(
+            agent.execute_modal_button_action(ButtonAction::UninstallSelectedMarketplacePlugin),
+        );
+        agent
+            .extensions_modal
+            .as_mut()
+            .unwrap()
+            .picker_state
+            .selected = 2;
+        match agent.handle_extensions_modal_key(&key(KeyCode::Char('y'))) {
+            InputOutcome::Action(Action::ExecuteMarketplaceAction(
+                xai_hooks_plugins_types::MarketplaceAction::Uninstall {
+                    plugin_relative_path,
+                    ..
+                },
+            )) => assert_eq!(plugin_relative_path, "plugins/plug-a"),
+            other => panic!("expected marketplace uninstall, got {other:?}"),
+        }
+        let state = agent.extensions_modal.as_ref().unwrap();
+        assert_eq!(state.pending_action.as_deref(), Some("Uninstalling..."));
+        assert_eq!(state.pending_entry_index, Some(1));
+    }
+
+    #[test]
+    fn managed_mcp_errors_without_prompt() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        modal.mcps_data = TabDataState::Loaded(vec![server_info(
+            "managed-one",
+            crate::views::mcps_modal::McpWireSource::Managed,
+        )]);
+        modal.entry_data_indices = vec![Some(0)];
+        modal.entry_group_keys = vec![None];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        assert_no_action(agent.execute_modal_button_action(ButtonAction::RemoveSelectedMcpServer));
+        match &agent.extensions_modal.as_ref().unwrap().modal_message {
+            Some(ModalMessage::Error(msg)) => {
+                assert!(msg.contains("Cannot remove managed server 'managed-one'"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_keys_dismiss_without_dispatch() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        modal.mcps_data = TabDataState::Loaded(vec![server_info(
+            "alpha",
+            crate::views::mcps_modal::McpWireSource::Local,
+        )]);
+        modal.entry_data_indices = vec![Some(0)];
+        modal.entry_group_keys = vec![None];
+        modal.picker_state.selected = 0;
+        agent.extensions_modal = Some(modal);
+
+        for code in [KeyCode::Esc, KeyCode::Char('n'), KeyCode::Char('Y')] {
+            agent.execute_modal_button_action(ButtonAction::RemoveSelectedMcpServer);
+            assert!(
+                agent
+                    .extensions_modal
+                    .as_ref()
+                    .unwrap()
+                    .modal_message
+                    .is_some()
+            );
+            assert_no_action(agent.handle_extensions_modal_key(&key(code)));
+            assert!(
+                agent
+                    .extensions_modal
+                    .as_ref()
+                    .unwrap()
+                    .modal_message
+                    .is_none(),
+                "key {code:?} must dismiss confirmation"
+            );
+        }
     }
 }

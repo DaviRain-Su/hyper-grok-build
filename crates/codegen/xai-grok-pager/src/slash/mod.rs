@@ -983,6 +983,19 @@ impl SlashController {
         self.arg_suggestions(command.as_ref(), models, &input.args_query)
     }
 
+    fn argument_highlight_indices(&mut self, query: &str, display: &str) -> Vec<u32> {
+        let token = query.split_whitespace().next_back().unwrap_or("");
+        let fragment = token.rsplit(['/', '\\']).next().unwrap_or(token);
+        self.matcher
+            .indices_for(fragment, display)
+            .or_else(|| {
+                fragment
+                    .rsplit_once('.')
+                    .and_then(|(_, suffix)| self.matcher.indices_for(suffix, display))
+            })
+            .unwrap_or_default()
+    }
+
     /// Generate argument suggestions for a specific command.
     fn arg_suggestions(
         &mut self,
@@ -1021,7 +1034,7 @@ impl SlashController {
         hits.into_iter()
             .map(|(idx, _)| {
                 let mut row = SuggestionRow::from_arg(&items[idx]);
-                row.indices = self.matcher.indices(row.display.as_str());
+                row.indices = self.argument_highlight_indices(trimmed, &row.display);
                 row
             })
             .collect()
@@ -2694,6 +2707,11 @@ mod tests {
             .collect();
         assert_eq!(rows, vec![("first", true), ("second", false)]);
 
+        ctrl.refresh(&state, "/chain fir", 10, &models);
+        let snap = state.snapshot();
+        assert!(snap.open);
+        assert_eq!(snap.matches[0].indices, vec![0, 1, 2]);
+
         // Typing "first " triggers the phase-2 sub-menu of terminal rows.
         ctrl.refresh(&state, "/chain first ", 13, &models);
         let snap = state.snapshot();
@@ -2703,6 +2721,11 @@ mod tests {
             .map(|r| (r.display.as_str(), r.insert_text.ends_with(' ')))
             .collect();
         assert_eq!(rows, vec![("alpha", false), ("beta", false)]);
+
+        ctrl.refresh(&state, "/chain first al", 15, &models);
+        let snap = state.snapshot();
+        assert!(snap.open);
+        assert_eq!(snap.matches[0].indices, vec![0, 1]);
     }
 
     #[test]
@@ -2721,6 +2744,39 @@ mod tests {
             .collect();
         assert!(displays.contains(&"/doctor"), "matches: {displays:?}");
         assert!(!displays.contains(&"/terminal-setup"));
+
+        for text in ["/doctor ", "/terminal-setup "] {
+            ctrl.refresh(&state, text, text.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(!snapshot.open, "bare args opened for {text:?}");
+            assert!(snapshot.matches.is_empty(), "matches for {text:?}");
+        }
+        for (text, inserted, indices) in [
+            ("/doctor f", "fix", vec![0]),
+            ("/doctor fix s", "fix ssh-wrap", vec![0]),
+            ("/doctor fix ssh", "fix ssh-wrap", vec![0, 1, 2]),
+            ("/doctor fix terminal.s", "fix ssh-wrap", vec![0]),
+            ("/terminal-setup f", "fix", vec![0]),
+            ("/terminal-setup fix s", "fix ssh-wrap", vec![0]),
+        ] {
+            ctrl.refresh(&state, text, text.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(snapshot.open, "no matches for {text:?}");
+            assert_eq!(snapshot.matches[0].insert_text, inserted);
+            assert_eq!(snapshot.matches[0].indices, indices, "{text:?}");
+        }
+
+        for text in [
+            "/doctor fix ssh-wrap",
+            "/doctor fix terminal.ssh-wrap",
+            "/terminal-setup fix ssh-wrap",
+            "/terminal-setup fix terminal.ssh-wrap",
+        ] {
+            ctrl.refresh(&state, text, text.len(), &models);
+            let snapshot = state.snapshot();
+            assert!(!snapshot.open, "exact form left picker open for {text:?}");
+            assert!(snapshot.matches.is_empty(), "matches for {text:?}");
+        }
 
         let text = "/terminal-setup";
         ctrl.refresh(&state, text, text.len(), &models);

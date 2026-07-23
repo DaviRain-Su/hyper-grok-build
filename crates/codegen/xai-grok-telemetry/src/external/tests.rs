@@ -239,6 +239,7 @@ fn client_identifier_allowlist_is_pinned() {
         "grok-web",
         "grok-desktop",
         "grok-code-extension",
+        "grok-agent-sdk",
         "nebula",
         "zed",
     ];

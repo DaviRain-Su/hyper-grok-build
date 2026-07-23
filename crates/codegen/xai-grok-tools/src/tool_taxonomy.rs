@@ -126,13 +126,14 @@ impl schemars::JsonSchema for ToolKind {
             .filter_map(|v| v.as_str().map(|s| format!("`{s}`")))
             .collect::<Vec<_>>()
             .join(", ");
-        schemars::json_schema!(
-            { "type" : "string", "description" :
-            format!("Categorizes what a tool does at a high level. Open set — consumers must \
+        schemars::json_schema!({
+            "type": "string",
+            "description": format!(
+                "Categorizes what a tool does at a high level. Open set — consumers must \
                  tolerate unknown values (Rust deserializes them to `other` via \
-                 `#[serde(other)]`). Known values: {known}."),
-            }
-        )
+                 `#[serde(other)]`). Known values: {known}."
+            ),
+        })
     }
 }
 /// Canonical identity for a tool call, resolved from a tool's registered
@@ -313,7 +314,7 @@ mod tests {
         let meta = CanonicalToolMeta::new(
             "read_file",
             &identity(ToolKind::Read),
-            Some(serde_json::json!({ "path" : "/a" })),
+            Some(serde_json::json!({ "path": "/a" })),
         );
         let t = serde_json::to_value(&meta).unwrap();
         assert_eq!(t["version"], serde_json::json!(TOOL_META_VERSION));
@@ -367,7 +368,7 @@ mod tests {
     #[test]
     fn merge_into_nests_under_one_key_and_preserves_existing() {
         let meta = CanonicalToolMeta::new("run_terminal_cmd", &identity(ToolKind::Execute), None);
-        let merged = meta.merge_into(Some(serde_json::json!({ "bash_mode" : true })));
+        let merged = meta.merge_into(Some(serde_json::json!({"bash_mode": true})));
         let o = merged.as_object().unwrap();
         assert_eq!(o["bash_mode"], true, "existing meta must be preserved");
         let t = &o[TOOL_META_KEY];

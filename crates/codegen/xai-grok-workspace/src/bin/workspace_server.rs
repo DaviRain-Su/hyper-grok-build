@@ -230,11 +230,11 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         Ok(endpoint) if !endpoint.is_empty() => {
             match xai_tracing::init_fastrace(endpoint.clone(), SERVICE_NAME.to_owned(), None) {
                 Ok(()) => {
-                    tracing::info!(% endpoint, "trace export enabled (direct OTLP)");
+                    tracing::info!(%endpoint, "trace export enabled (direct OTLP)");
                     true
                 }
                 Err(e) => {
-                    tracing::warn!(error = % e, "direct OTLP trace export init failed");
+                    tracing::warn!(error = %e, "direct OTLP trace export init failed");
                     false
                 }
             }
@@ -250,10 +250,8 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
                     .parse::<ProfileName>()
                     .expect("ProfileName::from_str is infallible");
                 if matches!(parsed, ProfileName::Custom(_)) {
-                    tracing::warn!(
-                        value = % val,
-                        "Unrecognized GROK_SANDBOX_PROFILE, defaulting to workspace"
-                    );
+                    tracing::warn!(value = %val,
+                        "Unrecognized GROK_SANDBOX_PROFILE, defaulting to workspace");
                     ProfileName::Workspace
                 } else {
                     parsed
@@ -264,16 +262,11 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         };
         let profile_name = profile.to_string();
         if profile == ProfileName::Off {
-            tracing::info!(
-                profile = % profile_name,
-                "Sandbox explicitly disabled via GROK_SANDBOX_PROFILE=off"
-            );
+            tracing::info!(profile = %profile_name, "Sandbox explicitly disabled via GROK_SANDBOX_PROFILE=off");
         } else {
             let mut sandbox = SandboxManager::new(profile, &cwd);
             if let Err(e) = sandbox.apply(&cwd) {
-                tracing::warn!(
-                    error = % e, "Sandbox apply returned error, continuing unsandboxed"
-                );
+                tracing::warn!(error = %e, "Sandbox apply returned error, continuing unsandboxed");
             } else if !sandbox.is_applied() {
                 tracing::warn!("Sandbox could not be applied (unsupported platform)");
             }
@@ -285,14 +278,19 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
                 "Workspace server sandbox NOT active"
             };
             tracing::info!(
-                profile = % profile_name, active,
-                restrict_network_at_known_linux_launches =
-                xai_grok_sandbox::should_restrict_child_network(), "{status_msg}"
+                profile = %profile_name,
+                active,
+                restrict_network_at_known_linux_launches = xai_grok_sandbox::should_restrict_child_network(),
+                "{status_msg}"
             );
         }
     }
     let auth_provider = xai_grok_workspace::hub_auth::provider(&url, args.auth_config.as_deref())?;
-    tracing::info!(hub_url = % url, cwd = % cwd.display(), "Starting workspace server");
+    tracing::info!(
+        hub_url = %url,
+        cwd = %cwd.display(),
+        "Starting workspace server"
+    );
     let cwd_display = cwd.display().to_string();
     let session_id = std::env::var("GROK_SESSION_ID").ok();
     let parsed_metadata = match args.metadata {
@@ -314,26 +312,24 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
     #[cfg(windows)]
     let diag_listener = diag_server::DiagListener::Tcp(args.diag_port);
     let diag_log_file = args.daemonize.then_some(args.log_file);
-    let _diag_server =
-        match diag_server::serve(diag_listener, diag_handle.clone(), diag_log_file).await {
-            Ok(bound) => {
-                tracing::info!(addr = % bound.addr, "diagnostics server listening");
-                Some(bound)
+    let _diag_server = match diag_server::serve(diag_listener, diag_handle.clone(), diag_log_file)
+        .await
+    {
+        Ok(bound) => {
+            tracing::info!(addr = %bound.addr, "diagnostics server listening");
+            Some(bound)
+        }
+        Err(e) => {
+            if args.daemonize {
+                tracing::error!(error = %e, "{}", diag_server::DIAG_BIND_FAILED_MARKER);
+                std::process::exit(diag_server::EXIT_DIAG_BIND_FAILED);
             }
-            Err(e) => {
-                if args.daemonize {
-                    tracing::error!(error = % e, "{}", diag_server::DIAG_BIND_FAILED_MARKER);
-                    std::process::exit(diag_server::EXIT_DIAG_BIND_FAILED);
-                }
-                tracing::warn!(
-                    error = % e, "{} (continuing without)",
-                    diag_server::DIAG_BIND_FAILED_MARKER
-                );
-                None
-            }
-        };
+            tracing::warn!(error = %e, "{} (continuing without)", diag_server::DIAG_BIND_FAILED_MARKER);
+            None
+        }
+    };
     tracing::info!(
-        cwd = % cwd_display,
+        cwd = %cwd_display,
         "Workspace server starting — sessions created dynamically via server bind"
     );
     let server_id = args.server_id.clone();
@@ -403,14 +399,16 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         None => tracing::info!("metric export disabled (not connected)"),
     }
     tracing::info!(
-        server_id = ? server_id, "Workspace server connected to hub. Serving tools."
+        server_id = ?server_id,
+        "Workspace server connected to hub. Serving tools."
     );
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate())?;
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {} _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
         }
     }
     #[cfg(not(unix))]
@@ -467,7 +465,7 @@ mod tests {
     #[test]
     fn capabilities_manifest_shape() {
         let value = serde_json::to_value(CAPABILITIES).unwrap();
-        assert_eq!(value, serde_json::json!({ "diag" : true }));
+        assert_eq!(value, serde_json::json!({"diag": true}));
     }
     #[test]
     fn capabilities_probe_of_legacy_binary_exits_nonzero() {

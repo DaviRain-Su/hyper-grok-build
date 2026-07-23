@@ -71,6 +71,56 @@ fn doctor_json_bypasses_unrelated_startup_state() {
 
 #[test]
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_fix_without_id_lists_only_applicable_automatic_fixes() {
+    let binary = pager_binary().expect("real pager binary is required when selected");
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+
+    let output = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix"],
+        &[("SSH_CONNECTION", "1 2 3 4")],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("On your local computer, run: grok doctor fix ssh-wrap"),
+        "{stdout}"
+    );
+    assert!(!home.join(".bashrc").exists());
+
+    let output = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix", "terminal.ssh-wrap", "--yes"],
+        &[],
+    );
+    assert!(output.status.success());
+    let output = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix"],
+        &[],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "No automatic fixes are available here.\n"
+    );
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn doctor_fix_yes_writes_only_actual_home_shell_rc() {
     let binary = pager_binary().expect("real pager binary is required when this test is selected");
     let temp = tempfile::tempdir().expect("tempdir");
@@ -95,7 +145,7 @@ fn doctor_fix_yes_writes_only_actual_home_shell_rc() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Doctor fix: terminal.ssh-wrap"));
+    assert!(stdout.contains("Fix: terminal.ssh-wrap"));
     assert!(stdout.contains("ssh -f"));
     assert!(stdout.contains("ControlPersist"));
     assert!(stdout.contains("~^Z"));
@@ -128,7 +178,12 @@ fn doctor_fix_safety_boundaries_are_process_isolated() {
         &[],
     );
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("existing SSH alias/function"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Grok found an existing SSH alias or function")
+            && stderr.contains(&conflict.display().to_string()),
+        "{stderr}"
+    );
     assert_eq!(
         std::fs::read_to_string(&conflict).unwrap(),
         "alias ssh='ssh -A'\n"
@@ -144,9 +199,10 @@ fn doctor_fix_safety_boundaries_are_process_isolated() {
         &[],
     );
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Doctor fix: terminal.ssh-wrap"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Fix: terminal.ssh-wrap"));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("non-interactive stdin without --yes")
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Cannot apply this fix without confirmation")
     );
     assert!(!conflict.exists());
 
@@ -159,7 +215,9 @@ fn doctor_fix_safety_boundaries_are_process_isolated() {
         &[("SSH_CONNECTION", "1 2 3 4")],
     );
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("run this fix on your local machine"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Run this fix on your local computer")
+    );
     assert!(!conflict.exists());
 }
 

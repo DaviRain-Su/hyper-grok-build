@@ -146,9 +146,7 @@ impl AgentView {
                 {
                     let plugin_id = name.clone();
                     if let Err(e) = xai_grok_shell::config::add_dismissed_plugin_cta(&plugin_id) {
-                        tracing::warn!(
-                            error = % e, "couldn't persist plugin CTA dismissal"
-                        );
+                        tracing::warn!(error = %e, "couldn't persist plugin CTA dismissal");
                     }
                     self.plugin_cta.dismissed.insert(plugin_id.clone());
                     xai_grok_telemetry::session_ctx::log_event(
@@ -667,12 +665,15 @@ impl AgentView {
                         self.last_permission_click = None;
                         self.pending_scrollback_click = Some((mouse.column, mouse.row));
                         tracing::debug!(
-                            event = "scrollback_mouse_down", col = mouse.column, row =
-                            mouse.row, area = ? self.pane_areas.scrollback, content_area
-                            = ? self.last_scrollback_selection_model.content_area, ranges
-                            = self.last_scrollback_selection_model.ranges.len(), blocks =
-                            self.last_scrollback_selection_model.visible_blocks.len(),
-                            hovered_entry = ? self.hovered_entry, "scrollback mouse down"
+                            event = "scrollback_mouse_down",
+                            col = mouse.column,
+                            row = mouse.row,
+                            area = ?self.pane_areas.scrollback,
+                            content_area = ?self.last_scrollback_selection_model.content_area,
+                            ranges = self.last_scrollback_selection_model.ranges.len(),
+                            blocks = self.last_scrollback_selection_model.visible_blocks.len(),
+                            hovered_entry = ?self.hovered_entry,
+                            "scrollback mouse down"
                         );
                         if self.begin_pending_text_drag(mouse) {
                             return InputOutcome::Changed;
@@ -704,8 +705,11 @@ impl AgentView {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.pending_link_click = None;
                 tracing::debug!(
-                    event = "scrollback_mouse_drag", col = mouse.column, row = mouse.row,
-                    pending = ? self.pending_text_drag, active = ? self.drag_selection,
+                    event = "scrollback_mouse_drag",
+                    col = mouse.column,
+                    row = mouse.row,
+                    pending = ?self.pending_text_drag,
+                    active = ?self.drag_selection,
                     "scrollback mouse drag"
                 );
                 self.handle_scrollback_drag_motion(mouse)
@@ -713,8 +717,11 @@ impl AgentView {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.left_mouse_down = false;
                 tracing::debug!(
-                    event = "scrollback_mouse_up", col = mouse.column, row = mouse.row,
-                    pending = ? self.pending_text_drag, active = ? self.drag_selection,
+                    event = "scrollback_mouse_up",
+                    col = mouse.column,
+                    row = mouse.row,
+                    pending = ?self.pending_text_drag,
+                    active = ?self.drag_selection,
                     "scrollback mouse up"
                 );
                 if self.scrollbar_dragging {
@@ -908,9 +915,12 @@ impl AgentView {
             }
             MouseEventKind::Moved => {
                 tracing::debug!(
-                    event = "scrollback_mouse_moved", col = mouse.column, row = mouse
-                    .row, pending = ? self.pending_text_drag, active = ? self
-                    .drag_selection, left_mouse_down = self.left_mouse_down,
+                    event = "scrollback_mouse_moved",
+                    col = mouse.column,
+                    row = mouse.row,
+                    pending = ?self.pending_text_drag,
+                    active = ?self.drag_selection,
+                    left_mouse_down = self.left_mouse_down,
                     "scrollback mouse moved"
                 );
                 if self.left_mouse_down

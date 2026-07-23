@@ -55,6 +55,7 @@ pub struct PromptTurnOk {
     /// `Some(Err)` carries a parse/validation error message.
     pub structured_output: Option<Result<serde_json::Value, String>>,
     pub usage: Option<crate::extensions::notification::PromptUsage>,
+    pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
 }
 /// Result of a prompt turn, containing the stop reason, accumulated token count,
 /// and an optional turn-end signals snapshot (for trace metadata enrichment).
@@ -68,6 +69,7 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
         completion_kind: PromptCompletionKind::Completed,
         structured_output: None,
         usage: None,
+        tool_overrides: None,
     })
 }
 /// Pre-parsed prompt metadata sent back to the caller after `parse_prompt`.
@@ -133,6 +135,15 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval,
+    GetToolOverrides {
+        respond_to: oneshot::Sender<Option<xai_grok_sampling_types::ToolOverrides>>,
+    },
+    /// Establish the per-turn tool-overrides state before the first prompt runs. Sent once by
+    /// `handle_subagent_request` ahead of the child's first `Prompt`, so a spawned subagent's
+    /// inherited cutoff is applied and published (for its own subagents to read) before any turn.
+    SetToolOverrides {
+        overrides: xai_grok_sampling_types::ToolOverrides,
+    },
     Prompt {
         prompt_id: String,
         prompt_blocks: Vec<acp::ContentBlock>,
@@ -158,6 +169,7 @@ pub enum SessionCommand {
         send_now: bool,
         /// Actor-authoritative admission and deferred fallback for terminal task wakes.
         admission: Option<TaskWakeAdmission>,
+        tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         /// Optional oneshot fired after the user message has been appended to
         /// chat history and a persistence flush barrier has completed, before
@@ -624,7 +636,7 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<(bool, bool)>,
     },
     ListAvailableCommands {
-        respond_to: oneshot::Sender<Vec<acp::AvailableCommand>>,
+        respond_to: oneshot::Sender<crate::session::slash_commands::ListCommandsResponse>,
     },
     /// Re-discover skills from disk, update the SkillManager baseline,
     /// and re-advertise slash commands to the client.

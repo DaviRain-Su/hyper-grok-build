@@ -2,8 +2,8 @@
 //! [`GrokStdioClient`] (`agent-client-protocol::ClientSideConnection` —
 //! authentication, session lifecycle, permissions, notification streaming) and
 //! the raw-wire [`RawStdioClient`] (verbatim JSON-RPC lines for shapes the
-//! typed client can't produce), plus the shared subprocess spawn/stderr-capture
-//! plumbing used by every harness in this crate.
+//! typed client can't produce), all backed by the shared [`TestProcess`]
+//! lifecycle owner.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,51 +13,50 @@ use std::time::Duration;
 use crate::scaled;
 
 use agent_client_protocol::{self as acp, Agent as _};
-use tempfile::TempDir;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use xai_acp_lib::LineBufferedRead;
 
-use crate::env::{grok_binary, test_env_cmd_tokio};
+use crate::env::grok_binary;
 use crate::headless::stderr_tail;
 use crate::mock_server::MockInferenceServer;
-use crate::process::spawn_piped_with_stderr_capture;
+use crate::process::{TestOutput, TestProcess, TestProcessConfig, TestStdin};
+use crate::sandbox::TestSandbox;
 
-/// Spawn `grok agent stdio` with the canonical hermetic test env: the sandbox
-/// from [`test_env_cmd_tokio`] plus the debug-logging kill-list, so the
-/// hermeticity setup exists exactly once for the typed ([`GrokStdioClient`])
-/// and raw ([`RawStdioClient`]) harnesses. `leading_args` go before the
-/// `agent stdio` subcommand (global flags); `extra_env` is applied after the
-/// kill-list so a test can still set e.g. `GROK_DEBUG_LOG=1` explicitly.
+/// Spawn `grok agent stdio` with the sandbox's canonical hermetic environment.
+/// `leading_args` go before the `agent stdio` subcommand (global flags).
 fn spawn_agent_process(
+    sandbox: &mut TestSandbox,
     server: &MockInferenceServer,
     cwd: &Path,
-    home: &Path,
     extra_env: &[(&str, &str)],
     leading_args: &[&str],
-) -> (tokio::process::Child, Arc<std::sync::Mutex<Vec<u8>>>) {
-    let binary = grok_binary();
+) -> TestProcess {
+    sandbox.set_mock_url(server.url());
+    for (key, value) in extra_env {
+        sandbox.set_env(*key, *value);
+    }
 
+    let binary = grok_binary();
     let mut cmd = tokio::process::Command::new(&binary);
     cmd.args(leading_args)
         .args(["agent", "stdio"])
         .current_dir(cwd);
-    test_env_cmd_tokio(&mut cmd, &server.url(), home);
-    // Hermetic firehose env: clear inherited debug-logging knobs so a test
-    // controls logging only via `extra_env` / `leading_args` (mirrors the
-    // headless `debug_cmd`).
-    for k in [
-        "GROK_DEBUG_LOG",
-        "GROK_LOG_FILE",
-        "GROK_LOG_SAMPLING",
-        "GROK_HOOKS_LOG",
-    ] {
-        cmd.env_remove(k);
-    }
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
 
-    spawn_piped_with_stderr_capture(cmd)
+    TestProcess::spawn(
+        cmd,
+        sandbox,
+        TestProcessConfig::new()
+            .label("grok agent stdio")
+            .stdin(TestStdin::Piped)
+            .stdout(TestOutput::Piped),
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "failed to spawn ACP test client at {}: {error}\n{}",
+            binary.display(),
+            sandbox.diagnostic_summary(),
+        )
+    })
 }
 
 #[derive(Default)]
@@ -115,49 +114,41 @@ impl acp::Client for TestAcpClient {
 /// Child process is killed on drop.
 pub struct GrokStdioClient {
     conn: acp::ClientSideConnection,
-    _child: tokio::process::Child,
-    home: Option<TempDir>,
+    process: TestProcess,
+    sandbox: Option<TestSandbox>,
     capture: Arc<TextCapture>,
-    stderr: Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl GrokStdioClient {
     pub async fn spawn(server: &MockInferenceServer, cwd: &Path) -> Self {
-        let home = TempDir::new().expect("create temp home");
-        Self::spawn_with_home(server, cwd, home).await
+        Self::spawn_with_sandbox(server, cwd, TestSandbox::new()).await
     }
 
-    pub async fn spawn_with_home(server: &MockInferenceServer, cwd: &Path, home: TempDir) -> Self {
-        Self::spawn_with_home_and_env(server, cwd, home, &[]).await
-    }
-
-    /// Like [`spawn_with_home`] but applies extra environment variables to the
-    /// child process (after the standard test env). Used by tests that toggle
-    /// behavior via env vars (e.g. the vendor-compat suite).
-    pub async fn spawn_with_home_and_env(
+    pub async fn spawn_with_sandbox(
         server: &MockInferenceServer,
         cwd: &Path,
-        home: TempDir,
-        extra_env: &[(&str, &str)],
+        sandbox: TestSandbox,
     ) -> Self {
-        Self::spawn_with_home_env_and_args(server, cwd, home, extra_env, &[]).await
+        Self::spawn_with_sandbox_env_and_args(server, cwd, sandbox, &[], &[]).await
     }
 
-    /// Like [`spawn_with_home_and_env`] but also prepends `leading_args` before
-    /// the `agent stdio` subcommand. Used to drive top-level global flags (e.g.
-    /// `--debug`) so a test can exercise the flag's master switch, not just env.
-    pub async fn spawn_with_home_env_and_args(
+    pub async fn spawn_with_sandbox_env_and_args(
         server: &MockInferenceServer,
         cwd: &Path,
-        home: TempDir,
+        mut sandbox: TestSandbox,
         extra_env: &[(&str, &str)],
         leading_args: &[&str],
     ) -> Self {
-        let (mut child, stderr) =
-            spawn_agent_process(server, cwd, home.path(), extra_env, leading_args);
+        let mut process = spawn_agent_process(&mut sandbox, server, cwd, extra_env, leading_args);
 
-        let outgoing = child.stdin.take().unwrap().compat_write();
-        let incoming = child.stdout.take().unwrap().compat();
+        let outgoing = process
+            .take_stdin()
+            .expect("child stdin missing")
+            .compat_write();
+        let incoming = process
+            .take_stdout()
+            .expect("child stdout missing")
+            .compat();
 
         let capture = Arc::new(TextCapture::default());
         let client = TestAcpClient {
@@ -172,10 +163,9 @@ impl GrokStdioClient {
 
         Self {
             conn,
-            _child: child,
-            home: Some(home),
+            process,
+            sandbox: Some(sandbox),
             capture,
-            stderr,
         }
     }
 
@@ -296,16 +286,35 @@ impl GrokStdioClient {
     }
 
     pub fn stderr(&self) -> String {
-        String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
+        self.process.stderr_tail().text
     }
 
-    pub fn take_home(&mut self) -> TempDir {
-        self.home.take().expect("test home already taken")
+    pub fn child_pid(&self) -> Option<u32> {
+        self.process.pid()
     }
 
-    /// Return the home directory path (for cache invalidation between phases).
-    pub fn home_path(&self) -> &std::path::Path {
-        self.home.as_ref().expect("test home already taken").path()
+    pub fn process_diagnostics(&self) -> String {
+        self.process.diagnostic_summary()
+    }
+
+    pub fn start_terminate(&mut self) -> std::io::Result<()> {
+        self.process.start_terminate()
+    }
+
+    pub fn start_kill(&mut self) {
+        self.process.start_kill();
+    }
+
+    pub async fn close(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.process.close().await
+    }
+
+    pub fn take_sandbox(&mut self) -> TestSandbox {
+        self.sandbox.take().expect("test sandbox already taken")
+    }
+
+    pub fn sandbox(&self) -> &TestSandbox {
+        self.sandbox.as_ref().expect("test sandbox already taken")
     }
 
     /// Timing breadcrumb for tuning CI timeout budgets (visible with --nocapture).
@@ -423,31 +432,49 @@ impl GrokStdioClient {
 /// ids. Child process is killed on drop.
 pub struct RawStdioClient {
     stdin: tokio::process::ChildStdin,
-    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
-    stderr: Arc<std::sync::Mutex<Vec<u8>>>,
-    _child: tokio::process::Child,
-    _home: TempDir,
+    stdout: tokio::io::BufReader<crate::process::TestProcessStdout>,
+    process: TestProcess,
+    _sandbox: TestSandbox,
 }
 
 impl RawStdioClient {
     pub async fn spawn(server: &MockInferenceServer, cwd: &Path) -> Self {
-        let home = TempDir::new().expect("create temp home");
-        let (mut child, stderr) = spawn_agent_process(server, cwd, home.path(), &[], &[]);
+        let mut sandbox = TestSandbox::new();
+        let mut process = spawn_agent_process(&mut sandbox, server, cwd, &[], &[]);
 
-        let stdin = child.stdin.take().expect("child stdin missing");
-        let child_stdout = child.stdout.take().expect("child stdout missing");
+        let stdin = process.take_stdin().expect("child stdin missing");
+        let child_stdout = process.take_stdout().expect("child stdout missing");
 
         Self {
             stdin,
             stdout: tokio::io::BufReader::new(child_stdout),
-            stderr,
-            _child: child,
-            _home: home,
+            process,
+            _sandbox: sandbox,
         }
     }
 
     pub fn stderr(&self) -> String {
-        String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
+        self.process.stderr_tail().text
+    }
+
+    pub fn child_pid(&self) -> Option<u32> {
+        self.process.pid()
+    }
+
+    pub fn process_diagnostics(&self) -> String {
+        self.process.diagnostic_summary()
+    }
+
+    pub fn start_terminate(&mut self) -> std::io::Result<()> {
+        self.process.start_terminate()
+    }
+
+    pub fn start_kill(&mut self) {
+        self.process.start_kill();
+    }
+
+    pub async fn close(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.process.close().await
     }
 
     /// Write `line` verbatim followed by `\n`, and flush.

@@ -247,17 +247,19 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
         "json",
         "--cwd",
     ])
-    .arg(workdir.path())
-    .current_dir(workdir.path())
+    .arg(workdir.workspace())
+    .current_dir(workdir.workspace())
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped())
     .kill_on_drop(true);
-    xai_grok_test_support::env::test_env_cmd_tokio(&mut cmd, &server.url(), &home);
-    cmd.env("HOME", &home);
-    cmd.env("GROK_HOME", &grok_home);
+    let mut sandbox = TestSandbox::builder().mock_url(server.url()).build();
+    sandbox
+        .set_env("HOME", &home)
+        .set_env("USERPROFILE", &home)
+        .set_env("GROK_HOME", &grok_home);
 
-    let result = run_headless_with_cmd(cmd).await;
+    let result = run_headless_in_sandbox(cmd, sandbox).await;
     assert_headless_success(
         &result,
         "headless session with trusted local plugin refresh",
@@ -281,10 +283,10 @@ async fn headless_session_refreshes_trusted_local_plugin_and_writes_session_json
         enabled: vec!["demo-plugin".to_string()],
     };
     let plugin_registry = SharedPluginRegistryHandle::new(None, Vec::new())
-        .build_for_cwd(workdir.path(), &config, &[], true)
+        .build_for_cwd(workdir.workspace(), &config, &[], true)
         .expect("registry built from refreshed snapshot");
     let agents = xai_grok_agent::discovery::all_subagents_with_plugins(
-        workdir.path(),
+        workdir.workspace(),
         &HashMap::new(),
         Some(plugin_registry.as_ref()),
     );

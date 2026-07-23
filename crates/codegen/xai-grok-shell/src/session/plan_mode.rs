@@ -690,9 +690,10 @@ mod tests {
         plan_path: &str,
         plan_has_content: bool,
     ) -> String {
-        let extra = serde_json::json!(
-            { "plan_path" : plan_path, "plan_has_content" : plan_has_content, }
-        );
+        let extra = serde_json::json!({
+            "plan_path": plan_path,
+            "plan_has_content": plan_has_content,
+        });
         renderer.render_with_extra(template, &extra).unwrap()
     }
     #[test]

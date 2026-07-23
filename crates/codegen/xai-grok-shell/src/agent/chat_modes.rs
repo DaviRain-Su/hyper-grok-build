@@ -107,9 +107,7 @@ impl ChatModesManager {
             }
             Ok(_) => empty_state(),
             Err(err) => {
-                tracing::warn!(
-                    error = % err, "chat modes fetch failed; serving cache/empty"
-                );
+                tracing::warn!(error = %err, "chat modes fetch failed; serving cache/empty");
                 let guard = self.inner.cache.read();
                 match guard.as_ref() {
                     Some(c) if c.user_id == user_id => modes_to_model_state(&c.response),
@@ -232,7 +230,7 @@ mod tests {
         Mode {
             id: id.to_owned(),
             availability: ModeAvailability {
-                requires_upgrade: Some(serde_json::json!({ "message" : "Upgrade" })),
+                requires_upgrade: Some(serde_json::json!({ "message": "Upgrade" })),
                 ..Default::default()
             },
             ..Default::default()

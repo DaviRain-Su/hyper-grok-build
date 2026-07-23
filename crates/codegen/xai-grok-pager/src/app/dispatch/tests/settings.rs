@@ -223,7 +223,7 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
-                serde_json::json!({ "promptId" : cancelled_pid })
+                serde_json::json!({ "promptId": cancelled_pid })
                     .as_object()
                     .cloned(),
             )),
@@ -253,10 +253,10 @@ fn set_default_model_allowed_when_agent_chat_kind() {
     app.agents.get_mut(&id).unwrap().chat_kind = true;
     let effects = dispatch(Action::SetDefaultModel(model_id.clone()), &mut app);
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::SwitchModel { model_id : mid, .. }
-        if mid == & model_id)),
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SwitchModel { model_id: mid, .. } if mid == &model_id
+        )),
         "chat_kind must still emit SwitchModel for live chat mode switches"
     );
     assert!(app.agents[&id].session.model_switch_pending);
@@ -296,9 +296,7 @@ fn slash_model_valid_dispatches_set_default_model_with_switch_and_persist() {
         effects[0],
     );
     assert!(
-        matches!(& effects[1], Effect::SwitchModel { model_id : mid, .. }
-if mid == &
-        model_id),
+        matches!(&effects[1], Effect::SwitchModel { model_id: mid, .. } if mid == &model_id),
         "second effect must be SwitchModel(<resolved id>), got {:?}",
         effects[1],
     );
@@ -713,6 +711,35 @@ fn dispatch_open_settings_opens_then_close_on_reentry() {
         );
     }
 }
+/// A focused open (privacy banner Customize) landing on an agent whose
+/// settings modal is already open must reopen focused on the requested
+/// row — not toggle the modal closed.
+#[test]
+fn dispatch_open_settings_focus_reopens_when_already_open() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    let _ = dispatch(Action::OpenSettings, &mut app);
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    assert!(matches!(
+        agent.active_modal,
+        Some(ActiveModal::Settings { .. })
+    ));
+    let _ = dispatch(
+        Action::OpenSettingsFocus {
+            key: "coding_data_sharing",
+        },
+        &mut app,
+    );
+    let agent = app.agents.get(&AgentId(0)).unwrap();
+    let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+        panic!("focused re-entry must keep the settings modal open")
+    };
+    assert_eq!(
+        state.focused_setting().map(|(k, _)| k),
+        Some("coding_data_sharing"),
+        "focused re-entry must land on the requested row"
+    );
+}
 /// `dispatch_open_reset_confirm` moves the Settings modal state
 /// into the new `ResetSettingsConfirm` variant, preserving it
 /// across the confirm dialog's lifecycle. The dispatch arm is
@@ -1048,8 +1075,13 @@ fn clear_default_model_persists_but_keeps_live_current() {
         "expected exactly one PersistSetting effect"
     );
     assert!(
-        matches!(& effects[0], Effect::PersistSetting { key : "default_model", value :
-        crate ::settings::SettingValue::String(s), .. } if s.is_empty()),
+        matches!(
+            &effects[0],
+            Effect::PersistSetting {
+                key: "default_model",
+                value: crate::settings::SettingValue::String(s),
+                .. } if s.is_empty()
+        ),
         "expected PersistSetting(default_model, ''), got {:?}",
         effects[0],
     );
@@ -1082,11 +1114,17 @@ fn set_default_model_resolves_known_name() {
         .insert(id.clone(), info);
     let effects = dispatch(Action::SetDefaultModel(id.clone()), &mut app);
     assert_eq!(effects.len(), 2);
-    assert!(
-        matches!(& effects[0], Effect::PersistSetting { key : "default_model", value :
-        crate ::settings::SettingValue::String(s), .. } if s == "grok-4.5")
-    );
-    assert!(matches!(& effects[1], Effect::SwitchModel { model_id : mid, .. } if mid == & id));
+    assert!(matches!(
+        &effects[0],
+        Effect::PersistSetting {
+            key: "default_model",
+            value: crate::settings::SettingValue::String(s),
+            .. } if s == "grok-4.5"
+    ));
+    assert!(matches!(
+        &effects[1],
+        Effect::SwitchModel { model_id: mid, .. } if mid == &id
+    ));
     assert_eq!(app.agents[&agent_id].session.models.current, Some(id));
 }
 /// Re-dispatching the same model
@@ -1543,6 +1581,7 @@ fn set_simple_mode_propagates_to_every_agent() {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         },

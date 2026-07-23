@@ -58,6 +58,9 @@ pub struct SessionHandle {
     /// Resolved turn limit for this session; lets a spawned subagent inherit
     /// the parent's limit. `None` = unlimited.
     pub max_turns: Option<usize>,
+    /// Configured cutoff a subagent inherits, published by the session actor. `None` when unset.
+    pub resolved_tool_overrides:
+        std::sync::Arc<arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>>,
     /// Handle to the hunk tracker for this session
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Actor-based chat state handle — lets callers inspect final conversation state.
@@ -381,16 +384,19 @@ impl SessionHandle {
         }
         rx.await.unwrap_or((false, false))
     }
-    pub(crate) async fn list_available_commands(&self) -> Vec<acp::AvailableCommand> {
+    pub(crate) async fn list_available_commands(
+        &self,
+    ) -> crate::session::slash_commands::ListCommandsResponse {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
             .send(SessionCommand::ListAvailableCommands { respond_to: tx })
             .is_err()
         {
-            return Vec::new();
+            return crate::session::slash_commands::ListCommandsResponse::default();
         }
-        rx.await.unwrap_or_default()
+        rx.await
+            .unwrap_or_else(|_| crate::session::slash_commands::ListCommandsResponse::default())
     }
     /// Replace the live session's client-registered hooks (see `SessionCommand::SetClientHooks`).
     pub(crate) fn set_client_hooks(&self, hooks: crate::extensions::hooks::ClientHooks) {
@@ -578,7 +584,7 @@ impl SessionHandle {
             .is_err()
         {
             tracing::warn!(
-                session_id = % self.info.id.0,
+                session_id = %self.info.id.0,
                 "feedback persistence channel closed; entry dropped",
             );
         }

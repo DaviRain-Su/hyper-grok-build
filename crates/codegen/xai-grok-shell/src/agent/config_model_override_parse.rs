@@ -658,8 +658,7 @@ mod tests {
         assert_eq!(warnings[0].kind, ConfigWarningKind::NotATable);
         assert!(matches!(
             &warnings[0].target,
-            WarningTarget::Model { key, field: None }
-if key == "oops"
+            WarningTarget::Model { key, field: None } if key == "oops"
         ));
     }
 

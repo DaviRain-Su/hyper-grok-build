@@ -170,15 +170,15 @@ pub(crate) async fn spawn_bottom_pinned_marker_scrollback_with_env(
     content.set_response(marker_response(MOCK_RESPONSE_SENTINEL, marker_count));
 
     let binary = pager_binary().expect("resolve pager binary");
-    // spawn_with_content minus the fixed env: content env + the caller's.
-    let content_env = content.env_for_pager();
-    let mut env: Vec<(&str, &str)> = content_env
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    env.extend_from_slice(extra_env);
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env)
-        .expect("spawn pager with content");
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        extra_env,
+    )
+    .expect("spawn pager with content");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -271,15 +271,15 @@ pub(crate) async fn spawn_streaming_marker_turn(
     );
 
     let binary = pager_binary().expect("resolve pager binary");
-    // spawn_with_content minus the fixed env: content env + the caller's.
-    let content_env = content.env_for_pager();
-    let mut env: Vec<(&str, &str)> = content_env
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    env.extend_from_slice(extra_env);
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env)
-        .expect("spawn pager with content");
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        extra_env,
+    )
+    .expect("spawn pager with content");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)

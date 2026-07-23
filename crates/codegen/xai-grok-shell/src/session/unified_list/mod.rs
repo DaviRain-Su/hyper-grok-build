@@ -542,10 +542,14 @@ mod tests {
     #[test]
     fn facets_carry_kind_and_cwd() {
         let r = row("s1", "2026-06-18T20:10:00Z");
-        assert!(matches!(r.facets.get(KIND_FACET_KEY),
-            Some(FacetValue::One(serde_json::Value::String(k))) if k == "build"));
-        assert!(matches!(r.facets.get(CWD_FACET_KEY),
-            Some(FacetValue::One(serde_json::Value::String(c))) if c == "/Users/me/xai"));
+        assert!(matches!(
+            r.facets.get(KIND_FACET_KEY),
+            Some(FacetValue::One(serde_json::Value::String(k))) if k == "build"
+        ));
+        assert!(matches!(
+            r.facets.get(CWD_FACET_KEY),
+            Some(FacetValue::One(serde_json::Value::String(c))) if c == "/Users/me/xai"
+        ));
     }
     #[test]
     fn bare_session_info_is_minimal_plus_meta() {
@@ -610,10 +614,11 @@ mod tests {
     }
     #[test]
     fn parsed_meta_reads_facet_filters_query_and_limit() {
-        let meta = serde_json::json!(
-            { "x.ai/facetFilters" : { "kind" : ["build"], "starred" : true },
-            "x.ai/query" : "antelope", "x.ai/limit" : 5, }
-        );
+        let meta = serde_json::json!({
+            "x.ai/facetFilters": { "kind": ["build"], "starred": true },
+            "x.ai/query": "antelope",
+            "x.ai/limit": 5,
+        });
         let parsed = ParsedMeta::parse(Some(&meta));
         assert_eq!(parsed.query.as_deref(), Some("antelope"));
         assert_eq!(parsed.limit, Some(5));
@@ -652,7 +657,9 @@ mod tests {
     #[test]
     fn forced_kind_replaces_client_build_filter() {
         let mut req = ListReq {
-            meta: Some(serde_json::json!({ "x.ai/facetFilters" : { "kind" : ["build"] }, })),
+            meta: Some(serde_json::json!({
+                "x.ai/facetFilters": { "kind": ["build"] },
+            })),
             ..ListReq::default()
         };
         force_kind_chat(&mut req);
@@ -668,11 +675,11 @@ mod tests {
     #[test]
     fn forced_kind_preserves_other_facets() {
         let mut req = ListReq {
-            meta: Some(serde_json::json!(
-                { "x.ai/facetFilters" : { "kind" : ["build"], "starred" : [true],
-                "workspace" : ["w1"] }, "x.ai/query" : "antelope", "x.ai/limit" : 5,
-                }
-            )),
+            meta: Some(serde_json::json!({
+                "x.ai/facetFilters": { "kind": ["build"], "starred": [true], "workspace": ["w1"] },
+                "x.ai/query": "antelope",
+                "x.ai/limit": 5,
+            })),
             ..ListReq::default()
         };
         force_kind_chat(&mut req);
@@ -745,14 +752,15 @@ mod tests {
     #[serial_test::serial]
     async fn forced_kind_serves_conversations_only() {
         let addr = spawn_conversations_stub(
-            serde_json::json!(
-                { "conversations" : [{ "conversationId" : "c1", "title" : "Hello",
-                "modifyTime" : "2026-07-01T00:00:00Z" }, { "conversationId" : "c2",
-                "title" : "", "modifyTime" : "2026-07-02T00:00:00Z" },], }
+                serde_json::json!({
+                "conversations": [
+                    { "conversationId": "c1", "title": "Hello", "modifyTime": "2026-07-01T00:00:00Z" },
+                    { "conversationId": "c2", "title": "", "modifyTime": "2026-07-02T00:00:00Z" },
+                ],
+            })
+                    .to_string(),
             )
-            .to_string(),
-        )
-        .await;
+            .await;
         let _env = xai_grok_test_support::EnvGuard::set(
             "GROK_CONVERSATIONS_BASE_URL",
             format!("http://{addr}"),
@@ -760,7 +768,9 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let client = ConversationsClient::new(xai_auth_manager(home.path()));
         let mut req = ListReq {
-            meta: Some(serde_json::json!({ "x.ai/facetFilters" : { "kind" : ["build"] }, })),
+            meta: Some(serde_json::json!({
+                "x.ai/facetFilters": { "kind": ["build"] },
+            })),
             ..ListReq::default()
         };
         force_kind_chat(&mut req);
@@ -863,10 +873,9 @@ mod tests {
     #[serial_test::serial]
     fn parse_list_req_forces_kind_under_process_chat_mode_only() {
         use crate::agent::chat_modes::GROK_CHAT_MODE_ENV;
-        let raw = serde_json::json!(
-            { "_meta" : { "x.ai/facetFilters" : { "kind" : ["build"], "starred" : [true]
-            } }, }
-        )
+        let raw = serde_json::json!({
+            "_meta": { "x.ai/facetFilters": { "kind": ["build"], "starred": [true] } },
+        })
         .to_string();
         {
             let _off = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_MODE_ENV);
@@ -914,8 +923,7 @@ mod tests {
             .expect("serialize");
             assert_eq!(
                 value["_meta"]["x.ai/partial"],
-                serde_json::json!({ "conversations" :
-                true, "reason" : wire })
+                serde_json::json!({ "conversations": true, "reason": wire })
             );
         }
         let healthy = serde_json::to_value(ext_list_response(UnifiedListResult {
@@ -928,8 +936,7 @@ mod tests {
         .expect("serialize");
         assert_eq!(
             healthy["_meta"]["x.ai/partial"],
-            serde_json::json!({ "conversations" :
-            false })
+            serde_json::json!({ "conversations": false })
         );
     }
     /// Receive-side wire pin: a field rename would silently drop the pager's

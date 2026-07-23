@@ -20,14 +20,24 @@ async fn minimal_ctrl_o_send_now_queued_apple_terminal() {
     );
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut env = content.env_for_pager();
-    env.push(("TERM_PROGRAM".into(), "Apple_Terminal".into()));
+    let mut overrides: Vec<(String, String)> =
+        vec![("TERM_PROGRAM".into(), "Apple_Terminal".into())];
     // Non-interactive $PAGER so a mistaken transcript open fails fast rather
     // than hanging in `less` if the predicate regresses.
-    env.push(("PAGER".into(), "cat".into()));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, &env_refs)
-        .expect("spawn minimal + Apple_Terminal");
+    overrides.push(("PAGER".into(), "cat".into()));
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        MINIMAL_ARGS,
+        &env_refs,
+    )
+    .expect("spawn minimal + Apple_Terminal");
     harness.set_respond_to_queries(true);
 
     wait_minimal_ready(&mut harness);

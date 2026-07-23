@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::VoiceError;
 
+/// Default STT capture rate (Hz). Shared with the `__mic-capture` helper's
+/// argv default so parent and child agree when `--rate` is omitted.
+pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+
 /// Voice settings for the STT transport.
 ///
 /// Prefer **https** `api_base` (same shape as chat). [`Self::stt_ws_url`] derives
@@ -34,7 +38,7 @@ impl Default for VoiceConfig {
             api_base: "https://api.x.ai".into(),
             stt_ws_path: "/v1/stt".into(),
             language: "en".into(),
-            sample_rate: 16_000,
+            sample_rate: DEFAULT_SAMPLE_RATE,
             stt_endpointing_ms: 400,
             stt_interim_results: true,
             client_identifier: String::new(),

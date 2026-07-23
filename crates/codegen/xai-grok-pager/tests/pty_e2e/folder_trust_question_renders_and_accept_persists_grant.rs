@@ -12,15 +12,15 @@ async fn folder_trust_question_renders_and_accept_persists_grant() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} trusted and running."));
     let repo = git_repo_with_mcp_json();
-    let env = trust_env(&content, true);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env_refs = trust_env(true);
     let cwd = repo.path().to_str().expect("utf8 repo path");
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(
+    let mut harness = PtyHarness::spawn_with_content_env(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        &content,
         &["--cwd", cwd],
         &env_refs,
     )

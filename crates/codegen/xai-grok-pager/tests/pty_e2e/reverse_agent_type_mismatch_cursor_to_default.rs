@@ -53,7 +53,7 @@ async fn reverse_agent_type_mismatch_cursor_to_default() {
         .expect("agent type mismatch modal should appear for reverse direction");
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited\nscreen:\n{}",
         harness.screen_contents()
     );

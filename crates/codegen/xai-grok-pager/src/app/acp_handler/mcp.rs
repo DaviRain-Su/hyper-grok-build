@@ -158,8 +158,7 @@ pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> 
     app.pending_effects.iter().any(|e| {
         matches!(
             e,
-            Effect::FetchMcpsList { agent_id: a, .. }
-if *a == agent_id
+            Effect::FetchMcpsList { agent_id: a, .. } if *a == agent_id
         )
     })
 }

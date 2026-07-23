@@ -91,9 +91,13 @@ pub(crate) async fn spawn_fake_leader(
         let _ = ready_tx.send(());
         loop {
             tokio::select! {
-                _ = cancel_clone.cancelled() => break, accept_result = listener.accept()
-                => { let Ok((stream, _)) = accept_result else { break; };
-                serve_client(stream, & behavior, & cancel_clone). await; }
+                _ = cancel_clone.cancelled() => break,
+                accept_result = listener.accept() => {
+                    let Ok((stream, _)) = accept_result else {
+                        break;
+                    };
+                    serve_client(stream, &behavior, &cancel_clone).await;
+                }
             }
         }
         let _ = fs::remove_file(&socket_path);

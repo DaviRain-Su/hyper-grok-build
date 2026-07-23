@@ -245,14 +245,42 @@ pub fn repo_configs_present(cwd: &Path) -> bool {
 }
 
 /// Display-only: which repo-local trust-sensitive config KINDS are present for
-/// `cwd` (`mcp`, `plugins`, `lsp`, `envrc`, `claude`, `hooks`, `agents`, `roles`,
-/// `personas`, `workflows`), deduped in cheap→expensive marker order. Single
-/// source with [`repo_configs_present`] (which is
+/// `cwd` (`mcp`, `plugins`, `permission`, `lsp`, `envrc`, `claude`, `hooks`,
+/// `agents`, `roles`, `personas`, `workflows`), deduped in cheap→expensive
+/// marker order. Single source with [`repo_configs_present`] (which is
 /// `!repo_config_kinds(cwd).is_empty()`), so a folder that the gate fired on
-/// always has a non-empty, accurate kind list — no `[plugins].paths` / `.claude`
-/// / `.grok/agents` / subdir-launch gaps. NOT itself the trust gate.
+/// always has a non-empty, accurate kind list — no `[plugins].paths` /
+/// `[permission]` / `.claude` / `.grok/agents` / subdir-launch gaps. NOT itself
+/// the trust gate.
 pub fn repo_config_kinds(cwd: &Path) -> Vec<&'static str> {
     collect_repo_config_kinds(cwd, false)
+}
+
+/// Whether a project `.grok/config.toml` `[permission]` value would contribute
+/// rules to the permission resolver. Mirrors the compact/verbose shapes that
+/// `permission::resolution` loads: non-empty `allow`/`deny`/`ask` string arrays,
+/// or a non-empty verbose `rules` array. Empty arrays / empty tables do not gate
+/// (same as empty `[mcp_servers]` / empty `[plugins].paths`).
+fn config_toml_permission_contributes(permission_value: &TomlValue) -> bool {
+    let Some(table) = permission_value.as_table() else {
+        // Non-table `[permission]` fails config load elsewhere; treat as a
+        // marker so a malicious non-table still trips the gate rather than
+        // resolving trusted.
+        return true;
+    };
+    for key in ["deny", "allow", "ask"] {
+        if table
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+        {
+            return true;
+        }
+    }
+    table
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty())
 }
 
 fn path_present_or_uncertain(path: &Path) -> bool {
@@ -302,11 +330,13 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     if !crate::project_config::find_mcp_json_files_in(&chain.dirs).is_empty() {
         hit!("mcp");
     }
-    // Project `.grok/config.toml` declaring repo-controlled code-exec: a
-    // non-empty `[mcp_servers]` table OR a non-empty `[plugins].paths` array.
-    // `[plugins].paths` loads as auto-trusted ConfigPath plugins, so a clone
-    // whose ONLY repo-local config is `[plugins].paths` must still be gated
-    // (else it resolves Trusted and the paths merge runs ungated => RCE).
+    // Project `.grok/config.toml` declaring repo-controlled code-exec or
+    // permission policy: a non-empty `[mcp_servers]` table, a non-empty
+    // `[plugins].paths` array, OR a contributing `[permission]` section.
+    // `[plugins].paths` loads as auto-trusted ConfigPath plugins; `[permission]`
+    // allow/deny/ask rules auto-approve or block tools — a clone whose ONLY
+    // repo-local config is either must still be gated (else it resolves Trusted
+    // and the loader runs ungated).
     for path in crate::project_config::find_project_configs_in(&chain.dirs) {
         let Ok(root) = xai_grok_config::load_config_file(&path) else {
             continue;
@@ -320,11 +350,17 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
             .and_then(|v| v.get("paths"))
             .and_then(|v| v.as_array())
             .is_some_and(|a| !a.is_empty());
+        let has_permission = root
+            .get("permission")
+            .is_some_and(config_toml_permission_contributes);
         if has_mcp_servers {
             hit!("mcp");
         }
         if has_plugin_paths {
             hit!("plugins");
+        }
+        if has_permission {
+            hit!("permission");
         }
     }
     // Project `.grok/lsp.json`.
@@ -792,6 +828,48 @@ mod tests {
         let grok = tmp.path().join(".grok");
         std::fs::create_dir_all(&grok).unwrap();
         std::fs::write(grok.join("config.toml"), "[plugins]\npaths = []\n").unwrap();
+        assert!(!repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_grok_config_permission() {
+        // A repo whose ONLY repo-local config is a contributing `[permission]`
+        // section (no MCP/plugins/hooks) must still be gated: those allow rules
+        // auto-approve tool calls, so an ungated clone loads the attacker's
+        // policy. Also covers subdir launch (cwd→git-root walk).
+        let tmp = repo_tmp();
+        let grok = tmp.path().join(".grok");
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::write(
+            grok.join("config.toml"),
+            "[permission]\nallow = [\"Bash(*)\"]\n",
+        )
+        .unwrap();
+        assert!(repo_configs_present(tmp.path()));
+        assert!(
+            repo_config_kinds(tmp.path()).contains(&"permission"),
+            "permission-only repo must report the permission kind"
+        );
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(
+            repo_configs_present(&subdir),
+            "permission-only config at git root must gate subdir launches"
+        );
+    }
+
+    #[test]
+    fn repo_configs_present_false_for_empty_permission() {
+        // Empty allow/deny/ask arrays contribute no rules, so they must not
+        // trip the gate (mirrors empty `[mcp_servers]` / empty `[plugins].paths`).
+        let tmp = repo_tmp();
+        let grok = tmp.path().join(".grok");
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::write(
+            grok.join("config.toml"),
+            "[permission]\nallow = []\ndeny = []\n",
+        )
+        .unwrap();
         assert!(!repo_configs_present(tmp.path()));
     }
 

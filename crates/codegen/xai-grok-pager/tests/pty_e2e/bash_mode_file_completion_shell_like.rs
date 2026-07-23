@@ -14,18 +14,18 @@ const INNER_SENTINEL: &str = "INNER-NOTE-SENTINEL-4173";
 /// history tier is pinned to a nonexistent file so file completions are the
 /// ONLY dropdown source.
 fn suggestions_env(content: &ContentController) -> Vec<(String, String)> {
-    let mut env = content.env_for_pager();
-    env.push(("SHELL".into(), "/bin/bash".into()));
-    env.push(("GROK_SUGGESTIONS".into(), "0".into()));
-    env.push((
-        "HISTFILE".into(),
-        content
-            .home()
-            .join(".no_such_history")
-            .to_string_lossy()
-            .into_owned(),
-    ));
-    env
+    vec![
+        ("SHELL".into(), "/bin/bash".into()),
+        ("GROK_SUGGESTIONS".into(), "0".into()),
+        (
+            "HISTFILE".into(),
+            content
+                .home()
+                .join(".no_such_history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ]
 }
 
 /// Seed the session cwd the file provider lists:
@@ -75,12 +75,16 @@ async fn bash_mode_file_completion_shell_like() {
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} session up."));
 
     let env = suggestions_env(&content);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env_refs: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new_in_dir(
+    let mut harness = PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        &content,
         &[],
         &env_refs,
         Some(&cwd),

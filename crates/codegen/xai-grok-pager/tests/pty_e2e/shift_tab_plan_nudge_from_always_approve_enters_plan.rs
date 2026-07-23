@@ -14,14 +14,14 @@ async fn shift_tab_plan_nudge_from_always_approve_enters_plan() {
     let binary = pager_binary().expect("resolve pager binary");
     // --yolo/--trust seed Always-Approve; hints env opts the tip in; CWD is
     // the sandboxed content home so trust resolves against the same tree.
-    let env = contextual_hints_env(&content);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut harness = PtyHarness::new_in_dir(
+    let env_refs = CONTEXTUAL_HINTS_ENV;
+    let mut harness = PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        &content,
         &["--yolo", "--trust"],
-        &env_refs,
+        env_refs,
         Some(content.home()),
     )
     .expect("spawn pager in always-approve");

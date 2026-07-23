@@ -83,7 +83,7 @@ async fn wheel_flood_paints_no_ghost_frames() {
     harness.update(Duration::from_millis(600));
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during the wheel flood\nscreen:\n{}",
         harness.screen_contents()
     );

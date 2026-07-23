@@ -984,6 +984,56 @@ fn cancel_rewind_removes_all_combined_segment_blocks() {
     );
 }
 
+/// A cancel landing before first server activity must NOT rewind the stashed
+/// in-flight prompt over a NEWER composer draft. Esc (and the mouse stop /
+/// palette cancel) fire with the draft intact — unlike keyboard Ctrl+C,
+/// which only cancels on an empty prompt — so the pristine rewind falls back
+/// to the standard cancel and the draft survives.
+#[test]
+fn cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sent_id = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("p-sent".into());
+        let sent_id = agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("sent prompt"));
+        agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "sent prompt".into(),
+            images: Vec::new(),
+            scrollback_entry: sent_id,
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        // Typed WHILE the turn was starting — newer than the stash.
+        agent.prompt.set_text("newer draft");
+        sent_id
+    };
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::CancelTurn { .. }]),
+        "cancel still flies to the server, got {effects:?}"
+    );
+
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.prompt.text(),
+        "newer draft",
+        "the composer draft must survive the cancel (no rewind clobber)"
+    );
+    assert!(
+        agent.scrollback.index_of_id(sent_id).is_some(),
+        "standard cancel keeps the sent prompt's block (no rewind removal)"
+    );
+    assert!(
+        agent.session.state.is_cancelling(),
+        "standard cancel path (TurnCancelling), not the rewind-Idle"
+    );
+}
+
 #[test]
 fn entry_title_strips_skill_xml_from_generated_title() {
     use crate::views::session_title::entry_title;

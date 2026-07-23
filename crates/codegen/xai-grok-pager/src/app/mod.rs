@@ -145,6 +145,19 @@ pub(crate) fn minimal_mode_active() -> bool {
 pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
     MINIMAL_MODE_ACTIVE.store(on, Ordering::Release);
 }
+/// Whether a bare Esc cancels a running turn: minimal mode and non-vim
+/// fullscreen get the single-Esc cancel; fullscreen vim mode keeps the
+/// mid-turn swallow (Ctrl+C stays the cancel gesture there).
+///
+/// Pure over its inputs — production callers pass the agent's injected
+/// effective screen mode (`AgentView::is_minimal_mode`, seeded by
+/// `apply_app_scoped_gates`; never the [`minimal_mode_active`] process
+/// global) and tests pass explicit booleans. `vim_mode` is the
+/// scrollback-nav setting (`[ui].vim_mode` / `/vim-mode`), not the prompt
+/// `simple_mode`.
+pub(crate) fn esc_cancels_turn(is_minimal: bool, vim_mode: bool) -> bool {
+    is_minimal || !vim_mode
+}
 /// Whether the opt-in mouse-reporting toggle feature is enabled
 /// (`[ui] mouse_reporting_toggle` / `GROK_MOUSE_REPORTING_TOGGLE`). Seeded once
 /// at startup; gates both the `Ctrl+R` shortcut registration and the
@@ -451,16 +464,15 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let grok_com_config =
-        match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
-            Ok(c) => c.grok_com_config,
-            Err(e) => {
-                tracing::warn!(
-                    error = % e, "failed to parse config for auth refresh, using defaults"
-                );
-                xai_grok_shell::auth::GrokComConfig::default()
-            }
-        };
+    let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
+        &raw_config,
+    ) {
+        Ok(c) => c.grok_com_config,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
+            xai_grok_shell::auth::GrokComConfig::default()
+        }
+    };
     let refreshed_auth = xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config).await;
     let early_prefetch =
         xai_grok_shell::agent::models::start_early_prefetch_with_auth(refreshed_auth);
@@ -497,9 +509,7 @@ pub async fn run(
         match std::env::current_dir() {
             Ok(cwd) => xai_grok_shell::agent::folder_trust::grant_folder_trust(&cwd),
             Err(e) => {
-                tracing::warn!(
-                    error = % e, "--trust: failed to resolve cwd; folder not trusted"
-                )
+                tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted")
             }
         }
     }
@@ -666,12 +676,18 @@ pub async fn run(
     let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
     let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
     tracing::info!(
-        use_alt_screen = screen_mode.is_fullscreen(), minimal = screen_mode.is_minimal(),
-        mouse_capture = ! screen_mode.is_minimal(), minimal_live_rows = config_watcher
-        .current().minimal_live_rows, is_control_mode, no_alt_screen_cli = args
-        .no_alt_screen, minimal_cli = args.minimal, fullscreen_cli = args.fullscreen,
-        config_screen_mode = ? config_screen_mode, auto_minimal_mouse_leak, config_mode =
-        ? alt_screen_config_mode, multiplexer = ? term_ctx.multiplexer,
+        use_alt_screen = screen_mode.is_fullscreen(),
+        minimal = screen_mode.is_minimal(),
+        mouse_capture = !screen_mode.is_minimal(),
+        minimal_live_rows = config_watcher.current().minimal_live_rows,
+        is_control_mode,
+        no_alt_screen_cli = args.no_alt_screen,
+        minimal_cli = args.minimal,
+        fullscreen_cli = args.fullscreen,
+        config_screen_mode = ?config_screen_mode,
+        auto_minimal_mouse_leak,
+        config_mode = ?alt_screen_config_mode,
+        multiplexer = ?term_ctx.multiplexer,
         "resolved fullscreen policy"
     );
     engage_startup_theme(screen_mode);
@@ -732,13 +748,14 @@ pub async fn run(
         match &result {
             Ok(_) => {
                 tracing::warn!(
-                    error = % cleanup_error,
+                    error = %cleanup_error,
                     "terminal cleanup failed after successful event loop"
                 )
             }
             Err(run_error) => {
                 tracing::warn!(
-                    error = % cleanup_error, run_error = % run_error,
+                    error = %cleanup_error,
+                    run_error = %run_error,
                     "terminal cleanup also failed"
                 )
             }
@@ -754,7 +771,7 @@ pub async fn run(
                     &relaunch.session_id,
                     relaunch.minimal,
                 ) {
-                    tracing::error!(error = % e, "screen-mode relaunch failed");
+                    tracing::error!(error = %e, "screen-mode relaunch failed");
                     print_relaunch_failure_hint(
                         &e,
                         &relaunch.session_id,
@@ -1153,8 +1170,10 @@ fn init_terminal(
                 let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
             });
             tracing::info!(
-                kitty.flags = ? flags, kitty.disambiguate = true, kitty
-                .report_event_types = true, kitty.report_all_keys = false,
+                kitty.flags = ?flags,
+                kitty.disambiguate = true,
+                kitty.report_event_types = true,
+                kitty.report_all_keys = false,
                 "kitty keyboard protocol pushed"
             );
         } else {

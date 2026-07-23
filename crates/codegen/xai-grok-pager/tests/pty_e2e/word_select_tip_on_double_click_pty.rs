@@ -24,9 +24,8 @@ fn double_click_at(harness: &mut PtyHarness, row: u16, col: u16) {
 
 fn spawn_with_hints(content: &ContentController) -> PtyHarness {
     let binary = pager_binary().expect("resolve pager binary");
-    let env = contextual_hints_env(content);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs)
+    let env_refs = CONTEXTUAL_HINTS_ENV;
+    PtyHarness::spawn_with_content_env(&binary, DEFAULT_ROWS, DEFAULT_COLS, content, &[], env_refs)
         .expect("spawn pager with contextual hints")
 }
 
@@ -227,11 +226,20 @@ async fn word_select_tip_skipped_when_contextual_hint_disabled() {
     // Content env only — pin the env master to empty (parsed as unset) so an
     // inherited GROK_CONTEXTUAL_HINTS from the runner's shell can't force
     // tips on and defeat the config opt-out under test.
-    let mut env = content.env_for_pager();
-    env.push(("GROK_CONTEXTUAL_HINTS".into(), String::new()));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let mut harness =
-        PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn pager");
+    let overrides: Vec<(String, String)> = vec![("GROK_CONTEXTUAL_HINTS".into(), String::new())];
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let mut harness = PtyHarness::spawn_with_content_env(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        &env_refs,
+    )
+    .expect("spawn pager");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)

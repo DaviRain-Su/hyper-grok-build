@@ -174,6 +174,7 @@ fn dispatch_load_session_ungated(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         },
@@ -217,6 +218,7 @@ fn dispatch_load_session_ungated(
         agent_id,
         session_id,
         session_cwd,
+        // Conversation-entry bit; effects OR SessionFlags.chat_mode for meta.
         chat_kind,
     }]
 }
@@ -822,6 +824,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         },
@@ -984,8 +987,14 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
                 prev_model_id: None,
             });
         }
-        if std::mem::take(&mut agent.pending_extensions_fetch) && agent.extensions_modal.is_some() {
-            effects.extend(extensions_modal_tab_fetches(agent_id, hydrate_sid.clone()));
+        if std::mem::take(&mut agent.pending_extensions_fetch)
+            && let Some(modal) = agent.extensions_modal.as_mut()
+        {
+            effects.extend(extensions_modal_tab_fetches(
+                modal,
+                agent_id,
+                hydrate_sid.clone(),
+            ));
         }
         effects.push(Effect::RegisterActiveSession {
             session_id: hydrate_sid,
@@ -1004,10 +1013,7 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
     session_id: acp::SessionId,
     error: String,
 ) -> Vec<Effect> {
-    tracing::error!(
-        agent = ? agent_id, session = ? session_id, error = % error,
-        "Session load failed"
-    );
+    tracing::error!(agent = ?agent_id, session = ?session_id, error = %error, "Session load failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
@@ -1133,6 +1139,7 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         agent_id,
         session_id: local_session_id,
         session_cwd: Some(cwd),
+        // Never a conversation entry (effects OR SessionFlags.chat_mode).
         chat_kind: false,
     }]
 }
@@ -1141,7 +1148,7 @@ pub(in crate::app::dispatch) fn handle_session_restore_failed(
     agent_id: AgentId,
     error: String,
 ) -> Vec<Effect> {
-    tracing::error!(agent = ? agent_id, error = % error, "Session restore failed");
+    tracing::error!(agent = ?agent_id, error = %error, "Session restore failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionRestoreFailed") {
             return vec![];

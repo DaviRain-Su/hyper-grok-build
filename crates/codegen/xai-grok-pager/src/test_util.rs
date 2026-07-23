@@ -38,6 +38,7 @@ pub fn make_agent_view(session_id: Option<&str>, cwd: &str) -> crate::app::agent
         bg_tool_call_to_task: std::collections::HashMap::new(),
         scheduled_tasks: std::collections::HashMap::new(),
         in_flight_prompt: None,
+        compact_held_prompt: None,
         current_prompt_id: None,
         created_via_new: false,
     };

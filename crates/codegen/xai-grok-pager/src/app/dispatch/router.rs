@@ -95,7 +95,8 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_share_session,
+    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom,
+    dispatch_privacy_banner_accept, dispatch_privacy_banner_customize, dispatch_share_session,
     dispatch_show_context_info, dispatch_show_privacy_info, dispatch_show_queue,
     dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
     dispatch_show_usage, set_coding_data_sharing,
@@ -515,7 +516,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             crate::unified_log::info(
                 "mouse_reporting_toggle.dispatch",
                 None,
-                Some(serde_json::json!({ "phase" : "entered_dispatch_arm", })),
+                Some(serde_json::json!({
+                    "phase": "entered_dispatch_arm",
+                })),
             );
             dispatch_toggle_mouse_capture(app);
             vec![]
@@ -1008,7 +1011,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewTheme(v) => preview_theme(app, v),
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
-        Action::OpenSettings => dispatch_open_settings(app),
+        Action::OpenSettings => dispatch_open_settings(app, None),
+        Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
+        Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),
+        Action::PrivacyBannerCustomize => dispatch_privacy_banner_customize(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
@@ -1157,6 +1163,34 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 "new_session_worktree_mode",
             );
             effects
+        }
+        Action::DoctorFixConfirmed { target, plan } => {
+            let Some(target) = super::task_result::current_doctor_target(app, &target) else {
+                super::task_result::deliver_doctor_message(
+                    app,
+                    target.agent_id,
+                    "This fix was cancelled because the session changed. Run `/doctor fix` again."
+                        .to_owned(),
+                );
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&target.agent_id) {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                        "Applying {}…",
+                        plan.id
+                    )));
+            }
+            vec![Effect::ApplyDoctorFix { target, plan }]
+        }
+        Action::DoctorFixCancelled(target) => {
+            super::task_result::deliver_doctor_message(
+                app,
+                target.agent_id,
+                "Fix cancelled.".to_owned(),
+            );
+            vec![]
         }
         Action::AgentTypeMismatchAnswered {
             start_new,
@@ -1322,10 +1356,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::ToggleWorkflows => {
-            let opening = matches!(
-                app.active_view, ActiveView::Agent(id) if app.agents.get(& id)
-                .is_some_and(| agent | ! agent.show_workflows)
-            );
+            let opening = matches!(app.active_view, ActiveView::Agent(id) if app.agents.get(&id).is_some_and(|agent| !agent.show_workflows));
             if opening {
                 app.scroll_state.cancel_stream();
                 app.last_scroll_pos = None;
@@ -1382,22 +1413,24 @@ pub(super) fn dispatch_action_result(
         }
         Ok(outcome) => match outcome.status {
             OutcomeStatus::Success => {
-                if !outcome.message.trim().is_empty()
-                    && let Some(ref mut modal) = agent.extensions_modal
-                    && modal.result_notice.is_none()
-                {
-                    let entry_index = match modal.last_plugins_action {
-                        Some(xai_hooks_plugins_types::PluginsAction::Uninstall { .. }) => None,
-                        _ => modal.pending_entry_index,
-                    };
-                    modal.result_notice =
-                        Some(crate::views::extensions_modal::ActionResultNotice {
-                            message: outcome.message.clone(),
-                            entry_index,
-                            ticks_remaining: crate::views::extensions_modal::RESULT_NOTICE_TICKS,
-                        });
-                }
                 let mut effects = Vec::new();
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    if !outcome.message.trim().is_empty() && modal.result_notice.is_none() {
+                        let entry_index = match modal.last_plugins_action {
+                            Some(xai_hooks_plugins_types::PluginsAction::Uninstall { .. }) => None,
+                            _ => modal.pending_entry_index,
+                        };
+                        modal.result_notice =
+                            Some(crate::views::extensions_modal::ActionResultNotice {
+                                message: outcome.message.clone(),
+                                entry_index,
+                                ticks_remaining:
+                                    crate::views::extensions_modal::RESULT_NOTICE_TICKS,
+                            });
+                    }
+                    modal.pending_action = None;
+                    modal.pending_entry_index = None;
+                }
                 if let Some(session_id) = agent.session.session_id.clone() {
                     if outcome.requires_reload {
                         effects.push(Effect::PluginsAction {
@@ -1405,7 +1438,7 @@ pub(super) fn dispatch_action_result(
                             session_id,
                             action: xai_hooks_plugins_types::PluginsAction::Reload,
                         });
-                    } else if agent.extensions_modal.is_some() {
+                    } else if let Some(modal) = agent.extensions_modal.as_mut() {
                         effects.push(Effect::FetchHooksList {
                             agent_id,
                             session_id: session_id.clone(),
@@ -1414,10 +1447,12 @@ pub(super) fn dispatch_action_result(
                             agent_id,
                             session_id: session_id.clone(),
                         });
-                        effects.push(Effect::FetchMarketplaceList {
+                        crate::app::dispatch::transcript::push_marketplace_fetch(
+                            modal,
+                            &mut effects,
                             agent_id,
-                            session_id: session_id.clone(),
-                        });
+                            session_id.clone(),
+                        );
                         effects.push(Effect::FetchMcpsList {
                             agent_id,
                             session_id,
@@ -1441,14 +1476,18 @@ pub(super) fn dispatch_action_result(
                         action
                     });
                     if let Some(action) = confirmed_action {
+                        let pending_entry_index = modal
+                            .pending_entry_index
+                            .or(Some(modal.picker_state.selected));
                         modal.modal_message =
                             Some(crate::views::extensions_modal::ModalMessage::Confirmation {
-                                message: format!(
-                                    "{} Press y to confirm, Esc to cancel.",
-                                    outcome.message
+                                message: outcome.message,
+                                action: crate::views::extensions_modal::ConfirmationAction::Plugins(
+                                    action,
                                 ),
-                                action,
+                                pending_entry_index,
                             });
+                        modal.picker_state.link_band = None;
                     } else {
                         modal.modal_message = Some(
                             crate::views::extensions_modal::ModalMessage::Error(outcome.message),
@@ -1462,6 +1501,8 @@ pub(super) fn dispatch_action_result(
             | OutcomeStatus::InternalError
             | OutcomeStatus::Unsupported => {
                 if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.pending_action = None;
+                    modal.pending_entry_index = None;
                     modal.modal_message = Some(
                         crate::views::extensions_modal::ModalMessage::Error(outcome.message),
                     );

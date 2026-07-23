@@ -41,14 +41,15 @@ async fn iterm_raw_readline_sequences_edit_picker_and_dashboard_rename() {
     let content = ContentController::start().await.expect("start content");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} iTerm editing turn."));
     let binary = pager_binary().expect("resolve pager binary");
-    let mut env = content.env_for_pager();
-    env.push(("TERM_PROGRAM".into(), "iTerm.app".into()));
-    let env_refs: Vec<(&str, &str)> = env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
-    let mut harness =
-        PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs).expect("spawn pager");
+    let mut harness = PtyHarness::spawn_with_content_env_ops(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        &[EnvOp::set("TERM_PROGRAM", "iTerm.app")],
+    )
+    .expect("spawn pager");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -143,8 +144,8 @@ async fn iterm_raw_readline_sequences_edit_picker_and_dashboard_rename() {
         .expect("quit confirmation rendered");
     harness.inject_keys(b"\x11").expect("Ctrl+Q confirm");
     assert_eq!(
-        harness.wait_exit_code(Duration::from_secs(10)),
-        Some(0),
+        wait_for_exit_status(&mut harness, Duration::from_secs(10)).expect("wait for pager exit"),
+        PtyExitPoll::Exited(0),
         "pager must exit cleanly"
     );
 }

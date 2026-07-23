@@ -245,3 +245,108 @@ fn extensions_modal_in_non_project_dir_creates_session() {
     );
     assert!(app.agents[&id].pending_extensions_fetch);
 }
+
+fn count_marketplace_fetches(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|e| matches!(e, Effect::FetchMarketplaceList { .. }))
+        .count()
+}
+
+fn success_outcome() -> xai_hooks_plugins_types::ActionOutcome {
+    xai_hooks_plugins_types::ActionOutcome {
+        status: xai_hooks_plugins_types::OutcomeStatus::Success,
+        message: "ok".into(),
+        requires_reload: false,
+        requires_restart: false,
+    }
+}
+
+fn empty_marketplace_response() -> xai_hooks_plugins_types::MarketplaceListResponse {
+    xai_hooks_plugins_types::MarketplaceListResponse { sources: vec![] }
+}
+
+#[test]
+fn marketplace_fetch_coalesces_while_inflight() {
+    use crate::views::extensions_modal::ExtensionsTab;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let effects = dispatch(
+        Action::OpenExtensionsModal {
+            tab: ExtensionsTab::Marketplace,
+            trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+        },
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 1);
+
+    // A successful action while the open-fetch is still in flight must not
+    // stack a second scan; it queues one refetch instead.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PluginsActionResult {
+            agent_id: id,
+            result: Ok(success_outcome()),
+        }),
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 0);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchHooksList { .. })),
+        "non-marketplace refetches still fire"
+    );
+
+    // When the in-flight fetch lands, the queued refetch fires exactly once.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::MarketplaceListLoaded {
+            agent_id: id,
+            result: Ok(empty_marketplace_response()),
+        }),
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 1);
+
+    // And the queue drains: the refetch landing issues nothing further.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::MarketplaceListLoaded {
+            agent_id: id,
+            result: Ok(empty_marketplace_response()),
+        }),
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 0);
+}
+
+#[test]
+fn marketplace_fetch_fires_immediately_when_idle() {
+    use crate::views::extensions_modal::ExtensionsTab;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    dispatch(
+        Action::OpenExtensionsModal {
+            tab: ExtensionsTab::Marketplace,
+            trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::SlashCommand,
+        },
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::MarketplaceListLoaded {
+            agent_id: id,
+            result: Ok(empty_marketplace_response()),
+        }),
+        &mut app,
+    );
+
+    // Nothing in flight: an action-triggered refetch goes out immediately.
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PluginsActionResult {
+            agent_id: id,
+            result: Ok(success_outcome()),
+        }),
+        &mut app,
+    );
+    assert_eq!(count_marketplace_fetches(&effects), 1);
+}

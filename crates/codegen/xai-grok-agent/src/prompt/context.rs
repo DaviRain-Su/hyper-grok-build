@@ -235,18 +235,19 @@ impl PromptContext {
     /// These are the agent-specific values that get merged with the
     /// tool context in `TemplateRenderer::render_with_extra()`.
     pub fn placeholders(&self) -> serde_json::Value {
-        serde_json::json!(
-            { "memory_enabled" : self.memory_enabled, "memory_global_path" : self
-            .memory_global_path.as_deref().unwrap_or(""), "memory_workspace_path" : self
-            .memory_workspace_path.as_deref().unwrap_or(""), "role_instructions" : self
-            .role_instructions.as_deref().unwrap_or(""), "persona_instructions" : self
-            .persona_instructions.as_deref().unwrap_or(""), "os_name" : self.os_name
-            .as_deref().unwrap_or(""), "shell_path" : self.shell_path.as_deref()
-            .unwrap_or(""), "working_directory" : self.working_directory.as_deref()
-            .unwrap_or(""), "current_date" : self.current_date.as_deref().unwrap_or(""),
-            "is_non_interactive" : self.is_non_interactive, "system_prompt_label" : self
-            .system_prompt_label.as_str(), }
-        )
+        serde_json::json!({
+            "memory_enabled": self.memory_enabled,
+            "memory_global_path": self.memory_global_path.as_deref().unwrap_or(""),
+            "memory_workspace_path": self.memory_workspace_path.as_deref().unwrap_or(""),
+            "role_instructions": self.role_instructions.as_deref().unwrap_or(""),
+            "persona_instructions": self.persona_instructions.as_deref().unwrap_or(""),
+            "os_name": self.os_name.as_deref().unwrap_or(""),
+            "shell_path": self.shell_path.as_deref().unwrap_or(""),
+            "working_directory": self.working_directory.as_deref().unwrap_or(""),
+            "current_date": self.current_date.as_deref().unwrap_or(""),
+            "is_non_interactive": self.is_non_interactive,
+            "system_prompt_label": self.system_prompt_label.as_str(),
+        })
     }
     /// Render the full system prompt via `ToolBridge`.
     ///
@@ -779,13 +780,24 @@ mod tests {
     }
     fn base_template_ctx() -> minijinja::Value {
         minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => true,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read =>
-            "hashline_read", edit => "hashline_edit", search => "hashline_grep", execute
-            => "run_terminal_cmd", background_task_action => "get_task_output",
-            memory_search => "memory_search", memory_get => "memory_get", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => true,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "hashline_read",
+                    edit => "hashline_edit",
+                    search => "hashline_grep",
+                    execute => "run_terminal_cmd",
+                    background_task_action => "get_task_output",
+                    memory_search => "memory_search",
+                    memory_get => "memory_get",
+                }
+            },
         }
     }
     #[test]
@@ -842,13 +854,23 @@ mod tests {
     #[test]
     fn child_rendered_prompt_includes_role_and_persona_sections() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "Follow Rust conventions", persona_instructions =>
-            "You are a code reviewer", tools => minijinja::context! { by_kind =>
-            minijinja::context! { read => "hashline_read", edit => "hashline_edit",
-            search => "hashline_grep", execute => "run_terminal_cmd",
-            background_task_action => "get_task_output", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "Follow Rust conventions",
+            persona_instructions => "You are a code reviewer",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "hashline_read",
+                    edit => "hashline_edit",
+                    search => "hashline_grep",
+                    execute => "run_terminal_cmd",
+                    background_task_action => "get_task_output",
+                }
+            },
+
         };
         let rendered = render_subagent_template(ctx);
         assert!(rendered.contains("<role-instructions>"));
@@ -899,11 +921,20 @@ mod tests {
     #[test]
     fn child_rendered_prompt_omits_background_tasks_without_execute() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read =>
-            "hashline_read", edit => "hashline_edit", search => "hashline_grep", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "hashline_read",
+                    edit => "hashline_edit",
+                    search => "hashline_grep",
+                }
+            },
         };
         let rendered = render_subagent_template(ctx);
         assert!(
@@ -927,12 +958,22 @@ mod tests {
     #[test]
     fn child_rendered_prompt_omits_code_change_rules_without_edit_tools() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read =>
-            "hashline_read", search => "hashline_grep", execute => "run_terminal_cmd",
-            background_task_action => "get_task_output", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "hashline_read",
+                    search => "hashline_grep",
+                    execute => "run_terminal_cmd",
+                    background_task_action => "get_task_output",
+                }
+            },
+
         };
         let rendered = render_subagent_template(ctx);
         assert!(
@@ -955,12 +996,22 @@ mod tests {
     #[test]
     fn rendered_prompt_size_read_only() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read =>
-            "hashline_read", search => "hashline_grep", execute => "run_terminal_cmd",
-            background_task_action => "get_task_output", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "hashline_read",
+                    search => "hashline_grep",
+                    execute => "run_terminal_cmd",
+                    background_task_action => "get_task_output",
+                }
+            },
+
         };
         let rendered = render_subagent_template(ctx);
         assert!(
@@ -979,12 +1030,22 @@ mod tests {
     #[test]
     fn child_rendered_prompt_omits_edit_references_without_edit_tool() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read => "read_file",
-            search => "grep", execute => "run_terminal_cmd", background_task_action =>
-            "get_task_output", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "read_file",
+                    search => "grep",
+                    execute => "run_terminal_cmd",
+                    background_task_action => "get_task_output",
+                }
+            },
+
         };
         let rendered = render_subagent_template(ctx);
         assert!(
@@ -995,11 +1056,20 @@ mod tests {
     #[test]
     fn child_rendered_prompt_omits_execute_references_without_execute_tool() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read => "read_file",
-            edit => "search_replace", search => "grep", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "read_file",
+                    edit => "search_replace",
+                    search => "grep",
+                }
+            },
         };
         let rendered = render_subagent_template(ctx);
         assert!(
@@ -1014,11 +1084,19 @@ mod tests {
     #[test]
     fn child_rendered_prompt_omits_both_edit_and_execute_references() {
         let ctx = minijinja::context! {
-            os_name => "linux", shell_path => "/bin/bash", working_directory =>
-            "/workspace", current_date => "2026-03-26", memory_enabled => false,
-            role_instructions => "", persona_instructions => "", tools =>
-            minijinja::context! { by_kind => minijinja::context! { read => "read_file",
-            search => "grep", } },
+            os_name => "linux",
+            shell_path => "/bin/bash",
+            working_directory => "/workspace",
+            current_date => "2026-03-26",
+            memory_enabled => false,
+            role_instructions => "",
+            persona_instructions => "",
+            tools => minijinja::context! {
+                by_kind => minijinja::context! {
+                    read => "read_file",
+                    search => "grep",
+                }
+            },
         };
         let rendered = render_subagent_template(ctx);
         assert!(

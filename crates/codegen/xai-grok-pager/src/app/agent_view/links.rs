@@ -510,9 +510,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         buf
     }
@@ -2129,9 +2127,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         buf
     }
@@ -2232,9 +2228,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         let tip_y = (0..tall.height)
             .find(|&y| buffer_row(&buf, tall.width, y).contains("Queued"))
@@ -2308,9 +2302,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         let frame: String = (0..tall.height)
             .map(|y| buffer_row(&buf, tall.width, y))

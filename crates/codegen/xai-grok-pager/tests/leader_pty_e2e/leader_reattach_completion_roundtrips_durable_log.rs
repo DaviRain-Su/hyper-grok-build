@@ -69,7 +69,7 @@ async fn leader_reattach_completion_roundtrips_durable_log() {
     wait_for_labels_absent(&mut c, &["Waiting"], Duration::from_secs(5));
 
     assert!(
-        c.is_running(),
+        c.is_running().expect("poll pager liveness"),
         "C exited unexpectedly\nscreen:\n{}",
         c.screen_contents()
     );

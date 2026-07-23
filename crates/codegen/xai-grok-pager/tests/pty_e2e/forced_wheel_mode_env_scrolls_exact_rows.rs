@@ -63,8 +63,9 @@ async fn forced_wheel_mode_env_scrolls_exact_rows() {
     // Outlasts the 80ms stream gap + finalize cadence with CI slack.
     harness.update(std::time::Duration::from_millis(600));
 
+    let running = harness.is_running().expect("poll pager liveness");
     assert!(
-        harness.is_running() && !harness.contains_text("panicked"),
+        running && !harness.contains_text("panicked"),
         "pager broke during the forced-wheel burst\nscreen:\n{}",
         harness.screen_contents()
     );

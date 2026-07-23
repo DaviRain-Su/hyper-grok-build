@@ -41,8 +41,9 @@ impl MvpAgent {
                                     };
                                     if let Some((root, inherited_loop)) = reparent {
                                         tracing::info!(
-                                            child_session_id = % child_sess, root_session_id = % root,
-                                            subagent_id = % request.id,
+                                            child_session_id = %child_sess,
+                                            root_session_id = %root,
+                                            subagent_id = %request.id,
                                             "Re-parenting child-session spawn to root session"
                                         );
                                         request.parent_session_id = root;
@@ -68,8 +69,8 @@ impl MvpAgent {
                                     this.try_build_subagent_spawn_context(&parent_sid)
                                 else {
                                     tracing::warn!(
-                                        parent_session_id = % parent_sid, subagent_id = % request
-                                        .id,
+                                        parent_session_id = %parent_sid,
+                                        subagent_id = %request.id,
                                         "Spawn for unknown/evicted parent session, failing request"
                                     );
                                     this.subagent_coordinator
@@ -248,7 +249,7 @@ impl MvpAgent {
                             let mut completions = this
                                 .subagent_coordinator
                                 .borrow_mut()
-                                .drain_pending_completions();
+                                .drain_pending_completions_for(&request.session_id);
                             completions.retain(|c| !request.suppress_ids.contains(&c.subagent_id));
                             let _ = request.respond_to.send(completions);
                         }
@@ -301,8 +302,8 @@ impl MvpAgent {
                                     ),
                                     None => {
                                         tracing::warn!(
-                                            parent_session_id = % request.parent_session_id,
-                                            subagent_type = % request.subagent_type,
+                                            parent_session_id = %request.parent_session_id,
+                                            subagent_type = %request.subagent_type,
                                             "DescribeType for unknown/evicted parent session, replying Unavailable",
                                         );
                                         SubagentDescribeOutcome::Unavailable
@@ -543,6 +544,12 @@ impl MvpAgent {
                 &parent_cwd,
                 project_trusted,
             );
+        let inherited_tool_overrides = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .get(&parent_sid)
+                .and_then(|ps| ps.resolved_tool_overrides.load_full().map(|o| (*o).clone()))
+        };
         Some(crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
             gateway: self.gateway.clone(),
@@ -562,6 +569,7 @@ impl MvpAgent {
             auth: self.current_or_buffered_auth(),
             parent_cwd: parent_cwd.clone(),
             parent_session_id: parent_session_id.to_string(),
+            inherited_tool_overrides,
             yolo_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
             parent_depth,

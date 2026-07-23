@@ -100,7 +100,7 @@ On startup, Grok detects your terminal's color capability level:
 
 When you set `NO_COLOR`, Grok emits no color and renders in monochrome.
 
-Run `/doctor` to see the detected level (`color` row) and which themes the picker offers on this terminal (`themes` row). When truecolor is missing, the issues section explains how to enable it (or that Terminal.app cannot).
+Run `/doctor` to see the detected color level and the themes available on this terminal. If truecolor is unavailable, Doctor shows the relevant setup steps or explains the terminal limitation.
 
 ### Automatic Quantization
 

@@ -327,10 +327,7 @@ pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
                     .ok();
             }
         }
-        // Restore stashed prompt since queue is now empty.
-        if let Some(stashed) = agent.permission_stashed_prompt.take() {
-            agent.prompt.restore(stashed);
-        }
+        super::permissions::restore_permission_stashes(agent);
     }
 
     // Telemetry + tracing guarded on real state change only.

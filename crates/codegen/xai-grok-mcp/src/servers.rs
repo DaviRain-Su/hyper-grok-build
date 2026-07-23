@@ -1460,8 +1460,7 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                             mime_type,
                             blob,
                             ..
-                        }
-if mime_type
+                        } if mime_type
                             .as_deref()
                             .is_some_and(|m| m.starts_with("image/")) =>
                         {

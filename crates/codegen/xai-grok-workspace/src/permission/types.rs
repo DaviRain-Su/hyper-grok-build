@@ -50,12 +50,30 @@ pub struct PermissionEvent {
     /// The trigger that produced this decision, distinct from `prompt_outcome`
     /// (which records the user's choice when prompted). Lets a trace show *why*
     /// a request reached a prompt even when `user_prompted=true`. Values:
-    /// yolo, policy_allow, policy_deny, policy_ask, auto_fast_path,
-    /// auto_classifier_allow, auto_classifier_block, sandbox_auto,
-    /// persisted_grant, session_grant, static_allowlist, safe_command,
-    /// session_deny, prompt_deny, needs_user, requester_gone.
+    /// yolo, policy_allow, policy_deny, policy_ask, bash_command_gate_ask,
+    /// shell_file_gate_ask, auto_fast_path,
+    /// auto_classifier_allow, auto_classifier_block, auto_classifier_deny,
+    /// auto_classifier_timeout, auto_classifier_unavailable, auto_denial_limit,
+    /// sandbox_auto, persisted_grant, session_grant, static_allowlist, safe_command,
+    /// session_deny, prompt_deny, needs_user, bash_request_floor, opaque_shell,
+    /// requester_gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_reason: Option<String>,
+    /// Auto-classifier path: "llm" | "heuristic" | "timeout" |
+    /// "transport_error" | "fast_path".
+    /// Absent when auto mode did not classify or take its fast path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_source: Option<String>,
+    /// Elapsed milliseconds spent in classification alone, including heuristic work;
+    /// absent when no classifier ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier_latency_ms: Option<u64>,
+    /// Consecutive auto-classifier denials at decision time; absent outside auto mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_denials_consecutive: Option<u32>,
+    /// Total auto-classifier denials at decision time; absent outside auto mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_denials_total: Option<u32>,
     /// Elapsed milliseconds from the actor dequeuing this request to the decision
     /// resolving. The timer starts at dequeue, so it excludes time the request
     /// waited in the channel behind others; small for fast auto paths but
@@ -430,6 +448,10 @@ mod tests {
         assert!(event.subagent_description.is_none());
         assert!(event.permission_mode.is_none());
         assert!(event.decision_reason.is_none());
+        assert!(event.classifier_source.is_none());
+        assert!(event.classifier_latency_ms.is_none());
+        assert!(event.auto_denials_consecutive.is_none());
+        assert!(event.auto_denials_total.is_none());
         assert!(event.wait_ms.is_none());
         assert!(event.queue_depth.is_none());
     }
@@ -452,6 +474,10 @@ mod tests {
             subagent_description: Some("Find endpoints".into()),
             permission_mode: Some("ask".into()),
             decision_reason: Some("needs_user".into()),
+            classifier_source: Some("llm".into()),
+            classifier_latency_ms: Some(42),
+            auto_denials_consecutive: Some(2),
+            auto_denials_total: Some(5),
             wait_ms: Some(1234),
             queue_depth: Some(3),
         };
@@ -461,6 +487,10 @@ mod tests {
         assert_eq!(json["subagent_description"], "Find endpoints");
         assert_eq!(json["permission_mode"], "ask");
         assert_eq!(json["decision_reason"], "needs_user");
+        assert_eq!(json["classifier_source"], "llm");
+        assert_eq!(json["classifier_latency_ms"], 42);
+        assert_eq!(json["auto_denials_consecutive"], 2);
+        assert_eq!(json["auto_denials_total"], 5);
         assert_eq!(json["wait_ms"], 1234);
         assert_eq!(json["queue_depth"], 3);
     }
@@ -483,6 +513,10 @@ mod tests {
             subagent_description: None,
             permission_mode: None,
             decision_reason: None,
+            classifier_source: None,
+            classifier_latency_ms: None,
+            auto_denials_consecutive: None,
+            auto_denials_total: None,
             wait_ms: None,
             queue_depth: None,
         };
@@ -491,6 +525,10 @@ mod tests {
         assert!(!json.contains("subagent_type"));
         assert!(!json.contains("permission_mode"));
         assert!(!json.contains("decision_reason"));
+        assert!(!json.contains("classifier_source"));
+        assert!(!json.contains("classifier_latency_ms"));
+        assert!(!json.contains("auto_denials_consecutive"));
+        assert!(!json.contains("auto_denials_total"));
         assert!(!json.contains("wait_ms"));
         assert!(!json.contains("queue_depth"));
     }
@@ -534,9 +572,11 @@ mod tests {
         });
         let access = AccessKind::from(&input);
         assert!(
-            matches!(access, AccessKind::MCPTool { ref name, ref input }
-if name ==
-            "linear__save_issue" && input["title"] == "test"),
+            matches!(
+                access,
+                AccessKind::MCPTool { ref name, ref input }
+                    if name == "linear__save_issue" && input["title"] == "test"
+            ),
             "UseTool should produce AccessKind::MCPTool carrying the inner tool name and args, got {access:?}"
         );
     }
@@ -548,12 +588,11 @@ if name ==
             command: "tail -f /var/log/syslog".into(),
             description: "watch syslog".into(),
             timeout_ms: None,
-            persistent: None,
+            persistent: false,
         });
         let access = AccessKind::from(&input);
         assert!(
-            matches!(access, AccessKind::Bash(ref cmd) if cmd ==
-            "tail -f /var/log/syslog"),
+            matches!(access, AccessKind::Bash(ref cmd) if cmd == "tail -f /var/log/syslog"),
             "Monitor runs shell and must map to AccessKind::Bash (not Read), got {access:?}"
         );
     }
@@ -582,8 +621,7 @@ if name ==
         });
         let access = AccessKind::from(&input);
         assert!(
-            matches!(access, AccessKind::WebFetch(ref u) if u ==
-            "https://custom.example.com/api"),
+            matches!(access, AccessKind::WebFetch(ref u) if u == "https://custom.example.com/api"),
             "WebFetch should produce AccessKind::WebFetch with the URL, got {access:?}"
         );
     }

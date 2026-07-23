@@ -170,6 +170,7 @@ This shows:
 
 - Session title (when set)
 - Shell version
+- Auth method (OAuth vs API key) and where to manage account and credits (https://grok.com/?_s=billing for OAuth, console.x.ai for API key; API-key sessions also suggest `grok login` for SuperGrok)
 - Session ID
 - Working directory
 - Model (with a model hash for coding models)

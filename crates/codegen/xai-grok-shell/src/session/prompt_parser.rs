@@ -427,10 +427,11 @@ mod tests {
     }
     #[test]
     fn test_parse_editor_meta_focused_with_cursor() {
-        let link = make_link(Some(serde_json::json!(
-            { "source" : "editor", "fileState" : "focused", "cursor" : { "line" :
-            10, "column" : 3 } }
-        )));
+        let link = make_link(Some(serde_json::json!({
+            "source": "editor",
+            "fileState": "focused",
+            "cursor": { "line": 10, "column": 3 }
+        })));
         let meta = parse_editor_meta(&link).expect("should parse");
         assert!(matches!(
             meta.file_state,
@@ -444,24 +445,27 @@ mod tests {
     }
     #[test]
     fn test_parse_editor_meta_focused_without_cursor_fails() {
-        let link = make_link(Some(
-            serde_json::json!({ "source" : "editor", "fileState" : "focused" }),
-        ));
+        let link = make_link(Some(serde_json::json!({
+            "source": "editor",
+            "fileState": "focused"
+        })));
         assert!(parse_editor_meta(&link).is_none());
     }
     #[test]
     fn test_parse_editor_meta_open() {
-        let link = make_link(Some(
-            serde_json::json!({ "source" : "editor", "fileState" : "open" }),
-        ));
+        let link = make_link(Some(serde_json::json!({
+            "source": "editor",
+            "fileState": "open"
+        })));
         let meta = parse_editor_meta(&link).expect("should parse");
         assert!(matches!(meta.file_state, FileState::Open));
     }
     #[test]
     fn test_parse_editor_meta_non_editor_source_returns_none() {
-        let link = make_link(Some(serde_json::json!(
-            { "source" : "something_else", "fileState" : "focused" }
-        )));
+        let link = make_link(Some(serde_json::json!({
+            "source": "something_else",
+            "fileState": "focused"
+        })));
         assert!(parse_editor_meta(&link).is_none());
     }
     #[test]
@@ -471,9 +475,10 @@ mod tests {
     }
     #[test]
     fn test_parse_editor_meta_unknown_file_state_returns_none() {
-        let link = make_link(Some(
-            serde_json::json!({ "source" : "editor", "fileState" : "minimized" }),
-        ));
+        let link = make_link(Some(serde_json::json!({
+            "source": "editor",
+            "fileState": "minimized"
+        })));
         assert!(parse_editor_meta(&link).is_none());
     }
     #[test]

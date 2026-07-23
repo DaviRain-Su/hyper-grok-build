@@ -191,7 +191,7 @@ impl WorkspaceClient {
         }
         let tool_id = xai_tool_protocol::ToolId::new(WORKSPACE_RPC_TOOL_ID)
             .expect("constant tool id is valid");
-        let args = serde_json::json!({ "method" : method, "params" : params });
+        let args = serde_json::json!({ "method": method, "params": params });
         tracing::debug!(method, "WorkspaceClient::rpc");
         let fut = async {
             let mut stream = self
@@ -582,28 +582,28 @@ mod tests {
             ToolDescription::new(WORKSPACE_RPC_TOOL_ID, "fake workspace rpc")
         }
         async fn run(&self, _ctx: ToolCallContext, args: Self::Args) -> Result<RawOut, ToolError> {
-            let ok = |v: serde_json::Value| Ok(RawOut(serde_json::json!({ "ok" : v })));
+            let ok = |v: serde_json::Value| Ok(RawOut(serde_json::json!({ "ok": v })));
             match args.method.as_str() {
-                "workspace.info" => ok(serde_json::json!(
-                    { "os" : "linux", "shell" : "bash", "cwd" : "/workspace", }
-                )),
+                "workspace.info" => ok(serde_json::json!({
+                    "os": "linux", "shell": "bash", "cwd": "/workspace",
+                })),
                 "workspace.git_status" => ok(serde_json::json!("On branch main")),
-                "workspace.discover_skills" => ok(serde_json::json!(
-                    [{ "name" : "my-skill", "description" : "A test skill",
-                    "path" : "/workspace/.grok/skills/my-skill/SKILL.md", "scope"
-                    : "local", }]
-                )),
-                "workspace.discover_agents_md" => ok(serde_json::json!(
-                    [{ "file_name" : "AGENTS.md", "file_path" :
-                    "/workspace/AGENTS.md", "content" : "# Project instructions",
-                    }]
-                )),
+                "workspace.discover_skills" => ok(serde_json::json!([{
+                    "name": "my-skill",
+                    "description": "A test skill",
+                    "path": "/workspace/.grok/skills/my-skill/SKILL.md",
+                    "scope": "local",
+                }])),
+                "workspace.discover_agents_md" => ok(serde_json::json!([{
+                    "file_name": "AGENTS.md",
+                    "file_path": "/workspace/AGENTS.md",
+                    "content": "# Project instructions",
+                }])),
                 "workspace.echo_params" => ok(args.params),
-                "workspace.err" => Ok(RawOut(serde_json::json!(
-                    { "err" : { "code" : "session_not_found", "message" :
-                    "ghost" }, }
-                ))),
-                "workspace.malformed" => Ok(RawOut(serde_json::json!({ "neither" : true }))),
+                "workspace.err" => Ok(RawOut(serde_json::json!({
+                    "err": { "code": "session_not_found", "message": "ghost" },
+                }))),
+                "workspace.malformed" => Ok(RawOut(serde_json::json!({ "neither": true }))),
                 "workspace.slow" => {
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     ok(serde_json::Value::Null)
@@ -667,7 +667,7 @@ mod tests {
             type Response = Value;
         }
         let echoed = client().rpc(&EchoReq { flag: true, n: 7 }).await.unwrap();
-        assert_eq!(echoed, serde_json::json!({ "flag" : true, "n" : 7 }));
+        assert_eq!(echoed, serde_json::json!({ "flag": true, "n": 7 }));
     }
     #[tokio::test]
     async fn err_envelope_maps_to_rpc_error() {
@@ -780,7 +780,7 @@ mod tests {
     }
     #[tokio::test]
     async fn consume_stream_terminal_returns_ok() {
-        let value = serde_json::json!({ "result" : "hello" });
+        let value = serde_json::json!({"result": "hello"});
         let typed = TypedToolOutput::from_value(ToolId::new("t").unwrap(), value.clone());
         let mut stream = xai_tool_runtime::terminal_only(Ok(typed));
         assert_eq!(

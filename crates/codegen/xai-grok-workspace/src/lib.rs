@@ -181,6 +181,10 @@ mod init_metrics_tests {
             &[("method", "unknown"), ("result", "error")]
         ));
         assert!(has(
+            "grok_workspace_rpc_errors_total",
+            &[("method", "unknown"), ("error_kind", "hub_error")]
+        ));
+        assert!(has(
             "grok_workspace_drain_started_total",
             &[("reason", "sigterm")]
         ));

@@ -28,7 +28,7 @@ pub async fn run(harness: &mut PtyHarness, content: &ContentController) -> Resul
     for _ in 0..SCROLL_KEYS {
         harness.inject_keys(keys::J)?;
         harness.update(KEY_INTERVAL);
-        if !harness.is_running() {
+        if !harness.is_running()? {
             break;
         }
     }

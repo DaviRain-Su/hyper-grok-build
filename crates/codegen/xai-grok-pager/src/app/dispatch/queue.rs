@@ -822,6 +822,9 @@ pub(crate) fn apply_turn_start_shim(
                 xai_prompt_queue::join_texts(segments.iter().map(String::as_str))
             });
             let earlier = all_ids.into_iter().filter(|id| *id != last_id).collect();
+            // An adopted turn arrives with text only, never the original
+            // attachments, so a Ctrl+C rewind restores just the joined text.
+            // The local drain path, which owns the data, restores images/chips.
             agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
                 text: restore,
                 images: Vec::new(),

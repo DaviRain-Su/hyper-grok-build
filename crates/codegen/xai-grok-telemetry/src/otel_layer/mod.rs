@@ -424,10 +424,7 @@ fn build_server_provider(client: OtelClientInfo, config: OtelLayerConfig) -> Sdk
         let http_client = match crate::otlp_http::build_blocking_client(timeout) {
             Ok(client) => client,
             Err(err) => {
-                tracing::warn!(
-                    error = % err,
-                    "otel: OTLP HTTP client build failed; span export disabled"
-                );
+                tracing::warn!(error = %err, "otel: OTLP HTTP client build failed; span export disabled");
                 return provider.build();
             }
         };

@@ -531,9 +531,8 @@ fn render_rename_editor(
 fn rename_cursor_pos(state: &DashboardState, rows: &[DashboardRow]) -> Option<(u16, u16)> {
     let rn = state.rename.as_ref()?;
     let (_, rect) = state.row_rects.iter().find(|(id, _)| *id == rn.row)?;
-    let (marker_width, indent_width, icon_width) = rows
-        .iter()
-        .find(|r| r.id == rn.row)
+    let row = rows.iter().find(|r| r.id == rn.row);
+    let (marker_width, indent_width, icon_width) = row
         .map(|r| {
             (
                 UnicodeWidthStr::width(crate::glyphs::selection_bar()) as u16,
@@ -549,7 +548,10 @@ fn rename_cursor_pos(state: &DashboardState, rows: &[DashboardRow]) -> Option<(u
     let cursor_x = content_x
         .saturating_add(cursor_offset)
         .min(rect.x.saturating_add(rect.width.saturating_sub(1)));
-    Some((cursor_x, rect.y))
+    // Mirror `render_row`'s vertical centering so the caret lands on
+    // the title line (narrow-mode single-line rects yield offset 0).
+    let title_y = rect.y + row.map_or(0, |r| row_content_offset(rect.height, r));
+    Some((cursor_x, title_y))
 }
 
 /// Render the compact dashboard "banner" used when an agent is
@@ -1553,7 +1555,7 @@ fn render_rows(
     }
 
     // Rows are 3 visual cells tall (title + secondary
-    // + breathing gap) and headers are 2 cells tall (label + gap).
+    // + padding) and headers are 2 cells tall (label + gap).
     // Viewport scrolling works on cumulative cell offsets so partial
     // rows can't peek out at the top / bottom of the list. The
     // clamp helper still operates in "1 unit = 1 cell" — we just
@@ -1645,6 +1647,10 @@ fn render_rows(
     let body_width = area.width;
     let max_y = area.y + area.height;
 
+    // Content background per visible line (`None` = spacer), consumed
+    // by the half-block halo pass after the items are painted.
+    let mut line_bg: Vec<Option<Color>> = vec![None; viewport_h];
+
     let mut cell_y: usize = 0;
     for (line, &h) in lines.iter().zip(heights.iter()) {
         let next_cell_y = cell_y + h as usize;
@@ -1672,6 +1678,14 @@ fn render_rows(
             width: body_width,
             height: render_h,
         };
+        // `line_bg` records each visible line's CONTENT background
+        // (`None` = spacer line) for the half-block halo pass below.
+        let mark = |line_bg: &mut Vec<Option<Color>>, dy: u16, bg: Color| {
+            let idx = (y - area.y + dy) as usize;
+            if let Some(slot) = line_bg.get_mut(idx) {
+                *slot = Some(bg);
+            }
+        };
         match line {
             DashboardLine::PinnedHeader { count } => {
                 let key = SectionKey::Pinned;
@@ -1681,12 +1695,16 @@ fn render_rows(
                 render_group_header(
                     buf, line_rect, theme, "Pinned", *count, collapsed, selected, hovered,
                 );
+                mark(&mut line_bg, 0, theme.bg_base);
+                // Full-height hit rect (label + trailing gap) — no
+                // hover/click dead zone between items.
                 state
                     .section_rects
-                    .push((key, Rect::new(area.x, y, body_width, 1)));
+                    .push((key, Rect::new(area.x, y, body_width, render_h)));
             }
             DashboardLine::Divider => {
                 render_divider(buf, line_rect, theme);
+                mark(&mut line_bg, 0, theme.bg_base);
             }
             DashboardLine::Header { state: rs, count } => {
                 // Headers only paint into the first cell; the
@@ -1705,22 +1723,31 @@ fn render_rows(
                     selected,
                     hovered,
                 );
+                mark(&mut line_bg, 0, theme.bg_base);
+                // Full-height hit rect (label + trailing gap) — no
+                // hover/click dead zone between items.
                 state
                     .section_rects
-                    .push((key, Rect::new(area.x, y, body_width, 1)));
+                    .push((key, Rect::new(area.x, y, body_width, render_h)));
             }
             DashboardLine::Row(row) => {
                 render_row(buf, line_rect, theme, row, state);
+                let bg = row_bg(theme, state, row);
+                let content_top = row_content_offset(render_h, row);
+                let content_h = row_content_height(row).min(render_h);
+                for dy in content_top..(content_top + content_h).min(render_h) {
+                    mark(&mut line_bg, dy, bg);
+                }
                 if !row.is_more_placeholder {
-                    // Hit rect covers the two content cells so a
-                    // click on the secondary line still selects the
-                    // row. The trailing gap (if any) stays outside.
-                    let hit_h = render_h.min(2);
+                    // Full-height hit rect (content + spacer lines) —
+                    // no hover/click dead zone between items; the
+                    // highlight covers the content plus half-cell
+                    // halos on the neighbouring spacer lines.
                     let hit = Rect {
                         x: area.x,
                         y,
                         width: body_width,
-                        height: hit_h,
+                        height: render_h,
                     };
                     state.row_rects.push((row.id.clone(), hit));
                 }
@@ -1735,14 +1762,59 @@ fn render_rows(
                     state.selected_idle_overflow,
                     state.hovered_idle_overflow,
                 );
-                state.idle_overflow_rect = Some(Rect::new(area.x, y, body_width, 1));
+                mark(&mut line_bg, 0, theme.bg_base);
+                // Full-height hit rect (label + trailing gap) — no
+                // hover/click dead zone below the overflow row.
+                state.idle_overflow_rect = Some(Rect::new(area.x, y, body_width, render_h));
             }
         }
         cell_y = next_cell_y;
     }
 
+    render_spacer_halos(buf, area, body_width, &line_bg, theme.bg_base);
+
     if needs_scrollbar {
         render_scrollbar(buf, area, offset, viewport_h, total_cells, theme);
+    }
+}
+
+/// Paint the spacer lines between items as half-cell "halos" so a
+/// highlighted row reads as vertically centered: the spacer below a
+/// highlighted block shows the highlight in its TOP half, and the
+/// spacer above shows it in its BOTTOM half. Implemented with the
+/// upper-half-block glyph (`▀`, CP437 `0xDF` — safe on legacy
+/// consoles): fg paints the top half with the colour of the content
+/// line above, bg paints the bottom half with the colour of the
+/// content line below. Spacers between two `bg_base` neighbours are
+/// left untouched.
+fn render_spacer_halos(
+    buf: &mut Buffer,
+    area: Rect,
+    body_width: u16,
+    line_bg: &[Option<Color>],
+    base: Color,
+) {
+    for (i, slot) in line_bg.iter().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let above = if i > 0 {
+            line_bg[i - 1].unwrap_or(base)
+        } else {
+            base
+        };
+        let below = line_bg.get(i + 1).copied().flatten().unwrap_or(base);
+        if above == base && below == base {
+            continue;
+        }
+        let y = area.y + i as u16;
+        if above == below {
+            let fill = " ".repeat(body_width as usize);
+            buf.set_string(area.x, y, &fill, Style::default().bg(above));
+        } else {
+            let fill = "\u{2580}".repeat(body_width as usize);
+            buf.set_string(area.x, y, &fill, Style::default().fg(above).bg(below));
+        }
     }
 }
 
@@ -2026,10 +2098,38 @@ fn snap_offset_to_line_boundary(offset: usize, heights: &[u16]) -> usize {
     snapped
 }
 
-/// Render a row as a 2-line block (`rect.height` is
-/// expected to be `>= 2`; the caller — `render_rows` — sizes the
-/// rect to either 2 or 3 lines depending on whether the trailing
-/// breathing-room gap is in budget).
+/// Number of content lines a row renders: title + optional secondary.
+fn row_content_height(row: &DashboardRow) -> u16 {
+    if row.secondary_line.as_deref().is_some_and(|s| !s.is_empty()) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Vertical offset of a row's content block within its rect. The
+/// 1- or 2-line content is centered at cell granularity: a title-only
+/// row in a 3-cell rect gets one padding line above and below, while
+/// a title+secondary row stays top-aligned ((3 - 2) / 2 = 0).
+fn row_content_offset(height: u16, row: &DashboardRow) -> u16 {
+    height.saturating_sub(row_content_height(row)) / 2
+}
+
+/// The row's background: keyboard selection wins over mouse hover.
+fn row_bg(theme: &Theme, state: &DashboardState, row: &DashboardRow) -> Color {
+    if state.selected.as_ref().is_some_and(|s| *s == row.id) {
+        theme.bg_highlight
+    } else if state.hovered_row.as_ref().is_some_and(|h| *h == row.id) {
+        theme.bg_hover
+    } else {
+        theme.bg_base
+    }
+}
+
+/// Render a row as a 2-line block plus a trailing padding line
+/// (`rect.height` is expected to be `>= 2`; the caller —
+/// `render_rows` — sizes the rect to either 2 or 3 lines depending
+/// on whether the padding is in budget).
 ///
 /// Visual:
 ///
@@ -2043,9 +2143,15 @@ fn snap_offset_to_line_boundary(offset: usize, heights: &[u16]) -> usize {
 /// tool call, the last assistant message, or a `Pending: …` preview
 /// of the front-most permission request.
 ///
-/// Selection / hover backgrounds cover both content rows (the
-/// trailing gap row, if any, stays on `bg_base` so consecutive
-/// selected rows still look distinct).
+/// The content block is vertically centered within the rect (see
+/// [`row_content_offset`]): a title-only row in a 3-cell rect renders
+/// as padding + title + padding.
+///
+/// Selection / hover backgrounds fill the CONTENT lines; the spacer
+/// lines around them are painted afterwards by `render_rows`'s
+/// half-block pass (see `render_spacer_halos`), which extends the
+/// highlight half a cell above and below so it reads as centered on
+/// the text.
 fn render_row(
     buf: &mut Buffer,
     rect: Rect,
@@ -2057,21 +2163,16 @@ fn render_row(
         return;
     }
     let selected = state.selected.as_ref().is_some_and(|s| *s == row.id);
-    let hovered = state.hovered_row.as_ref().is_some_and(|h| *h == row.id);
     let renaming = state.rename.as_ref().is_some_and(|r| r.row == row.id);
-    let bg = if selected {
-        theme.bg_highlight
-    } else if hovered {
-        theme.bg_hover
-    } else {
-        theme.bg_base
-    };
+    let bg = row_bg(theme, state, row);
 
-    // Paint both content rows with the same background so selection
-    // reads as a single block.
-    let content_h = rect.height.min(2);
+    // Paint the content lines with the row background. Spacer lines
+    // keep `bg_base` here; the halo pass splits them between the
+    // neighbouring items.
+    let content_top = row_content_offset(rect.height, row);
+    let content_h = row_content_height(row).min(rect.height);
     let fill = " ".repeat(rect.width as usize);
-    for dy in 0..content_h {
+    for dy in content_top..(content_top + content_h).min(rect.height) {
         buf.set_string(rect.x, rect.y + dy, &fill, Style::default().bg(bg));
     }
 
@@ -2095,8 +2196,11 @@ fn render_row(
     let icon_w = UnicodeWidthStr::width(icon) as u16;
     // Title-row paint cursor (no leading 1-col gap before the marker
     // — the marker IS the leftmost cell, mirroring the wide-mode
-    // header which starts flush-left at col 0).
-    let title_y = rect.y;
+    // header which starts flush-left at col 0). The content block is
+    // vertically centered within the rect at cell granularity:
+    // title-only rows sit padded above and below, while 2-line rows
+    // stay top-aligned (2 lines cannot center in a 3-cell row).
+    let title_y = rect.y + row_content_offset(rect.height, row);
     let content_start_x = rect.x + marker_w + 1 + indent_w + icon_w + 1;
 
     // Rename overlay: keep the row's chrome (marker + state icon) in
@@ -2113,14 +2217,14 @@ fn render_row(
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         );
-        // Keep the left bar continuous on secondary lines even while
-        // the rename overlay is active on the title line.
-        if selected && content_h >= 2 {
+        // Keep the left bar continuous on every content line even
+        // while the rename overlay is active on the title line.
+        if selected {
             let bar_style = Style::default()
                 .bg(bg)
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD);
-            for dy in 1..content_h {
+            for dy in content_top..(content_top + content_h).min(rect.height) {
                 buf.set_string(
                     rect.x,
                     rect.y + dy,
@@ -2163,16 +2267,15 @@ fn render_row(
     );
 
     // For the active selection, extend the thin left bar down every
-    // content line of the row (title + secondary) so it forms one
-    // continuous vertical rule along the full height of the selected
-    // item. Hover and normal states keep their marker only on the
-    // title line.
-    if selected && content_h >= 2 {
+    // content line of the row so it forms one continuous vertical rule
+    // along the highlighted text. Hover and normal states keep their
+    // marker only on the title line.
+    if selected {
         let bar_style = Style::default()
             .bg(bg)
             .fg(theme.accent_user)
             .add_modifier(Modifier::BOLD);
-        for dy in 1..content_h {
+        for dy in content_top..(content_top + content_h).min(rect.height) {
             buf.set_string(
                 rect.x,
                 rect.y + dy,
@@ -2305,7 +2408,7 @@ fn render_row(
         && let Some(secondary) = row.secondary_line.as_deref()
         && !secondary.is_empty()
     {
-        let sec_y = rect.y + 1;
+        let sec_y = title_y + 1;
         let avail = rect
             .width
             .saturating_sub(content_start_x - rect.x)
@@ -5071,6 +5174,112 @@ mod tests {
         assert!(!state.row_rects.is_empty());
     }
 
+    /// Wide-mode hit rects include each item's trailing gap line and
+    /// tile the list contiguously, so hover/click never falls into a
+    /// dead zone between items.
+    #[test]
+    fn render_rows_hit_rects_leave_no_dead_zones() {
+        let rows = vec![
+            header_test_row(1, RowState::Working, "alpha"),
+            header_test_row(2, RowState::Working, "beta"),
+            header_test_row(3, RowState::Idle, "gamma"),
+        ];
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        let mut state = DashboardState::new();
+        state.grouping = Grouping::State;
+        let theme = Theme::current();
+        render_rows(&mut buf, area, &theme, &rows, &mut state);
+
+        assert_eq!(state.row_rects.len(), 3);
+        for (id, rect) in &state.row_rects {
+            assert_eq!(rect.height, ROW_HEIGHT, "row {id:?} must be full-height");
+        }
+        assert_eq!(state.section_rects.len(), 2);
+        for (key, rect) in &state.section_rects {
+            assert_eq!(
+                rect.height, GROUP_HEADER_HEIGHT,
+                "section {key:?} must be full-height",
+            );
+        }
+
+        // Each hit rect starts exactly where the previous one ended.
+        let mut rects: Vec<Rect> = state
+            .row_rects
+            .iter()
+            .map(|(_, r)| *r)
+            .chain(state.section_rects.iter().map(|(_, r)| *r))
+            .collect();
+        rects.sort_by_key(|r| r.y);
+        for pair in rects.windows(2) {
+            assert_eq!(
+                pair[0].y + pair[0].height,
+                pair[1].y,
+                "hit rects must tile without gaps: {pair:?}",
+            );
+        }
+
+        // Hovering a row highlights its content line fully and paints
+        // half-cell halos on the spacer lines above and below, so the
+        // highlight reads as centered on the text. These rows are
+        // title-only, so the content line is the middle of the 3-cell
+        // rect. Use an unquantized theme: `Theme::current()` in the
+        // test environment collapses `bg_hover` onto `bg_base`, which
+        // (correctly) suppresses the halos.
+        let theme = Theme::groknight();
+        assert_ne!(theme.bg_hover, theme.bg_base);
+        let (id, rect) = state.row_rects[0].clone();
+        state.hovered_row = Some(id);
+        render_rows(&mut buf, area, &theme, &rows, &mut state);
+        let title_y = rect.y + 1;
+        assert_eq!(
+            buf[(rect.x, title_y)].style().bg,
+            Some(theme.bg_hover),
+            "hovered row must highlight its content line",
+        );
+        let above = &buf[(rect.x, title_y - 1)];
+        assert_eq!(above.symbol(), "\u{2580}", "spacer above must be a halo");
+        assert_eq!(
+            above.style().bg,
+            Some(theme.bg_hover),
+            "halo above must show the hover colour in its bottom half",
+        );
+        let below = &buf[(rect.x, title_y + 1)];
+        assert_eq!(below.symbol(), "\u{2580}", "spacer below must be a halo");
+        assert_eq!(
+            below.style().fg,
+            Some(theme.bg_hover),
+            "halo below must show the hover colour in its top half",
+        );
+    }
+
+    /// A row's content is vertically centered within its 3-cell rect:
+    /// a title-only row renders padding + title + padding, while a
+    /// title + secondary row stays top-aligned (2 lines cannot center
+    /// in 3 cells).
+    #[test]
+    fn render_row_centers_title_only_content() {
+        let theme = Theme::current();
+        let state = DashboardState::new();
+
+        // Title-only → centered on the middle line.
+        let row = header_test_row(1, RowState::Idle, "solo");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 3));
+        render_row(&mut buf, Rect::new(0, 0, 40, 3), &theme, &row, &state);
+        assert_eq!(buf[(4, 1)].symbol(), "s", "title must sit on line 1");
+        assert_eq!(buf[(4, 0)].symbol(), " ", "line 0 must be padding");
+        assert_eq!(buf[(4, 2)].symbol(), " ", "line 2 must be padding");
+
+        // Title + secondary → top-aligned.
+        let mut row = header_test_row(2, RowState::Working, "pair");
+        row.secondary_line = Some("Responding".to_string());
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 3));
+        render_row(&mut buf, Rect::new(0, 0, 40, 3), &theme, &row, &state);
+        assert_eq!(buf[(4, 0)].symbol(), "p", "title must sit on line 0");
+        assert_eq!(buf[(4, 1)].symbol(), "R", "secondary must sit on line 1");
+        assert_eq!(buf[(4, 2)].symbol(), " ", "line 2 must be padding");
+    }
+
     /// Empty area is a quick exit.
     #[test]
     fn render_empty_state_zero_area_is_no_op() {
@@ -5549,7 +5758,9 @@ mod tests {
             (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect()
         };
 
-        // Wide path: title row sits 2 below the group header (header + gap).
+        // Wide path: this title-only row centers its title within its
+        // 3-cell rect, so the title sits 3 below the group header
+        // (header + gap + row top padding).
         // `title_byte` is a byte offset (for `str::find` comparisons);
         // `title_col` is the display column (the icon glyph is
         // multi-byte UTF-8, so the two differ) for cursor math.
@@ -5557,7 +5768,7 @@ mod tests {
             let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
             let mut state = DashboardState::new();
             render_rows(&mut buf, Rect::new(0, 0, 80, 5), &theme, &rows, &mut state);
-            let line = row_text(&buf, 2, 80);
+            let line = row_text(&buf, 3, 80);
             let byte = line.find("row label").expect("title must render");
             (byte, line[..byte].chars().count() as u16)
         };
@@ -5566,14 +5777,14 @@ mod tests {
             let mut state = DashboardState::new();
             state.rename = Some(RenameDraft::new(id.clone(), "new name"));
             render_rows(&mut buf, Rect::new(0, 0, 80, 5), &theme, &rows, &mut state);
-            let line = row_text(&buf, 2, 80);
+            let line = row_text(&buf, 3, 80);
             assert_eq!(
                 line.find("rename: new name"),
                 Some(title_byte),
                 "wide: `rename:` must start at the title column, got: {line:?}",
             );
             assert_eq!(
-                buf[(2, 2)].symbol(),
+                buf[(2, 3)].symbol(),
                 crate::glyphs::diamond_hollow(),
                 "wide: the state icon must stay in place while renaming",
             );
@@ -5583,7 +5794,7 @@ mod tests {
             let draft_w = "new name".len() as u16;
             assert_eq!(
                 rename_cursor_pos(&state, &rows),
-                Some((title_col + prefix_w + draft_w, 2)),
+                Some((title_col + prefix_w + draft_w, 3)),
                 "cursor must sit one cell past the draft text",
             );
             // With an empty draft the cursor sits immediately after
@@ -5591,7 +5802,7 @@ mod tests {
             state.rename = Some(RenameDraft::new(id.clone(), ""));
             assert_eq!(
                 rename_cursor_pos(&state, &rows),
-                Some((title_col + prefix_w, 2)),
+                Some((title_col + prefix_w, 3)),
                 "empty draft: cursor must sit right after `rename: `",
             );
         }
@@ -5654,7 +5865,7 @@ mod tests {
         let theme = Theme::current();
         let registry = crate::actions::ActionRegistry::defaults();
 
-        for (width, narrow, row_y) in [(80, false, 2), (30, true, 1)] {
+        for (width, narrow, row_y) in [(80, false, 3), (30, true, 1)] {
             let area = Rect::new(0, 0, width, if narrow { 3 } else { 5 });
             let mut buffer = Buffer::empty(area);
             let mut state = DashboardState::new();
@@ -6041,8 +6252,7 @@ mod tests {
         assert!(
             lines.iter().any(|l| matches!(
                 l,
-                DashboardLine::Header { state, count }
-if *state == RowState::Working && *count == 2
+                DashboardLine::Header { state, count } if *state == RowState::Working && *count == 2
             )),
             "collapsed Working header must still render with its true count",
         );
@@ -6144,8 +6354,7 @@ if *state == RowState::Working && *count == 2
         assert!(
             lines.iter().any(|l| matches!(
                 l,
-                DashboardLine::Header { state, count }
-if *state == RowState::Idle && *count == total as usize
+                DashboardLine::Header { state, count } if *state == RowState::Idle && *count == total as usize
             )),
             "Idle header keeps the true total count",
         );
@@ -6847,8 +7056,9 @@ if *state == RowState::Idle && *count == total as usize
     /// Group header (section title) leads with a disclosure glyph at
     /// col 0, then the label at col 2, within the list area. Row content
     /// below is indented (marker col 0, gap col 1, icon col 2). The
-    /// header is 2 visual cells tall (label + gap) so the row's title
-    /// sits 2 rows below the header in this fixture.
+    /// header is 2 visual cells tall (label + gap) and the title-only
+    /// row centers its title, so the title sits 3 rows below the
+    /// header in this fixture.
     #[test]
     fn render_group_header_leads_with_disclosure_glyph() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -6871,12 +7081,13 @@ if *state == RowState::Idle && *count == total as usize
             "section title `Idle …` must start after the disclosure glyph, got: {header_label_x:?}",
         );
 
-        // Header gap → row 1 is blank. Row's title row starts at y=2
-        // (after the 2-cell header). Rows still render their marker/icon
-        // in the left chrome columns.
-        let row_col0 = buf[(0, 2)].symbol().to_string();
-        let row_col1 = buf[(1, 2)].symbol().to_string();
-        let row_col2 = buf[(2, 2)].symbol().to_string();
+        // Header gap → row 1 is blank. The title-only row centers its
+        // title within its 3-cell rect (y=2..5), so the title sits at
+        // y=3. Rows still render their marker/icon in the left chrome
+        // columns.
+        let row_col0 = buf[(0, 3)].symbol().to_string();
+        let row_col1 = buf[(1, 3)].symbol().to_string();
+        let row_col2 = buf[(2, 3)].symbol().to_string();
         assert_eq!(
             row_col0, " ",
             "row's col 0 must be the marker space when nothing selected, got: {row_col0:?}",
@@ -6966,7 +7177,7 @@ if *state == RowState::Idle && *count == total as usize
     #[test]
     fn render_rows_subagents_do_not_trigger_their_own_headers() {
         use crate::app::agent::AgentId;
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 20));
         let mut state = DashboardState::new();
         let parent = DashboardRow {
             id: DashboardRowId::TopLevel(AgentId(1)),

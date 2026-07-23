@@ -422,7 +422,8 @@ pub fn try_remove_temp(path: &Path, stats: Option<&UploadQueueStats>) {
         && e.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(
-            path = % path.display(), error = % e,
+            path = %path.display(),
+            error = %e,
             "Failed to remove upload-queue temp file; leaked"
         );
         if let Some(s) = stats {
@@ -577,7 +578,7 @@ impl UploadQueue {
     ) -> Self {
         let queue_dir = grok_home.join("upload_queue");
         if let Err(e) = std::fs::create_dir_all(&queue_dir) {
-            tracing::warn!(error = % e, "Failed to create upload queue dir");
+            tracing::warn!(error = %e, "Failed to create upload queue dir");
         }
         if let Some(raw_secs) = std::env::var("GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS")
             .ok()
@@ -1327,7 +1328,8 @@ impl UploadQueue {
             }
             let slice = deadline.min(now + Duration::from_millis(250));
             tokio::select! {
-                _ = notified => {} _ = tokio::time::sleep_until(slice) => {}
+                _ = notified => {}
+                _ = tokio::time::sleep_until(slice) => {}
             }
         }
     }
@@ -1372,9 +1374,7 @@ impl UploadQueue {
                     let remaining = self.stats.pending.load(Ordering::Relaxed) as usize;
                     current_span.record("outcome", "panicked");
                     current_span.record("remaining", remaining);
-                    tracing::warn!(
-                        error = % e, "Upload queue worker panicked during drain"
-                    );
+                    tracing::warn!(error = %e, "Upload queue worker panicked during drain");
                     remaining
                 }
                 Err(_) => {
@@ -1480,31 +1480,35 @@ impl UploadQueue {
                     .acquire_many_owned(permits)
                     .await
                     .map_err(|e| {
-                        tracing::warn!(
-                            error = % e,
-                            "inline-fallback semaphore closed; proceeding ungated"
-                        )
+                        tracing::warn!(error = %e, "inline-fallback semaphore closed; proceeding ungated")
                     })
                     .ok();
-                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver).await;
-                let result =
-                    match upload_file(&wrapped, &gcs_path, &source_path, &content_type).await {
-                        Ok(url) => Ok(UploadCompletion {
+                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver)
+                    .await;
+                let result = match upload_file(
+                        &wrapped,
+                        &gcs_path,
+                        &source_path,
+                        &content_type,
+                    )
+                    .await
+                {
+                    Ok(url) => {
+                        Ok(UploadCompletion {
                             gcs_url: url,
                             compression: BlobCompression::None,
                             original_size,
                             stored_size: original_size,
-                        }),
-                        Err(e) => {
-                            tracing::warn!(
-                                gcs_path, error = % e, "Inline blocking upload failed"
-                            );
-                            Err(e)
-                        }
-                    };
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!(gcs_path, error = %e, "Inline blocking upload failed");
+                        Err(e)
+                    }
+                };
                 let _ = completion_tx.send(result);
             }
-            .instrument(parent_span),
+                .instrument(parent_span),
         );
     }
     /// Inline fallback for `enqueue_file_reference` when the channel is full /
@@ -1532,26 +1536,29 @@ impl UploadQueue {
                     .acquire_many_owned(permits)
                     .await
                     .map_err(|e| {
-                        tracing::warn!(
-                            error = % e,
-                            "inline-fallback semaphore closed; proceeding ungated"
-                        )
+                        tracing::warn!(error = %e, "inline-fallback semaphore closed; proceeding ungated")
                     })
                     .ok();
-                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver).await;
-                let result = match upload_file(&wrapped, &gcs_path, &snapshot, &content_type).await
+                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver)
+                    .await;
+                let result = match upload_file(
+                        &wrapped,
+                        &gcs_path,
+                        &snapshot,
+                        &content_type,
+                    )
+                    .await
                 {
-                    Ok(url) => Ok(UploadCompletion {
-                        gcs_url: url,
-                        compression: BlobCompression::None,
-                        original_size,
-                        stored_size: original_size,
-                    }),
+                    Ok(url) => {
+                        Ok(UploadCompletion {
+                            gcs_url: url,
+                            compression: BlobCompression::None,
+                            original_size,
+                            stored_size: original_size,
+                        })
+                    }
                     Err(e) => {
-                        tracing::warn!(
-                            gcs_path, error = % e,
-                            "Inline snapshot fallback upload failed"
-                        );
+                        tracing::warn!(gcs_path, error = %e, "Inline snapshot fallback upload failed");
                         Err(e)
                     }
                 };
@@ -1560,7 +1567,7 @@ impl UploadQueue {
                     let _ = tx.send(result);
                 }
             }
-            .instrument(parent_span),
+                .instrument(parent_span),
         );
     }
     /// Fire-and-forget inline fallback for `enqueue_file` (over-budget /
@@ -1585,21 +1592,23 @@ impl UploadQueue {
                     .acquire_many_owned(permits)
                     .await
                     .map_err(|e| {
-                        tracing::warn!(
-                            error = % e,
-                            "inline-fallback semaphore closed; proceeding ungated"
-                        )
+                        tracing::warn!(error = %e, "inline-fallback semaphore closed; proceeding ungated")
                     })
                     .ok();
-                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver).await;
-                if let Err(e) = upload_file(&wrapped, &gcs_path, &source_path, &content_type).await
+                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver)
+                    .await;
+                if let Err(e) = upload_file(
+                        &wrapped,
+                        &gcs_path,
+                        &source_path,
+                        &content_type,
+                    )
+                    .await
                 {
-                    tracing::warn!(
-                        gcs_path, error = % e, "Inline fallback upload failed"
-                    );
+                    tracing::warn!(gcs_path, error = %e, "Inline fallback upload failed");
                 }
             }
-            .instrument(parent_span),
+                .instrument(parent_span),
         );
     }
     /// Fire-and-forget inline fallback for the bytes-based `enqueue`
@@ -1622,20 +1631,23 @@ impl UploadQueue {
                     .acquire_many_owned(permits)
                     .await
                     .map_err(|e| {
-                        tracing::warn!(
-                            error = % e,
-                            "inline-fallback semaphore closed; proceeding ungated"
-                        )
+                        tracing::warn!(error = %e, "inline-fallback semaphore closed; proceeding ungated")
                     })
                     .ok();
-                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver).await;
-                if let Err(e) = upload_bytes(&wrapped, &gcs_path, &content, &content_type).await {
-                    tracing::warn!(
-                        gcs_path, error = % e, "Inline fallback upload failed"
-                    );
+                let wrapped = ResolvedStorageConfig::from_resolver_async(&resolver)
+                    .await;
+                if let Err(e) = upload_bytes(
+                        &wrapped,
+                        &gcs_path,
+                        &content,
+                        &content_type,
+                    )
+                    .await
+                {
+                    tracing::warn!(gcs_path, error = %e, "Inline fallback upload failed");
                 }
             }
-            .instrument(parent_span),
+                .instrument(parent_span),
         );
     }
 }
@@ -1694,9 +1706,11 @@ async fn dispatch_item(
     let consecutive_failures = consecutive_failures.clone();
     let draining = draining.clone();
     let span = tracing::info_span!(
-        parent : item.parent_span.clone(), "gcs_queue_upload", artifact = % item
-        .artifact_name, gcs_path = % item.gcs_path, client_version = % item
-        .client_version.as_deref().unwrap_or("unknown"),
+        parent: item.parent_span.clone(),
+        "gcs_queue_upload",
+        artifact = %item.artifact_name,
+        gcs_path = %item.gcs_path,
+        client_version = %item.client_version.as_deref().unwrap_or("unknown"),
     );
     tasks.spawn(
         async move {
@@ -1725,8 +1739,11 @@ async fn circuit_breaker_cooldown(
     stats.circuit_breaker_active.store(true, Ordering::Relaxed);
     stats.notify_transition();
     let interrupted = tokio::select! {
-        _ = tokio::time::sleep(CIRCUIT_BREAKER_COOLDOWN) => false, _ = shutdown_rx
-        .as_mut() => { tracing::debug!("upload_queue.shutdown_signal"); true }
+        _ = tokio::time::sleep(CIRCUIT_BREAKER_COOLDOWN) => false,
+        _ = shutdown_rx.as_mut() => {
+            tracing::debug!("upload_queue.shutdown_signal");
+            true
+        }
     };
     stats.circuit_breaker_active.store(false, Ordering::Relaxed);
     stats.notify_transition();
@@ -1772,11 +1789,24 @@ async fn upload_worker(
             consecutive_failures.store(0, Ordering::Relaxed);
         }
         tokio::select! {
-            item = rx.recv() => { match item { Some(item) => { dispatch_item(item, &
-            semaphore, & resolver, & retry_policy, & stats, & consecutive_failures, &
-            draining_flag, & mut tasks,). await; while tasks.try_join_next().is_some() {}
-            } None => break false, } } _ = & mut shutdown_rx => {
-            tracing::debug!("upload_queue.shutdown_signal"); break true; }
+            item = rx.recv() => {
+                match item {
+                    Some(item) => {
+                        dispatch_item(
+                            item, &semaphore, &resolver, &retry_policy,
+                            &stats, &consecutive_failures, &draining_flag, &mut tasks,
+                        ).await;
+                        // Reap finished tasks so the JoinSet doesn't grow
+                        // unbounded over the worker's lifetime.
+                        while tasks.try_join_next().is_some() {}
+                    }
+                    None => break false,
+                }
+            }
+            _ = &mut shutdown_rx => {
+                tracing::debug!("upload_queue.shutdown_signal");
+                break true;
+            }
         }
     };
     draining_flag.store(true, Ordering::Relaxed);
@@ -1940,8 +1970,10 @@ async fn process_item(
                 consecutive_failures.fetch_add(1, Ordering::Relaxed);
             }
             tracing::warn!(
-                attempts = item.attempts, size_bytes = size, outcome = if terminal {
-                "dropped" } else { "exhausted" }, error = ? e,
+                attempts = item.attempts,
+                size_bytes = size,
+                outcome = if terminal { "dropped" } else { "exhausted" },
+                error = ?e,
                 "Upload queue item failed permanently"
             );
             remove_item_files(&item, Some(stats));
@@ -2034,7 +2066,8 @@ async fn upload_with_retries(
             Err(e) => match upload_disposition(&e) {
                 Disposition::Terminal => {
                     tracing::warn!(
-                        attempt = item.attempts, error = ? e,
+                        attempt = item.attempts,
+                        error = ?e,
                         "Storage upload failed with a terminal client error (400/403/404); dropping artifact"
                     );
                     return Err(e);
@@ -2042,7 +2075,8 @@ async fn upload_with_retries(
                 Disposition::AuthRefresh => {
                     if !auth_retried {
                         tracing::info!(
-                            attempt = item.attempts, error = ? e,
+                            attempt = item.attempts,
+                            error = ?e,
                             "Auth error, re-resolving credentials for one retry"
                         );
                         auth_retried = true;
@@ -2078,7 +2112,9 @@ async fn upload_with_retries(
                             AUTH_PARK_WAIT_INTERVAL,
                         ) else {
                             tracing::warn!(
-                                attempt = item.attempts, parked, error = ? e,
+                                attempt = item.attempts,
+                                parked,
+                                error = ?e,
                                 "Auth error persists after credential refresh, aborting"
                             );
                             return Err(e);
@@ -2087,7 +2123,8 @@ async fn upload_with_retries(
                             parked = true;
                             stats.auth_parked.fetch_add(1, Ordering::Relaxed);
                             tracing::warn!(
-                                attempt = item.attempts, gcs_path = % item.gcs_path,
+                                attempt = item.attempts,
+                                gcs_path = %item.gcs_path,
                                 "401 persists after credential refresh; parking item until auth recovers"
                             );
                             notify_completion(
@@ -2122,8 +2159,10 @@ async fn upload_with_retries(
                     }
                     let delay = policy.backoff_delay(item.attempts - 1);
                     tracing::debug!(
-                        attempt = item.attempts, delay_ms = delay.as_millis() as u64,
-                        error = ? e, "Upload queue item failed, retrying"
+                        attempt = item.attempts,
+                        delay_ms = delay.as_millis() as u64,
+                        error = ?e,
+                        "Upload queue item failed, retrying"
                     );
                     tokio::time::sleep(delay).await;
                 }
@@ -2264,7 +2303,8 @@ fn move_or_copy_to_queue_with(
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::warn!(
-                    source = % source.display(), error = % e,
+                    source = %source.display(),
+                    error = %e,
                     "rename within queue_dir failed; falling back to copy + remove"
                 );
                 copy_fn(source, dest)?;
@@ -2349,7 +2389,9 @@ fn cleanup_queue_dir(queue_dir: &Path, max_age: Duration, stats: Option<&UploadQ
     }
     if cleaned > 0 {
         tracing::info!(
-            cleaned, cleaned_bytes, dir = % queue_dir.display(),
+            cleaned,
+            cleaned_bytes,
+            dir = %queue_dir.display(),
             "Cleaned up orphaned upload queue entries from previous session"
         );
     }
@@ -4248,8 +4290,8 @@ mod tests {
                     return true;
                 }
                 tokio::select! {
-                    r = rx.changed() => r.is_ok(), _ = tokio::time::sleep(slice) =>
-                    false,
+                    r = rx.changed() => r.is_ok(),
+                    _ = tokio::time::sleep(slice) => false,
                 }
             }))
         }

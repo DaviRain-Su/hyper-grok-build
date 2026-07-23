@@ -108,6 +108,10 @@ Usage:
 - Results are returned with line numbers starting at 1. The format is: LINE_NUMBER→LINE_CONTENT
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc).
 - When reading an image file the contents are presented visually as this tool uses multimodal LLMs."#;
+/// Schema-only advertised default (runtime still treats omit as line 1 via unwrap_or).
+fn schema_default_offset() -> Option<i64> {
+    Some(1)
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadFileInput {
     #[serde(rename = "target_file")]
@@ -122,6 +126,7 @@ pub struct ReadFileInput {
     )]
     #[schemars(
         with = "GrokIntegerSchema",
+        default = "schema_default_offset",
         description = "The line number to start reading from. Only provide if the file is too large to read at once."
     )]
     pub offset: Option<i64>,
@@ -444,9 +449,10 @@ pub(crate) async fn run_read_file(
     }
     if crate::util::binary::is_binary(&extension, &file_bytes) {
         tracing::info!(
-            path = % path.display(), extension = % extension, detected_by = if crate
-            ::util::binary::BINARY_EXTENSIONS.binary_search(& extension.as_str()).is_ok()
-            { "extension" } else { "content_inspection" },
+            path = %path.display(),
+            extension = %extension,
+            detected_by = if crate::util::binary::BINARY_EXTENSIONS
+                .binary_search(&extension.as_str()).is_ok() { "extension" } else { "content_inspection" },
             "binary file rejected by read_file"
         );
         return Ok(ReadFileOutput::FileReadError(format!(
@@ -625,26 +631,51 @@ impl xai_tool_runtime::Tool for ReadFileTool {
         let Some(spec) = admitted_spec else {
             let this = ReadFileTool;
             return Box::pin(async_stream::stream! {
-                yield xai_tool_runtime::ToolStreamItem::Terminal(this.run(ctx, input)
-                . await);
+                yield xai_tool_runtime::ToolStreamItem::Terminal(this.run(ctx, input).await);
             });
         };
         Box::pin(async_stream::stream! {
-            match ReadFileTool::read_with_streamability(& ctx, input). await {
-            Ok((output, streamable)) => { if streamable && let
-            ReadFileOutput::FileContent(fc) = & output && ! fc.content.is_empty() {
-            let content = fc.content.as_bytes(); let mut last_total : u64 = 0; let
-            mut window_start = 0usize; while window_start < content.len() { let mut
-            window_end = (window_start + STREAM_DELTA_TARGET_BYTES).min(content
-            .len()); while window_end > window_start && ! fc.content
-            .is_char_boundary(window_end) { window_end -= 1; }
-if let Some(p) =
-            xai_tool_runtime::stream_chunk(spec, & content[..window_end], window_end
-            as u64, & mut last_total, false,) { yield
-            xai_tool_runtime::ToolStreamItem::Progress(p); } window_start =
-            window_end; } } yield
-            xai_tool_runtime::ToolStreamItem::Terminal(Ok(output)); } Err(e) => yield
-            xai_tool_runtime::ToolStreamItem::Terminal(Err(e)), }
+            // `streamable` is call-local to this read.
+            match ReadFileTool::read_with_streamability(&ctx, input).await {
+                Ok((output, streamable)) => {
+                    if streamable
+                        && let ReadFileOutput::FileContent(fc) = &output
+                        && !fc.content.is_empty()
+                    {
+                        // Replay char-aligned slices of the final `content`
+                        // (each below the 16 KiB cap; see
+                        // STREAM_DELTA_TARGET_BYTES).
+                        let content = fc.content.as_bytes();
+                        let mut last_total: u64 = 0;
+                        let mut window_start = 0usize;
+                        while window_start < content.len() {
+                            let mut window_end =
+                                (window_start + STREAM_DELTA_TARGET_BYTES).min(content.len());
+                            // Align DOWN to a char boundary (a char is ≤ 4
+                            // bytes vs the 4 KiB target: never a zero-width
+                            // window).
+                            while window_end > window_start
+                                && !fc.content.is_char_boundary(window_end)
+                            {
+                                window_end -= 1;
+                            }
+                            if let Some(p) = xai_tool_runtime::stream_chunk(
+                                spec,
+                                &content[..window_end],
+                                window_end as u64,
+                                &mut last_total,
+                                // Full replay, no streaming loss ⇒ never truncated.
+                                false,
+                            ) {
+                                yield xai_tool_runtime::ToolStreamItem::Progress(p);
+                            }
+                            window_start = window_end;
+                        }
+                    }
+                    yield xai_tool_runtime::ToolStreamItem::Terminal(Ok(output));
+                }
+                Err(e) => yield xai_tool_runtime::ToolStreamItem::Terminal(Err(e)),
+            }
         })
     }
     #[tracing::instrument(name = "tool.read_file", skip_all, fields(path = %input.path))]
@@ -2385,12 +2416,17 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         }
     }
     #[test]
-    fn read_file_offset_description_unchanged() {
+    fn read_file_offset_schema_advertises_start_default() {
         let src = include_str!("mod.rs");
         assert!(
-            src
-            .contains("description = \"The line number to start reading from. Only provide if the file is too large to read at once.\""),
-            "offset schemars description must not change"
+            src.contains(
+                "description = \"The line number to start reading from. Only provide if the file is too large to read at once.\""
+            ),
+            "offset schemars description must remain the pre-PR wording"
+        );
+        assert!(
+            src.contains("default = \"schema_default_offset\""),
+            "offset must advertise schema_default_offset"
         );
     }
     #[test]

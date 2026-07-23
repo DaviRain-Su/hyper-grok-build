@@ -154,9 +154,7 @@ pub(crate) async fn upload_to_auth_diagnostics(
             );
         }
         Err(e) => {
-            tracing::warn!(
-                error = % e, "failed to upload diagnostic log to auth-diagnostics"
-            );
+            tracing::warn!(error = %e, "failed to upload diagnostic log to auth-diagnostics");
         }
     }
 }

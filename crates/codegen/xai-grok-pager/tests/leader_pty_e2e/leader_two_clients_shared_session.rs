@@ -108,7 +108,7 @@ async fn leader_two_clients_shared_session() {
         }
 
         assert!(
-            h.is_running(),
+            h.is_running().expect("poll pager liveness"),
             "pager {name} exited\nscreen:\n{}",
             h.screen_contents()
         );
@@ -132,7 +132,7 @@ async fn leader_two_clients_shared_session() {
     drop(a);
     b.update(Duration::from_secs(3));
     assert!(
-        b.is_running(),
+        b.is_running().expect("poll pager liveness"),
         "B exited after A quit\nscreen:\n{}",
         b.screen_contents()
     );

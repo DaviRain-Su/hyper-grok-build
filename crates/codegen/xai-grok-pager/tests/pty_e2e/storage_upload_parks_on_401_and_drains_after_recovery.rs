@@ -23,18 +23,25 @@ async fn storage_upload_parks_on_401_and_drains_after_recovery() {
     // under test.
     seed_fake_oauth(&content, "pty-park-e2e");
 
-    // Appended last so they win over the harness defaults.
-    let env = oauth_env_for_pager(&content);
-    let mut env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    env_refs.retain(|(k, _)| *k != "GROK_TRACE_UPLOAD");
-    env_refs.push(("GROK_TRACE_UPLOAD", "true"));
-    env_refs.push(("GROK_TELEMETRY_TRACE_UPLOAD", "true"));
-    env_refs.push(("GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS", "2"));
+    // Explicit overrides win over the sandbox defaults. Disable only the fake
+    // API-key credential so seeded OAuth remains active.
+    let overrides = [
+        oauth_credential_ops()[0],
+        EnvOp::set("GROK_TRACE_UPLOAD", "true"),
+        EnvOp::set("GROK_TELEMETRY_TRACE_UPLOAD", "true"),
+        EnvOp::set("GROK_UPLOAD_QUEUE_AUTH_PROBE_SECS", "2"),
+    ];
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, DEFAULT_COLS, &[], &env_refs)
-        .expect("spawn pager with storage-401 mock");
+    let mut harness = PtyHarness::spawn_with_content_env_ops(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        &overrides,
+    )
+    .expect("spawn pager with storage-401 mock");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -91,7 +98,10 @@ async fn storage_upload_parks_on_401_and_drains_after_recovery() {
         "parked queue must not spam storage: {parked_count} -> {after} \
          (allowed +{MAX_EXTRA_WHILE_PARKED})"
     );
-    assert!(harness.is_running(), "pager stays healthy while parked");
+    assert!(
+        harness.is_running().expect("poll pager liveness"),
+        "pager stays healthy while parked"
+    );
 
     content.set_storage_unauthorized(false);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);

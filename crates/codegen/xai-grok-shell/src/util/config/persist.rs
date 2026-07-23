@@ -4,59 +4,56 @@ use anyhow::Result;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
 use xai_grok_agent::prompt::skills::SkillsConfig;
-
 /// Process-wide write lock for `~/.grok/config.toml`.
 ///
 /// Serializes the read-modify-write in `save_config` so two rapid
 /// settings toggles can't interleave and clobber each other.
 static SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 pub async fn save_config(config: &Config) -> Result<()> {
     let _guard = SAVE_LOCK.lock().await;
-
+    save_config_locked(config).await
+}
+/// [`save_config`] body; caller must hold [`SAVE_LOCK`].
+async fn save_config_locked(config: &Config) -> Result<()> {
     let path = user_config_path();
     let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => {
-            // Refuse to overwrite an unparseable config — silent fallback
-            // to an empty table would permanently drop unmodeled sections.
-            match toml::from_str::<TomlValue>(&s) {
-                Ok(v) => v,
-                Err(parse_err) => {
-                    return Err(anyhow::anyhow!(
-                        "refusing to overwrite unparseable {}: {}; save a backup \
+        Ok(s) => match toml::from_str::<TomlValue>(&s) {
+            Ok(v) => v,
+            Err(parse_err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to overwrite unparseable {}: {}; save a backup \
                          and fix the syntax error before retrying",
-                        path.display(),
-                        parse_err,
-                    ));
-                }
+                    path.display(),
+                    parse_err,
+                ));
             }
-        }
+        },
         Err(_) => TomlValue::Table(TomlMap::new()),
     };
     if !matches!(root, TomlValue::Table(_)) {
         root = TomlValue::Table(TomlMap::new());
     }
     let table = root.as_table_mut().expect("root must be a table");
-
     merge_section(table, "cli", &config.cli);
     merge_section(table, "models", &config.models);
     merge_section(table, "ui", &config.ui);
     merge_section(table, "harness", &config.harness);
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
-
+    if config.privacy == super::mcp::PrivacyConfig::default() {
+        table.remove("privacy");
+    } else {
+        merge_section(table, "privacy", &config.privacy);
+    }
     if config.skills == SkillsConfig::default() {
         table.remove("skills");
     } else {
         merge_section(table, "skills", &config.skills);
     }
-
     let toml_str = toml::to_string_pretty(&root)?;
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-
-    // Preserve existing file permissions across the tmp+rename swap.
     #[cfg(unix)]
     let prior_mode: Option<u32> = match tokio::fs::metadata(&path).await {
         Ok(m) => {
@@ -67,9 +64,6 @@ pub async fn save_config(config: &Config) -> Result<()> {
     };
     #[cfg(not(unix))]
     let prior_mode: Option<u32> = None;
-
-    // Unique tmp filename (PID + nanos) avoids inode sharing if a
-    // future caller bypasses SAVE_LOCK.
     let suffix = {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -79,26 +73,21 @@ pub async fn save_config(config: &Config) -> Result<()> {
     };
     let tmp = path.with_extension(suffix);
     tokio::fs::write(&tmp, toml_str).await?;
-
     #[cfg(unix)]
     if let Some(mode) = prior_mode {
         use std::os::unix::fs::PermissionsExt;
-        // Set mode before rename so permissions never widen atomically.
         let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
     }
     let _ = prior_mode;
-
     tokio::fs::rename(&tmp, &path).await?;
     Ok(())
 }
-
 /// Acquire the `config.toml` write lock used by [`save_config`], so callers that
 /// mutate the file directly (marketplace add/remove) can't interleave with a
 /// settings save and clobber it.
 pub(crate) async fn lock_config_writes() -> tokio::sync::MutexGuard<'static, ()> {
     SAVE_LOCK.lock().await
 }
-
 /// Read a file, treating only `NotFound` as empty. Hard read errors (EACCES,
 /// EIO) propagate so callers don't clobber an unreadable file on the next write.
 pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result<String> {
@@ -108,14 +97,12 @@ pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result
         Err(e) => Err(e),
     }
 }
-
 /// Atomic write via temp file + `rename` (mirrors [`save_config`]) so a crash
 /// mid-write can't truncate `config.toml`. Preserves the dest mode on unix.
 pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-
     #[cfg(unix)]
     let prior_mode: Option<u32> = match std::fs::metadata(path) {
         Ok(m) => {
@@ -126,7 +113,6 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
     };
     #[cfg(not(unix))]
     let prior_mode: Option<u32> = None;
-
     let suffix = {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -136,22 +122,18 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
     };
     let tmp = path.with_extension(suffix);
     std::fs::write(&tmp, content)?;
-
     #[cfg(unix)]
     if let Some(mode) = prior_mode {
         use std::os::unix::fs::PermissionsExt;
-        // Set mode before rename so permissions never widen atomically.
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
     }
     let _ = prior_mode;
-
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(())
 }
-
 /// Merge `[toolset.ask_user_question]` into the root table. `[toolset]` is
 /// deliberately NOT merged wholesale — it carries runtime-only structs
 /// (`web_search` sampler etc.) whose serialized defaults must never land in
@@ -160,16 +142,12 @@ fn merge_ask_user_question_section(
     table: &mut TomlMap<String, TomlValue>,
     ask: &crate::tools::config::AskUserQuestionToolConfig,
 ) {
-    // All-None means nothing to write; skip so an empty [toolset] header
-    // never appears in config.toml.
     if ask.timeout_enabled.is_none() && ask.timeout_secs.is_none() {
         return;
     }
     let toolset = table
         .entry("toolset".to_string())
         .or_insert_with(|| TomlValue::Table(TomlMap::new()));
-    // Mirror merge_section's recovery: replace a non-table `toolset` scalar so
-    // a user-initiated write never silently vanishes after the success toast.
     if !matches!(toolset, TomlValue::Table(_)) {
         *toolset = TomlValue::Table(TomlMap::new());
     }
@@ -177,7 +155,6 @@ fn merge_ask_user_question_section(
         merge_section(toolset_table, "ask_user_question", ask);
     }
 }
-
 /// Merge serialized fields of `value` into `table[key]`, preserving any
 /// existing keys not present in the serialized output. This prevents
 /// unmodeled fields (e.g. pager-written `show_timestamps`, `auto_dark_theme`)
@@ -198,7 +175,6 @@ fn merge_toml_tables(
         }
     }
 }
-
 fn merge_section<T: serde::Serialize>(
     table: &mut TomlMap<String, TomlValue>,
     key: &str,
@@ -215,8 +191,6 @@ fn merge_section<T: serde::Serialize>(
                 *section = TomlValue::Table(new_fields);
             }
         }
-        // Serialized struct is empty (all-Option structs like CliConfig/HarnessConfig
-        // with every field at None). Preserve the existing section untouched.
         Ok(TomlValue::Table(_)) => {}
         Ok(_) | Err(_) => {
             table.remove(key);
@@ -228,13 +202,13 @@ pub async fn update_config<F>(f: F) -> Result<()>
 where
     F: FnOnce(&mut Config),
 {
+    let _guard = SAVE_LOCK.lock().await;
     let root: TomlValue =
         crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
     let mut cfg = load_config_from_toml(&root);
     f(&mut cfg);
-    save_config(&cfg).await
+    save_config_locked(&cfg).await
 }
-
 #[cfg(test)]
 mod tests {
     use super::super::load::load_config_from_toml;
@@ -242,7 +216,6 @@ mod tests {
     use super::*;
     use toml::Value as TomlValue;
     use toml::map::Map as TomlMap;
-
     /// The `[toolset.ask_user_question]` settings write merges only that
     /// sub-table: the toggled field lands, hand-written sibling keys survive,
     /// and no other `[toolset]` defaults (bash/web_search) are splatted into
@@ -272,13 +245,9 @@ mod tests {
             Some(30),
             "hand-written sibling keys must survive the merge"
         );
-
-        // The update_config read side parses the same sub-table back, closing
-        // the read-modify-write loop.
         let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
         assert_eq!(reparsed.ask_user_question.timeout_enabled, Some(false));
         assert_eq!(reparsed.ask_user_question.timeout_secs, Some(30));
-
         let mut empty_root: TomlMap<String, TomlValue> = TomlMap::new();
         merge_ask_user_question_section(
             &mut empty_root,
@@ -288,9 +257,6 @@ mod tests {
             empty_root.is_empty(),
             "all-None must not create an empty [toolset] header"
         );
-
-        // A non-table `toolset` scalar is replaced (merge_section parity) so
-        // the toggle still lands instead of silently vanishing.
         let mut scalar_root: TomlMap<String, TomlValue> = TomlMap::new();
         scalar_root.insert("toolset".into(), TomlValue::String("bogus".into()));
         merge_ask_user_question_section(&mut scalar_root, &ask);
@@ -304,7 +270,6 @@ mod tests {
             "scalar [toolset] must be replaced so the write lands"
         );
     }
-
     #[test]
     fn transport_oauth_client_id_takes_priority_over_block() {
         let json = r#"{
@@ -322,7 +287,6 @@ mod tests {
         let oauth = svc.oauth_config().expect("oauth_config");
         assert_eq!(oauth.client_id.as_deref(), Some("transport-client"));
     }
-
     #[test]
     fn parse_mcp_config_with_oauth_extracts_byo_client_id() {
         let json = r#"{
@@ -348,9 +312,6 @@ mod tests {
         );
         assert!(!oauth.contains_key("plain"));
     }
-
-    // -- Cursor MCP loading --
-
     #[test]
     fn merge_section_preserves_unmodeled_fields() {
         let mut table = TomlMap::new();
@@ -362,10 +323,8 @@ mod tests {
         );
         ui.insert("custom_user_key".into(), TomlValue::Integer(42));
         table.insert("ui".into(), TomlValue::Table(ui));
-
         let cfg = crate::agent::config::UiConfig::default();
         merge_section(&mut table, "ui", &cfg);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("show_timestamps").and_then(|v| v.as_bool()),
@@ -383,7 +342,6 @@ mod tests {
             "truly unmodeled user-added key should survive merge"
         );
     }
-
     #[test]
     fn merge_section_nested_display_refresh_preserves_future_knob() {
         let mut table = TomlMap::new();
@@ -393,11 +351,9 @@ mod tests {
         dr.insert("future_knob".into(), TomlValue::Integer(42));
         ui.insert("display_refresh".into(), TomlValue::Table(dr));
         table.insert("ui".into(), TomlValue::Table(ui));
-
         let mut cfg = crate::agent::config::UiConfig::default();
         cfg.display_refresh.probe_enabled = Some(false);
         merge_section(&mut table, "ui", &cfg);
-
         let nested = table
             .get("ui")
             .and_then(|v| v.as_table())
@@ -414,7 +370,6 @@ mod tests {
             "unknown nested keys must survive shallow-looking settings writes"
         );
     }
-
     #[test]
     fn merge_section_updates_modeled_fields_preserving_unmodeled() {
         let mut table = TomlMap::new();
@@ -426,13 +381,11 @@ mod tests {
             TomlValue::String("grokday".into()),
         );
         table.insert("ui".into(), TomlValue::Table(ui));
-
         let cfg = crate::agent::config::UiConfig {
             yolo: true,
             ..Default::default()
         };
         merge_section(&mut table, "ui", &cfg);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("yolo").and_then(|v| v.as_bool()),
@@ -450,22 +403,18 @@ mod tests {
             "pre-existing field not in serialized output should be preserved"
         );
     }
-
     #[test]
     fn merge_section_creates_new_section() {
         let mut table = TomlMap::new();
         assert!(table.get("ui").is_none());
-
         let cfg = crate::agent::config::UiConfig {
             yolo: true,
             ..Default::default()
         };
         merge_section(&mut table, "ui", &cfg);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(ui.get("yolo").and_then(|v| v.as_bool()), Some(true));
     }
-
     /// Regression test: pager-side commits of a
     /// [session] field (e.g., `auto_compact_threshold_percent`) must
     /// NOT inject `load_envrc` into the user's config when the user
@@ -484,20 +433,9 @@ mod tests {
     #[test]
     fn merge_section_session_default_does_not_leak_load_envrc() {
         let mut table = TomlMap::new();
-        // The starting state: user has no [session] section on disk
-        // (managed config might set load_envrc = false; user TOML is
-        // silent on the matter).
         assert!(table.get("session").is_none());
-
-        // Pager calls update_config to set a totally unrelated [ui]
-        // field. The closure exits with cfg.session ==
-        // SessionConfig::default() (both fields None). save_config
-        // then calls merge_section("session", &cfg.session).
         let cfg = crate::agent::config::SessionConfig::default();
         merge_section(&mut table, "session", &cfg);
-
-        // After the fix, [session] is either absent OR present-but-
-        // empty. Crucially, it must NOT contain `load_envrc`.
         if let Some(session) = table.get("session").and_then(|v| v.as_table()) {
             assert!(
                 session.get("load_envrc").is_none(),
@@ -511,9 +449,7 @@ mod tests {
                 "default auto_compact_threshold_percent must not be serialized either"
             );
         }
-        // If the table is wholly absent or empty, that's also fine.
     }
-
     /// Companion to the above: when the user explicitly commits a
     /// non-default `auto_compact_threshold_percent`, the field is
     /// serialized but `load_envrc` (still default None) is NOT.
@@ -522,38 +458,27 @@ mod tests {
     #[test]
     fn merge_section_session_explicit_value_does_not_drag_load_envrc() {
         let mut table = TomlMap::new();
-        // Pre-existing managed-config-set value.
         let mut session = TomlMap::new();
         session.insert("load_envrc".into(), TomlValue::Boolean(false));
         table.insert("session".into(), TomlValue::Table(session));
-
-        // User commits auto_compact_threshold_percent via the modal.
-        // The cfg.session has load_envrc: None (user never touched it)
-        // and auto_compact_threshold_percent: Some(70).
         let cfg = crate::agent::config::SessionConfig {
             auto_compact_threshold_percent: Some(70),
             load_envrc: None,
         };
         merge_section(&mut table, "session", &cfg);
-
         let session = table.get("session").unwrap().as_table().unwrap();
-        // The user's commit landed.
         assert_eq!(
             session
                 .get("auto_compact_threshold_percent")
                 .and_then(|v| v.as_integer()),
             Some(70),
         );
-        // The pre-existing load_envrc = false IS preserved (unmodeled-
-        // field survival via the merge_section invariant) — the fix
-        // doesn't break the historical preservation contract.
         assert_eq!(
             session.get("load_envrc").and_then(|v| v.as_bool()),
             Some(false),
             "pre-existing load_envrc must survive a partial settings save"
         );
     }
-
     /// Follow-on: when the user DOES explicitly set
     /// `load_envrc = false` via TOML, the value round-trips through
     /// `load_config_from_toml` → mutate → `merge_section` correctly.
@@ -568,16 +493,12 @@ mod tests {
             "#,
         )
         .unwrap();
-
         let cfg = load_config_from_toml(&raw_config);
         assert_eq!(
             cfg.session.load_envrc,
             Some(false),
             "explicit load_envrc = false on disk must load as Some(false), not None"
         );
-
-        // Now round-trip through save: merge into a fresh table and
-        // verify load_envrc = false stays present.
         let mut table = TomlMap::new();
         merge_section(&mut table, "session", &cfg.session);
         let session = table.get("session").unwrap().as_table().unwrap();
@@ -587,7 +508,6 @@ mod tests {
             "explicit load_envrc = false must survive a save"
         );
     }
-
     #[test]
     fn merge_section_empty_struct_preserves_existing_section() {
         let mut table = TomlMap::new();
@@ -595,11 +515,8 @@ mod tests {
         harness.insert("custom_key".into(), TomlValue::Boolean(true));
         harness.insert("another_key".into(), TomlValue::String("value".into()));
         table.insert("harness".into(), TomlValue::Table(harness));
-
-        // HarnessConfig has all-Option fields; default serializes to empty table
         let cfg = crate::agent::config::HarnessConfig::default();
         merge_section(&mut table, "harness", &cfg);
-
         let harness = table.get("harness").unwrap().as_table().unwrap();
         assert_eq!(
             harness.get("custom_key").and_then(|v| v.as_bool()),
@@ -611,7 +528,6 @@ mod tests {
             Some("value"),
         );
     }
-
     #[test]
     fn ui_config_round_trip_preserves_pager_fields() {
         let toml_str = r#"
@@ -623,16 +539,12 @@ auto_light_theme = "grokday"
 "#;
         let root: TomlValue = toml::from_str(toml_str).unwrap();
         let cfg = load_config_from_toml(&root);
-
         assert!(cfg.ui.yolo);
         assert_eq!(cfg.ui.show_timestamps, Some(false));
         assert_eq!(cfg.ui.auto_dark_theme.as_deref(), Some("tokyonight"));
         assert_eq!(cfg.ui.auto_light_theme.as_deref(), Some("grokday"));
-
-        // Simulate save_config: serialize back through merge_section
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "ui", &cfg.ui);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("show_timestamps").and_then(|v| v.as_bool()),
@@ -648,15 +560,11 @@ auto_light_theme = "grokday"
         );
         assert_eq!(ui.get("yolo").and_then(|v| v.as_bool()), Some(true));
     }
-
     #[test]
     fn ui_config_hunk_tracker_mode_round_trips() {
-        // Parse from `[ui].hunk_tracker_mode`...
         let root: TomlValue = toml::from_str("[ui]\nhunk_tracker_mode = \"off\"\n").unwrap();
         let cfg = load_config_from_toml(&root);
         assert_eq!(cfg.ui.hunk_tracker_mode.as_deref(), Some("off"));
-
-        // ...and serialize back through merge_section.
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "ui", &cfg.ui);
         let ui = table.get("ui").unwrap().as_table().unwrap();
@@ -664,8 +572,6 @@ auto_light_theme = "grokday"
             ui.get("hunk_tracker_mode").and_then(|v| v.as_str()),
             Some("off")
         );
-
-        // Default (None) is skipped on the wire — "not set".
         let serialized = TomlValue::try_from(crate::agent::config::UiConfig::default()).unwrap();
         assert!(
             serialized
@@ -676,15 +582,11 @@ auto_light_theme = "grokday"
             "hunk_tracker_mode=None must not appear in serialized output"
         );
     }
-
     #[test]
     fn ui_config_serialization_behavior() {
         let cfg = crate::agent::config::UiConfig::default();
         let val = TomlValue::try_from(&cfg).unwrap();
         let table = val.as_table().unwrap();
-
-        // Non-Option fields always serialize (even at default) so merge_section
-        // can overwrite stale values in the file.
         assert!(
             table.get("yolo").is_some(),
             "yolo must always serialize so revert-to-default persists"
@@ -697,8 +599,6 @@ auto_light_theme = "grokday"
             table.get("max_thoughts_width").is_some(),
             "max_thoughts_width must always serialize so revert-to-default persists"
         );
-
-        // Option fields at None are skipped — they represent "not set".
         assert!(
             table.get("show_timestamps").is_none(),
             "show_timestamps=None should not appear in serialized output"
@@ -712,7 +612,6 @@ auto_light_theme = "grokday"
             "theme=None should not appear in serialized output"
         );
     }
-
     /// The settings-modal helpers in the parent module are 3-line
     /// wrappers around `update_config(|cfg| cfg.ui.<field> = ...)`. To
     /// guard against future drift between the wrapper and the schema
@@ -724,8 +623,6 @@ auto_light_theme = "grokday"
     /// `let mut cfg = load_config_from_toml(...); f(&mut cfg);`.
     #[test]
     fn merge_section_full_save_config_simulation() {
-        // Simulate the full save_config flow: existing config with pager-written
-        // fields, load it, modify an unrelated field, save back.
         let original = r#"
 [ui]
 show_timestamps = true
@@ -740,18 +637,12 @@ auto_update = true
 "#;
         let root: TomlValue = toml::from_str(original).unwrap();
         let mut cfg = load_config_from_toml(&root);
-
-        // User changes default model (unrelated to UI)
         cfg.models.default = Some("grok-4".to_string());
-
-        // Simulate save_config
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "cli", &cfg.cli);
         merge_section(&mut table, "models", &cfg.models);
         merge_section(&mut table, "ui", &cfg.ui);
         merge_section(&mut table, "harness", &cfg.harness);
-
-        // Verify pager fields survived
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("show_timestamps").and_then(|v| v.as_bool()),
@@ -765,29 +656,21 @@ auto_update = true
             ui.get("auto_light_theme").and_then(|v| v.as_str()),
             Some("grokday")
         );
-
-        // Verify the model change went through
         let models = table.get("models").unwrap().as_table().unwrap();
         assert_eq!(
             models.get("default").and_then(|v| v.as_str()),
             Some("grok-4")
         );
     }
-
     #[test]
     fn merge_section_revert_to_default_overwrites_old_value() {
-        // Regression test: setting a modeled field back to its
-        // default must persist (overwrite the old non-default value).
         let mut table = TomlMap::new();
         let mut ui = TomlMap::new();
         ui.insert("yolo".into(), TomlValue::Boolean(true));
         ui.insert("compact_mode".into(), TomlValue::Boolean(true));
         table.insert("ui".into(), TomlValue::Table(ui));
-
-        // Revert both to false (their defaults)
         let cfg = crate::agent::config::UiConfig::default();
         merge_section(&mut table, "ui", &cfg);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("yolo").and_then(|v| v.as_bool()),
@@ -800,18 +683,15 @@ auto_update = true
             "compact_mode=false must overwrite the old compact_mode=true"
         );
     }
-
     #[test]
     fn merge_section_replaces_non_table_section() {
         let mut table = TomlMap::new();
         table.insert("ui".into(), TomlValue::String("garbage".into()));
-
         let cfg = crate::agent::config::UiConfig {
             yolo: true,
             ..Default::default()
         };
         merge_section(&mut table, "ui", &cfg);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("yolo").and_then(|v| v.as_bool()),
@@ -819,7 +699,6 @@ auto_update = true
             "non-table section should be replaced with proper table"
         );
     }
-
     #[test]
     fn models_config_serializes_only_some_fields() {
         let m = crate::agent::config::ModelsConfig {
@@ -842,7 +721,6 @@ auto_update = true
             panic!("expected table from serialization");
         }
     }
-
     /// Canonical list of every `Option<T>` field in [`CliConfig`].  Kept in one
     /// place so both serialization and merge-section tests automatically cover
     /// newly-added fields without copy-pasting assertion lists.
@@ -858,7 +736,6 @@ auto_update = true
         "session_registry",
         "minimum_version",
     ];
-
     /// Assert that every `CliConfig` `Option<T>` field NOT in `present` is
     /// absent from `table`.
     fn assert_cli_option_fields_absent(table: &TomlMap<String, TomlValue>, present: &[&str]) {
@@ -890,7 +767,6 @@ auto_update = true
             panic!("expected table from serialization");
         }
     }
-
     #[test]
     fn merge_section_cli_only_updates_set_fields_preserves_unmodeled() {
         let mut table = TomlMap::new();
@@ -930,7 +806,6 @@ auto_update = true
             ],
         );
     }
-
     #[test]
     fn merge_section_models_only_updates_set_fields_preserves_others() {
         let mut table = TomlMap::new();
@@ -955,7 +830,6 @@ auto_update = true
         );
         assert!(!m.contains_key("session_summary"));
     }
-
     #[test]
     fn persist_preferred_model_flow_roundtrips_via_load_and_new_from_toml_cfg() {
         let original = "[models]\ndefault = \"grok-old\"\nweb_search = \"some-search\"\n";
@@ -975,12 +849,6 @@ auto_update = true
             .expect("new_from_toml_cfg");
         assert_eq!(cfg2.models.default.as_deref(), Some("grok-persisted"));
     }
-
-    // ── merge_section pin tests for CLI/session setters ──────────────────
-    //
-    // Pin the schema-level write shape: each setter writes to the correct
-    // TOML section, and `None` fields don't serialize (skip_serializing_if).
-
     #[test]
     fn merge_section_cli_show_tips_writes_under_cli_section() {
         let mut table = TomlMap::new();
@@ -996,15 +864,12 @@ auto_update = true
             "set_show_tips must persist Some(false) at `[cli].show_tips`"
         );
     }
-
     #[test]
     fn merge_section_cli_show_tips_none_does_not_serialize() {
-        // `None` fields must not serialize (skip_serializing_if invariant).
         let mut table = TomlMap::new();
         let cfg = crate::agent::config::CliConfig::default();
         assert!(cfg.show_tips.is_none());
         merge_section(&mut table, "cli", &cfg);
-
         if let Some(c) = table.get("cli").and_then(|v| v.as_table()) {
             assert!(
                 c.get("show_tips").is_none(),
@@ -1013,7 +878,6 @@ auto_update = true
             );
         }
     }
-
     #[test]
     fn merge_section_cli_session_picker_grouped_writes_under_cli_section() {
         let mut table = TomlMap::new();
@@ -1029,7 +893,6 @@ auto_update = true
             "Some(false) must round-trip to `[cli].session_picker_grouped`"
         );
     }
-
     #[test]
     fn merge_section_cli_auto_update_writes_under_cli_section() {
         let mut table = TomlMap::new();
@@ -1045,7 +908,6 @@ auto_update = true
             "set_auto_update must persist Some(false) at `[cli].auto_update`"
         );
     }
-
     #[test]
     fn merge_section_cli_use_leader_writes_under_cli_section() {
         let mut table = TomlMap::new();
@@ -1061,7 +923,6 @@ auto_update = true
             "Some(true) must round-trip to `[cli].use_leader`"
         );
     }
-
     /// Verify `Option<bool>` + `skip_serializing_if` prevents one
     /// `[session]` field from dragging unrelated fields.
     #[test]
@@ -1079,7 +940,6 @@ auto_update = true
             "Some(false) must round-trip to `[session].load_envrc`"
         );
     }
-
     /// Committing `load_envrc` alone must not inject `auto_compact_threshold_percent`.
     #[test]
     fn merge_section_session_load_envrc_does_not_drag_auto_compact() {
@@ -1097,14 +957,6 @@ auto_update = true
              when only load_envrc is being committed"
         );
     }
-
-    // ── resolve_auto_compact_threshold_percent: precedence matrix ──────────
-    //
-    // Covers every boundary in the resolver chain:
-    //   env > user [model.<id>] > user [session] > GB per-model > GB global > 85
-    //
-    // Env-var tests share a process-wide mutex to avoid set_var races.
-
     mod resolve_auto_compact {
         use super::super::super::RemoteSettings;
         use super::super::super::resolve::{
@@ -1113,13 +965,10 @@ auto_update = true
         };
         use crate::agent::config::{Config, ConfigModelOverride, ModelInfo};
         use std::sync::Mutex;
-
         const TEST_MODEL: &str = "grok-4.5";
         const OTHER_MODEL: &str = "grok-4.3";
-
         /// Serialize tests that mutate `GROK_AUTO_COMPACT_THRESHOLD_PERCENT`.
         static ENV_LOCK: Mutex<()> = Mutex::new(());
-
         /// Build a `Config` populated with optional per-source values for the
         /// `TEST_MODEL`. Any `None` argument means "that source is unset".
         fn make_cfg(
@@ -1146,20 +995,17 @@ auto_update = true
             }
             cfg
         }
-
         /// ModelInfo populated with the GB per-model value (or none).
         fn model_info(gb_per_model: Option<u8>) -> ModelInfo {
             let mut info = ModelInfo::fallback(TEST_MODEL);
             info.auto_compact_threshold_percent = gb_per_model;
             info
         }
-
         /// Run the resolver against the assembled inputs.
         fn resolve(cfg: &Config, gb_per_model: Option<u8>) -> u8 {
             let info = model_info(gb_per_model);
             resolve_auto_compact_threshold_percent(cfg, TEST_MODEL, Some(&info))
         }
-
         /// RAII guard that swaps the env var for the duration of a test and
         /// restores the previous value on drop. Acquires `ENV_LOCK` so two
         /// env-var tests never run concurrently.
@@ -1173,12 +1019,9 @@ auto_update = true
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let prev = std::env::var(ENV_AUTO_COMPACT_THRESHOLD_PERCENT).ok();
-                // SAFETY: serialized via ENV_LOCK; tests in this module never
-                // observe each other's writes mid-flight.
                 unsafe { std::env::set_var(ENV_AUTO_COMPACT_THRESHOLD_PERCENT, value) };
                 Self { _lock: lock, prev }
             }
-
             fn unset() -> Self {
                 let lock = ENV_LOCK
                     .lock()
@@ -1196,16 +1039,12 @@ auto_update = true
                 }
             }
         }
-
-        // ── Tier 6: default (all unset) ─────────────────────────────────
-
         #[test]
         fn all_unset_returns_default_85() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(None, None, None);
             assert_eq!(resolve(&cfg, None), DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
         }
-
         #[test]
         fn all_unset_no_model_info_returns_default_85() {
             let _g = EnvVarGuard::unset();
@@ -1215,126 +1054,96 @@ auto_update = true
                 DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
             );
         }
-
-        // ── Tier 5: GB global ───────────────────────────────────────────
-
         #[test]
         fn gb_global_only() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(None, None, Some(40));
             assert_eq!(resolve(&cfg, None), 40);
         }
-
-        // ── Tier 4 > Tier 5: GB per-model beats GB global ───────────────
-
         #[test]
         fn gb_per_model_beats_gb_global() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(None, None, Some(40));
             assert_eq!(resolve(&cfg, Some(90)), 90);
         }
-
-        // ── Tier 3 > Tier 4: user global beats GB per-model ─────────────
-
         #[test]
         fn user_session_beats_gb_per_model() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(Some(75), None, None);
             assert_eq!(resolve(&cfg, Some(90)), 75);
         }
-
         #[test]
         fn user_session_beats_gb_global() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(Some(75), None, Some(40));
             assert_eq!(resolve(&cfg, None), 75);
         }
-
-        // ── Tier 2 > Tier 3: user per-model beats user global ───────────
-
         #[test]
         fn user_per_model_beats_user_session() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(Some(75), Some(70), None);
             assert_eq!(resolve(&cfg, None), 70);
         }
-
         #[test]
         fn user_per_model_beats_gb_per_model() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(None, Some(70), None);
             assert_eq!(resolve(&cfg, Some(90)), 70);
         }
-
         #[test]
         fn user_per_model_beats_gb_global() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(None, Some(70), Some(40));
             assert_eq!(resolve(&cfg, None), 70);
         }
-
         #[test]
         fn user_per_model_beats_everything_below_env() {
             let _g = EnvVarGuard::unset();
             let cfg = make_cfg(Some(75), Some(70), Some(40));
             assert_eq!(resolve(&cfg, Some(90)), 70);
         }
-
-        // ── Tier 1: env wins over everything ────────────────────────────
-
         #[test]
         fn env_beats_user_per_model() {
             let _g = EnvVarGuard::set("50");
             let cfg = make_cfg(Some(75), Some(70), Some(40));
             assert_eq!(resolve(&cfg, Some(90)), 50);
         }
-
         #[test]
         fn env_at_lower_bound_is_honored() {
             let _g = EnvVarGuard::set("0");
             let cfg = make_cfg(Some(75), None, None);
             assert_eq!(resolve(&cfg, None), 0);
         }
-
         #[test]
         fn env_at_upper_bound_is_honored() {
             let _g = EnvVarGuard::set("100");
             let cfg = make_cfg(Some(75), None, None);
             assert_eq!(resolve(&cfg, None), 100);
         }
-
-        // ── Env-tier failure modes fall through ─────────────────────────
-
         #[test]
         fn env_out_of_range_high_falls_through() {
             let _g = EnvVarGuard::set("101");
             let cfg = make_cfg(Some(75), None, None);
             assert_eq!(resolve(&cfg, None), 75);
         }
-
         #[test]
         fn env_out_of_range_negative_falls_through() {
             let _g = EnvVarGuard::set("-1");
             let cfg = make_cfg(Some(75), None, None);
             assert_eq!(resolve(&cfg, None), 75);
         }
-
         #[test]
         fn env_unparseable_falls_through() {
             let _g = EnvVarGuard::set("not-a-number");
             let cfg = make_cfg(Some(75), None, None);
             assert_eq!(resolve(&cfg, None), 75);
         }
-
         #[test]
         fn env_empty_falls_through_to_default() {
             let _g = EnvVarGuard::set("");
             let cfg = make_cfg(None, None, None);
             assert_eq!(resolve(&cfg, None), DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
         }
-
-        // ── Per-model entry for a DIFFERENT model must not match ────────
-
         #[test]
         fn user_per_model_for_other_model_does_not_match() {
             let _g = EnvVarGuard::unset();
@@ -1349,7 +1158,6 @@ auto_update = true
             );
             assert_eq!(resolve(&cfg, None), DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
         }
-
         #[test]
         fn user_per_model_for_other_model_falls_through_to_user_session() {
             let _g = EnvVarGuard::unset();
@@ -1364,9 +1172,6 @@ auto_update = true
             );
             assert_eq!(resolve(&cfg, None), 75);
         }
-
-        // ── ModelInfo-less call still walks the rest of the chain ───────
-
         #[test]
         fn missing_model_info_falls_through_to_gb_global() {
             let _g = EnvVarGuard::unset();
@@ -1376,9 +1181,6 @@ auto_update = true
                 40
             );
         }
-
-        // ── No remote_settings still works ──────────────────────────────
-
         #[test]
         fn no_remote_settings_falls_through_to_default() {
             let _g = EnvVarGuard::unset();
@@ -1388,14 +1190,6 @@ auto_update = true
             };
             assert_eq!(resolve(&cfg, None), DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
         }
-
-        // ── ConfigModelOverride should NOT collapse into ModelInfo ──────
-        //
-        // Regression guard. If `ConfigModelOverride::apply` ever starts
-        // merging `auto_compact_threshold_percent` into `ModelInfo`, the
-        // resolver would see user-per-model as GB-per-model and ordering
-        // between "user per-model" and "user global" would collapse.
-
         #[test]
         fn apply_does_not_merge_auto_compact_threshold_percent_into_model_info() {
             use crate::agent::config::{EndpointsConfig, ModelEntry};
@@ -1414,7 +1208,6 @@ auto_update = true
             );
         }
     }
-
     #[test]
     fn settings_helpers_target_correct_ui_fields() {
         fn apply<F: FnOnce(&mut Config)>(f: F) -> Config {
@@ -1422,50 +1215,33 @@ auto_update = true
             f(&mut cfg);
             cfg
         }
-
-        // set_compact_mode wraps `cfg.ui.compact_mode = value` (plain bool).
         let cfg = apply(|cfg| cfg.ui.compact_mode = true);
         assert!(cfg.ui.compact_mode, "set_compact_mode must set bool field");
         let cfg = apply(|cfg| cfg.ui.compact_mode = false);
         assert!(!cfg.ui.compact_mode);
-
-        // set_show_timestamps wraps `cfg.ui.show_timestamps = Some(value)`.
         let cfg = apply(|cfg| cfg.ui.show_timestamps = Some(true));
         assert_eq!(cfg.ui.show_timestamps, Some(true));
         let cfg = apply(|cfg| cfg.ui.show_timestamps = Some(false));
         assert_eq!(cfg.ui.show_timestamps, Some(false));
-
-        // set_simple_mode wraps `cfg.ui.simple_mode = Some(value)`.
         let cfg = apply(|cfg| cfg.ui.simple_mode = Some(true));
         assert_eq!(cfg.ui.simple_mode, Some(true));
         let cfg = apply(|cfg| cfg.ui.simple_mode = Some(false));
         assert_eq!(cfg.ui.simple_mode, Some(false));
-
-        // set_theme wraps `cfg.ui.theme = Some(value)` (canonical name).
         let cfg = apply(|cfg| cfg.ui.theme = Some("tokyonight".to_string()));
         assert_eq!(cfg.ui.theme, Some("tokyonight".to_string()));
         let cfg = apply(|cfg| cfg.ui.theme = Some("auto".to_string()));
         assert_eq!(cfg.ui.theme, Some("auto".to_string()));
-
-        // set_auto_dark_theme / set_auto_light_theme wrap
-        // `cfg.ui.auto_{dark,light}_theme = Some(value)`.
         let cfg = apply(|cfg| cfg.ui.auto_dark_theme = Some("tokyonight".to_string()));
         assert_eq!(cfg.ui.auto_dark_theme, Some("tokyonight".to_string()));
         let cfg = apply(|cfg| cfg.ui.auto_light_theme = Some("grokday".to_string()));
         assert_eq!(cfg.ui.auto_light_theme, Some("grokday".to_string()));
-
-        // set_hunk_tracker_mode wraps `cfg.ui.hunk_tracker_mode = Some(value)`.
         let cfg = apply(|cfg| cfg.ui.hunk_tracker_mode = Some("off".to_string()));
         assert_eq!(cfg.ui.hunk_tracker_mode, Some("off".to_string()));
-
-        // `[ui].screen_mode` is a manual config.toml preference (CLI flags do
-        // not write it); ensure the field still round-trips through merge.
         let cfg = apply(|cfg| cfg.ui.screen_mode = Some("minimal".to_string()));
         assert_eq!(cfg.ui.screen_mode, Some("minimal".to_string()));
         let cfg = apply(|cfg| cfg.ui.screen_mode = Some("fullscreen".to_string()));
         assert_eq!(cfg.ui.screen_mode, Some("fullscreen".to_string()));
     }
-
     /// Theme merge round-trip: verifies the theme field is set and
     /// unmodeled fields survive. Same pattern as `set_compact_mode_round_trips`.
     #[test]
@@ -1479,12 +1255,9 @@ custom_user_key = "preserve-me"
 "#;
         let root: TomlValue = toml::from_str(original).unwrap();
         let mut cfg = load_config_from_toml(&root);
-
         cfg.ui.theme = Some("tokyonight".to_string());
-
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "ui", &cfg.ui);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("theme").and_then(|v| v.as_str()),
@@ -1507,7 +1280,6 @@ custom_user_key = "preserve-me"
             "unmodeled field must survive"
         );
     }
-
     /// Same as above but for `set_auto_dark_theme` and `set_auto_light_theme`.
     #[test]
     fn set_auto_dark_and_light_theme_round_trip_through_merge() {
@@ -1520,13 +1292,10 @@ custom_unknown_key = 42
 "#;
         let root: TomlValue = toml::from_str(original).unwrap();
         let mut cfg = load_config_from_toml(&root);
-
         cfg.ui.auto_dark_theme = Some("tokyonight".to_string());
         cfg.ui.auto_light_theme = Some("rosepine-moon".to_string());
-
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "ui", &cfg.ui);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("auto_dark_theme").and_then(|v| v.as_str()),
@@ -1547,7 +1316,6 @@ custom_unknown_key = 42
             "unmodeled field must survive"
         );
     }
-
     /// Compact-mode merge round-trip: flipped field persists,
     /// unrelated modeled and unmodeled fields survive.
     #[test]
@@ -1561,12 +1329,9 @@ custom_user_key = "preserve-me"
 "#;
         let root: TomlValue = toml::from_str(original).unwrap();
         let mut cfg = load_config_from_toml(&root);
-
         cfg.ui.compact_mode = true;
-
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "ui", &cfg.ui);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("compact_mode").and_then(|v| v.as_bool()),
@@ -1590,7 +1355,6 @@ custom_user_key = "preserve-me"
              this is the merge_section invariant the new helpers depend on"
         );
     }
-
     /// Same merge round-trip for `show_timestamps` and `simple_mode`.
     #[test]
     fn set_show_timestamps_and_simple_mode_round_trip_through_merge() {
@@ -1601,13 +1365,10 @@ custom_unknown_key = 42
 "#;
         let root: TomlValue = toml::from_str(original).unwrap();
         let mut cfg = load_config_from_toml(&root);
-
         cfg.ui.show_timestamps = Some(false);
         cfg.ui.simple_mode = Some(false);
-
         let mut table = root.as_table().unwrap().clone();
         merge_section(&mut table, "ui", &cfg.ui);
-
         let ui = table.get("ui").unwrap().as_table().unwrap();
         assert_eq!(
             ui.get("show_timestamps").and_then(|v| v.as_bool()),

@@ -488,14 +488,15 @@ mod tests {
                     .expect("first agent build should succeed");
                 let first_description = task_description(&first);
                 assert!(
-                    first_description
-                    .contains("If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
+                    first_description.contains(
+                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
                          - alpha-public\n\
-                         - zeta-public")
+                         - zeta-public"
+                    )
                 );
-                assert!(! first_description.contains("private-hidden-model"));
-                assert!(! first_description.contains("private-unselectable-model"));
-                assert!(! first_description.contains("internal-alpha"));
+                assert!(!first_description.contains("private-hidden-model"));
+                assert!(!first_description.contains("private-unselectable-model"));
+                assert!(!first_description.contains("internal-alpha"));
                 let validator = first
                     .tool_bridge()
                     .toolset()
@@ -513,11 +514,12 @@ mod tests {
                     .expect("rebuilt agent should succeed");
                 let rebuilt_description = task_description(&rebuilt);
                 assert!(
-                    rebuilt_description
-                    .contains("If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
+                    rebuilt_description.contains(
+                        "If the user explicitly asks for the model of a subagent/task, you may ONLY use model slugs from this list:\n\
                          - alpha-public\n\
                          - beta-public\n\
-                         - zeta-public")
+                         - zeta-public"
+                    )
                 );
             })
             .await;

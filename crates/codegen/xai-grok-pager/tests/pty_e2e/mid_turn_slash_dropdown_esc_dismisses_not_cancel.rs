@@ -4,8 +4,8 @@ use super::common::*;
 
 /// Overlay-steal precedence: while a turn is streaming, opening the slash
 /// dropdown and pressing **Esc dismisses the dropdown and does NOT cancel the
-/// turn** (and does not hit the mid-turn swallow). The pane-level slash handler
-/// returns `Changed` before `try_handle_esc_policy` ever runs.
+/// turn** (it never reaches the mid-turn Esc policy). The pane-level slash
+/// handler returns `Changed` before `try_handle_esc_policy` ever runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn mid_turn_slash_dropdown_esc_dismisses_not_cancel() {

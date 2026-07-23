@@ -35,7 +35,7 @@ Show how the context window is being used: a category breakdown (system prompt, 
 
 ### `/session-info`
 
-Show session details — model, turn count, and context usage. Aliases: `/status`, `/info`.
+Show session details — auth method, model, turn count, and context usage. Aliases: `/status`, `/info`.
 
 ### `/fork`
 
@@ -331,7 +331,7 @@ Open the MCP servers management modal.
 
 ### `/doctor`
 
-Show the read-only terminal diagnostic report — color level, available themes, clipboard routes, live keyboard and screen evidence, and fixes for common issues. Aliases: `/terminal-setup`, `/terminal-check`, `/terminal-info`.
+Check the current session for terminal, clipboard, color, input, notification, and sandbox issues. Doctor shows what it found and how to resolve each issue. Run `/doctor fix` to list available automatic fixes; other findings include manual steps. `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases.
 
 ### `/release-notes`
 

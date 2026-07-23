@@ -27,6 +27,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         send_now: bool,
         task_wake_fallback: Option<TaskWakeFallback>,
+        tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
@@ -200,6 +201,7 @@ impl SessionActor {
             json_schema,
             origin,
             task_wake_fallback,
+            tool_overrides_update,
             respond_to,
             persist_ack,
             parsed_prompt_tx,
@@ -449,31 +451,9 @@ impl SessionActor {
         state.running_prompt_id() == Some(prompt_id)
     }
 
-    /// Remove a queued prompt by id. Versioned + idempotent:
-    /// a missing id (already drained) or a stale `expected_version` is a
-    /// benign no-op — the actor still re-broadcasts so the client reconciles.
-    /// The in-flight turn is never removed. `owner` (when `Some`) scopes the
-    /// edit to the requesting client's own items.
-    /// Resolve a removed prompt's in-flight `session/prompt` RPC
-    /// before its [`InputItem`] is dropped.
-    ///
-    /// A queued prompt still has a client awaiting its `respond_to` oneshot (the
-    /// leader's `MvpAgent::prompt()` handler blocks on it). Dropping the sender
-    /// unfulfilled makes that await fail with `RecvError`, which the handler
-    /// turns into `acp::Error::internal_error("session failed to respond")`.
-    /// Worse, the client's `PromptResponse` handler only applies its
-    /// prompt-id gate on the `Ok` path, so that `Err` is misattributed to the
-    /// *running* turn and rendered as a spurious "Turn failed" — the session
-    /// appears to die.
-    ///
-    /// Report success with [`PromptCompletionKind::RemovedFromQueue`] instead:
-    /// the response is now `Ok`, so the client's prompt-id gate sees it isn't
-    /// the running turn and silently discards it, leaving the active turn
-    /// untouched. Crucially, `RemovedFromQueue` makes the leader's `prompt()`
-    /// handler short-circuit BEFORE the `prompt_complete` broadcast + roster
-    /// delta, so other attached clients (leader mode) don't see the running
-    /// turn spuriously end. Token count is `0` — a removed queued prompt never
-    /// ran (and the value is discarded by the gate regardless).
+    /// Resolve a removed prompt's pending RPC with `Ok(RemovedFromQueue)` before dropping it. A
+    /// dropped sender would look like the running turn failing; the `Ok` lets the client discard it.
+    /// It never ran, so token count is `0` and there is no `tool_overrides` echo.
     pub(super) fn respond_removed_prompt(respond_to: oneshot::Sender<PromptTurnResult>) {
         let _ = respond_to.send(Ok(PromptTurnOk {
             stop_reason: acp::StopReason::Cancelled,
@@ -482,6 +462,7 @@ impl SessionActor {
             completion_kind: PromptCompletionKind::RemovedFromQueue,
             structured_output: None,
             usage: None,
+            tool_overrides: None,
         }));
     }
 
@@ -758,6 +739,9 @@ impl SessionActor {
             return;
         };
         Self::apply_queued_prompt_edit(item, new_text, editor);
+        // Clear the hold under the same lock as the text update — see
+        // pager `exit_editing_mode_keeping_hold` for the race this closes.
+        state.combine_edit_holds.remove(id);
         self.broadcast_queue_changed(&state);
     }
 
@@ -827,7 +811,11 @@ impl SessionActor {
             .unwrap_or("");
         xai_prompt_queue::CombineGate {
             id: item.prompt_id.as_str(),
-            is_plain_prompt: is_plain_prompt && has_text && !non_text_non_image,
+            // A row with its own override can't merge into another turn (that would drop its bound).
+            is_plain_prompt: is_plain_prompt
+                && has_text
+                && !non_text_non_image
+                && item.tool_overrides_update.is_none(),
             is_synthetic: item.origin.is_synthetic(),
             is_expanded_skill,
             is_bash,

@@ -16,7 +16,7 @@ use xai_grok_sampling_types::ReasoningEffort;
 use xai_grok_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
-#[allow(dead_code)] // Inert relocation storage; orchestration lands in later stack layers.
+#[allow(dead_code)] // Transaction APIs remain deferred until later protocol wiring.
 pub(crate) mod relocation;
 pub mod search;
 pub mod search_fts;
@@ -742,6 +742,10 @@ pub struct CopySessionResult {
     /// Number of `compaction/segment_*.md` (+ `INDEX.md`) files copied from the
     /// source session's compaction archive. `0` when disabled or none exist.
     pub compaction_segments_copied: usize,
+    /// Number of `compaction_checkpoints/{uuid}.json` files copied for the
+    /// checkpoint records retained in the copied updates. `0` when no records
+    /// survive the copy or their files are missing from the source.
+    pub compaction_checkpoints_copied: usize,
 }
 
 /// Options for copying session data during fork
@@ -1472,7 +1476,9 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
 pub fn load_updates_for_replay(
     session_id: &str,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(session_dir) = crate::session::persistence::find_session_dir_by_id(session_id) else {
+    let Some(session_dir) =
+        crate::session::persistence::find_persisted_session_dir_by_id_result(session_id)?
+    else {
         return Ok(None);
     };
     load_updates_for_replay_from_dir(&session_dir)
@@ -1485,7 +1491,10 @@ pub fn load_updates_for_replay_at(
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
     let sessions_root = grok_home.join("sessions");
     let Some(session_dir) =
-        crate::session::persistence::find_session_dir_by_id_in_root(session_id, &sessions_root)
+        crate::session::persistence::find_persisted_session_dir_by_id_in_root_result(
+            session_id,
+            &sessions_root,
+        )?
     else {
         return Ok(None);
     };

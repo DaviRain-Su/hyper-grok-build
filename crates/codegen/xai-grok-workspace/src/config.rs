@@ -233,8 +233,9 @@ impl WorkspaceBindConfig {
             unserved_tool_ids.sort_unstable();
             if !unserved_tool_ids.is_empty() {
                 tracing::warn!(
-                    unserved = ? unserved_tool_ids, config_manifest_version = ? self
-                    .manifest_version, running_version = xai_grok_version::VERSION,
+                    unserved = ?unserved_tool_ids,
+                    config_manifest_version = ?self.manifest_version,
+                    running_version = xai_grok_version::VERSION,
                     "session.bind: serving known subset of pinned tools"
                 );
             }
@@ -266,7 +267,8 @@ fn parse_field<T: serde::de::DeserializeOwned>(name: &str, value: &serde_json::V
         Ok(parsed) => Some(parsed),
         Err(e) => {
             tracing::warn!(
-                field = name, error = % e,
+                field = name,
+                error = %e,
                 "session.bind metadata: ignoring malformed field"
             );
             None
@@ -286,9 +288,7 @@ mod bind_config_tests {
     }
     #[test]
     fn parses_preset_and_capability() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "capability_mode" : "read_only" }
-        );
+        let v = serde_json::json!({"preset": "explore", "capability_mode": "read_only"});
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert_eq!(cfg.preset.as_deref(), Some("explore"));
         assert_eq!(
@@ -316,7 +316,7 @@ mod bind_config_tests {
     #[test]
     fn presets_are_never_resolved() {
         for preset in ["explore", "grok-computer", "bogus"] {
-            let cfg = WorkspaceBindConfig::from_metadata(&serde_json::json!({ "preset" : preset }));
+            let cfg = WorkspaceBindConfig::from_metadata(&serde_json::json!({ "preset": preset }));
             assert!(
                 matches!(cfg.resolve(&all_known, false), ResolvedToolset::UseDefault),
                 "lax mode must fall through to the default, preset={preset}"
@@ -342,18 +342,17 @@ mod bind_config_tests {
     }
     #[test]
     fn malformed_field_does_not_discard_valid_siblings() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "capability_mode" : "raed_only" }
-        );
+        let v = serde_json::json!({"preset": "explore", "capability_mode": "raed_only"});
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert_eq!(cfg.preset.as_deref(), Some("explore"));
         assert!(cfg.capability_mode.is_none());
     }
     #[test]
     fn workspace_bind_config_from_metadata_extracts_viewer_ctx() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "viewer_ctx" : { "stream_tool_progress" : true }, }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "viewer_ctx": {"stream_tool_progress": true},
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert_eq!(cfg.preset.as_deref(), Some("explore"));
         let viewer = cfg.viewer_ctx.expect("viewer_ctx parsed");
@@ -363,63 +362,61 @@ mod bind_config_tests {
     /// proxy/workspace deploys).
     #[test]
     fn workspace_bind_config_from_metadata_legacy_omitted_viewer_ctx() {
-        let v = serde_json::json!({ "preset" : "explore" });
+        let v = serde_json::json!({"preset": "explore"});
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert!(cfg.viewer_ctx.is_none());
     }
     #[test]
     fn workspace_bind_config_from_metadata_extracts_yolo_mode() {
-        let v = serde_json::json!({ "preset" : "explore", "yolo_mode" : true });
+        let v = serde_json::json!({"preset": "explore", "yolo_mode": true});
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert_eq!(cfg.yolo_mode, Some(true));
     }
     #[test]
     fn workspace_bind_config_yolo_mode_omitted_or_malformed_fails_closed() {
-        let omitted =
-            WorkspaceBindConfig::from_metadata(&serde_json::json!({ "preset" : "explore" }));
+        let omitted = WorkspaceBindConfig::from_metadata(&serde_json::json!({"preset": "explore"}));
         assert!(omitted.yolo_mode.is_none());
         let malformed = WorkspaceBindConfig::from_metadata(
-            &serde_json::json!({ "preset" : "explore", "yolo_mode" : "yes" }),
+            &serde_json::json!({"preset": "explore", "yolo_mode": "yes"}),
         );
         assert!(malformed.yolo_mode.is_none());
         assert_eq!(malformed.preset.as_deref(), Some("explore"));
     }
     #[test]
     fn workspace_bind_config_extracts_system_notifications_flag() {
-        let on = WorkspaceBindConfig::from_metadata(
-            &serde_json::json!({ "system_notifications" : true }),
-        );
+        let on =
+            WorkspaceBindConfig::from_metadata(&serde_json::json!({"system_notifications": true}));
         assert!(on.system_notifications);
-        let off = WorkspaceBindConfig::from_metadata(&serde_json::json!({ "preset" : "explore" }));
+        let off = WorkspaceBindConfig::from_metadata(&serde_json::json!({"preset": "explore"}));
         assert!(!off.system_notifications);
-        let explicit_off = WorkspaceBindConfig::from_metadata(
-            &serde_json::json!({ "system_notifications" : false }),
-        );
+        let explicit_off =
+            WorkspaceBindConfig::from_metadata(&serde_json::json!({"system_notifications": false}));
         assert!(!explicit_off.system_notifications);
     }
     #[test]
     fn workspace_bind_config_extracts_rpc_only_flag() {
-        let on = WorkspaceBindConfig::from_metadata(&serde_json::json!({ "rpc_only" : true }));
+        let on = WorkspaceBindConfig::from_metadata(&serde_json::json!({"rpc_only": true}));
         assert!(on.rpc_only);
-        let off = WorkspaceBindConfig::from_metadata(&serde_json::json!({ "preset" : "explore" }));
+        let off = WorkspaceBindConfig::from_metadata(&serde_json::json!({"preset": "explore"}));
         assert!(!off.rpc_only);
         let explicit_off =
-            WorkspaceBindConfig::from_metadata(&serde_json::json!({ "rpc_only" : false }));
+            WorkspaceBindConfig::from_metadata(&serde_json::json!({"rpc_only": false}));
         assert!(!explicit_off.rpc_only);
     }
     #[test]
     fn workspace_bind_config_from_metadata_extracts_manifest_fields() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "manifest_version" : "v1", "manifest_hash" :
-            "abc123", }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "manifest_version": "v1",
+            "manifest_hash": "abc123",
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert_eq!(cfg.manifest_version.as_deref(), Some("v1"));
         assert_eq!(cfg.manifest_hash.as_deref(), Some("abc123"));
     }
     #[test]
     fn workspace_bind_config_manifest_fields_default_to_none_when_absent() {
-        let cfg = WorkspaceBindConfig::from_metadata(&serde_json::json!({ "preset" : "explore" }));
+        let cfg = WorkspaceBindConfig::from_metadata(&serde_json::json!({"preset": "explore"}));
         assert!(cfg.manifest_version.is_none());
         assert!(cfg.manifest_hash.is_none());
     }
@@ -428,13 +425,20 @@ mod bind_config_tests {
     /// `configs::plane` tests.
     #[test]
     fn tools_entries_resolve_to_tool_server_config() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "GrokBuild:grep", "params_json" :
-            "{\"max_results\":50}", "name_override" : "search", "params_name_overrides" :
-            { "pattern" : "query" }, "behavior_version" : "legacy-0.4.10",
-            "description_override" : "Search the codebase", }, { "id" :
-            "GrokBuild:read_file" },], }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [
+                {
+                    "id": "GrokBuild:grep",
+                    "params_json": "{\"max_results\":50}",
+                    "name_override": "search",
+                    "params_name_overrides": {"pattern": "query"},
+                    "behavior_version": "legacy-0.4.10",
+                    "description_override": "Search the codebase",
+                },
+                {"id": "GrokBuild:read_file"},
+            ],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, false) else {
             panic!("tools entries must resolve to an explicit toolset");
@@ -450,9 +454,7 @@ mod bind_config_tests {
         assert_eq!(grep.id, "GrokBuild:grep");
         assert_eq!(
             grep.params,
-            serde_json::json!({ "max_results" : 50 })
-                .as_object()
-                .cloned()
+            serde_json::json!({"max_results": 50}).as_object().cloned()
         );
         assert_eq!(grep.name_override.as_deref(), Some("search"));
         assert_eq!(
@@ -469,10 +471,10 @@ mod bind_config_tests {
     }
     #[test]
     fn explicit_tool_config_wins_over_tools_entries() {
-        let v = serde_json::json!(
-            { "tool_config" : { "tools" : [{ "id" : "raw:tool" }] }, "tools" : [{ "id" :
-            "wire:tool" }], }
-        );
+        let v = serde_json::json!({
+            "tool_config": {"tools": [{"id": "raw:tool"}]},
+            "tools": [{"id": "wire:tool"}],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, false) else {
             panic!("must resolve to a toolset");
@@ -482,9 +484,10 @@ mod bind_config_tests {
     }
     #[test]
     fn tools_entries_win_even_with_preset_present() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "wire:tool" }], }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [{"id": "wire:tool"}],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, false) else {
             panic!("must resolve to a toolset");
@@ -494,7 +497,7 @@ mod bind_config_tests {
     }
     #[test]
     fn empty_tools_array_is_treated_as_unset() {
-        let v = serde_json::json!({ "preset" : "explore", "tools" : [] });
+        let v = serde_json::json!({"preset": "explore", "tools": []});
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert!(cfg.tools.is_none());
         assert!(matches!(
@@ -505,7 +508,7 @@ mod bind_config_tests {
             cfg.resolve(&all_known, true),
             ResolvedToolset::MissingToolConfig
         ));
-        let no_preset = serde_json::json!({ "tools" : [] });
+        let no_preset = serde_json::json!({"tools": []});
         let cfg = WorkspaceBindConfig::from_metadata(&no_preset);
         assert!(matches!(
             cfg.resolve(&all_known, false),
@@ -514,10 +517,10 @@ mod bind_config_tests {
     }
     #[test]
     fn invalid_tools_entry_fails_closed() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "bad:tool", "params_json" :
-            "{not json" }], }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [{"id": "bad:tool", "params_json": "{not json"}],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         match cfg.resolve(&all_known, false) {
             ResolvedToolset::InvalidToolConfig(err) => {
@@ -529,10 +532,12 @@ mod bind_config_tests {
     }
     #[test]
     fn invalid_name_override_fails_closed() {
-        let v = serde_json::json!(
-            { "tools" : [{ "id" : "wire:ok", "name_override" : "fine_name" }, { "id" :
-            "wire:bad", "name_override" : "not a tool id!" },], }
-        );
+        let v = serde_json::json!({
+            "tools": [
+                {"id": "wire:ok", "name_override": "fine_name"},
+                {"id": "wire:bad", "name_override": "not a tool id!"},
+            ],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         match cfg.resolve(&all_known, true) {
             ResolvedToolset::InvalidToolConfig(err) => {
@@ -544,11 +549,12 @@ mod bind_config_tests {
     }
     #[test]
     fn tool_config_escape_hatch_invalid_name_override_fails_closed() {
-        let v = serde_json::json!(
-            { "tool_config" : { "tools" : [{ "id" : "raw:ok", "name_override" :
-            "fine_name" }, { "id" : "raw:bad", "name_override" : "not a tool id!" },] },
-            }
-        );
+        let v = serde_json::json!({
+            "tool_config": {"tools": [
+                {"id": "raw:ok", "name_override": "fine_name"},
+                {"id": "raw:bad", "name_override": "not a tool id!"},
+            ]},
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         match cfg.resolve(&all_known, true) {
             ResolvedToolset::InvalidToolConfig(err) => {
@@ -557,10 +563,9 @@ mod bind_config_tests {
             }
             other => panic!("expected InvalidToolConfig, got {other:?}"),
         }
-        let v = serde_json::json!(
-            { "tool_config" : { "tools" : [{ "id" : "raw:ok", "name_override" :
-            "fine_name" }] }, }
-        );
+        let v = serde_json::json!({
+            "tool_config": {"tools": [{"id": "raw:ok", "name_override": "fine_name"}]},
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, true) else {
             panic!("valid escape-hatch config must resolve");
@@ -569,10 +574,12 @@ mod bind_config_tests {
     }
     #[test]
     fn invalid_entry_error_reports_wire_index_after_unknown_drop() {
-        let v = serde_json::json!(
-            { "tools" : [{ "id" : "wire:unknown" }, { "id" : "wire:bad", "params_json" :
-            "{not json" },], }
-        );
+        let v = serde_json::json!({
+            "tools": [
+                {"id": "wire:unknown"},
+                {"id": "wire:bad", "params_json": "{not json"},
+            ],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let known = |id: &str| id != "wire:unknown";
         match cfg.resolve(&known, false) {
@@ -588,10 +595,12 @@ mod bind_config_tests {
     }
     #[test]
     fn valid_name_overrides_resolve_intact() {
-        let v = serde_json::json!(
-            { "tools" : [{ "id" : "wire:a", "name_override" : "renamed_a" }, { "id" :
-            "wire:b" },], }
-        );
+        let v = serde_json::json!({
+            "tools": [
+                {"id": "wire:a", "name_override": "renamed_a"},
+                {"id": "wire:b"},
+            ],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, true) else {
             panic!("well-formed overrides must resolve to a toolset");
@@ -605,10 +614,11 @@ mod bind_config_tests {
     }
     #[test]
     fn pinned_tools_all_known_serves_full_expansion() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "wire:tool" }],
-            "manifest_version" : "9.9.9-any", }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [{"id": "wire:tool"}],
+            "manifest_version": "9.9.9-any",
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, false) else {
             panic!("known pinned tools must use the tools expansion");
@@ -621,11 +631,15 @@ mod bind_config_tests {
     /// by live preset resolution.
     #[test]
     fn pinned_tools_unknown_ids_are_partitioned_and_reported() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "wire:known" }, { "id" :
-            "wire:zz_unknown" }, { "id" : "wire:aa_unknown" },], "manifest_version" :
-            "0.0.0-stale", }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [
+                {"id": "wire:known"},
+                {"id": "wire:zz_unknown"},
+                {"id": "wire:aa_unknown"},
+            ],
+            "manifest_version": "0.0.0-stale",
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let known = |id: &str| id == "wire:known";
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&known, false) else {
@@ -643,10 +657,11 @@ mod bind_config_tests {
     /// widens to preset/default.
     #[test]
     fn pinned_tools_all_unknown_serves_empty_and_reports_all() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "wire:tool" }],
-            "manifest_version" : "0.0.0-stale", }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [{"id": "wire:tool"}],
+            "manifest_version": "0.0.0-stale",
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&none_known, false) else {
             panic!("all-unknown expansion must resolve (empty), not fall back");
@@ -656,9 +671,10 @@ mod bind_config_tests {
     }
     #[test]
     fn legacy_tools_without_manifest_version_are_not_gated() {
-        let v = serde_json::json!(
-            { "preset" : "explore", "tools" : [{ "id" : "wire:tool" }], }
-        );
+        let v = serde_json::json!({
+            "preset": "explore",
+            "tools": [{"id": "wire:tool"}],
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert!(cfg.manifest_version.is_none());
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&all_known, false) else {
@@ -669,10 +685,11 @@ mod bind_config_tests {
     }
     #[test]
     fn tool_config_wins_regardless_of_stale_manifest_version() {
-        let v = serde_json::json!(
-            { "tool_config" : { "tools" : [{ "id" : "raw:tool" }] }, "tools" : [{ "id" :
-            "wire:tool" }], "manifest_version" : "0.0.0-stale", }
-        );
+        let v = serde_json::json!({
+            "tool_config": {"tools": [{"id": "raw:tool"}]},
+            "tools": [{"id": "wire:tool"}],
+            "manifest_version": "0.0.0-stale",
+        });
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         let ResolvedToolset::Toolset(resolved) = cfg.resolve(&none_known, false) else {
             panic!("tool_config must always win");
@@ -683,7 +700,7 @@ mod bind_config_tests {
     }
     #[test]
     fn malformed_tools_field_is_dropped_keeping_siblings() {
-        let v = serde_json::json!({ "preset" : "explore", "tools" : "not-a-list" });
+        let v = serde_json::json!({"preset": "explore", "tools": "not-a-list"});
         let cfg = WorkspaceBindConfig::from_metadata(&v);
         assert!(cfg.tools.is_none());
         assert!(matches!(
@@ -942,9 +959,12 @@ mod tests {
         let value = serde_json::to_value(&meta).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "sandbox_id" : "sb-123", "session_id" :
-            "11111111-1111-1111-1111-111111111111", "provider_id" : "test-provider",
-            "launch_id" : "33333333-3333-3333-3333-333333333333", })
+            serde_json::json!({
+                "sandbox_id": "sb-123",
+                "session_id": "11111111-1111-1111-1111-111111111111",
+                "provider_id": "test-provider",
+                "launch_id": "33333333-3333-3333-3333-333333333333",
+            })
         );
     }
     #[test]
@@ -956,15 +976,17 @@ mod tests {
             launch_id: None,
         };
         let value = serde_json::to_value(&meta).unwrap();
-        assert_eq!(value, serde_json::json!({ "sandbox_id" : "sb-123" }));
+        assert_eq!(value, serde_json::json!({ "sandbox_id": "sb-123" }));
         let empty = serde_json::to_value(WorkspaceServerMetadata::default()).unwrap();
         assert_eq!(empty, serde_json::json!({}));
     }
     #[test]
     fn workspace_server_metadata_deserializes_legacy_payload_without_new_fields() {
-        let legacy = serde_json::json!(
-            { "sandbox_id" : "sb-legacy", "cwd" : "/workspace", "mode" : "remote", }
-        );
+        let legacy = serde_json::json!({
+            "sandbox_id": "sb-legacy",
+            "cwd": "/workspace",
+            "mode": "remote",
+        });
         let meta: WorkspaceServerMetadata = serde_json::from_value(legacy).unwrap();
         assert_eq!(meta.sandbox_id.as_deref(), Some("sb-legacy"));
         assert_eq!(meta.session_id, None);
@@ -986,30 +1008,33 @@ mod tests {
     }
     #[test]
     fn workspace_server_metadata_deserializes_partial_new_fields() {
-        let only_session = serde_json::json!(
-            { "sandbox_id" : "sb-1", "session_id" :
-            "33333333-3333-3333-3333-333333333333", }
-        );
+        let only_session = serde_json::json!({
+            "sandbox_id": "sb-1",
+            "session_id": "33333333-3333-3333-3333-333333333333",
+        });
         let meta: WorkspaceServerMetadata = serde_json::from_value(only_session).unwrap();
         assert_eq!(
             meta.session_id.as_deref(),
             Some("33333333-3333-3333-3333-333333333333")
         );
         assert_eq!(meta.provider_id, None);
-        let only_provider = serde_json::json!(
-            { "sandbox_id" : "sb-1", "provider_id" : "test-provider", }
-        );
+        let only_provider = serde_json::json!({
+            "sandbox_id": "sb-1",
+            "provider_id": "test-provider",
+        });
         let meta: WorkspaceServerMetadata = serde_json::from_value(only_provider).unwrap();
         assert_eq!(meta.provider_id.as_deref(), Some("test-provider"));
         assert_eq!(meta.session_id, None);
     }
     #[test]
     fn workspace_server_metadata_reads_start_path_shaped_payload() {
-        let start_path = serde_json::json!(
-            { "cwd" : "/workspace", "mode" : "remote", "sandbox_id" : "sb-start",
-            "session_id" : "44444444-4444-4444-4444-444444444444", "provider_id" :
-            "test-provider", }
-        );
+        let start_path = serde_json::json!({
+            "cwd": "/workspace",
+            "mode": "remote",
+            "sandbox_id": "sb-start",
+            "session_id": "44444444-4444-4444-4444-444444444444",
+            "provider_id": "test-provider",
+        });
         let meta: WorkspaceServerMetadata = serde_json::from_value(start_path).unwrap();
         assert_eq!(meta.sandbox_id.as_deref(), Some("sb-start"));
         assert_eq!(
@@ -1023,32 +1048,35 @@ mod tests {
         let merged =
             WorkspaceServerMetadata::merge_session_metadata(None, Some("sess-1".to_owned()))
                 .unwrap();
-        assert_eq!(merged, serde_json::json!({ "session_id" : "sess-1" }));
+        assert_eq!(merged, serde_json::json!({ "session_id": "sess-1" }));
         let empty = WorkspaceServerMetadata::merge_session_metadata(None, None).unwrap();
         assert_eq!(empty, serde_json::json!({}));
     }
     #[test]
     fn merge_session_metadata_overlays_into_object_without_clobbering() {
-        let base = serde_json::json!({ "sandbox_id" : "sb-9", "mode" : "remote" });
+        let base = serde_json::json!({ "sandbox_id": "sb-9", "mode": "remote" });
         let merged =
             WorkspaceServerMetadata::merge_session_metadata(Some(base), Some("env-id".to_owned()))
                 .unwrap();
         assert_eq!(
             merged,
-            serde_json::json!({ "sandbox_id" : "sb-9", "mode" : "remote",
-            "session_id" : "env-id", })
+            serde_json::json!({
+                "sandbox_id": "sb-9",
+                "mode": "remote",
+                "session_id": "env-id",
+            })
         );
-        let explicit = serde_json::json!({ "session_id" : "explicit" });
+        let explicit = serde_json::json!({ "session_id": "explicit" });
         let merged = WorkspaceServerMetadata::merge_session_metadata(
             Some(explicit),
             Some("env-id".to_owned()),
         )
         .unwrap();
-        assert_eq!(merged, serde_json::json!({ "session_id" : "explicit" }));
+        assert_eq!(merged, serde_json::json!({ "session_id": "explicit" }));
     }
     #[test]
     fn merge_session_metadata_leaves_object_untouched_when_no_env_id() {
-        let base = serde_json::json!({ "sandbox_id" : "sb-9" });
+        let base = serde_json::json!({ "sandbox_id": "sb-9" });
         let merged =
             WorkspaceServerMetadata::merge_session_metadata(Some(base.clone()), None).unwrap();
         assert_eq!(merged, base);
@@ -1068,7 +1096,7 @@ mod tests {
         let none_branch =
             WorkspaceServerMetadata::merge_session_metadata(None, Some(String::new())).unwrap();
         assert_eq!(none_branch, serde_json::json!({}));
-        let base = serde_json::json!({ "sandbox_id" : "sb-9" });
+        let base = serde_json::json!({ "sandbox_id": "sb-9" });
         let overlay = WorkspaceServerMetadata::merge_session_metadata(
             Some(base.clone()),
             Some(String::new()),
@@ -1078,7 +1106,7 @@ mod tests {
     }
     #[test]
     fn workspace_server_metadata_rejects_wrong_typed_field() {
-        let bad = serde_json::json!({ "sandbox_id" : "sb-1", "session_id" : 42 });
+        let bad = serde_json::json!({ "sandbox_id": "sb-1", "session_id": 42 });
         let result: Result<WorkspaceServerMetadata, _> = serde_json::from_value(bad);
         assert!(result.is_err());
     }

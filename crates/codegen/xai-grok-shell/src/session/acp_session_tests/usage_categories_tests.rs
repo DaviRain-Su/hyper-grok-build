@@ -11,7 +11,7 @@ fn mcp_tool(server: &str, tool: &str) -> ToolMetadata {
         tool_name: tool.to_string(),
         description: format!("{tool} description"),
         parameters: vec!["arg".to_string()],
-        input_schema: serde_json::json!({ "type" : "object" }),
+        input_schema: serde_json::json!({"type": "object"}),
     }
 }
 fn install_mcp_servers(actor: &SessionActor) {

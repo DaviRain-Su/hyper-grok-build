@@ -17,10 +17,11 @@ pub(crate) fn build_code_restore_meta(
 ) -> Option<Value> {
     let decision = build_restore_decision(Some(target_sha), outcome, kind);
     let summary = decision.summary?;
-    Some(serde_json::json!(
-        { "restored" : decision.restored, "summary" : summary, "degree" : decision
-        .degree, }
-    ))
+    Some(serde_json::json!({
+        "restored": decision.restored,
+        "summary": summary,
+        "degree": decision.degree,
+    }))
 }
 #[cfg(test)]
 mod tests {

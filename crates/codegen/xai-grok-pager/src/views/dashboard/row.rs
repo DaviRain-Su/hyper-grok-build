@@ -1390,7 +1390,7 @@ mod tests {
         let older = newer - Duration::from_secs(60);
         let mut rows = vec![
             DashboardRow {
-                last_change_at: newer,
+                last_change_at: newer, // recency would put id1 first
                 ..make_row_with_id(id1.clone(), 0, RowState::Working)
             },
             DashboardRow {
@@ -1740,6 +1740,7 @@ mod tests {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         };

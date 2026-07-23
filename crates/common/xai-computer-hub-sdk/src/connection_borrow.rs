@@ -96,6 +96,11 @@ impl ConnectionBorrow {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
+
+    /// Whether teardown has already been claimed (`begin_teardown` won).
+    pub(crate) fn is_torn_down(&self) -> bool {
+        self.torn_down.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]

@@ -74,7 +74,7 @@ async fn wheel_scrolls_viewport_during_streaming_turn() {
     harness.update(Duration::from_millis(600));
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during the mid-stream wheel burst\nscreen:\n{}",
         harness.screen_contents()
     );

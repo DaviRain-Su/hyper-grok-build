@@ -80,10 +80,12 @@ Use these keys in the Plugins tab:
 | `r` | Reload all plugins |
 | `a` | Add a plugin from `owner/repo`, a URL, or a local path |
 | `Space` | Enable or disable the selected plugin |
-| `x` | Uninstall the selected plugin |
+| `x` | Uninstall the selected plugin (asks for confirmation) |
 | `f` | Filter by status (all, enabled, or disabled) |
 | `Enter` | Expand or collapse plugin details |
 | `/` | Search plugins by name |
+
+Uninstall asks for confirmation: press lowercase `y` to confirm, or any other key (including `Esc`) to cancel.
 
 ### Marketplace tab
 
@@ -94,9 +96,9 @@ Use these keys in the Marketplace tab:
 | Key | Action |
 |-----|--------|
 | `i` | Install the selected plugin |
-| `d` | Uninstall the selected plugin |
+| `d` | Uninstall the selected plugin (asks for confirmation) |
 | `a` | Add a marketplace source |
-| `x` | Remove the selected source and its plugins |
+| `x` | Remove the selected source and all its plugins (asks for confirmation) |
 | `r` | Refresh marketplace sources |
 | `u` | Update the selected marketplace plugin |
 | `Enter` | Expand or collapse a source or plugin |
@@ -294,4 +296,4 @@ These keys work across every tab in the modal:
 | `/` | Search the current tab by name |
 | `Esc` | Clear the search, or close the modal |
 
-Some actions, such as uninstalling a plugin, ask for confirmation. Press `y` to confirm or `Esc` to cancel.
+Destructive remove and uninstall actions in the modal ask for confirmation. Press lowercase `y` to confirm, or any other key (including `Esc`) to cancel.

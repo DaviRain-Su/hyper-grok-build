@@ -113,6 +113,28 @@ Use Ctrl+V for screenshots, browser \"Copy Image\", and file-manager image \
 copies.\n\
 You can also drag an image file into the prompt.";
 
+// Undo/redo are textarea chords, not ActionRegistry entries. Super/Cmd also
+// works where the terminal delivers it; list Ctrl only (hosts often swallow Super).
+const UNDO_LONG_HELP: &str = "\
+Undoes the last change in the prompt editor.\n\
+Covers typing, deletes, line/word kills, and clearing a draft.";
+
+const REDO_LONG_HELP: &str = "\
+Redoes the last undone change in the prompt editor.\n\
+Ctrl+Shift+Z is primary; Ctrl+R is an alternate.";
+
+/// Bundle key for a pseudo-row's long-help const (paste/undo/redo).
+/// The consts are `&'static str` values compared by content.
+fn pseudo_long_help_key(lh: &str) -> &'static str {
+    if lh == PASTE_LONG_HELP {
+        "shortcuts_help.paste_long_help"
+    } else if lh == UNDO_LONG_HELP {
+        "shortcuts_help.undo_long_help"
+    } else {
+        "shortcuts_help.redo_long_help"
+    }
+}
+
 /// Build the entries vector for the modal, grouped by category.
 ///
 /// All registered actions are included, grouped by category. Actions
@@ -266,22 +288,41 @@ pub fn build_entries(
                 long_help: None,
             });
         }
-        // Paste is handled by `is_paste_key`, not the registry. Ctrl+V always;
-        // Windows also Alt+V as a fallback. Super/Cmd omitted — many terminals
-        // swallow it. Lit on the agent prompt and the dashboard (both paste).
+        // Clipboard + textarea chords not in ActionRegistry. Super/Cmd omitted
+        // (often swallowed). Lit on agent prompt and dashboard reply hosts.
         if cat == Category::Input {
-            let mut item = HintItem::new(crate::key!('v', CONTROL), rust_i18n::t!("hints.paste"));
-            item.description = Some(rust_i18n::t!("shortcuts_help.paste_desc"));
-            #[cfg(target_os = "windows")]
-            item.keys.push(crate::key!('v', ALT));
             let dimmed = !active_contexts.contains(&When::PromptFocused)
                 && !active_contexts.contains(&When::DashboardFocused);
-            entries.push(ShortcutsHelpEntry::Hint {
-                item,
-                dimmed,
-                action_id: None,
-                long_help: Some(PASTE_LONG_HELP),
-            });
+            let push_pseudo = |entries: &mut Vec<ShortcutsHelpEntry>,
+                               item: HintItem,
+                               long_help: Option<&'static str>| {
+                entries.push(ShortcutsHelpEntry::Hint {
+                    item,
+                    dimmed,
+                    action_id: None,
+                    long_help,
+                });
+            };
+
+            let mut paste = HintItem::new(crate::key!('v', CONTROL), rust_i18n::t!("hints.paste"));
+            paste.description = Some(rust_i18n::t!("shortcuts_help.paste_desc"));
+            #[cfg(target_os = "windows")]
+            paste.keys.push(crate::key!('v', ALT));
+            push_pseudo(&mut entries, paste, Some(PASTE_LONG_HELP));
+
+            let mut undo = HintItem::new(crate::key!('z', CONTROL), rust_i18n::t!("hints.undo"));
+            undo.description = Some(rust_i18n::t!("shortcuts_help.undo_desc"));
+            push_pseudo(&mut entries, undo, Some(UNDO_LONG_HELP));
+
+            // Textarea: Ctrl+Shift+Z (+ Ctrl+R alt). Ctrl+R is prompt-only;
+            // scrollback may bind it to mouse reporting when that toggle is on.
+            let mut redo = HintItem::new(
+                crate::key!('z', CONTROL | SHIFT),
+                rust_i18n::t!("hints.redo"),
+            );
+            redo.description = Some(rust_i18n::t!("shortcuts_help.redo_desc"));
+            redo.keys.push(crate::key!('r', CONTROL));
+            push_pseudo(&mut entries, redo, Some(REDO_LONG_HELP));
         }
         let count = entries.len() - header_idx - 1;
         if count == 0 {
@@ -564,8 +605,8 @@ pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode
         (Some(lh), Some(id)) => {
             crate::i18n::tr_or(&format!("actions.{}.long_help", id.i18n_key()), lh).into_owned()
         }
-        // Pseudo-rows (paste is the only one shipping long_help today).
-        (Some(lh), None) => crate::i18n::tr_or("shortcuts_help.paste_long_help", lh).into_owned(),
+        // Pseudo-rows: per-const bundle key (paste/undo/redo).
+        (Some(lh), None) => crate::i18n::tr_or(pseudo_long_help_key(lh), lh).into_owned(),
         _ => item
             .description
             .as_deref()
@@ -738,8 +779,8 @@ pub fn hint_inline_help(entry: &ShortcutsHelpEntry) -> Option<std::borrow::Cow<'
                 ));
             }
             if let Some(lh) = long_help {
-                // Pseudo-rows (paste): no registry action — dedicated key.
-                return Some(crate::i18n::tr_or("shortcuts_help.paste_long_help", lh));
+                // Pseudo-rows: per-const bundle key (paste/undo/redo).
+                return Some(crate::i18n::tr_or(pseudo_long_help_key(lh), lh));
             }
             item.description.clone()
         }
@@ -1708,8 +1749,7 @@ mod tests {
         let has_row = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, .. }
-if item.label == "mouse reporting"
+                ShortcutsHelpEntry::Hint { item, .. } if item.label == "mouse reporting"
             )
         });
         assert!(
@@ -1827,8 +1867,7 @@ if item.label == "mouse reporting"
                         item,
                         action_id: Some(id),
                         ..
-                    }
-if item.keys.contains(&crate::key!('g', CONTROL))
+                    } if item.keys.contains(&crate::key!('g', CONTROL))
                         && registry
                             .find(*id)
                             .is_some_and(|def| def.context == When::AgentScreen) =>
@@ -1870,22 +1909,19 @@ if item.keys.contains(&crate::key!('g', CONTROL))
         let has_todos = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, .. }
-if item.label == "todos"
+                ShortcutsHelpEntry::Hint { item, .. } if item.label == "todos"
             )
         });
         let has_sessions = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, .. }
-if item.label == "sessions"
+                ShortcutsHelpEntry::Hint { item, .. } if item.label == "sessions"
             )
         });
         let has_queue = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, .. }
-if item.label == "queue"
+                ShortcutsHelpEntry::Hint { item, .. } if item.label == "queue"
             )
         });
         assert!(has_todos, "should include toggle todos");
@@ -1936,8 +1972,7 @@ if item.label == "queue"
                         item,
                         action_id: None,
                         ..
-                    }
-if item.label == "paste"
+                    } if item.label == "paste"
                 )
             })
             .expect("cheatsheet should list paste");
@@ -1965,50 +2000,87 @@ if item.label == "paste"
         assert!(!item.keys.iter().any(|k| *k == key!('v', ALT)));
     }
 
-    fn paste_is_dimmed(entries: &[ShortcutsHelpEntry]) -> Option<bool> {
+    /// Display-only Input rows for textarea undo/redo (mirrors paste).
+    #[test]
+    fn build_entries_lists_undo_and_redo() {
+        let registry = ActionRegistry::defaults();
+        let entries = build_entries(&all_contexts(), &registry, true);
+
+        let (undo_keys, undo_help) = pseudo_hint(&entries, "undo").expect("undo row");
+        assert!(undo_keys.contains(&key!('z', CONTROL)));
+        assert_eq!(undo_help, Some(UNDO_LONG_HELP));
+
+        let (redo_keys, redo_help) = pseudo_hint(&entries, "redo").expect("redo row");
+        assert!(redo_keys.contains(&key!('z', CONTROL | SHIFT)));
+        assert!(redo_keys.contains(&key!('r', CONTROL)));
+        assert_eq!(redo_help, Some(REDO_LONG_HELP));
+    }
+
+    fn pseudo_hint<'a>(
+        entries: &'a [ShortcutsHelpEntry],
+        label: &str,
+    ) -> Option<(&'a [KeyShortcut], Option<&'static str>)> {
+        entries.iter().find_map(|e| match e {
+            ShortcutsHelpEntry::Hint {
+                item,
+                action_id: None,
+                long_help,
+                ..
+            } if item.label == label => Some((item.keys.as_slice(), *long_help)),
+            _ => None,
+        })
+    }
+
+    fn pseudo_dimmed(entries: &[ShortcutsHelpEntry], label: &str) -> Option<bool> {
         entries.iter().find_map(|e| match e {
             ShortcutsHelpEntry::Hint {
                 item,
                 dimmed,
                 action_id: None,
                 ..
-            } if item.label == "paste" => Some(*dimmed),
+            } if item.label == label => Some(*dimmed),
             _ => None,
         })
     }
 
     #[test]
-    fn build_entries_dims_paste_outside_prompt_and_dashboard() {
+    fn build_entries_dims_editor_pseudo_rows_outside_prompt_and_dashboard() {
         let registry = ActionRegistry::defaults();
-        assert_eq!(
-            paste_is_dimmed(&build_entries(
-                &[When::ScrollbackFocused, When::AgentScreen, When::Always],
-                &registry,
-                true,
-            )),
-            Some(true),
-            "paste dimmed when neither prompt nor dashboard is active"
-        );
-        assert_eq!(
-            paste_is_dimmed(&build_entries(
-                &[When::PromptFocused, When::AgentScreen, When::Always],
-                &registry,
-                true,
-            )),
-            Some(false),
-            "paste lit when prompt is focused"
-        );
-        // Dashboard host opens the cheatsheet with only DashboardFocused + Always
-        // and handles paste itself — must not dim a working shortcut.
-        assert_eq!(
-            paste_is_dimmed(&build_entries(
-                &[When::DashboardFocused, When::Always],
-                &registry,
-                true,
-            )),
-            Some(false),
-            "paste lit on the dashboard host"
-        );
+        // paste / undo / redo share the same host lit/dim policy.
+        for label in ["paste", "undo", "redo"] {
+            assert_eq!(
+                pseudo_dimmed(
+                    &build_entries(
+                        &[When::ScrollbackFocused, When::AgentScreen, When::Always],
+                        &registry,
+                        true,
+                    ),
+                    label,
+                ),
+                Some(true),
+                "{label} dimmed off prompt/dashboard"
+            );
+            assert_eq!(
+                pseudo_dimmed(
+                    &build_entries(
+                        &[When::PromptFocused, When::AgentScreen, When::Always],
+                        &registry,
+                        true,
+                    ),
+                    label,
+                ),
+                Some(false),
+                "{label} lit when prompt focused"
+            );
+            assert_eq!(
+                pseudo_dimmed(
+                    &build_entries(&[When::DashboardFocused, When::Always], &registry, true),
+                    label,
+                ),
+                Some(false),
+                "{label} lit on dashboard host"
+            );
+        }
     }
 
     #[test]
@@ -2020,8 +2092,7 @@ if item.label == "paste"
         let nav_dimmed = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, dimmed: true, .. }
-if item.label == "nav"
+                ShortcutsHelpEntry::Hint { item, dimmed: true, .. } if item.label == "nav"
             )
         });
         assert!(
@@ -2032,8 +2103,7 @@ if item.label == "nav"
         let quit_bright = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, dimmed: false, .. }
-if item.label == "quit"
+                ShortcutsHelpEntry::Hint { item, dimmed: false, .. } if item.label == "quit"
             )
         });
         assert!(quit_bright, "quit should not be dimmed (When::Always)");
@@ -2041,8 +2111,7 @@ if item.label == "quit"
         let cancel_bright = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, dimmed: false, .. }
-if item.label == "cancel"
+                ShortcutsHelpEntry::Hint { item, dimmed: false, .. } if item.label == "cancel"
             )
         });
         assert!(
@@ -2060,8 +2129,7 @@ if item.label == "cancel"
         let send_dimmed = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, dimmed: true, .. }
-if item.label == "send"
+                ShortcutsHelpEntry::Hint { item, dimmed: true, .. } if item.label == "send"
             )
         });
         assert!(
@@ -2072,8 +2140,7 @@ if item.label == "send"
         let nav_dimmed = entries.iter().any(|e| {
             matches!(
                 e,
-                ShortcutsHelpEntry::Hint { item, dimmed: true, .. }
-if item.label == "nav"
+                ShortcutsHelpEntry::Hint { item, dimmed: true, .. } if item.label == "nav"
             )
         });
         assert!(
@@ -2731,7 +2798,6 @@ if item.label == "nav"
         );
     }
 
-    /// Paste ships long_help — Enter opens the man-page detail view.
     #[test]
     fn enter_on_paste_pseudo_row_opens_detail() {
         let registry = ActionRegistry::defaults();
@@ -2746,8 +2812,7 @@ if item.label == "nav"
                         action_id: None,
                         long_help: Some(_),
                         ..
-                    }
-if item.label == "paste"
+                    } if item.label == "paste"
                 )
             })
             .expect("paste pseudo-row with long_help");
@@ -3128,8 +3193,7 @@ if item.label == "paste"
             let present = entries.iter().any(|e| {
                 matches!(
                     e,
-                    ShortcutsHelpEntry::Hint { item, .. }
-if item.label == label
+                    ShortcutsHelpEntry::Hint { item, .. } if item.label == label
                 )
             });
             assert!(
@@ -3241,9 +3305,11 @@ if item.label == label
             "registry-backed hints must carry their ActionId for expand/detail"
         );
 
-        // Registry rows carry ActionId; search + paste are display-only.
+        // Registry rows carry ActionId; known display-only rows stay action-less.
         let search_key = key!('/');
         let paste_key = key!('v', CONTROL);
+        let undo_key = key!('z', CONTROL);
+        let redo_key = key!('z', CONTROL | SHIFT);
         for entry in &entries {
             let ShortcutsHelpEntry::Hint {
                 item, action_id, ..
@@ -3251,8 +3317,13 @@ if item.label == label
             else {
                 continue;
             };
-            let is_pseudo = (item.label == "search" && item.keys.contains(&search_key))
-                || (item.label == "paste" && item.keys.contains(&paste_key));
+            let is_pseudo = match item.label.as_ref() {
+                "search" => item.keys.contains(&search_key),
+                "paste" => item.keys.contains(&paste_key),
+                "undo" => item.keys.contains(&undo_key),
+                "redo" => item.keys.contains(&redo_key),
+                _ => false,
+            };
             if is_pseudo {
                 assert!(
                     action_id.is_none(),
@@ -3425,8 +3496,7 @@ if item.label == label
                         action_id: None,
                         long_help: Some(_),
                         ..
-                    }
-if item.label == "paste"
+                    } if item.label == "paste"
                 )
             })
             .expect("paste pseudo-row with long_help");

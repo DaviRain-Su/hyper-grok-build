@@ -6,6 +6,7 @@ use super::*;
 
 /// Number of output lines to show in final bash mode output summary
 const BASH_MODE_FINAL_OUTPUT_LINES: usize = 10;
+const BASH_MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Phase 2: dispatch a tool call through [`WorkspaceOps::call_tool`].
 ///
@@ -236,7 +237,7 @@ impl SessionActor {
             command: command.clone(),
             cwd: self.tool_context.cwd.clone(),
             env: self.tool_context.session_env.as_ref().clone(),
-            timeout: DEFAULT_TIMEOUT,
+            timeout: BASH_MODE_TIMEOUT,
             output_byte_limit: 1_048_576, // 1 MiB
             stream: true,                 // Enable streaming for bash mode
             output_file: None,            // No file logging for interactive bash mode

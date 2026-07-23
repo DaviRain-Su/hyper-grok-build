@@ -252,7 +252,7 @@ async fn resize_preserves_scroll_position() {
     let screen_after = harness.screen_contents();
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during resize\nscreen:\n{screen_after}"
     );
     assert!(

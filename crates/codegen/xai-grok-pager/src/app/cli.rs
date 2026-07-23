@@ -17,7 +17,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check terminal support and configuration without starting Grok
+    /// Check terminal, clipboard, color, and input support without starting Grok
     Doctor(crate::doctor_cmd::DoctorArgs),
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
@@ -1008,15 +1008,33 @@ mod tests {
         let fix =
             PagerArgs::try_parse_from(["grok", "doctor", "fix", "terminal.ssh-wrap", "--yes"])
                 .expect("doctor fix parses");
-        assert!(
-            matches!(fix.command, Some(Command::Doctor(crate ::doctor_cmd::DoctorArgs {
-            json : false, command : Some(crate ::doctor_cmd::DoctorCommand::Fix(crate
-            ::doctor_cmd::FixArgs { ref id, yes : true })), })) if id ==
-            "terminal.ssh-wrap")
-        );
+        assert!(matches!(
+            fix.command,
+            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
+                json: false,
+                command: Some(crate::doctor_cmd::DoctorCommand::Fix(
+                    crate::doctor_cmd::FixArgs { ref id, yes: true }
+                )),
+            })) if id.as_deref() == Some("terminal.ssh-wrap")
+        ));
+        let list = PagerArgs::try_parse_from(["grok", "doctor", "fix"])
+            .expect("doctor fix without an ID lists applicable fixes");
+        assert!(matches!(
+            list.command,
+            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
+                json: false,
+                command: Some(crate::doctor_cmd::DoctorCommand::Fix(
+                    crate::doctor_cmd::FixArgs {
+                        id: None,
+                        yes: false
+                    }
+                )),
+            }))
+        ));
         for unsupported in [
-            vec!["grok", "doctor", "fix"],
             vec!["grok", "doctor", "all"],
+            vec!["grok", "doctor", "fix", "ssh-wrap", "extra"],
+            vec!["grok", "doctor", "fix", "--yes"],
             vec!["grok", "doctor", "--json", "fix", "terminal.ssh-wrap"],
         ] {
             let error = PagerArgs::try_parse_from(unsupported)

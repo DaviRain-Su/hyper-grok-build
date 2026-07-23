@@ -863,8 +863,7 @@ mod tests {
                             svg_path,
                             frequency_hz: 200,
                             ..
-                        }
-if svg_path == output_path
+                        } if svg_path == output_path
                     ));
 
                     let status = client
@@ -880,8 +879,7 @@ if svg_path == output_path
                             svg_path: Some(path),
                             frequency_hz: Some(200),
                             ..
-                        }
-if path == output_path
+                        } if path == output_path
                     ));
 
                     let stopped = client
@@ -891,8 +889,7 @@ if path == output_path
                         .unwrap();
                     assert!(matches!(
                         stopped,
-                        ControlPayload::CpuProfileStopped { svg_path, .. }
-if svg_path == output_path
+                        ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
                     ));
                     assert!(output_path.exists());
                 }
@@ -997,8 +994,7 @@ if svg_path == output_path
                 svg_path: Some(path),
                 frequency_hz: Some(200),
                 ..
-            }
-if path == output_path
+            } if path == output_path
         ));
 
         let leader_info = client_b
@@ -1038,8 +1034,7 @@ if path == output_path
         let stopped = stop_task.await.unwrap().unwrap().unwrap();
         assert!(matches!(
             stopped,
-            ControlPayload::CpuProfileStopped { svg_path, .. }
-if svg_path == output_path
+            ControlPayload::CpuProfileStopped { svg_path, .. } if svg_path == output_path
         ));
         assert_eq!(
             stop_calls.lock().unwrap().as_slice(),

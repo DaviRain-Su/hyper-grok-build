@@ -52,31 +52,33 @@ pub enum PromptMode {
 impl AgentView {
     /// Editing-mode key intercepts for the prompt pane.
     ///
-    /// Bare Enter saves, Esc cancels.
-    /// Interject-key handling for edit mode lives in
-    /// `interject_editing_queued_intercept`, reached via the
-    /// `ActionId::InterjectPrompt` registry arm in `handle_prompt_key` (the
-    /// binding is remappable, so it cannot be matched on a raw key here).
-    /// Shift-Enter / Alt-Enter fall through to widget (newline insertion).
-    /// Tab removed as cancel trigger — too easy to hit accidentally.
-    /// Ctrl-C on empty prompt also cancels (matches cancel-turn pattern).
+    /// Bare Enter saves, Esc (or Ctrl-C on empty) cancels. Shift/Alt+Enter
+    /// inserts a newline (same as the normal composer) and must not save.
+    /// Apple Terminal Cmd/Shift/Opt+Enter is rescued inside `is_mod_enter`
+    /// via CoreGraphics — not a universal Cmd+Enter binding.
+    /// Interject is remappable, so it is handled via the
+    /// `ActionId::InterjectPrompt` registry arm → `interject_editing_queued_intercept`,
+    /// not matched as a raw key here.
     ///
-    /// Returns `None` when not editing or for any unhandled key — the key
-    /// MUST fall through to the widget (typing, newline insertion).
+    /// Returns `None` when not editing or unhandled — must fall through to the widget.
     pub(super) fn handle_editing_queued_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
         if let PromptMode::EditingQueued { id, server_id, .. } = &self.prompt_mode {
             let (id, server_id) = (*id, server_id.clone());
             let ctrl_c_empty = key!('c', CONTROL).matches(key) && self.prompt.text().is_empty();
 
+            // Before bare-Enter save: Shift/Alt flags, or Apple Terminal bare
+            // Enter with Cmd/Shift/Opt held (CoreGraphics rescue in is_mod_enter).
+            if crate::input::is_mod_enter(key) {
+                self.prompt.textarea.insert_str("\n");
+                return Some(InputOutcome::Changed);
+            }
             if key!(Enter).matches(key) && !self.prompt.text().trim().is_empty() {
                 return Some(self.save_edited_queued_row(id, server_id, true));
             }
             if key.code == KeyCode::Esc || ctrl_c_empty {
-                // Discard changes.
                 self.exit_editing_mode();
                 return Some(InputOutcome::Action(Action::DrainQueue));
             }
-            // Everything else (including Shift-Enter, Alt-Enter, typing) falls through.
         }
         None
     }
@@ -319,10 +321,11 @@ impl AgentView {
         match server_id {
             Some(server_id) => {
                 let new_text = self.prompt.text().to_string();
-                // Server-origin row: route the edit through the agent (LWW).
-                // The rebroadcast updates every client's shared queue mirror
-                // — do NOT mutate locally.
-                self.exit_editing_mode();
+                // Server-origin row: route the edit through the agent (LWW); the
+                // rebroadcast updates every client's mirror, so don't mutate
+                // locally. Keep the hold until the edit lands — see
+                // `exit_editing_mode_keeping_hold`.
+                self.exit_editing_mode_keeping_hold();
                 InputOutcome::Action(Action::QueueEditShared {
                     id: server_id,
                     new_text,
@@ -427,7 +430,9 @@ impl AgentView {
                     self.show_toast("Images can't be attached when editing a shared queued prompt");
                 }
                 // new_text carries the edit — without it the agent would
-                // interject the original server-side text.
+                // interject the original server-side text. Release is safe
+                // here: interject removes the row from the queue (no
+                // combine-on-stale-text window for a still-queued hold).
                 let expected_version = self.queue.row_ref(id).map(|r| r.version);
                 self.exit_editing_mode();
                 match expected_version {
@@ -496,20 +501,34 @@ impl AgentView {
     }
 
     /// Exit editing mode: restore stashed text, clear mode, focus queue pane.
-    /// No-op unless `EditingQueued`.
+    /// No-op unless `EditingQueued`. The default exit; releases the
+    /// server-side combine hold (cancel, lost-row, interject, modal paths).
     ///
     /// Always resets `prompt_input_mode` to `Normal` so it doesn't leak
     /// into subsequent normal prompt entry.
     pub(super) fn exit_editing_mode(&mut self) {
+        self.exit_editing_mode_inner(true);
+    }
+
+    /// Exit editing without emitting `QueueReleaseEdit` — the server-row save
+    /// path's `QueueEditShared` clears the hold on the shell instead. Releasing
+    /// here would flush first (via `pending_effects`) and let combine merge the
+    /// row on stale text before the edit lands.
+    fn exit_editing_mode_keeping_hold(&mut self) {
+        self.exit_editing_mode_inner(false);
+    }
+
+    fn exit_editing_mode_inner(&mut self, release_hold: bool) {
         // Idempotent: remove_local_queue_row's guard may have exited already;
         // a second take() of the spent stash would wipe the composer.
         if !matches!(self.prompt_mode, PromptMode::EditingQueued { .. }) {
             return;
         }
-        if let PromptMode::EditingQueued {
-            server_id: Some(sid),
-            ..
-        } = &self.prompt_mode
+        if release_hold
+            && let PromptMode::EditingQueued {
+                server_id: Some(sid),
+                ..
+            } = &self.prompt_mode
             && let Some(session_id) = self.session.session_id.clone()
         {
             self.pending_effects
@@ -571,6 +590,62 @@ mod tests {
 
     fn enter_key() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn enter_edit_local_row() -> AgentView {
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+        let ids = agent.queue.entry_ids();
+        // Local row is second (server rendered first).
+        agent.queue.list_state.select_by_id(ids[1]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        agent
+    }
+
+    /// Shift/Alt+Enter → newline in edit mode (must not save).
+    /// Cmd/SUPER is not a product-wide newline chord (Apple Terminal only via CG).
+    #[test]
+    fn edit_mod_enter_inserts_newline_without_exiting() {
+        for mods in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let mut agent = enter_edit_local_row();
+            agent.prompt.set_text("line1");
+            let outcome = agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, mods));
+            assert!(
+                matches!(outcome, InputOutcome::Changed),
+                "mod Enter ({mods:?}) must not save; got {outcome:?}"
+            );
+            assert!(
+                matches!(agent.prompt_mode, PromptMode::EditingQueued { .. }),
+                "must stay in edit mode for {mods:?}"
+            );
+            assert_eq!(
+                agent.prompt.text(),
+                "line1\n",
+                "mod Enter ({mods:?}) must insert a newline"
+            );
+            assert_eq!(
+                agent.session.pending_prompts[0].text, "local one",
+                "queue row must stay unchanged for {mods:?}"
+            );
+        }
+    }
+
+    /// Bare Enter still saves (mod-enter path must not steal it).
+    #[test]
+    fn edit_bare_enter_still_saves() {
+        let mut agent = enter_edit_local_row();
+        agent.prompt.set_text("line1 EDITED");
+        let outcome = agent.handle_prompt_key_for_test(&enter_key());
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::DrainQueue)),
+            "bare Enter must save; got {outcome:?}"
+        );
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert_eq!(agent.session.pending_prompts[0].text, "line1 EDITED");
     }
 
     fn attach_image_to_local_row(agent: &mut AgentView) {
@@ -646,6 +721,67 @@ mod tests {
         assert_eq!(agent.shared_queue[0].text, "server one");
         // EditingQueued cleared.
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+    }
+
+    /// Saving a server-row edit must not emit `QueueReleaseEdit` — see
+    /// `exit_editing_mode_keeping_hold`.
+    #[test]
+    fn submit_server_edit_keeps_combine_hold_until_edit() {
+        use crate::app::actions::Effect;
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[0]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+        // Entering edit on a server row arms the hold.
+        assert!(
+            agent
+                .pending_effects
+                .iter()
+                .any(|e| matches!(e, Effect::QueueHoldEdit { .. })),
+            "entering edit must emit QueueHoldEdit"
+        );
+
+        agent.prompt.set_text("server one EDITED");
+        let outcome = agent.handle_prompt_key_for_test(&enter_key());
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::QueueEditShared { .. })
+            ),
+            "save must route to QueueEditShared"
+        );
+        assert!(
+            !agent
+                .pending_effects
+                .iter()
+                .any(|e| matches!(e, Effect::QueueReleaseEdit { .. })),
+            "server-row save must NOT emit QueueReleaseEdit (the edit clears the hold)"
+        );
+    }
+
+    /// Cancelling (Esc) a server-row edit still releases the hold, so an
+    /// abandoned edit can't pin the row out of combine.
+    #[test]
+    fn cancel_server_edit_releases_combine_hold() {
+        use crate::app::actions::Effect;
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[0]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+        agent.pending_effects.clear();
+
+        let _ = agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            agent
+                .pending_effects
+                .iter()
+                .any(|e| matches!(e, Effect::QueueReleaseEdit { .. })),
+            "cancelling an edit must emit QueueReleaseEdit"
+        );
     }
 
     #[test]

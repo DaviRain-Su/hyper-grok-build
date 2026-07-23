@@ -778,9 +778,7 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
                 acp::Error::invalid_request().data(format!("unknown session id: {}", session_id.0))
             );
         };
-        let response = crate::session::slash_commands::ListCommandsResponse {
-            commands: handle.list_available_commands().await,
-        };
+        let response = handle.list_available_commands().await;
         return Ok(acp::ExtResponse::new(Arc::from(
             serde_json::value::to_raw_value(&response)?,
         )));

@@ -95,7 +95,7 @@ pub(crate) async fn single_check(
             xai_grok_telemetry::unified_log::warn(
                 "paywall_check_error",
                 None,
-                Some(serde_json::json!({ "user_id" : user_id, "kind" : kind })),
+                Some(serde_json::json!({ "user_id": user_id, "kind": kind })),
             );
             return None;
         }
@@ -103,10 +103,10 @@ pub(crate) async fn single_check(
     xai_grok_telemetry::unified_log::info(
         "paywall_check_result",
         None,
-        Some(serde_json::json!(
-            { "user_id" : user_id, "subscription_tier" : user_info.subscription_tier,
-            }
-        )),
+        Some(serde_json::json!({
+            "user_id": user_id,
+            "subscription_tier": user_info.subscription_tier,
+        })),
     );
     let new_tier = match &user_info.subscription_tier {
         Some(tier) if !tier.is_empty() => tier.clone(),
@@ -118,7 +118,10 @@ pub(crate) async fn single_check(
     xai_grok_telemetry::unified_log::info(
         "paywall_check_subscription_detected",
         None,
-        Some(serde_json::json!({ "user_id" : user_id, "new_tier" : new_tier, })),
+        Some(serde_json::json!({
+            "user_id": user_id,
+            "new_tier": new_tier,
+        })),
     );
     if let Err(e) = auth_manager
         .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
@@ -127,10 +130,11 @@ pub(crate) async fn single_check(
         xai_grok_telemetry::unified_log::warn(
             "paywall_check_error",
             None,
-            Some(serde_json::json!(
-                { "user_id" : user_id, "kind" : "refresh_failed", "detail" : e
-                .to_string(), }
-            )),
+            Some(serde_json::json!({
+                "user_id": user_id,
+                "kind": "refresh_failed",
+                "detail": e.to_string(),
+            })),
         );
     }
     let settings = if crate::util::config::resolve_remote_fetch_enabled() {
@@ -149,7 +153,7 @@ pub(crate) async fn single_check(
     xai_grok_telemetry::unified_log::info(
         "paywall_check_unblocked",
         None,
-        Some(serde_json::json!({ "user_id" : user_id, "new_tier" : new_tier })),
+        Some(serde_json::json!({ "user_id": user_id, "new_tier": new_tier })),
     );
     Some(UnblockResult { new_tier, settings })
 }

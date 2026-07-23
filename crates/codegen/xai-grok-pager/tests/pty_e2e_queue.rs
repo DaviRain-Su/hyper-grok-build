@@ -29,16 +29,16 @@ mod edit_interject_lone_queued_row_keeps_tui_alive;
 mod empty_enter_force_sends_top_queued;
 #[path = "pty_e2e/empty_enter_sends_top_not_last_of_two.rs"]
 mod empty_enter_sends_top_not_last_of_two;
+#[path = "pty_e2e/esc_cancels_running_turn_from_prompt_preserves_draft.rs"]
+mod esc_cancels_running_turn_from_prompt_preserves_draft;
+#[path = "pty_e2e/esc_cancels_running_turn_from_scrollback.rs"]
+mod esc_cancels_running_turn_from_scrollback;
 #[path = "pty_e2e/esc_esc_clears_idle_prompt_and_records_history.rs"]
 mod esc_esc_clears_idle_prompt_and_records_history;
 #[path = "pty_e2e/esc_esc_opens_rewind_picker_silent_first_press.rs"]
 mod esc_esc_opens_rewind_picker_silent_first_press;
 #[path = "pty_e2e/esc_idle_empty_no_messages_is_swallowed_noop.rs"]
 mod esc_idle_empty_no_messages_is_swallowed_noop;
-#[path = "pty_e2e/esc_mid_turn_from_prompt_is_swallowed_preserves_draft.rs"]
-mod esc_mid_turn_from_prompt_is_swallowed_preserves_draft;
-#[path = "pty_e2e/esc_mid_turn_from_scrollback_is_swallowed.rs"]
-mod esc_mid_turn_from_scrollback_is_swallowed;
 #[path = "pty_e2e/interjection_reaches_model_ctrl_l_in_vscode_family.rs"]
 mod interjection_reaches_model_ctrl_l_in_vscode_family;
 #[path = "pty_e2e/interjection_reaches_model_in_same_turn.rs"]

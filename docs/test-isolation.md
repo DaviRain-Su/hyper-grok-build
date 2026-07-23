@@ -144,3 +144,11 @@ scratch 路径（`cli_models` 用的就是这个，避开 `OnceLock`-cached 真�
 | 主题/颜色断言（`scrollback::blocks::user::*` ×9、`views::picker`、`app::modals`、`settings_modal`、`workflow`、`edit_highlight_worker` 等） | 运行环境 `NO_COLOR=1`/`TERM=dumb` ⇒ `color_support::detect()` 的 `OnceLock` 缓存为 `ColorLevel::None`，颜色全部退化为 `Reset`；且读-改-读缓存对与并行写者撕裂 | `xai-grok-pager-render` 新增 `color_support::force_level_for_test`（逐调用覆盖，绕过 OnceLock）；`test_util::pin_theme()` RAII guard 统一持 `test_lock` + 钉 GrokNight + 强制 TrueColor；全模块测试统一点位（`scrollback/blocks/user.rs` 41 个测试全钉），两个无锁 `cache::set` 写者（`text_selection.rs`、`bg_task.rs`）一并改持锁 |
 
 规约补充：**凡断言颜色/样式/主题缓存的测试，必须 `let _theme = crate::test_util::pin_theme();` 持锁**——既防环境污染，也防并行写者撕裂读-改-读对。残留的 `mermaid_worker` / `app_view` 动画时序 flake 属负载敏感的既有问题，与本组无关。
+
+## 7. 主题缓存 lost-update 竞态的根修（2026-07-23,`xai-grok-pager-render`)
+
+合并 upstream 后主题测试以 ~1 次/轮的频率随机失败（渲染读到 GrokNight、断言读到 TokyoNight——后者来自开发者真实 `~/.grok/config.toml`)。写入端全部持锁仍无法解释,最终由写日志（`THEME_DEBUG_WRITES`）证明**无外部写者**,oracle 分析定位到机制:
+
+`theme::cache::current_kind()` 的慢路径是 check-then-disk-read-then-store 的无锁序列:某个并行测试在 `LOADED=false` 时进入 `load_from_disk()`（慢磁盘读）,期间失败测试的 pin 完成 `set(GrokNight)` 并渲染;在途的磁盘读返回后执行 `CURRENT.store(TokyoNight)` 覆盖显式写入——`TEST_LOCK` 管不到不持锁的普通读者。
+
+**修复（生产级,非测试补丁)**:`theme/cache.rs` 新增 `STATE_LOCK`——`current_kind()` 慢路径持锁复查 `LOADED` 后再发布,`set()` / `reset_for_test()` 也持同一把锁（不复用 `TEST_LOCK`,否则与持锁读者死锁）。同一 lost-update 在生产上显式换肤与首次初始化重叠时也存在,故修在渲染 crate 而非测试侧。回归测试经 `set_disk_kind_override_for_test` / `set_load_pause_for_test` 两个测试钩子确定性覆盖两种交错序。验证:scrollback::blocks ×16 线程 ×8 轮 0 失败,全量套件 ×5 轮仅余 `mermaid_worker` 时序 flake。

@@ -100,11 +100,37 @@ impl FuzzyMatcher {
         pattern.indices(s.slice(..), &mut self.matcher, &mut indices);
         indices
     }
+
+    /// Match `query` against display text and return display-relative indices.
+    pub fn indices_for(&mut self, query: &str, text: &str) -> Option<Vec<u32>> {
+        let query = query.trim();
+        if query.is_empty() || text.is_empty() {
+            return None;
+        }
+        self.pattern
+            .reparse(0, query, CaseMatching::Smart, Normalization::Smart, false);
+        let text = Utf32String::from(text);
+        self.pattern
+            .score(std::slice::from_ref(&text), &mut self.matcher)?;
+        let mut indices = Vec::new();
+        self.pattern
+            .column_pattern(0)
+            .indices(text.slice(..), &mut self.matcher, &mut indices);
+        Some(indices)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::FuzzyMatcher;
+
+    #[test]
+    fn indices_for_are_relative_to_display() {
+        let mut matcher = FuzzyMatcher::new();
+        assert_eq!(matcher.indices_for("ssh", "ssh-wrap"), Some(vec![0, 1, 2]));
+        assert_eq!(matcher.indices_for("sw", "ssh-wrap"), Some(vec![0, 4]));
+        assert_eq!(matcher.indices_for("fix s", "ssh-wrap"), None);
+    }
 
     #[test]
     fn empty_query_yields_insertion_order() {

@@ -58,7 +58,7 @@ async fn agent_type_mismatch_no_keeps_current_session() {
         harness.screen_contents()
     );
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited\nscreen:\n{}",
         harness.screen_contents()
     );

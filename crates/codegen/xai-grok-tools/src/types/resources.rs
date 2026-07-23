@@ -1109,14 +1109,12 @@ mod tests {
         let mut state_map = HashMap::new();
         state_map.insert(
             "grok_build.ReadFile".to_string(),
-            serde_json::json!({ "files_read" : ["loaded.rs"] }),
+            serde_json::json!({"files_read": ["loaded.rs"]}),
         );
         let mut params_map = HashMap::new();
         params_map.insert(
             "grok_build.Edit".to_string(),
-            serde_json::json!(
-                { "skip_read_before_edit" : true, "max_file_size" : 512 }
-            ),
+            serde_json::json!({"skip_read_before_edit": true, "max_file_size": 512}),
         );
         let mut data = HashMap::new();
         data.insert("state".to_string(), state_map);
@@ -1135,11 +1133,11 @@ mod tests {
         let mut state_map = HashMap::new();
         state_map.insert(
             "unknown.Type".to_string(),
-            serde_json::json!({ "foo" : "bar" }),
+            serde_json::json!({"foo": "bar"}),
         );
         state_map.insert(
             "grok_build.ReadFile".to_string(),
-            serde_json::json!({ "files_read" : ["ok.rs"] }),
+            serde_json::json!({"files_read": ["ok.rs"]}),
         );
         let mut data = HashMap::new();
         data.insert("state".to_string(), state_map);
@@ -1176,7 +1174,7 @@ mod tests {
         let ok = res.set_json(
             "params",
             "grok_build.Edit",
-            serde_json::json!({ "skip_read_before_edit" : true }),
+            serde_json::json!({"skip_read_before_edit": true}),
         );
         assert!(ok);
         let config = res.get::<Params<EditConfig>>().unwrap();

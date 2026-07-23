@@ -219,8 +219,7 @@ fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
     );
     assert!(matches!(
         &app.agents[&id].plugin_cta.phase,
-        CtaPhase::Matched { name, .. }
-if name == "zzctaplugin"
+        CtaPhase::Matched { name, .. } if name == "zzctaplugin"
     ));
 }
 

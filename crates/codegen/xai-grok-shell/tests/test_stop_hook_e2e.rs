@@ -4,7 +4,6 @@
 //! cargo test -p xai-grok-shell --test test_stop_hook_e2e -- --ignored
 //! ```
 
-use xai_grok_test_support::env::test_env_cmd_tokio;
 use xai_grok_test_support::*;
 
 /// Everything a test needs to assert on after a headless run with a Stop hook.
@@ -12,8 +11,6 @@ struct StopHookRun {
     result: HeadlessResult,
     server: MockInferenceServer,
     state_dir: tempfile::TempDir,
-    _home: tempfile::TempDir,
-    _workdir: tempfile::TempDir,
 }
 
 impl StopHookRun {
@@ -44,15 +41,14 @@ impl StopHookRun {
 /// Runs the built binary headless with a global Stop hook whose script body is
 /// `respond`. `$n` holds the 1-based invocation number when `respond` runs.
 async fn run_with_stop_hook(respond: &str) -> StopHookRun {
-    let home = tempfile::TempDir::new().expect("create temp home");
     let state_dir = tempfile::TempDir::new().expect("create state dir");
-    let workdir = git_workdir();
     let server = MockInferenceServer::start()
         .await
         .expect("start mock server");
+    let sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
 
     let state = state_dir.path().display();
-    let script_path = home.path().join("stop_hook.sh");
+    let script_path = sandbox.home().join("stop_hook.sh");
     // Only turn-end gate fires (`reason: "end_turn"`) are counted and
     // responded to, so a session-end Stop fire (`channel_closed`/`shutdown`)
     // can never skew the counts these tests assert on.
@@ -71,7 +67,7 @@ async fn run_with_stop_hook(respond: &str) -> StopHookRun {
     )
     .expect("write hook script");
 
-    let hooks_dir = home.path().join(".grok").join("hooks");
+    let hooks_dir = sandbox.grok_home().join("hooks");
     std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
     std::fs::write(
         hooks_dir.join("stop.json"),
@@ -92,20 +88,17 @@ async fn run_with_stop_hook(respond: &str) -> StopHookRun {
 
     let mut cmd = tokio::process::Command::new(grok_binary());
     cmd.args(["-p", "say hello", "--yolo"])
-        .current_dir(workdir.path())
+        .current_dir(sandbox.workspace())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    test_env_cmd_tokio(&mut cmd, &server.url(), home.path());
-    let result = run_headless_with_cmd(cmd).await;
+    let result = run_headless_in_sandbox(cmd, sandbox).await;
 
     StopHookRun {
         result,
         server,
         state_dir,
-        _home: home,
-        _workdir: workdir,
     }
 }
 

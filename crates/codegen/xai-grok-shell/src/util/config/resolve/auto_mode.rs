@@ -4,6 +4,10 @@ use toml::Value as TomlValue;
 /// Env override for the **auto** permission-mode feature gate.
 pub(crate) const ENV_AUTO_PERMISSION_MODE: &str = "GROK_AUTO_PERMISSION_MODE";
 
+const AUTO_MODE_CLASSIFY_TIMEOUT_MIN_MS: u64 = 1_000;
+const AUTO_MODE_CLASSIFY_TIMEOUT_DEFAULT_MS: u64 = 30_000;
+const AUTO_MODE_CLASSIFY_TIMEOUT_MAX_MS: u64 = 120_000;
+
 /// Crate-wide serialization lock for tests that mutate
 /// `GROK_AUTO_PERMISSION_MODE`. Every test reading the gate (here and in
 /// `permissions.rs`, compiled into the same test binary) locks this so a
@@ -163,6 +167,7 @@ fn merge_auto_mode_config(
         enabled: config.enabled.or(remote.enabled),
         prompt_type: config.prompt_type.or(remote.prompt_type),
         classifier_model: config.classifier_model.or(remote.classifier_model),
+        classify_timeout_ms: config.classify_timeout_ms.or(remote.classify_timeout_ms),
         reasoning_effort: config.reasoning_effort.or(remote.reasoning_effort),
     }
 }
@@ -182,6 +187,28 @@ pub fn resolve_auto_mode_config_from_disk() -> crate::agent::config::AutoModeCon
         .and_then(|g| g.clone())
         .unwrap_or_default();
     merge_auto_mode_config(config, remote)
+}
+
+pub fn auto_mode_classify_timeout(
+    cfg: &crate::agent::config::AutoModeConfig,
+) -> std::time::Duration {
+    let configured = cfg
+        .classify_timeout_ms
+        .unwrap_or(AUTO_MODE_CLASSIFY_TIMEOUT_DEFAULT_MS);
+    let bounded = configured.clamp(
+        AUTO_MODE_CLASSIFY_TIMEOUT_MIN_MS,
+        AUTO_MODE_CLASSIFY_TIMEOUT_MAX_MS,
+    );
+    if bounded != configured {
+        tracing::warn!(
+            configured_ms = configured,
+            bounded_ms = bounded,
+            min_ms = AUTO_MODE_CLASSIFY_TIMEOUT_MIN_MS,
+            max_ms = AUTO_MODE_CLASSIFY_TIMEOUT_MAX_MS,
+            "[auto_mode] classify_timeout_ms outside supported range; clamped"
+        );
+    }
+    std::time::Duration::from_millis(bounded)
 }
 
 /// Apply the built-in Auto-mode classifier defaults to a resolved config (these
@@ -403,22 +430,69 @@ mod auto_permission_mode_gate_tests {
             enabled: Some(true),
             prompt_type: Some(ClassifierPromptType::JustCommand),
             classifier_model: None,
+            classify_timeout_ms: Some(45_000),
             reasoning_effort: None,
         };
         let remote = AutoModeConfig {
             enabled: Some(false),
             prompt_type: Some(ClassifierPromptType::Full),
             classifier_model: Some("remote-model".into()),
+            classify_timeout_ms: Some(60_000),
             reasoning_effort: Some(ReasoningEffort::Low),
         };
         let merged = merge_auto_mode_config(config, remote);
         assert_eq!(merged.enabled, Some(true));
         assert_eq!(merged.prompt_type, Some(ClassifierPromptType::JustCommand));
         assert_eq!(merged.classifier_model.as_deref(), Some("remote-model"));
+        assert_eq!(merged.classify_timeout_ms, Some(45_000));
         assert_eq!(merged.reasoning_effort, Some(ReasoningEffort::Low));
+        let remote_timeout = merge_auto_mode_config(
+            AutoModeConfig::default(),
+            AutoModeConfig {
+                classify_timeout_ms: Some(60_000),
+                ..AutoModeConfig::default()
+            },
+        );
+        assert_eq!(remote_timeout.classify_timeout_ms, Some(60_000));
         // Both unset ⇒ all-None (the wire fn then applies the built-in defaults).
         let empty = merge_auto_mode_config(AutoModeConfig::default(), AutoModeConfig::default());
-        assert!(empty.enabled.is_none() && empty.classifier_model.is_none());
+        assert_eq!(empty.enabled, None);
+        assert_eq!(empty.prompt_type, None);
+        assert_eq!(empty.classifier_model, None);
+        assert_eq!(empty.classify_timeout_ms, None);
+        assert_eq!(empty.reasoning_effort, None);
+    }
+
+    #[test]
+    fn auto_mode_classify_timeout_applies_default_and_bounds() {
+        use crate::agent::config::AutoModeConfig;
+        use std::time::Duration;
+
+        assert_eq!(
+            auto_mode_classify_timeout(&AutoModeConfig::default()),
+            Duration::from_millis(AUTO_MODE_CLASSIFY_TIMEOUT_DEFAULT_MS)
+        );
+        assert_eq!(
+            auto_mode_classify_timeout(&AutoModeConfig {
+                classify_timeout_ms: Some(45_000),
+                ..AutoModeConfig::default()
+            }),
+            Duration::from_millis(45_000)
+        );
+        assert_eq!(
+            auto_mode_classify_timeout(&AutoModeConfig {
+                classify_timeout_ms: Some(0),
+                ..AutoModeConfig::default()
+            }),
+            Duration::from_millis(AUTO_MODE_CLASSIFY_TIMEOUT_MIN_MS)
+        );
+        assert_eq!(
+            auto_mode_classify_timeout(&AutoModeConfig {
+                classify_timeout_ms: Some(u64::MAX),
+                ..AutoModeConfig::default()
+            }),
+            Duration::from_millis(AUTO_MODE_CLASSIFY_TIMEOUT_MAX_MS)
+        );
     }
 
     #[test]
@@ -450,13 +524,14 @@ mod auto_permission_mode_gate_tests {
         use xai_grok_workspace::permission::ClassifierPromptType;
         // A real [auto_mode] table round-trips (not silently dropped).
         let toml: TomlValue = toml::from_str(
-            "[auto_mode]\nenabled = true\nprompt_type = \"just_command\"\nclassifier_model = \"m\"\n",
+            "[auto_mode]\nenabled = true\nprompt_type = \"just_command\"\nclassifier_model = \"m\"\nclassify_timeout_ms = 45000\n",
         )
         .unwrap();
         let cfg = auto_mode_config_from_toml(Some(&toml)).expect("table parses");
         assert_eq!(cfg.enabled, Some(true));
         assert_eq!(cfg.prompt_type, Some(ClassifierPromptType::JustCommand));
         assert_eq!(cfg.classifier_model.as_deref(), Some("m"));
+        assert_eq!(cfg.classify_timeout_ms, Some(45_000));
         // Absent [auto_mode] ⇒ None.
         let bare: TomlValue = toml::from_str("[features]\ngoal = true\n").unwrap();
         assert!(auto_mode_config_from_toml(Some(&bare)).is_none());
@@ -470,11 +545,12 @@ mod auto_permission_mode_gate_tests {
         use xai_grok_workspace::permission::ClassifierPromptType;
         let _g = guard();
         // Seed the full remote config, then flip ONLY the gate via the pager
-        // kill-switch path — prompt_type / classifier_model must survive.
+        // kill-switch path — classifier fields must survive.
         cache_remote_auto_mode(Some(serde_json::json!({
             "enabled": true,
             "prompt_type": "bare_instructions",
-            "classifier_model": "remote-model"
+            "classifier_model": "remote-model",
+            "classify_timeout_ms": 45000
         })));
         assert_eq!(cached_remote_auto_permission_mode_enabled(), Some(true));
         cache_remote_auto_permission_mode_enabled(Some(false));
@@ -489,6 +565,7 @@ mod auto_permission_mode_gate_tests {
             Some(ClassifierPromptType::BareInstructions)
         );
         assert_eq!(stored.classifier_model.as_deref(), Some("remote-model"));
+        assert_eq!(stored.classify_timeout_ms, Some(45_000));
         cache_remote_auto_mode(None);
     }
 }

@@ -714,6 +714,9 @@ pub struct AgentSession {
     /// the input box if the user cancels before any response arrives.
     /// `None` for skill-injected prompts (cannot be reversed) and bash/cron.
     pub in_flight_prompt: Option<InFlightPrompt>,
+    /// Prompt held across auto-compact for reauth resubmit after `/login`.
+    /// `in_flight_prompt` is cleared on compact start so cancel cannot rewind.
+    pub compact_held_prompt: Option<InFlightPrompt>,
     /// Stable id for the prompt currently in flight. Generated client-side
     /// at `Effect::SendPrompt` time and threaded through `PromptRequest._meta`
     /// to the agent, which echoes it back on every `SessionNotification` and
@@ -790,6 +793,7 @@ impl AgentSession {
     /// Called by `maybe_drain_queue` when a prompt is being sent.
     pub fn start_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.tracker.finish_turn(scrollback);
+        self.compact_held_prompt = None;
         self.tracker.set_session_cwd(&self.cwd);
         self.tracker.expect_user_echo();
         self.state = AgentState::TurnRunning;
@@ -806,6 +810,7 @@ impl AgentSession {
         self.credit_limit_blocked = false;
         self.free_usage_blocked = false;
         self.in_flight_prompt = None;
+        self.compact_held_prompt = None;
         self.current_prompt_id = None;
     }
     /// Whether any background task is still running (vs. completed/failed).
@@ -1078,6 +1083,7 @@ mod tests {
             bg_tool_call_to_task: HashMap::new(),
             scheduled_tasks: HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         }

@@ -1,10 +1,13 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
+use agent_client_protocol as acp;
 use nix::sys::stat::Mode;
 use nix::unistd::mkfifo;
 
 use super::*;
+use crate::session::info::Info;
 use crate::session::storage::relocation::journal::AtomicWriteFault;
 
 #[test]
@@ -164,4 +167,415 @@ fn durable_remove_and_atomic_no_replace_are_inert_building_blocks() {
     ));
     storage.remove_directory(&source).unwrap();
     storage.remove_directory(&source).unwrap();
+}
+
+fn request(id: &str, source: &str, target: &str, generation: u64) -> RelocationRequest {
+    RelocationRequest {
+        session_id: id.into(),
+        nonce: "nonce-1".into(),
+        source_cwd: source.into(),
+        target_cwd: target.into(),
+        cwd_generation: generation,
+        pending_reminder: PendingCwdSwitchReminder {
+            cwd_generation: generation,
+            previous_cwd: source.into(),
+            destination_cwd: target.into(),
+            content: "cwd switched".into(),
+            destination_project_instructions: Some("target rules".into()),
+        },
+    }
+}
+
+fn session_dir(root: &Path, cwd: &str, id: &str) -> PathBuf {
+    journal::session_dir_at(root, cwd, id)
+}
+
+fn create_source(root: &Path, cwd: &str, id: &str, generation: u64) -> PathBuf {
+    let dir = session_dir(root, cwd, id);
+    let nested = dir.join("unknown/nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o750)).unwrap();
+    let mut summary = Summary::new(
+        &Info {
+            id: acp::SessionId::new(id),
+            cwd: cwd.into(),
+        },
+        acp::ModelId::new("test-model"),
+    )
+    .unwrap();
+    summary.cwd_generation = generation;
+    let mut value = serde_json::to_value(summary).unwrap();
+    value["opaque_top"] = serde_json::json!({"future": [1, 2, 3]});
+    value["info"]["opaque_info"] = serde_json::json!("future-info");
+    let summary_path = dir.join(super::super::SUMMARY_FILE);
+    fs::write(&summary_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    fs::set_permissions(&summary_path, fs::Permissions::from_mode(0o640)).unwrap();
+    fs::write(dir.join("chat_history.jsonl"), b"historical bytes\n").unwrap();
+    let executable = nested.join("tool");
+    fs::write(&executable, b"opaque\0bytes").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o751)).unwrap();
+    dir
+}
+
+fn create_valid_target(root: &Path, journal: &RelocationJournal) -> PathBuf {
+    let dir = create_source(
+        root,
+        &journal.target_cwd,
+        &journal.session_id,
+        journal.cwd_generation,
+    );
+    let path = dir.join(super::super::SUMMARY_FILE);
+    let mut summary: Summary = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    summary.previous_cwd = Some(journal.source_cwd.clone());
+    summary.pending_cwd_switch_reminder = Some(PendingCwdSwitchReminder {
+        cwd_generation: journal.cwd_generation,
+        previous_cwd: journal.source_cwd.clone(),
+        destination_cwd: journal.target_cwd.clone(),
+        content: "cwd switched".into(),
+        destination_project_instructions: None,
+    });
+    fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
+    dir
+}
+
+#[test]
+fn commit_and_rollback_terminal_proofs_allow_retries_and_second_relocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = RelocationStorage::new(temp.path().into());
+    create_source(temp.path(), "/source", "again", 0);
+    let lease = storage.acquire("again").unwrap();
+    let staged = storage
+        .stage_and_publish(&lease, request("again", "/source", "/target", 1))
+        .unwrap();
+    let rollback = storage.rollback(&lease, &staged).unwrap();
+    assert!(!session_dir(temp.path(), "/target", "again").exists());
+    storage.finalize_terminal(&lease, &rollback).unwrap();
+
+    let staged = storage
+        .stage_and_publish(&lease, request("again", "/source", "/target", 1))
+        .unwrap();
+    let committed = storage.mark_ready_and_commit(&lease, &staged).unwrap();
+    let faulted = RelocationStorage::with_fault(temp.path().into(), TestFault::NamespaceBarrier);
+    assert!(faulted.finalize_terminal(&lease, &committed).is_err());
+    assert!(!journal::journal_path(temp.path(), "again").exists());
+    storage.finalize_terminal(&lease, &committed).unwrap();
+    let mut request = request("again", "/target", "/third", 2);
+    request.nonce = "nonce-2".into();
+    let next = storage.stage_and_publish(&lease, request).unwrap();
+    assert!(matches!(
+        storage.rollback(&lease, &staged),
+        Err(RelocationError::TransactionMismatch)
+    ));
+    assert!(matches!(
+        storage.mark_ready_and_commit(&lease, &staged),
+        Err(RelocationError::TransactionMismatch)
+    ));
+    assert!(next.matches(&storage.read_journal("again").unwrap()));
+}
+
+#[test]
+fn barriers_and_malformed_ready_fail_closed_before_source_deletion() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = RelocationStorage::new(temp.path().into());
+    let missing_lease = missing.acquire("missing").unwrap();
+    assert!(matches!(
+        missing.recover(&missing_lease),
+        Err(RelocationError::JournalMissing(_))
+    ));
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = RelocationStorage::new(temp.path().into());
+    create_source(temp.path(), "/source", "barrier", 0);
+    let lease = base.acquire("barrier").unwrap();
+    let staged = base
+        .stage_and_publish(&lease, request("barrier", "/source", "/target", 1))
+        .unwrap();
+    let faulted = RelocationStorage::with_fault(
+        temp.path().into(),
+        TestFault::ReadyAfterRenameThenNamespaceBarrier,
+    );
+    assert!(matches!(
+        faulted.mark_ready_and_commit(&lease, &staged),
+        Err(RelocationError::RecoveryRequired {
+            phase: RelocationPhase::Ready,
+            ..
+        })
+    ));
+    assert!(faulted.recover(&lease).is_err());
+
+    let target = session_dir(temp.path(), "/target", "barrier");
+    let decoy = temp.path().join("decoy");
+    fs::rename(&target, &decoy).unwrap();
+    std::os::unix::fs::symlink(&decoy, &target).unwrap();
+    assert!(matches!(
+        base.recover(&lease),
+        Err(RelocationError::RecoveryRequired {
+            phase: RelocationPhase::Ready,
+            ..
+        })
+    ));
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = RelocationStorage::new(temp.path().into());
+    let source = create_source(temp.path(), "/source", "remove", 0);
+    let summary = source.join(super::super::SUMMARY_FILE);
+    let source_bytes = fs::read(&summary).unwrap();
+    let lease = base.acquire("remove").unwrap();
+    let staged = base
+        .stage_and_publish(&lease, request("remove", "/source", "/target", 1))
+        .unwrap();
+    let mut malformed: serde_json::Value = serde_json::from_slice(&source_bytes).unwrap();
+    malformed["info"]["id"] = "other".into();
+    fs::write(&summary, serde_json::to_vec(&malformed).unwrap()).unwrap();
+    assert!(matches!(
+        base.recover(&lease),
+        Err(RelocationError::RecoveryRequired {
+            phase: RelocationPhase::TargetPublished,
+            ..
+        })
+    ));
+    assert!(session_dir(temp.path(), "/target", "remove").exists());
+    fs::write(summary, source_bytes).unwrap();
+    let faulted = RelocationStorage::with_fault(temp.path().into(), TestFault::RemoveBarrier);
+    assert!(matches!(
+        faulted.rollback(&lease, &staged),
+        Err(RelocationError::RecoveryRequired {
+            phase: RelocationPhase::TargetPublished,
+            ..
+        })
+    ));
+    assert_eq!(
+        base.read_journal("remove").unwrap().phase,
+        RelocationPhase::TargetPublished
+    );
+}
+
+#[test]
+fn copy_failure_self_cleans_and_post_publication_failure_requires_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = RelocationStorage::new(temp.path().into());
+    let source = create_source(temp.path(), "/source", "copy", 0);
+    mkfifo(&source.join("unknown/pipe"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    let lease = storage.acquire("copy").unwrap();
+    let failure = storage
+        .stage_and_publish(&lease, request("copy", "/source", "/target", 1))
+        .unwrap_err();
+    let proof = match failure {
+        RelocationError::RolledBack { terminal, .. } => terminal,
+        error => panic!("expected typed rollback proof, got {error}"),
+    };
+    fs::remove_file(source.join("unknown/pipe")).unwrap();
+    storage.finalize_terminal(&lease, &proof).unwrap();
+    storage
+        .stage_and_publish(&lease, request("copy", "/source", "/target", 1))
+        .unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = RelocationStorage::new(temp.path().into());
+    create_source(temp.path(), "/source", "published", 0);
+    let lease = base.acquire("published").unwrap();
+    let faulted = RelocationStorage::with_fault(
+        temp.path().into(),
+        TestFault::Journal(
+            RelocationPhase::TargetPublished,
+            AtomicWriteFault::BeforeRename,
+        ),
+    );
+    assert!(matches!(
+        faulted.stage_and_publish(&lease, request("published", "/source", "/target", 1)),
+        Err(RelocationError::RecoveryRequired {
+            phase: RelocationPhase::Staged,
+            ..
+        })
+    ));
+    assert!(session_dir(temp.path(), "/target", "published").exists());
+}
+
+#[test]
+fn recover_all_finalizes_every_phase() {
+    for phase in [
+        RelocationPhase::Prepared,
+        RelocationPhase::Staged,
+        RelocationPhase::TargetPublished,
+        RelocationPhase::Ready,
+        RelocationPhase::Committed,
+        RelocationPhase::RolledBack,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = RelocationJournal::test_new("r", "/source", "/target", phase);
+        for cwd in ["/source", "/target"] {
+            fs::create_dir_all(session_dir(temp.path(), cwd, "r").parent().unwrap()).unwrap();
+        }
+        if phase != RelocationPhase::Committed {
+            create_source(temp.path(), "/source", "r", 0);
+        }
+        if matches!(
+            phase,
+            RelocationPhase::TargetPublished | RelocationPhase::Ready | RelocationPhase::Committed
+        ) {
+            create_valid_target(temp.path(), &journal);
+        }
+        super::journal::write(temp.path(), &journal, None).unwrap();
+        RelocationStorage::new(temp.path().into())
+            .recover_all()
+            .unwrap();
+        let target = matches!(phase, RelocationPhase::Ready | RelocationPhase::Committed);
+        assert_eq!(session_dir(temp.path(), "/source", "r").exists(), !target);
+        assert_eq!(session_dir(temp.path(), "/target", "r").exists(), target);
+        assert!(!journal::journal_path(temp.path(), "r").exists());
+    }
+}
+
+#[test]
+fn storage_view_follows_journal_authority_and_fails_closed_without_it() {
+    for phase in [
+        RelocationPhase::Prepared,
+        RelocationPhase::Staged,
+        RelocationPhase::TargetPublished,
+        RelocationPhase::Ready,
+        RelocationPhase::Committed,
+        RelocationPhase::RolledBack,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        create_source(temp.path(), "/source", "session", 0);
+        let journal = RelocationJournal::test_new("session", "/source", "/target", phase);
+        create_valid_target(temp.path(), &journal);
+        super::journal::write(temp.path(), &journal, None).unwrap();
+        let expected_cwd = if matches!(phase, RelocationPhase::Ready | RelocationPhase::Committed) {
+            "/target"
+        } else {
+            "/source"
+        };
+        assert_eq!(
+            RelocationView::load(temp.path())
+                .unwrap()
+                .find_persisted_session_dir("session")
+                .unwrap(),
+            Some(session_dir(temp.path(), expected_cwd, "session"))
+        );
+    }
+
+    for phase in [RelocationPhase::TargetPublished, RelocationPhase::Ready] {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = RelocationJournal::test_new("missing", "/source", "/target", phase);
+        if phase == RelocationPhase::TargetPublished {
+            create_valid_target(temp.path(), &journal);
+        } else {
+            create_source(temp.path(), "/source", "missing", 0);
+        }
+        super::journal::write(temp.path(), &journal, None).unwrap();
+        let view = RelocationView::load(temp.path()).unwrap();
+        assert!(view.session_dirs(None).is_err());
+        assert!(view.find_persisted_session_dir("missing").is_err());
+        assert!(super::super::load_updates_for_replay_at("missing", temp.path()).is_err());
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = create_source(temp.path(), "/source", "linked", 0);
+    let summary = source.join(super::super::SUMMARY_FILE);
+    fs::rename(&summary, source.join("real-summary")).unwrap();
+    std::os::unix::fs::symlink("real-summary", &summary).unwrap();
+    let journal = RelocationJournal::test_new(
+        "linked",
+        "/source",
+        "/target",
+        RelocationPhase::TargetPublished,
+    );
+    super::journal::write(temp.path(), &journal, None).unwrap();
+    assert!(
+        RelocationView::load(temp.path())
+            .unwrap()
+            .session_dirs(None)
+            .is_err()
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    create_source(temp.path(), "/a", "card", 0);
+    fs::create_dir_all(session_dir(temp.path(), "/b", "card").join("images")).unwrap();
+    let view = RelocationView::load(temp.path()).unwrap();
+    assert_eq!(
+        view.find_persisted_session_dir("card").unwrap(),
+        Some(session_dir(temp.path(), "/a", "card"))
+    );
+    create_source(temp.path(), "/b", "card", 0);
+    assert_eq!(
+        RelocationView::load(temp.path())
+            .unwrap()
+            .find_persisted_session_dir("card")
+            .unwrap(),
+        None
+    );
+    fs::create_dir_all(session_dir(temp.path(), "/a", ".hidden")).unwrap();
+    assert!(
+        RelocationView::load(temp.path())
+            .unwrap()
+            .session_dirs(None)
+            .unwrap()
+            .iter()
+            .all(|path| !path.file_name().unwrap().to_string_lossy().starts_with('.'))
+    );
+}
+
+#[test]
+fn cwd_scoped_storage_view_ignores_unrelated_malformed_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let requested = create_source(temp.path(), "/requested", "requested", 0);
+    let unrelated = RelocationJournal::test_new(
+        "unrelated",
+        "/other-source",
+        "/other-target",
+        RelocationPhase::Ready,
+    );
+    create_source(temp.path(), "/other-source", "unrelated", 0);
+    super::journal::write(temp.path(), &unrelated, None).unwrap();
+
+    let view = RelocationView::load(temp.path()).unwrap();
+    assert_eq!(
+        view.session_dirs(Some("/requested")).unwrap(),
+        vec![requested]
+    );
+    assert!(view.session_dirs(None).is_err());
+}
+
+#[test]
+fn cwd_scoped_storage_view_fails_for_missing_authority_in_requested_cwd() {
+    let temp = tempfile::tempdir().unwrap();
+    create_source(temp.path(), "/other", "requested", 0);
+    let requested =
+        RelocationJournal::test_new("requested", "/source", "/requested", RelocationPhase::Ready);
+    super::journal::write(temp.path(), &requested, None).unwrap();
+
+    let view = RelocationView::load(temp.path()).unwrap();
+    assert!(view.session_dirs(Some("/requested")).is_err());
+    assert!(view.session_dirs(Some("/other")).unwrap().is_empty());
+}
+
+#[test]
+fn long_cwd_marker_publication_is_atomic_and_retryable() {
+    let target = format!("/{}", "long-segment/".repeat(40));
+    for fault in [
+        AtomicWriteFault::BeforeRename,
+        AtomicWriteFault::AfterRename,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        create_source(temp.path(), "/source", "marker", 0);
+        let base = RelocationStorage::new(temp.path().into());
+        let lease = base.acquire("marker").unwrap();
+        let faulted =
+            RelocationStorage::with_fault(temp.path().into(), TestFault::CwdMarker(fault));
+        assert!(
+            faulted
+                .stage_and_publish(&lease, request("marker", "/source", &target, 1))
+                .is_err()
+        );
+        let marker = base.target_parent(&target).join(".cwd");
+        if fault == AtomicWriteFault::BeforeRename {
+            assert!(!marker.exists());
+        } else {
+            assert_eq!(fs::read_to_string(&marker).unwrap(), target);
+        }
+        base.stage_and_publish(&lease, request("marker", "/source", &target, 1))
+            .unwrap();
+        assert_eq!(fs::read_to_string(marker).unwrap(), target);
+    }
 }

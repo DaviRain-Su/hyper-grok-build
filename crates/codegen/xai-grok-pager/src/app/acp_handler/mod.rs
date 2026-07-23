@@ -34,7 +34,7 @@ use crate::views::permission_view::{
 };
 use crate::views::plan_approval_view::PlanReviewSource;
 
-use super::agent_view::{AgentView, InputMode};
+use super::agent_view::{AgentPane, AgentView, InputMode};
 use super::app_view::{ActiveView, AppView};
 
 mod background;
@@ -658,8 +658,7 @@ fn queue_open_workflows_modal_refresh(app: &mut AppView, agent_id: AgentId) {
             Effect::FetchWorkflowsList {
                 agent_id: pending_id,
                 ..
-            }
-if *pending_id == agent_id
+            } if *pending_id == agent_id
         )
     });
     if !already_pending {

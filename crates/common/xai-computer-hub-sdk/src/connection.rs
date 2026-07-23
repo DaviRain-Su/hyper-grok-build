@@ -531,7 +531,8 @@ impl HubConnection {
         .await?;
         *connection_id.lock().await = Some(ack.connection_id.clone());
         info!(
-            url = % config.url, connection_id = % ack.connection_id,
+            url = %config.url,
+            connection_id = %ack.connection_id,
             "server connection established"
         );
         if let Some(cb) = &config.on_connect {
@@ -664,9 +665,10 @@ impl HubConnection {
         self.inner.bound_sessions.increment(session_id);
     }
     /// Decrement the refcount on `session_id`. Removes tracking when
-    /// the last borrower drops.
-    pub fn untrack_session(&self, session_id: &SessionId) {
-        self.inner.bound_sessions.decrement(session_id);
+    /// the last borrower drops. Returns the post-decrement count
+    /// (`Some(0)` = last borrower; `None` = key was absent).
+    pub fn untrack_session(&self, session_id: &SessionId) -> Option<u64> {
+        self.inner.bound_sessions.decrement(session_id)
     }
     /// Send a JSON-RPC request and await the response.
     ///
@@ -831,17 +833,15 @@ impl HubConnection {
                 }
                 Err(DeadlineCallError::TimedOut(timeout)) => {
                     crate::metrics::serve_replay_timeout();
-                    warn!(
-                        % session_id, attempt, ? timeout,
-                        "serve attempt timed out; will retry"
-                    );
+                    warn!(%session_id, attempt, ?timeout, "serve attempt timed out; will retry");
                     last_err = Some(DeadlineCallError::TimedOut(timeout).into());
                 }
                 Err(DeadlineCallError::Other(e)) => return Err(e),
             }
         }
         warn!(
-            % session_id, attempts = SERVE_MAX_ATTEMPTS,
+            %session_id,
+            attempts = SERVE_MAX_ATTEMPTS,
             "serve timed out every bounded attempt; forcing reconnect to restart replay"
         );
         self.force_reconnect();
@@ -887,7 +887,7 @@ async fn open_socket(
     }
     if is_plaintext_remote {
         warn!(
-            host = % url.host_str().unwrap_or(""),
+            host = %url.host_str().unwrap_or(""),
             "opening server connection over plaintext ws:// (allow_insecure_ws=true); bearer crosses the network in cleartext"
         );
     }
@@ -1060,19 +1060,56 @@ async fn run_writer<S>(
     let mut live = true;
     loop {
         tokio::select! {
-            biased; _ = writer_stop_rx.recv() => break, ctl = writer_ctl_rx.recv() =>
-            match ctl { Some(WriterControl::Pause) => live = false,
-            Some(WriterControl::Resume(new_sink)) => { sink = new_sink; live = true;
-            write_error.lock().take(); ping_interval =
-            tokio::time::interval(ping_period); ping_interval.tick(). await; } None =>
-            break, }, _ = ping_interval.tick(), if live => { if let Err(e) = sink
-            .send(Message::Ping(Vec::new().into())). await { * write_error.lock() =
-            Some(format!("ping send failed: {e}")); crate
-            ::metrics::writer_sink_send_error(); live = false; } } outbound = outbound_rx
-            .recv(), if live => match outbound { Some(text) => { if let Err(e) = sink
-            .send(Message::Text(text.into())). await { * write_error.lock() =
-            Some(format!("frame send failed: {e}")); crate
-            ::metrics::writer_sink_send_error(); live = false; } } None => break, },
+            biased;
+            _ = writer_stop_rx.recv() => break,
+            ctl = writer_ctl_rx.recv() => match ctl {
+                Some(WriterControl::Pause) => live = false,
+                Some(WriterControl::Resume(new_sink)) => {
+                    sink = new_sink;
+                    live = true;
+                    // Discard any error a late old-sink send left behind. The
+                    // reader clears the slot before sending `Resume`, but an
+                    // in-flight send on the dead socket (e.g. blocked on TCP
+                    // retransmits since before `Pause`) can fail after that
+                    // clear and re-fill the slot. This task is the only slot
+                    // writer and processes messages sequentially, so by the
+                    // time `Resume` is handled that old-sink send has
+                    // finished — clearing here closes the race and stops a
+                    // stale detail from mislabeling the NEXT disconnect as
+                    // transport_write_error.
+                    write_error.lock().take();
+                    // Restart the keepalive cadence from the reconnect instant:
+                    // consume the immediate first tick so the next ping fires
+                    // one period after Resume, not as a catch-up burst for ticks
+                    // missed while paused.
+                    ping_interval = tokio::time::interval(ping_period);
+                    ping_interval.tick().await;
+                }
+                // Reader gone (control sender dropped) → wind down.
+                None => break,
+            },
+            _ = ping_interval.tick(), if live => {
+                if let Err(e) = sink.send(Message::Ping(Vec::new().into())).await {
+                    // The reader detects the death (stream error, or liveness-
+                    // deadline expiry once pings stop being answered) and
+                    // drives the reconnect; we just stop draining onto the
+                    // corpse.
+                    *write_error.lock() = Some(format!("ping send failed: {e}"));
+                    crate::metrics::writer_sink_send_error();
+                    live = false;
+                }
+            }
+            outbound = outbound_rx.recv(), if live => match outbound {
+                Some(text) => {
+                    if let Err(e) = sink.send(Message::Text(text.into())).await {
+                        *write_error.lock() = Some(format!("frame send failed: {e}"));
+                        crate::metrics::writer_sink_send_error();
+                        live = false;
+                    }
+                }
+                // Last `outbound_tx` dropped → channel closed → wind down.
+                None => break,
+            },
         }
     }
 }
@@ -1110,7 +1147,7 @@ async fn run_reader_actor(
         {
             ConnectedExit::Stop => break,
             ConnectedExit::TerminalClose(code) => {
-                info!(code, url = % url, "server sent terminal close; not reconnecting");
+                info!(code, url = %url, "server sent terminal close; not reconnecting");
                 fire_on_disconnect(inner.as_ref());
                 inner.demux.drain_waiters_with(|| {
                     ClientError::Closed(format!("server terminal close (code {code})"))
@@ -1135,13 +1172,16 @@ async fn run_reader_actor(
                     cause,
                 };
                 warn!(
-                    url = % url, cause = outage.cause.label(), close_code = ? outage
-                    .cause.close_code(), error_detail = ? outage.cause.detail(),
-                    connection_id = ? outage.prev_connection_id,
+                    url = %url,
+                    cause = outage.cause.label(),
+                    close_code = ?outage.cause.close_code(),
+                    error_detail = ?outage.cause.detail(),
+                    connection_id = ?outage.prev_connection_id,
                     prev_connection_duration_ms = outage.prev_connection_duration_ms,
-                    detect_ms = outage.detect_ms, since_last_probe_monotonic_ms = outage
-                    .since_last_probe_monotonic_ms, since_last_probe_wall_ms = outage
-                    .since_last_probe_wall_ms, clock_jump_ms = outage.clock_jump_ms,
+                    detect_ms = outage.detect_ms,
+                    since_last_probe_monotonic_ms = outage.since_last_probe_monotonic_ms,
+                    since_last_probe_wall_ms = outage.since_last_probe_wall_ms,
+                    clock_jump_ms = outage.clock_jump_ms,
                     "server connection lost; scheduling reconnect"
                 );
                 fire_on_disconnect(inner.as_ref());
@@ -1156,21 +1196,29 @@ async fn run_reader_actor(
                 loop {
                     attempt = attempt.saturating_add(1);
                     let backoff = backoff_for(attempt, &inner.reconnect_backoff);
-                    info!(
-                        ? backoff, attempt, url = % url, "reconnecting server connection"
-                    );
+                    info!(?backoff, attempt, url = %url, "reconnecting server connection");
                     tokio::select! {
-                        _ = stop_rx.recv() => break 'actor, _ = sleep(backoff) => {}
+                        _ = stop_rx.recv() => break 'actor,
+                        _ = sleep(backoff) => {}
                     }
                     backoff_total += backoff;
                     let reconnect_start = std::time::Instant::now();
                     let attempt_budget = reconnect_attempt_budget(liveness_deadline);
                     let outcome = tokio::select! {
-                        _ = stop_rx.recv() => break 'actor, outcome =
-                        tokio::time::timeout(attempt_budget, reconnect_and_replay(inner
-                        .as_ref(), & url, attempt, & outage, backoff_total,),) => outcome
-                        .unwrap_or_else(| _elapsed | {
-                        Err(ClientError::NetworkError(format!("reconnect attempt timed out after {attempt_budget:?}")))
+                        _ = stop_rx.recv() => break 'actor,
+                        outcome = tokio::time::timeout(
+                            attempt_budget,
+                            reconnect_and_replay(
+                                inner.as_ref(),
+                                &url,
+                                attempt,
+                                &outage,
+                                backoff_total,
+                            ),
+                        ) => outcome.unwrap_or_else(|_elapsed| {
+                            Err(ClientError::NetworkError(format!(
+                                "reconnect attempt timed out after {attempt_budget:?}"
+                            )))
                         }),
                     };
                     match outcome {
@@ -1272,28 +1320,74 @@ where
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            biased; _ = stop_rx.recv() => return ConnectedExit::Stop, _ = reconnect_rx
-            .recv() => { info!("forced reconnect requested; dropping current socket");
-            return ConnectedExit::SocketClosed(DisconnectCause::Forced); } msg = stream
-            .next() => { if matches!(msg, Some(Ok(ref m)) if ! matches!(m,
-            Message::Close(_))) { inner.health.record_inbound(); } match msg {
-            Some(Ok(msg)) => { let now = tokio::time::Instant::now(); let rearm = now
-            .checked_add(liveness_deadline).unwrap_or_else(|| now +
-            Duration::from_secs(86400 * 365 * 30)); deadline.as_mut().reset(rearm); match
-            msg { Message::Text(text) => { if let Some(pong_text) = route_or_pong(inner,
-            text.as_ref()) && inner.outbound_tx.try_send(pong_text).is_err() { crate
-            ::metrics::heartbeat_pong_dropped(); } } Message::Ping(_) | Message::Pong(_)
-            | Message::Frame(_) => {} Message::Binary(_) => {
-            warn!("server sent binary frame; ignoring"); } Message::Close(frame) => {
-            return exit_for_close_code(frame.map(| f | f.code.into())); } } }
-            Some(Err(e)) => { return
-            ConnectedExit::SocketClosed(classify_stream_end(inner, Some(e
-            .to_string()),)); } None => { return
-            ConnectedExit::SocketClosed(classify_stream_end(inner, None)); } } } _ =
-            clock_probe.tick() => inner.health.refresh_clock(), _ = & mut deadline => {
-            crate ::metrics::liveness_deadline_expired(); warn!(? liveness_deadline,
-            "no inbound frame within the liveness deadline; declaring the socket dead and reconnecting");
-            return ConnectedExit::SocketClosed(DisconnectCause::LivenessDeadline); }
+            biased;
+            _ = stop_rx.recv() => return ConnectedExit::Stop,
+            _ = reconnect_rx.recv() => {
+                info!("forced reconnect requested; dropping current socket");
+                return ConnectedExit::SocketClosed(DisconnectCause::Forced);
+            }
+            // Before the deadline arm so a frame that raced the expiry
+            // proves liveness and wins.
+            msg = stream.next() => {
+                if matches!(msg, Some(Ok(ref m)) if !matches!(m, Message::Close(_))) {
+                    inner.health.record_inbound();
+                }
+                match msg {
+                    Some(Ok(msg)) => {
+                        // Any inbound frame (data or control) proves liveness,
+                        // so re-arm the deadline. Saturate on overflow so a
+                        // `Duration::MAX` "disable" override can't panic
+                        // `Instant + Duration`.
+                        let now = tokio::time::Instant::now();
+                        let rearm = now
+                            .checked_add(liveness_deadline)
+                            .unwrap_or_else(|| now + Duration::from_secs(86400 * 365 * 30));
+                        deadline.as_mut().reset(rearm);
+                        match msg {
+                            Message::Text(text) => {
+                                if let Some(pong_text) = route_or_pong(inner, text.as_ref())
+                                    && inner.outbound_tx.try_send(pong_text).is_err()
+                                {
+                                    // App-level pong is JSON text; the reader no longer
+                                    // owns the sink, so route it through the writer.
+                                    // Best-effort (non-blocking) to keep the reader hot:
+                                    // a paused writer (dead socket) or a saturated buffer
+                                    // drops the heartbeat. Metered so the residual loss is
+                                    // observable/alertable rather than silent.
+                                    crate::metrics::heartbeat_pong_dropped();
+                                }
+                            }
+                            // WS control pings get an automatic Pong queued + flushed
+                            // by tungstenite on read; nothing to do here.
+                            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                            Message::Binary(_) => {
+                                warn!("server sent binary frame; ignoring");
+                            }
+                            Message::Close(frame) => {
+                                return exit_for_close_code(frame.map(|f| f.code.into()));
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        return ConnectedExit::SocketClosed(classify_stream_end(
+                            inner,
+                            Some(e.to_string()),
+                        ));
+                    }
+                    None => {
+                        return ConnectedExit::SocketClosed(classify_stream_end(inner, None));
+                    }
+                }
+            }
+            _ = clock_probe.tick() => inner.health.refresh_clock(),
+            _ = &mut deadline => {
+                crate::metrics::liveness_deadline_expired();
+                warn!(
+                    ?liveness_deadline,
+                    "no inbound frame within the liveness deadline; declaring the socket dead and reconnecting"
+                );
+                return ConnectedExit::SocketClosed(DisconnectCause::LivenessDeadline);
+            }
         }
     }
 }
@@ -1347,14 +1441,21 @@ async fn reconnect_and_replay(
     let sessions_replayed = sessions.len();
     let silent_gap_ms = outage.last_inbound.elapsed().as_millis() as u64;
     info!(
-        attempt, sessions_replayed, cause = outage.cause.label(), close_code = ? outage
-        .cause.close_code(), error_detail = ? outage.cause.detail(), prev_connection_id =
-        ? outage.prev_connection_id, connection_id = % ack.connection_id,
-        prev_connection_duration_ms = outage.prev_connection_duration_ms, silent_gap_ms,
-        detect_ms = outage.detect_ms, backoff_total_ms = backoff_total.as_millis() as
-        u64, since_last_probe_monotonic_ms = outage.since_last_probe_monotonic_ms,
-        since_last_probe_wall_ms = outage.since_last_probe_wall_ms, clock_jump_ms =
-        outage.clock_jump_ms, "server reconnect succeeded"
+        attempt,
+        sessions_replayed,
+        cause = outage.cause.label(),
+        close_code = ?outage.cause.close_code(),
+        error_detail = ?outage.cause.detail(),
+        prev_connection_id = ?outage.prev_connection_id,
+        connection_id = %ack.connection_id,
+        prev_connection_duration_ms = outage.prev_connection_duration_ms,
+        silent_gap_ms,
+        detect_ms = outage.detect_ms,
+        backoff_total_ms = backoff_total.as_millis() as u64,
+        since_last_probe_monotonic_ms = outage.since_last_probe_monotonic_ms,
+        since_last_probe_wall_ms = outage.since_last_probe_wall_ms,
+        clock_jump_ms = outage.clock_jump_ms,
+        "server reconnect succeeded"
     );
     crate::metrics::reconnect_cause(outage.cause.label());
     crate::metrics::reconnect_gap_observe(silent_gap_ms as f64 / 1_000.0);
@@ -2045,14 +2146,15 @@ mod tests {
             classify_stream_end(inner, None),
             DisconnectCause::Eof
         ));
-        assert!(
-            matches!(classify_stream_end(inner, Some("reset by peer".to_owned())),
-            DisconnectCause::ReadError(detail) if detail == "reset by peer")
-        );
+        assert!(matches!(
+            classify_stream_end(inner, Some("reset by peer".to_owned())),
+            DisconnectCause::ReadError(detail) if detail == "reset by peer"
+        ));
         *inner.writer_error.lock() = Some("ping send failed: broken pipe".to_owned());
-        assert!(matches!(classify_stream_end(inner, None),
-            DisconnectCause::WriteError(detail) if detail ==
-            "ping send failed: broken pipe"));
+        assert!(matches!(
+            classify_stream_end(inner, None),
+            DisconnectCause::WriteError(detail) if detail == "ping send failed: broken pipe"
+        ));
         assert!(
             inner.writer_error.lock().is_none(),
             "classification must consume the recorded write error"
@@ -2082,7 +2184,7 @@ mod tests {
             id: JsonRpcId::from_request_id(&request_id),
             session_id: Some(session.clone()),
             method: Method::Hook.as_wire_str().to_owned(),
-            params: serde_json::json!({ "k" : "v" }),
+            params: serde_json::json!({ "k": "v" }),
         };
         let call = tokio::spawn(async move {
             conn.call_request_with_timeout(request_id, &req, Duration::from_secs(5))
@@ -2098,10 +2200,12 @@ mod tests {
             sent_value["method"].as_str(),
             Some(Method::Hook.as_wire_str())
         );
-        let outcome = demux.route(serde_json::json!(
-            { "jsonrpc" : "2.0", "id" : id_str, "session_id" : session.as_str(),
-            "result" : { "ok" : true }, }
-        ));
+        let outcome = demux.route(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id_str,
+            "session_id": session.as_str(),
+            "result": { "ok": true },
+        }));
         assert_eq!(outcome, crate::demux::RouteOutcome::Response);
         let resp = call
             .await
@@ -2110,7 +2214,7 @@ mod tests {
         let ResponseOutcome::Result(value) = resp.outcome else {
             panic!("expected a result outcome");
         };
-        assert_eq!(value, serde_json::json!({ "ok" : true }));
+        assert_eq!(value, serde_json::json!({ "ok": true }));
     }
     #[tokio::test]
     async fn call_request_reclaims_waiter_on_send_failure() {
@@ -2271,10 +2375,12 @@ mod tests {
     #[tokio::test]
     async fn early_subscribed_receiver_buffers_pre_run_connection_notifications() {
         let (conn, demux, _outbound_rx) = test_connection();
-        let outcome = demux.route(serde_json::json!(
-            { "jsonrpc" : "2.0", "id" : "b1", "method" : "session.bind", "params"
-            : { "session_id" : "s1" }, }
-        ));
+        let outcome = demux.route(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "b1",
+            "method": "session.bind",
+            "params": { "session_id": "s1" },
+        }));
         assert_eq!(outcome, crate::demux::RouteOutcome::Notification);
         let mut rx = conn
             .take_early_notifications()
@@ -2346,11 +2452,12 @@ mod tests {
                         return;
                     }
                     let _ = ws.next().await;
-                    let ack = serde_json::json!(
-                        { "connection_id" : format!("mock-conn-{n}"), "user_id" : "test",
-                        "computer_hub_version" : "test", "supported_protocol_versions" :
-                        ["1.0.0"], }
-                    );
+                    let ack = serde_json::json!({
+                        "connection_id": format!("mock-conn-{n}"),
+                        "user_id": "test",
+                        "computer_hub_version": "test",
+                        "supported_protocol_versions": ["1.0.0"],
+                    });
                     if ws
                         .send(tokio_tungstenite::tungstenite::Message::Text(
                             ack.to_string().into(),
@@ -2638,9 +2745,8 @@ mod tests {
             );
             tokio::pin!(phase);
             tokio::select! {
-                _ = phase.as_mut() =>
-                panic!("idle-but-healthy connection tripped the deadline"), _ =
-                tokio::time::sleep(deadline * 4) => {}
+                _ = phase.as_mut() => panic!("idle-but-healthy connection tripped the deadline"),
+                _ = tokio::time::sleep(deadline * 4) => {}
             }
         }
         ctl_tx.send(WriterControl::Pause).await.expect("pause");
@@ -2660,8 +2766,9 @@ mod tests {
             tokio::pin!(phase);
             tokio::select! {
                 _ = phase.as_mut() => {
-                panic!("idle connection tripped the deadline after Pause→Resume") } _ =
-                tokio::time::sleep(deadline * 4) => {}
+                    panic!("idle connection tripped the deadline after Pause→Resume")
+                }
+                _ = tokio::time::sleep(deadline * 4) => {}
             }
         }
         writer_stop_tx.send(()).await.expect("stop");

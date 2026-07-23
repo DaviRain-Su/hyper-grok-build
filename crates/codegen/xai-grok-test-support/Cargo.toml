@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 futures-util = { workspace = true }
+portable-pty = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
@@ -21,8 +22,10 @@ tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+url = { workspace = true }
 xai-acp-lib = { workspace = true }
 xai-grok-models = { workspace = true }
+xai-tty-utils = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

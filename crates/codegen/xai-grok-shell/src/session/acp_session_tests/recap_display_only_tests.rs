@@ -64,6 +64,7 @@ async fn queue_input_user_prompt_bumps_recap_epoch() {
                     None,
                     false,
                     None,
+                    /*tool_overrides_update*/ None,
                     respond_to,
                     None,
                     None,
@@ -103,6 +104,7 @@ async fn queue_input_synthetic_does_not_bump_recap_epoch() {
                     None,
                     false,
                     None,
+                    /*tool_overrides_update*/ None,
                     respond_to,
                     None,
                     None,
@@ -696,6 +698,166 @@ async fn recap_request_rides_parent_prompt_cache() {
                 tools.len(),
                 main_turn_specs.len(),
                 "recap must send exactly the main turn's tool specs"
+            );
+        })
+        .await;
+}
+
+/// Hosted tools serialize into the token prefix on the Responses path, so a recap in a backend-search session must send the main turn's hosted
+/// tools or its prefix diverges and cold-misses the cache.
+#[tokio::test(flavor = "current_thread")]
+async fn recap_request_sends_hosted_tools_under_backend_search() {
+    use xai_grok_sampling_types::HostedTool;
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+
+            // Backend-search fixture: agent carries hosted tools and both gates are on.
+            {
+                let mut agent_slot = actor.agent.borrow_mut();
+                let agent = &*agent_slot;
+                *agent_slot = xai_grok_agent::Agent::new(
+                    agent.definition().clone(),
+                    agent.prompt_context().clone(),
+                    agent.system_prompt().to_string(),
+                    std::sync::Arc::clone(agent.tool_bridge()),
+                    agent.reminder_policy().clone(),
+                    agent.compaction_policy().clone(),
+                    vec![HostedTool::WebSearch { options: None }],
+                    true,
+                );
+            }
+            actor.supports_backend_search.set(true);
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("You asked about the borrow checker.");
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("you are a coding agent"),
+                ConversationItem::user("explain the borrow checker"),
+                ConversationItem::assistant("it enforces shared-xor-mutable"),
+            ]);
+
+            actor.handle_recap(false).await;
+
+            let requests = server.requests();
+            let recap_req = requests
+                .iter()
+                .rev()
+                .find(|r| r.path.contains("responses"))
+                .expect("a responses request must be recorded");
+            let body = recap_req.body.as_ref().expect("recap body must be JSON");
+            let tools = body["tools"].as_array().expect("tools must be present");
+
+            assert!(
+                tools
+                    .iter()
+                    .any(|t| t["type"].as_str() == Some("web_search")),
+                "recap must send the main turn's hosted tools: {tools:?}"
+            );
+            // Function tools must still match the main turn's specs exactly.
+            let main_turn_specs =
+                actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
+            assert!(!main_turn_specs.is_empty(), "test env must expose tools");
+            let function_tools = tools
+                .iter()
+                .filter(|t| t["type"].as_str() == Some("function"))
+                .count();
+            assert_eq!(
+                function_tools,
+                main_turn_specs.len(),
+                "hosted tools augment, not replace, the main turn's function tools"
+            );
+        })
+        .await;
+}
+
+/// A recap must serialize the main turn's *effective* hosted tools, so an active per-turn cutoff
+/// reaches the recap's `x_search` entry rather than an unbounded tool.
+#[tokio::test(flavor = "current_thread")]
+async fn recap_hosted_tools_reflect_the_active_per_turn_override() {
+    use xai_grok_sampling_types::{HostedTool, SearchDateBound, ToolOverrides, XSearchOptions};
+    use xai_grok_test_support::MockInferenceServer;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+
+            // Backend-search fixture seeded with an *unbounded* x_search (options: None), so any
+            // bound the recap sends can only have come from the per-turn override below.
+            {
+                let mut agent_slot = actor.agent.borrow_mut();
+                let agent = &*agent_slot;
+                *agent_slot = xai_grok_agent::Agent::new(
+                    agent.definition().clone(),
+                    agent.prompt_context().clone(),
+                    agent.system_prompt().to_string(),
+                    std::sync::Arc::clone(agent.tool_bridge()),
+                    agent.reminder_policy().clone(),
+                    agent.compaction_policy().clone(),
+                    vec![HostedTool::XSearch { options: None }],
+                    true,
+                );
+            }
+            actor.supports_backend_search.set(true);
+
+            // A per-turn cutoff (toDate only), with no definition seed: the recap must reflect it.
+            *actor.tool_overrides.borrow_mut() = Some(ToolOverrides {
+                x_search: Some(XSearchOptions {
+                    date_bound: Some(
+                        SearchDateBound::new(None, Some("2024-03-15".to_string())).unwrap(),
+                    ),
+                }),
+                web_search: None,
+            });
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("recap summary");
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("you are a coding agent"),
+                ConversationItem::user("explain the borrow checker"),
+                ConversationItem::assistant("it enforces shared-xor-mutable"),
+            ]);
+
+            actor.handle_recap(false).await;
+
+            let requests = server.requests();
+            let recap_req = requests
+                .iter()
+                .rev()
+                .find(|r| r.path.contains("responses"))
+                .expect("a responses request must be recorded");
+            let body = recap_req.body.as_ref().expect("recap body must be JSON");
+            let tools = body["tools"].as_array().expect("tools must be present");
+            let x_search = tools
+                .iter()
+                .find(|t| t["type"].as_str() == Some("x_search"))
+                .expect("recap must send the x_search hosted tool");
+            assert_eq!(
+                x_search["to_date"].as_str(),
+                Some("2024-03-15"),
+                "recap must serialize the per-turn override's cutoff, not the unbounded seed: {x_search:?}"
             );
         })
         .await;

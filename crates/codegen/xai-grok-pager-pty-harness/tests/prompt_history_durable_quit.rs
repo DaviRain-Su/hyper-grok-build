@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use xai_grok_pager_pty_harness::{ContentController, PtyHarness, keys, pager_binary};
+use xai_grok_pager_pty_harness::{ContentController, PtyExitPoll, PtyHarness, keys, pager_binary};
 
 const ROWS: u16 = 50;
 const COLS: u16 = 120;
@@ -75,11 +75,13 @@ async fn run() -> Result<()> {
     // graceful teardown (incl. the show-cursor restore) for the assertions below.
     first.update(Duration::from_secs(10));
 
-    let code = first.wait_exit_code(Duration::from_secs(10));
+    let exit = first
+        .wait_exit_code(Duration::from_secs(10))
+        .context("wait for double-Ctrl+C exit")?;
     assert_eq!(
-        code,
-        Some(0),
-        "double Ctrl+C should exit via the graceful quit (exit 0), got {code:?}"
+        exit,
+        PtyExitPoll::Exited(0),
+        "double Ctrl+C should exit via the graceful quit (exit 0), got {exit:?}"
     );
     assert!(
         terminal_restored(&first, pre),
@@ -156,11 +158,13 @@ async fn run_sigint() -> Result<()> {
 
     // Pre-fix the SIGINT handler called std::process::exit(130); routing it
     // through the graceful quit exits 0 — the deterministic Part-B regression catch.
-    let code = first.wait_exit_code(Duration::from_secs(10));
+    let exit = first
+        .wait_exit_code(Duration::from_secs(10))
+        .context("wait for SIGINT exit")?;
     assert_eq!(
-        code,
-        Some(0),
-        "real SIGINT should route through the graceful quit (exit 0), got {code:?}"
+        exit,
+        PtyExitPoll::Exited(0),
+        "real SIGINT should route through the graceful quit (exit 0), got {exit:?}"
     );
     assert!(
         terminal_restored(&first, pre),

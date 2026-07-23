@@ -97,7 +97,7 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
     for _ in 0..30 {
         harness.inject_keys(keys::PGUP)?;
         harness.update(Duration::from_millis(35));
-        if !harness.is_running() {
+        if !harness.is_running()? {
             bail!("pager exited while PageUp scrolling");
         }
     }
@@ -126,7 +126,7 @@ async fn scroll_up_from_follow_bottom_then_back_down() -> Result<()> {
     for _ in 0..35 {
         harness.inject_keys(keys::PGDN)?;
         harness.update(Duration::from_millis(35));
-        if !harness.is_running() {
+        if !harness.is_running()? {
             bail!("pager exited while PageDown scrolling");
         }
     }

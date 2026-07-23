@@ -546,7 +546,7 @@ impl StorageClient {
     /// These become the headers:
     ///   - `x-grok-client-version`
     ///   - `x-grok-client-identifier` (one of "grok-shell", "grok-pager",
-    ///     "grok-desktop", "grok-extension")
+    ///     "grok-desktop", "grok-extension", "grok-agent-sdk")
     ///
     /// Server-side logs in `cli-chat-proxy` and analytics queries now
     /// surface these values, making it easy to attribute 400/403 errors to

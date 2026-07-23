@@ -169,6 +169,10 @@ impl SessionActor {
     }
 
     pub(super) async fn handle_completion(&self, prompt_id: String, result: PromptTurnResult) {
+        let result = result.map(|mut ok| {
+            ok.tool_overrides = self.effective_tool_overrides();
+            ok
+        });
         let became_idle = {
             let mut current_prompt_id = self
                 .current_prompt_id

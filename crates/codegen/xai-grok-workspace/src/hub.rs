@@ -311,7 +311,7 @@ impl HubHandle {
         const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.server.shutdown()).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(error = % e, "tool server shutdown error"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "tool server shutdown error"),
             Err(_) => tracing::warn!("tool server shutdown timed out"),
         }
         if let Some(task) = self.server_task {
@@ -496,8 +496,10 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                             _ => format!("tool permission denied for {}", self.name()),
                         };
                         tracing::info!(
-                            tool = % self.name(), session = % session_id, call_id = %
-                            call_id, ? outcome,
+                            tool = %self.name(),
+                            session = %session_id,
+                            call_id = %call_id,
+                            ?outcome,
                             "tool-permission denied via hub; rejecting tool call"
                         );
                         return terminal_only(Err(ToolError::new(
@@ -508,7 +510,8 @@ impl ToolServerHandler for SessionRoutedToolHandler {
                 }
                 None => {
                     tracing::warn!(
-                        tool = % self.name(), session = % session_id,
+                        tool = %self.name(),
+                        session = %session_id,
                         "GROK_HITL_PERMISSION_LIVE set but no hub ToolServer; rejecting guarded tool"
                     );
                     return terminal_only(Err(ToolError::new(
@@ -520,7 +523,9 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         }
         let toolset = session.toolset();
         tracing::debug!(
-            tool = % self.name(), call_id = % call_id, session = % session_id,
+            tool = %self.name(),
+            call_id = %call_id,
+            session = %session_id,
             "dispatching tool call"
         );
         tracker.tool_call_started(&call_id, self.name(), hub_session.as_deref());
@@ -530,20 +535,52 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         let session_label = session_id.to_owned();
         let guard = CallCompletedGuard::new(tracker, call_id, Some(session_label.clone()));
         Box::pin(async_stream::stream! {
-            use futures::StreamExt; let mut _guard = guard; let mut inner = inner;
-            while let Some(item) = inner.next(). await { match item {
-            ToolStreamItem::Progress(p) => { yield ToolStreamItem::Progress(p); }
-            ToolStreamItem::Terminal(Ok(run_result)) => { _guard
-            .set_outcome(xai_file_utils::events::ToolOutcome::Success); yield
-            ToolStreamItem::Terminal(Ok(run_result
-            .into_typed_tool_output(tool_id),)); return; }
-            ToolStreamItem::Terminal(Err(e)) => { tracing::error!(tool = % name,
-            session = % session_label, error = % e, kind = % e.variant_name(),
-            "tool call failed"); _guard
-            .set_outcome(xai_file_utils::events::ToolOutcome::Error); yield
-            ToolStreamItem::Terminal(Err(e)); return; } } } yield
-            ToolStreamItem::Terminal(Err(ToolError::new(ToolErrorKind::TerminalError,
-            "tool stream ended without a terminal",)));
+            use futures::StreamExt;
+            // Move the guard into the stream so completion accounting spans the
+            // full stream lifetime (and fires on drop if never consumed).
+            let mut _guard = guard;
+            let mut inner = inner;
+            while let Some(item) = inner.next().await {
+                match item {
+                    // Rollout gate lives downstream in the sampler.
+                    ToolStreamItem::Progress(p) => {
+                        yield ToolStreamItem::Progress(p);
+                    }
+                    ToolStreamItem::Terminal(Ok(run_result)) => {
+                        // Background-task accounting lives in the activity feed, not here.
+                        _guard.set_outcome(xai_file_utils::events::ToolOutcome::Success);
+                        yield ToolStreamItem::Terminal(Ok(
+                            run_result.into_typed_tool_output(tool_id),
+                        ));
+                        return;
+                    }
+                    ToolStreamItem::Terminal(Err(e)) => {
+                        tracing::error!(
+                            tool = %name,
+                            session = %session_label,
+                            error = %e,
+                            kind = %e.variant_name(),
+                            "tool call failed"
+                        );
+                        _guard.set_outcome(xai_file_utils::events::ToolOutcome::Error);
+                        // Forward the inner ToolError verbatim so the harness
+                        // and dashboards keep its kind + structured details
+                        // (e.g. invalid-argument vs crashed subprocess).
+                        yield ToolStreamItem::Terminal(Err(e));
+                        return;
+                    }
+                }
+            }
+            // Defensive fallback: every terminal arm above `return`s, so this is
+            // only reached if the inner `call_streaming` stream ended without a
+            // terminal. That is unreachable under the `call_streaming` contract
+            // (it yields exactly one terminal on every code path), but we emit a
+            // terminal here anyway so the "exactly one Terminal" invariant is
+            // enforced locally rather than merely inherited from the inner layer.
+            yield ToolStreamItem::Terminal(Err(ToolError::new(
+                ToolErrorKind::TerminalError,
+                "tool stream ended without a terminal",
+            )));
         })
     }
 }
@@ -563,8 +600,9 @@ impl ToolServerHandler for SessionRoutedToolHandler {
 pub(crate) fn hub_tool_ids_to_tool_configs(tool_ids: &[ToolId]) -> Vec<ToolConfig> {
     if !tool_ids.is_empty() {
         tracing::info!(
-            count = tool_ids.len(), tools = ? tool_ids.iter().map(| id | id.as_str())
-            .collect::< Vec < _ >> (), "Registering remote tools"
+            count = tool_ids.len(),
+            tools = ?tool_ids.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+            "Registering remote tools"
         );
     }
     tool_ids
@@ -724,7 +762,7 @@ mod tests {
         let stream = handler
             .handle_call(
                 ctx,
-                serde_json::json!({ "target_file" : "does-not-exist.txt" }),
+                serde_json::json!({ "target_file": "does-not-exist.txt" }),
             )
             .await;
         let items: Vec<_> = stream.collect().await;
@@ -745,7 +783,7 @@ mod tests {
         let handle = crate::handle::tests::make_handle();
         let session = handle.session("main").expect("main session present");
         let toolset = session.toolset();
-        let args = serde_json::json!({ "target_file" : "missing-file.txt" });
+        let args = serde_json::json!({ "target_file": "missing-file.txt" });
         let reference = toolset
             .call("read_file", args.clone(), "ref-call", None)
             .await;
@@ -792,7 +830,7 @@ mod tests {
         let handler = make_handler(&handle, "read_file");
         let (ctx, _call_id) = make_ctx("main");
         let stream = handler
-            .handle_call(ctx, serde_json::json!({ "target_file" : "x.txt" }))
+            .handle_call(ctx, serde_json::json!({ "target_file": "x.txt" }))
             .await;
         let items: Vec<_> = stream.collect().await;
         assert_eq!(items.len(), 1, "draining yields exactly one item");
@@ -818,7 +856,7 @@ mod tests {
         let handler = make_handler(&handle, "read_file");
         let (ctx, _call_id) = make_ctx("main");
         let stream = handler
-            .handle_call(ctx, serde_json::json!({ "target_file" : "x.txt" }))
+            .handle_call(ctx, serde_json::json!({ "target_file": "x.txt" }))
             .await;
         assert_eq!(
             tracker.snapshot().active_tool_calls,
@@ -889,7 +927,7 @@ mod tests {
             .register_tool(
                 tool_name.to_owned(),
                 GateStreamingStub,
-                Some(serde_json::json!({ "type" : "object", "properties" : {} })),
+                Some(serde_json::json!({"type": "object", "properties": {}})),
             )
             .expect("register_tool must succeed");
     }
@@ -1052,15 +1090,12 @@ mod tests {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         run_tool_in_session(
-            &handle,
-            "main",
-            "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test", "is_background" :
-                true }
-            ),
-        )
-        .await;
+                &handle,
+                "main",
+                "run_terminal_cmd",
+                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+            )
+            .await;
         let busy = wait_until(
             &tracker,
             |s| s.background_tasks == 1 && s.idle_since_ms.is_none(),
@@ -1087,9 +1122,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_background_on_timeout_increments_then_decrements_through_real_wiring() {
         let mut cfg = bg_config();
-        cfg.tools[0].params = serde_json::json!(
-            { "enabled_background" : true, "auto_background_on_timeout" : true, }
-        )
+        cfg.tools[0].params = serde_json::json!({
+            "enabled_background": true,
+            "auto_background_on_timeout": true,
+        })
         .as_object()
         .cloned();
         let handle = make_bg_handle_with_config(cfg);
@@ -1098,9 +1134,7 @@ mod tests {
             &handle,
             "main",
             "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test", "timeout" : 300 }
-            ),
+            serde_json::json!({ "command": "sleep 2", "description": "test", "timeout": 300 }),
         )
         .await;
         let busy = wait_until(
@@ -1134,9 +1168,7 @@ mod tests {
             &handle,
             "main",
             "monitor",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test monitor" }
-            ),
+            serde_json::json!({ "command": "sleep 2", "description": "test monitor" }),
         )
         .await;
         let busy = wait_until(
@@ -1163,25 +1195,19 @@ mod tests {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         run_tool_in_session(
-            &handle,
-            "main",
-            "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test", "is_background" :
-                true }
-            ),
-        )
-        .await;
+                &handle,
+                "main",
+                "run_terminal_cmd",
+                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+            )
+            .await;
         run_tool_in_session(
-            &handle,
-            "main",
-            "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 5", "description" : "test", "is_background" :
-                true }
-            ),
-        )
-        .await;
+                &handle,
+                "main",
+                "run_terminal_cmd",
+                serde_json::json!({ "command": "sleep 5", "description": "test", "is_background": true }),
+            )
+            .await;
         let two = wait_until(
             &tracker,
             |s| s.background_tasks == 2,
@@ -1229,15 +1255,12 @@ mod tests {
         cfg.tool_config = Some(bg_config());
         handle.fork_session(cfg).await.expect("fork child session");
         run_tool_in_session(
-            &handle,
-            "child",
-            "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test", "is_background" :
-                true }
-            ),
-        )
-        .await;
+                &handle,
+                "child",
+                "run_terminal_cmd",
+                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+            )
+            .await;
         let busy = wait_until(
             &tracker,
             |s| s.background_tasks == 1,
@@ -1269,7 +1292,7 @@ mod tests {
             .compose_session_notification_handle(Some(sys))
             .expect("system-only sink")
             .send(bg_started_notif("sys-only"));
-        assert!(matches!(sys_rx.try_recv(), Ok(n) if started_id(& n) == "sys-only"));
+        assert!(matches!(sys_rx.try_recv(), Ok(n) if started_id(&n) == "sys-only"));
         let (activity, mut activity_rx) = ToolNotificationHandle::channel();
         shared
             .activity_notify_handle
@@ -1278,18 +1301,18 @@ mod tests {
             .compose_session_notification_handle(None)
             .expect("activity-only sink")
             .send(bg_started_notif("act-only"));
-        assert!(matches!(activity_rx.try_recv(), Ok(n) if started_id(& n) == "act-only"));
+        assert!(matches!(activity_rx.try_recv(), Ok(n) if started_id(&n) == "act-only"));
         let (sys2, mut sys2_rx) = ToolNotificationHandle::channel();
         shared
             .compose_session_notification_handle(Some(sys2))
             .expect("tee sink")
             .send(bg_started_notif("both"));
         assert!(
-            matches!(activity_rx.try_recv(), Ok(n) if started_id(& n) == "both"),
+            matches!(activity_rx.try_recv(), Ok(n) if started_id(&n) == "both"),
             "tee must deliver to the activity (tracker) leg"
         );
         assert!(
-            matches!(sys2_rx.try_recv(), Ok(n) if started_id(& n) == "both"),
+            matches!(sys2_rx.try_recv(), Ok(n) if started_id(&n) == "both"),
             "tee must deliver to the system.notify leg"
         );
     }
@@ -1343,15 +1366,12 @@ mod tests {
             .await
             .expect("update_tool_config rebuilds the toolset");
         run_tool_in_session(
-            &handle,
-            "main",
-            "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test", "is_background" :
-                true }
-            ),
-        )
-        .await;
+                &handle,
+                "main",
+                "run_terminal_cmd",
+                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+            )
+            .await;
         let busy = wait_until(
             &tracker,
             |s| s.background_tasks == 1,
@@ -1373,15 +1393,12 @@ mod tests {
             .await;
         assert!(rebuilt >= 1, "the main session must be re-resolved");
         run_tool_in_session(
-            &handle,
-            "main",
-            "run_terminal_cmd",
-            serde_json::json!(
-                { "command" : "sleep 2", "description" : "test", "is_background" :
-                true }
-            ),
-        )
-        .await;
+                &handle,
+                "main",
+                "run_terminal_cmd",
+                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+            )
+            .await;
         let busy = wait_until(
             &tracker,
             |s| s.background_tasks == 1,

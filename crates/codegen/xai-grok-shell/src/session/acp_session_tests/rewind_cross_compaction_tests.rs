@@ -49,27 +49,12 @@ fn checkpoint_update(id: &str, prompt_index_at_compaction: usize) -> SessionUpda
     }))
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn rewind_pre_compaction_with_cancelled_turns_truncates_context_gb2961() {
-    let local = tokio::task::LocalSet::new();
-    local.run_until(run_rewind_scenario()).await;
-}
-
-async fn run_rewind_scenario() {
-    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
-
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    actor.session_info.id = acp::SessionId::new(format!("rw-e2e-{unique}"));
-
-    let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+/// Writes the shared cross-compaction fixture into `session_dir`: a checkpoint
+/// file (compacted `[SYS, SUMMARY]` at prompt 5) plus an `updates.jsonl` with
+/// prompts P0..P6 and the checkpoint record between P4 and P5.
+fn write_compacted_session_fixture(session_dir: &std::path::Path, ckpt_id: &str) {
     std::fs::create_dir_all(session_dir.join("compaction_checkpoints")).unwrap();
 
-    let ckpt_id = "ckpt5";
     let ckpt_file = CompactionCheckpointFile {
         checkpoint_id: ckpt_id.to_string(),
         prompt_index_at_compaction: 5,
@@ -106,6 +91,27 @@ async fn run_rewind_scenario() {
         content.push(b'\n');
     }
     std::fs::write(session_dir.join("updates.jsonl"), content).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_pre_compaction_with_cancelled_turns_truncates_context_gb2961() {
+    let local = tokio::task::LocalSet::new();
+    local.run_until(run_rewind_scenario()).await;
+}
+
+async fn run_rewind_scenario() {
+    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    actor.session_info.id = acp::SessionId::new(format!("rw-e2e-{unique}"));
+
+    let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+    write_compacted_session_fixture(&session_dir, "ckpt5");
 
     let mut snap = actor
         .chat_state_handle
@@ -287,45 +293,7 @@ async fn run_clears_marker_scenario() {
     actor.session_info.id = acp::SessionId::new(format!("rw-marker-{unique}"));
 
     let session_dir = crate::session::persistence::session_dir(&actor.session_info);
-    std::fs::create_dir_all(session_dir.join("compaction_checkpoints")).unwrap();
-
-    let ckpt_id = "ckptm";
-    let ckpt_file = CompactionCheckpointFile {
-        checkpoint_id: ckpt_id.to_string(),
-        prompt_index_at_compaction: 5,
-        compacted_history: vec![
-            ConversationItem::system("SYS"),
-            ConversationItem::user("SUMMARY"),
-        ],
-        schema_version: 1,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        original_user_info: Some("UI0".to_string()),
-        reread_file_paths: vec![],
-    };
-    std::fs::write(
-        session_dir.join(format!("compaction_checkpoints/{ckpt_id}.json")),
-        serde_json::to_vec(&ckpt_file).unwrap(),
-    )
-    .unwrap();
-
-    let updates = vec![
-        user_chunk("P0", 0),
-        user_chunk("P1", 1),
-        user_chunk("P2", 2),
-        user_chunk("P3", 3),
-        user_chunk("P4", 4),
-        checkpoint_update(ckpt_id, 5),
-        user_chunk("P5", 5),
-        agent_chunk("R5"),
-        user_chunk("P6", 6),
-    ];
-    let mut content = Vec::new();
-    for u in &updates {
-        let env = SessionUpdateEnvelope::from_update(u).unwrap();
-        content.extend(serde_json::to_vec(&env).unwrap());
-        content.push(b'\n');
-    }
-    std::fs::write(session_dir.join("updates.jsonl"), content).unwrap();
+    write_compacted_session_fixture(&session_dir, "ckptm");
 
     let mut snap = actor
         .chat_state_handle
@@ -385,5 +353,111 @@ async fn run_clears_marker_scenario() {
         header.as_deref(),
         Some("1"),
         "header must report 1 after the summary is dropped (got {header:?})"
+    );
+}
+
+/// Forking a session must carry the `compaction_checkpoints/{uuid}.json` files
+/// along with the copied checkpoint records — replay hard-requires each
+/// referenced file, so without the copy every rewind in the forked session
+/// fails with "compaction checkpoint file missing". Drives the production
+/// `fork_session` path so this test tracks its copy wiring.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_succeeds_in_forked_session_with_compaction_checkpoint() {
+    let local = tokio::task::LocalSet::new();
+    local.run_until(run_forked_rewind_scenario()).await;
+}
+
+async fn run_forked_rewind_scenario() {
+    use crate::session::fork::{ForkSessionRequest, fork_session};
+    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+
+    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut source_info = actor.session_info.clone();
+    source_info.id = acp::SessionId::new(format!("rw-fork-src-{unique}"));
+    let fork_id = format!("rw-fork-dst-{unique}");
+    actor.session_info.id = acp::SessionId::new(fork_id.clone());
+
+    // fork_session reads the source summary, so init a real session first.
+    JsonlStorageAdapter::with_root(crate::util::grok_home::grok_home())
+        .init_session(
+            &source_info,
+            crate::session::persistence::default_model_id(),
+        )
+        .await
+        .unwrap();
+    let source_dir = crate::session::persistence::session_dir(&source_info);
+    write_compacted_session_fixture(&source_dir, "ckptf");
+
+    fork_session(
+        ForkSessionRequest {
+            source_session_id: source_info.id.to_string(),
+            source_cwd: source_info.cwd.clone(),
+            new_cwd: actor.session_info.cwd.clone(),
+            new_session_id: Some(fork_id.clone()),
+            ..Default::default()
+        },
+        "test-agent",
+        None,
+    )
+    .await
+    .expect("fork_session ok");
+
+    let target_dir = crate::session::persistence::session_dir(&actor.session_info);
+    let forked_checkpoint = target_dir.join("compaction_checkpoints/ckptf.json");
+
+    // Simulate the forked session's live post-compaction state.
+    let mut snap = actor
+        .chat_state_handle
+        .snapshot()
+        .await
+        .expect("snapshot available");
+    snap.conversation = vec![
+        ConversationItem::system("SYS"),
+        ConversationItem::user("UI1"),
+        ConversationItem::user("SUMMARY"),
+        ConversationItem::user("P5"),
+        ConversationItem::assistant("R5"),
+        ConversationItem::user("P6"),
+    ];
+    snap.prompt_index = 7;
+    snap.prompt_texts = (0..7).map(|i| format!("P{i}")).collect();
+    snap.last_compaction_prompt_index = Some(5);
+    actor.chat_state_handle.restore_snapshot(snap);
+
+    // Rewind to a post-compaction target: replay must load the checkpoint
+    // file from the FORKED session dir.
+    let resp = actor
+        .handle_rewind(RewindRequest {
+            target_prompt_index: 6,
+            force: true,
+            mode: RewindMode::ConversationOnly,
+        })
+        .await
+        .expect("handle_rewind ok");
+
+    let checkpoint_copied = forked_checkpoint.is_file();
+    let prompt_index = actor.chat_state_handle.get_prompt_index().await;
+
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let _ = std::fs::remove_dir_all(&target_dir);
+
+    assert!(
+        checkpoint_copied,
+        "fork must copy the referenced checkpoint file"
+    );
+    assert!(
+        resp.success,
+        "rewind in a forked session must succeed once checkpoint files are copied: {resp:?}"
+    );
+    assert_eq!(
+        prompt_index, 6,
+        "prompt_index must be reset to the rewind target"
     );
 }

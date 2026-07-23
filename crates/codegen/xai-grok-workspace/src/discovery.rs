@@ -204,13 +204,19 @@ fn toml_to_json(v: &toml::Value) -> Value {
 /// merges rules from requirements.toml, managed-settings.json,
 /// managed_config.toml, config.toml, and `.claude/settings.json`.
 ///
+/// `project_trusted` gates project-tier permission sources (same contract as
+/// env/hooks/plugins). Hub/cloud callers outside the local folder-trust model
+/// should pass `true`.
+///
 /// Returns a JSON object with `sources`, `loaded` (rule count), and
 /// `skipped` (unrecognized rules). Returns `Value::Null` if no
 /// permission sources are configured.
-pub async fn load_permissions(root_cwd: &Path) -> Value {
+pub async fn load_permissions(root_cwd: &Path, project_trusted: bool) -> Value {
     use crate::permission::resolution;
 
-    let Some(resolved) = resolution::resolve_permissions_with_provenance(root_cwd).await else {
+    let Some(resolved) =
+        resolution::resolve_permissions_with_provenance(root_cwd, project_trusted).await
+    else {
         return Value::Null;
     };
 
@@ -536,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn load_permissions_returns_valid_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = load_permissions(tmp.path()).await;
+        let result = load_permissions(tmp.path(), true).await;
         // Result is either Null (no sources) or an object with
         // sources, loaded, and skipped fields. Both branches assert
         // a definite pass criterion.
@@ -563,7 +569,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = load_permissions(tmp.path()).await;
+        let result = load_permissions(tmp.path(), true).await;
         assert!(result.is_object(), "should return an object, got {result}");
         assert!(result["sources"].is_array(), "sources should be an array");
         assert!(result["loaded"].is_number(), "loaded should be a number");

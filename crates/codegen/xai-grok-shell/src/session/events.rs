@@ -209,6 +209,7 @@ pub(crate) fn prior_turn_interrupt_from_cancellation(
         CancellationCategory::PermissionRejected => Some(PriorTurnInterrupt::PermissionRejected),
         CancellationCategory::PermissionCancelled => Some(PriorTurnInterrupt::PermissionCancelled),
         CancellationCategory::HookDenied => None,
+        CancellationCategory::ActionStationarity => None,
     }
 }
 

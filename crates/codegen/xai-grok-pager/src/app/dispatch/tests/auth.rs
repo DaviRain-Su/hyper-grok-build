@@ -303,6 +303,158 @@ fn login_from_welcome_does_not_stash_return_view() {
     assert_eq!(app.auth_return_view, None);
 }
 
+/// Compact-auth recovery: hold prompt across auto-compact 401, stash on
+/// PromptResponse, resubmit on mid-session AuthComplete.
+#[test]
+fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
+    use crate::app::acp_handler::apply_session_event_for_test;
+    use crate::app::agent::{AgentState, InFlightPrompt};
+    use crate::scrollback::EntryId;
+    use crate::scrollback::block::RenderBlock;
+    use xai_grok_shell::extensions::notification::{RetryState, SessionUpdate as XaiSessionUpdate};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-compact-auth-e2e"));
+        agent.session.current_prompt_id = Some("prompt-1".into());
+        agent.session.in_flight_prompt = Some(InFlightPrompt {
+            text: "please continue after login".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+
+        apply_session_event_for_test(
+            &XaiSessionUpdate::AutoCompactStarted {
+                tokens_used: 180_000,
+                context_window: 200_000,
+                percentage: 90,
+                reason: "threshold".into(),
+            },
+            &mut agent.session,
+            &mut agent.scrollback,
+        );
+        assert!(
+            agent.session.in_flight_prompt.is_none(),
+            "cancel rewind must still be blocked mid-compact"
+        );
+        assert_eq!(
+            agent
+                .session
+                .compact_held_prompt
+                .as_ref()
+                .map(|p| p.text.as_str()),
+            Some("please continue after login"),
+            "must hold the prompt text for reauth auto-resubmit"
+        );
+
+        apply_session_event_for_test(
+            &XaiSessionUpdate::AutoCompactFailed {
+                error: "authentication problem — re-authenticate using /login and retry.".into(),
+            },
+            &mut agent.session,
+            &mut agent.scrollback,
+        );
+        assert!(agent.session.compact_held_prompt.is_some());
+
+        apply_session_event_for_test(
+            &XaiSessionUpdate::RetryState(RetryState::Failed {
+                error_type: "auth".into(),
+                message: "Unauthorized (401): compaction failed".into(),
+            }),
+            &mut agent.session,
+            &mut agent.scrollback,
+        );
+        let has_reauth = (0..agent.scrollback.len()).any(|i| {
+            matches!(
+                agent.scrollback.entry(i).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev))
+                    if matches!(ev.event, SessionEvent::ReAuthRequired)
+            )
+        });
+        assert!(has_reauth, "RetryState auth must show ReAuthRequired");
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("Unauthorized (401)".to_string()),
+            http_status: Some(401),
+            prompt_id: Some("prompt-1".into()),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .reauth_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("please continue after login"),
+        "PromptResponse must stash the compact-held prompt for AuthComplete"
+    );
+
+    dispatch(Action::Login, &mut app);
+    let seq = authenticating_seq(&app);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AuthComplete {
+            request_seq: seq,
+            meta: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_none(),
+        "stash consumed on AuthComplete"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+        )),
+        "AuthComplete must resubmit the prompt so compact runs again with valid auth, got: {effects:?}"
+    );
+}
+
+/// Without compact_held, clearing in_flight on compact start leaves reauth empty.
+#[test]
+fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {
+    use crate::app::agent::AgentState;
+    use crate::scrollback::block::RenderBlock;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.session_id = Some(acp::SessionId::new("sess-pre-fix"));
+        agent.session.current_prompt_id = Some("p1".into());
+        agent.session.in_flight_prompt = None;
+        agent.session.compact_held_prompt = None;
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("Unauthorized (401)".to_string()),
+            http_status: Some(401),
+            prompt_id: Some("p1".into()),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].reauth_stashed_prompt.is_none(),
+        "without compact_held / in_flight, reauth cannot stash — the pre-fix bug"
+    );
+}
+
 /// A second auth-failed turn with no rewindable prompt
 /// (`in_flight_prompt == None`) must not clobber the stash from an
 /// earlier 401.

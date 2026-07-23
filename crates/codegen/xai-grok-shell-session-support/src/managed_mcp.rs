@@ -451,7 +451,9 @@ pub async fn fetch_managed_configs(
     Ok(response.mcp_servers)
 }
 
-const GATEWAY_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// Above the server-side tool-call budget so the client is not the first
+// hop to abort a slow tool call.
+const GATEWAY_TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
 
 pub async fn call_gateway_tool(
     proxy_base_url: &str,

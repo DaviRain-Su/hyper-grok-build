@@ -162,14 +162,16 @@ fn spawn_pager(
     content: &ContentController,
     extra_env: &[(&str, &str)],
 ) -> PtyHarness {
-    let content_env = content.env_for_pager();
-    let mut env: Vec<(&str, &str)> = content_env
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    env.extend_from_slice(extra_env);
-    let mut harness = PtyHarness::new(binary, SESSION_ROWS, SESSION_COLS, &[], &env)
-        .expect("spawn pager with content");
+    let mut harness = PtyHarness::new_in_sandbox(
+        binary,
+        SESSION_ROWS,
+        SESSION_COLS,
+        &[],
+        content.sandbox(),
+        extra_env,
+        None,
+    )
+    .expect("spawn pager with content");
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");

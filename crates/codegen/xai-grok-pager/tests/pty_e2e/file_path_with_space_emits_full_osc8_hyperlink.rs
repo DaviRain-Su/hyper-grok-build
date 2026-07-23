@@ -27,13 +27,16 @@ async fn file_path_with_space_emits_full_osc8_hyperlink() {
     // The default harness PTY only sets `TERM=xterm-256color`, so brand is
     // `Unknown` and the pager deliberately skips OSC 8. Pin WezTerm so the
     // byte-level proof below is meaningful (same override as `pty_xtversion`).
-    let mut env = content.env_for_pager();
-    env.push(("TERM_PROGRAM".into(), "WezTerm".into()));
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let overrides: Vec<(String, String)> = vec![("TERM_PROGRAM".into(), "WezTerm".into())];
+    let env_refs: Vec<(&str, &str)> = overrides
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
     // Wide enough that the path does not wrap mid-segment (wrap would still
     // linkify, but we want a single-row assertion on the screen text).
-    let mut harness = PtyHarness::new(&binary, DEFAULT_ROWS, 160, &[], &env_refs)
-        .expect("spawn pager with content");
+    let mut harness =
+        PtyHarness::spawn_with_content_env(&binary, DEFAULT_ROWS, 160, &content, &[], &env_refs)
+            .expect("spawn pager with content");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)

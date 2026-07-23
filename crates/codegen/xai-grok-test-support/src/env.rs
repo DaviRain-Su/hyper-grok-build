@@ -1,10 +1,10 @@
-//! Shared environment helpers: binary resolution, git workdirs, env var setup.
+//! Binary resolution, serial env guards, and git sandbox creation.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tempfile::TempDir;
+use crate::sandbox::TestSandbox;
 
 /// RAII guard for a single environment variable in `#[serial]` tests: snapshots
 /// the prior value on construction, applies the change, then restores the prior
@@ -75,8 +75,8 @@ fn ensure_local_grok_binary(binary: &Path) {
     }
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let output = Command::new(&cargo)
-        .current_dir(workspace_root())
+    let mut cmd = Command::new(&cargo);
+    cmd.current_dir(workspace_root())
         .args([
             "build",
             "-p",
@@ -84,6 +84,10 @@ fn ensure_local_grok_binary(binary: &Path) {
             "--bin",
             "hyper",
         ])
+        .stdin(std::process::Stdio::null())
+        .envs(xai_tty_utils::pager_env());
+    xai_tty_utils::detach_std_command(&mut cmd);
+    let output = cmd
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn {cargo} to build hyper: {e}"));
 
@@ -151,38 +155,9 @@ pub fn unset_all_byok_platform_api_key_envs() -> Vec<EnvGuard> {
     guards
 }
 
-/// Temp dir with a git repo + one committed file.
-/// Forces libgit2 to fully init (the codepath that breaks with bad OpenSSL linking).
-pub fn git_workdir() -> TempDir {
-    let dir = TempDir::new().expect("create temp dir");
-    let path = dir.path();
-
-    fn run_git(args: &[&str], dir: &Path) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to spawn git {}: {e}", args.join(" ")));
-        assert!(
-            output.status.success(),
-            "git {} failed (exit {:?}):\n{}",
-            args.join(" "),
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
-    run_git(&["init"], path);
-    // Configure git user for commits (required in CI where no global config exists)
-    run_git(&["config", "user.email", "test@test.com"], path);
-    run_git(&["config", "user.name", "Test"], path);
-
-    std::fs::write(path.join("README.md"), "test file\n").expect("write test file");
-
-    run_git(&["add", "-A"], path);
-    run_git(&["commit", "-m", "init", "--no-gpg-sign"], path);
-
-    dir
+/// Create an owned, git-initialized [`TestSandbox`].
+pub fn git_workdir() -> TestSandbox {
+    TestSandbox::builder().git().build()
 }
 
 /// Point grok at the mock server with a fake API key and telemetry disabled.

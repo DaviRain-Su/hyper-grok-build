@@ -533,6 +533,7 @@ pub enum SubagentCancelOutcome {
 #[derive(Debug, Clone)]
 pub struct SubagentCompletionSummary {
     pub subagent_id: String,
+    pub owner_session_id: String,
     pub subagent_type: String,
     pub description: String,
     pub success: bool,
@@ -565,6 +566,7 @@ pub struct SubagentMultiWaitRequest {
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct SubagentCompletionsRequest {
+    pub session_id: String,
     pub suppress_ids: Vec<String>,
     #[educe(Debug(ignore))]
     pub respond_to: oneshot::Sender<Vec<SubagentCompletionSummary>>,
@@ -1286,16 +1288,19 @@ mod tests {
         let (respond_to, mut response_rx) = oneshot::channel();
 
         tx.send(super::SubagentCompletionsRequest {
+            session_id: "session-1".into(),
             suppress_ids: vec!["id-1".into(), "id-2".into()],
             respond_to,
         })
         .unwrap();
 
         let req = rx.try_recv().unwrap();
+        assert_eq!(req.session_id, "session-1");
         assert_eq!(req.suppress_ids, vec!["id-1", "id-2"]);
 
         let summaries = vec![super::SubagentCompletionSummary {
             subagent_id: "sub-1".into(),
+            owner_session_id: "session-1".into(),
             subagent_type: "general-purpose".into(),
             description: "test task".into(),
             success: true,
@@ -1374,6 +1379,7 @@ mod tests {
             .0
             .send(super::SubagentEvent::Completions(
                 super::SubagentCompletionsRequest {
+                    session_id: String::new(),
                     suppress_ids: vec![],
                     respond_to,
                 },
@@ -1405,6 +1411,7 @@ mod tests {
             .0
             .send(super::SubagentEvent::Completions(
                 super::SubagentCompletionsRequest {
+                    session_id: String::new(),
                     suppress_ids: vec![],
                     respond_to,
                 },

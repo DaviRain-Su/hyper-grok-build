@@ -10,7 +10,7 @@ impl schemars::JsonSchema for GrokIntegerSchema {
         "grok_integer_schema".into()
     }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type" : "integer" })
+        schemars::json_schema!({ "type": "integer" })
     }
 }
 /// Largest whole value exactly representable as `f64` (2^53). JSON floats above this

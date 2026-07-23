@@ -59,6 +59,10 @@ reqwest = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
 
+[[test]]
+name = "env_op_compile"
+path = "tests/env_op_compile.rs"
+
 [[bin]]
 name = "pty-scenario"
 path = "src/bin/pty_scenario.rs"

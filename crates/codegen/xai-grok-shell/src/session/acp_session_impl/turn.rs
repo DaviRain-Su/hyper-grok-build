@@ -263,9 +263,10 @@ impl SessionActor {
         xai_grok_telemetry::unified_log::info(
             "shell.handle_prompt.start",
             Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!(
-                { "prompt_id" : prompt_id, "block_count" : prompt_blocks.len(), }
-            )),
+            Some(serde_json::json!({
+                "prompt_id": prompt_id,
+                "block_count": prompt_blocks.len(),
+            })),
         );
         let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
         if let Some(completion_id) = origin.completion_id() {
@@ -429,8 +430,10 @@ impl SessionActor {
                         )
                     };
                     tracing::info_span!(
-                        "skill.activated", skill_name = % sk.name, invocation_trigger =
-                        "slash_command", skill_source = skill_source,
+                        "skill.activated",
+                        skill_name = %sk.name,
+                        invocation_trigger = "slash_command",
+                        skill_source = skill_source,
                     )
                     .in_scope(|| {});
                     if let Some(ref pname) = sk.plugin_name {
@@ -444,7 +447,9 @@ impl SessionActor {
                             },
                         );
                         tracing::info_span!(
-                            "plugin.used", plugin_name = % pname, skill_name = % sk.name,
+                            "plugin.used",
+                            plugin_name = %pname,
+                            skill_name = %sk.name,
                         )
                         .in_scope(|| {});
                     }
@@ -582,7 +587,8 @@ impl SessionActor {
         );
         if recovered > 0 {
             tracing::info!(
-                session_id = % self.session_info.id, recovered,
+                session_id = %self.session_info.id,
+                recovered,
                 "server-side placeholder fallback: loaded orphan image(s) from disk",
             );
         }
@@ -598,7 +604,8 @@ impl SessionActor {
                 let cleaned_text = extraction.text;
                 let count = extraction.images.len();
                 tracing::info!(
-                    session_id = % self.session_info.id, count,
+                    session_id = %self.session_info.id,
+                    count,
                     "base64 images extracted from user query",
                 );
                 let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
@@ -609,8 +616,8 @@ impl SessionActor {
                 let nr = crate::session::image_normalize::normalize_images(acp_imgs, false).await;
                 if !nr.re_encode_fallbacks.is_empty() {
                     tracing::warn!(
-                        session_id = % self.session_info.id, notes = % nr
-                        .re_encode_fallbacks.join(" "),
+                        session_id = %self.session_info.id,
+                        notes = %nr.re_encode_fallbacks.join(" "),
                         "Extracted user query image kept original after re-encode failure",
                     );
                 }
@@ -686,7 +693,7 @@ impl SessionActor {
             xai_grok_telemetry::unified_log::info(
                 "shell.task_wake.gate_cleared",
                 Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "reason" : "handle_prompt_user_start" })),
+                Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
             );
             self.consume_deferred_completions_for_user_turn().await;
         }
@@ -796,13 +803,15 @@ impl SessionActor {
                         let _ = ack.send(());
                     } else {
                         tracing::error!(
-                            session_id = % self.session_info.id.0, prompt_id = %
-                            prompt_id, "persist_ack flush barrier failed"
+                            session_id = %self.session_info.id.0,
+                            prompt_id = %prompt_id,
+                            "persist_ack flush barrier failed"
                         );
                     }
                 } else {
                     tracing::error!(
-                        session_id = % self.session_info.id.0, prompt_id = % prompt_id,
+                        session_id = %self.session_info.id.0,
+                        prompt_id = %prompt_id,
                         "persist_ack skipped: chat-state actor unavailable"
                     );
                 }
@@ -893,12 +902,13 @@ impl SessionActor {
         xai_grok_telemetry::unified_log::info(
             "shell.handle_prompt.done",
             Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!(
-                { "prompt_id" : prompt_id, "total_elapsed_ms" :
-                handle_prompt_elapsed_ms, "turn_elapsed_ms" : turn_duration_ms,
-                "pre_turn_ms" : handle_prompt_elapsed_ms
-                .saturating_sub(turn_duration_ms), "ok" : result.is_ok(), }
-            )),
+            Some(serde_json::json!({
+                "prompt_id": prompt_id,
+                "total_elapsed_ms": handle_prompt_elapsed_ms,
+                "turn_elapsed_ms": turn_duration_ms,
+                "pre_turn_ms": handle_prompt_elapsed_ms.saturating_sub(turn_duration_ms),
+                "ok": result.is_ok(),
+            })),
         );
         let turn_tool_count = self.events.tool_count_this_turn();
         let bridge_outcome = turn_result_to_hook_outcome(&result);
@@ -990,9 +1000,10 @@ impl SessionActor {
                 self.emit_turn_ended(
                     crate::session::events::TurnOutcomeLabel::Cancelled,
                     None,
-                    Some(serde_json::json!(
-                        { "reason" : "max_turns_reached", "limit" : limit, }
-                    )),
+                    Some(serde_json::json!({
+                        "reason": "max_turns_reached",
+                        "limit": limit,
+                    })),
                 );
                 self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
@@ -1002,9 +1013,10 @@ impl SessionActor {
                     model_id: turn_model_id.clone(),
                     written_repo_paths: Vec::new(),
                     cancellation_category: None,
-                    cancellation_context: Some(serde_json::json!(
-                        { "reason" : "max_turns_reached", "limit" : limit, }
-                    )),
+                    cancellation_context: Some(serde_json::json!({
+                        "reason": "max_turns_reached",
+                        "limit": limit,
+                    })),
                 })
                 .await;
                 xai_grok_telemetry::session_ctx::log_event(
@@ -1179,6 +1191,7 @@ impl SessionActor {
                     completion_kind,
                     structured_output,
                     usage,
+                    tool_overrides: None,
                 })
             }
             Err(e) => {
@@ -1371,7 +1384,8 @@ impl SessionActor {
         self.chat_state_handle
             .push_user_message(ConversationItem::system_reminder(wrapped));
         tracing::info!(
-            session_id = % self.session_info.id.0, count = mine.len(),
+            session_id = %self.session_info.id.0,
+            count = mine.len(),
             "injected mid-turn monitor events as hidden synthetic user message"
         );
     }
@@ -1601,7 +1615,7 @@ impl SessionActor {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if !self.memory.initial_injection_config.enabled {
             tracing::info!(
-                target : xai_grok_telemetry::memory_log::TARGET,
+                target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_INJECT: first-turn injection disabled by config"
             );
             return None;
@@ -1614,7 +1628,7 @@ impl SessionActor {
         let conversation = self.chat_state_handle.get_conversation().await;
         if crate::session::helpers::memory_context::conversation_has_memory_context(&conversation) {
             tracing::info!(
-                target : xai_grok_telemetry::memory_log::TARGET,
+                target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_INJECT: existing memory-context block present in system message -- skipping re-injection to preserve prompt cache"
             );
             return None;
@@ -1648,7 +1662,8 @@ impl SessionActor {
             .as_ref()
             .map_or(0, |r| r.iter().map(|s| s.snippet.len()).sum());
         tracing::info!(
-            target : xai_grok_telemetry::memory_log::TARGET, configured_min_score,
+            target: xai_grok_telemetry::memory_log::TARGET,
+            configured_min_score,
             "MEMORY_INJECT_SEARCH: results={result_count}"
         );
         xai_grok_telemetry::session_ctx::log_event(
@@ -1804,7 +1819,7 @@ impl SessionActor {
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
         self.maybe_refresh_model_metadata_on_resume().await;
-        self.maybe_compact_on_model_switch().await;
+        self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());
         {
@@ -1844,11 +1859,12 @@ impl SessionActor {
         xai_grok_telemetry::unified_log::info(
             "shell.turn.tool_prep_done",
             Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!(
-                { "tool_count" : tool_definitions.len(), "mcp_wait_ms" : mcp_wait_ms,
-                "total_prep_ms" : total_prep_ms, "elapsed_since_turn_start_ms" :
-                conv_turn_start.elapsed().as_millis() as u64, }
-            )),
+            Some(serde_json::json!({
+                "tool_count": tool_definitions.len(),
+                "mcp_wait_ms": mcp_wait_ms,
+                "total_prep_ms": total_prep_ms,
+                "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
+            })),
         );
         if let Some(ref gcs_config) = trace_gcs_config {
             let gcs_cfg = gcs_config.clone();
@@ -1870,6 +1886,7 @@ impl SessionActor {
         let mut turn_tools_called: Vec<String> = Vec::new();
         let mut tool_turn_count: usize = 1;
         let mut loop_index: u32 = 0;
+        let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
         let mut turn_span_totals = TurnSpanTotals::default();
@@ -1904,6 +1921,47 @@ impl SessionActor {
         loop {
             self.emit_event(crate::session::events::Event::LoopStarted { loop_index });
             loop_index += 1;
+            if identical_tool_calls.run_len >= MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
+                let run_len = identical_tool_calls.run_len;
+                let tool_name = identical_tool_calls.tool_name.clone();
+                tracing::warn!(
+                    session_id = %self.session_info.id,
+                    tool_name = %tool_name,
+                    run_len,
+                    "action stationarity: stopping turn after repeated identical tool calls"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "shell.turn.action_stationarity_stop",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
+                        "tool_name": tool_name,
+                        "run_len": run_len,
+                    })),
+                );
+                let notice = format!(
+                    "Stopped: the agent ran the same command (`{tool_name}`) {run_len} times in \
+                     a row with no change in the result. If it's waiting on a long-running job, \
+                     use a background task or the `monitor` tool (or a single `sleep` then check) \
+                     instead of polling; otherwise send a new instruction."
+                );
+                self.send_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(notice)),
+                    )),
+                    None,
+                )
+                .await;
+                return Ok(TurnOutcome::Cancelled {
+                    category: Some(
+                        crate::session::events::CancellationCategory::ActionStationarity,
+                    ),
+                    context: Some(serde_json::json!({
+                        "tool_name": tool_name,
+                        "run_len": run_len,
+                    })),
+                });
+            }
             self.drain_pending_interjections().await;
             self.flush_pending_skill_reminders().await;
             self.inject_pending_monitor_events().await;
@@ -1913,7 +1971,7 @@ impl SessionActor {
                     .injection_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(
-                    target : xai_grok_telemetry::memory_log::TARGET,
+                    target: xai_grok_telemetry::memory_log::TARGET,
                     "MEMORY_INJECT: first-turn memory context injected"
                 );
             }
@@ -1930,15 +1988,23 @@ impl SessionActor {
                 });
                 self.compaction.prefire.set_handle(handle);
             }
+            if self.tool_context.task_output_token_budget.is_none() {
+                self.refresh_token_if_expired().await;
+            }
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
                 && let Err(e) = self.run_compact_only(trigger_info).await
             {
-                tracing::error!(error = % e, "Pre-sampling auto-compaction failed");
+                tracing::error!(error = %e, "Pre-sampling auto-compaction failed");
+                if Self::is_auth_compact_error(&e) {
+                    return Err(self.surface_compact_auth_failure(e).await);
+                }
             }
-            let use_backend_search =
-                self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get();
-            tracing::debug!(use_backend_search, "backend_search: turn tool resolution");
+            let backend_search_active = self.backend_search_active();
+            tracing::debug!(
+                backend_search_active,
+                "backend_search: turn tool resolution"
+            );
             let mut effective_tools: Vec<ToolSpec> =
                 if let Some(ref override_tools) = self.forked_tool_override {
                     override_tools.clone()
@@ -1979,10 +2045,10 @@ impl SessionActor {
             xai_grok_telemetry::unified_log::debug(
                 "shell.turn.build_request_done",
                 Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!(
-                    { "build_request_ms" : build_req_start.elapsed().as_millis() as
-                    u64, "loop_index" : loop_index, }
-                )),
+                Some(serde_json::json!({
+                    "build_request_ms": build_req_start.elapsed().as_millis() as u64,
+                    "loop_index": loop_index,
+                })),
             );
             let mut request = request;
             request.x_grok_session_id = Some(self.session_info.id.to_string());
@@ -1997,9 +2063,7 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            if use_backend_search {
-                request.hosted_tools = self.agent.borrow().hosted_tools().to_vec();
-            }
+            request.hosted_tools = self.hosted_tools_for_turn();
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
@@ -2017,10 +2081,10 @@ impl SessionActor {
             xai_grok_telemetry::unified_log::info(
                 "shell.turn.inference_start",
                 Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!(
-                    { "loop_index" : loop_index, "elapsed_since_turn_start_ms" :
-                    conv_turn_start.elapsed().as_millis() as u64, }
-                )),
+                Some(serde_json::json!({
+                    "loop_index": loop_index,
+                    "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
+                })),
             );
             let model_timer = std::time::Instant::now();
             let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
@@ -2044,11 +2108,12 @@ impl SessionActor {
                         xai_grok_telemetry::unified_log::warn(
                             "shell.turn.auth_retry_backoff",
                             Some(self.session_info.id.0.as_ref()),
-                            Some(serde_json::json!(
-                                { "loop_index" : loop_index, "attempt" : attempt,
-                                "max_retries" : AuthRetrySchedule::MAX_RETRIES, "delay_ms" :
-                                delay_ms, }
-                            )),
+                            Some(serde_json::json!({
+                                "loop_index": loop_index,
+                                "attempt": attempt,
+                                "max_retries": AuthRetrySchedule::MAX_RETRIES,
+                                "delay_ms": delay_ms,
+                            })),
                         );
                         self.send_xai_notification(XaiSessionUpdate::RetryState(
                             crate::extensions::notification::RetryState::Retrying {
@@ -2096,16 +2161,19 @@ impl SessionActor {
             xai_grok_telemetry::unified_log::info(
                 "shell.turn.inference_done",
                 Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!(
-                    { "loop_index" : loop_index, "model_elapsed_ms" :
-                    model_elapsed_ms, "elapsed_since_turn_start_ms" : conv_turn_start
-                    .elapsed().as_millis() as u64, "ttft_ms" : ttft_ms, "itl_p50_ms"
-                    : latency.itl_p50_ms, "attempts" : latency.attempts,
-                    "prompt_tokens" : prompt_tokens, "cached_prompt_tokens" :
-                    cached_prompt_tokens, "completion_tokens" : completion_tokens,
-                    "reasoning_tokens" : reasoning_tokens, "tokens_per_sec" :
-                    tokens_per_sec, }
-                )),
+                Some(serde_json::json!({
+                    "loop_index": loop_index,
+                    "model_elapsed_ms": model_elapsed_ms,
+                    "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
+                    "ttft_ms": ttft_ms,
+                    "itl_p50_ms": latency.itl_p50_ms,
+                    "attempts": latency.attempts,
+                    "prompt_tokens": prompt_tokens,
+                    "cached_prompt_tokens": cached_prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "tokens_per_sec": tokens_per_sec,
+                })),
             );
             if let Some(usage) = response.usage.as_ref() {
                 self.chat_state_handle
@@ -2119,6 +2187,7 @@ impl SessionActor {
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
             );
+            self.clear_auth_compact_suppression();
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
                 let model_id = self.current_model_id().await;
@@ -2236,11 +2305,13 @@ impl SessionActor {
                         if todo_gate_fires < gate_cfg.max_fires_per_prompt {
                             todo_gate_fires += 1;
                             tracing::info!(
-                                prompt_id = % req_id, pending = ? input.pending,
-                                unbacked_in_progress = ? input.in_progress_unbacked,
-                                backed_in_progress = ? input.in_progress_backed,
+                                prompt_id = %req_id,
+                                pending = ?input.pending,
+                                unbacked_in_progress = ?input.in_progress_unbacked,
+                                backed_in_progress = ?input.in_progress_backed,
                                 backing_task_count = input.backing_task_count,
-                                todo_gate_fires, reason = reason.as_str(),
+                                todo_gate_fires,
+                                reason = reason.as_str(),
                                 "turn-end TodoGate: nudging model to advance remaining todos"
                             );
                             self.events
@@ -2261,7 +2332,8 @@ impl SessionActor {
                         }
                         let cap = gate_cfg.max_fires_per_prompt;
                         tracing::warn!(
-                            prompt_id = % req_id, todo_gate_cap = cap,
+                            prompt_id = %req_id,
+                            todo_gate_cap = cap,
                             "turn-end TodoGate: exhausted retries, falling through"
                         );
                         self.events
@@ -2351,6 +2423,45 @@ impl SessionActor {
                 }
                 turn_tools_called.push(tc.name.clone());
             }
+            let step_signature = tool_calls
+                .iter()
+                .map(|tc| format!("{}\u{1f}{}", tc.name, tc.arguments.as_ref()))
+                .collect::<Vec<_>>()
+                .join("\u{1e}");
+            let step_tool_name = tool_calls
+                .first()
+                .map(|tc| tc.name.clone())
+                .unwrap_or_default();
+            let identical_run_len = identical_tool_calls.observe(&step_signature, &step_tool_name);
+            if identical_run_len == NUDGE_AFTER_IDENTICAL_TOOL_CALLS {
+                tracing::warn!(
+                    session_id = %self.session_info.id,
+                    tool_name = %step_tool_name,
+                    run_len = identical_run_len,
+                    "action stationarity: nudging model to break repeated identical tool calls"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "shell.turn.action_stationarity_nudge",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
+                        "tool_name": step_tool_name,
+                        "run_len": identical_run_len,
+                    })),
+                );
+                let reminder = self
+                    .tool_bridge_handle()
+                    .render_prompt(
+                        ACTION_STATIONARITY_NUDGE_TEMPLATE,
+                        &serde_json::json!({
+                            "tool_name": step_tool_name,
+                            "run_len": identical_run_len,
+                        }),
+                    )
+                    .await
+                    .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
+                self.push_system_reminder(&reminder);
+            }
             let tool_call_responses: Vec<ToolCallResponse> = tool_calls
                 .into_iter()
                 .map(|tc| ToolCallResponse {
@@ -2379,9 +2490,10 @@ impl SessionActor {
                         category: Some(
                             crate::session::events::CancellationCategory::PermissionRejected,
                         ),
-                        context: Some(serde_json::json!(
-                            { "tool_name" : tool_name, "reason" : reason, }
-                        )),
+                        context: Some(serde_json::json!({
+                            "tool_name": tool_name,
+                            "reason": reason,
+                        })),
                     });
                 }
                 Ok(ToolLoop::HookDenied { .. }) => {}
@@ -2405,7 +2517,9 @@ impl SessionActor {
                 && next_turn > limit
             {
                 tracing::info!(
-                    session_id = % self.session_info.id, tool_turn_count, limit,
+                    session_id = %self.session_info.id,
+                    tool_turn_count,
+                    limit,
                     "max-turns limit reached, stopping"
                 );
                 return Ok(TurnOutcome::MaxTurnsReached { limit });
@@ -2415,11 +2529,85 @@ impl SessionActor {
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {
                 if let Err(e) = self.run_compact_only(trigger_info).await {
-                    tracing::error!(error = % e, "Preflight overflow compaction failed");
+                    tracing::error!(error = %e, "Preflight overflow compaction failed");
+                    if Self::is_auth_compact_error(&e) {
+                        return Err(self.surface_compact_auth_failure(e).await);
+                    }
                 }
                 continue;
             }
         }
+    }
+}
+const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 16;
+const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 8;
+const _: () = assert!(NUDGE_AFTER_IDENTICAL_TOOL_CALLS < MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
+const ACTION_STATIONARITY_NUDGE_TEMPLATE: &str = "You have called the same tool \
+     (`${{ tool_name }}`) with the exact same arguments ${{ run_len }} times in a row, \
+     getting the same result each time — you appear to be stuck in a polling loop. Stop \
+     repeating this call. If you are waiting on a long-running job or command, use a \
+     background task${%- if tools.by_kind.monitor %} or the `${{ tools.by_kind.monitor }}` \
+     tool${%- endif %}, or run a single `sleep` and then check once — do not poll in a tight \
+     loop. If you cannot make progress, stop and tell the user what you are waiting for. This \
+     turn will be halted automatically if the identical call keeps repeating.";
+fn hash_step_signature(signature: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signature.hash(&mut hasher);
+    hasher.finish()
+}
+#[derive(Default)]
+struct IdenticalToolCallRun {
+    last_signature_hash: Option<u64>,
+    tool_name: String,
+    run_len: u32,
+}
+impl IdenticalToolCallRun {
+    fn observe(&mut self, signature: &str, tool_name: &str) -> u32 {
+        let hash = hash_step_signature(signature);
+        if self.last_signature_hash == Some(hash) {
+            self.run_len += 1;
+        } else {
+            self.run_len = 1;
+            self.last_signature_hash = Some(hash);
+        }
+        self.tool_name = tool_name.to_string();
+        self.run_len
+    }
+}
+#[cfg(test)]
+mod identical_tool_call_run_tests {
+    use super::{IdenticalToolCallRun, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS};
+    #[test]
+    fn counts_consecutive_identical_calls() {
+        let mut run = IdenticalToolCallRun::default();
+        let sig = "run_terminal_cmd\u{1f}{\"command\":\"squeue\"}";
+        assert_eq!(run.observe(sig, "run_terminal_cmd"), 1);
+        assert_eq!(run.observe(sig, "run_terminal_cmd"), 2);
+        assert_eq!(run.observe(sig, "run_terminal_cmd"), 3);
+    }
+    #[test]
+    fn a_different_call_resets_the_run() {
+        let mut run = IdenticalToolCallRun::default();
+        run.observe("a", "a");
+        run.observe("a", "a");
+        assert_eq!(run.observe("b", "b"), 1, "a different signature resets");
+        assert_eq!(run.observe("b", "b"), 2);
+        assert_eq!(run.tool_name, "b");
+        assert_eq!(
+            run.observe("a", "a"),
+            1,
+            "not consecutive with the first run"
+        );
+    }
+    #[test]
+    fn run_reaches_the_bound_after_n_identical_calls() {
+        let mut run = IdenticalToolCallRun::default();
+        let mut last = 0;
+        for _ in 0..MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
+            last = run.observe("same", "same");
+        }
+        assert_eq!(last, MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
     }
 }
 /// Backoff schedule for resubmits after a *successful* 401 auth recovery
@@ -2549,11 +2737,12 @@ mod user_echo_broadcast_tests {
 mod structured_output_validation_tests {
     use super::validate_structured_output;
     fn validator() -> Result<jsonschema::Validator, String> {
-        let schema = serde_json::json!(
-            { "type" : "object", "properties" : { "name" : { "type" : "string" }, "age" :
-            { "type" : "integer" } }, "required" : ["name", "age"],
-            "additionalProperties" : false, }
-        );
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+            "required": ["name", "age"],
+            "additionalProperties": false,
+        });
         jsonschema::validator_for(&schema).map_err(|e| e.to_string())
     }
     #[test]

@@ -37,7 +37,7 @@ async fn scroll_does_not_crash() {
     harness.update(Duration::from_millis(250));
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited during scroll\nscreen:\n{}",
         harness.screen_contents()
     );

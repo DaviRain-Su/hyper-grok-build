@@ -47,7 +47,9 @@ pub(crate) async fn upload_tool_definitions(
     .await;
     if let Err(ref e) = ok {
         tracing::debug!(
-            ? e, object_path = % object_path, "Failed to upload tool definitions trace"
+            ?e,
+            object_path = %object_path,
+            "Failed to upload tool definitions trace"
         );
     }
     if let Some(manifest) = artifact_tracker {
@@ -87,6 +89,7 @@ pub(crate) async fn upload_session_state(
 /// only while the cancellation left the item parked on queue confirmation (the
 /// live worker still owns it); a cancelled direct attempt queued nothing
 /// durable and must record the loss.
+#[cfg(test)]
 fn confirm_timeout_artifact_result(
     direct_attempt_started: bool,
 ) -> super::manifest::ArtifactResult<'static> {
@@ -159,11 +162,20 @@ fn record_upload_failure(ctx: &PromptTraceContext, f: UploadFailure<'_>) {
     let method = upload_method_label(&ctx.gcs_config.upload_method);
     macro_rules! log_failure {
         ($level:ident) => {
-            tracing::$level ! (artifact = f.artifact, reason = f.reason, method, phase =
-            f.phase.unwrap_or(""), gcs_path = f.gcs_path.unwrap_or(""), status_code = ? f
-            .status_code, bytes = ? f.bytes, session_id = % ctx.session_info.id.0,
-            turn_number = ctx.turn_number, suppressed_count = prior_failures, error = f
-            .error, "file upload failed")
+            tracing::$level!(
+                artifact = f.artifact,
+                reason = f.reason,
+                method,
+                phase = f.phase.unwrap_or(""),
+                gcs_path = f.gcs_path.unwrap_or(""),
+                status_code = ?f.status_code,
+                bytes = ?f.bytes,
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                suppressed_count = prior_failures,
+                error = f.error,
+                "file upload failed"
+            )
         };
     }
     match level {
@@ -176,11 +188,16 @@ fn record_upload_failure(ctx: &PromptTraceContext, f: UploadFailure<'_>) {
     }
     let msg = format!("upload failed: {} ({})", f.artifact, f.reason);
     let sid = Some(ctx.session_info.id.0.as_ref());
-    let log_ctx = Some(serde_json::json!(
-        { "artifact" : f.artifact, "reason" : f.reason, "method" : method, "error" :
-        f.error, "gcs_path" : f.gcs_path, "status_code" : f.status_code, "bytes" : f
-        .bytes, "phase" : f.phase, }
-    ));
+    let log_ctx = Some(serde_json::json!({
+        "artifact": f.artifact,
+        "reason": f.reason,
+        "method": method,
+        "error": f.error,
+        "gcs_path": f.gcs_path,
+        "status_code": f.status_code,
+        "bytes": f.bytes,
+        "phase": f.phase,
+    }));
     if level == UploadFailureLogLevel::Warn {
         xai_grok_telemetry::unified_log::warn(&msg, sid, log_ctx);
     } else {
@@ -286,8 +303,10 @@ pub(crate) async fn upload_metadata(ctx: &PromptTraceContext, metadata: PromptMe
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                error = % e, "Failed to serialize prompt metadata"
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                error = %e,
+                "Failed to serialize prompt metadata"
             );
             super::manifest::record_artifact(
                 &ctx.artifact_tracker,
@@ -330,7 +349,8 @@ pub(crate) async fn upload_subagent_metadata(
         Ok(j) => j,
         Err(e) => {
             tracing::warn!(
-                session_id = % metadata.child_session_id, error = % e,
+                session_id = %metadata.child_session_id,
+                error = %e,
                 "Failed to serialize subagent metadata"
             );
             return;
@@ -352,7 +372,9 @@ pub(crate) async fn upload_subagent_metadata(
         xai_file_utils::gcs::upload_bytes(&config, &gcs_path, &json, "application/json").await
     {
         tracing::warn!(
-            session_id = % metadata.child_session_id, gcs_path = % gcs_path, error = % e,
+            session_id = %metadata.child_session_id,
+            gcs_path = %gcs_path,
+            error = %e,
             "Failed to upload subagent.json to GCS"
         );
     }
@@ -371,7 +393,9 @@ pub(crate) async fn upload_images(
     }
     let image_count = images.len();
     tracing::info!(
-        session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number, image_count,
+        session_id = %ctx.session_info.id.0,
+        turn_number = ctx.turn_number,
+        image_count,
         "Uploading prompt images to GCS"
     );
     for (i, image) in images.iter().enumerate() {
@@ -385,8 +409,10 @@ pub(crate) async fn upload_images(
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!(
-                    session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                    image_index = i, error = % e,
+                    session_id = %ctx.session_info.id.0,
+                    turn_number = ctx.turn_number,
+                    image_index = i,
+                    error = %e,
                     "Failed to decode base64 image data, skipping"
                 );
                 continue;
@@ -475,13 +501,18 @@ pub(crate) async fn upload_plugin_state(
             .collect(),
         None => Vec::new(),
     };
-    let payload = serde_json::json!({ "schema_version" : 1u32, "plugins" : plugins, });
+    let payload = serde_json::json!({
+        "schema_version": 1u32,
+        "plugins": plugins,
+    });
     let json = match serde_json::to_vec_pretty(&payload) {
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                error = % e, "Failed to serialize plugin state"
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                error = %e,
+                "Failed to serialize plugin state"
             );
             return;
         }
@@ -516,8 +547,11 @@ pub(crate) async fn upload_artifact_to_gcs(
         Ok(gcs_url) => {
             record_upload_success(ctx);
             tracing::info!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                artifact, gcs_url = % gcs_url, bytes = content.len(),
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                artifact,
+                gcs_url = %gcs_url,
+                bytes = content.len(),
                 "Artifact uploaded to GCS",
             );
             Some(gcs_url)
@@ -665,8 +699,10 @@ pub(crate) async fn upload_turn_result(
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                error = % e, "Failed to serialize turn result metadata"
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                error = %e,
+                "Failed to serialize turn result metadata"
             );
             return;
         }
@@ -709,8 +745,10 @@ pub(crate) async fn upload_streaming_partial(
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                error = % e, "Failed to serialize streaming partial capture"
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                error = %e,
+                "Failed to serialize streaming partial capture"
             );
             return;
         }
@@ -759,7 +797,8 @@ pub(crate) async fn upload_session_metadata(
                 Ok(json) => json,
                 Err(e) => {
                     tracing::warn!(
-                        session_id = % session_id, error = % e,
+                        session_id = %session_id,
+                        error = %e,
                         "Failed to serialize share metadata"
                     );
                     return;
@@ -790,7 +829,7 @@ pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext) {
     let archive = match crate::session::memory::archive::build_memory_archive(&storage) {
         Ok(a) => a,
         Err(e) => {
-            tracing::warn!(error = % e, "failed to build memory archive, skipping");
+            tracing::warn!(error = %e, "failed to build memory archive, skipping");
             return;
         }
     };
@@ -826,15 +865,18 @@ pub(crate) async fn upload_unified_log(ctx: &PromptTraceContext, wait: UploadWai
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
             tracing::debug!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
                 "No unified log entries for this session, skipping upload"
             );
             return;
         }
         Err(e) => {
             tracing::warn!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                error = % e, "Failed to snapshot unified log"
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                error = %e,
+                "Failed to snapshot unified log"
             );
             return;
         }
@@ -881,8 +923,10 @@ pub(crate) async fn upload_permission_events(
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(
-                session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                error = % e, "Failed to serialize permission events"
+                session_id = %ctx.session_info.id.0,
+                turn_number = ctx.turn_number,
+                error = %e,
+                "Failed to serialize permission events"
             );
             return;
         }
@@ -917,6 +961,7 @@ pub(crate) async fn upload_turn_messages(
 /// `reason` so the caller records the matching artifact-failure category
 /// (`serialize_failed` vs `archive_failed`), mirroring `upload_turn_messages`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct SessionStateBuildError {
     pub reason: &'static str,
     pub error: anyhow::Error,
@@ -1082,7 +1127,8 @@ impl TraceExportSource for DynamicResolver {
                     Ok(key) => *user_token = key,
                     Err(e) => {
                         tracing::warn!(
-                            error = % e, "auth: upload credential resolve failed"
+                            error = %e,
+                            "auth: upload credential resolve failed"
                         )
                     }
                 }
@@ -1147,7 +1193,7 @@ pub(crate) fn spawn_startup_spill_reconcile(
                         tracing::info!(removed, "purged spilled uploads from a prior run");
                     }
                     Err(e) => {
-                        tracing::warn!(error = % e, "startup spill purge task failed")
+                        tracing::warn!(error = %e, "startup spill purge task failed")
                     }
                 }
             }
@@ -1242,13 +1288,15 @@ pub(crate) fn spawn_purge_stale_upload_scratch() {
         let run = move || match purge_stale_upload_scratch_dir(&dir) {
             Ok(true) => {
                 tracing::info!(
-                    path = % dir.display(), "removed stale upload_queue/scratch staging"
+                    path = %dir.display(),
+                    "removed stale upload_queue/scratch staging"
                 )
             }
             Ok(false) => {}
             Err(e) => {
                 tracing::warn!(
-                    path = % dir.display(), error = % e,
+                    path = %dir.display(),
+                    error = %e,
                     "failed to remove stale upload_queue/scratch staging"
                 )
             }
@@ -1280,103 +1328,6 @@ pub(crate) fn spawn_upload_queue(
     } else {
         queue
     }
-}
-/// Upload and wait for storage confirmation. Used for artifacts that gate
-/// `restorable_turn_number` advancement.
-///
-/// `direct_attempt_started`, when provided, is set the moment the helper
-/// leaves the queue path for the direct attempt — the one state where a
-/// caller cancelling this future (Defer-timeout) holds nothing durable.
-pub(crate) async fn upload_trace_artifact_blocking(
-    ctx: &PromptTraceContext,
-    content: &[u8],
-    gcs_path: &str,
-    content_type: &str,
-    artifact_name: &str,
-    direct_attempt_started: Option<&std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<()> {
-    let queue_result = if let Some(queue) = &ctx.upload_queue {
-        let session_id = ctx.session_info.id.0.to_string();
-        match queue
-            .enqueue_blocking(
-                content,
-                gcs_path,
-                content_type,
-                artifact_name,
-                &session_id,
-                ctx.turn_number,
-            )
-            .await
-        {
-            Ok(_url) => {
-                record_upload_success(ctx);
-                tracing::info!("Artifact upload confirmed by GCS");
-                Some(Ok(()))
-            }
-            Err(e)
-                if e.downcast_ref::<xai_file_utils::queue::QueueClosed>()
-                    .is_some() =>
-            {
-                tracing::debug!(
-                    artifact = artifact_name,
-                    "upload queue closed; attempting direct upload"
-                );
-                None
-            }
-            Err(e) => {
-                record_upload_failure(
-                    ctx,
-                    UploadFailure {
-                        artifact: artifact_name,
-                        reason: "enqueue_blocking_failed",
-                        error: &format!("{e:#}"),
-                        gcs_path: Some(gcs_path),
-                        bytes: Some(content.len()),
-                        ..Default::default()
-                    },
-                );
-                Some(Err(e))
-            }
-        }
-    } else {
-        None
-    };
-    let result = match queue_result {
-        Some(result) => result,
-        None => {
-            if let Some(flag) = direct_attempt_started {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            if upload_artifact_to_gcs(ctx, gcs_path, content, content_type, artifact_name)
-                .await
-                .is_some()
-            {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("inline upload failed"))
-            }
-        }
-    };
-    if let Some(filename) = gcs_path.rsplit('/').next() {
-        match &result {
-            Ok(()) => {
-                super::manifest::record_artifact(
-                    &ctx.artifact_tracker,
-                    filename,
-                    super::manifest::ArtifactResult::Succeeded,
-                );
-            }
-            Err(e) => super::manifest::record_artifact(
-                &ctx.artifact_tracker,
-                filename,
-                super::manifest::ArtifactResult::Failed {
-                    reason: "upload_failed",
-                    error: Some(&format!("{e:#}")),
-                },
-            ),
-        }
-    }
-    result
 }
 /// Only these accept shapes are durably owned by the queue (temp + recovery
 /// sidecar on disk, flushed by the turn-end wait or recovered next run).
@@ -1504,7 +1455,8 @@ pub(crate) async fn upload_trace_artifact(
             }
             Err(e) => {
                 tracing::warn!(
-                    artifact = artifact_name, error = ? e,
+                    artifact = artifact_name,
+                    error = ?e,
                     "Enqueue failed, inline fallback also failed"
                 );
                 (false, Some(format!("{e:#}")))
@@ -1533,6 +1485,7 @@ pub(crate) async fn upload_trace_artifact(
         );
     }
 }
+#[cfg(test)]
 fn sort_session_files_by_priority(files: &mut [crate::session::persistence::CopiedSessionFile]) {
     files.sort_by_key(|f| match f.name.as_str() {
         "summary.json" => 0,

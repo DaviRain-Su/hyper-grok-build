@@ -21,15 +21,15 @@ async fn folder_trust_home_git_repo_subdir_keys_on_subdir() {
     std::fs::create_dir_all(&proj).expect("create proj subdir");
     std::fs::write(proj.join(".mcp.json"), "{}").expect("write proj/.mcp.json");
 
-    let env = trust_env(&content, true);
-    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env_refs = trust_env(true);
     let cwd = proj.to_str().expect("utf8 proj path");
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::new(
+    let mut harness = PtyHarness::spawn_with_content_env(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
+        &content,
         &["--cwd", cwd],
         &env_refs,
     )

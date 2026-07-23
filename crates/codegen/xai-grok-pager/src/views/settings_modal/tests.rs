@@ -41,8 +41,7 @@ fn contextual_hints_group_sub_sheet_flow() {
     assert!(
         !s.rows.iter().any(|r| matches!(
             r,
-            RowEntry::Setting { key, .. }
-if key.starts_with("contextual_hints.")
+            RowEntry::Setting { key, .. } if key.starts_with("contextual_hints.")
         )),
         "child rows must be hidden from the top-level list",
     );

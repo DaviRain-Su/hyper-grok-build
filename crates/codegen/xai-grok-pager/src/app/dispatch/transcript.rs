@@ -393,19 +393,16 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
 /// session-ready handlers so they can't drift and leave a tab stuck on its
 /// initial `Loading` state.
 pub(super) fn extensions_modal_tab_fetches(
+    modal: &mut crate::views::extensions_modal::ExtensionsModalState,
     agent_id: AgentId,
     session_id: acp::SessionId,
 ) -> Vec<Effect> {
-    vec![
+    let mut effects = vec![
         Effect::FetchHooksList {
             agent_id,
             session_id: session_id.clone(),
         },
         Effect::FetchPluginsList {
-            agent_id,
-            session_id: session_id.clone(),
-        },
-        Effect::FetchMarketplaceList {
             agent_id,
             session_id: session_id.clone(),
         },
@@ -420,9 +417,33 @@ pub(super) fn extensions_modal_tab_fetches(
         },
         Effect::FetchWorkflowsList {
             agent_id,
-            session_id,
+            session_id: session_id.clone(),
         },
-    ]
+    ];
+    push_marketplace_fetch(modal, &mut effects, agent_id, session_id);
+    effects
+}
+
+/// Push a marketplace list fetch, coalescing overlapping requests: while one
+/// is in flight, further requests fold into a single queued refetch that
+/// fires when the current response lands (see the field docs on
+/// `ExtensionsModalState`). The other tab fetches are cheap local reads and
+/// don't need this.
+pub(super) fn push_marketplace_fetch(
+    modal: &mut crate::views::extensions_modal::ExtensionsModalState,
+    effects: &mut Vec<Effect>,
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+) {
+    if modal.marketplace_fetch_inflight {
+        modal.marketplace_refetch_queued = true;
+        return;
+    }
+    modal.marketplace_fetch_inflight = true;
+    effects.push(Effect::FetchMarketplaceList {
+        agent_id,
+        session_id,
+    });
 }
 
 /// Open the hooks/plugins modal on the active agent view and fetch list data.
@@ -457,7 +478,10 @@ pub(super) fn dispatch_open_extensions_modal(
         return skip_picker_and_create_session(app, id);
     };
     agent.pending_extensions_fetch = false;
-    extensions_modal_tab_fetches(id, session_id)
+    let Some(modal) = agent.extensions_modal.as_mut() else {
+        return vec![];
+    };
+    extensions_modal_tab_fetches(modal, id, session_id)
 }
 
 /// Open the agents modal, showing all agent definitions.
@@ -731,9 +755,18 @@ pub(super) fn handle_marketplace_list_loaded(
     result: Result<xai_hooks_plugins_types::MarketplaceListResponse, String>,
 ) -> Vec<Effect> {
     use crate::views::extensions_modal::TabDataState;
-    if let Some(agent) = app.agents.get_mut(&agent_id)
-        && let Some(ref mut modal) = agent.extensions_modal
-    {
+    let mut effects = Vec::new();
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
+        let session_id = agent.session.session_id.clone();
+        let Some(ref mut modal) = agent.extensions_modal else {
+            return effects;
+        };
+        modal.marketplace_fetch_inflight = false;
+        if std::mem::take(&mut modal.marketplace_refetch_queued)
+            && let Some(session_id) = session_id
+        {
+            push_marketplace_fetch(modal, &mut effects, agent_id, session_id);
+        }
         modal.marketplace_data = match result {
             Ok(mut response) => {
                 response.sanitize();
@@ -766,7 +799,7 @@ pub(super) fn handle_marketplace_list_loaded(
         modal.pending_action = None;
         modal.pending_entry_index = None;
     }
-    vec![]
+    effects
 }
 
 pub(super) fn handle_skills_toggle_done(

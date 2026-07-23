@@ -21,6 +21,10 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+# Sanctioned TTY detach for the capture subprocesses (Linux system recorders,
+# macOS `__mic-capture` self-exec helper) — workspace rule: never spawn a raw
+# `std::process::Command`.
+xai-tty-utils = { workspace = true }
 
 [features]
 # `audio` = "microphone capture is compiled in". It's enabled on every OS for

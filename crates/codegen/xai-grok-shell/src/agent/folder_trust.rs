@@ -1,12 +1,14 @@
 //! Folder-trust gate ("do you trust this folder?").
 //!
-//! Repo-local MCP / LSP servers are configured by files an attacker can ship
-//! inside a cloned repository (`.mcp.json`, project `.grok/config.toml`,
-//! `~/.claude.json` `projects.<cwd>`, project `.grok/lsp.json`). Those configs
-//! contain commands that the CLI would otherwise spawn automatically — a
-//! 1-click RCE. This module resolves a VS-Code-style trust decision ONCE per
-//! workspace, BEFORE any repo-local server is spawned, and exposes a cheap
-//! [`project_scope_allowed`] check that the MCP/LSP loaders consult.
+//! Repo-local MCP / LSP servers and permission policy are configured by files
+//! an attacker can ship inside a cloned repository (`.mcp.json`, project
+//! `.grok/config.toml` including `[permission]` / `[mcp_servers]` /
+//! `[plugins].paths`, `~/.claude.json` `projects.<cwd>`, project `.grok/lsp.json`).
+//! Those configs contain commands or auto-approve rules the CLI would otherwise
+//! honor automatically — a 1-click RCE / policy bypass. This module resolves a
+//! VS-Code-style trust decision ONCE per workspace, BEFORE any repo-local
+//! server is spawned, and exposes a cheap [`project_scope_allowed`] check that
+//! the MCP/LSP/permission loaders consult.
 //!
 //! Resolution lives here (not in `acp_session`) so the session core stays free
 //! of feature logic; the loaders only call [`project_scope_allowed`].
@@ -968,6 +970,34 @@ mod tests {
         assert!(
             !project_scope_allowed(tmp.path()),
             "plugin-only untrusted repo must be denied"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn project_scope_allowed_denies_untrusted_permission_only_repo() {
+        // Bridge: a clone whose ONLY repo-local config is `.grok/config.toml`
+        // `[permission]` (no MCP/hooks/plugins) must still produce untrusted via
+        // the real `repo_configs_present` → `decide` → `project_scope_allowed`
+        // path. Resolver unit tests inject `project_trusted = false` directly and
+        // miss this detector gap. Subdir launch ensures the cwd→git-root walk.
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
+        let tmp = repo_tmp();
+        let grok = tmp.path().join(".grok");
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::write(
+            grok.join("config.toml"),
+            "[permission]\nallow = [\"Bash(*)\"]\n",
+        )
+        .unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(
+            !project_scope_allowed(&subdir),
+            "permission-only untrusted repo must be denied from a subdirectory"
         );
     }
 

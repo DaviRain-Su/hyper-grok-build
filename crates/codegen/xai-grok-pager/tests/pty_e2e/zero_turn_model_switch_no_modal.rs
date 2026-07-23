@@ -48,7 +48,7 @@ async fn zero_turn_model_switch_no_modal() {
         harness.screen_contents()
     );
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited\nscreen:\n{}",
         harness.screen_contents()
     );

@@ -99,12 +99,15 @@ async fn run_scenario(env: &[(&str, &str)]) -> String {
         .await
         .expect("start mock server");
     let workdir = git_workdir();
-    let home = tempfile::TempDir::new().expect("create temp home");
-    seed_fixtures(home.path(), workdir.path());
+    let mut sandbox = TestSandbox::new();
+    seed_fixtures(sandbox.home(), workdir.workspace());
+    sandbox.extend_env(env.iter().copied());
 
-    let client = GrokStdioClient::spawn_with_home_and_env(&server, workdir.path(), home, env).await;
+    let client = GrokStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
     client.initialize_with_timeout().await;
-    let session_id = client.create_session_with_timeout(workdir.path()).await;
+    let session_id = client
+        .create_session_with_timeout(workdir.workspace())
+        .await;
     let _ = client.prompt_with_timeout(&session_id, "hello").await;
 
     let bodies: Vec<String> = server

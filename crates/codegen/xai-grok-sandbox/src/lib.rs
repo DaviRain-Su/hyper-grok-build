@@ -117,7 +117,7 @@ pub fn flush() {
     if let Some(state) = SANDBOX.get()
         && let Err(e) = state.logger.flush_to_disk()
     {
-        tracing::warn!(error = % e, "Failed to flush sandbox events to disk");
+        tracing::warn!(error = %e, "Failed to flush sandbox events to disk");
     }
 }
 /// Violation metrics, or `None` if sandbox is not active.
@@ -156,7 +156,7 @@ impl SandboxManager {
         let support = Sandbox::support_info();
         if !support.is_supported {
             tracing::warn!(
-                details = % support.details,
+                details = %support.details,
                 "Sandbox not supported on this platform, continuing without sandbox"
             );
             self.logger.log(SandboxEvent::apply_failed(
@@ -177,7 +177,8 @@ impl SandboxManager {
                     &resolved,
                 ));
                 tracing::info!(
-                    profile = % self.profile, workspace = % workspace.display(),
+                    profile = %self.profile,
+                    workspace = %workspace.display(),
                     restrict_network_configured = self.net_restricted,
                     "Sandbox applied (kernel-enforced, irreversible)"
                 );
@@ -185,7 +186,8 @@ impl SandboxManager {
             }
             Err(e) => {
                 tracing::warn!(
-                    profile = % self.profile, error = % e,
+                    profile = %self.profile,
+                    error = %e,
                     "Sandbox could not be applied, continuing without sandbox"
                 );
                 self.logger.log(SandboxEvent::apply_failed(
@@ -201,7 +203,7 @@ impl SandboxManager {
     #[cfg(not(all(feature = "enforce", unix)))]
     pub fn apply(&mut self, _workspace: &Path) -> anyhow::Result<()> {
         tracing::info!(
-            profile = % self.profile,
+            profile = %self.profile,
             "Sandbox enforcement unavailable (built without 'enforce' feature)"
         );
         Ok(())

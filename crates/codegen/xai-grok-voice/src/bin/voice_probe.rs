@@ -11,8 +11,20 @@ use xai_grok_voice::{
     StaticVoiceAuth, VoiceConfig, VoiceProbeOptions, format_probe_report, run_streaming_probe,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Hidden mic-capture helper intercept (macOS): the capture backend
+    // re-execs the current binary — here, voice-probe itself. Runs before any
+    // runtime/TLS init so the capture child stays minimal.
+    if let Some(code) = xai_grok_voice::maybe_run_capture_subprocess() {
+        std::process::exit(code);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     // Standalone binary: install the process-level rustls provider (the pager
     // does this in its own main), or the first TLS/WSS connect panics with
     // "Could not automatically determine the process-level CryptoProvider".

@@ -82,5 +82,54 @@ pub enum WorkspaceError {
     ToolsetExternallyOwned(String),
 }
 
+impl WorkspaceError {
+    /// Low-cardinality `error_kind` metric label: the variant name in
+    /// snake_case; `DeployError` reports its per-kind `wire_code()`.
+    pub fn metric_kind(&self) -> &'static str {
+        match self {
+            Self::ParentSessionNotFound(_) => "parent_session_not_found",
+            Self::SessionNotFound(_) => "session_not_found",
+            Self::SessionAlreadyExists(_) => "session_already_exists",
+            Self::EmptyAgentId => "empty_agent_id",
+            Self::CannotDropMainSession => "cannot_drop_main_session",
+            Self::Finalize(_) => "finalize",
+            Self::CapabilityWidening { .. } => "capability_widening",
+            Self::Unauthorized { .. } => "unauthorized",
+            Self::TurnActive(_) => "turn_active",
+            Self::MaxDepthExceeded { .. } => "max_depth_exceeded",
+            Self::JoinError(_) => "join_error",
+            Self::InvalidHunkAction(_) => "invalid_hunk_action",
+            Self::HunkActionFailed(_) => "hunk_action_failed",
+            Self::HubError(_) => "hub_error",
+            Self::DeployError { kind, .. } => kind.wire_code(),
+            Self::ShuttingDown => "shutting_down",
+            Self::ToolsetExternallyOwned(_) => "toolset_externally_owned",
+        }
+    }
+}
+
 /// Convenience alias for the workspace's primary `Result` type.
 pub type WorkspaceResult<T> = Result<T, WorkspaceError>;
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceError;
+    use xai_grok_workspace_types::rpc::deploy::DeployError;
+
+    #[test]
+    fn metric_kind_reports_deploy_wire_code() {
+        for kind in DeployError::ALL {
+            let err = WorkspaceError::DeployError {
+                kind,
+                message: "m".into(),
+            };
+            assert_eq!(err.metric_kind(), kind.wire_code());
+        }
+    }
+
+    #[test]
+    fn metric_kind_is_message_free() {
+        let err = WorkspaceError::HubError("something wildly unique 12345".into());
+        assert_eq!(err.metric_kind(), "hub_error");
+    }
+}

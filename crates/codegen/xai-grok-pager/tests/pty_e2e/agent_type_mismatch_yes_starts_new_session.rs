@@ -49,7 +49,7 @@ async fn agent_type_mismatch_yes_starts_new_session() {
         .expect("new session created");
 
     assert!(
-        harness.is_running(),
+        harness.is_running().expect("poll pager liveness"),
         "pager exited after starting new session\nscreen:\n{}",
         harness.screen_contents()
     );

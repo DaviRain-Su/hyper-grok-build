@@ -141,8 +141,7 @@ mod tests {
         assert_eq!(err.field_path(), "tools[3].params_json");
         assert!(matches!(
             &err.kind,
-            ToolConfigEntryErrorKind::ParamsJsonParse { raw, .. }
-if raw == "{not json"
+            ToolConfigEntryErrorKind::ParamsJsonParse { raw, .. } if raw == "{not json"
         ));
     }
 
@@ -182,8 +181,7 @@ if raw == "{not json"
             assert!(
                 matches!(
                     &err.kind,
-                    ToolConfigEntryErrorKind::NameOverrideInvalid { name: n, .. }
-if n == name
+                    ToolConfigEntryErrorKind::NameOverrideInvalid { name: n, .. } if n == name
                 ),
                 "name={name:?} kind={:?}",
                 err.kind

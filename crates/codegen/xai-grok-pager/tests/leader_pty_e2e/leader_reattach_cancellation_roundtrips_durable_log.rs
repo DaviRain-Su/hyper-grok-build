@@ -45,7 +45,7 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
     a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
         .expect("A turn streaming");
 
-    // Ctrl+C on an empty prompt cancels while streaming (Esc no longer cancels).
+    // Ctrl+C on an empty prompt cancels while streaming.
     a.inject_keys(keys::CTRL_C).expect("A press ctrl+c");
     a.update(Duration::from_millis(200));
     // Generous budget: the heavy multi-client leader cluster drains the paced
@@ -85,7 +85,7 @@ async fn leader_reattach_cancellation_roundtrips_durable_log() {
     // the durable replay (not a fixed long sleep that would mask a hang).
     c.update(Duration::from_millis(500));
     assert!(
-        c.is_running(),
+        c.is_running().expect("poll pager liveness"),
         "C exited after A quit\nscreen:\n{}",
         c.screen_contents()
     );

@@ -42,8 +42,8 @@ async fn mouse_reporting_toggle_sticky_persists_pty() {
     let toggle_visible =
         |h: &PtyHarness| sticky_visible(h) || h.contains_text("Mouse reporting on");
 
-    // Defocus the prompt so scrollback owns keys — Tab is leave-prompt
-    // (Esc is clear/rewind idle / mid-turn swallow). Tab TOGGLES focus, so never re-press it
+    // Defocus the prompt so scrollback owns keys — Tab is leave-prompt (Esc is
+    // reserved for the cancel / clear / rewind policy). Tab TOGGLES focus, so never re-press it
     // blindly (a lagged frame would bounce focus back to the prompt). Idempotent:
     // return if the scrollback already owns keys, else a SINGLE Tab + wait for
     // the footer's "Space:prompt" to render (mirrors `drive_to_scrollback_with_turn`).

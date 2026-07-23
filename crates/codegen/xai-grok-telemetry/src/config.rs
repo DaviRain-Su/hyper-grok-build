@@ -75,7 +75,7 @@ impl<'de> serde::Deserialize<'de> for TelemetryMode {
             TelemetryModeValue::Bool(b) => Ok(Self::from(b)),
             TelemetryModeValue::Str(s) => Ok(Self::parse(&s).unwrap_or_else(|| {
                 tracing::warn!(
-                    value = % s,
+                    value = %s,
                     "TELEMETRY_MODE_UNKNOWN: unrecognized telemetry mode; treating as disabled",
                 );
                 Self::Disabled

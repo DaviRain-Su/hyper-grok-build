@@ -183,8 +183,8 @@ fn signed_principal_matches(payload: &SignedPayload, expected_principal: Option<
         .as_deref()
         .or(payload.team_id.as_deref());
     !matches!(
-        (signed, expected_principal), (Some(signed), Some(expected)) if signed !=
-        expected
+        (signed, expected_principal),
+        (Some(signed), Some(expected)) if signed != expected
     )
 }
 /// Full verification of a fetched envelope against the embedded trusted keys

@@ -19,312 +19,276 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::time::Duration;
 
 use agent_client_protocol::{self as acp, Agent as _};
-
 use xai_grok_test_support::leader::{
-    LeaderStdioClient, leader_log, wait_for_live_leader, wait_for_new_leader,
-    wait_for_replay_notifications,
+    LeaderFixture, leader_log, wait_for_live_leader, wait_for_replay_notifications,
 };
 use xai_grok_test_support::*;
 
-/// THE repro. Kill the shared leader with SIGKILL while two clients are
-/// connected; both must recover their sessions on the re-elected leader.
+/// Kill the shared leader while two clients are connected; both must recover.
 #[tokio::test]
-#[ignore] // requires pre-built binary; run with --ignored
+#[ignore = "leader-acceptance: detached replacement cleanup needs OS containment or a test-only leader binary"]
 async fn test_leader_sigkill_clients_recover_sessions() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let workdir = git_workdir();
-            let home = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(home.path().join(".grok")).unwrap();
-
-            // ── Phase 1: two clients, one leader, two sessions ────────────
-            let client_a = LeaderStdioClient::spawn(&server, workdir.path(), home.path()).await;
-            client_a.initialize().await;
-            let session_a = client_a.create_session(workdir.path()).await;
-            let r = client_a.prompt(&session_a, "hello from A").await;
-            assert!(
-                r.is_ok(),
-                "pre-crash prompt A failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                r.err(),
-                client_a.stderr_text(),
-                leader_log(home.path()),
-            );
-
-            let client_b = LeaderStdioClient::spawn(&server, workdir.path(), home.path()).await;
-            client_b.initialize().await;
-            let session_b = client_b.create_session(workdir.path()).await;
-            let r = client_b.prompt(&session_b, "hello from B").await;
-            assert!(
-                r.is_ok(),
-                "pre-crash prompt B failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                r.err(),
-                client_b.stderr_text(),
-                leader_log(home.path()),
-            );
-
-            let leader_pid = wait_for_live_leader(home.path(), Duration::from_secs(5))
+            let sandbox = TestSandbox::new();
+            let fixture = LeaderFixture::start(&server, workdir.workspace(), &sandbox)
                 .await
-                .expect("no live leader PID in lock file");
-            assert_ne!(leader_pid, client_a.child.id().unwrap_or(0));
-            assert_ne!(leader_pid, client_b.child.id().unwrap_or(0));
+                .expect("start persistent leader fixture");
+            let mut clients = Vec::new();
+            common::leader::run_with_cleanup(&fixture, &mut clients, |fixture, clients| {
+                Box::pin(async move {
+                    clients.push(
+                        fixture
+                            .spawn_client(&server, workdir.workspace(), &sandbox)
+                            .await
+                            .expect("spawn client A"),
+                    );
+                    clients[0].initialize().await;
+                    let session_a = clients[0].create_session(workdir.workspace()).await;
+                    clients[0]
+                        .prompt(&session_a, "hello from A")
+                        .await
+                        .expect("pre-crash prompt A");
 
-            // ── Phase 2: SIGKILL the leader (simulated crash) ─────────────
-            let base_a = client_a.notification_count();
-            let base_b = client_b.notification_count();
-            eprintln!("killing leader pid {leader_pid}");
-            unsafe {
-                libc::kill(leader_pid as i32, libc::SIGKILL);
-            }
+                    clients.push(
+                        fixture
+                            .spawn_client(&server, workdir.workspace(), &sandbox)
+                            .await
+                            .expect("spawn client B"),
+                    );
+                    clients[1].initialize().await;
+                    let session_b = clients[1].create_session(workdir.workspace()).await;
+                    clients[1]
+                        .prompt(&session_b, "hello from B")
+                        .await
+                        .expect("pre-crash prompt B");
 
-            // ── Phase 3: clients must re-elect a leader and reconnect ─────
-            let new_pid = wait_for_new_leader(home.path(), leader_pid, Duration::from_secs(60))
-                .await
-                .unwrap_or_else(|| {
-                    panic!(
-                        "no new leader was elected after SIGKILL\n\
-                         client A stderr:\n{}\nclient B stderr:\n{}\nleader log:\n{}",
-                        client_a.stderr_text(),
-                        client_b.stderr_text(),
-                        leader_log(home.path()),
-                    )
-                });
-            eprintln!("new leader elected: pid {new_pid}");
-
-            let a_reconnected =
-                wait_for_replay_notifications(&client_a, base_a, Duration::from_secs(60)).await;
-            let b_reconnected =
-                wait_for_replay_notifications(&client_b, base_b, Duration::from_secs(60)).await;
-            eprintln!("replay evidence: A={a_reconnected} B={b_reconnected}");
-
-            // ── Phase 4: prompts on the ORIGINAL session IDs must work ────
-            let res_a = client_a.prompt(&session_a, "after crash A").await;
-            let res_b = client_b.prompt(&session_b, "after crash B").await;
-
-            assert!(
-                res_a.is_ok(),
-                "client A prompt after leader crash failed: {:?}\n\
-                 stderr:\n{}\nleader log:\n{}",
-                res_a.err(),
-                client_a.stderr_text(),
-                leader_log(home.path()),
-            );
-            assert!(
-                res_b.is_ok(),
-                "client B prompt after leader crash failed: {:?}\n\
-                 stderr:\n{}\nleader log:\n{}",
-                res_b.err(),
-                client_b.stderr_text(),
-                leader_log(home.path()),
-            );
+                    let leader_pid = wait_for_live_leader(sandbox.home(), Duration::from_secs(5))
+                        .await
+                        .expect("live leader");
+                    let base_a = clients[0].notification_count();
+                    let base_b = clients[1].notification_count();
+                    assert_eq!(
+                        fixture
+                            .kill_current_concrete_leader()
+                            .expect("kill owned leader"),
+                        leader_pid
+                    );
+                    fixture
+                        .reap_exited_concrete_leaders()
+                        .await
+                        .expect("reap crashed concrete leader");
+                    let _new_pid = fixture
+                        .wait_for_new_leader(leader_pid, Duration::from_secs(60))
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "no replacement leader\nA:\n{}\nB:\n{}\nleader:\n{}",
+                                clients[0].stderr_text(),
+                                clients[1].stderr_text(),
+                                leader_log(sandbox.home()),
+                            )
+                        });
+                    wait_for_replay_notifications(&clients[0], base_a, Duration::from_secs(60))
+                        .await;
+                    wait_for_replay_notifications(&clients[1], base_b, Duration::from_secs(60))
+                        .await;
+                    clients[0]
+                        .prompt(&session_a, "after crash A")
+                        .await
+                        .expect("client A recovery");
+                    clients[1]
+                        .prompt(&session_b, "after crash B")
+                        .await
+                        .expect("client B recovery");
+                })
+            })
+            .await;
         })
         .await;
 }
 
-/// Single-client variant: kill -9 the leader, the lone client must re-elect
-/// and restore. Narrower failure surface than the two-client test.
+/// Single-client recovery variant.
 #[tokio::test]
-#[ignore] // requires pre-built binary; run with --ignored
+#[ignore = "leader-acceptance: detached replacement cleanup needs OS containment or a test-only leader binary"]
 async fn test_leader_sigkill_single_client_recovers() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let workdir = git_workdir();
-            let home = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(home.path().join(".grok")).unwrap();
-
-            let client = LeaderStdioClient::spawn(&server, workdir.path(), home.path()).await;
-            client.initialize().await;
-            let session = client.create_session(workdir.path()).await;
-            client
-                .prompt(&session, "hello")
+            let sandbox = TestSandbox::new();
+            let fixture = LeaderFixture::start(&server, workdir.workspace(), &sandbox)
                 .await
-                .expect("pre-crash prompt failed");
-
-            let leader_pid = wait_for_live_leader(home.path(), Duration::from_secs(5))
-                .await
-                .expect("no live leader PID in lock file");
-            let base = client.notification_count();
-            eprintln!("killing leader pid {leader_pid}");
-            unsafe {
-                libc::kill(leader_pid as i32, libc::SIGKILL);
-            }
-
-            let new_pid = wait_for_new_leader(home.path(), leader_pid, Duration::from_secs(60))
-                .await
-                .unwrap_or_else(|| {
-                    panic!(
-                        "no new leader was elected after SIGKILL\nstderr:\n{}\nleader log:\n{}",
-                        client.stderr_text(),
-                        leader_log(home.path()),
-                    )
-                });
-            eprintln!("new leader elected: pid {new_pid}");
-
-            let reconnected =
-                wait_for_replay_notifications(&client, base, Duration::from_secs(60)).await;
-            eprintln!("replay evidence: {reconnected}");
-
-            let res = client.prompt(&session, "after crash").await;
-            assert!(
-                res.is_ok(),
-                "prompt after leader crash failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                res.err(),
-                client.stderr_text(),
-                leader_log(home.path()),
-            );
+                .expect("start fixture");
+            let mut clients = Vec::new();
+            common::leader::run_with_cleanup(&fixture, &mut clients, |fixture, clients| {
+                Box::pin(async move {
+                    clients.push(
+                        fixture
+                            .spawn_client(&server, workdir.workspace(), &sandbox)
+                            .await
+                            .expect("spawn client"),
+                    );
+                    clients[0].initialize().await;
+                    let session = clients[0].create_session(workdir.workspace()).await;
+                    clients[0].prompt(&session, "hello").await.expect("prompt");
+                    let leader_pid = wait_for_live_leader(sandbox.home(), Duration::from_secs(5))
+                        .await
+                        .expect("live leader");
+                    let base = clients[0].notification_count();
+                    assert_eq!(
+                        fixture
+                            .kill_current_concrete_leader()
+                            .expect("kill owned leader"),
+                        leader_pid
+                    );
+                    let _new_pid = fixture
+                        .wait_for_new_leader(leader_pid, Duration::from_secs(60))
+                        .await
+                        .expect("replacement leader");
+                    wait_for_replay_notifications(&clients[0], base, Duration::from_secs(60)).await;
+                    clients[0]
+                        .prompt(&session, "after crash")
+                        .await
+                        .expect("recovered prompt");
+                })
+            })
+            .await;
         })
         .await;
 }
 
-/// One client driving TWO sessions over a single stdio bridge (the IDE
-/// shape). After a leader SIGKILL, BOTH sessions must be replayed onto the
-/// re-elected leader — restoring only the most recent one left the other
-/// failing with "unknown session id".
+/// One client must restore both of its sessions after re-election.
 #[tokio::test]
-#[ignore] // requires pre-built binary; run with --ignored
+#[ignore = "leader-acceptance: detached replacement cleanup needs OS containment or a test-only leader binary"]
 async fn test_leader_sigkill_multi_session_client_recovers_all_sessions() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let workdir = git_workdir();
-            let home = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(home.path().join(".grok")).unwrap();
-
-            let client = LeaderStdioClient::spawn(&server, workdir.path(), home.path()).await;
-            client.initialize().await;
-            let session_one = client.create_session(workdir.path()).await;
-            client
-                .prompt(&session_one, "hello one")
+            let sandbox = TestSandbox::new();
+            let fixture = LeaderFixture::start(&server, workdir.workspace(), &sandbox)
                 .await
-                .expect("pre-crash prompt on session one failed");
-            let session_two = client.create_session(workdir.path()).await;
-            client
-                .prompt(&session_two, "hello two")
-                .await
-                .expect("pre-crash prompt on session two failed");
-            assert_ne!(session_one.0, session_two.0);
-
-            let leader_pid = wait_for_live_leader(home.path(), Duration::from_secs(5))
-                .await
-                .expect("no live leader PID in lock file");
-            let base = client.notification_count();
-            eprintln!("killing leader pid {leader_pid}");
-            unsafe {
-                libc::kill(leader_pid as i32, libc::SIGKILL);
-            }
-
-            wait_for_new_leader(home.path(), leader_pid, Duration::from_secs(60))
-                .await
-                .unwrap_or_else(|| {
-                    panic!(
-                        "no new leader was elected after SIGKILL\nstderr:\n{}\nleader log:\n{}",
-                        client.stderr_text(),
-                        leader_log(home.path()),
-                    )
-                });
-            wait_for_replay_notifications(&client, base, Duration::from_secs(60)).await;
-
-            // BOTH sessions must work on the new leader.
-            let res_one = client.prompt(&session_one, "after crash one").await;
-            let res_two = client.prompt(&session_two, "after crash two").await;
-            assert!(
-                res_one.is_ok(),
-                "session one prompt after crash failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                res_one.err(),
-                client.stderr_text(),
-                leader_log(home.path()),
-            );
-            assert!(
-                res_two.is_ok(),
-                "session two prompt after crash failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                res_two.err(),
-                client.stderr_text(),
-                leader_log(home.path()),
-            );
+                .expect("start fixture");
+            let mut clients = Vec::new();
+            common::leader::run_with_cleanup(&fixture, &mut clients, |fixture, clients| {
+                Box::pin(async move {
+                    clients.push(
+                        fixture
+                            .spawn_client(&server, workdir.workspace(), &sandbox)
+                            .await
+                            .expect("spawn client"),
+                    );
+                    clients[0].initialize().await;
+                    let session_one = clients[0].create_session(workdir.workspace()).await;
+                    clients[0]
+                        .prompt(&session_one, "hello one")
+                        .await
+                        .expect("session one prompt");
+                    let session_two = clients[0].create_session(workdir.workspace()).await;
+                    clients[0]
+                        .prompt(&session_two, "hello two")
+                        .await
+                        .expect("session two prompt");
+                    let leader_pid = wait_for_live_leader(sandbox.home(), Duration::from_secs(5))
+                        .await
+                        .expect("live leader");
+                    let base = clients[0].notification_count();
+                    assert_eq!(
+                        fixture
+                            .kill_current_concrete_leader()
+                            .expect("kill owned leader"),
+                        leader_pid
+                    );
+                    let _new_pid = fixture
+                        .wait_for_new_leader(leader_pid, Duration::from_secs(60))
+                        .await
+                        .expect("replacement leader");
+                    wait_for_replay_notifications(&clients[0], base, Duration::from_secs(60)).await;
+                    clients[0]
+                        .prompt(&session_one, "after crash one")
+                        .await
+                        .expect("session one recovery");
+                    clients[0]
+                        .prompt(&session_two, "after crash two")
+                        .await
+                        .expect("session two recovery");
+                })
+            })
+            .await;
         })
         .await;
 }
 
-/// Prompt sent DURING the outage (after the bridge noticed the dead leader
-/// but before the new one is ready). The stdio bridge must hold and deliver
-/// it once the session is restored — not silently drop it (which left the
-/// client's request hanging forever).
+/// A prompt queued during re-election must be delivered after recovery.
 #[tokio::test]
-#[ignore] // requires pre-built binary; run with --ignored
+#[ignore = "leader-acceptance: detached replacement cleanup needs OS containment or a test-only leader binary"]
 async fn test_prompt_sent_during_outage_is_delivered_after_recovery() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let workdir = git_workdir();
-            let home = tempfile::tempdir().unwrap();
-            std::fs::create_dir_all(home.path().join(".grok")).unwrap();
-
-            let client = LeaderStdioClient::spawn(&server, workdir.path(), home.path()).await;
-            client.initialize().await;
-            let session = client.create_session(workdir.path()).await;
-            client
-                .prompt(&session, "hello")
+            let sandbox = TestSandbox::new();
+            let fixture = LeaderFixture::start(&server, workdir.workspace(), &sandbox)
                 .await
-                .expect("pre-crash prompt failed");
+                .expect("start fixture");
+            let mut clients = Vec::new();
+            common::leader::run_with_cleanup(&fixture, &mut clients, |fixture, clients| {
+                Box::pin(async move {
+                    clients.push(
+                        fixture
+                            .spawn_client(&server, workdir.workspace(), &sandbox)
+                            .await
+                            .expect("spawn client"),
+                    );
+                    clients[0].initialize().await;
+                    let session = clients[0].create_session(workdir.workspace()).await;
+                    clients[0].prompt(&session, "hello").await.expect("prompt");
+                    let leader_pid = wait_for_live_leader(sandbox.home(), Duration::from_secs(5))
+                        .await
+                        .expect("live leader");
+                    assert_eq!(
+                        fixture
+                            .kill_current_concrete_leader()
+                            .expect("kill owned leader"),
+                        leader_pid
+                    );
+                    tokio::time::sleep(Duration::from_millis(300)).await;
 
-            let leader_pid = wait_for_live_leader(home.path(), Duration::from_secs(5))
-                .await
-                .expect("no live leader PID in lock file");
-            eprintln!("killing leader pid {leader_pid}");
-            unsafe {
-                libc::kill(leader_pid as i32, libc::SIGKILL);
-            }
-            // Give the bridge a moment to observe the dead socket (its send
-            // channel closes), then prompt mid-outage: re-election + session
-            // restore are still seconds away.
-            tokio::time::sleep(Duration::from_millis(300)).await;
-
-            let res = tokio::time::timeout(
-                Duration::from_secs(90),
-                client.conn.prompt(acp::PromptRequest::new(session.clone(), vec![acp::ContentBlock::Text(acp::TextContent::new("sent during outage".to_string()))])),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "prompt sent during outage never completed (dropped by bridge?)\n\
-                     stderr:\n{}\nleader log:\n{}",
-                    client.stderr_text(),
-                    leader_log(home.path()),
-                )
-            });
-            assert!(
-                res.is_ok(),
-                "prompt sent during outage failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                res.err(),
-                client.stderr_text(),
-                leader_log(home.path()),
-            );
-
-            // A session-scoped request other than prompt (model switch) must
-            // also survive — same "unknown session id" class.
-            let set_model = tokio::time::timeout(
-                Duration::from_secs(30),
-                client.conn.set_session_model(acp::SetSessionModelRequest::new(session.clone(), acp::ModelId::new("test-model"))),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "set_session_model after recovery never completed\nstderr:\n{}\nleader log:\n{}",
-                    client.stderr_text(),
-                    leader_log(home.path()),
-                )
-            });
-            assert!(
-                set_model.is_ok(),
-                "set_session_model after recovery failed: {:?}\nstderr:\n{}\nleader log:\n{}",
-                set_model.err(),
-                client.stderr_text(),
-                leader_log(home.path()),
-            );
+                    tokio::time::timeout(
+                        Duration::from_secs(90),
+                        clients[0].conn.prompt(acp::PromptRequest::new(
+                            session.clone(),
+                            vec![acp::ContentBlock::Text(acp::TextContent::new(
+                                "sent during outage".to_string(),
+                            ))],
+                        )),
+                    )
+                    .await
+                    .expect("outage prompt timeout")
+                    .expect("outage prompt failed");
+                    let _new_pid = fixture
+                        .wait_for_new_leader(leader_pid, Duration::from_secs(60))
+                        .await
+                        .expect("replacement leader");
+                    clients[0]
+                        .conn
+                        .set_session_model(acp::SetSessionModelRequest::new(
+                            session,
+                            acp::ModelId::new("test-model"),
+                        ))
+                        .await
+                        .expect("set model after recovery");
+                })
+            })
+            .await;
         })
         .await;
 }

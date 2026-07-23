@@ -28,7 +28,7 @@ pub(super) fn log_prompt_result(
             ulog::error(
                 "agent response failed",
                 Some(sid),
-                Some(serde_json::json!({ "error" : e.to_string() })),
+                Some(serde_json::json!({"error": e.to_string()})),
             )
         }
     }
@@ -53,9 +53,10 @@ pub(super) async fn fetch_plugin_cta_mcps(
     plugin_name: String,
     tx: AcpAgentTx,
 ) -> TaskResult {
-    let params = serde_json::json!(
-        { "sessionId" : session_id.0.to_string(), "cache" : false, }
-    );
+    let params = serde_json::json!({
+        "sessionId": session_id.0.to_string(),
+        "cache": false,
+    });
     let req = acp::ExtRequest::new(
         "x.ai/mcp/list",
         serde_json::value::to_raw_value(&params)
@@ -73,7 +74,9 @@ pub(super) async fn fetch_plugin_cta_mcps(
                 .map(crate::views::mcps_modal::convert_list_response)
                 .map_err(|_| "couldn't load server list".to_string())
         }
-        Err(e) => Err(sanitize_user_error(&format!("couldn't load server list: {e}"))),
+        Err(e) => Err(sanitize_user_error(&format!(
+            "couldn't load server list: {e}"
+        ))),
     };
     TaskResult::PluginCtaMcpsLoaded {
         agent_id,
@@ -165,15 +168,19 @@ pub(crate) fn parse_session_load_running_prompt_id(
         .and_then(|v| v.as_str())
         .map(String::from)
 }
+/// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
+fn is_disk_full_error(raw: &str) -> bool {
+    raw.contains(xai_fast_worktree::OUT_OF_DISK_CONTEXT)
+        || raw.contains(xai_fast_worktree::ENOSPC_OS_MESSAGE)
+        || raw.contains("Disk quota exceeded") || raw.contains("Out of disk space")
+}
 /// Sanitize an error string before showing it to the user.
 ///
 /// Strips protocol jargon (ACP, JSON-RPC) and other technical noise that would
 /// be meaningless in a toast, and collapses known disk-full markers.
 pub(crate) fn sanitize_user_error(raw: &str) -> String {
-    if raw.contains(xai_fast_worktree::OUT_OF_DISK_CONTEXT)
-        || raw.contains(xai_fast_worktree::ENOSPC_OS_MESSAGE)
-    {
-        return "Out of disk space.".to_string();
+    if is_disk_full_error(raw) {
+        return xai_fast_worktree::ENOSPC_OS_MESSAGE.to_string();
     }
     static REPLACEMENTS: &[(&str, &str)] = &[
         ("cli-chat-proxy", "server"),
@@ -296,7 +303,7 @@ impl SessionFlags {
             meta.insert("agentProfile".into(), serde_json::json!(profile));
         }
         if self.chat_mode {
-            meta.insert("x.ai/session".into(), serde_json::json!({ "kind" : "chat" }));
+            meta.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
@@ -304,9 +311,10 @@ impl SessionFlags {
         meta.insert("yoloMode".into(), serde_json::json!(self.yolo_mode));
         meta.insert(
             "autoMode".into(),
-            serde_json::json!(
-                super::dispatch::effective_auto(self.yolo_mode, self.auto_mode)
-            ),
+            serde_json::json!(super::dispatch::effective_auto(
+                self.yolo_mode,
+                self.auto_mode
+            )),
         );
         if meta.is_empty() { None } else { Some(meta) }
     }
@@ -321,7 +329,7 @@ pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
 /// Stamp `_meta["x.ai/session"].kind = "chat"` and strip Build `agentProfile` (K12).
 pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
     let obj = meta.get_or_insert_with(acp::Meta::new);
-    obj.insert("x.ai/session".into(), serde_json::json!({ "kind" : "chat" }));
+    obj.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
     obj.remove("agentProfile");
 }
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
@@ -653,7 +661,7 @@ pub(super) async fn send_logout(tx: &AcpAgentTx) {
             .into(),
     );
     if let Err(e) = acp_send(req, tx).await {
-        tracing::warn!(error = % e, "logout failed");
+        tracing::warn!(error = %e, "logout failed");
     }
 }
 /// Best-effort `x.ai/auth/cancel`: stops the shell's device/loopback wait so a
@@ -663,13 +671,13 @@ pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskR
     let req = acp::ExtRequest::new(
         "x.ai/auth/cancel",
         serde_json::value::to_raw_value(
-                &serde_json::json!({ "request_seq" : request_seq }),
+                &serde_json::json!({ "request_seq": request_seq }),
             )
             .expect("serialize auth/cancel params")
             .into(),
     );
     if let Err(e) = acp_send(req, tx).await {
-        tracing::debug!(error = % e, "auth cancel ext request failed (ignored)");
+        tracing::debug!(error = %e, "auth cancel ext request failed (ignored)");
     }
     TaskResult::AuthCancelComplete
 }
@@ -694,11 +702,14 @@ pub(super) async fn send_check_subscription(
             }
         }
         Err(e) => {
-            tracing::warn!(error = % e, "check_subscription failed");
+            tracing::warn!(error = %e, "check_subscription failed");
             crate::unified_log::warn(
                 "subscription.check.rpc_failed",
                 None,
-                Some(serde_json::json!({ "verify" : verify, "error" : e.to_string(), })),
+                Some(serde_json::json!({
+                    "verify": verify,
+                    "error": e.to_string(),
+                })),
             );
             TaskResult::CheckSubscriptionComplete {
                 verify,
@@ -732,7 +743,7 @@ pub(super) async fn send_credit_limit_recheck(
             }
         }
         Err(e) => {
-            tracing::warn!(error = % e, "credit_limit_recheck failed");
+            tracing::warn!(error = %e, "credit_limit_recheck failed");
             TaskResult::CreditLimitRecheckComplete {
                 agent_id,
                 meta: None,
@@ -747,9 +758,10 @@ pub(super) async fn send_authenticate(
     use_oauth: bool,
     force_interactive: bool,
 ) -> TaskResult {
-    let mut meta = serde_json::json!(
-        { "use_oauth" : use_oauth, "request_seq" : request_seq, }
-    );
+    let mut meta = serde_json::json!({
+        "use_oauth": use_oauth,
+        "request_seq": request_seq,
+    });
     if force_interactive {
         meta["force_interactive"] = serde_json::json!(true);
     }
@@ -767,7 +779,7 @@ pub(super) async fn send_authenticate(
             ulog::error(
                 "auth failed",
                 None,
-                Some(serde_json::json!({ "error" : & error })),
+                Some(serde_json::json!({"error": &error})),
             );
             TaskResult::AuthFailed {
                 request_seq,
@@ -1179,10 +1191,11 @@ pub(crate) async fn persist_permission_mode_and_notify(
     let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
     if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
     {
-        let params = serde_json::json!(
-            { "yolo_mode" : enabled, "auto_mode" : auto_mode, "permission_mode" :
-            config_str, }
-        );
+        let params = serde_json::json!({
+            "yolo_mode": enabled,
+            "auto_mode": auto_mode,
+            "permission_mode": config_str,
+        });
         let notification = acp::ExtNotification::new(
             "x.ai/yolo_mode_changed",
             serde_json::value::to_raw_value(&params)
@@ -1287,9 +1300,7 @@ pub(super) fn route_permission_mode_result(
             }
         }
         (Err(e), PermissionModePersist::WithRollback(prev_canonical)) => {
-            tracing::warn!(
-                "failed to save permission mode preference: {e} — rolling back"
-            );
+            tracing::warn!("failed to save permission mode preference: {e} — rolling back");
             TaskResult::SettingPersistFailed {
                 key: "permission_mode",
                 rollback_value: crate::settings::SettingValue::Enum(prev_canonical),
@@ -1297,9 +1308,7 @@ pub(super) fn route_permission_mode_result(
             }
         }
         (Err(e), PermissionModePersist::BestEffort) => {
-            tracing::warn!(
-                "failed to save permission mode preference (best-effort): {e}"
-            );
+            tracing::warn!("failed to save permission mode preference (best-effort): {e}");
             TaskResult::SettingPersistFailedBestEffort {
                 key: "permission_mode",
                 error: e,
@@ -1467,11 +1476,11 @@ pub(super) fn unregister_active_session_best_effort_in(
         Ok(true) => {}
         Ok(false) => {
             tracing::debug!(
-                session_id = % session_id.0,
-                "Skipped active-session unregister under lock contention; \
+            session_id = %session_id.0,
+            "Skipped active-session unregister under lock contention; \
              reaped by collect_crashed on next launch"
-            )
+        )
         }
-        Err(e) => tracing::warn!(? e, "Failed to unregister active session"),
+        Err(e) => tracing::warn!(?e, "Failed to unregister active session"),
     }
 }

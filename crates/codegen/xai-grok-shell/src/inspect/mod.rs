@@ -348,7 +348,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
     // Discover with all vendors ON so inspect shows the full set on disk.
     let (mut instructions, permissions, mut skills) = tokio::join!(
         list_instructions(cwd),
-        list_permissions(cwd),
+        list_permissions(cwd, project_trusted),
         list_skills(cwd, &plugin_registry, &skills_config),
     );
 
@@ -547,7 +547,7 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
 
 /// Calls the production permission resolver (`resolve_permissions_with_provenance`)
 /// which handles both Grok TOML and vendor settings fallback in one codepath.
-async fn list_permissions(cwd: &Path) -> PermissionsReport {
+async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsReport {
     use xai_grok_workspace::permission::resolution;
 
     let ms = resolution::managed_settings();
@@ -602,7 +602,9 @@ async fn list_permissions(cwd: &Path) -> PermissionsReport {
         }
     }
 
-    let Some(resolved) = resolution::resolve_permissions_with_provenance(cwd).await else {
+    let Some(resolved) =
+        resolution::resolve_permissions_with_provenance(cwd, project_trusted).await
+    else {
         return PermissionsReport {
             sources: vec![],
             loaded: 0,

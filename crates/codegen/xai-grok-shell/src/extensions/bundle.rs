@@ -652,7 +652,7 @@ mod tests {
         let root = tmp.path().join("bundled");
         let (proxy_base_url, _seen_headers, server) = start_bundle_server(
             StatusCode::UNAUTHORIZED,
-            serde_json::json!({ "error" : "unauthorized" }),
+            serde_json::json!({"error": "unauthorized"}),
         )
         .await;
         let am = test_auth_manager();
@@ -752,10 +752,9 @@ mod tests {
             false,
         ))
         .unwrap_err();
-        assert!(
-            error.to_string()
-            .contains("bundle sync requires either an authenticated cli-chat-proxy session or a deployment key")
-        );
+        assert!(error
+            .to_string()
+            .contains("bundle sync requires either an authenticated cli-chat-proxy session or a deployment key"));
     }
     #[test]
     #[serial]

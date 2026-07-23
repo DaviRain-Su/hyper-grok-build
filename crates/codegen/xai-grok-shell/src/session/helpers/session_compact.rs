@@ -376,7 +376,8 @@ pub(crate) async fn generate_session_compact(
                 ..Default::default()
             };
             tracing::info!(
-                compact_model = % sampling_config.model, num_messages = num_messages,
+                compact_model = %sampling_config.model,
+                num_messages = num_messages,
                 "Sending compact request (streaming)"
             );
             // Route through SamplingClient's unified conversation path so the
@@ -402,9 +403,9 @@ pub(crate) async fn generate_session_compact(
                                 acp::Error::internal_error()
                                     .data(
                                         format!(
-                                            "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
-                                            content.chars().count()
-                                        ),
+                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                content.chars().count()
+                            ),
                                     ),
                             ),
                         );
@@ -416,8 +417,8 @@ pub(crate) async fn generate_session_compact(
                             acp::Error::internal_error()
                                 .data(
                                     format!(
-                                        "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                                    ),
+                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                        ),
                                 ),
                         ),
                     );
@@ -496,9 +497,9 @@ pub(crate) async fn generate_session_compact(
                                 acp::Error::internal_error()
                                     .data(
                                         format!(
-                                            "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
-                                            content.chars().count()
-                                        ),
+                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                content.chars().count()
+                            ),
                                     ),
                             ),
                         );
@@ -510,8 +511,8 @@ pub(crate) async fn generate_session_compact(
                             acp::Error::internal_error()
                                 .data(
                                     format!(
-                                        "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                                    ),
+                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                        ),
                                 ),
                         ),
                     );
@@ -545,8 +546,9 @@ pub(crate) async fn generate_session_compact(
                                     .map(|e| e.message.as_str())
                                     .unwrap_or("unknown error");
                                 tracing::warn!(
-                                    code = code.unwrap_or("none"), message = % message, status =
-                                    ? failed_event.response.status,
+                                    code = code.unwrap_or("none"),
+                                    message = %message,
+                                    status = ?failed_event.response.status,
                                     "compact: response.failed event"
                                 );
                                 return Err(classify_response_event_error(code, message));
@@ -554,8 +556,9 @@ pub(crate) async fn generate_session_compact(
                             ResponseStreamEvent::ResponseError(error_event) => {
                                 let code = error_event.code.as_deref();
                                 tracing::warn!(
-                                    code = code.unwrap_or("none"), message = % error_event
-                                    .message, "compact: stream error event"
+                                    code = code.unwrap_or("none"),
+                                    message = %error_event.message,
+                                    "compact: stream error event"
                                 );
                                 return Err(classify_response_event_error(
                                     code,
@@ -570,7 +573,8 @@ pub(crate) async fn generate_session_compact(
                                     .map(|d| d.reason.clone())
                                     .unwrap_or_else(|| "unknown".to_string());
                                 tracing::warn!(
-                                    reason = % reason, "compact: response.incomplete event"
+                                    reason = %reason,
+                                    "compact: response.incomplete event"
                                 );
                                 stop_reason = Some(reason);
                                 truncated = true;
@@ -625,9 +629,9 @@ pub(crate) async fn generate_session_compact(
                                 acp::Error::internal_error()
                                     .data(
                                         format!(
-                                            "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
-                                            content.chars().count()
-                                        ),
+                                "compact failed: stream idle timeout after {idle_timeout:?} ({} chars received)",
+                                content.chars().count()
+                            ),
                                     ),
                             ),
                         );
@@ -639,8 +643,8 @@ pub(crate) async fn generate_session_compact(
                             acp::Error::internal_error()
                                 .data(
                                     format!(
-                                        "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
-                                    ),
+                            "compact failed: exceeded wall-clock budget {wall_clock_budget_secs}s (runaway generation)"
+                        ),
                                 ),
                         ),
                     );
@@ -669,10 +673,10 @@ pub(crate) async fn generate_session_compact(
                             } => {
                                 if let Some(sr) = delta.stop_reason {
                                     truncated = matches!(
-                                        sr, xai_grok_sampling_types::messages::StopReason::MaxTokens
-                                        |
-                                        xai_grok_sampling_types::messages::StopReason::ModelContextWindowExceeded
-                                    );
+                                    sr,
+                                    xai_grok_sampling_types::messages::StopReason::MaxTokens
+                                        | xai_grok_sampling_types::messages::StopReason::ModelContextWindowExceeded
+                                );
                                     stop_reason = Some(
                                         match sr {
                                             xai_grok_sampling_types::messages::StopReason::EndTurn => {
@@ -987,10 +991,11 @@ mod compacted_history_shape_tests {
             ConversationItem::tool_result("tc1", "fn login() { /* buggy code */ }"),
             ConversationItem::Assistant(AssistantItem {
                 content: "Found the bug, applying fix.".into(),
-                tool_calls: vec![ToolCall { id :
-            "tc2".into(), name : "search_replace".into(), arguments :
-            r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#
-            .into(), }],
+                tool_calls: vec![ToolCall {
+                    id: "tc2".into(),
+                    name: "search_replace".into(),
+                    arguments: r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#.into(),
+                }],
                 model_id: None,
                 reasoning_model_identity: None,
                 model_fingerprint: None,
@@ -1217,7 +1222,9 @@ mod compacted_history_shape_tests {
         let raw = vec![
             ConversationItem::system("sys"),
             ConversationItem::user("<user_query>\ntask\n</user_query>"),
+            // Orphan: no preceding assistant with call_ORPHAN
             ConversationItem::tool_result("call_ORPHAN", "Tool call omitted..."),
+            // Valid pair
             ConversationItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_OK".into(),
                 name: "edit".to_string(),
@@ -1517,10 +1524,17 @@ mod reasoning_compaction_regression_tests {
     fn summary_stream() -> Vec<Event> {
         vec![
             Event::default().data(
-                json!({ "id" : "chatcmpl-test", "object" :
-            "chat.completion.chunk", "created" : 1234567890, "model" : "test-model",
-            "choices" : [{ "index" : 0, "delta" : { "role" : "assistant", "content" :
-            "<summary>ok</summary>" }, "finish_reason" : "stop" }] })
+                json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion.chunk",
+                    "created": 1234567890,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "role": "assistant", "content": "<summary>ok</summary>" },
+                        "finish_reason": "stop"
+                    }]
+                })
                 .to_string(),
             ),
             Event::default().data("[DONE]"),
@@ -1530,18 +1544,31 @@ mod reasoning_compaction_regression_tests {
     fn reasoning_then_summary_stream() -> Vec<Event> {
         vec![
             Event::default().data(
-                json!({ "id" : "chatcmpl-test", "object" :
-            "chat.completion.chunk", "created" : 1234567890, "model" : "test-model",
-            "choices" : [{ "index" : 0, "delta" : { "role" : "assistant",
-            "reasoning_content" : "let me think about the summary" }, "finish_reason" :
-            null }] })
+                json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion.chunk",
+                    "created": 1234567890,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "role": "assistant", "reasoning_content": "let me think about the summary" },
+                        "finish_reason": null
+                    }]
+                })
                 .to_string(),
             ),
             Event::default().data(
-                json!({ "id" :
-            "chatcmpl-test", "object" : "chat.completion.chunk", "created" : 1234567890,
-            "model" : "test-model", "choices" : [{ "index" : 0, "delta" : { "content" :
-            "<summary>ok</summary>" }, "finish_reason" : "stop" }] })
+                json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion.chunk",
+                    "created": 1234567890,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": "<summary>ok</summary>" },
+                        "finish_reason": "stop"
+                    }]
+                })
                 .to_string(),
             ),
             Event::default().data("[DONE]"),
@@ -1824,7 +1851,7 @@ mod reasoning_compaction_regression_tests {
         let tools = vec![ToolSpec {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
-            parameters: json!({ "type" : "object", "properties" : {} }),
+            parameters: json!({"type": "object", "properties": {}}),
         }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
@@ -1881,23 +1908,44 @@ mod reasoning_compaction_regression_tests {
     fn responses_summary_stream() -> Vec<Event> {
         vec![
             Event::default().data(
-                json!({ "type" : "response.created", "sequence_number"
-                : 0, "response" : { "id" : "resp_test", "object" : "response", "created_at" :
-                1234567890, "model" : "test-model", "status" : "in_progress", "output" : [] }
+                json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": {
+                        "id": "resp_test",
+                        "object": "response",
+                        "created_at": 1234567890,
+                        "model": "test-model",
+                        "status": "in_progress",
+                        "output": []
+                    }
                 })
                 .to_string(),
             ),
             Event::default().data(
-                json!({ "type" :
-            "response.output_text.delta", "sequence_number" : 1, "item_id" : "msg_test",
-            "output_index" : 0, "content_index" : 0, "delta" : "<summary>ok</summary>" })
+                json!({
+                    "type": "response.output_text.delta",
+                    "sequence_number": 1,
+                    "item_id": "msg_test",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "<summary>ok</summary>"
+                })
                 .to_string(),
             ),
             Event::default().data(
-                json!({ "type" : "response.completed",
-            "sequence_number" : 2, "response" : { "id" : "resp_test", "object" :
-            "response", "created_at" : 1234567890, "model" : "test-model", "status" :
-            "completed", "output" : [] } })
+                json!({
+                    "type": "response.completed",
+                    "sequence_number": 2,
+                    "response": {
+                        "id": "resp_test",
+                        "object": "response",
+                        "created_at": 1234567890,
+                        "model": "test-model",
+                        "status": "completed",
+                        "output": []
+                    }
+                })
                 .to_string(),
             ),
         ]
@@ -1949,11 +1997,9 @@ mod reasoning_compaction_regression_tests {
         let tools = vec![ToolSpec {
             name: "read_file".to_string(),
             description: Some("Reads a file".to_string()),
-            parameters: json!({ "type" : "object", "properties" : {} }),
+            parameters: json!({"type": "object", "properties": {}}),
         }];
-        let hosted = vec![HostedTool::WebSearch {
-            allowed_domains: None,
-        }];
+        let hosted = vec![HostedTool::WebSearch { options: None }];
         let client = Client::new(config.clone()).unwrap();
         generate_session_compact(
             chat_history.clone(),
@@ -2081,23 +2127,34 @@ mod reasoning_compaction_regression_tests {
     }
     #[tokio::test]
     async fn completed_then_stalled_stream_errors_no_salvage() {
-        let app = Router::new().route(
-            "/v1/chat/completions",
-            post(|| async {
-                let events = stream::iter(vec![Ok::<_, std::convert::Infallible>(
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    let events = stream::iter(
+                            vec![Ok::<_, std::convert::Infallible>(
                     Event::default().data(
-                        json!({ "id" : "chatcmpl-test", "object" :
-                                "chat.completion.chunk", "created" : 1234567890, "model" :
-                                "test-model", "choices" : [{ "index" : 0, "delta" : { "role"
-                                : "assistant", "content" : "<summary>ok</summary>" },
-                                "finish_reason" : "stop" }] })
+                        json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion.chunk",
+                            "created": 1234567890,
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "role": "assistant", "content": "<summary>ok</summary>" },
+                                "finish_reason": "stop"
+                            }]
+                        })
                         .to_string(),
                     ),
-                )])
-                .chain(stream::pending::<Result<Event, std::convert::Infallible>>());
-                Sse::new(events)
-            }),
-        );
+                )],
+                        )
+                        .chain(
+                            stream::pending::<Result<Event, std::convert::Infallible>>(),
+                        );
+                    Sse::new(events)
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -2159,10 +2216,16 @@ mod reasoning_compaction_regression_tests {
                 let body = "x".repeat(2500);
                 let events = stream::iter(vec![Ok::<_, std::convert::Infallible>(
                     Event::default().data(
-                        json!({ "id" : "chatcmpl-test", "object" :
-                                "chat.completion.chunk", "created" : 1234567890, "model" :
-                                "test-model", "choices" : [{ "index" : 0, "delta" : { "role"
-                                : "assistant", "content" : body } }] })
+                        json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion.chunk",
+                            "created": 1234567890,
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "role": "assistant", "content": body }
+                            }]
+                        })
                         .to_string(),
                     ),
                 )])
@@ -2228,10 +2291,16 @@ mod reasoning_compaction_regression_tests {
             post(|| async {
                 let events = stream::iter(vec![Ok::<_, std::convert::Infallible>(
                     Event::default().data(
-                        json!({ "id" : "chatcmpl-test", "object" :
-                                "chat.completion.chunk", "created" : 1234567890, "model" :
-                                "test-model", "choices" : [{ "index" : 0, "delta" : { "role"
-                                : "assistant", "content" : "partial" } }] })
+                        json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion.chunk",
+                            "created": 1234567890,
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "role": "assistant", "content": "partial" }
+                            }]
+                        })
                         .to_string(),
                     ),
                 )])

@@ -227,9 +227,8 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
 
 /// Drain all queued permission requests, sending `Cancelled` to each.
 ///
-/// Called on turn-end and turn-cancel. After draining, restores the stashed
-/// prompt text (if any). This is distinct from `dispatch_permission_cancel`
-/// which cancels only the front request.
+/// Called on turn-end and turn-cancel. After draining, restores stashed
+/// prompt/pane. Distinct from `dispatch_permission_cancel` (front only).
 pub(super) fn drain_permission_queue(agent: &mut AgentView) {
     agent.last_permission_click = None;
     if agent.permission_queue.is_empty() {
@@ -243,25 +242,18 @@ pub(super) fn drain_permission_queue(agent: &mut AgentView) {
             )))
             .ok();
     }
-    // Queue is now empty — restore stashed prompt.
-    if let Some(stashed) = agent.permission_stashed_prompt.take() {
-        agent.prompt.restore(stashed);
-    }
+    restore_permission_stashes(agent);
 }
 
 /// Handle queue transition after resolving (select/followup/cancel) the front
 /// permission request.
 ///
-/// - Queue now empty → restore stashed prompt text.
-/// - Queue still has items → clear prompt text (for next followup input)
-///   and reset next front's focus to Options.
+/// - Queue now empty → restore stashed prompt/pane.
+/// - Queue still has items → clear prompt text and reset next front to Options.
 pub(crate) fn resolve_permission_queue_transition(agent: &mut AgentView) {
     agent.last_permission_click = None;
     if agent.permission_queue.is_empty() {
-        // Restore original prompt.
-        if let Some(stashed) = agent.permission_stashed_prompt.take() {
-            agent.prompt.restore(stashed);
-        }
+        restore_permission_stashes(agent);
     } else {
         // Clear any followup text from the just-resolved permission so it
         // doesn't leak into the next permission's UI.
@@ -270,5 +262,15 @@ pub(crate) fn resolve_permission_queue_transition(agent: &mut AgentView) {
         if let Some(next) = agent.permission_queue.front_mut() {
             next.focus = crate::views::permission_view::PermissionFocus::Options;
         }
+    }
+}
+
+/// Restore composer + pane stashes when the permission queue empties.
+pub(super) fn restore_permission_stashes(agent: &mut AgentView) {
+    if let Some(stashed) = agent.permission_stashed_prompt.take() {
+        agent.prompt.restore(stashed);
+    }
+    if let Some(pane) = agent.permission_stashed_pane.take() {
+        agent.set_active_pane(pane, true);
     }
 }

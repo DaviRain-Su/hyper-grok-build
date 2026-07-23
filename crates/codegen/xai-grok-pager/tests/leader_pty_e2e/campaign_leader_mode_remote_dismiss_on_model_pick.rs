@@ -57,16 +57,14 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     // structurally unreachable (see `spawn_polling_session`'s doc).
     seed_fake_oauth(&content, "pty-campaign-leader");
     let binary = pager_binary().expect("resolve pager binary");
-    let env = oauth_env_for_pager(&content);
     let spawn = || -> PtyHarness {
-        let env_refs: Vec<(&str, &str)> =
-            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        PtyHarness::new(
+        PtyHarness::spawn_with_content_env_ops(
             &binary,
             DEFAULT_ROWS,
             DEFAULT_COLS,
+            &content,
             &["--leader", "--leader-socket", &socket],
-            &env_refs,
+            &oauth_credential_ops(),
         )
         .expect("spawn leader-mode pager")
     };

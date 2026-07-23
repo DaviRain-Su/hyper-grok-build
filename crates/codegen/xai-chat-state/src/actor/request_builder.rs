@@ -610,8 +610,7 @@ mod tests {
             item,
             ConversationItem::User(u) if u.content.iter().any(|p| matches!(
                 p,
-                ContentPart::Text { text }
-if text.as_ref() == IMAGE_COMPACT_PLACEHOLDER
+                ContentPart::Text { text } if text.as_ref() == IMAGE_COMPACT_PLACEHOLDER
             ))
         )
     }

@@ -259,8 +259,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         loop {
             if matches!(
                 *status_rx.borrow_and_update(),
-                ConnectionStatus::Connected { generation }
-if generation >= 1
+                ConnectionStatus::Connected { generation } if generation >= 1
             ) {
                 break;
             }

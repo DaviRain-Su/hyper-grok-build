@@ -24,6 +24,297 @@ fn send_prompt_clears_active_ephemeral_tip() {
     );
 }
 
+#[test]
+fn doctor_fix_list_and_plan_dispatch_as_background_effects() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+
+    let list = dispatch_doctor(crate::slash::command::DoctorRequest::ListFixes, &mut app);
+    assert!(matches!(
+        list.as_slice(),
+        [Effect::PlanDoctorFix {
+            target,
+            request: crate::slash::command::DoctorRequest::ListFixes,
+            ..
+        }] if target.agent_id == id
+            && target.session_id == app.agents[&id].session.session_id
+            && target.cwd == app.agents[&id].session.cwd
+    ));
+
+    let fix = dispatch_doctor(
+        crate::slash::command::DoctorRequest::Fix(crate::diagnostics::SSH_WRAP_ID),
+        &mut app,
+    );
+    assert!(matches!(
+        fix.as_slice(),
+        [Effect::PlanDoctorFix {
+            request: crate::slash::command::DoctorRequest::Fix(id),
+            ..
+        }] if *id == crate::diagnostics::SSH_WRAP_ID
+    ));
+}
+
+fn target_for(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
+    crate::app::actions::DoctorFixTarget {
+        agent_id: id,
+        session_id: app.agents[&id].session.session_id.clone(),
+        session_binding_epoch: app.agents[&id].session_binding_epoch,
+        cwd: app.agents[&id].session.cwd.clone(),
+    }
+}
+
+fn doctor_question_app(temp: &std::path::Path) -> AppView {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+    let target = target_for(&app, id);
+    super::super::prompt::open_doctor_fix_question(
+        &mut app,
+        target,
+        Box::new(crate::diagnostics::test_fix_plan(temp)),
+    );
+    app
+}
+
+#[test]
+fn doctor_fix_modal_stashes_prompt_and_confirms_exactly_one_apply() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = doctor_question_app(temp.path());
+    let id = AgentId(0);
+    assert_eq!(app.agents[&id].prompt.text(), "");
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_question_key_for_test(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("confirm must produce an action: {outcome:?}");
+    };
+    let effects = dispatch(action, &mut app);
+    assert_eq!(app.agents[&id].prompt.text(), "draft");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ApplyDoctorFix { .. }]
+    ));
+}
+
+#[test]
+fn doctor_fix_confirm_rejects_changed_session_or_cwd() {
+    let temp = tempfile::tempdir().unwrap();
+    for mutate in ["session", "cwd"] {
+        let mut app = doctor_question_app(temp.path());
+        let id = AgentId(0);
+        let outcome = app
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .handle_question_key_for_test(&crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+            panic!("confirm must produce an action: {outcome:?}");
+        };
+        if mutate == "session" {
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .bind_session_id("changed".into());
+        } else {
+            app.agents.get_mut(&id).unwrap().session.cwd = std::path::PathBuf::from("/changed");
+        }
+        let effects = dispatch(action, &mut app);
+        assert!(effects.is_empty(), "{mutate}");
+        assert_eq!(app.agents[&id].prompt.text(), "draft", "{mutate}");
+        assert!(
+            last_system_text(&app, id).contains("session changed"),
+            "{mutate}"
+        );
+    }
+}
+
+#[test]
+fn doctor_fix_promoted_target_allows_confirm_and_apply() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = doctor_question_app(temp.path());
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().unbind_session_id();
+    let epoch = app.agents[&id].session_binding_epoch;
+    let question = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .question_view
+        .as_mut()
+        .unwrap();
+    let Some(crate::views::question_view::LocalQuestionKind::DoctorFix { target, .. }) =
+        question.local_kind.as_mut()
+    else {
+        panic!("doctor modal expected");
+    };
+    target.session_id = None;
+    target.session_binding_epoch = epoch;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id("bound".into());
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_question_key_for_test(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("confirm must produce an action: {outcome:?}");
+    };
+    let effects = dispatch(action, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ApplyDoctorFix { target, .. }]
+            if target.session_id == app.agents[&id].session.session_id
+    ));
+}
+
+#[test]
+fn doctor_fix_none_target_rejects_cwd_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = doctor_question_app(temp.path());
+    let id = AgentId(0);
+    let epoch = app.agents[&id].session_binding_epoch;
+    let question = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .question_view
+        .as_mut()
+        .unwrap();
+    let Some(crate::views::question_view::LocalQuestionKind::DoctorFix { target, .. }) =
+        question.local_kind.as_mut()
+    else {
+        panic!("doctor modal expected");
+    };
+    target.session_id = None;
+    target.session_binding_epoch = epoch;
+    let outcome = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .handle_question_key_for_test(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("confirm must produce an action: {outcome:?}");
+    };
+    app.agents.get_mut(&id).unwrap().session.cwd = std::path::PathBuf::from("/changed");
+    assert!(dispatch(action, &mut app).is_empty());
+    assert!(last_system_text(&app, id).contains("session changed"));
+}
+
+#[test]
+fn doctor_fix_background_confirm_keeps_original_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = doctor_question_app(temp.path());
+    let initiator = AgentId(0);
+    let original = target_for(&app, initiator);
+    let outcome = app
+        .agents
+        .get_mut(&initiator)
+        .unwrap()
+        .handle_question_key_for_test(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("confirm must produce an action: {outcome:?}");
+    };
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.active_view = ActiveView::Agent(AgentId(1));
+    assert!(matches!(
+        &action,
+        Action::DoctorFixConfirmed { target, .. } if target == &original
+    ));
+    let effects = dispatch(action, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ApplyDoctorFix { target, .. }] if target == &original
+    ));
+}
+
+#[test]
+fn doctor_fix_cancel_routes_to_initiator_then_fallbacks() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = doctor_question_app(temp.path());
+    let initiator = AgentId(0);
+    let outcome = app
+        .agents
+        .get_mut(&initiator)
+        .unwrap()
+        .handle_question_key_for_test(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("cancel must produce an action: {outcome:?}");
+    };
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.active_view = ActiveView::Agent(AgentId(1));
+    assert!(dispatch(action, &mut app).is_empty());
+    assert_eq!(last_system_text(&app, initiator), "Fix cancelled.");
+
+    let target = target_for(&app, initiator);
+    app.agents.shift_remove(&initiator);
+    assert!(dispatch(Action::DoctorFixCancelled(target.clone()), &mut app).is_empty());
+    assert_eq!(last_system_text(&app, AgentId(1)), "Fix cancelled.");
+
+    app.agents.clear();
+    app.active_view = ActiveView::Welcome;
+    assert!(dispatch(Action::DoctorFixCancelled(target), &mut app).is_empty());
+    assert_eq!(
+        app.startup_warnings.last().unwrap().message,
+        "Fix cancelled."
+    );
+}
+
+#[test]
+fn doctor_fix_all_cancel_keys_restore_prompt_without_effect() {
+    let temp = tempfile::tempdir().unwrap();
+    for key in [
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('X'),
+            crossterm::event::KeyModifiers::SHIFT,
+        ),
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ),
+    ] {
+        let mut app = doctor_question_app(temp.path());
+        let id = AgentId(0);
+        let outcome = app
+            .agents
+            .get_mut(&id)
+            .unwrap()
+            .handle_question_key_for_test(&key);
+        let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+            panic!("cancel must produce an action: {outcome:?}");
+        };
+        let effects = dispatch(action, &mut app);
+        assert!(effects.is_empty());
+        assert_eq!(app.agents[&id].prompt.text(), "draft");
+        assert_eq!(last_system_text(&app, id), "Fix cancelled.");
+    }
+}
+
 /// `/history` dispatches `OpenHistorySearch`, which opens the search
 /// panel on the active agent with the session's prompt history.
 #[test]

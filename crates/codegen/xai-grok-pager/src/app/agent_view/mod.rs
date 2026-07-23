@@ -26,20 +26,27 @@
 //!       on an empty prompt) re-enters this level and runs CancelTurn.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
-//!       turn running → Changed (swallow; Esc does not cancel)
-//!       turn cancelling → CancelTurn (retry lost ack; Ctrl+C escalates to Quit)
+//!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
+//!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
+//!         is preserved, unlike Ctrl+C's clear-first gesture)
+//!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
+//!       turn cancelling → CancelTurn in every mode (retry lost ack;
+//!         Ctrl+C escalates to Quit)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
-//!         needs-input overlay pending, no open history search) → ArmPending
-//!         RewindShowPicker (2×, silent)
+//!         needs-input overlay pending, no open history search, and not
+//!         within ESC_CANCEL_REWIND_GRACE of an Esc-fired cancel) →
+//!         ArmPending RewindShowPicker (2×, silent)
 //!       idle otherwise (scrollback-pane draft / latent mode / pending overlay /
-//!         open history search, or empty + no messages) → Changed (swallow Esc;
-//!         not FocusScrollback)
+//!         open history search / post-cancel grace, or empty + no messages) →
+//!         Changed (swallow Esc; not FocusScrollback)
 //!   → 4. return Unchanged → bubbles to app_view for global actions (quit)
 //! ```
 //!
-//! Esc policy is independent of `[ui].simple_mode` (prompt editor) and
-//! `[ui].vim_mode` (scrollback nav). Tab remains leave-prompt in both modes.
+//! The mid-turn cancel is the only Esc-policy branch gated on `[ui].vim_mode`
+//! (scrollback nav); everything else — and all of it with respect to
+//! `[ui].simple_mode` (prompt editor) — is mode-independent. Tab remains
+//! leave-prompt in both modes.
 //!
 //! ## Future: data/view split
 //!
@@ -163,6 +170,7 @@ mod plan;
 mod prompt;
 mod queue;
 mod render;
+pub use render::AppRenderParams;
 mod rewind;
 mod selection;
 mod session;
@@ -709,6 +717,7 @@ impl ParkedMarkerSlot {
 }
 pub struct AgentView {
     pub session: AgentSession,
+    pub(crate) session_binding_epoch: u32,
     pub scrollback: ScrollbackState,
     pub prompt: PromptWidget,
     /// Sticky: once the user types in the prompt, hide the tip for the session.
@@ -1267,6 +1276,8 @@ pub struct AgentView {
     /// per-request — stashing happens on the `empty -> non-empty` transition
     /// and restoring on the `non-empty -> empty` transition.
     pub permission_stashed_prompt: Option<StashedPrompt>,
+    /// Scrollback focus stolen for a permission prompt; restored when the queue empties.
+    pub permission_stashed_pane: Option<AgentPane>,
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
@@ -1293,8 +1304,8 @@ pub struct AgentView {
     /// cancel falls back to that UI/config field, then the prompt panel.
     pub(crate) cancel_subagents_preference: Option<bool>,
     /// What gesture triggered the pending turn-cancel (Ctrl+C / mouse; Esc
-    /// only via the cancel-retry path while TurnCancelling — a bare Esc no
-    /// longer starts a cancel).
+    /// via the mid-turn cancel in minimal / non-vim mode and the cancel-retry
+    /// path while TurnCancelling).
     /// Set by the key/mouse handler, consumed by `do_cancel_turn` / the
     /// cancel-retry path so `session/cancel` carries `_meta.cancelTrigger`.
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
@@ -1349,6 +1360,13 @@ pub struct AgentView {
     /// Cleared on any non-`d` key press, after 500ms expiry, or once
     /// `try_handle_esc_policy` consumes the Esc. `pub(crate)` for policy tests.
     pub(crate) esc_pressed_at: Option<std::time::Instant>,
+    /// Post-cancel grace deadline: while `now` is before it, the Esc policy
+    /// holds the idle rewind ARM so Esc-mashing past a cancel cannot
+    /// silently arm the rewind picker. Set (`now + ESC_CANCEL_REWIND_GRACE`)
+    /// by `suppress_rewind_arm` on every Esc-fired cancel, consumed and
+    /// retired-on-expiry by `rewind_arm_suppressed`. `pub(crate)` for policy
+    /// tests.
+    pub(crate) rewind_suppress_deadline: Option<std::time::Instant>,
     /// First prompt to enqueue once the session finishes loading replay.
     /// Set by `/fork` when a directive is provided; drained in the
     /// `TaskResult::SessionLoaded` arm via `enqueue_prompt_front` so the
@@ -1662,6 +1680,13 @@ fn translate_local_submit(
                 effort,
             })
         }
+        LocalQuestionKind::DoctorFix { target, plan } => {
+            if *idx == 0 {
+                InputOutcome::Action(Action::DoctorFixConfirmed { target, plan })
+            } else {
+                InputOutcome::Action(Action::DoctorFixCancelled(target))
+            }
+        }
         LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
     }
 }
@@ -1723,9 +1748,8 @@ fn translate_project_select(
             disable_picker: true,
         });
     }
-    let picked_recent = matches!(
-        selected_idx, Some(idx) if (1..resolved_paths.len()).contains(& idx)
-    );
+    let picked_recent =
+        matches!(selected_idx, Some(idx) if (1..resolved_paths.len()).contains(&idx));
     emit(if picked_recent {
         ProjectPickerOutcome::RecentProject
     } else {
@@ -1973,10 +1997,11 @@ fn is_mouse_reporting_toggle_chord(key: &KeyEvent) -> bool {
     crate::key!('r', CONTROL).matches(key)
 }
 fn format_key_for_log(key: &KeyEvent) -> serde_json::Value {
-    serde_json::json!(
-        { "code" : format!("{:?}", key.code), "modifiers" : format!("{:?}", key
-        .modifiers), "kind" : format!("{:?}", key.kind), }
-    )
+    serde_json::json!({
+        "code": format!("{:?}", key.code),
+        "modifiers": format!("{:?}", key.modifiers),
+        "kind": format!("{:?}", key.kind),
+    })
 }
 fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
     let action = match action_id? {
@@ -2178,9 +2203,10 @@ pub(crate) mod test_fixtures {
         agent.session.handle_update(
             acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                 acp::ToolCallId::new(Arc::from(tool_call_id)),
-                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!(
-                    { "task_ids" : [task_id], "timeout_ms" : timeout_ms, }
-                ))),
+                acp::ToolCallUpdateFields::new().raw_input(Some(serde_json::json!({
+                    "task_ids": [task_id],
+                    "timeout_ms": timeout_ms,
+                }))),
             )),
             &meta,
             &mut agent.scrollback,
@@ -2342,7 +2368,7 @@ pub(crate) mod test_fixtures {
         (0..agent.scrollback.len())
             .filter(|i| {
                 matches!(
-                    agent.scrollback.get(* i).map(| e | & e.block),
+                    agent.scrollback.get(*i).map(|e| &e.block),
                     Some(RenderBlock::SessionEvent(b)) if b.parked
                 )
             })
@@ -2435,6 +2461,7 @@ pub(crate) mod test_fixtures {
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         };
@@ -2497,6 +2524,7 @@ pub(crate) mod test_fixtures {
                 bg_tool_call_to_task: std::collections::HashMap::new(),
                 scheduled_tasks: std::collections::HashMap::new(),
                 in_flight_prompt: None,
+                compact_held_prompt: None,
                 current_prompt_id: None,
                 created_via_new: false,
             },
@@ -3317,6 +3345,7 @@ pub(crate) fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf)
             bg_tool_call_to_task: std::collections::HashMap::new(),
             scheduled_tasks: std::collections::HashMap::new(),
             in_flight_prompt: None,
+            compact_held_prompt: None,
             current_prompt_id: None,
             created_via_new: false,
         },
@@ -3475,17 +3504,25 @@ mod prompt_input_mode_tests {
     #[test]
     fn send_action_maps_to_correct_action_variant() {
         let t1 = "hello world".to_string();
-        assert!(matches!(PromptInputMode::Normal.send_action(t1.clone()),
-            Action::SendPrompt(t) if t == t1));
+        assert!(matches!(
+            PromptInputMode::Normal.send_action(t1.clone()),
+            Action::SendPrompt(t) if t == t1
+        ));
         let t2 = "ls -l".to_string();
-        assert!(matches!(PromptInputMode::Bash.send_action(t2.clone()),
-            Action::SendBashCommand(t) if t == t2));
+        assert!(matches!(
+            PromptInputMode::Bash.send_action(t2.clone()),
+            Action::SendBashCommand(t) if t == t2
+        ));
         let t3 = "this is feedback".to_string();
-        assert!(matches!(PromptInputMode::Feedback.send_action(t3.clone()),
-            Action::SendFeedback(t) if t == t3));
+        assert!(matches!(
+            PromptInputMode::Feedback.send_action(t3.clone()),
+            Action::SendFeedback(t) if t == t3
+        ));
         let t4 = "remember this".to_string();
-        assert!(matches!(PromptInputMode::Remember.send_action(t4.clone()),
-            Action::SendRememberNote(t) if t == t4));
+        assert!(matches!(
+            PromptInputMode::Remember.send_action(t4.clone()),
+            Action::SendRememberNote(t) if t == t4
+        ));
     }
     #[test]
     fn is_exit_key_normal_never_exits() {

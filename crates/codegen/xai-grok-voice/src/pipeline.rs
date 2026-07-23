@@ -7,8 +7,6 @@
 
 #[cfg(feature = "audio")]
 use std::collections::VecDeque;
-#[cfg(feature = "audio")]
-use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -96,7 +94,7 @@ pub async fn run_voice_pipeline(
                 };
                 // The reader task owns the capture handle; signalling it lets the
                 // reader stop the mic and send `audio.done` in a single place,
-                // matching the silence-guard teardown below.
+                // matching the no-speech-watchdog teardown below.
                 let _ = session.finish_tx.send(()).await;
             }
         }
@@ -193,30 +191,21 @@ async fn forward_pcm(
     }
 }
 
-/// Silence → short toast (+ long OS hint); non-silence → "try again".
-/// Toast may be the only surface (dashboard / `--minimal`), so on macOS it
-/// includes grant + restart — the long hint has the full Settings path.
+/// How long a session may run without any transcript before it is torn down
+/// (instead of streaming a dead mic until the user gives up). Disarmed by the
+/// first transcript, so long dictation with pauses is unaffected.
 #[cfg(feature = "audio")]
-fn silence_guard_error(peak: u16) -> (String, Option<String>) {
-    if crate::pcm::is_silence(peak) {
-        let message = if cfg!(target_os = "macos") {
-            "microphone delivered only silence — allow terminal mic access, then restart it"
-        } else {
-            "microphone delivered only silence — check mic permission"
-        };
-        (
-            message.to_string(),
-            Some(format!(
-                "To fix voice dictation, {}",
-                crate::probe::mic_silence_help()
-            )),
-        )
-    } else {
-        (
-            "heard audio but no speech was detected — try again".to_string(),
-            None,
-        )
-    }
+const NO_SPEECH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Message and permission guidance for a session torn down by
+/// [`NO_SPEECH_TIMEOUT`]. A denied grant is indistinguishable from not speaking
+/// because macOS may return silence instead of an error.
+#[cfg(feature = "audio")]
+fn no_speech_error() -> (String, Option<String>) {
+    (
+        "No speech was detected. Voice stopped.".to_owned(),
+        Some(crate::probe::mic_fix_help().to_owned()),
+    )
 }
 
 #[cfg(feature = "audio")]
@@ -256,7 +245,6 @@ async fn start_capture_session(
             )));
         }
     };
-    let peak = capture.peak_meter();
     let mut stt = connect_res?;
 
     // Hand the live sender to the forwarder; it flushes the backlog then streams.
@@ -278,9 +266,9 @@ async fn start_capture_session(
                 handle.stop();
             }
         };
-        // No transcript in first 10s → diagnose from peak. Disarmed after speech.
-        let silence_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut silence_check = true;
+        // No transcript within the timeout → tear down. Disarmed after speech.
+        let no_speech_deadline = tokio::time::Instant::now() + NO_SPEECH_TIMEOUT;
+        let mut awaiting_speech = true;
         // Chunk-final (`is_final && !speech_final`) text is locked: the server
         // sends it as a delta of the turn. Stitch those deltas into the live
         // preview so a long pauseless utterance keeps accumulating on screen
@@ -293,19 +281,19 @@ async fn start_capture_session(
             tokio::select! {
                 msg = finish_rx.recv() => {
                     if msg.is_some() {
-                        // User ended the turn; stop watching for initial silence.
-                        silence_check = false;
+                        // User ended the turn; stop the no-speech watchdog.
+                        awaiting_speech = false;
                         stop_capture(&mut capture);
                         stt.finish_audio();
                     } else {
                         return;
                     }
                 }
-                _ = tokio::time::sleep_until(silence_deadline), if silence_check => {
-                    // Tear down rather than streaming silence until the user stops.
+                _ = tokio::time::sleep_until(no_speech_deadline), if awaiting_speech => {
+                    // Tear down rather than streaming a dead mic until the user stops.
                     stop_capture(&mut capture);
                     stt.finish_audio();
-                    let (message, hint) = silence_guard_error(peak.load(Ordering::Relaxed));
+                    let (message, hint) = no_speech_error();
                     let _ = out.send(VoiceEvent::Error { message, hint }).await;
                     return;
                 }
@@ -316,8 +304,8 @@ async fn start_capture_session(
                             if text.is_empty() {
                                 continue;
                             }
-                            // Real speech arrived: disarm the initial-silence guard.
-                            silence_check = false;
+                            // Real speech arrived: disarm the no-speech watchdog.
+                            awaiting_speech = false;
 
                             let event = if p.speech_final {
                                 locked_prefix.clear();
@@ -348,7 +336,7 @@ async fn start_capture_session(
                         Some(StreamingSttEvent::Done { text }) => {
                             locked_prefix.clear();
                             if !text.trim().is_empty() {
-                                silence_check = false;
+                                awaiting_speech = false;
                                 let _ = out.send(VoiceEvent::UtteranceFinal { text }).await;
                             }
                         }
@@ -422,16 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn silence_guard_error_matches_metered_level() {
-        let (message, hint) = silence_guard_error(0);
-        assert!(message.contains("only silence"));
-        if cfg!(target_os = "macos") {
-            assert!(message.contains("restart"), "{message}");
-        }
-        assert!(hint.is_some_and(|h| h.contains(crate::probe::mic_silence_help())));
-
-        let (message, hint) = silence_guard_error(2_000);
-        assert!(message.contains("no speech was detected"));
-        assert!(hint.is_none());
+    fn no_speech_error_carries_permission_hint() {
+        let (message, hint) = no_speech_error();
+        assert_eq!(message, "No speech was detected. Voice stopped.");
+        assert!(hint.is_some_and(|hint| hint.contains(crate::probe::mic_fix_help())));
     }
 }

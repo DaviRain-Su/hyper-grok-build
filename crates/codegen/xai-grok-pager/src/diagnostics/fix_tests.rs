@@ -4,7 +4,7 @@ use crate::diagnostics::{DiagnosticFinding, FindingDisposition, ManualRemediatio
 use crate::host::DisplayServer;
 use crate::terminal::{MultiplexerKind, TerminalName};
 
-fn report() -> DiagnosticReport {
+pub(super) fn report() -> DiagnosticReport {
     let mut report = DiagnosticReport {
         facts: crate::diagnostics::DiagnosticFacts {
             terminal: TerminalName::Ghostty,
@@ -70,7 +70,7 @@ fn terminal() -> TerminalContext {
     }
 }
 
-fn request(home: &Path, shell: &str) -> FixRequest {
+pub(super) fn request(home: &Path, shell: &str) -> FixRequest {
     FixRequest {
         id: SSH_WRAP_ID,
         home: home.to_path_buf(),
@@ -93,6 +93,43 @@ fn canonical_and_short_ids_resolve_to_canonical_id() {
         resolve_fix_id("terminal.unknown"),
         Err(FixError::UnknownId(_))
     ));
+}
+
+#[test]
+fn applicable_fix_listing_uses_report_metadata_and_planner_availability() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = report();
+    let local = terminal();
+    let local_fixes = applicable_automatic_fixes_with(&report, &local, |id| {
+        Ok(FixRequest {
+            id,
+            ..request(temp.path(), "/bin/bash")
+        })
+    });
+    assert_eq!(
+        local_fixes,
+        vec![(SSH_WRAP_ID, "ssh-wrap", AutomaticFixAvailability::Here)]
+    );
+
+    let mut remote = local.clone();
+    remote.is_ssh = true;
+    assert_eq!(
+        applicable_automatic_fixes_with(&report, &remote, |_| { Err(FixError::HomeUnavailable) }),
+        vec![(
+            SSH_WRAP_ID,
+            "ssh-wrap",
+            AutomaticFixAvailability::RunLocally
+        )]
+    );
+
+    let mut manual_only = report;
+    manual_only.findings[0].automatic_remediation = None;
+    assert!(
+        applicable_automatic_fixes_with(&manual_only, &local, |_| {
+            Err(FixError::HomeUnavailable)
+        })
+        .is_empty()
+    );
 }
 
 #[test]

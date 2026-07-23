@@ -10,7 +10,8 @@ use crate::permission::bash_command_splitting::{
     try_parse_shell, unwrap_wrappers,
 };
 use crate::permission::policy::{
-    CompiledPolicy, InlineShellScript, ShellWord, shell_dash_c_script,
+    CompiledPolicy, GateDecision, InlineShellScript, ShellWord, combine_gate_decisions,
+    shell_dash_c_script,
 };
 use crate::permission::types::{AccessKind, Decision};
 
@@ -18,6 +19,18 @@ impl CompiledPolicy {
     /// Escalate (never auto-allow) a shell reader/writer/redirect touching a
     /// restricted path; unpinnable operands return `Ask`.
     pub fn evaluate_shell_file_access(&self, cmd: &str, cwd: &Path) -> Option<Decision> {
+        self.evaluate_shell_file_access_gate(cmd, cwd)
+            .map(GateDecision::into_decision)
+    }
+
+    /// [`Self::evaluate_shell_file_access`] with `Ask` provenance kept: a
+    /// rule-match Ask stays binding while the manager may defer a fail-closed
+    /// Ask to the auto-mode classifier.
+    pub(crate) fn evaluate_shell_file_access_gate(
+        &self,
+        cmd: &str,
+        cwd: &Path,
+    ) -> Option<GateDecision> {
         if !self.has_file_restrictions {
             return None;
         }
@@ -31,15 +44,15 @@ impl CompiledPolicy {
         inline_depth_remaining: usize,
         cwd_unpinned: bool,
         entered_inline: bool,
-    ) -> Option<Decision> {
+    ) -> Option<GateDecision> {
         let Some(tree) = try_parse_shell(cmd) else {
-            return entered_inline.then_some(Decision::Ask);
+            return entered_inline.then_some(GateDecision::AskFailClosed);
         };
         let root = tree.root_node();
         let parse_failed = root.has_error();
         // WHY: only recursively entered scripts gain a general malformed-script Ask floor.
         let mut forced_ask = entered_inline && parse_failed;
-        let mut decision: Option<Decision> = None;
+        let mut decision: Option<GateDecision> = None;
 
         let invocations = shell_command_invocations(root, cmd);
 
@@ -55,7 +68,7 @@ impl CompiledPolicy {
             if let Some(path) = redirect.path {
                 let path_cwd_unpinned = cwd_unpinned
                     || cwd_unpinned_before(&cwd_changes, redirect.start_byte, redirect.scope);
-                decision = combine_decisions(
+                decision = combine_gate_decisions(
                     decision,
                     self.evaluate_shell_path(&path, cwd, redirect.mode, path_cwd_unpinned),
                 );
@@ -82,7 +95,7 @@ impl CompiledPolicy {
                     if inline_depth_remaining == 0 {
                         forced_ask = true;
                     } else if let ShellWord::Literal(inner) = shell_words[index] {
-                        decision = combine_decisions(
+                        decision = combine_gate_decisions(
                             decision,
                             self.evaluate_shell_file_access_inner(
                                 inner,
@@ -126,7 +139,7 @@ impl CompiledPolicy {
                 if shell_arg_is_ambiguous(&path) {
                     forced_ask = true;
                 }
-                decision = combine_decisions(
+                decision = combine_gate_decisions(
                     decision,
                     self.evaluate_shell_path(&path, cwd, mode, invocation_cwd_unpinned),
                 );
@@ -139,7 +152,7 @@ impl CompiledPolicy {
                     if shell_arg_is_ambiguous(path) {
                         forced_ask = true;
                     }
-                    decision = combine_decisions(
+                    decision = combine_gate_decisions(
                         decision,
                         self.evaluate_shell_path(path, cwd, mode, invocation_cwd_unpinned),
                     );
@@ -159,7 +172,7 @@ impl CompiledPolicy {
                     forced_ask = true;
                 }
                 for &mode in modes {
-                    decision = combine_decisions(
+                    decision = combine_gate_decisions(
                         decision,
                         self.evaluate_shell_path(token, cwd, mode, invocation_cwd_unpinned),
                     );
@@ -169,7 +182,7 @@ impl CompiledPolicy {
                 forced_ask = true;
             }
         }
-        combine_decisions(decision, forced_ask.then_some(Decision::Ask))
+        combine_gate_decisions(decision, forced_ask.then_some(GateDecision::AskFailClosed))
     }
 
     fn evaluate_shell_path(
@@ -178,13 +191,14 @@ impl CompiledPolicy {
         cwd: &Path,
         mode: ShellFileMode,
         cwd_unpinned: bool,
-    ) -> Option<Decision> {
+    ) -> Option<GateDecision> {
         let path = normalize_shell_path(token);
         let is_absolute = is_absolute_shell_path(&path);
         // Escalate only: drop Allow so a file allow-rule can't auto-approve here.
         let escalate = |access: &AccessKind| match self.evaluate(access) {
-            Some(Decision::Allow) | None => None,
-            other => other,
+            Some(Decision::Reject(reason)) => Some(GateDecision::Reject(reason)),
+            Some(Decision::Ask) => Some(GateDecision::AskRuleMatch),
+            _ => None,
         };
         // Also re-check the resolved symlink target so a deny keyed on the real
         // path can't be dodged via an in-workspace symlink (`ln -s /etc x`).
@@ -210,7 +224,7 @@ impl CompiledPolicy {
                 // Unresolvable (depth/cycle/error): fail closed to Ask when any
                 // component of the operand is a symlink, rather than silently
                 // allowing it (covers mid-path chains, not just the leaf).
-                None => path_has_symlink(&raw_absolute).then_some(Decision::Ask),
+                None => path_has_symlink(&raw_absolute).then_some(GateDecision::AskFailClosed),
             }
         });
         let path_decision = escalate(&shell_access(mode, path.clone()));
@@ -223,12 +237,12 @@ impl CompiledPolicy {
             } else {
                 normalize_shell_path(&cwd.join(&path).to_string_lossy())
             };
-            combine_decisions(escalate(&shell_access(mode, absolute)), resolved_decision)
+            combine_gate_decisions(escalate(&shell_access(mode, absolute)), resolved_decision)
         };
-        let decision = combine_decisions(path_decision, anchored_decision);
-        combine_decisions(
+        let decision = combine_gate_decisions(path_decision, anchored_decision);
+        combine_gate_decisions(
             decision,
-            (cwd_unpinned && !is_absolute).then_some(Decision::Ask),
+            (cwd_unpinned && !is_absolute).then_some(GateDecision::AskFailClosed),
         )
     }
 }
@@ -509,7 +523,8 @@ fn cwd_unpinned_before(positions: &[CwdPoison], at: usize, scope: ExecutionScope
         .any(|poison| poison.at < at && (poison.scope == scope || poison.scope.contains(scope)))
 }
 
-/// A command operand or redirect destination extracted from the AST.
+/// A command operand or redirect destination extracted from the AST, with
+/// escape/quote folding already applied to literals.
 #[derive(Clone)]
 enum InvocationWord {
     Literal(String),
@@ -750,6 +765,29 @@ fn shell_command_invocations(root: Node<'_>, src: &str) -> Vec<ShellInvocation> 
     }
     found.sort_by_key(|invocation| invocation.start_byte);
     found
+}
+
+/// Auto-mode opaque-shell floor: a (potential) `-c` string reinterpretation
+/// (`bash|sh|dash|zsh|ksh -c …`) or a literal `eval` head. The one classifier
+/// shared by the decomposable segment loop and the undecomposable tree walk so
+/// the two can't drift.
+pub(crate) fn words_are_opaque_shell(words: &[ShellWord<'_>]) -> bool {
+    shell_dash_c_script(words).is_potential_inline()
+        || matches!(
+            words.first(),
+            Some(ShellWord::Literal(program)) if shell_program_name(program) == "eval"
+        )
+}
+
+/// Undecomposable-path opaque-shell floor: word-only decomposition failed, so
+/// apply the canonical word predicate to each parsed invocation directly.
+pub(crate) fn tree_has_opaque_shell(root: Node<'_>, src: &str) -> bool {
+    shell_command_invocations(root, src)
+        .iter()
+        .any(|invocation| {
+            let peeled = unwrap_invocation_checked(invocation);
+            words_are_opaque_shell(&peeled.words.shell_words())
+        })
 }
 
 fn shell_redirect_targets(root: Node<'_>, src: &str) -> Vec<ShellRedirectTarget> {
@@ -1163,6 +1201,45 @@ mod tests {
 
     fn cwd() -> &'static std::path::Path {
         std::path::Path::new("/work")
+    }
+
+    #[test]
+    fn shell_file_gate_distinguishes_ask_provenance() {
+        let ask = compiled(vec![file_rule(
+            RuleAction::Ask,
+            ToolFilter::Read,
+            "**/secrets/**",
+        )]);
+        // Rule match: an identified operand hits the ask rule.
+        assert_eq!(
+            ask.evaluate_shell_file_access_gate("cat secrets/token.txt", cwd()),
+            Some(GateDecision::AskRuleMatch)
+        );
+        // Fail-closed: a recursive reader has no pinnable operands.
+        assert_eq!(
+            ask.evaluate_shell_file_access_gate("rg TODO", cwd()),
+            Some(GateDecision::AskFailClosed)
+        );
+        // Fail-closed: a dynamic operand on a known reader is unpinnable.
+        assert_eq!(
+            ask.evaluate_shell_file_access_gate("cat \"$F\"", cwd()),
+            Some(GateDecision::AskFailClosed)
+        );
+        // A rule match anywhere outranks a fail-closed floor in the same script.
+        assert_eq!(
+            ask.evaluate_shell_file_access_gate("rg TODO && cat secrets/token.txt", cwd()),
+            Some(GateDecision::AskRuleMatch)
+        );
+        // Deny rules keep rejecting with provenance preserved.
+        let deny = compiled(vec![file_rule(
+            RuleAction::Deny,
+            ToolFilter::Read,
+            "**/.env",
+        )]);
+        assert!(matches!(
+            deny.evaluate_shell_file_access_gate("cat .env", cwd()),
+            Some(GateDecision::Reject(_))
+        ));
     }
 
     #[test]

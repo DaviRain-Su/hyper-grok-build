@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use xai_grok_test_support::MockInferenceServer;
+use xai_grok_test_support::{MockInferenceServer, TestSandbox};
 
 pub use xai_grok_test_support::mock_server::LogEntry;
 pub use xai_grok_test_support::mock_server::MockModelEntry as MockModel;
@@ -107,7 +107,7 @@ impl AgentTurnExpectation {
 /// Shuts the server down on drop (the inner server's `Drop`).
 pub struct ContentController {
     server: MockInferenceServer,
-    home: tempfile::TempDir,
+    sandbox: TestSandbox,
 }
 
 impl ContentController {
@@ -132,9 +132,11 @@ impl ContentController {
         server.preset_allow_access();
         server.set_response(default_response_text());
 
-        let home = tempfile::tempdir().context("create temp HOME")?;
+        let mut sandbox = TestSandbox::builder().mock_url(server.url()).build();
+        // Keep unrelated autocomplete work out of PTY timing assertions.
+        sandbox.set_env("GROK_PROMPT_SUGGESTIONS", "false");
 
-        Ok(Self { server, home })
+        Ok(Self { server, sandbox })
     }
 
     /// Base URL of the mock server, e.g. `http://127.0.0.1:41823/v1`.
@@ -145,36 +147,12 @@ impl ContentController {
     /// Isolated `$HOME` directory that the pager should use (keeps its ~/.grok
     /// cache/state out of the real home during tests).
     pub fn home(&self) -> &Path {
-        self.home.path()
+        self.sandbox.home()
     }
 
-    /// Env vars to pass to the pager process so it hits the mock server
-    /// with telemetry / feedback disabled.
-    ///
-    /// Mirrors `xai_grok_test_support::env::test_env_cmd_tokio`.
-    pub fn env_for_pager(&self) -> Vec<(String, String)> {
-        let home = self.home.path().to_string_lossy().into_owned();
-        let grok_home = self
-            .home
-            .path()
-            .join(".grok")
-            .to_string_lossy()
-            .into_owned();
-        vec![
-            ("HOME".into(), home),
-            // Explicit GROK_HOME prevents leaking the real user's
-            // config.toml when $HOME alone isn't sufficient (e.g. if
-            // GROK_HOME is set in the test runner's env).
-            ("GROK_HOME".into(), grok_home),
-            ("GROK_CLI_CHAT_PROXY_BASE_URL".into(), self.url()),
-            ("GROK_XAI_API_BASE_URL".into(), self.url()),
-            ("XAI_API_KEY".into(), "test-key-for-ci".into()),
-            ("GROK_TELEMETRY_ENABLED".into(), "false".into()),
-            ("GROK_FEEDBACK_ENABLED".into(), "false".into()),
-            ("GROK_TRACE_UPLOAD".into(), "false".into()),
-            // Keep unrelated autocomplete work out of PTY timing assertions.
-            ("GROK_PROMPT_SUGGESTIONS".into(), "false".into()),
-        ]
+    /// Filesystem and environment used by content-backed spawns.
+    pub fn sandbox(&self) -> &TestSandbox {
+        &self.sandbox
     }
 
     /// Replace the mocked assistant response. All subsequent chat completion
@@ -537,33 +515,5 @@ mod tests {
             panic.is_err(),
             "unused logical turn must fail one-of-two contract"
         );
-    }
-
-    /// `env_for_pager` keeps the exact sandbox + endpoint env contract the
-    /// pager spawn path depends on.
-    #[tokio::test]
-    async fn env_for_pager_shape() {
-        let content = ContentController::start().await.unwrap();
-        let env = content.env_for_pager();
-        let get = |k: &str| {
-            env.iter()
-                .find(|(key, _)| key.as_str() == k)
-                .map(|(_, v)| v.clone())
-        };
-
-        assert_eq!(get("HOME").as_deref(), content.home().to_str());
-        assert_eq!(
-            get("GROK_HOME").as_deref(),
-            content.home().join(".grok").to_str()
-        );
-        assert_eq!(get("GROK_CLI_CHAT_PROXY_BASE_URL"), Some(content.url()));
-        assert_eq!(get("GROK_XAI_API_BASE_URL"), Some(content.url()));
-        assert_eq!(get("XAI_API_KEY").as_deref(), Some("test-key-for-ci"));
-        assert_eq!(get("GROK_TELEMETRY_ENABLED").as_deref(), Some("false"));
-        assert_eq!(get("GROK_FEEDBACK_ENABLED").as_deref(), Some("false"));
-        assert_eq!(get("GROK_TRACE_UPLOAD").as_deref(), Some("false"));
-        assert_eq!(get("GROK_PROMPT_SUGGESTIONS").as_deref(), Some("false"));
-        assert_eq!(get("GROK_MAX_RETRIES"), None);
-        assert_eq!(env.len(), 9, "env list must not silently grow or shrink");
     }
 }

@@ -1304,10 +1304,7 @@ impl WorkspaceOps {
         };
         handle.on_session_ended(session_id);
         if let Err(e) = handle.drop_session(session_id, session_id) {
-            tracing::debug!(
-                % session_id, error = % e,
-                "end_local_session: drop_session failed (expected if never bound)"
-            );
+            tracing::debug!(%session_id, error = %e, "end_local_session: drop_session failed (expected if never bound)");
         }
     }
     pub async fn on_before_turn(
@@ -2044,9 +2041,10 @@ mod tests {
     /// PutFileEntry serde round-trip with defaults.
     #[test]
     fn put_file_entry_defaults() {
-        let json = serde_json::json!(
-            { "path" : "src/main.rs", "content" : "fn main() {}" }
-        );
+        let json = serde_json::json!({
+            "path": "src/main.rs",
+            "content": "fn main() {}"
+        });
         let entry: PutFileEntry = serde_json::from_value(json).unwrap();
         assert_eq!(entry.path, "src/main.rs");
         assert_eq!(entry.content, "fn main() {}");
@@ -2092,7 +2090,7 @@ mod tests {
     /// GetFileEntry serde round-trip with defaults.
     #[test]
     fn get_file_entry_defaults() {
-        let json = serde_json::json!({ "path" : "lib.rs" });
+        let json = serde_json::json!({ "path": "lib.rs" });
         let entry: GetFileEntry = serde_json::from_value(json).unwrap();
         assert_eq!(entry.path, "lib.rs");
         assert!(entry.if_none_match.is_none());
@@ -2127,7 +2125,10 @@ mod tests {
     /// GetFileResult serialization skips None fields, defaults matched to false.
     #[test]
     fn get_file_result_defaults_and_skip() {
-        let json = serde_json::json!({ "path" : "a.txt", "exists" : true, });
+        let json = serde_json::json!({
+            "path": "a.txt",
+            "exists": true,
+        });
         let result: GetFileResult = serde_json::from_value(json).unwrap();
         assert!(!result.matched, "matched should default to false");
         assert!(result.content.is_none());
