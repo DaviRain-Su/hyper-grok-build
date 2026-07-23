@@ -4,14 +4,26 @@
 
 <img src="docs/assets/hyper-banner.jpg" alt="Hyper —— 终端 AI 编码代理" width="720">
 
+<p>
+  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/DaviRain-Su/hyper-grok-build?display_name=tag" alt="发布版本"></a>
+  <a href="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml"><img src="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml/badge.svg" alt="发布 CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="许可证"></a>
+  <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="平台:macOS、Linux、Windows">
+  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/downloads/DaviRain-Su/hyper-grok-build/total?label=downloads" alt="下载量"></a>
+  <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n:10 种语言">
+</p>
+
 **Hyper** 是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
-一个基于终端的 AI 编码代理,对 xAI Grok、Kimi Code / Moonshot、
-ChatGPT Codex、OpenAI、Anthropic、Z.AI、Ollama Cloud 等平台提供一流支持。
+一个用 Rust 编写的终端 AI 编码代理,对多家 LLM 供应商提供一流支持:
+xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenAI、Anthropic、Z.AI、Ollama Cloud 等。
 
 它以全屏 TUI 的形式运行,能够理解你的代码库、编辑文件、
 执行 shell 命令、搜索网页,并管理长时间运行的任务 ——
 既可以在终端中交互使用,也可以无头模式用于脚本/CI,
 还能通过 Agent Client Protocol(ACP)嵌入到编辑器中。
+UI 已本地化为 10 种语言(English、中文、日本語、한국어、Español、
+Português、Français、Deutsch、Русский),并可在设置中实时切换。
 
 [安装](#安装) ·
 [供应商](#供应商) ·

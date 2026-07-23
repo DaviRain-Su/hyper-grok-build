@@ -4,15 +4,28 @@
 
 <img src="docs/assets/hyper-banner.jpg" alt="Hyper — terminal AI coding agent" width="720">
 
+<p>
+  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/v/release/DaviRain-Su/hyper-grok-build?display_name=tag" alt="Release"></a>
+  <a href="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml"><img src="https://github.com/DaviRain-Su/hyper-grok-build/actions/workflows/release.yml/badge.svg" alt="Release CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/rust-1.92.0-orange?logo=rust" alt="Rust 1.92">
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey" alt="Platforms: macOS, Linux, Windows">
+  <a href="https://github.com/DaviRain-Su/hyper-grok-build/releases"><img src="https://img.shields.io/github/downloads/DaviRain-Su/hyper-grok-build/total?label=downloads" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/i18n-10%20locales-brightgreen" alt="i18n: 10 locales">
+</p>
+
 **Hyper** is an unofficial multi-provider community build of
 [Grok Build](https://github.com/xai-org/grok-build) — a terminal-based AI
-coding agent with first-class support for xAI Grok, Kimi Code / Moonshot,
-ChatGPT Codex, OpenAI, Anthropic, Z.AI, Ollama Cloud, and more.
+coding agent written in Rust, with first-class multi-provider LLM support:
+xAI Grok, Kimi Code / Moonshot, ChatGPT Codex, OpenAI, Anthropic, Z.AI,
+Ollama Cloud, and more.
 
 It runs as a full-screen TUI that understands your codebase, edits files,
 executes shell commands, searches the web, and manages long-running tasks —
 interactively, headlessly for scripting/CI, or embedded in editors via the
-Agent Client Protocol (ACP).
+Agent Client Protocol (ACP). The UI is localized in 10 languages
+(English, 中文, 日本語, 한국어, Español, Português, Français, Deutsch,
+Русский) and switchable live from Settings.
 
 [Installation](#installation) ·
 [Providers](#providers) ·
