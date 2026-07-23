@@ -212,7 +212,11 @@ Known issues and remaining work: [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 In-tree user guide (examples may still say `grok`; the Hyper binary name is
 `hyper`, paths remain under `~/.grok`):
 
-[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
+- English: [`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
+- 中文: [`crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/`](crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/)
+
+Related extension docs also have Chinese translations (`*.zh-CN.md`) under
+`crates/codegen/xai-grok-pager/docs/`.
 
 Upstream product docs: [docs.x.ai/build](https://docs.x.ai/build/overview)
 
