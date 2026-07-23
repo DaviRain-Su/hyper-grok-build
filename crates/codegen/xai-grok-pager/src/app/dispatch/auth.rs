@@ -241,9 +241,7 @@ pub(super) fn dispatch_set_platform_api_key(
 
 /// `/login kimi` — Kimi Code subscription device OAuth.
 pub(super) fn dispatch_login_kimi(app: &mut AppView) -> Vec<Effect> {
-    let method_id = acp::AuthMethodId::new(
-        xai_grok_shell::agent::auth_method::KIMI_CODE_METHOD_ID,
-    );
+    let method_id = acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::KIMI_CODE_METHOD_ID);
     // Prefer the advertised label when present.
     if let Some(m) = app
         .auth_methods
@@ -261,9 +259,8 @@ pub(super) fn dispatch_login_kimi(app: &mut AppView) -> Vec<Effect> {
 
 /// `/login openai` — OpenAI Codex (ChatGPT) subscription browser OAuth.
 pub(super) fn dispatch_login_openai_codex(app: &mut AppView) -> Vec<Effect> {
-    let method_id = acp::AuthMethodId::new(
-        xai_grok_shell::agent::auth_method::OPENAI_CODEX_METHOD_ID,
-    );
+    let method_id =
+        acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::OPENAI_CODEX_METHOD_ID);
     if let Some(m) = app
         .auth_methods
         .iter()

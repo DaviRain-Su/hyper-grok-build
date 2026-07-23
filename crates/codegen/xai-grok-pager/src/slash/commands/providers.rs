@@ -10,9 +10,7 @@ use xai_grok_models::PlatformId;
 
 use crate::acp::model_state::{ModelState, platform_lock};
 use crate::app::actions::Action;
-use crate::slash::command::{
-    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand,
-};
+use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
 pub struct ProvidersCommand;
 
@@ -182,10 +180,7 @@ enum PlatformStatus {
     NoCatalog,
 }
 
-fn platform_status(
-    models: &ModelState,
-    platform: PlatformId,
-) -> (PlatformStatus, usize, usize) {
+fn platform_status(models: &ModelState, platform: PlatformId) -> (PlatformStatus, usize, usize) {
     let prefix = format!("{}/", platform.as_str());
     let mut usable = 0usize;
     let mut locked = 0usize;
@@ -219,14 +214,12 @@ fn compact_hint(platform: PlatformId) -> String {
 }
 
 fn build_clear_verb_items() -> Vec<ArgItem> {
-    vec![
-        ArgItem::new(
-            "clear / logout  (remove stored API key)",
-            "clear logout remove unset delete",
-            "clear ",
-            "Pick a platform next — removes platform/<id> from ~/.grok/auth.json",
-        ),
-    ]
+    vec![ArgItem::new(
+        "clear / logout  (remove stored API key)",
+        "clear logout remove unset delete",
+        "clear ",
+        "Pick a platform next — removes platform/<id> from ~/.grok/auth.json",
+    )]
 }
 
 fn build_clear_platform_items(models: &ModelState) -> Vec<ArgItem> {
@@ -434,10 +427,7 @@ mod tests {
         let mut models = ModelState::default();
         insert_model(&mut models, "deepseek/deepseek-v4-flash", true);
         let out = render_providers(&models);
-        assert!(
-            out.contains("/providers deepseek"),
-            "hint missing: {out}"
-        );
+        assert!(out.contains("/providers deepseek"), "hint missing: {out}");
     }
 
     #[test]
@@ -480,11 +470,7 @@ mod tests {
     fn run_clear_subcommand_sends_empty_key() {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
-        for cmd in [
-            "clear zai-coding",
-            "logout zai-coding",
-            "remove zai-coding",
-        ] {
+        for cmd in ["clear zai-coding", "logout zai-coding", "remove zai-coding"] {
             match ProvidersCommand.run(&mut ctx, cmd) {
                 CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
                     assert_eq!(platform, "zai-coding", "cmd={cmd}");

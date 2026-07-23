@@ -75,10 +75,8 @@ fn fix_zsh_root_prompt_positional(script: &str, bin: &str) -> String {
         });
     // clap_complete emits `:bin-command-$line[N]:` inside a zsh `${…}` expansion.
     // Escape `{`/`}` for `format!` so only `{bin}` is interpolated.
-    let from_ctx =
-        format!(r#"curcontext="${{curcontext%:*:*}}:{bin}-command-$line[2]:""#);
-    let to_ctx =
-        format!(r#"curcontext="${{curcontext%:*:*}}:{bin}-command-$line[1]:""#);
+    let from_ctx = format!(r#"curcontext="${{curcontext%:*:*}}:{bin}-command-$line[2]:""#);
+    let to_ctx = format!(r#"curcontext="${{curcontext%:*:*}}:{bin}-command-$line[1]:""#);
     for (from, to) in [
         (
             r#"words=($line[2] "${words[@]}")"#,

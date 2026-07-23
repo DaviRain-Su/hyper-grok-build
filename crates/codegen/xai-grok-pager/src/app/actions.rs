@@ -1543,10 +1543,7 @@ pub enum Effect {
     },
     /// Persist a BYOK platform API key via `x.ai/internal/set_platform_api_key`
     /// and restamp the catalog. Empty `api_key` clears the stored key.
-    SetPlatformApiKey {
-        platform: String,
-        api_key: String,
-    },
+    SetPlatformApiKey { platform: String, api_key: String },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,

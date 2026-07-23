@@ -1386,8 +1386,8 @@ mod tests {
             Some(Command::Login { openai: true, .. })
         ));
         // --openai may combine with --device-auth (headless device flow)…
-        let args =
-            PagerArgs::try_parse_from(["grok", "login", "--openai", "--device-auth"]).expect("parses");
+        let args = PagerArgs::try_parse_from(["grok", "login", "--openai", "--device-auth"])
+            .expect("parses");
         assert!(matches!(
             args.command,
             Some(Command::Login {

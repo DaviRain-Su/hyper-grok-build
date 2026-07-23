@@ -1338,9 +1338,8 @@ impl AgentView {
                         && !items.is_empty()
                     {
                         let hidden_ids = crate::config_toml_edit::hidden_model_ids();
-                        let scoped = crate::app::modals::model_picker_view_items(
-                            &items, &hidden_ids, false,
-                        );
+                        let scoped =
+                            crate::app::modals::model_picker_view_items(&items, &hidden_ids, false);
                         self.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
                             command: command.to_string(),
                             args_query: String::new(),

@@ -140,7 +140,9 @@ fn list_path_completions(cwd: &Path, query: &str) -> Vec<ArgItem> {
             } else {
                 "file".to_string()
             },
-            locked: false, action_id: None, hidden: false,
+            locked: false,
+            action_id: None,
+            hidden: false,
         });
 
         // Pre-sort cap to avoid pathological directories.

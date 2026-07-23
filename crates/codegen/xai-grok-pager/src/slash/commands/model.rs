@@ -266,10 +266,8 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
         .collect();
 
     // Catalog id tokens (`platform/model`) — always unique.
-    let mut id_tokens: Vec<(&acp::ModelId, &str)> = usable
-        .iter()
-        .map(|(id, _)| (*id, id.0.as_ref()))
-        .collect();
+    let mut id_tokens: Vec<(&acp::ModelId, &str)> =
+        usable.iter().map(|(id, _)| (*id, id.0.as_ref())).collect();
     id_tokens.sort_by_key(|(_, token)| std::cmp::Reverse(token.len()));
     for (id, token) in id_tokens {
         if starts_with_token_then_ws(args_query, token) {
@@ -367,11 +365,7 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         // Trailing space on reasoning models: signals "more input
         // expected" to the prompt widget so Enter advances to effort
         // phase instead of submitting.
-        let insert_text = if supports {
-            format!("{token} ")
-        } else {
-            token
-        };
+        let insert_text = if supports { format!("{token} ") } else { token };
 
         let match_text = match provider.as_deref() {
             Some(p) => format!("{} {p} {}", info.name, id.0),

@@ -511,12 +511,14 @@ mod tests {
         let choices = usable_model_choices(&state);
         assert_eq!(choices.len(), 2);
         assert!(
-            choices
-                .iter()
-                .all(|(id, _)| !id.starts_with("deepseek/")),
+            choices.iter().all(|(id, _)| !id.starts_with("deepseek/")),
             "credential-less platform models must not be offered"
         );
-        assert!(choices.iter().any(|(id, name)| id == "model-a" && name == "Model A"));
+        assert!(
+            choices
+                .iter()
+                .any(|(id, name)| id == "model-a" && name == "Model A")
+        );
     }
 
     #[test]
