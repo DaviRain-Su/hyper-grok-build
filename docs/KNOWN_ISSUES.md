@@ -17,7 +17,8 @@ Last reviewed: 2026-07-22 (v0.2.109 wire-compat release).
 
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
-| Modes | design-only | Amp-style low–ultra agent modes | See [design-modes.md](./design-modes.md) — **not shipped**. Deferred; not a release blocker. |
+| Modes | deferred | Amp-style low–ultra agent modes | **缓停** — [design-modes.md](./design-modes.md) §0。现有模型配置已够；不作为发布缺口。 |
+| Oracle | design | Stronger-model pin + trigger UX | 类型已有；缺口见 [design-oracle.md](./design-oracle.md)。 |
 | Non-Darwin Unix process ID | low | BSD without libproc | `is_grok_process` falls back to liveness-only on non-Linux non-macOS Unix. Rare for Hyper targets (we ship Linux/macOS/Windows). |
 
 ## Fixed in tree
@@ -53,7 +54,8 @@ Last reviewed: 2026-07-22 (v0.2.109 wire-compat release).
 |--------|----------|
 | Shared `~/.grok` | Config, auth, sessions, and leader IPC live under the upstream home. Binary install root is `~/.hyper`. |
 | Shared Kimi + Codex proxy | Catalog id (`kimi-code/*` vs `openai-codex/*`) selects credentials; ambiguous URL alone does not guess a family. |
-| Hyper Modes | Design doc only until implemented. |
+| Hyper Modes | **Deferred** — Amp four-tier modes will not ship as designed; see [design-modes.md](./design-modes.md) §0. |
+| Oracle upgrade | Design in [design-oracle.md](./design-oracle.md); pin + trigger not yet productized. |
 | Sticky refresh cache | In-process only (not shared across processes); multi-process still uses flock + compare/adopt. |
 | Logout `--all` vs BYOK | Platform API keys under `platform/*` scopes stay until `/logout provider` / `/providers clear`. |
 
