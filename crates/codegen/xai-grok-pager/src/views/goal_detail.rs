@@ -77,19 +77,50 @@ pub(crate) fn format_elapsed(ms: u64) -> String {
 // Status label
 // ---------------------------------------------------------------------------
 
-fn status_label(goal: &GoalDisplayState) -> (&'static str, Color, String) {
+fn status_label(goal: &GoalDisplayState) -> (std::borrow::Cow<'static, str>, Color, String) {
     let theme = Theme::current();
     match goal.status {
-        GoalDisplayStatus::Active => ("Active", theme.accent_success, active_phase_label(goal)),
+        GoalDisplayStatus::Active => (
+            rust_i18n::t!("goal.status.active"),
+            theme.accent_success,
+            active_phase_label(goal),
+        ),
         GoalDisplayStatus::UserPaused
         | GoalDisplayStatus::BackOffPaused
         | GoalDisplayStatus::NoProgressPaused
         | GoalDisplayStatus::InfraPaused
-        | GoalDisplayStatus::Blocked => (goal.status.pause_label(), theme.warning, String::new()),
-        GoalDisplayStatus::Failed => ("Failed", theme.accent_error, String::new()),
-        GoalDisplayStatus::Interrupted => ("Interrupted", theme.accent_error, String::new()),
-        GoalDisplayStatus::BudgetLimited => ("Budget Limited", theme.accent_error, String::new()),
-        GoalDisplayStatus::Complete => ("Complete", theme.accent_success, String::new()),
+        | GoalDisplayStatus::Blocked => {
+            // `UserPaused` maps to the plain "Paused" key; the other paused
+            // variants carry a cause suffix from `pause_label()` (e.g.
+            // "Paused (back-off)") for which no i18n key is defined, so they
+            // stay as the English `pause_label()` return value.
+            let label = if goal.status == GoalDisplayStatus::UserPaused {
+                rust_i18n::t!("goal.status.paused")
+            } else {
+                std::borrow::Cow::Borrowed(goal.status.pause_label())
+            };
+            (label, theme.warning, String::new())
+        }
+        GoalDisplayStatus::Failed => (
+            rust_i18n::t!("goal.status.failed"),
+            theme.accent_error,
+            String::new(),
+        ),
+        GoalDisplayStatus::Interrupted => (
+            rust_i18n::t!("goal.status.interrupted"),
+            theme.accent_error,
+            String::new(),
+        ),
+        GoalDisplayStatus::BudgetLimited => (
+            rust_i18n::t!("goal.status.budget_limited"),
+            theme.accent_error,
+            String::new(),
+        ),
+        GoalDisplayStatus::Complete => (
+            rust_i18n::t!("goal.status.complete"),
+            theme.accent_success,
+            String::new(),
+        ),
     }
 }
 
@@ -299,26 +330,28 @@ fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
     // can't leak control bytes; the fixed labels below are `&'static`.
     let phrase = |d: Option<&str>| d.map(|s| strip_control_chars(&s.replace('_', " "), false));
     match event {
-        "goal_created" => "Goal created".into(),
-        "planning_started" => "Planning started".into(),
-        "planning_completed" => "Planning completed".into(),
-        "planning_failed" => "Planning failed".into(),
-        "worker_started" => "Worker started".into(),
-        "worker_completed" => "Worker completed".into(),
-        "worker_failed" => "Worker failed".into(),
-        "context_rotated" => "Context rotated".into(),
+        "goal_created" => rust_i18n::t!("goal.event.created").into_owned(),
+        "planning_started" => rust_i18n::t!("goal.event.planning_started").into_owned(),
+        "planning_completed" => rust_i18n::t!("goal.event.planning_completed").into_owned(),
+        "planning_failed" => rust_i18n::t!("goal.event.planning_failed").into_owned(),
+        "worker_started" => rust_i18n::t!("goal.event.worker_started").into_owned(),
+        "worker_completed" => rust_i18n::t!("goal.event.worker_completed").into_owned(),
+        "worker_failed" => rust_i18n::t!("goal.event.worker_failed").into_owned(),
+        "context_rotated" => rust_i18n::t!("goal.event.context_rotated").into_owned(),
         // A plain user pause has no extra cause worth showing.
         "goal_paused" => match phrase(detail).filter(|d| d != "user") {
-            Some(d) => format!("Paused: {d}"),
-            None => "Paused".into(),
+            Some(d) => rust_i18n::t!("goal.event.paused_reason", reason = d.as_str()).into_owned(),
+            None => rust_i18n::t!("goal.event.paused").into_owned(),
         },
-        "goal_resumed" => "Resumed".into(),
-        "goal_completed" => "Completed".into(),
-        "goal_cleared" => "Cleared".into(),
-        "budget_exceeded" => "Budget exceeded".into(),
+        "goal_resumed" => rust_i18n::t!("goal.event.resumed").into_owned(),
+        "goal_completed" => rust_i18n::t!("goal.event.completed").into_owned(),
+        "goal_cleared" => rust_i18n::t!("goal.event.cleared").into_owned(),
+        "budget_exceeded" => rust_i18n::t!("goal.event.budget_exceeded").into_owned(),
         "premature_stop_detected" => match phrase(detail) {
-            Some(d) => format!("Stopped early: {d}"),
-            None => "Stopped early".into(),
+            Some(d) => {
+                rust_i18n::t!("goal.event.stopped_early_reason", reason = d.as_str()).into_owned()
+            }
+            None => rust_i18n::t!("goal.event.stopped_early").into_owned(),
         },
         other => {
             let mut s = strip_control_chars(&other.replace('_', " "), false);
@@ -346,9 +379,9 @@ fn humanize_event_timestamp(ts: &str) -> String {
         .max(0) as u64;
     let ago = crate::util::format_time_ago(std::time::Duration::from_secs(secs));
     if ago == "just now" {
-        ago
+        rust_i18n::t!("goal.time.just_now").into_owned()
     } else {
-        format!("{ago} ago")
+        rust_i18n::t!("goal.time.ago", ago = ago.as_str()).into_owned()
     }
 }
 
@@ -623,10 +656,7 @@ pub fn render_goal_detail(
     }
 
     if goal.status.is_paused() {
-        let hint = format!(
-            "Status: {} \u{2014} type /goal resume to continue",
-            goal.status.pause_label()
-        );
+        let hint = rust_i18n::t!("goal.hint.paused", label = goal.status.pause_label());
         buf.set_line_safe(
             x,
             y,
@@ -643,7 +673,7 @@ pub fn render_goal_detail(
         } else {
             "Failed"
         };
-        let hint = format!("Status: {label} \u{2014} type /goal clear, then start a new goal");
+        let hint = rust_i18n::t!("goal.hint.failed", label = label);
         buf.set_line_safe(
             x,
             y,
@@ -695,10 +725,20 @@ pub fn render_goal_detail(
     };
     let has_budget = goal.token_budget.is_some_and(|b| b > 0);
     let budget_label = if has_budget {
-        let pct_display = format!(" ({:.0}%)", pct * 100.0);
-        format!("Budget: {budget_display}{pct_display}  Elapsed: {elapsed_str}")
+        rust_i18n::t!(
+            "goal.budget_line",
+            display = budget_display.as_str(),
+            pct = format!("{:.0}", pct * 100.0).as_str(),
+            elapsed = elapsed_str.as_str()
+        )
+        .into_owned()
     } else {
-        format!("Tokens: {budget_display}  Elapsed: {elapsed_str}")
+        rust_i18n::t!(
+            "goal.tokens_line",
+            display = budget_display.as_str(),
+            elapsed = elapsed_str.as_str()
+        )
+        .into_owned()
     };
     buf.set_line_safe(
         x,
@@ -750,7 +790,7 @@ pub fn render_goal_detail(
             x,
             y,
             &Line::from(Span::styled(
-                "No progress items yet",
+                rust_i18n::t!("goal.no_progress"),
                 Style::default().fg(theme.gray),
             )),
             w,
@@ -761,7 +801,7 @@ pub fn render_goal_detail(
             x,
             y,
             &Line::from(Span::styled(
-                "Progress:",
+                rust_i18n::t!("goal.progress_header"),
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -800,7 +840,7 @@ pub fn render_goal_detail(
                 x,
                 y,
                 &Line::from(Span::styled(
-                    format!("  +{remaining} more"),
+                    format!("  {}", rust_i18n::t!("goal.more", count = remaining)),
                     Style::default().fg(theme.gray),
                 )),
                 w,
@@ -821,7 +861,10 @@ pub fn render_goal_detail(
             return Some(close_rect);
         }
         let mut subagent_spans = vec![
-            Span::styled("Active Subagent: ", Style::default().fg(theme.gray)),
+            Span::styled(
+                format!("{} ", rust_i18n::t!("goal.active_subagent")),
+                Style::default().fg(theme.gray),
+            ),
             Span::styled(
                 role.as_str(),
                 Style::default()
@@ -843,19 +886,22 @@ pub fn render_goal_detail(
             // Subagent detail line.
             let mut detail_parts: Vec<String> = Vec::new();
             if let Some(tok) = goal.live_subagent_tokens {
-                detail_parts.push(format!(
-                    "Tokens: {}",
-                    format_tokens_compact(tok.min(i64::MAX as u64) as i64)
-                ));
+                detail_parts.push(
+                    rust_i18n::t!(
+                        "goal.detail.tokens",
+                        count = format_tokens_compact(tok.min(i64::MAX as u64) as i64)
+                    )
+                    .into_owned(),
+                );
             }
             if let Some(ctx) = goal.live_context_pct {
-                detail_parts.push(format!("Context: {ctx}%"));
+                detail_parts.push(rust_i18n::t!("goal.detail.context", pct = ctx).into_owned());
             }
             if let Some(turns) = goal.live_turn_count {
-                detail_parts.push(format!("Turns: {turns}"));
+                detail_parts.push(rust_i18n::t!("goal.detail.turns", count = turns).into_owned());
             }
             if let Some(tools) = goal.live_tool_call_count {
-                detail_parts.push(format!("Tools: {tools}"));
+                detail_parts.push(rust_i18n::t!("goal.detail.tools", count = tools).into_owned());
             }
             if !detail_parts.is_empty() {
                 let detail = format!("  {}", detail_parts.join("  "));
@@ -902,7 +948,7 @@ pub fn render_goal_detail(
                     x,
                     y,
                     &Line::from(Span::styled(
-                        format!("  +{remaining} more"),
+                        format!("  {}", rust_i18n::t!("goal.more", count = remaining)),
                         Style::default().fg(theme.gray),
                     )),
                     w,
@@ -928,7 +974,7 @@ pub fn render_goal_detail(
             x,
             y,
             &Line::from(Span::styled(
-                "Completion review:",
+                rust_i18n::t!("goal.completion_review"),
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -943,7 +989,10 @@ pub fn render_goal_detail(
                 x,
                 y,
                 &Line::from(vec![
-                    Span::styled("  Last verdict: ", Style::default().fg(theme.gray)),
+                    Span::styled(
+                        format!("  {} ", rust_i18n::t!("goal.last_verdict")),
+                        Style::default().fg(theme.gray),
+                    ),
                     Span::styled(verdict_label, Style::default().fg(theme.text_secondary)),
                 ]),
                 w,
@@ -964,7 +1013,10 @@ pub fn render_goal_detail(
                 x,
                 y,
                 &Line::from(vec![
-                    Span::styled("  Attempts: ", Style::default().fg(theme.gray)),
+                    Span::styled(
+                        format!("  {} ", rust_i18n::t!("goal.attempts")),
+                        Style::default().fg(theme.gray),
+                    ),
                     Span::styled(attempts_display, Style::default().fg(theme.text_secondary)),
                 ]),
                 w,
@@ -981,7 +1033,10 @@ pub fn render_goal_detail(
                 x,
                 y,
                 &Line::from(vec![
-                    Span::styled("  Details: ", Style::default().fg(theme.gray)),
+                    Span::styled(
+                        format!("  {} ", rust_i18n::t!("goal.details")),
+                        Style::default().fg(theme.gray),
+                    ),
                     Span::styled(
                         path_display.to_owned(),
                         Style::default().fg(theme.text_secondary),
@@ -1008,7 +1063,7 @@ pub fn render_goal_detail(
             x,
             y,
             &Line::from(Span::styled(
-                "Recent History:",
+                rust_i18n::t!("goal.recent_history"),
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -1048,9 +1103,9 @@ pub fn render_goal_detail(
             goal.status,
             GoalDisplayStatus::Failed | GoalDisplayStatus::Interrupted
         ) {
-            "Esc: close  /goal clear, then start a new goal"
+            rust_i18n::t!("goal.footer.closed")
         } else {
-            "Esc: close  /goal resume | pause | status | clear"
+            rust_i18n::t!("goal.footer.active")
         };
         buf.set_line_safe(x, y, &Line::from(Span::styled(hint, hint_style)), w);
     }

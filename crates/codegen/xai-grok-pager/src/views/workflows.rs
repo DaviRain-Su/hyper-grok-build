@@ -144,66 +144,66 @@ pub fn footer_shortcuts(
     let mut s = Vec::new();
     if in_detail {
         s.push(Shortcut {
-            label: "↑↓ phase · enter agent",
+            label: rust_i18n::t!("footer.phase_agent"),
             clickable: false,
             id: 0,
         });
         if has_run_list {
             s.push(Shortcut {
-                label: "←/tab runs",
+                label: rust_i18n::t!("footer.runs_tab"),
                 clickable: true,
                 id: shortcut_ids::RUNS,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_pause) {
             s.push(Shortcut {
-                label: "p pause",
+                label: rust_i18n::t!("footer.p_pause"),
                 clickable: true,
                 id: shortcut_ids::PAUSE,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_resume) {
             s.push(Shortcut {
-                label: "r resume",
+                label: rust_i18n::t!("footer.r_resume"),
                 clickable: true,
                 id: shortcut_ids::RESUME,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_stop) {
             s.push(Shortcut {
-                label: "x stop",
+                label: rust_i18n::t!("footer.x_stop"),
                 clickable: true,
                 id: shortcut_ids::STOP,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_save) {
             s.push(Shortcut {
-                label: "s save",
+                label: rust_i18n::t!("footer.s_save"),
                 clickable: true,
                 id: shortcut_ids::SAVE,
             });
         }
     } else {
         s.push(Shortcut {
-            label: "↑↓ select",
+            label: rust_i18n::t!("footer.select_compact"),
             clickable: false,
             id: 0,
         });
         s.push(Shortcut {
-            label: "enter open",
+            label: rust_i18n::t!("footer.enter_open"),
             clickable: true,
             id: shortcut_ids::OPEN,
         });
         if run.is_some_and(WorkflowRunSnapshot::can_stop) {
             s.push(Shortcut {
-                label: "x stop",
+                label: rust_i18n::t!("footer.x_stop"),
                 clickable: true,
                 id: shortcut_ids::STOP,
             });
         }
     }
     s.push(Shortcut {
-        label: "esc close",
+        label: rust_i18n::t!("footer.esc_close"),
         clickable: false,
         id: 0,
     });
@@ -952,11 +952,12 @@ fn render_detail(
     );
 
     if roster_agents.is_empty() {
+        let phase_empty = rust_i18n::t!("workflows.phase_empty");
         span_at(
             buf,
             roster_inner.x,
             roster_inner.y,
-            "No agents in this phase yet.",
+            phase_empty.as_ref(),
             Style::default().fg(theme.gray_dim),
             roster_inner.right(),
         );
@@ -1118,10 +1119,10 @@ mod tests {
                 .map(|shortcut| shortcut.label)
                 .collect::<Vec<_>>()
         };
-        assert!(labels(&run).contains(&"s save"));
+        assert!(labels(&run).contains(&std::borrow::Cow::Borrowed("s save")));
 
         run.builtin = true;
-        assert!(!labels(&run).contains(&"s save"));
+        assert!(!labels(&run).contains(&std::borrow::Cow::Borrowed("s save")));
     }
 
     #[test]
@@ -1134,10 +1135,10 @@ mod tests {
             .into_iter()
             .map(|shortcut| shortcut.label)
             .collect::<Vec<_>>();
-        assert!(!labels.contains(&"r resume"));
+        assert!(!labels.contains(&std::borrow::Cow::Borrowed("r resume")));
 
         assert!(
-            labels.contains(&"x stop"),
+            labels.contains(&std::borrow::Cow::Borrowed("x stop")),
             "budget_limited is non-terminal and must keep stop"
         );
 
@@ -1196,7 +1197,7 @@ mod tests {
         assert!(text.contains("count-v2"), "{text}");
         assert!(text.contains("agents 2/128 (126 left)"), "{text}");
         assert!(!text.contains(" · out "), "{text}");
-        assert!(text.contains("enter open"), "{text}");
+        assert!(text.contains("Enter open"), "{text}");
     }
 
     #[test]

@@ -3,7 +3,6 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::input::key::KeyShortcut;
@@ -45,13 +44,11 @@ pub fn undo_tip() -> EphemeralTip {
     let chord = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    let label = undo_chord_label();
+    let tpl = rust_i18n::t!("tips.clear_detector", key = label.as_str());
     EphemeralTip::new(
         UNDO_TIP_KEY,
-        Line::from(vec![
-            Span::styled("Input cleared · ", dim),
-            Span::styled(undo_chord_label(), chord),
-            Span::styled(" to undo", dim),
-        ]),
+        super::styled_placeholder_line(&tpl, &[label.as_str()], dim, chord),
     )
     .with_session_seen_cap(UNDO_TIP_SEEN_KEY, UNDO_TIP_SEEN_CAP)
 }

@@ -639,17 +639,17 @@ pub fn modal_footer_detail() -> Vec<crate::views::modal_window::Shortcut<'static
     use crate::views::modal_window::Shortcut;
     vec![
         Shortcut {
-            label: "Esc back",
+            label: rust_i18n::t!("footer.esc_back"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} scroll",
+            label: rust_i18n::t!("footer.scroll"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Ctrl+./X close",
+            label: rust_i18n::t!("footer.ctrl_dot_x_close"),
             clickable: false,
             id: 0,
         },
@@ -1072,41 +1072,41 @@ pub fn modal_footer(filter_active: bool) -> Vec<crate::views::modal_window::Shor
     use crate::views::modal_window::Shortcut;
     let mut shortcuts = vec![
         Shortcut {
-            label: "\u{2191}/\u{2193} nav",
+            label: rust_i18n::t!("footer.nav"),
             clickable: false,
             id: 0,
         },
         Shortcut {
             label: if filter_active {
-                "f show all"
+                rust_i18n::t!("footer.f_show_all")
             } else {
-                "f filter"
+                rust_i18n::t!("footer.f_filter")
             },
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "e/Space/\u{2192} expand",
+            label: rust_i18n::t!("footer.e_space_expand"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2190} collapse",
+            label: rust_i18n::t!("footer.arrow_collapse"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter details",
+            label: rust_i18n::t!("footer.enter_details"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "/ search",
+            label: rust_i18n::t!("footer.search"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: rust_i18n::t!("footer.esc_close"),
             clickable: false,
             id: 0,
         },

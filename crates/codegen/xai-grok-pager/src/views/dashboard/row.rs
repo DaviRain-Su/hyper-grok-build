@@ -315,8 +315,10 @@ fn append_roster_rows(
             .unwrap_or_else(|| sanitize(&entry.session_id));
         let state = roster_activity_to_state(entry.activity);
         let activity = match state {
-            RowState::NeedsInput => Some("Awaiting input".to_string()),
-            RowState::Working => Some("Working".to_string()),
+            RowState::NeedsInput => {
+                Some(rust_i18n::t!("dash.activity.awaiting_input_short").into_owned())
+            }
+            RowState::Working => Some(rust_i18n::t!("dash.activity.working").into_owned()),
             _ => None,
         };
         let mut badges = Vec::new();
@@ -722,11 +724,14 @@ fn top_level_secondary_line(
             if let Some(perm) = agent.permission_queue.front() {
                 let title = perm.title.trim();
                 if !title.is_empty() {
-                    return Some(format!("Pending: {}", sanitize(title)));
+                    return Some(
+                        rust_i18n::t!("dash.activity.pending_title", title = sanitize(title))
+                            .into_owned(),
+                    );
                 }
             }
             if agent.question_view.is_some() {
-                return Some("Pending: question".to_string());
+                return Some(rust_i18n::t!("dash.activity.pending_question").into_owned());
             }
             activity.map(sanitize)
         }
@@ -788,18 +793,18 @@ fn subagent_secondary_line(
 }
 fn top_level_activity(agent: &AgentView, state: RowState) -> Option<String> {
     match state {
-        RowState::NeedsInput => Some("Awaiting your input".to_string()),
+        RowState::NeedsInput => Some(rust_i18n::t!("dash.activity.awaiting_input").into_owned()),
         RowState::Working => {
             if let Some(cmd) = agent.session.state.command_in_flight() {
                 Some(format!("{}…", cmd.display_name()))
             } else if let Some(activity) = agent.resolve_turn_activity() {
                 Some(sanitize(&format_activity_label(&activity)))
             } else if agent.session.loading_replay {
-                Some("Loading…".to_string())
+                Some(rust_i18n::t!("dash.activity.loading").into_owned())
             } else if let Some(bg) = background_work_label(agent) {
                 Some(bg)
             } else {
-                Some("Working".to_string())
+                Some(rust_i18n::t!("dash.activity.working").into_owned())
             }
         }
         _ => None,
@@ -817,7 +822,7 @@ fn subagent_activity(info: &SubagentInfo, state: RowState) -> Option<String> {
         }
         let last_tool = info.tools_used.last().map(|s| s.as_ref()).unwrap_or("");
         if last_tool.is_empty() {
-            Some("Working".to_string())
+            Some(rust_i18n::t!("dash.activity.working").into_owned())
         } else {
             Some(sanitize(&format_activity_label(
                 &TurnActivity::ToolRunning {

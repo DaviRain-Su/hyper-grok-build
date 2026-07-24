@@ -6,7 +6,6 @@
 //! above it the default layout is roomy enough that the hint is noise.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -43,12 +42,11 @@ pub fn small_screen_tip() -> EphemeralTip {
     let command = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    // `cmd` is a literal command token (not prose) — stays untranslated.
+    let tpl = rust_i18n::t!("tips.small_screen", cmd = "/compact-mode");
     EphemeralTip::new(
         SMALL_SCREEN_TIP_KEY,
-        Line::from(vec![
-            Span::styled("Tight on space? Try ", dim),
-            Span::styled("/compact-mode", command),
-        ]),
+        super::styled_placeholder_line(&tpl, &["/compact-mode"], dim, command),
     )
     .with_session_seen_cap(SMALL_SCREEN_TIP_SEEN_KEY, SMALL_SCREEN_TIP_SEEN_CAP)
     .ambient()

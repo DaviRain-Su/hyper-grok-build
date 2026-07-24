@@ -2,7 +2,6 @@
 //! bare Enter on an empty prompt force-sends the top queued item ("send now").
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -27,13 +26,12 @@ pub fn send_now_tip() -> EphemeralTip {
     let key_style = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    // `key` is the chord name (a literal key token, not prose) — it stays
+    // untranslated and is styled as the key chord span.
+    let tpl = rust_i18n::t!("tips.send_now", key = "Enter");
     EphemeralTip::new(
         SEND_NOW_TIP_KEY,
-        Line::from(vec![
-            Span::styled("Queued · ", dim),
-            Span::styled("Enter", key_style),
-            Span::styled(" to send now", dim),
-        ]),
+        super::styled_placeholder_line(&tpl, &["Enter"], dim, key_style),
     )
     .with_session_seen_cap(SEND_NOW_TIP_SEEN_KEY, SEND_NOW_TIP_SEEN_CAP)
 }

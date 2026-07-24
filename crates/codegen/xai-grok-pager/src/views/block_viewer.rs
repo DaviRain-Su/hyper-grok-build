@@ -1052,33 +1052,51 @@ impl BlockViewerPane {
     /// Build shortcuts bar hints for this viewer.
     pub fn shortcuts_hints(&self) -> Vec<HintItem> {
         let mut hints = vec![
-            HintItem::new(crate::key!(Esc), "close"),
-            HintItem::new(crate::key!('/'), "search"),
-            HintItem::new(crate::key!('f'), "filter"),
-            HintItem::new(crate::key!('v'), "select"),
-            HintItem::new(crate::key!('w'), "wrap"),
+            HintItem::new(crate::key!(Esc), rust_i18n::t!("hints.close")),
+            HintItem::new(crate::key!('/'), rust_i18n::t!("hints.search")),
+            HintItem::new(crate::key!('f'), rust_i18n::t!("hints.filter")),
+            HintItem::new(crate::key!('v'), rust_i18n::t!("hints.select")),
+            HintItem::new(crate::key!('w'), rust_i18n::t!("hints.wrap")),
         ];
         match self.kind {
             ViewerKind::Markdown => {
-                hints.push(HintItem::new(crate::key!('r'), "raw"));
+                hints.push(HintItem::new(crate::key!('r'), rust_i18n::t!("hints.raw")));
             }
             ViewerKind::Execute => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy cmd"));
+                hints.push(HintItem::new(
+                    crate::key!('Y'),
+                    rust_i18n::t!("hints.copy_cmd"),
+                ));
             }
             ViewerKind::Edit => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy path"));
+                hints.push(HintItem::new(
+                    crate::key!('Y'),
+                    rust_i18n::t!("hints.copy_path"),
+                ));
             }
             ViewerKind::WebFetch => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy url"));
+                hints.push(HintItem::new(
+                    crate::key!('Y'),
+                    rust_i18n::t!("hints.copy_url"),
+                ));
             }
             ViewerKind::WebSearch => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy query"));
+                hints.push(HintItem::new(
+                    crate::key!('Y'),
+                    rust_i18n::t!("hints.copy_query"),
+                ));
             }
             ViewerKind::Read => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy path"));
+                hints.push(HintItem::new(
+                    crate::key!('Y'),
+                    rust_i18n::t!("hints.copy_path"),
+                ));
             }
             ViewerKind::Grep => {
-                hints.push(HintItem::new(crate::key!('Y'), "copy pattern"));
+                hints.push(HintItem::new(
+                    crate::key!('Y'),
+                    rust_i18n::t!("hints.copy_pattern"),
+                ));
             }
             ViewerKind::BgTask => {}
             ViewerKind::IntegrationSearch | ViewerKind::UseTool | ViewerKind::PlainText => {}

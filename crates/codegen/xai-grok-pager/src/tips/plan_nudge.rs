@@ -2,7 +2,6 @@
 //! pager can hint that Shift+Tab cycles into plan mode first.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -50,12 +49,11 @@ pub fn plan_nudge_tip() -> EphemeralTip {
     let chord = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    let chord_label = plan_chord_label();
+    let tpl = rust_i18n::t!("tips.plan_nudge", key = chord_label.as_str());
     EphemeralTip::new(
         PLAN_NUDGE_KEY,
-        Line::from(vec![
-            Span::styled("Planning? Check out plan mode via ", dim),
-            Span::styled(plan_chord_label(), chord),
-        ]),
+        super::styled_placeholder_line(&tpl, &[chord_label.as_str()], dim, chord),
     )
     .with_session_seen_cap(PLAN_NUDGE_SEEN_KEY, PLAN_NUDGE_SEEN_CAP)
 }

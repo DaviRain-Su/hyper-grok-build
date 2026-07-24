@@ -201,7 +201,8 @@ pub struct FoldInfo {
 /// A single footer shortcut definition.
 pub struct Shortcut<'a> {
     /// Display label (e.g. "Enter import 3" or "Esc cancel").
-    pub label: &'a str,
+    /// `Cow` so localized (`t!`) strings can flow through without leaking.
+    pub label: std::borrow::Cow<'a, str>,
     /// Whether clicking this shortcut dispatches `ShortcutActivated`.
     /// All shortcuts get the same visual style and hover highlights
     /// regardless of this flag.
@@ -216,7 +217,7 @@ pub struct Shortcut<'a> {
 pub fn push_vim_nav_search_hint<'a>(shortcuts: &mut Vec<Shortcut<'a>>, search_active: bool) {
     if !search_active && crate::appearance::cache::load_vim_mode() {
         shortcuts.push(Shortcut {
-            label: "i search",
+            label: rust_i18n::t!("footer.i_search"),
             clickable: false,
             id: 0,
         });
@@ -770,7 +771,8 @@ pub fn render_modal_shortcuts(
                 break;
             }
 
-            let display = &shortcut.label[..byte_offset_at_width(shortcut.label, remaining)];
+            let display =
+                &shortcut.label[..byte_offset_at_width(shortcut.label.as_ref(), remaining)];
             let visible_w = display.width() as u16;
             let is_hovered = hovered == Some(shortcut_idx);
 

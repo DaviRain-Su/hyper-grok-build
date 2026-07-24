@@ -233,17 +233,17 @@ impl RowState {
     }
 
     /// Human-readable group header.
-    pub fn group_label(self) -> &'static str {
+    pub fn group_label(self) -> std::borrow::Cow<'static, str> {
         match self {
             // Shorter, punchier labels. "Done" reads cleaner as a group
             // header than the past-tense "Completed" did.
-            Self::NeedsInput => "Awaiting",
-            Self::Working => "Working",
-            Self::Idle => "Idle",
-            Self::Inactive => "Inactive",
-            Self::Completed => "Done",
-            Self::Failed => "Failed",
-            Self::Blocked => "Blocked",
+            Self::NeedsInput => rust_i18n::t!("dash.state.awaiting"),
+            Self::Working => rust_i18n::t!("dash.state.working"),
+            Self::Idle => rust_i18n::t!("dash.state.idle"),
+            Self::Inactive => rust_i18n::t!("dash.state.inactive"),
+            Self::Completed => rust_i18n::t!("dash.state.done"),
+            Self::Failed => rust_i18n::t!("dash.state.failed"),
+            Self::Blocked => rust_i18n::t!("dash.state.blocked"),
         }
     }
 }

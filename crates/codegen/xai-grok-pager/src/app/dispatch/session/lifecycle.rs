@@ -597,9 +597,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         return vec![];
     }
     if !app.cwd_has_git_ancestor {
-        let msg: String = "Not inside a git repository. Navigate to a git repo \
-                      or run 'git init' first."
-            .into();
+        let msg: String = rust_i18n::t!("warn.not_git_repo").into_owned();
         if !app.startup_warnings.iter().any(|w| w.message == msg) {
             app.startup_warnings.push(crate::startup::StartupWarning {
                 severity: crate::startup::WarningSeverity::Warning,
@@ -750,7 +748,7 @@ pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, 
         app.session_picker_state.selected = 0;
         app.session_picker_content_results = None;
         app.session_picker_content_loading = false;
-        let msg = crate::app::session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL.to_string();
+        let msg = rust_i18n::t!("warn.chat_active").into_owned();
         if !app.startup_warnings.iter().any(|w| w.message == msg) {
             app.startup_warnings.push(crate::startup::StartupWarning {
                 severity: crate::startup::WarningSeverity::Warning,
@@ -1023,7 +1021,7 @@ pub(in crate::app::dispatch) fn handle_session_failed(
     error: String,
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, error = %error, "Session creation failed");
-    let msg = format!("Session creation failed: {error}");
+    let msg = rust_i18n::t!("warn.session_create_failed", error = error.as_str()).into_owned();
     let is_orphan = app
         .agents
         .get(&agent_id)
@@ -1094,7 +1092,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
             app.session_picker_content_results = None;
             app.session_picker_content_loading = false;
         }
-        let msg = format!("Cannot create worktree: {error}");
+        let msg = rust_i18n::t!("warn.worktree_failed", error = error.as_str()).into_owned();
         if !app.startup_warnings.iter().any(|w| w.message == msg) {
             app.startup_warnings.push(crate::startup::StartupWarning {
                 severity: crate::startup::WarningSeverity::Warning,

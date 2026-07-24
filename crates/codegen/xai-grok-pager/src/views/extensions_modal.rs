@@ -816,7 +816,10 @@ impl ModalInput {
                     .map(|(_, f)| f.label())
                     .collect();
                 if !empty_required.is_empty() {
-                    self.error = Some(format!("Required: {}", empty_required.join(", ")));
+                    self.error = Some(
+                        rust_i18n::t!("ext.required", fields = empty_required.join(", "))
+                            .into_owned(),
+                    );
                     return ModalInputOutcome::Changed;
                 }
                 ModalInputOutcome::Submit {
@@ -1001,7 +1004,7 @@ impl McpSetupFormState {
             }
             KeyCode::Enter => {
                 if self.selected_value().is_none() {
-                    self.error = Some("Select an option".to_string());
+                    self.error = Some(rust_i18n::t!("ext.select_option").into_owned());
                     McpSetupOutcome::Changed
                 } else {
                     McpSetupOutcome::Submit
@@ -1135,6 +1138,35 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
         ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
     }
+}
+
+/// Translate an extension action-key verb (`&'static str` from
+/// [`extensions_action_keys`] / [`action_key_footer_desc`] /
+/// [`action_key_cheatsheet_desc`]) for the current locale.
+///
+/// The raw verb token stays English on the wire (telemetry / picker
+/// identity); only the user-facing copy is localized. Unknown verbs
+/// degrade to the English source via `tr_or`.
+fn ext_verb(verb: &str) -> std::borrow::Cow<'static, str> {
+    let key = match verb {
+        "reload" => "ext.verb.reload",
+        "add" => "ext.verb.add",
+        "toggle" => "ext.verb.toggle",
+        "remove" => "ext.verb.remove",
+        "update" => "ext.verb.update",
+        "install" => "ext.verb.install",
+        "uninstall" => "ext.verb.uninstall",
+        "refresh" => "ext.verb.refresh",
+        "add source" => "ext.verb.add_source",
+        "remove source" => "ext.verb.remove_source",
+        "filter" => "hints.filter",
+        "disable" => "ext.verb.disable",
+        "enable" => "ext.verb.enable",
+        "enable/disable" => "ext.verb.enable_disable",
+        "auth" => "ext.verb.auth",
+        _ => return std::borrow::Cow::Owned(verb.to_string()),
+    };
+    rust_i18n::t!(key)
 }
 
 /// Footer verb for an action key. Uses the state's published
@@ -1281,18 +1313,34 @@ pub fn tab_all_hints(tab: ExtensionsTab) -> Vec<crate::views::shortcuts_bar::Hin
     let mut hints: Vec<HintItem> = Vec::new();
     for (ch, label) in extensions_action_keys(tab) {
         let display_key = KeyShortcut::new(KeyCode::Char(ch), KeyModifiers::NONE);
-        let mut item = HintItem::new(display_key, action_key_cheatsheet_desc(ch, label));
+        let mut item = HintItem::new(display_key, ext_verb(action_key_cheatsheet_desc(ch, label)));
         if ch == ' ' {
             item.custom_display = Some("Space");
         }
         hints.push(item);
     }
     // Common navigation.
-    hints.push(HintItem::paired(crate::key!('j'), crate::key!('k'), "nav"));
-    hints.push(HintItem::new(crate::key!(Tab), "switch tab"));
-    hints.push(HintItem::new(crate::key!('/'), "search"));
-    hints.push(HintItem::new(crate::key!(Enter), "expand"));
-    hints.push(HintItem::new(crate::key!(Esc), "close"));
+    hints.push(HintItem::paired(
+        crate::key!('j'),
+        crate::key!('k'),
+        rust_i18n::t!("hints.nav"),
+    ));
+    hints.push(HintItem::new(
+        crate::key!(Tab),
+        rust_i18n::t!("hints.switch_tab"),
+    ));
+    hints.push(HintItem::new(
+        crate::key!('/'),
+        rust_i18n::t!("hints.search"),
+    ));
+    hints.push(HintItem::new(
+        crate::key!(Enter),
+        rust_i18n::t!("hints.expand"),
+    ));
+    hints.push(HintItem::new(
+        crate::key!(Esc),
+        rust_i18n::t!("hints.close"),
+    ));
     hints
 }
 
@@ -1316,9 +1364,9 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Plugins, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "plugins_install".into(),
             fields: vec![FieldSpec {
-                label: "Source".into(),
+                label: rust_i18n::t!("ext.field.source").into_owned(),
                 required: true,
-                placeholder: Some("owner/repo, URL, or local path".into()),
+                placeholder: Some(rust_i18n::t!("ext.placeholder.source").into_owned()),
             }],
         }),
         // Toggle enable/disable on the selected plugin.
@@ -1329,7 +1377,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Hooks, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "hooks_add".into(),
             fields: vec![FieldSpec {
-                label: "Path".into(),
+                label: rust_i18n::t!("ext.field.path").into_owned(),
                 required: true,
                 placeholder: None,
             }],
@@ -1349,9 +1397,9 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Marketplace, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "marketplace_add_source".into(),
             fields: vec![FieldSpec {
-                label: "Source".into(),
+                label: rust_i18n::t!("ext.field.source").into_owned(),
                 required: true,
-                placeholder: Some("owner/repo, git URL, or local path".into()),
+                placeholder: Some(rust_i18n::t!("ext.placeholder.source_git").into_owned()),
             }],
         }),
         (ExtensionsTab::Marketplace, 'x') => Some(ButtonAction::RemoveSelectedMarketplaceSource),
@@ -1365,14 +1413,14 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
             // `build_action_from_input` reads matching indices.
             fields: vec![
                 FieldSpec {
-                    label: "URL / Command".into(),
+                    label: rust_i18n::t!("ext.field.url_command").into_owned(),
                     required: true,
-                    placeholder: Some("https://... or command [args...]".into()),
+                    placeholder: Some(rust_i18n::t!("ext.placeholder.url_command").into_owned()),
                 },
                 FieldSpec {
-                    label: "Name".into(),
+                    label: rust_i18n::t!("ext.field.name").into_owned(),
                     required: false,
-                    placeholder: Some("Auto generated by URL".into()),
+                    placeholder: Some(rust_i18n::t!("ext.placeholder.auto_url").into_owned()),
                 },
             ],
         }),
@@ -3255,7 +3303,7 @@ pub fn render_extensions_modal(
                     &entry_group_keys,
                     selected,
                 );
-                Some((i, format!("{key_str} {verb}")))
+                Some((i, format!("{key_str} {}", ext_verb(verb))))
             }
         })
         .collect();
@@ -3290,17 +3338,17 @@ pub fn render_extensions_modal(
         // Input-mode is handled below; it owns its own footer.
     } else if state.mcp_setup.is_some() {
         shortcuts.push(Shortcut {
-            label: "Enter save and authenticate",
+            label: rust_i18n::t!("footer.enter_save_auth"),
             clickable: false,
             id: 0,
         });
         shortcuts.push(Shortcut {
-            label: "↑/↓ select",
+            label: rust_i18n::t!("footer.select"),
             clickable: false,
             id: 0,
         });
         shortcuts.push(Shortcut {
-            label: "Esc cancel",
+            label: rust_i18n::t!("footer.esc_cancel"),
             clickable: false,
             id: 0,
         });
@@ -3309,21 +3357,21 @@ pub fn render_extensions_modal(
         // handles. Tab is either path completion (single-field) or
         // field navigation (multi-field).
         shortcuts.push(Shortcut {
-            label: "Enter submit",
+            label: rust_i18n::t!("footer.enter_submit"),
             clickable: false,
             id: 0,
         });
         shortcuts.push(Shortcut {
             label: if input.is_multi_field() {
-                "Tab/Shift+Tab field"
+                rust_i18n::t!("footer.tab_shift_tab_field")
             } else {
-                "Tab complete"
+                rust_i18n::t!("footer.tab_complete")
             },
             clickable: false,
             id: 0,
         });
         shortcuts.push(Shortcut {
-            label: "Esc cancel",
+            label: rust_i18n::t!("footer.esc_cancel"),
             clickable: false,
             id: 0,
         });
@@ -3335,20 +3383,20 @@ pub fn render_extensions_modal(
         // cycles forward; `Shift+Tab` is still listed in the
         // cheatsheet (`?` shortcut help).
         shortcuts.push(Shortcut {
-            label: "Tab tabs",
+            label: rust_i18n::t!("footer.tab_tabs"),
             clickable: true,
             id: 98,
         });
         for &(orig_idx, ref label) in &action_labels {
             shortcuts.push(Shortcut {
-                label: label.as_str(),
+                label: std::borrow::Cow::Borrowed(label.as_str()),
                 clickable: true,
                 id: 100 + orig_idx,
             });
         }
         if state.active_tab == ExtensionsTab::McpServers {
             shortcuts.push(Shortcut {
-                label: MCP_SERVERS_OPEN_CONNECTORS_FOOTER,
+                label: rust_i18n::t!("footer.ctrl_o_open"),
                 clickable: false,
                 id: 0,
             });
@@ -3358,7 +3406,7 @@ pub fn render_extensions_modal(
         // from the footer to save space — the cheatsheet still lists it.
         // ID 99 = close action, handled in the mouse handler.
         shortcuts.push(Shortcut {
-            label: "Esc close",
+            label: rust_i18n::t!("footer.esc_close"),
             clickable: true,
             id: 99,
         });

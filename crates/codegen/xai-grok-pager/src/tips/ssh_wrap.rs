@@ -8,7 +8,6 @@
 //! `[ui.contextual_hints].ssh_wrap`.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -38,15 +37,13 @@ pub fn ssh_wrap_tip() -> EphemeralTip {
     let command = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    // `cmd` is a literal command token (not prose) — stays untranslated.
+    let tpl = rust_i18n::t!("tips.ssh_wrap", cmd = "/doctor");
     EphemeralTip {
         ticks_remaining: SSH_WRAP_TIP_TICKS,
         ..EphemeralTip::new(
             SSH_WRAP_TIP_KEY,
-            Line::from(vec![
-                Span::styled("Run ", dim),
-                Span::styled("/doctor", command),
-                Span::styled(" for details and fixes.", dim),
-            ]),
+            super::styled_placeholder_line(&tpl, &["/doctor"], dim, command),
         )
         .with_session_seen_cap(SSH_WRAP_TIP_SEEN_KEY, SSH_WRAP_TIP_SEEN_CAP)
         .ambient()

@@ -892,7 +892,7 @@ fn space_prompt_hint() -> HintItem {
     use crossterm::event::{KeyCode, KeyModifiers};
     HintItem {
         keys: vec![KeyShortcut::new(KeyCode::Char(' '), KeyModifiers::NONE)],
-        label: "prompt".into(),
+        label: rust_i18n::t!("hints.prompt"),
         custom_display: Some("Space"),
         description: None,
         pinned: false,

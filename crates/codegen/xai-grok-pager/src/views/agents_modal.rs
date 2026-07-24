@@ -1300,12 +1300,12 @@ fn model_picker_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
     if state.available_models.is_empty() {
         return vec![
             Shortcut {
-                label: "Enter save (empty = inherit)",
+                label: rust_i18n::t!("footer.enter_save_inherit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc cancel",
+                label: rust_i18n::t!("footer.esc_cancel"),
                 clickable: false,
                 id: 0,
             },
@@ -1313,22 +1313,22 @@ fn model_picker_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
     }
     vec![
         Shortcut {
-            label: "type to filter",
+            label: rust_i18n::t!("footer.type_filter"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} choose",
+            label: rust_i18n::t!("footer.choose"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter apply",
+            label: rust_i18n::t!("footer.enter_apply"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc cancel",
+            label: rust_i18n::t!("footer.esc_cancel"),
             clickable: false,
             id: 0,
         },
@@ -1341,52 +1341,52 @@ fn build_agents_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>>
     }
     let mut shortcuts = vec![
         Shortcut {
-            label: "j/k nav",
+            label: rust_i18n::t!("footer.nav_jk"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "e/\u{2192} expand",
+            label: rust_i18n::t!("footer.e_arrow_expand"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "E/\u{2190} collapse",
+            label: rust_i18n::t!("footer.big_e_collapse"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter view",
+            label: rust_i18n::t!("footer.enter_view"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "/ search",
+            label: rust_i18n::t!("footer.search"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "t toggle",
+            label: rust_i18n::t!("footer.t_toggle"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "s default",
+            label: rust_i18n::t!("footer.s_default"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "m model",
+            label: rust_i18n::t!("footer.m_model"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Tab switch tab",
+            label: rust_i18n::t!("footer.tab_switch_tab"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: rust_i18n::t!("footer.esc_close"),
             clickable: false,
             id: 0,
         },
@@ -1402,17 +1402,17 @@ fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a
     if state.persona_input.is_some() {
         vec![
             Shortcut {
-                label: "Tab switch field",
+                label: rust_i18n::t!("footer.tab_switch_field"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter create",
+                label: rust_i18n::t!("footer.enter_create"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc cancel",
+                label: rust_i18n::t!("footer.esc_cancel"),
                 clickable: false,
                 id: 0,
             },
@@ -1420,12 +1420,12 @@ fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a
     } else if state.persona_confirm.is_some() {
         vec![
             Shortcut {
-                label: "y confirm",
+                label: rust_i18n::t!("footer.y_confirm"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "n/Esc cancel",
+                label: rust_i18n::t!("footer.n_esc_cancel"),
                 clickable: false,
                 id: 0,
             },
@@ -1433,52 +1433,52 @@ fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a
     } else {
         let mut shortcuts = vec![
             Shortcut {
-                label: "j/k nav",
+                label: rust_i18n::t!("footer.nav_jk"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "e/\u{2192} expand",
+                label: rust_i18n::t!("footer.e_arrow_expand"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "E/\u{2190} collapse",
+                label: rust_i18n::t!("footer.big_e_collapse"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter view",
+                label: rust_i18n::t!("footer.enter_view"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "/ search",
+                label: rust_i18n::t!("footer.search"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "n new",
+                label: rust_i18n::t!("footer.n_new"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "m model",
+                label: rust_i18n::t!("footer.m_model"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "d delete",
+                label: rust_i18n::t!("footer.d_delete"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Tab switch tab",
+                label: rust_i18n::t!("footer.tab_switch_tab"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc close",
+                label: rust_i18n::t!("footer.esc_close"),
                 clickable: false,
                 id: 0,
             },

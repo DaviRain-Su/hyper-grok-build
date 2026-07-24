@@ -1033,28 +1033,28 @@ fn build_shortcuts(
     match mode {
         MemoryModalMode::Browse => {
             let toggle_label = if memory_enabled {
-                "t toggle (on)"
+                rust_i18n::t!("footer.t_toggle_on")
             } else {
-                "t toggle (off)"
+                rust_i18n::t!("footer.t_toggle_off")
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193} nav",
+                    label: rust_i18n::t!("footer.nav"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "/ search",
+                    label: rust_i18n::t!("footer.search"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "y copy path",
+                    label: rust_i18n::t!("footer.y_copy_path"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "x delete",
+                    label: rust_i18n::t!("footer.x_delete"),
                     clickable: false,
                     id: 0,
                 },
@@ -1065,15 +1065,15 @@ fn build_shortcuts(
                 },
                 Shortcut {
                     label: if fullscreen {
-                        "^F normal"
+                        rust_i18n::t!("footer.fullscreen_normal")
                     } else {
-                        "^F fullscreen"
+                        rust_i18n::t!("footer.fullscreen_full")
                     },
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Esc close",
+                    label: rust_i18n::t!("footer.esc_close"),
                     clickable: false,
                     id: 0,
                 },
@@ -1085,24 +1085,24 @@ fn build_shortcuts(
         }
         MemoryModalMode::FilterFocused => vec![
             Shortcut {
-                label: "type to filter",
+                label: rust_i18n::t!("footer.type_filter"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc exit filter",
+                label: rust_i18n::t!("footer.esc_exit_filter"),
                 clickable: false,
                 id: 0,
             },
         ],
         MemoryModalMode::ConfirmingDelete { .. } => vec![
             Shortcut {
-                label: "x confirm delete",
+                label: rust_i18n::t!("footer.x_confirm_delete"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "any key cancel",
+                label: rust_i18n::t!("footer.any_key_cancel"),
                 clickable: false,
                 id: 0,
             },

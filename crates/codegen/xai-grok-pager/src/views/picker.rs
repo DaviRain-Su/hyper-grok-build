@@ -2498,14 +2498,14 @@ pub fn render_picker(
         if config.expandable && !config.compact_bottom_bar {
             all_hints.push(HintItem {
                 keys: vec![],
-                label: "expand".into(),
+                label: rust_i18n::t!("hints.expand"),
                 custom_display: Some("e/Shift+e"),
                 description: None,
                 pinned: false,
             });
             all_hints.push(HintItem {
                 keys: vec![],
-                label: "copy".into(),
+                label: rust_i18n::t!("hints.copy"),
                 custom_display: Some("y"),
                 description: None,
                 pinned: false,

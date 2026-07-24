@@ -2,7 +2,6 @@
 //! advertise Settings → Text selection → Word select.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::theme::Theme;
@@ -43,17 +42,19 @@ pub fn word_select_tip() -> EphemeralTip {
     let key_style = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    // `path` and `key` are literal tokens (a settings path and a chord name),
+    // not prose — they stay untranslated and are styled as key spans.
+    let path = "/settings → Text selection";
+    let tpl = rust_i18n::t!(
+        "tips.word_select",
+        path = path,
+        key = WORD_SELECT_ACCEPT_CHORD
+    );
     EphemeralTip {
         ticks_remaining: WORD_SELECT_TIP_TICKS,
         ..EphemeralTip::new(
             WORD_SELECT_TIP_KEY,
-            Line::from(vec![
-                Span::styled("Want double-click to select? ", dim),
-                Span::styled("/settings", key_style),
-                Span::styled(" → Text selection · ", dim),
-                Span::styled(WORD_SELECT_ACCEPT_CHORD, key_style),
-                Span::styled(": enable now", dim),
-            ]),
+            super::styled_placeholder_line(&tpl, &[path, WORD_SELECT_ACCEPT_CHORD], dim, key_style),
         )
         .with_session_seen_cap(WORD_SELECT_TIP_SEEN_KEY, WORD_SELECT_TIP_SEEN_CAP)
         // Ambient: not about the draft being edited — an unrelated submit

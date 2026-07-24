@@ -3244,8 +3244,10 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         let entry_count = entry_map.len();
         let non_selectable_flags: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
         let picker_sc = crate::views::picker::picker_shortcuts();
+        let sf_label = source_filter.label();
+        let resume_title = rust_i18n::t!("modal.title.resume_session");
         let config = PickerConfig {
-            title: Some("Resume session"),
+            title: Some(resume_title.as_ref()),
             show_search_hint: true,
             expandable: true,
             esc_clears_query: true,
@@ -3256,7 +3258,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             shortcuts_area: None,
             tabs: None,
             active_tab: 0,
-            filter_label: (!ctx.chat_mode).then(|| source_filter.label()),
+            filter_label: (!ctx.chat_mode).then(|| sf_label.as_ref()),
             filter_key_hint: (!ctx.chat_mode).then_some("f"),
             filter_active: !ctx.chat_mode && source_filter.is_active(),
             header_note: None,

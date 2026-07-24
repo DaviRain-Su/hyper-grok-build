@@ -1584,7 +1584,7 @@ fn render_changelog_section(
             .fg(theme.gray_bright)
             .add_modifier(Modifier::DIM),
     );
-    let title = "Changelog";
+    let title = rust_i18n::t!("welcome.changelog");
     buf.set_span(
         centered.x,
         centered.y,
@@ -1705,8 +1705,8 @@ fn render_welcome_done(
 
     let cta = p
         .gate
-        .and_then(|g| g.label.as_deref())
-        .unwrap_or("Upgrade Subscription");
+        .and_then(|g| g.label.clone())
+        .unwrap_or_else(|| rust_i18n::t!("welcome.upgrade_subscription").into_owned());
     let in_vscode_family = welcome_in_vscode_family();
     let (key_g, key_l, key_q) = (
         "ctrl+g",
@@ -1754,10 +1754,22 @@ fn render_welcome_done(
     // frame so the menu doesn't shift while the CDN fetch completes.
     let show_changelog_action = p.has_access && !show_picker;
 
+    // Menu label bindings must outlive `menu_items` (borrowed by both
+    // branches below), so hoist them out of the if/else.
+    let logout_text = rust_i18n::t!("welcome.logout").to_string();
+    let quit_text = rust_i18n::t!("welcome.quit").to_string();
+    let import_text = rust_i18n::t!("welcome.import_claude").to_string();
+    let new_worktree_text = rust_i18n::t!("welcome.new_worktree").to_string();
+    let resume_text = rust_i18n::t!("welcome.resume_session").to_string();
+    let changelog_text = rust_i18n::t!("welcome.changelog").to_string();
     let gate_menu;
     let owned_menu;
     let menu_items: &[(&str, &str)] = if !p.has_access {
-        gate_menu = [(key_g, cta), (key_l, "Logout"), (key_q, "Quit")];
+        gate_menu = [
+            (key_g, cta.as_str()),
+            (key_l, logout_text.as_str()),
+            (key_q, quit_text.as_str()),
+        ];
         &gate_menu
     } else {
         let (key_w, key_s, key_q, key_i_with_x) = (
@@ -1775,15 +1787,15 @@ fn render_welcome_done(
             // 3 cells of this row as dismiss instead of open. Keyboard:
             // ctrl-shift-i. The key string is right-aligned by render_menu,
             // so [x] sits at the very end of the row.
-            items.push((key_i_with_x, "Import Claude settings"));
+            items.push((key_i_with_x, import_text.as_str()));
         }
-        items.push((key_w, "New worktree"));
-        items.push((key_s, "Resume session"));
+        items.push((key_w, new_worktree_text.as_str()));
+        items.push((key_s, resume_text.as_str()));
         // "Changelog" above Quit; no shortcut — opened by click (row or block).
         if show_changelog_action {
-            items.push(("", "Changelog"));
+            items.push(("", changelog_text.as_str()));
         }
-        items.push((key_q, "Quit"));
+        items.push((key_q, quit_text.as_str()));
         owned_menu = items;
         owned_menu.as_slice()
     };
@@ -2422,13 +2434,13 @@ pub(crate) fn render_session_picker(
     let worktree_shortcut: &'static str = "ctrl+w";
     use crate::views::shortcuts_bar::HintItem;
     let mut default_shortcuts: Vec<HintItem> = vec![
-        HintItem::new(crate::key!(Esc), "back"),
-        HintItem::new(crate::key!(Enter), "select"),
+        HintItem::new(crate::key!(Esc), rust_i18n::t!("hints.back")),
+        HintItem::new(crate::key!(Enter), rust_i18n::t!("hints.select")),
     ];
     if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
-            label: "worktree".into(),
+            label: rust_i18n::t!("hints.worktree"),
             custom_display: Some(worktree_shortcut),
             description: None,
             pinned: false,
@@ -2436,7 +2448,7 @@ pub(crate) fn render_session_picker(
     }
     default_shortcuts.push(HintItem {
         keys: vec![],
-        label: "navigate".into(),
+        label: rust_i18n::t!("hints.navigate"),
         custom_display: Some("\u{2191}\u{2193}"),
         description: None,
         pinned: false,
@@ -2444,15 +2456,17 @@ pub(crate) fn render_session_picker(
     if !ctx.chat_mode {
         default_shortcuts.push(HintItem {
             keys: vec![],
-            label: "filter".into(),
+            label: rust_i18n::t!("hints.filter"),
             custom_display: Some("f"),
             description: None,
             pinned: false,
         });
     }
 
+    let sf_label = ctx.source_filter.label();
+    let resume_title = rust_i18n::t!("modal.title.resume_session");
     let config = PickerConfig {
-        title: Some("Resume session"),
+        title: Some(resume_title.as_ref()),
         show_search_hint: true,
         expandable: true,
         esc_clears_query: true,
@@ -2463,7 +2477,7 @@ pub(crate) fn render_session_picker(
         shortcuts_area: ctx.shortcuts_area,
         tabs: None,
         active_tab: 0,
-        filter_label: (!ctx.chat_mode).then(|| ctx.source_filter.label()),
+        filter_label: (!ctx.chat_mode).then(|| sf_label.as_ref()),
         filter_key_hint: (!ctx.chat_mode).then_some("f"),
         filter_active: !ctx.chat_mode && ctx.source_filter.is_active(),
         header_note: hidden_hint.as_deref(),

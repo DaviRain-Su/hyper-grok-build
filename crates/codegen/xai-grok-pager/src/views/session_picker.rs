@@ -163,13 +163,13 @@ pub enum SourceFilter {
 }
 
 impl SourceFilter {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Grok => "Grok",
-            Self::Local => "Local",
-            Self::Remote => "Remote",
-            Self::External => "External",
-            Self::All => "All",
+            Self::Grok => rust_i18n::t!("picker.source.grok"),
+            Self::Local => rust_i18n::t!("picker.source.local"),
+            Self::Remote => rust_i18n::t!("picker.source.remote"),
+            Self::External => rust_i18n::t!("picker.source.external"),
+            Self::All => rust_i18n::t!("picker.source.all"),
         }
     }
 
@@ -657,7 +657,10 @@ pub(crate) fn build_session_entry_data(
                 };
                 field_data.push(("Created".into(), fmt_time(entry.created_at)));
                 field_data.push(("Updated".into(), fmt_time(entry.updated_at)));
-                field_data.push(("Source".into(), entry.source.clone()));
+                field_data.push((
+                    rust_i18n::t!("picker.source_label").to_string(),
+                    entry.source.clone(),
+                ));
                 if let Some(ref host) = entry.hostname {
                     field_data.push(("Host".into(), host.clone()));
                 }

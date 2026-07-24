@@ -24,7 +24,7 @@ pub(super) fn dispatch_import_claude(app: &mut AppView) -> Vec<Effect> {
             .retain(|w| !w.message.contains("Claude settings"));
         app.startup_warnings.push(crate::startup::StartupWarning {
             severity: crate::startup::WarningSeverity::Info,
-            message: "No Claude settings found to import.".into(),
+            message: rust_i18n::t!("warn.no_claude_settings").into_owned(),
             action: None,
         });
         return vec![];
@@ -46,7 +46,7 @@ pub(super) fn dispatch_import_claude_confirm(app: &mut AppView) -> Vec<Effect> {
     let selected_count = filtered.global_items.len() + filtered.project_items.len();
 
     let mut summary = if selected_count == 0 {
-        "No items selected.".to_string()
+        rust_i18n::t!("warn.no_items_selected").into_owned()
     } else {
         filtered.summary(&cwd).trim_end().to_string()
     };
@@ -66,7 +66,8 @@ pub(super) fn dispatch_import_claude_confirm(app: &mut AppView) -> Vec<Effect> {
             Err(e) => {
                 app.startup_warnings.push(crate::startup::StartupWarning {
                     severity: crate::startup::WarningSeverity::Warning,
-                    message: format!("Failed to import Claude settings: {}", e),
+                    message: rust_i18n::t!("warn.import_failed", error = e.to_string().as_str())
+                        .into_owned(),
                     action: None,
                 });
                 return vec![];

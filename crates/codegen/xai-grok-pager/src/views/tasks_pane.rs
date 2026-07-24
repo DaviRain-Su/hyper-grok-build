@@ -267,7 +267,18 @@ const GROUP_KIND_COUNT: usize = 4;
 
 impl GroupKind {
     /// Display label shown in the group header.
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            GroupKind::Workflows => rust_i18n::t!("tasks.group.workflows"),
+            GroupKind::Subagents => rust_i18n::t!("tasks.group.subagents"),
+            GroupKind::Tasks => rust_i18n::t!("tasks.group.tasks"),
+            GroupKind::Watchers => rust_i18n::t!("tasks.group.watchers"),
+        }
+    }
+
+    /// Static search label (English fallback) for `search_text`.
+    /// Uses `tr_or` so the translated value is returned when available.
+    fn search_text_label(self) -> &'static str {
         match self {
             GroupKind::Workflows => "Workflows",
             GroupKind::Subagents => "Subagents",
@@ -835,7 +846,7 @@ impl ListItem for TaskEntry {
             | TaskEntry::Agent { label, .. }
             | TaskEntry::Scheduled { label, .. }
             | TaskEntry::Workflow { label, .. } => label,
-            TaskEntry::Header { group, .. } => group.label(),
+            TaskEntry::Header { group, .. } => group.search_text_label(),
         }
     }
 }
@@ -1389,21 +1400,14 @@ impl TasksPane {
                 let theme = Theme::current();
                 if self.show_done {
                     let span = Span::styled(
-                        "No tasks or agents.",
+                        rust_i18n::t!("tasks.empty"),
                         Style::default().fg(theme.gray_bright),
                     );
                     buf.set_span(inner.x, inner.y, &span, inner.width);
                 } else {
                     let muted = Style::default().fg(theme.gray_bright);
-                    let key_style = Style::default()
-                        .fg(theme.text_primary)
-                        .add_modifier(Modifier::BOLD);
-                    let line = Line::from(vec![
-                        Span::styled("No running tasks. Press ", muted),
-                        Span::styled("h", key_style),
-                        Span::styled(" to show all.", muted),
-                    ]);
-                    buf.set_line(inner.x, inner.y, &line, inner.width);
+                    let span = Span::styled(rust_i18n::t!("tasks.empty_show_all"), muted);
+                    buf.set_span(inner.x, inner.y, &span, inner.width);
                 }
             }
             return;

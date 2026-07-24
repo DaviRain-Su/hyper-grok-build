@@ -1156,6 +1156,7 @@ impl AgentView {
                 // filter and local-disk delete are dead weight there.
                 let chat_mode = self.app_chat_mode;
                 let picker_sc = crate::views::picker::picker_shortcuts();
+                let sf_label = source_filter.label();
                 let config = PickerConfig {
                     title: Some("Resume session"),
                     show_search_hint: true,
@@ -1168,7 +1169,7 @@ impl AgentView {
                     shortcuts_area: None,
                     tabs: None,
                     active_tab: 0,
-                    filter_label: (!chat_mode).then(|| source_filter.label()),
+                    filter_label: (!chat_mode).then(|| sf_label.as_ref()),
                     filter_key_hint: (!chat_mode).then_some("f"),
                     filter_active: !chat_mode && source_filter.is_active(),
                     header_note: None,
@@ -1850,17 +1851,17 @@ impl AgentView {
             // Standard footer shortcuts for picker-style modals.
             let mut picker_shortcuts: Vec<Shortcut> = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193} nav",
+                    label: rust_i18n::t!("footer.nav"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Enter select",
+                    label: rust_i18n::t!("footer.enter_select"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Esc close",
+                    label: rust_i18n::t!("footer.esc_close"),
                     clickable: false,
                     id: 0,
                 },
@@ -1990,12 +1991,12 @@ impl AgentView {
                 // catalog (locked BYOK rows), ^X hides a model from the list.
                 // Owned string must outlive `picker_shortcuts` which borrows it.
                 let locked_count = original_items.iter().filter(|i| i.locked).count();
-                let model_tab_hint: Option<String> =
+                let model_tab_hint: Option<std::borrow::Cow<str>> =
                     if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
                         if *show_all {
-                            Some("Tab scoped".to_string())
+                            Some(rust_i18n::t!("footer.tab_scoped"))
                         } else if locked_count > 0 {
-                            Some(format!("Tab all (+{locked_count} 🔒)"))
+                            Some(rust_i18n::t!("footer.tab_all_locked", count = locked_count))
                         } else {
                             None
                         }
@@ -2005,20 +2006,20 @@ impl AgentView {
                 if matches!(command.as_str(), "model" | "m") && args_query.is_empty() {
                     if let Some(hint) = &model_tab_hint {
                         picker_shortcuts.push(Shortcut {
-                            label: hint,
+                            label: hint.clone(),
                             clickable: false,
                             id: 0,
                         });
                     }
                     if *show_all && locked_count > 0 {
                         picker_shortcuts.push(Shortcut {
-                            label: "🔒 needs key → /providers",
+                            label: rust_i18n::t!("footer.needs_key"),
                             clickable: false,
                             id: 0,
                         });
                     }
                     picker_shortcuts.push(Shortcut {
-                        label: "^X hide",
+                        label: rust_i18n::t!("footer.ctrlx_hide"),
                         clickable: false,
                         id: 0,
                     });
@@ -2083,12 +2084,12 @@ impl AgentView {
                 let mut session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
                     vec![
                         Shortcut {
-                            label: "y confirm delete",
+                            label: rust_i18n::t!("footer.y_confirm_delete"),
                             clickable: false,
                             id: 0,
                         },
                         Shortcut {
-                            label: "n cancel",
+                            label: rust_i18n::t!("footer.n_cancel"),
                             clickable: false,
                             id: 0,
                         },
@@ -2097,19 +2098,19 @@ impl AgentView {
                     let external =
                         *source_filter == crate::views::session_picker::SourceFilter::External;
                     let mut shortcuts = vec![Shortcut {
-                        label: "\u{2191}\u{2193} nav",
+                        label: rust_i18n::t!("footer.nav_compact"),
                         clickable: false,
                         id: 0,
                     }];
                     if !external {
                         shortcuts.extend([
                             Shortcut {
-                                label: "e expand",
+                                label: rust_i18n::t!("footer.e_expand"),
                                 clickable: false,
                                 id: 0,
                             },
                             Shortcut {
-                                label: "/ search",
+                                label: rust_i18n::t!("footer.search"),
                                 clickable: false,
                                 id: 0,
                             },
@@ -2117,13 +2118,13 @@ impl AgentView {
                     }
                     if !chat_mode {
                         shortcuts.push(Shortcut {
-                            label: "f filter",
+                            label: rust_i18n::t!("footer.f_filter"),
                             clickable: false,
                             id: 0,
                         });
                         if !external {
                             shortcuts.push(Shortcut {
-                                label: "d delete",
+                                label: rust_i18n::t!("footer.d_delete"),
                                 clickable: false,
                                 id: 0,
                             });
@@ -2171,13 +2172,14 @@ impl AgentView {
                     if chat_mode {
                         state.filter_area = None;
                     } else {
+                        let filter_label = source_filter.label();
                         let filter_rect = picker::render_filter_indicator(
                             buf,
                             content_area.x,
                             content_area.y,
                             content_area.width,
                             &theme,
-                            source_filter.label(),
+                            filter_label.as_ref(),
                             "f",
                             source_filter.is_active(),
                             state.filter_hovered,
@@ -2429,22 +2431,22 @@ impl AgentView {
 
                 let shortcuts: Vec<Shortcut> = vec![
                     Shortcut {
-                        label: "\u{2191}/\u{2193} scroll",
+                        label: rust_i18n::t!("footer.scroll"),
                         clickable: false,
                         id: 0,
                     },
                     Shortcut {
-                        label: "Enter save",
+                        label: rust_i18n::t!("footer.enter_save"),
                         clickable: false,
                         id: 0,
                     },
                     Shortcut {
-                        label: tab_label,
+                        label: tab_label.into(),
                         clickable: false,
                         id: 0,
                     },
                     Shortcut {
-                        label: "Esc cancel",
+                        label: rust_i18n::t!("footer.esc_cancel"),
                         clickable: false,
                         id: 0,
                     },

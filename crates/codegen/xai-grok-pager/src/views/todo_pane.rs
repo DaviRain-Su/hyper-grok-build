@@ -181,12 +181,12 @@ impl TodoCounts {
 
 fn empty_placeholder_message(todos_empty: bool, counts: TodoCounts) -> String {
     if todos_empty {
-        return "No todo items.".into();
+        return rust_i18n::t!("todo.empty").to_string();
     }
     match (counts.completed, counts.cancelled) {
-        (_, 0) => "All done.".into(),
-        (0, c) => format!("{c} cancelled."),
-        (d, c) => format!("{d} done. {c} cancelled."),
+        (_, 0) => rust_i18n::t!("todo.all_done").to_string(),
+        (0, c) => rust_i18n::t!("todo.all_cancelled", count = c).to_string(),
+        (d, c) => rust_i18n::t!("todo.done_cancelled", done = d, cancelled = c).to_string(),
     }
 }
 

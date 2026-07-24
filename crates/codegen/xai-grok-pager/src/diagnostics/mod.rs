@@ -213,7 +213,7 @@ fn actionable_warning_summary(
         .filter_map(|warning| view::id_for(warning.category));
     Some(crate::startup::ActionableStartupWarning::new(
         crate::startup::WarningSeverity::Warning,
-        "Clipboard may be unreachable.",
+        rust_i18n::t!("warn.clipboard_unreachable"),
         ids,
     ))
 }
@@ -243,7 +243,7 @@ pub(crate) fn collect_startup_warnings_from(
     if ctx.brand == TerminalName::AppleTerminal && ctx.is_ssh {
         let mut warning = TerminalWarning::new(
             WarningCategory::UnsupportedTerminal,
-            "Apple Terminal doesn't support OSC 52, so clipboard copy over SSH is unavailable",
+            &rust_i18n::t!("warn.osc52_ssh"),
             None,
             None,
         );
@@ -512,7 +512,7 @@ fn actionable_assembled_warnings(
     if sandbox_profile_warning.is_some() {
         warnings.push(crate::startup::ActionableStartupWarning::new(
             crate::startup::WarningSeverity::Warning,
-            "Project sandbox settings conflict with your settings.",
+            rust_i18n::t!("warn.sandbox_conflict"),
             [SANDBOX_PROFILE_CONFLICT_ID],
         ));
     }
@@ -521,7 +521,7 @@ fn actionable_assembled_warnings(
             0,
             crate::startup::ActionableStartupWarning::new(
                 crate::startup::WarningSeverity::Warning,
-                "Copies need this terminal to stay focused.",
+                rust_i18n::t!("warn.clipboard_focus"),
                 [DiagnosticId::new("terminal", "wayland-data-control")],
             ),
         );
@@ -531,7 +531,7 @@ fn actionable_assembled_warnings(
             0,
             crate::startup::ActionableStartupWarning::new(
                 crate::startup::WarningSeverity::Warning,
-                "Shift+Enter can't insert newlines in WezTerm.",
+                rust_i18n::t!("warn.wezterm_shift_enter"),
                 [DiagnosticId::new("terminal", "wezterm-kitty")],
             ),
         );

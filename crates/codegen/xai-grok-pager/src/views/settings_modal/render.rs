@@ -341,22 +341,22 @@ fn build_reset_confirm_shortcuts() -> Vec<Shortcut<'static>> {
     use crate::views::modal::{RESET_CONFIRM_NO_ID, RESET_CONFIRM_YES_ID};
     vec![
         Shortcut {
-            label: "y reset",
+            label: rust_i18n::t!("footer.y_reset"),
             clickable: true,
             id: RESET_CONFIRM_YES_ID,
         },
         Shortcut {
-            label: "n cancel",
+            label: rust_i18n::t!("footer.n_cancel"),
             clickable: true,
             id: RESET_CONFIRM_NO_ID,
         },
         Shortcut {
-            label: "Esc cancel",
+            label: rust_i18n::t!("footer.esc_cancel"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "F2 cancel",
+            label: rust_i18n::t!("footer.f2_cancel"),
             clickable: false,
             id: 0,
         },
@@ -1550,17 +1550,26 @@ pub(super) fn int_step_sizes(min: i64, max: i64) -> (i64, i64) {
 }
 
 /// Footer labels for the Int stepper (must be `'static` for `Shortcut`).
-fn int_step_footer_labels(min: i64, max: i64) -> (&'static str, &'static str) {
+fn int_step_footer_labels(
+    min: i64,
+    max: i64,
+) -> (
+    std::borrow::Cow<'static, str>,
+    std::borrow::Cow<'static, str>,
+) {
     let (small, large) = int_step_sizes(min, max);
-    match (small, large) {
-        (1, 1) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-1"),
-        (1, 5) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-5"),
-        (5, 10) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} +/-10"),
-        // Defensive fallback if thresholds change without new static pairs.
-        (1, _) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} step"),
-        (5, _) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} step"),
-        _ => ("\u{2191}/\u{2193} step", "\u{2190}/\u{2192} step"),
-    }
+    let small_label = match small {
+        1 => crate::i18n::tr_or("footer.int_step_up_1", "\u{2191}/\u{2193} +/-1"),
+        5 => crate::i18n::tr_or("footer.int_step_up_5", "\u{2191}/\u{2193} +/-5"),
+        _ => crate::i18n::tr_or("footer.int_step_up", "\u{2191}/\u{2193} step"),
+    };
+    let large_label = match large {
+        1 => crate::i18n::tr_or("footer.int_step_side_1", "\u{2190}/\u{2192} +/-1"),
+        5 => crate::i18n::tr_or("footer.int_step_side_5", "\u{2190}/\u{2192} +/-5"),
+        10 => crate::i18n::tr_or("footer.int_step_side_10", "\u{2190}/\u{2192} +/-10"),
+        _ => crate::i18n::tr_or("footer.int_step_side", "\u{2190}/\u{2192} step"),
+    };
+    (small_label, large_label)
 }
 
 // ‹ / › (U+2039 / U+203A) — fall back to ASCII `<` / `>` on legacy ConHost.
@@ -2765,22 +2774,24 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
     match &state.state.mode {
         SettingsMode::Browse => {
             let enter_label = match state.focused_setting() {
-                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => "Enter toggle",
-                _ => "Enter edit",
+                Some((_, meta)) if matches!(meta.kind, SettingKind::Bool { .. }) => {
+                    rust_i18n::t!("footer.enter_toggle")
+                }
+                _ => rust_i18n::t!("footer.enter_edit"),
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193}/j/k nav",
+                    label: rust_i18n::t!("footer.nav_arrows_jk"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "g/G top/btm",
+                    label: rust_i18n::t!("footer.top_btm"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Space toggle",
+                    label: rust_i18n::t!("footer.space_toggle"),
                     clickable: false,
                     id: 0,
                 },
@@ -2790,22 +2801,22 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
-                    label: "\u{2192} expand",
+                    label: rust_i18n::t!("footer.arrow_expand"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "/ search",
+                    label: rust_i18n::t!("footer.search"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "d reset",
+                    label: rust_i18n::t!("footer.d_reset"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "F2/Esc close",
+                    label: rust_i18n::t!("footer.f2_esc_close"),
                     clickable: false,
                     id: 0,
                 },
@@ -2817,27 +2828,27 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         }
         SettingsMode::FilterFocused => vec![
             Shortcut {
-                label: "type to filter",
+                label: rust_i18n::t!("footer.type_filter"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "\u{2191}/\u{2193} nav",
+                label: rust_i18n::t!("footer.nav"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Backspace edit",
+                label: rust_i18n::t!("footer.backspace_edit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter commit",
+                label: rust_i18n::t!("footer.enter_commit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc clear",
+                label: rust_i18n::t!("footer.esc_clear"),
                 clickable: false,
                 id: 0,
             },
@@ -2848,11 +2859,15 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         } => {
             // Labels depend on whether the Enum supports live preview.
             let nav_label = if *sp {
-                "\u{2191}/\u{2193} try"
+                rust_i18n::t!("footer.try")
             } else {
-                "\u{2191}/\u{2193} nav"
+                rust_i18n::t!("footer.nav")
             };
-            let esc_label = if *sp { "Esc revert" } else { "Esc cancel" };
+            let esc_label = if *sp {
+                rust_i18n::t!("footer.esc_revert")
+            } else {
+                rust_i18n::t!("footer.esc_cancel")
+            };
             vec![
                 Shortcut {
                     label: nav_label,
@@ -2860,7 +2875,7 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
-                    label: "Enter commit",
+                    label: rust_i18n::t!("footer.enter_commit"),
                     clickable: false,
                     id: 0,
                 },
@@ -2870,7 +2885,7 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
-                    label: "d reset",
+                    label: rust_i18n::t!("footer.d_reset"),
                     clickable: false,
                     id: 0,
                 },
@@ -2891,17 +2906,17 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
                     id: 0,
                 },
                 Shortcut {
-                    label: "Enter commit",
+                    label: rust_i18n::t!("footer.enter_commit"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Esc cancel",
+                    label: rust_i18n::t!("footer.esc_cancel"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "d reset",
+                    label: rust_i18n::t!("footer.d_reset"),
                     clickable: false,
                     id: 0,
                 },
@@ -2909,39 +2924,39 @@ pub(super) fn build_shortcuts(state: &SettingsModalState) -> Vec<Shortcut<'stati
         }
         SettingsMode::EditingString { .. } => vec![
             Shortcut {
-                label: "type to edit",
+                label: rust_i18n::t!("footer.type_edit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "\u{2190}/\u{2192} cursor",
+                label: rust_i18n::t!("footer.cursor"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter commit",
+                label: rust_i18n::t!("footer.enter_commit"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc cancel",
+                label: rust_i18n::t!("footer.esc_cancel"),
                 clickable: false,
                 id: 0,
             },
         ],
         SettingsMode::PickingGroup { .. } => vec![
             Shortcut {
-                label: "\u{2191}/\u{2193}/j/k nav",
+                label: rust_i18n::t!("footer.nav_arrows_jk"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Space/Enter toggle",
+                label: rust_i18n::t!("footer.space_enter_toggle"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc back",
+                label: rust_i18n::t!("footer.esc_back"),
                 clickable: false,
                 id: 0,
             },

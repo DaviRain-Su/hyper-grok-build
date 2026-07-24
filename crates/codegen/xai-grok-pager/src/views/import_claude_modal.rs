@@ -594,40 +594,39 @@ pub fn render_import_claude_modal(
     theme: &Theme,
     compact: bool,
 ) {
-    let confirm_label = format!("Enter import {}", state.selected_count());
     let shortcuts = [
         Shortcut {
-            label: "\u{2191}\u{2193} navigate",
+            label: rust_i18n::t!("footer.navigate_compact"),
             clickable: false,
             id: SHORTCUT_ID_HINT,
         },
         Shortcut {
-            label: "space toggle",
+            label: rust_i18n::t!("footer.space_toggle"),
             clickable: false,
             id: SHORTCUT_ID_HINT,
         },
         Shortcut {
-            label: "\u{2190}\u{2192} fold",
+            label: rust_i18n::t!("footer.fold"),
             clickable: false,
             id: SHORTCUT_ID_HINT,
         },
         Shortcut {
-            label: "a all",
+            label: rust_i18n::t!("footer.a_all"),
             clickable: true,
             id: SHORTCUT_ID_SELECT_ALL,
         },
         Shortcut {
-            label: "n none",
+            label: rust_i18n::t!("footer.n_none"),
             clickable: true,
             id: SHORTCUT_ID_SELECT_NONE,
         },
         Shortcut {
-            label: &confirm_label,
+            label: rust_i18n::t!("footer.enter_import", count = state.selected_count()),
             clickable: true,
             id: SHORTCUT_ID_CONFIRM,
         },
         Shortcut {
-            label: "Esc cancel",
+            label: rust_i18n::t!("footer.esc_cancel"),
             clickable: true,
             id: SHORTCUT_ID_CANCEL,
         },

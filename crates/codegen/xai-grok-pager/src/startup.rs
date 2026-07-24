@@ -3,6 +3,7 @@
 //! Any subsystem (terminal diagnostics, auth, config migration, etc.) can
 //! produce [`StartupWarning`]s.
 
+#[cfg(test)]
 pub(crate) const DOCTOR_ACTION: &str = "Run /doctor for details and fixes.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +27,7 @@ impl ActionableStartupWarning {
             warning: StartupWarning {
                 severity,
                 message: message.into(),
-                action: Some(DOCTOR_ACTION.to_owned()),
+                action: Some(rust_i18n::t!("warn.doctor_action").into_owned()),
             },
             ids,
         }

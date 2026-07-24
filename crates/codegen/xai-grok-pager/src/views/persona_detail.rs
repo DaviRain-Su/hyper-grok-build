@@ -46,15 +46,15 @@ impl PersonaField {
         PersonaField::InstructionsFile,
     ];
 
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Name => "Name",
-            Self::Description => "Description",
-            Self::Model => "Model",
-            Self::ReasoningEffort => "Effort",
-            Self::Isolation => "Isolation",
-            Self::Instructions => "Instructions",
-            Self::InstructionsFile => "Instr. file",
+            Self::Name => rust_i18n::t!("persona.field.name"),
+            Self::Description => rust_i18n::t!("persona.field.description"),
+            Self::Model => rust_i18n::t!("persona.field.model"),
+            Self::ReasoningEffort => rust_i18n::t!("persona.field.effort"),
+            Self::Isolation => rust_i18n::t!("persona.field.isolation"),
+            Self::Instructions => rust_i18n::t!("persona.field.instructions"),
+            Self::InstructionsFile => rust_i18n::t!("persona.field.instr_file"),
         }
     }
 
@@ -241,7 +241,7 @@ impl PersonaDetailState {
             outputs: Vec::new(),
             source_path: None,
             editable: false,
-            scope_label: "bundled".to_owned(),
+            scope_label: rust_i18n::t!("persona.bundled").into_owned(),
             selected_field: PersonaField::Name,
             scroll_offset: 0,
             mode: PersonaDetailMode::Browse,
@@ -444,7 +444,7 @@ pub fn render_persona_detail(
             let blank: String = " ".repeat(w);
             buf.set_string(content_area.x, y, &blank, Style::default().bg(bg));
         }
-        buf.set_string(content_area.x, y, label, label_style);
+        buf.set_string(content_area.x, y, label.as_ref(), label_style);
 
         let value_x = content_area.x + label_w;
         let value_w = w.saturating_sub(label_w as usize);
@@ -684,38 +684,38 @@ fn build_shortcuts(state: &PersonaDetailState) -> Vec<Shortcut<'static>> {
     if state.is_editing() {
         vec![
             Shortcut {
-                label: "Enter save",
+                label: rust_i18n::t!("footer.enter_save"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc cancel",
+                label: rust_i18n::t!("footer.esc_cancel"),
                 clickable: false,
                 id: 0,
             },
         ]
     } else {
         let mut shortcuts = vec![Shortcut {
-            label: "j/k nav",
+            label: rust_i18n::t!("footer.nav_jk"),
             clickable: false,
             id: 0,
         }];
         if state.editable {
             shortcuts.push(Shortcut {
-                label: "e edit field",
+                label: rust_i18n::t!("footer.e_edit_field"),
                 clickable: false,
                 id: 0,
             });
         }
         if state.source_path.is_some() && state.editable {
             shortcuts.push(Shortcut {
-                label: "i $EDITOR",
+                label: rust_i18n::t!("footer.i_editor"),
                 clickable: false,
                 id: 0,
             });
         }
         shortcuts.push(Shortcut {
-            label: "Esc back",
+            label: rust_i18n::t!("footer.esc_back"),
             clickable: false,
             id: 0,
         });

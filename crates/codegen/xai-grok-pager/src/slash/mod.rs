@@ -59,7 +59,11 @@ impl SuggestionRow {
         }
         Self {
             display: trigger.display.clone(),
-            description: trigger.description.clone(),
+            description: crate::i18n::tr_or(
+                &format!("slash.{}.desc", trigger.canonical),
+                &trigger.description,
+            )
+            .into_owned(),
             insert_text,
             indices: Vec::new(),
             tag: None,

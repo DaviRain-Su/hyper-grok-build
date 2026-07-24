@@ -21,7 +21,6 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
 use super::EphemeralTip;
 use crate::input::key::KeyShortcut;
@@ -60,13 +59,11 @@ pub fn clipboard_image_tip() -> EphemeralTip {
     let chord = Style::default()
         .fg(theme.text_secondary)
         .add_modifier(Modifier::BOLD);
+    let paste = paste_label();
+    let tpl = rust_i18n::t!("tips.clipboard_focus", key = paste.as_str());
     EphemeralTip::new(
         CLIPBOARD_IMAGE_TIP_KEY,
-        Line::from(vec![
-            Span::styled("Image in clipboard · ", dim),
-            Span::styled(paste_label(), chord),
-            Span::styled(" to paste", dim),
-        ]),
+        super::styled_placeholder_line(&tpl, &[paste.as_str()], dim, chord),
     )
 }
 
