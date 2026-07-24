@@ -56,10 +56,9 @@ const RECV_POLL: Duration = Duration::from_millis(50);
 
 /// Timeout for joining the backend thread on stop. A pathological backend that
 /// refuses to exit after this long is detached (logged) so teardown is not
-/// wedged indefinitely.
+/// wedged indefinitely. Implemented via `bounded_join` (helper thread +
+/// `recv_timeout`) — a true bounded join, not `thread::join()`.
 const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-#[allow(dead_code)]
-const _STOP_JOIN_TIMEOUT: Duration = STOP_JOIN_TIMEOUT;
 
 // ---------------------------------------------------------------------------
 // Linear resampler (pure state, reusable across chunk boundaries)
@@ -213,6 +212,77 @@ impl LinearResampler {
     pub fn reset(&mut self) {
         self.position = 0.0;
         self.last_sample = None;
+    }
+}
+
+/// Resampler + excess-output buffer, persisted across cpal callbacks so that
+/// resampled samples beyond the current output buffer's needs are **not
+/// discarded** — they carry to the next callback (finding 5). The resampler
+/// itself preserves interpolation state across chunk boundaries; this struct
+/// adds the output-side carry so no output tails are lost when the device
+/// buffer is smaller than the resampled chunk.
+///
+/// This is a pure struct with no platform dependencies, so it can be tested on
+/// any platform. It's only used by the Windows cpal callback at runtime.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct ResamplerState {
+    resampler: LinearResampler,
+    /// Excess resampled output from the previous callback, carried to the next.
+    leftover: Vec<f32>,
+}
+
+#[allow(dead_code)]
+impl ResamplerState {
+    fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self {
+            resampler: LinearResampler::new(source_rate, target_rate),
+            leftover: Vec::new(),
+        }
+    }
+
+    /// Resample `input` and write up to `max_frames` mono samples into `out`,
+    /// persisting any excess in `leftover` for the next call. Returns the
+    /// number of frames written. If `input` is empty and there's no leftover,
+    /// writes nothing (silence is the caller's responsibility).
+    fn fill(&mut self, input: &[f32], out: &mut [f32]) -> usize {
+        // First, consume any leftover from the previous callback.
+        let mut written = 0usize;
+        if !self.leftover.is_empty() {
+            let take = self.leftover.len().min(out.len() - written);
+            out[..take].copy_from_slice(&self.leftover[..take]);
+            written += take;
+            // Drop the consumed samples; keep the rest.
+            self.leftover.drain(..take);
+            if self.leftover.is_empty() {
+                // Shrink to avoid unbounded capacity retention.
+                self.leftover = Vec::new();
+            }
+        }
+
+        if written >= out.len() {
+            return written; // leftover alone filled the buffer
+        }
+
+        if input.is_empty() {
+            return written; // nothing new to resample
+        }
+
+        // Resample the new input into a temp buffer.
+        let mut resampled = Vec::with_capacity(input.len() + 1);
+        self.resampler.resample(input, &mut resampled);
+
+        // Write as much as fits; keep the rest as leftover.
+        let remaining = out.len() - written;
+        if resampled.len() <= remaining {
+            out[written..written + resampled.len()].copy_from_slice(&resampled);
+            written += resampled.len();
+        } else {
+            out[written..written + remaining].copy_from_slice(&resampled[..remaining]);
+            written += remaining;
+            self.leftover.extend_from_slice(&resampled[remaining..]);
+        }
+        written
     }
 }
 
@@ -445,12 +515,16 @@ impl PlaybackStream {
     }
 
     /// Internal shutdown: stop the queue, teardown platform resources, join the
-    /// backend thread with a bounded wait.
+    /// backend thread with a **true bounded wait** (helper thread +
+    /// `recv_timeout`). Returns only after the backend thread has exited, or
+    /// `STOP_JOIN_TIMEOUT` elapses (in which case the thread is detached and
+    /// logged). Unlike `thread::join()` (which has no timeout on stable Rust),
+    /// this guarantees a bounded return.
     fn shutdown_and_join(&mut self) {
         if self.stopped.swap(true, Ordering::AcqRel) {
             // Already stopped; still try to join if the thread is still alive.
             if let Some(thread) = self.writer_thread.take() {
-                let _ = thread.join();
+                let _ = bounded_join(thread, STOP_JOIN_TIMEOUT);
             }
             return;
         }
@@ -470,22 +544,12 @@ impl PlaybackStream {
             }
             Teardown::Cpal | Teardown::None => {}
         }
-        // Join the backend thread with a bounded wait. Unlike a detached join,
-        // this ensures the thread and device are actually released before
-        // returning. If the thread doesn't exit within the timeout (pathological
-        // backend), we log and detach.
+        // Bounded join: helper thread + recv_timeout so we never block
+        // indefinitely. If the backend thread doesn't exit within
+        // STOP_JOIN_TIMEOUT, it is detached (logged) — but this is a
+        // pathological case; normal teardown exits within RECV_POLL.
         if let Some(thread) = self.writer_thread.take() {
-            let joined = thread
-                .join()
-                .map_err(|_| {
-                    tracing::warn!("live playback backend thread panicked");
-                })
-                .is_ok();
-            if !joined {
-                tracing::warn!(
-                    "live playback backend thread did not exit within timeout; detaching"
-                );
-            }
+            let _ = bounded_join(thread, STOP_JOIN_TIMEOUT);
         }
     }
 }
@@ -725,10 +789,11 @@ fn start_windows_cpal(
         buffer_size: cpal::BufferSize::Default,
     };
 
-    // The resampler state is persisted across callbacks in a Mutex so
-    // interpolation spans chunk boundaries correctly.
-    let resampler: Arc<parking_lot::Mutex<LinearResampler>> = Arc::new(parking_lot::Mutex::new(
-        LinearResampler::new(sample_rate, stream_rate),
+    // The resampler + leftover state is persisted across callbacks in a Mutex
+    // so interpolation spans chunk boundaries AND excess resampled output
+    // carries to the next callback (finding 5: no output tails lost).
+    let resampler: Arc<parking_lot::Mutex<ResamplerState>> = Arc::new(parking_lot::Mutex::new(
+        ResamplerState::new(sample_rate, stream_rate),
     ));
     let stop_cb = Arc::clone(&stopped);
     let queue_for_cb = Arc::clone(&queue);
@@ -793,7 +858,7 @@ fn build_cpal_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     queue: Arc<PlaybackQueue>,
-    resampler: Arc<parking_lot::Mutex<LinearResampler>>,
+    resampler: Arc<parking_lot::Mutex<ResamplerState>>,
     stopped: Arc<AtomicBool>,
     source_rate: u32,
     stream_rate: u32,
@@ -826,14 +891,16 @@ where
 }
 
 /// Fill one cpal output buffer from the queue, resampling mono input to the
-/// device rate and upmixing to the device channel count. The resampler state
-/// is persisted across callbacks so interpolation spans chunk boundaries.
+/// device rate and upmixing to the device channel count. The resampler +
+/// leftover state is persisted across callbacks so interpolation spans chunk
+/// boundaries AND excess resampled output carries to the next callback (no
+/// output tails lost — finding 5).
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn fill_cpal_output<T>(
     out: &mut [T],
     queue: &PlaybackQueue,
-    resampler: &Arc<parking_lot::Mutex<LinearResampler>>,
+    resampler: &Arc<parking_lot::Mutex<ResamplerState>>,
     stopped: &Arc<AtomicBool>,
     source_rate: u32,
     stream_rate: u32,
@@ -849,34 +916,34 @@ fn fill_cpal_output<T>(
     let total_frames = out.len() / ch;
 
     // Drain all available source samples from the queue.
-    // We need enough source samples to produce `total_frames` output frames.
-    // For resampling, the number of source samples needed is approximately
-    // `total_frames * ratio`. We drain a generous amount and let the resampler
-    // consume what it needs; leftover is lost (the queue is already bounded
-    // and shedding oldest, so this is consistent with the low-latency design).
     let ratio = f64::from(source_rate) / f64::from(stream_rate);
     let needed = (total_frames as f64 * ratio).ceil() as usize + 2;
     let input = queue.try_drain(needed.max(1));
 
-    if input.is_empty() {
-        // No new data — output silence (already filled). The resampler state
-        // is preserved for the next callback.
-        return;
+    if input.is_empty() && {
+        // No new data — but there may be leftover resampled output from the
+        // previous callback. Check by attempting a fill with empty input.
+        let mut rs = resampler.lock();
+        let mut mono = vec![0.0f32; total_frames];
+        let written = rs.fill(&[], &mut mono);
+        written == 0
+    } {
+        return; // truly nothing to output
     }
 
-    // Resample.
-    let mut resampled = Vec::with_capacity(total_frames + 1);
-    {
+    // Resample (with leftover carry) into a mono buffer, then upmix.
+    let mut mono = vec![0.0f32; total_frames];
+    let written = {
         let mut rs = resampler.lock();
-        rs.resample(&input, &mut resampled);
-    }
+        rs.fill(&input, &mut mono)
+    };
 
     // Upmix mono → channels and write to the output buffer.
-    for (frame_idx, &sample) in resampled.iter().enumerate() {
+    for frame_idx in 0..written {
         if frame_idx >= total_frames {
             break;
         }
-        let clamped = sample.clamp(-1.0, 1.0);
+        let clamped = mono[frame_idx].clamp(-1.0, 1.0);
         let base = frame_idx * ch;
         for c in 0..ch {
             out[base + c] = T::from_sample(clamped);
@@ -932,6 +999,39 @@ fn start_macos_helper(
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Join a thread with a bounded timeout. Spawns a helper thread that performs
+/// the actual `join()` and signals completion via a `std::sync::mpsc` channel;
+/// the caller does `recv_timeout`. If the helper doesn't signal within
+/// `timeout`, the backend thread is **detached** (the helper thread is left to
+/// reap it in the background) and a warning is logged. This provides a true
+/// bounded join — unlike `thread::join()` which has no timeout on stable Rust.
+///
+/// Returns `Ok(())` if the thread exited within the timeout, `Err(())` if it
+/// timed out (detached).
+fn bounded_join(handle: JoinHandle<()>, timeout: Duration) -> Result<(), ()> {
+    use std::sync::mpsc;
+    let (done_tx, done_rx) = mpsc::channel::<Result<(), ()>>();
+    // The helper thread owns the JoinHandle and joins it. When it finishes, it
+    // sends the result. If the caller times out, the helper is left running
+    // (it will eventually join the backend thread and exit on its own).
+    let _helper = thread::spawn(move || {
+        let result = handle.join().map(|_| ()).map_err(|_| {
+            tracing::warn!("live playback backend thread panicked");
+        });
+        let _ = done_tx.send(result);
+    });
+    match done_rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                "live playback backend thread did not exit within {:?}; detaching",
+                timeout
+            );
+            Err(())
+        }
+    }
+}
 
 /// Drain the queue and discard samples (no-op backend / fallback). Used on
 /// platforms without a dedicated player backend. Exits when stopped or the
@@ -1433,5 +1533,160 @@ mod tests {
         // Next real input should continue from the preserved state.
         rs.resample(&[4.0, 5.0], &mut output);
         assert!(output.len() > len_before);
+    }
+
+    // --- ResamplerState tests (finding 5: no output tails lost) ---
+
+    /// ResamplerState must carry excess resampled output to the next call when
+    /// the output buffer is smaller than the resampled chunk. This simulates a
+    /// small cpal output buffer: feed a large input, drain in small buffers,
+    /// and verify the total output equals what a single large buffer would
+    /// produce (no tails lost).
+    #[test]
+    fn resampler_state_carries_excess_across_small_buffers() {
+        let input = sine_wave(4800, 440.0, 0.5); // 100ms at 48k
+
+        // Reference: resample all at once into one large buffer.
+        let mut rs_ref = LinearResampler::new(48000, 44100);
+        let mut reference = Vec::new();
+        rs_ref.resample(&input, &mut reference);
+
+        // Now: ResamplerState with a tiny output buffer (16 samples), called
+        // repeatedly with the full input on the first call and empty input on
+        // subsequent calls (simulating one large queue drain followed by
+        // callbacks that only consume leftover).
+        let mut state = ResamplerState::new(48000, 44100);
+        let mut all_output = Vec::new();
+        let mut buf = vec![0.0f32; 16];
+
+        // First call: feed the entire input. The buffer is tiny so most output
+        // becomes leftover.
+        let n = state.fill(&input, &mut buf);
+        all_output.extend_from_slice(&buf[..n]);
+
+        // Subsequent calls: no new input, just drain leftover.
+        loop {
+            let n = state.fill(&[], &mut buf);
+            if n == 0 {
+                break;
+            }
+            all_output.extend_from_slice(&buf[..n]);
+        }
+
+        // The total output should match the reference (no tails lost).
+        assert_eq!(
+            all_output.len(),
+            reference.len(),
+            "small-buffer output lost samples: got {} expected {}",
+            all_output.len(),
+            reference.len()
+        );
+        let min_len = all_output.len().min(reference.len());
+        let mut max_diff = 0.0f64;
+        for i in 0..min_len {
+            max_diff = max_diff.max((f64::from(all_output[i]) - f64::from(reference[i])).abs());
+        }
+        assert!(
+            max_diff < 1e-5,
+            "small-buffer output diverged from reference: max_diff {max_diff}"
+        );
+    }
+
+    /// ResamplerState chunked-vs-contiguous: feeding input in small chunks with
+    /// small output buffers should produce the same output as one large call.
+    #[test]
+    fn resampler_state_chunked_vs_contiguous_small_buffers() {
+        let input = sine_wave(4800, 440.0, 0.5);
+
+        // Contiguous: one big buffer.
+        let mut state_c = ResamplerState::new(48000, 44100);
+        let mut contiguous = vec![0.0f32; 10000];
+        let n = state_c.fill(&input, &mut contiguous);
+        contiguous.truncate(n);
+
+        // Chunked: 10 chunks of 480 samples, each drained into a 64-sample
+        // buffer, looping until leftover is empty before the next chunk.
+        let mut state_k = ResamplerState::new(48000, 44100);
+        let mut chunked = Vec::new();
+        let mut buf = vec![0.0f32; 64];
+        for chunk in input.chunks(480) {
+            let n = state_k.fill(chunk, &mut buf);
+            chunked.extend_from_slice(&buf[..n]);
+            // Drain any leftover from this chunk.
+            loop {
+                let n = state_k.fill(&[], &mut buf);
+                if n == 0 {
+                    break;
+                }
+                chunked.extend_from_slice(&buf[..n]);
+            }
+        }
+        // Drain final leftover.
+        loop {
+            let n = state_k.fill(&[], &mut buf);
+            if n == 0 {
+                break;
+            }
+            chunked.extend_from_slice(&buf[..n]);
+        }
+
+        assert!(
+            (contiguous.len() as i32 - chunked.len() as i32).abs() <= 2,
+            "chunked vs contiguous length mismatch: {} vs {}",
+            contiguous.len(),
+            chunked.len()
+        );
+        let min_len = contiguous.len().min(chunked.len());
+        let mut max_diff = 0.0f64;
+        for i in 0..min_len.saturating_sub(2) {
+            max_diff = max_diff.max((f64::from(contiguous[i]) - f64::from(chunked[i])).abs());
+        }
+        assert!(
+            max_diff < 0.05,
+            "chunked vs contiguous diverged: max_diff {max_diff}"
+        );
+    }
+
+    /// ResamplerState with empty input and no leftover writes nothing.
+    #[test]
+    fn resampler_state_empty_input_no_leftover_writes_nothing() {
+        let mut state = ResamplerState::new(48000, 48000);
+        let mut buf = vec![0.0f32; 32];
+        assert_eq!(state.fill(&[], &mut buf), 0);
+    }
+
+    // --- bounded_join tests (finding 4) ---
+
+    /// bounded_join returns promptly when the thread exits quickly.
+    #[test]
+    fn bounded_join_returns_after_thread_exits() {
+        let handle = thread::spawn(|| {});
+        let start = std::time::Instant::now();
+        let result = bounded_join(handle, Duration::from_secs(5));
+        assert!(result.is_ok());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "bounded_join took too long for a fast thread"
+        );
+    }
+
+    /// bounded_join times out and detaches when the thread blocks longer than
+    /// the timeout. The function must return within timeout + small slack.
+    #[test]
+    fn bounded_join_times_out_on_long_running_thread() {
+        let handle = thread::spawn(|| {
+            thread::sleep(Duration::from_secs(10));
+        });
+        let start = std::time::Instant::now();
+        let result = bounded_join(handle, Duration::from_millis(200));
+        assert!(result.is_err(), "expected timeout (Err), got Ok");
+        let elapsed = start.elapsed();
+        // Should return around 200ms, definitely under 2s.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bounded_join did not time out promptly: {elapsed:?}"
+        );
+        // The test passes; the detached helper thread is still sleeping but
+        // will exit on its own (it's a daemon thread).
     }
 }

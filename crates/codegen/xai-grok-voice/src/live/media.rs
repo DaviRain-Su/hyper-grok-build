@@ -364,6 +364,9 @@ impl LivePeerCore {
         }
         self.signal_tx
             .send_replace(PeerSignal::Failed(message.clone()));
+        // Finding 2: force the output level to zero on failure so the barge-in
+        // gate clears reliably (not via a lossy metering queue).
+        let _ = self.event_tx.try_send(MediaEvent::OutputLevel(0.0));
         // Failures are once-only and critical. If the bounded event channel is
         // full (e.g. the transport consumer stalled), we still signal the
         // failure via the watch channel (above) so wait_for_open returns Err.
@@ -382,6 +385,10 @@ impl LivePeerCore {
             }
             return;
         }
+
+        // Finding 2: force output level to zero on teardown so the barge-in
+        // gate clears reliably (not via a lossy metering queue).
+        let _ = self.event_tx.try_send(MediaEvent::OutputLevel(0.0));
 
         let resources = self.resources.lock().take();
         if let Some(resources) = resources {

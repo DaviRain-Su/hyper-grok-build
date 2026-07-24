@@ -364,13 +364,14 @@ impl CodexLiveTransport {
             attestation.as_deref(),
         );
 
-        // Parse the sideband URL to get the target host and port.
+        // Parse the sideband URL to get the target host, port, and scheme.
         let sideband_url =
             url::Url::parse(&url_str).map_err(|e| format!("invalid sideband URL: {e}"))?;
         let target_host = sideband_url
             .host_str()
             .ok_or_else(|| "sideband URL has no host".to_string())?;
         let target_port = sideband_url.port_or_known_default().unwrap_or(443);
+        let is_wss = sideband_url.scheme() == "wss" || sideband_url.scheme() == "https";
 
         // Resolve the proxy for the sideband host (from sideband_base or
         // default api.openai.com). If a proxy is configured and not bypassed
@@ -378,34 +379,67 @@ impl CodexLiveTransport {
         let sideband_host = sideband_host(self.config.sideband_base.as_deref());
         let proxy_url = resolve_proxy_for_host(&sideband_host);
 
-        let ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>> =
+        // Finding 6: one timeout around the entire setup (DNS/TCP/proxy
+        // CONNECT/TLS/WebSocket handshake). The individual steps are NOT
+        // separately timed — the overall budget is SIDEBAND_CONNECT_TIMEOUT.
+        let setup = async {
             if let Some(proxy_url) = proxy_url {
-                // CONNECT tunnel through the proxy, then TLS.
-                let tunnel = open_connect_tunnel(&proxy_url, target_host, target_port)
-                    .await
-                    .map_err(|e| format!("sideband proxy CONNECT failed: {e}"))?;
-                let tls_stream = tls_wrap(tunnel, target_host)
-                    .await
-                    .map_err(|e| format!("sideband proxy TLS handshake failed: {e}"))?;
-                let (ws, _resp) = tokio::time::timeout(
-                    SIDEBAND_CONNECT_TIMEOUT,
-                    client_async(request, MaybeTlsStream::Rustls(tls_stream)),
+                // Parse the proxy URL safely (scheme/host/port/userinfo).
+                let proxy = parse_proxy_url_full(&proxy_url)
+                    .map_err(|e| format!("invalid proxy configuration: {e}"))?;
+
+                // HTTPS proxies (TLS-to-proxy) are not supported via a raw
+                // CONNECT tunnel — we'd need a TLS handshake to the proxy
+                // itself before CONNECT. Reject explicitly with a sanitized
+                // error (no credentials in the message).
+                if proxy.is_https {
+                    return Err("HTTPS proxy (TLS-to-proxy) is not supported for the live \
+                         sideband WebSocket; use an HTTP proxy or configure \
+                         HTTPS_PROXY to an http:// URL"
+                        .to_string());
+                }
+
+                // Open the CONNECT tunnel (with Basic auth if the proxy URL
+                // has userinfo).
+                let tunnel = open_connect_tunnel(
+                    proxy.host.as_str(),
+                    proxy.port,
+                    proxy.basic_auth(),
+                    target_host,
+                    target_port,
                 )
-                .await
-                .map_err(|_| "Codex live sideband connection timed out".to_string())?
-                .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
-                ws
+                .await?;
+
+                if is_wss {
+                    // wss:// through the tunnel: TLS handshake to the target
+                    // host, then WebSocket upgrade.
+                    let tls_stream = tls_wrap(tunnel, target_host).await?;
+                    let (ws, _resp) = client_async(request, MaybeTlsStream::Rustls(tls_stream))
+                        .await
+                        .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
+                    Ok(ws)
+                } else {
+                    // ws:// through the tunnel: plain WebSocket upgrade (no
+                    // TLS to the target). Use MaybeTlsStream::Plain.
+                    let (ws, _resp) = client_async(request, MaybeTlsStream::Plain(tunnel))
+                        .await
+                        .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
+                    Ok(ws)
+                }
             } else {
-                // Direct connection (no proxy).
-                let connect = tokio::time::timeout(
-                    SIDEBAND_CONNECT_TIMEOUT,
-                    tokio_tungstenite::connect_async(request),
-                )
+                // Direct connection (no proxy). connect_async handles ws/wss
+                // natively (TLS for wss, plain for ws).
+                let connect = tokio_tungstenite::connect_async(request)
+                    .await
+                    .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
+                Ok(connect.0)
+            }
+        };
+
+        let ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>> =
+            tokio::time::timeout(SIDEBAND_CONNECT_TIMEOUT, setup)
                 .await
-                .map_err(|_| "Codex live sideband connection timed out".to_string())?
-                .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
-                connect.0
-            };
+                .map_err(|_| "Codex live sideband connection timed out".to_string())??;
 
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -752,26 +786,36 @@ async fn tls_wrap(
 }
 
 /// Open a raw TCP tunnel through an HTTP CONNECT proxy. Sends
-/// `CONNECT host:port HTTP/1.1` and verifies a 200 response. Returns the
-/// `TcpStream` positioned after the CONNECT response headers.
+/// `CONNECT host:port HTTP/1.1` (with optional `Proxy-Authorization` header)
+/// and verifies a 200 response. Returns the `TcpStream` positioned after the
+/// CONNECT response headers. The proxy URL is never passed here — only the
+/// parsed host/port/auth — so credentials cannot leak into error messages
+/// (finding 6).
 async fn open_connect_tunnel(
-    proxy_url: &str,
+    proxy_host: &str,
+    proxy_port: u16,
+    basic_auth: Option<String>,
     target_host: &str,
     target_port: u16,
 ) -> Result<TcpStream, String> {
-    let (proxy_host, proxy_port) =
-        parse_proxy_url(proxy_url).map_err(|e| format!("invalid proxy URL '{proxy_url}': {e}"))?;
-
     let proxy_addr = format!("{proxy_host}:{proxy_port}");
     let stream = TcpStream::connect(&proxy_addr)
         .await
-        .map_err(|e| format!("failed to connect to proxy at {proxy_addr}: {e}"))?;
+        .map_err(|e| format!("failed to connect to proxy: {e}"))?;
 
-    let connect_req = format!(
-        "CONNECT {target_host}:{target_port} HTTP/1.1\r\n\
-         Host: {target_host}:{target_port}\r\n\
-         \r\n"
-    );
+    let connect_req = match &basic_auth {
+        Some(auth) => format!(
+            "CONNECT {target_host}:{target_port} HTTP/1.1\r\n\
+             Host: {target_host}:{target_port}\r\n\
+             Proxy-Authorization: {auth}\r\n\
+             \r\n"
+        ),
+        None => format!(
+            "CONNECT {target_host}:{target_port} HTTP/1.1\r\n\
+             Host: {target_host}:{target_port}\r\n\
+             \r\n"
+        ),
+    };
     let (reader_half, mut writer_half) = stream.into_split();
     writer_half
         .write_all(connect_req.as_bytes())
@@ -789,7 +833,10 @@ async fn open_connect_tunnel(
         .await
         .map_err(|e| format!("proxy CONNECT read failed: {e}"))?;
     if !status_line.starts_with("HTTP/1.1 200") && !status_line.starts_with("HTTP/1.0 200") {
-        return Err(format!("proxy CONNECT failed: {}", status_line.trim()));
+        // Sanitize: the status line from the proxy should not contain our
+        // credentials (they're in the request, not the response), but strip
+        // any trailing whitespace.
+        return Err(format!("proxy CONNECT rejected: {}", status_line.trim()));
     }
     // Consume remaining response headers.
     loop {
@@ -816,22 +863,121 @@ async fn open_connect_tunnel(
         .map_err(|e| format!("proxy stream reunite failed: {e}"))
 }
 
-/// Parse a proxy URL into (host, port). Accepted formats: `http://host:port`,
-/// `http://host` (defaults to 80), `host:port`.
-fn parse_proxy_url(url: &str) -> Result<(String, u16), String> {
-    let without_scheme = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    if let Some((host, port_str)) = authority.rsplit_once(':') {
-        let port: u16 = port_str
-            .parse()
-            .map_err(|_| format!("invalid proxy port in '{url}'"))?;
-        Ok((host.to_string(), port))
-    } else {
-        Ok((authority.to_string(), 80))
+/// Parsed proxy URL: scheme, host, port, and optional userinfo (for Basic auth).
+/// The raw URL is never stored or surfaced in errors (finding 6: no credentials
+/// in error messages). `Debug` is derived for test assertions only; this struct
+/// is private to the module.
+#[derive(Debug)]
+struct ProxyConfig {
+    is_https: bool,
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+impl ProxyConfig {
+    /// Returns a `Authorization: Basic <base64>` header value if the proxy URL
+    /// had userinfo, or `None` otherwise.
+    fn basic_auth(&self) -> Option<String> {
+        match (&self.username, &self.password) {
+            (Some(u), Some(p)) => {
+                let credentials = format!("{u}:{p}");
+                let encoded = base64_encode(credentials.as_bytes());
+                Some(format!("Basic {encoded}"))
+            }
+            (Some(u), None) => {
+                let credentials = format!("{u}:");
+                let encoded = base64_encode(credentials.as_bytes());
+                Some(format!("Basic {encoded}"))
+            }
+            _ => None,
+        }
     }
+}
+
+/// Minimal Base64 encoder (standard alphabet, with padding) for proxy Basic
+/// auth. We avoid pulling in a base64 crate dependency for this small use.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let i0 = (b0 >> 2) as usize;
+        let i1 = (((b0 & 0x03) << 4) | (b1 >> 4)) as usize;
+        out.push(ALPHABET[i0] as char);
+        out.push(ALPHABET[i1] as char);
+        if chunk.len() > 1 {
+            let i2 = (((b1 & 0x0f) << 2) | (b2 >> 6)) as usize;
+            out.push(ALPHABET[i2] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            let i3 = (b2 & 0x3f) as usize;
+            out.push(ALPHABET[i3] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Parse a proxy URL into a `ProxyConfig` (scheme/host/port/userinfo). Accepted
+/// schemes: `http://`, `https://`, or bare `host:port`. Never includes the raw
+/// URL in errors — uses a generic message so credentials are never leaked
+/// (finding 6).
+fn parse_proxy_url_full(url: &str) -> Result<ProxyConfig, String> {
+    let (is_https, without_scheme) = if let Some(rest) = url.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        (false, url)
+    };
+
+    // Strip path/query.
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+
+    // Extract userinfo (user:pass@) if present.
+    let (userinfo, hostport) = if let Some(at_pos) = authority.rfind('@') {
+        (Some(&authority[..at_pos]), &authority[at_pos + 1..])
+    } else {
+        (None, authority)
+    };
+
+    // Parse host:port.
+    let (host, port) = if let Some((h, p)) = hostport.rsplit_once(':') {
+        let port: u16 = p.parse().map_err(|_| "invalid proxy port".to_string())?;
+        (h.to_string(), port)
+    } else {
+        (hostport.to_string(), 80)
+    };
+
+    if host.is_empty() {
+        return Err("proxy URL has no host".to_string());
+    }
+
+    let (username, password) = match userinfo {
+        Some(ui) => {
+            if let Some((u, p)) = ui.split_once(':') {
+                (Some(u.to_string()), Some(p.to_string()))
+            } else {
+                (Some(ui.to_string()), None)
+            }
+        }
+        None => (None, None),
+    };
+
+    Ok(ProxyConfig {
+        is_https,
+        host,
+        port,
+        username,
+        password,
+    })
 }
 
 /// Check whether `host` is in the `no_proxy` list (matches the shell helper).
@@ -1189,16 +1335,86 @@ mod tests {
 
     #[test]
     fn parse_proxy_url_extracts_host_and_port() {
-        let (host, port) = parse_proxy_url("http://proxy.example.com:3128").unwrap();
-        assert_eq!(host, "proxy.example.com");
-        assert_eq!(port, 3128);
+        let p = parse_proxy_url_full("http://proxy.example.com:3128").unwrap();
+        assert_eq!(p.host, "proxy.example.com");
+        assert_eq!(p.port, 3128);
+        assert!(!p.is_https);
+        assert!(p.username.is_none());
+        assert!(p.password.is_none());
     }
 
     #[test]
     fn parse_proxy_url_defaults_port_to_80() {
-        let (host, port) = parse_proxy_url("http://proxy.example.com").unwrap();
-        assert_eq!(host, "proxy.example.com");
-        assert_eq!(port, 80);
+        let p = parse_proxy_url_full("http://proxy.example.com").unwrap();
+        assert_eq!(p.host, "proxy.example.com");
+        assert_eq!(p.port, 80);
+    }
+
+    /// Finding 6: HTTPS proxy scheme is detected so it can be rejected.
+    #[test]
+    fn parse_proxy_url_detects_https_scheme() {
+        let p = parse_proxy_url_full("https://proxy.example.com:3128").unwrap();
+        assert!(p.is_https);
+        assert_eq!(p.port, 3128);
+    }
+
+    /// Finding 6: proxy URL userinfo (Basic auth) is parsed correctly.
+    #[test]
+    fn parse_proxy_url_extracts_userinfo() {
+        let p = parse_proxy_url_full("http://user:pass@proxy.example.com:3128").unwrap();
+        assert_eq!(p.host, "proxy.example.com");
+        assert_eq!(p.port, 3128);
+        assert_eq!(p.username.as_deref(), Some("user"));
+        assert_eq!(p.password.as_deref(), Some("pass"));
+        let auth = p.basic_auth().unwrap();
+        assert!(auth.starts_with("Basic "));
+        // Base64 of "user:pass" = "dXNlcjpwYXNz"
+        assert!(auth.contains("dXNlcjpwYXNz"));
+    }
+
+    /// Finding 6: proxy URL with username only (no password).
+    #[test]
+    fn parse_proxy_url_extracts_username_only() {
+        let p = parse_proxy_url_full("http://user@proxy.example.com:3128").unwrap();
+        assert_eq!(p.username.as_deref(), Some("user"));
+        assert!(p.password.is_none());
+        assert!(p.basic_auth().is_some());
+    }
+
+    /// Finding 6: bare host:port (no scheme) parses as HTTP.
+    #[test]
+    fn parse_proxy_url_bare_host_port() {
+        let p = parse_proxy_url_full("proxy.example.com:3128").unwrap();
+        assert_eq!(p.host, "proxy.example.com");
+        assert_eq!(p.port, 3128);
+        assert!(!p.is_https);
+    }
+
+    /// Finding 6: errors never include the raw URL (no credential leak).
+    #[test]
+    fn parse_proxy_url_error_has_no_credentials() {
+        let url = "http://secretuser:secretpass@proxy.example.com:notaport";
+        let err = parse_proxy_url_full(url).unwrap_err();
+        assert!(!err.contains("secretuser"));
+        assert!(!err.contains("secretpass"));
+        assert!(!err.contains(url));
+    }
+
+    /// Finding 6: base64 encoder correctness.
+    #[test]
+    fn base64_encode_userpass() {
+        assert_eq!(base64_encode(b"user:pass"), "dXNlcjpwYXNz");
+        assert_eq!(base64_encode(b"a:b"), "YTpi");
+        assert_eq!(base64_encode(b"test"), "dGVzdA==");
+    }
+
+    /// Finding 6: ws:// (unencrypted) scheme detection.
+    #[test]
+    fn sideband_url_scheme_ws_vs_wss() {
+        let ws = url::Url::parse("ws://example.com/live").unwrap();
+        assert_eq!(ws.scheme(), "ws");
+        let wss = url::Url::parse("wss://example.com/live").unwrap();
+        assert_eq!(wss.scheme(), "wss");
     }
 
     // --- Error body redaction tests (finding 8) ---

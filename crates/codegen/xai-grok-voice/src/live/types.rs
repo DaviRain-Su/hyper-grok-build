@@ -7,8 +7,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::protocol::{LiveContextChannel, LiveRole, LiveServerEvent};
 
@@ -149,44 +150,205 @@ pub(super) fn server_event_to_live_event(event: LiveServerEvent) -> Option<LiveE
 
 /// Adapter that turns transport callbacks into events on an mpsc sender.
 ///
-/// Non-level events (transcript, delegation, turn, error) are forwarded to
-/// `event_tx` (the pager-facing channel). Output levels are sent to a separate
-/// internal `levels_tx` so the session loop can drive the echo gate (muting the
-/// mic while the model is speaking) *and* forward the level to the pager.
+/// Non-level events (transcript, delegation, turn) are forwarded to
+/// `event_tx` (the pager-facing channel) via best-effort `try_send`. Output
+/// levels are written to a dedicated `watch::Sender<f64>` (`output_level_tx`)
+/// so the session's barge-in gate always reads the **latest** level directly
+/// from shared state — never a stale value from a lossy queue. The latest level
+/// is also forwarded to the pager as a lossy `LiveEvent::Levels` for meter UI.
 ///
-/// **Critical** events (fatal errors from the media peer or sideband) are sent
-/// through `critical_tx` — a dedicated channel the session monitors in its main
-/// `select!` so it can tear down deterministically. Critical events are also
-/// forwarded to `event_tx` as `LiveEvent::Error` so the pager sees them. The
-/// `critical_tx` channel ensures the error is never shed (unlike the lossy
-/// `levels_tx` / `event_tx` `try_send` paths).
+/// **Critical (fatal) events** are delivered through a dedicated
+/// `watch::Sender<Option<LiveEvent>>` (`fatal_tx`) guarded by an
+/// `AtomicBool` (`fatal_reported`) so exactly **one** fatal event is ever
+/// surfaced — even if the media peer and the sideband fail simultaneously. The
+/// session monitors `fatal_rx` in its main `select!` and emits the awaited
+/// `LiveEvent::Error` itself (via a blocking-timeout `send`), then `Closing`,
+/// then `Closed`. The watch channel is non-sheddable: a single `send_replace`
+/// atomically publishes the first fatal payload; subsequent failures are
+/// suppressed by the atomic. The callback never emits `LiveEvent::Error` to
+/// `event_tx` directly — only the session does, guaranteeing exactly-once
+/// terminal delivery.
 pub(super) struct CallbackSink {
     pub event_tx: mpsc::Sender<LiveEvent>,
-    pub levels_tx: mpsc::Sender<f64>,
-    /// Critical (fatal) events that the session must act on. Sent through this
-    /// channel *in addition to* `event_tx` so the session loop can detect them
-    /// and tear down. The sender is bounded(8) — enough for a few simultaneous
-    /// failures without shedding the critical one.
-    pub critical_tx: mpsc::Sender<LiveEvent>,
+    /// Latest output level, shared via `watch` so the barge-in gate reads
+    /// reliable state. The media layer writes here directly (and forces 0.0
+    /// on teardown / output-task exits).
+    pub output_level_tx: watch::Sender<f64>,
+    /// Once-only fatal-event signal. The first failure publishes
+    /// `Some(LiveEvent::Error)` here; the session subscribes and acts.
+    pub fatal_tx: watch::Sender<Option<LiveEvent>>,
+    /// Guards `fatal_tx` so only the first fatal event is published.
+    fatal_reported: Arc<AtomicBool>,
+}
+
+impl CallbackSink {
+    /// Build a sink from the pager-facing `event_tx`. The caller retains the
+    /// `watch::Receiver`s for the session loop.
+    pub fn new(
+        event_tx: mpsc::Sender<LiveEvent>,
+        output_level_tx: watch::Sender<f64>,
+        fatal_tx: watch::Sender<Option<LiveEvent>>,
+    ) -> Self {
+        Self {
+            event_tx,
+            output_level_tx,
+            fatal_tx,
+            fatal_reported: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Publish a fatal event exactly once. Returns `true` if this call won the
+    /// race (was the first to report), `false` if a fatal was already reported.
+    pub fn report_fatal(&self, event: LiveEvent) -> bool {
+        if self.fatal_reported.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        self.fatal_tx.send_replace(Some(event));
+        true
+    }
+
+    /// Whether a fatal event has already been reported.
+    #[allow(dead_code)]
+    pub fn fatal_reported(&self) -> bool {
+        self.fatal_reported.load(Ordering::Acquire)
+    }
 }
 
 impl super::transport::LiveTransportCallbacks for CallbackSink {
     fn on_event(&self, event: LiveServerEvent) {
         if let Some(live_event) = server_event_to_live_event(event.clone()) {
-            // best-effort: if the receiver is gone the session is shutting down.
-            let _ = self.event_tx.try_send(live_event.clone());
-            // Critical events (Error) go through the dedicated critical channel
-            // so the session loop can detect them and tear down. Non-critical
-            // events (transcript, delegation, turn) are not sent here — they're
-            // informational and don't require teardown.
+            // Critical (Error) events are NOT forwarded to event_tx here —
+            // the session emits exactly one awaited Error itself after
+            // receiving the fatal watch signal. Forwarding here would risk
+            // duplicate or shed errors.
             if matches!(live_event, LiveEvent::Error { .. }) {
-                let _ = self.critical_tx.try_send(live_event);
+                self.report_fatal(live_event);
+                return;
             }
+            // Non-critical events (transcript, delegation, turn): best-effort.
+            // If the receiver is gone the session is shutting down.
+            let _ = self.event_tx.try_send(live_event);
         }
     }
 
     fn on_output_level(&self, level: f64) {
-        // Drive the echo gate (session loop) and forward to the pager.
-        let _ = self.levels_tx.try_send(level);
+        // Write the latest level to the shared watch state (reliable for the
+        // barge-in gate) and forward a lossy meter event to the pager.
+        let clamped = if level.is_finite() && level >= 0.0 {
+            level.min(1.0)
+        } else {
+            0.0
+        };
+        let _ = self.output_level_tx.send(clamped);
+        let _ = self.event_tx.try_send(LiveEvent::Levels(clamped));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live::transport::LiveTransportCallbacks;
+    use std::sync::atomic::Ordering;
+
+    fn make_sink() -> (
+        CallbackSink,
+        mpsc::Receiver<LiveEvent>,
+        watch::Receiver<f64>,
+        watch::Receiver<Option<LiveEvent>>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (output_level_tx, output_level_rx) = watch::channel(0.0);
+        let (fatal_tx, fatal_rx) = watch::channel(None);
+        let sink = CallbackSink::new(event_tx, output_level_tx, fatal_tx);
+        (sink, event_rx, output_level_rx, fatal_rx)
+    }
+
+    #[test]
+    fn fatal_reported_exactly_once_under_concurrent_callers() {
+        let (sink, _event_rx, _level_rx, fatal_rx) = make_sink();
+        let arc = Arc::new(sink);
+        let mut handles = Vec::new();
+        for i in 0..8u32 {
+            let sink = Arc::clone(&arc);
+            handles.push(std::thread::spawn(move || {
+                sink.report_fatal(LiveEvent::Error {
+                    message: format!("failure-{i}"),
+                })
+            }));
+        }
+        let won: u32 = handles.into_iter().map(|h| h.join().unwrap() as u32).sum();
+        // Exactly one caller wins.
+        assert_eq!(won, 1);
+        // The published fatal is the winner's (some failure-N).
+        let published = fatal_rx.borrow().clone();
+        assert!(matches!(published, Some(LiveEvent::Error { .. })));
+        // A later call loses.
+        assert!(!arc.report_fatal(LiveEvent::Error {
+            message: "late".into()
+        }));
+        assert!(arc.fatal_reported());
+    }
+
+    #[test]
+    fn on_event_routes_error_to_fatal_not_event_tx() {
+        let (sink, mut event_rx, _level_rx, fatal_rx) = make_sink();
+        sink.on_event(LiveServerEvent::Error {
+            message: "boom".into(),
+        });
+        // The error must NOT appear on event_tx (the session emits it).
+        assert!(event_rx.try_recv().is_err());
+        // It must appear on the fatal watch.
+        let published = fatal_rx.borrow().clone();
+        assert!(matches!(
+            published,
+            Some(LiveEvent::Error { message }) if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn on_event_routes_non_critical_to_event_tx() {
+        let (sink, mut event_rx, _level_rx, fatal_rx) = make_sink();
+        sink.on_event(LiveServerEvent::TranscriptAdded {
+            kind: super::super::protocol::TranscriptKind::Input,
+            text: "hi".into(),
+        });
+        let ev = event_rx.try_recv().unwrap();
+        assert!(matches!(ev, LiveEvent::Transcript { .. }));
+        // No fatal published.
+        assert!(fatal_rx.borrow().is_none());
+    }
+
+    #[test]
+    fn on_output_level_updates_watch_and_forwards_lossy_event() {
+        let (sink, mut event_rx, level_rx, _fatal_rx) = make_sink();
+        sink.on_output_level(0.42);
+        // The watch carries the latest level (reliable for barge-in).
+        assert!((*level_rx.borrow() - 0.42).abs() < 1e-9);
+        // A lossy meter event is forwarded to the pager.
+        let ev = event_rx.try_recv().unwrap();
+        assert!(matches!(ev, LiveEvent::Levels(l) if (l - 0.42).abs() < 1e-9));
+    }
+
+    #[test]
+    fn on_output_level_clamps_non_finite_and_negative() {
+        let (sink, _event_rx, level_rx, _fatal_rx) = make_sink();
+        sink.on_output_level(f64::NAN);
+        assert_eq!(*level_rx.borrow(), 0.0);
+        sink.on_output_level(-5.0);
+        assert_eq!(*level_rx.borrow(), 0.0);
+        sink.on_output_level(2.0);
+        assert!((*level_rx.borrow() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fatal_reported_atomic_is_acqrel_consistent() {
+        let (sink, _event_rx, _level_rx, _fatal_rx) = make_sink();
+        assert!(!sink.fatal_reported());
+        assert!(sink.report_fatal(LiveEvent::Error {
+            message: "first".into()
+        }));
+        assert!(sink.fatal_reported());
+        // Re-check with explicit load to verify ordering.
+        assert!(sink.fatal_reported.load(Ordering::Acquire));
     }
 }

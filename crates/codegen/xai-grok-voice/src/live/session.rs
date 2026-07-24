@@ -20,13 +20,27 @@
 //!   `outputActive && inputLevel < max(0.04, outputLevel * 0.65)`. Louder user
 //!   input passes through to interrupt the model.
 //! - Output activity clears promptly when the output track ends (the media peer
-//!   emits a final 0.0 level).
+//!   forces the shared output-level watch to 0.0).
+//!
+//! # Terminal failure (finding 1)
+//! Exactly one fatal `LiveEvent::Error` is emitted by the **session** (not by
+//! media/sideband callbacks). Callbacks publish a once-only signal via a
+//! `watch<Option<LiveEvent>>` guarded by an `AtomicBool`; the session loop
+//! subscribes, reads the first fatal, and emits the awaited `Error` → `Closing`
+//! → `Closed` sequence. Simultaneous media + sideband failures surface only the
+//! first.
+//!
+//! # Output level (finding 2)
+//! The current output level is held in a `watch::channel<f64>` shared between
+//! the media layer (writer) and the session barge-in gate (reader). The barge-in
+//! reads `watch.borrow()` directly — never a stale value from a lossy queue. The
+//! media layer forces the watch to 0.0 on every output-task exit and on teardown.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::protocol::{
     build_delegation_context_append, build_session_close, build_session_context_append,
@@ -45,16 +59,12 @@ const OUTPUT_ACTIVE_LEVEL: f64 = 0.015;
 const MIN_BARGE_IN_LEVEL: f64 = 0.04;
 const OUTPUT_ECHO_RATIO: f64 = 0.65;
 
-/// Store the current output level as a bit-packed `AtomicU64` so the barge-in
-/// decision can be made per mic chunk without a mutex. The level is stored as
-/// the bits of an `f64`.
-fn store_output_level(atomic: &AtomicU64, level: f64) {
-    atomic.store(level.to_bits(), Ordering::Release);
-}
-
-fn load_output_level(atomic: &AtomicU64) -> f64 {
-    f64::from_bits(atomic.load(Ordering::Acquire))
-}
+/// Bounded wait for delivering a terminal lifecycle event to the pager. If the
+/// pager isn't draining its event channel within this window, the session
+/// proceeds with teardown anyway — a stuck consumer must not prevent device
+/// release (finding 7). If the receiver is gone, `send` returns Err
+/// immediately (no hang).
+const TERMINAL_EVENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Clamp a level to `[0, 1]`, returning 0 for non-finite values (OMP
 /// `clampLevel`).
@@ -108,27 +118,24 @@ pub async fn run_live_session(
     };
     phase(LivePhase::Connecting);
 
-    // Barge-in state: the current output level (bit-packed f64) drives the
-    // echo gate decision per mic chunk. User mute is independent.
-    let output_level = Arc::new(AtomicU64::new(0.0f64.to_bits()));
+    // Barge-in state: the current output level is held in a `watch` channel so
+    // the barge-in decision reads the **latest** level directly from shared
+    // state (never a stale value from a lossy queue). The media layer writes
+    // here via `CallbackSink::on_output_level`. User mute is independent.
+    let (output_level_tx, output_level_rx) = watch::channel(0.0f64);
     let user_muted = Arc::new(AtomicBool::new(false));
 
-    // Levels flow on a dedicated internal channel so the session loop can drive
-    // the barge-in gate and forward them to the pager. This is a **lossy**
-    // channel (try_send) — levels are high-frequency and ephemeral.
-    let (levels_tx, mut levels_rx) = mpsc::channel::<f64>(64);
+    // Fatal (terminal) event signal: a `watch<Option<LiveEvent>>` guarded by an
+    // atomic in `CallbackSink` so exactly one fatal event is ever published,
+    // even if media + sideband fail simultaneously. The session subscribes and
+    // emits the awaited `LiveEvent::Error` itself (then Closing → Closed).
+    let (fatal_tx, fatal_rx) = watch::channel(None::<LiveEvent>);
 
-    // Critical (fatal) events from the transport/media: the session monitors
-    // this channel in its main select! and tears down deterministically when a
-    // critical event arrives. This is **not** lossy — critical events use a
-    // bounded channel with try_send but the session always drains it promptly.
-    let (critical_tx, mut critical_rx) = mpsc::channel::<LiveEvent>(8);
-
-    let callbacks = Arc::new(CallbackSink {
-        event_tx: event_tx.clone(),
-        levels_tx,
-        critical_tx,
-    });
+    let callbacks = Arc::new(CallbackSink::new(
+        event_tx.clone(),
+        output_level_tx.clone(),
+        fatal_tx.clone(),
+    ));
 
     // Open mic capture concurrently with the transport connect (both take
     // hundreds of ms). Reuse the existing PCM16 backend.
@@ -157,18 +164,13 @@ pub async fn run_live_session(
             tokio::select! {
                 biased;
                 res = &mut connect => {
-                    // The single connect future resolved. Break with the result.
                     break res;
                 }
                 cmd = cmd_rx.recv() => match cmd {
                     Some(LiveCommand::Shutdown) | None => {
-                        // Shutdown during connection: set the flag and break.
-                        // The connect future is dropped at scope exit
-                        // (canceling it safely).
                         shutdown_during_connect = true;
                         break Err("Live session shutdown during connection".to_owned());
                     }
-                    // Buffer non-shutdown commands; they're applied after connect.
                     Some(other) => buffered_commands.push(other),
                 }
             }
@@ -179,22 +181,29 @@ pub async fn run_live_session(
     if shutdown_during_connect {
         // The connect future was dropped at scope exit. We must await capture
         // cleanup before emitting Closed — the capture task was spawned and may
-        // still be opening the mic device. Await it (with a timeout) and stop
-        // the handle if it succeeded, so the device is released.
-        let capture_result = tokio::time::timeout(Duration::from_secs(5), capture_task).await;
-        match capture_result {
-            Ok(Ok(Ok(handle))) => {
-                // Capture opened successfully — stop it to release the device.
+        // still be opening the mic device.
+        //
+        // Finding 3: do NOT use a detached timeout on the spawn_blocking task.
+        // `spawn_pcm_capture` is internally bounded (the subprocess handshake
+        // has its own READY_TIMEOUT ~5s, and in-process cpal open is fast), so
+        // awaiting the JoinHandle fully is safe and deterministic. A timeout
+        // that detaches would leave a task that can later acquire the device.
+        // If the task already succeeded, stop the handle to release the device.
+        let capture_outcome = capture_task.await;
+        match capture_outcome {
+            Ok(Ok(handle)) => {
                 handle.stop();
             }
-            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                // Capture failed or timed out — nothing to stop. The task is
-                // dropped, which cancels it if still running (timeout case).
+            Ok(Err(_)) | Err(_) => {
+                // Capture failed or the blocking task panicked — nothing to
+                // stop. The device was never acquired (or the error already
+                // closed it).
             }
         }
         transport.close().await;
+        let _ = output_level_tx.send(0.0);
         phase(LivePhase::Closed);
-        let _ = event_tx.send(LiveEvent::Closed).await;
+        deliver_terminal(&event_tx, LiveEvent::Closed).await;
         return;
     }
 
@@ -203,24 +212,30 @@ pub async fn run_live_session(
         Ok(Ok(handle)) => handle,
         Ok(Err(e)) => {
             transport.close().await;
-            let _ = event_tx
-                .send(LiveEvent::Error {
+            let _ = output_level_tx.send(0.0);
+            deliver_terminal(
+                &event_tx,
+                LiveEvent::Error {
                     message: e.to_string(),
-                })
-                .await;
+                },
+            )
+            .await;
             phase(LivePhase::Closed);
-            let _ = event_tx.send(LiveEvent::Closed).await;
+            deliver_terminal(&event_tx, LiveEvent::Closed).await;
             return;
         }
         Err(join_err) => {
             transport.close().await;
-            let _ = event_tx
-                .send(LiveEvent::Error {
+            let _ = output_level_tx.send(0.0);
+            deliver_terminal(
+                &event_tx,
+                LiveEvent::Error {
                     message: format!("voice capture task failed: {join_err}"),
-                })
-                .await;
+                },
+            )
+            .await;
             phase(LivePhase::Closed);
-            let _ = event_tx.send(LiveEvent::Closed).await;
+            deliver_terminal(&event_tx, LiveEvent::Closed).await;
             return;
         }
     };
@@ -229,9 +244,10 @@ pub async fn run_live_session(
         // Capture opened but connect failed: drop capture to release the mic.
         drop(capture);
         transport.close().await;
-        let _ = event_tx.send(LiveEvent::Error { message: e }).await;
+        let _ = output_level_tx.send(0.0);
+        deliver_terminal(&event_tx, LiveEvent::Error { message: e }).await;
         phase(LivePhase::Closed);
-        let _ = event_tx.send(LiveEvent::Closed).await;
+        deliver_terminal(&event_tx, LiveEvent::Closed).await;
         return;
     }
 
@@ -239,36 +255,29 @@ pub async fn run_live_session(
 
     // Apply buffered commands that arrived during connection.
     for cmd in buffered_commands {
-        apply_command(&cmd, &mut transport, &output_level, &user_muted, &event_tx).await;
+        apply_command(&cmd, &mut transport, &user_muted).await;
     }
 
     // The session loop drives both mic-PCM forward (barge-in gated / muted) and
-    // command handling. The mic PCM channel (`pcm_rx`) was filled by the
-    // capture task above; capture stays open for the session's lifetime.
+    // command handling.
     //
-    // The loop also monitors `critical_rx` for fatal transport/media errors.
-    // When a critical event arrives, the loop breaks and the shutdown path
-    // emits Error → Closing → Closed exactly once.
+    // Finding 1: the loop monitors `fatal_rx` (a `watch` channel) for the
+    // single fatal event. When it fires, the loop breaks and the shutdown path
+    // emits the awaited Error (read from the watch), then Closing → Closed.
+    // Finding 2: the barge-in reads `output_level_rx` (a `watch`) directly —
+    // no lossy queue. Output level is forced to 0.0 on teardown below.
     let mut capture = Some(capture);
+    let mut fatal_rx = fatal_rx;
+    let mut fatal_event: Option<LiveEvent> = None;
     loop {
         tokio::select! {
             biased;
-            // Critical (fatal) events from the transport/media — must not be
-            // shed. When one arrives, break the loop and tear down.
-            critical = critical_rx.recv() => {
-                if let Some(LiveEvent::Error { .. }) = critical {
-                    // A fatal error was already forwarded to event_tx by the
-                    // CallbackSink. Break the loop to tear down (Error →
-                    // Closing → Closed).
+            // Fatal (terminal) event from the transport/media — exactly one.
+            // `watch::changed` resolves when the first fatal is published.
+            _ = fatal_rx.changed() => {
+                if let Some(ev) = fatal_rx.borrow().clone() {
+                    fatal_event = Some(ev);
                     break;
-                }
-            }
-            // Output levels: update the barge-in gate state and forward to pager.
-            level = levels_rx.recv() => {
-                if let Some(level) = level {
-                    let clamped = clamp_level(level);
-                    store_output_level(&output_level, clamped);
-                    let _ = event_tx.try_send(LiveEvent::Levels(clamped));
                 }
             }
             // Forward mic PCM to the peer with the OMP barge-in echo gate.
@@ -285,17 +294,16 @@ pub async fn run_live_session(
                     //   outputActive = outputLevel > 0.015
                     //   echoThreshold = max(0.04, outputLevel * 0.65)
                     //   suppress if outputActive && inputLevel < echoThreshold
-                    let out_level = load_output_level(&output_level);
+                    //
+                    // The output level is read from the shared `watch` — the
+                    // latest value written by the media layer, never stale.
+                    let out_level = *output_level_rx.borrow();
                     let output_active = out_level > OUTPUT_ACTIVE_LEVEL;
                     let input_level = microphone_level(&samples);
                     let echo_threshold = MIN_BARGE_IN_LEVEL.max(out_level * OUTPUT_ECHO_RATIO);
                     if output_active && input_level < echo_threshold {
-                        // Suppress: the user's input is likely echo, not a
-                        // barge-in. Skip forwarding this chunk.
                         continue;
                     }
-                    // The user is loud enough to interrupt (or the model is
-                    // silent): forward the mic audio to the peer.
                     transport.push_audio(&samples);
                 }
                 None => {
@@ -306,15 +314,21 @@ pub async fn run_live_session(
             cmd = cmd_rx.recv() => match cmd {
                 Some(LiveCommand::Shutdown) | None => break,
                 Some(other) => {
-                    apply_command(&other, &mut transport, &output_level, &user_muted, &event_tx).await;
+                    apply_command(&other, &mut transport, &user_muted).await;
                 }
             },
         }
     }
 
-    // Idempotent shutdown: the loop above only exits on Shutdown/closed rx,
-    // so this runs exactly once.
+    // Idempotent shutdown: the loop above exits on Shutdown/closed rx, or on a
+    // fatal event. This runs exactly once.
     phase(LivePhase::Closing);
+    // Finding 1: if we broke due to a fatal event, the session (not the
+    // callback) emits exactly one awaited Error. If we broke due to Shutdown,
+    // no Error is emitted (clean shutdown).
+    if let Some(ev) = fatal_event.take() {
+        deliver_terminal(&event_tx, ev).await;
+    }
     // Stop the mic first to release the device, then close the transport.
     if let Some(handle) = capture.take() {
         handle.stop();
@@ -322,12 +336,24 @@ pub async fn run_live_session(
     // Best-effort session.close on the sideband.
     let _ = transport.send(&build_session_close()).await;
     transport.close().await;
+    // Finding 2: force output level to zero so the barge-in gate clears and no
+    // stale state remains after teardown.
+    let _ = output_level_tx.send(0.0);
     phase(LivePhase::Closed);
-    let _ = event_tx.send(LiveEvent::Closed).await;
+    deliver_terminal(&event_tx, LiveEvent::Closed).await;
     // Drop the capture handle if we somehow still hold it.
     if let Some(handle) = capture.take() {
         handle.stop();
     }
+}
+
+/// Deliver a terminal lifecycle event (`Error` or `Closed`) to the pager with a
+/// bounded wait so a stuck/slow consumer cannot deadlock the session or prevent
+/// device release (finding 7). If the receiver is gone, `send` returns Err
+/// immediately (no hang). If the receiver is alive but not draining, we wait at
+/// most `TERMINAL_EVENT_TIMEOUT` then proceed regardless.
+async fn deliver_terminal(event_tx: &mpsc::Sender<LiveEvent>, event: LiveEvent) {
+    let _ = tokio::time::timeout(TERMINAL_EVENT_TIMEOUT, event_tx.send(event)).await;
 }
 
 /// Apply a single [`LiveCommand`] to the transport. Used both for buffered
@@ -335,19 +361,12 @@ pub async fn run_live_session(
 async fn apply_command(
     cmd: &LiveCommand,
     transport: &mut CodexLiveTransport,
-    output_level: &Arc<AtomicU64>,
     user_muted: &Arc<AtomicBool>,
-    event_tx: &mpsc::Sender<LiveEvent>,
 ) {
     match cmd {
         LiveCommand::ToggleMute => {
             let next = !user_muted.load(Ordering::Acquire);
             user_muted.store(next, Ordering::Release);
-            // The barge-in gate is per-chunk (not a global mute), so user mute
-            // only affects whether mic PCM is forwarded at all. We don't need
-            // to call transport.set_muted for the echo gate — but we do call it
-            // so the peer's encoder knows to discard partial frames (OMP
-            // behavior: muting clears pending input).
             transport.set_muted(next);
         }
         LiveCommand::SetMuted(muted) => {
@@ -389,8 +408,6 @@ async fn apply_command(
         }
         LiveCommand::Shutdown => {
             // Handled by the caller's loop break; unreachable here.
-            let _ = event_tx;
-            let _ = output_level;
         }
     }
 }
@@ -411,7 +428,6 @@ async fn send_chunked(
             None => build_session_context_append(chunk, channel),
         };
         if transport.send(&message).await.is_err() {
-            // Sideband closed mid-send; stop chunking.
             break;
         }
     }
@@ -445,7 +461,7 @@ mod tests {
 
     #[test]
     fn pcm16_le_to_f32_ignores_trailing_odd_byte() {
-        let bytes = [0x00, 0x00, 0xff]; // one full sample + 1 odd byte
+        let bytes = [0x00, 0x00, 0xff];
         let f = pcm16_le_to_f32(&bytes);
         assert_eq!(f.len(), 1);
     }
@@ -454,8 +470,6 @@ mod tests {
     fn pcm16_le_to_f32_empty_input() {
         assert!(pcm16_le_to_f32(&[]).is_empty());
     }
-
-    // --- Barge-in (finding 7) tests ---
 
     #[test]
     fn clamp_level_returns_zero_for_non_finite_and_negative() {
@@ -475,31 +489,24 @@ mod tests {
 
     #[test]
     fn microphone_level_computes_rms_correctly() {
-        // Full-scale sine → RMS ~0.707 for a full-scale sine, but we use
-        // constant amplitude. Amplitude 1.0 → RMS 1.0.
         let samples = vec![1.0f32; 100];
         assert!((microphone_level(&samples) - 1.0).abs() < 1e-6);
 
-        // Amplitude 0.5 → RMS 0.5.
         let samples = vec![0.5f32; 100];
         assert!((microphone_level(&samples) - 0.5).abs() < 1e-6);
 
-        // Silence → 0.
         let samples = vec![0.0f32; 100];
         assert_eq!(microphone_level(&samples), 0.0);
 
-        // Empty → 0.
         assert_eq!(microphone_level(&[]), 0.0);
     }
 
     #[test]
     fn microphone_level_clamps_to_one() {
-        // Amplitude > 1.0 should clamp.
         let samples = vec![2.0f32; 100];
         assert_eq!(microphone_level(&samples), 1.0);
     }
 
-    /// Verify the exact OMP barge-in thresholds.
     #[test]
     fn barge_in_thresholds_match_omp() {
         assert_eq!(OUTPUT_ACTIVE_LEVEL, 0.015);
@@ -507,44 +514,33 @@ mod tests {
         assert_eq!(OUTPUT_ECHO_RATIO, 0.65);
     }
 
-    /// Verify the barge-in suppression rule: suppress when outputActive and
-    /// inputLevel < echoThreshold; pass through otherwise.
     #[test]
     fn barge_in_suppresses_quiet_input_during_output() {
-        // Output active at 0.5, input at 0.02 (quiet):
-        // echoThreshold = max(0.04, 0.5 * 0.65) = max(0.04, 0.325) = 0.325
-        // 0.02 < 0.325 → suppress
         let out_level = 0.5;
         let input_level = 0.02;
         let output_active = out_level > OUTPUT_ACTIVE_LEVEL;
         let echo_threshold = MIN_BARGE_IN_LEVEL.max(out_level * OUTPUT_ECHO_RATIO);
         assert!(output_active);
         assert!(input_level < echo_threshold);
-        assert!(output_active && input_level < echo_threshold); // suppress
+        assert!(output_active && input_level < echo_threshold);
     }
 
     #[test]
     fn barge_in_passes_loud_input_during_output() {
-        // Output active at 0.5, input at 0.4 (loud):
-        // echoThreshold = max(0.04, 0.325) = 0.325
-        // 0.4 >= 0.325 → pass through (barge-in!)
         let out_level = 0.5;
         let input_level = 0.4;
         let output_active = out_level > OUTPUT_ACTIVE_LEVEL;
         let echo_threshold = MIN_BARGE_IN_LEVEL.max(out_level * OUTPUT_ECHO_RATIO);
         assert!(output_active);
-        assert!(input_level >= echo_threshold); // not suppressed
+        assert!(input_level >= echo_threshold);
     }
 
     #[test]
     fn barge_in_passes_all_input_when_output_inactive() {
-        // Output at 0.01 (< 0.015), any input → not suppressed.
         let out_level = 0.01;
         let input_level = 0.001;
         let output_active = out_level > OUTPUT_ACTIVE_LEVEL;
         assert!(!output_active);
-        // When output is not active, the suppression condition is false
-        // regardless of input level.
         assert!(
             !(output_active && input_level < MIN_BARGE_IN_LEVEL.max(out_level * OUTPUT_ECHO_RATIO))
         );
@@ -552,24 +548,63 @@ mod tests {
 
     #[test]
     fn barge_in_uses_min_threshold_when_output_low() {
-        // Output active at 0.02 (> 0.015), input at 0.03:
-        // echoThreshold = max(0.04, 0.02 * 0.65) = max(0.04, 0.013) = 0.04
-        // 0.03 < 0.04 → suppress (MIN_BARGE_IN_LEVEL dominates)
         let out_level = 0.02;
         let input_level = 0.03;
         let output_active = out_level > OUTPUT_ACTIVE_LEVEL;
         let echo_threshold = MIN_BARGE_IN_LEVEL.max(out_level * OUTPUT_ECHO_RATIO);
-        assert_eq!(echo_threshold, 0.04); // MIN dominates
+        assert_eq!(echo_threshold, 0.04);
         assert!(output_active);
-        assert!(input_level < echo_threshold); // suppress
+        assert!(input_level < echo_threshold);
     }
 
+    /// Finding 2: the barge-in gate reads the latest output level from a
+    /// `watch` channel directly. Verify that a watch always returns the most
+    /// recently written value (no stale queue).
     #[test]
-    fn output_level_atomic_store_load_roundtrips() {
-        let atomic = Arc::new(AtomicU64::new(0.0f64.to_bits()));
-        store_output_level(&atomic, 0.5);
-        assert!((load_output_level(&atomic) - 0.5).abs() < 1e-10);
-        store_output_level(&atomic, 0.0);
-        assert_eq!(load_output_level(&atomic), 0.0);
+    fn output_level_watch_returns_latest_value() {
+        let (tx, rx) = watch::channel(0.0f64);
+        assert_eq!(*rx.borrow(), 0.0);
+        tx.send(0.5).unwrap();
+        assert!((*rx.borrow() - 0.5).abs() < 1e-10);
+        tx.send(0.8).unwrap();
+        tx.send(0.1).unwrap();
+        // The latest write wins — no queue accumulation.
+        assert!((*rx.borrow() - 0.1).abs() < 1e-10);
+        // Forcing zero clears the gate.
+        tx.send(0.0).unwrap();
+        assert_eq!(*rx.borrow(), 0.0);
+    }
+
+    /// Finding 7: terminal event delivery must not hang when the receiver is
+    /// gone. `deliver_terminal` uses a bounded timeout; with a dropped receiver
+    /// the send returns Err immediately.
+    #[tokio::test]
+    async fn deliver_terminal_returns_promptly_when_receiver_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let start = std::time::Instant::now();
+        deliver_terminal(&tx, LiveEvent::Closed).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "deliver_terminal hung on a closed receiver"
+        );
+    }
+
+    /// Finding 7: terminal event delivery must not block indefinitely on a
+    /// slow consumer. A bounded channel that's never drained should time out
+    /// within `TERMINAL_EVENT_TIMEOUT`.
+    #[tokio::test]
+    async fn deliver_terminal_times_out_on_slow_consumer() {
+        let (tx, _rx) = mpsc::channel(1);
+        // Fill the single-slot channel so the next send would block.
+        tx.send(LiveEvent::Phase(LivePhase::Closing)).await.unwrap();
+        let start = std::time::Instant::now();
+        deliver_terminal(&tx, LiveEvent::Closed).await;
+        let elapsed = start.elapsed();
+        // It should time out around TERMINAL_EVENT_TIMEOUT (2s), not hang.
+        assert!(
+            elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(4),
+            "deliver_terminal returned in {elapsed:?} — expected ~2s timeout"
+        );
     }
 }
