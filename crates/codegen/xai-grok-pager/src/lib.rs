@@ -70,6 +70,8 @@ pub use xai_grok_pager_render::{
     appearance, clipboard, gboom, glyphs, host, link_opener, modal_window_state, prompt_images,
     render, syntax, terminal, theme, util,
 };
+#[cfg(feature = "codex-live")]
+pub mod live;
 pub mod trace_cmd;
 pub mod tracing;
 pub mod unified_log;

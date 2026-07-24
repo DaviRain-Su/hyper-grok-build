@@ -1174,6 +1174,19 @@ pub struct AppView {
     /// combinations are unrepresentable; production mutates it only through the
     /// `AppView::voice_*` transition methods.
     pub voice_state: VoiceState,
+    /// Codex Live (`/live`) runtime — session lifecycle, visualizer state,
+    /// delegation broker, context channel. Only present when the `codex-live`
+    /// feature is enabled.
+    #[cfg(feature = "codex-live")]
+    pub live_runtime: crate::live::state::LiveRuntime,
+    /// Codex Live event receiver (bounded), polled in the event loop's
+    /// lowest-priority arm. `None` when no Live session is active.
+    #[cfg(feature = "codex-live")]
+    pub live_event_rx: Option<tokio::sync::mpsc::Receiver<crate::live::LiveEvent>>,
+    /// The Codex Live gate (resolved at startup). When false, `/live` is a
+    /// silent no-op.
+    #[cfg(feature = "codex-live")]
+    pub live_mode_enabled: bool,
 }
 /// Reshow window elapsed? None/0 = never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1562,6 +1575,12 @@ impl AppView {
             voice_auth: None,
             voice_cmd_tx: None,
             voice_state: VoiceState::Idle,
+            #[cfg(feature = "codex-live")]
+            live_runtime: crate::live::state::LiveRuntime::default(),
+            #[cfg(feature = "codex-live")]
+            live_event_rx: None,
+            #[cfg(feature = "codex-live")]
+            live_mode_enabled: false,
         }
     }
     /// Seed `deferred_model_switch` from CLI `-m`. The CLI effort token is
@@ -1836,6 +1855,72 @@ impl AppView {
             return;
         }
         self.voice_reset();
+    }
+
+    // ── Codex Live (`/live`) helper methods ────────────────────────────────
+    #[cfg(feature = "codex-live")]
+    /// Whether the Live session is bound to the active agent + session.
+    pub fn is_live_bound_to_active(
+        &self,
+        agent_id: crate::app::agent::AgentId,
+        session_id: &str,
+    ) -> bool {
+        match self.active_view {
+            ActiveView::Agent(active) if active == agent_id => {
+                self.agents.get(&agent_id).is_some_and(|a| {
+                    a.session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|s| s.0.as_ref() == session_id)
+                })
+            }
+            _ => false,
+        }
+    }
+    #[cfg(feature = "codex-live")]
+    /// Whether the Live session is active (visualizer shown).
+    pub fn live_active(&self) -> bool {
+        self.live_runtime.state.is_active()
+    }
+    #[cfg(feature = "codex-live")]
+    /// Whether a Live start is pending.
+    pub fn live_pending(&self) -> bool {
+        self.live_runtime.state.is_pending()
+    }
+    #[cfg(feature = "codex-live")]
+    /// Whether any Live session is in flight (active, pending, or stopping).
+    pub fn live_in_flight(&self) -> bool {
+        self.live_runtime.state.is_in_flight()
+    }
+    #[cfg(feature = "codex-live")]
+    /// Hard teardown of the Live session: send Shutdown, drop the channel,
+    /// reset state, forget delegations. Idempotent.
+    pub fn live_reset(&mut self) {
+        self.live_runtime.teardown();
+        self.live_event_rx = None;
+    }
+    #[cfg(feature = "codex-live")]
+    /// Send a best-effort command into the Live pipeline (no-op if not up).
+    pub fn live_send_cmd(&self, cmd: crate::live::LiveCommand) {
+        self.live_runtime.send_cmd(cmd);
+    }
+    #[cfg(feature = "codex-live")]
+    /// Toggle the Live mute state.
+    pub fn live_toggle_mute(&mut self) {
+        self.live_runtime.muted = !self.live_runtime.muted;
+        self.live_send_cmd(crate::live::LiveCommand::ToggleMute);
+    }
+    #[cfg(feature = "codex-live")]
+    /// Set the Live mute state explicitly.
+    pub fn live_set_muted(&mut self, muted: bool) {
+        self.live_runtime.muted = muted;
+        self.live_send_cmd(crate::live::LiveCommand::SetMuted(muted));
+    }
+    #[cfg(feature = "codex-live")]
+    /// Sync the Live gate into slash surfaces.
+    pub fn apply_live_mode_enabled(&mut self, enabled: bool) {
+        self.live_mode_enabled = enabled;
+        crate::live::state::set_live_enabled_for_test(enabled);
     }
     /// Esc handling shared by the agent and dashboard surfaces: while voice is
     /// active, Esc aborts it (and consumes the key) rather than falling into the
@@ -5825,6 +5910,12 @@ pub(crate) mod tests {
             voice_auth: None,
             voice_cmd_tx: None,
             voice_state: VoiceState::Idle,
+            #[cfg(feature = "codex-live")]
+            live_runtime: crate::live::state::LiveRuntime::default(),
+            #[cfg(feature = "codex-live")]
+            live_event_rx: None,
+            #[cfg(feature = "codex-live")]
+            live_mode_enabled: false,
         }
     }
     pub(crate) fn test_app_with_agent() -> AppView {

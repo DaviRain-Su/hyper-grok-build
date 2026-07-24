@@ -29,6 +29,11 @@ use super::import_claude::{
 };
 use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
+#[cfg(feature = "codex-live")]
+use super::live::{
+    dispatch_live_delegation_submit, dispatch_live_set_muted, dispatch_live_stop,
+    dispatch_live_toggle,
+};
 use super::modes::{
     dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
     set_permission_mode, set_plan_mode, set_yolo_mode,
@@ -154,6 +159,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             if let Some(tx) = &app.voice_cmd_tx {
                 let _ = tx.try_send(xai_grok_voice::VoiceCommand::Shutdown);
             }
+            #[cfg(feature = "codex-live")]
+            super::live::stop_live_on_teardown(app);
             let mut effects = unregister_all_active_sessions(app);
             effects.push(Effect::Quit);
             effects
@@ -195,7 +202,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::NewSession => dispatch_new_session(app),
         Action::ChooseNewSessionMode => open_new_session_question(app),
-        Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
+        Action::ExitSession | Action::ExitSessionConfirmed => {
+            #[cfg(feature = "codex-live")]
+            super::live::stop_live_on_teardown(app);
+            dispatch_exit_session(app)
+        }
         Action::NewWorktreeSession {
             load_session_id,
             label,
@@ -368,6 +379,20 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::EnableVoiceMode => dispatch_enable_voice_mode(app, true),
         Action::VoiceToggle => dispatch_voice_toggle(app),
         Action::VoiceStop => dispatch_voice_stop(app),
+        #[cfg(feature = "codex-live")]
+        Action::LiveToggle => dispatch_live_toggle(app),
+        #[cfg(feature = "codex-live")]
+        Action::LiveStop => dispatch_live_stop(app),
+        #[cfg(feature = "codex-live")]
+        Action::LiveSetMuted(muted) => dispatch_live_set_muted(app, muted),
+        #[cfg(feature = "codex-live")]
+        Action::LiveDelegationSubmit {
+            agent_id,
+            text,
+            delegation_id,
+            generation,
+            draft,
+        } => dispatch_live_delegation_submit(app, agent_id, text, delegation_id, generation, draft),
         Action::SendBashCommand(cmd) => dispatch_send_bash_command(app, cmd),
         Action::ShowUndoTip => dispatch_show_undo_tip(app),
         Action::ShowPlanNudge => dispatch_show_plan_nudge(app),

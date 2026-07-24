@@ -183,6 +183,32 @@ pub enum Action {
     /// any pending cold-start so a release during pipeline spawn can't leave a
     /// hot mic.
     VoiceStop,
+    /// Toggle the Codex Live voice session (`/live`). Starts if idle, stops if
+    /// active. Mutually exclusive with `/voice` dictation — starting one stops
+    /// the other.
+    #[cfg(feature = "codex-live")]
+    LiveToggle,
+    /// Stop the Codex Live session unconditionally (Esc, Ctrl+C, navigation,
+    /// quit, ACP disconnect). Idempotent.
+    #[cfg(feature = "codex-live")]
+    LiveStop,
+    /// Set the Live mute state explicitly (`true` = muted, `false` = unmuted).
+    /// Space toggles; this is the explicit variant.
+    #[cfg(feature = "codex-live")]
+    LiveSetMuted(bool),
+    /// A `LiveEvent::Delegation` submitted text to the bound AgentSession.
+    /// Carries the draft snapshot so it can be restored after the prompt
+    /// pipeline clears the textarea. The event loop dispatches this to submit
+    /// the text through the normal `SendPrompt` path, then registers the
+    /// `(generation, delegation_id) -> (AgentId, SessionId, prompt_id)`.
+    #[cfg(feature = "codex-live")]
+    LiveDelegationSubmit {
+        agent_id: crate::app::agent::AgentId,
+        text: String,
+        delegation_id: String,
+        generation: u64,
+        draft: crate::live::state::DraftSnapshot,
+    },
     /// Send a direct bash command (bypasses agent loop).
     SendBashCommand(String),
     /// The user wiped a substantial prompt draft: show the seen-gated

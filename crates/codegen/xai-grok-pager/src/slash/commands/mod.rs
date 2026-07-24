@@ -35,6 +35,8 @@ pub mod imagine;
 pub mod imagine_video;
 pub mod import_claude;
 pub mod jump;
+#[cfg(feature = "codex-live")]
+pub mod live;
 pub mod login;
 pub mod logout;
 pub mod loop_cmd;
@@ -143,6 +145,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(readiness::ReadinessCommand),
         Arc::new(changes::ChangesCommand),
         Arc::new(voice::VoiceCommand),
+        #[cfg(feature = "codex-live")]
+        Arc::new(live::LiveCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
         Arc::new(imagine_video::ImagineVideoCommand),
@@ -307,6 +311,8 @@ mod tests {
             "imagine-video",
             "import-claude",
             "jump",
+            #[cfg(feature = "codex-live")]
+            "live",
             "login",
             "logout",
             "log",

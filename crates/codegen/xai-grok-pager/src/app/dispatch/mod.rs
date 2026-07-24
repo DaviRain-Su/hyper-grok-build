@@ -22,6 +22,8 @@ pub(crate) mod external_editor;
 mod import_claude;
 mod interject;
 mod jump;
+#[cfg(feature = "codex-live")]
+mod live;
 mod modes;
 mod notes;
 mod permissions;
@@ -38,6 +40,8 @@ mod turn;
 mod voice;
 
 pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
+#[cfg(feature = "codex-live")]
+pub(crate) use live::enforce_live_session_bound;
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;

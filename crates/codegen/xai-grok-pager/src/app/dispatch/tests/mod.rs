@@ -274,6 +274,12 @@ fn test_app() -> AppView {
         voice_auth: None,
         voice_cmd_tx: None,
         voice_state: VoiceState::Idle,
+        #[cfg(feature = "codex-live")]
+        live_runtime: crate::live::state::LiveRuntime::default(),
+        #[cfg(feature = "codex-live")]
+        live_event_rx: None,
+        #[cfg(feature = "codex-live")]
+        live_mode_enabled: false,
     }
 }
 /// Build a default `AgentSession` for

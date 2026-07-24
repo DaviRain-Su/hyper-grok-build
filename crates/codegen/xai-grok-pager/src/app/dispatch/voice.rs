@@ -95,6 +95,12 @@ pub(super) fn dispatch_enable_voice_mode(app: &mut AppView, from_hold: bool) -> 
     if !app.voice_mode_enabled || !xai_grok_voice::AUDIO_SUPPORTED {
         return vec![];
     }
+    // Mutual exclusion: stop Codex Live (`/live`) if it's active — starting
+    // `/voice` deterministically stops `/live`.
+    #[cfg(feature = "codex-live")]
+    if app.live_in_flight() {
+        super::live::dispatch_live_stop(app);
+    }
     // Tier gate: free / X Basic personal users can't use voice (the server
     // zero-limits these tiers). The Ctrl+Space / F8 keybinding bypasses the
     // slash registry, so this is the enforcement point for it — show the

@@ -90,6 +90,8 @@ default = [
     "sandbox-enforce",
     # This fork ships as Hyper; enable community branding + updater guards by default.
     "community-build",
+    # Codex Live (`/live`): enabled in the normal Hyper default set.
+    "codex-live",
     ]
 default-bazel = [
     "jemalloc",
@@ -103,3 +105,6 @@ release-dist = ["xai-grok-pager/release-dist"]
 # Users upgrade by re-running install.sh. Also brands `--version` / completions
 # as `hyper` and is forwarded into the pager library.
 community-build = ["xai-grok-pager/community-build"]
+# Codex Live (`/live`): forwarded into the pager library. Omitted from
+# `default-bazel` (no audio device / live internals in the test sandbox).
+codex-live = ["xai-grok-pager/codex-live"]

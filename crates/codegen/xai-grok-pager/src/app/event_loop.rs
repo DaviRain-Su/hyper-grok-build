@@ -1018,6 +1018,13 @@ pub(crate) async fn run(
     }
     app.apply_voice_mode_enabled(voice_mode_enabled);
 
+    // Codex Live gate (independent of the xAI /voice tier).
+    #[cfg(feature = "codex-live")]
+    {
+        let live_mode_enabled = crate::live::gate::resolve_codex_live_live();
+        app.apply_live_mode_enabled(live_mode_enabled);
+    }
+
     // Fallback: prefetch may have gate info the shell's AuthMeta missed.
     // Errs on the side of blocking if stale.
     if app.gate.is_none()
@@ -1505,6 +1512,15 @@ pub(crate) async fn run(
     let mut voice_rx = None::<tokio::sync::mpsc::Receiver<xai_grok_voice::VoiceEvent>>;
     let voice_auth_factory = connection.auth_manager.clone();
 
+    // Codex Live event receiver (bounded, lowest-priority arm). `None` when no
+    // Live session is active. Spawned lazily on `/live` ColdStart. Always
+    // declared so the select! arm is always present; the type resolves to a
+    // placeholder when `codex-live` is off.
+    #[cfg(feature = "codex-live")]
+    let mut live_rx: Option<tokio::sync::mpsc::Receiver<crate::live::LiveEvent>> = None;
+    #[cfg(not(feature = "codex-live"))]
+    let mut live_rx: Option<std::convert::Infallible> = None;
+
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
     let mut animation_tick_at: Option<Instant> = None;
@@ -1880,6 +1896,46 @@ pub(crate) async fn run(
 
         // Stop voice if the user has left the recording session (see method).
         app.enforce_voice_session_bound();
+
+        // Codex Live: enforce the session binding (stop on navigation away).
+        #[cfg(feature = "codex-live")]
+        dispatch::enforce_live_session_bound(&mut app);
+
+        // Codex Live: lazy pipeline spawn on ColdStart (like voice).
+        #[cfg(feature = "codex-live")]
+        {
+            if let crate::live::state::LiveState::ColdStart {
+                agent_id,
+                session_id,
+                generation,
+                draft,
+            } = app.live_runtime.state.clone()
+            {
+                // Spawn the Live pipeline.
+                let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+                let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
+                let live_config = crate::live::config::build_live_config_default(&session_id);
+                let live_auth = crate::live::auth::build_live_auth();
+                tokio::spawn(crate::live::run_live_session(
+                    live_config,
+                    live_auth,
+                    cmd_rx,
+                    event_tx,
+                ));
+                app.live_runtime.cmd_channel =
+                    Some(crate::live::LiveContextChannel::from_sender(cmd_tx));
+                live_rx = Some(event_rx);
+                app.live_runtime.state = crate::live::state::LiveState::Active {
+                    agent_id,
+                    session_id,
+                    generation,
+                    draft,
+                };
+                crate::live::state::set_live_active_for_test(true);
+                tracing::info!("codex live pipeline started (/live)");
+                presenter.request_presentation(&mut app, terminal, false);
+            }
+        }
 
         // Keep the /gboom keyboard layer in sync with whether the game is
         // open, so WASD emit releases while it runs and the layer is popped
@@ -2755,6 +2811,65 @@ pub(crate) async fn run(
                         }
                         presenter.request(false);
                     }
+                }
+            }
+
+            // Codex Live — THE LAST (lowest-priority) arm, after voice. Live
+            // events (phase, levels, transcript, delegation) are serviced only
+            // when nothing else is pending. A bounded 128-slot channel prevents
+            // backpressure from starving higher-priority arms. Delegations
+            // submit through the normal Action dispatch (preserving the draft).
+            // When `codex-live` is off, `live_rx` is `Infallible` and this arm
+            // never fires.
+            ev = async {
+                #[cfg(feature = "codex-live")]
+                {
+                    match live_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }
+                #[cfg(not(feature = "codex-live"))]
+                {
+                    std::future::pending::<Option<std::convert::Infallible>>().await
+                }
+            } => {
+                #[cfg(feature = "codex-live")]
+                {
+                    match ev {
+                        Some(ev) => {
+                            let (needs_draw, actions) =
+                                crate::live::handle::handle_live_event(&mut app, ev);
+                            // Dispatch any actions (e.g. LiveDelegationSubmit).
+                            for action in actions {
+                                let effs = dispatch::dispatch(action, &mut app);
+                                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                                    break;
+                                }
+                            }
+                            if needs_draw {
+                                schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                                let now = Instant::now();
+                                if presenter.request_throttled(now, min_draw_interval) {
+                                    app.update_notifications();
+                                }
+                            }
+                        }
+                        // Closed channel: revert to pending() (avoid hot-loop).
+                        None => {
+                            live_rx = None;
+                            let was_active = app.live_active();
+                            app.live_reset();
+                            if was_active {
+                                app.show_toast("Live stopped unexpectedly. Try again.");
+                            }
+                            presenter.request(false);
+                        }
+                    }
+                }
+                #[cfg(not(feature = "codex-live"))]
+                {
+                    let _ = ev;
                 }
             }
         }
