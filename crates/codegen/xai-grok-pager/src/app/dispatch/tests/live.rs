@@ -15,9 +15,9 @@
 #![cfg(feature = "codex-live")]
 
 use super::*;
-use crate::live::LiveCommand;
 use crate::live::broker::LiveDelegationBroker;
 use crate::live::state::{DraftSnapshot, LiveState};
+use crate::live::{LiveCommand, LiveEvent, LiveRole, TranscriptKind};
 
 /// Build a `PastedImage` from a minimal in-memory PNG (no disk I/O) large
 /// enough to pass `insert_image`'s 8×8 minimum-side check. The delegation path
@@ -169,6 +169,224 @@ fn delegation_with_draft_images_and_running_turn_sends_and_preserves_images() {
 }
 
 #[test]
+fn delegation_preserves_preexisting_user_queue_and_rejects_without_dispatch() {
+    let (mut app, id, mut cmd_rx) = app_with_active_live();
+    let generation = app.live_runtime.state.generation().unwrap();
+
+    let existing_id = app
+        .agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .enqueue_prompt("user queued work".to_string());
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(
+        Action::LiveDelegationSubmit {
+            agent_id: id,
+            text: "live delegated work".into(),
+            delegation_id: "del-queued".into(),
+            generation,
+            draft: DraftSnapshot::default(),
+        },
+        &mut app,
+    );
+
+    assert!(
+        effects.is_empty(),
+        "delegation must not drain existing user work"
+    );
+    let pending = &app.agents[&id].session.pending_prompts;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, existing_id);
+    assert_eq!(pending[0].text, "user queued work");
+    assert!(!app.live_runtime.has_delegation(generation, "del-queued"));
+
+    let cmd = cmd_rx
+        .try_recv()
+        .expect("rejection must complete the delegation");
+    assert!(matches!(
+        cmd,
+        LiveCommand::CompleteDelegation { delegation_id, text }
+            if delegation_id == "del-queued"
+                && text.contains("already has queued user work")
+    ));
+}
+
+#[test]
+fn delegation_rolls_back_only_its_queue_row_when_dispatch_is_blocked() {
+    let (mut app, id, mut cmd_rx) = app_with_active_live();
+    let generation = app.live_runtime.state.generation().unwrap();
+
+    // With an idle agent but a model switch in flight, generic prompt dispatch
+    // enqueues the literal row and `maybe_drain_queue` returns no effect. The
+    // Live wrapper must remove the exact newly minted row.
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .model_switch_pending = true;
+    let queue_id_before = app.agents[&id].session.next_queue_id;
+
+    let effects = dispatch(
+        Action::LiveDelegationSubmit {
+            agent_id: id,
+            text: "must not run later".into(),
+            delegation_id: "del-blocked".into(),
+            generation,
+            draft: DraftSnapshot::default(),
+        },
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert!(
+        app.agents[&id].session.pending_prompts.is_empty(),
+        "the delegation's local row must be removed"
+    );
+    assert_eq!(
+        app.agents[&id].session.next_queue_id,
+        queue_id_before + 1,
+        "the monotonic queue id may advance but must never be reused"
+    );
+    assert!(!app.live_runtime.has_delegation(generation, "del-blocked"));
+    assert!(matches!(
+        cmd_rx.try_recv().expect("blocked submit must complete"),
+        LiveCommand::CompleteDelegation { delegation_id, .. }
+            if delegation_id == "del-blocked"
+    ));
+}
+
+#[test]
+fn duplicate_delegation_created_id_produces_only_one_submit_action() {
+    let (mut app, _id, _cmd_rx) = app_with_active_live();
+    let event = LiveEvent::Delegation {
+        id: "del-duplicate".into(),
+        content: vec!["do this once".into()],
+    };
+
+    let (first_draw, first_actions) =
+        crate::live::handle::handle_live_event(&mut app, event.clone());
+    let (second_draw, second_actions) = crate::live::handle::handle_live_event(&mut app, event);
+
+    assert!(first_draw);
+    assert_eq!(first_actions.len(), 1);
+    assert!(!second_draw);
+    assert!(
+        second_actions.is_empty(),
+        "duplicate id must not submit twice"
+    );
+}
+
+#[test]
+fn assistant_final_flushes_merged_text_once_and_keeps_finalized_state() {
+    use crate::scrollback::block::RenderBlock;
+
+    let (mut app, id, _cmd_rx) = app_with_active_live();
+    let before = app.agents[&id].scrollback.len();
+
+    crate::live::handle::handle_live_event(
+        &mut app,
+        LiveEvent::Transcript {
+            kind: TranscriptKind::Output,
+            text: "Hello world, done.".into(),
+        },
+    );
+    assert_eq!(
+        app.agents[&id].scrollback.len(),
+        before + 1,
+        "first output delta creates one transient Live block"
+    );
+    let (_, streaming) = app.agents[&id]
+        .scrollback
+        .iter_entries()
+        .last()
+        .expect("Live streaming block");
+    assert!(streaming.is_running);
+    let RenderBlock::AgentMessage(streaming_message) = &streaming.block else {
+        panic!("expected streaming Live assistant block");
+    };
+    assert!(streaming_message.text().contains("Hello world, done."));
+    assert!(app.live_runtime.assistant_transcript_entry.is_some());
+
+    crate::live::handle::handle_live_event(
+        &mut app,
+        LiveEvent::Turn {
+            role: LiveRole::Assistant,
+            // The streaming current is longer than this final snapshot and
+            // must be the text persisted to scrollback.
+            transcript: "Hello world".into(),
+        },
+    );
+
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1);
+    let (_, last) = app.agents[&id]
+        .scrollback
+        .iter_entries()
+        .last()
+        .expect("Live final block");
+    let RenderBlock::AgentMessage(message) = &last.block else {
+        panic!("expected Live assistant agent-message block");
+    };
+    assert!(message.text().contains("Hello world, done."));
+    assert!(!last.is_running, "turn.done finalizes the transient block");
+    assert_eq!(
+        app.live_runtime.visualizer.assistant_transcript,
+        "Hello world, done."
+    );
+    assert!(app.live_runtime.visualizer.assistant_flushed);
+    assert!(app.live_runtime.assistant_transcript_entry.is_none());
+
+    // A repeated final frame from the same turn is ignored. The visualizer
+    // retains finalized state instead of resetting it after the first flush.
+    crate::live::handle::handle_live_event(
+        &mut app,
+        LiveEvent::Turn {
+            role: LiveRole::Assistant,
+            transcript: "Hello world".into(),
+        },
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1);
+    assert!(app.live_runtime.visualizer.assistant_flushed);
+}
+
+#[test]
+fn live_reset_finalizes_partial_assistant_transcript() {
+    let (mut app, id, _cmd_rx) = app_with_active_live();
+    crate::live::handle::handle_live_event(
+        &mut app,
+        LiveEvent::Transcript {
+            kind: TranscriptKind::Output,
+            text: "partial before disconnect".into(),
+        },
+    );
+    let entry_id = app
+        .live_runtime
+        .assistant_transcript_entry
+        .expect("streaming entry")
+        .entry_id;
+    assert!(
+        app.agents[&id]
+            .scrollback
+            .get_by_id(entry_id)
+            .unwrap()
+            .is_running
+    );
+
+    app.live_reset();
+
+    assert!(
+        !app.agents[&id]
+            .scrollback
+            .get_by_id(entry_id)
+            .unwrap()
+            .is_running
+    );
+    assert!(app.live_runtime.assistant_transcript_entry.is_none());
+    assert!(matches!(app.live_runtime.state, LiveState::Idle));
+}
+
+#[test]
 fn delegation_not_accepted_leaves_no_queued_delegation() {
     // When the prompt is not accepted (no matching Effect::SendPrompt), the
     // delegation must be marked terminal, an explicit failure
@@ -227,6 +445,42 @@ fn delegation_not_accepted_leaves_no_queued_delegation() {
     );
 }
 
+#[test]
+fn live_stop_completes_each_active_delegation_before_shutdown() {
+    let (mut app, id, mut cmd_rx) = app_with_active_live();
+    let generation = app.live_runtime.state.generation().unwrap();
+    let session_id = app.live_runtime.state.session_id().unwrap().to_string();
+    assert!(
+        app.live_runtime
+            .broker
+            .register_delegation("del-stop".into())
+    );
+    app.live_runtime.register_delegation(
+        generation,
+        "del-stop".into(),
+        id,
+        session_id,
+        "pid-stop".into(),
+    );
+
+    let effects = dispatch(Action::LiveStop, &mut app);
+    assert!(effects.is_empty());
+    assert!(matches!(app.live_runtime.state, LiveState::Idle));
+
+    let commands: Vec<_> = std::iter::from_fn(|| cmd_rx.try_recv().ok()).collect();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        LiveCommand::CompleteDelegation { delegation_id, text }
+            if delegation_id == "del-stop"
+                && text.contains("cancelled because Live stopped")
+    )));
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, LiveCommand::Shutdown))
+    );
+}
+
 // ── Centralized failure rail (on_prompt_failed) ─────────────────────────────
 
 #[test]
@@ -263,7 +517,7 @@ fn on_prompt_failed_enqueues_one_complete_delegation_and_marks_terminal() {
         {
             assert_eq!(delegation_id, "del-fail");
             assert!(
-                text.starts_with("Agent Final Message:"),
+                text.starts_with("\"Agent Final Message\":"),
                 "failure final must be wrapped, got: {text}"
             );
             assert!(

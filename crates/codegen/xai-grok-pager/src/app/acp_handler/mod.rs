@@ -264,7 +264,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     #[cfg(feature = "codex-live")]
                     let live_bridge_text: Option<String> = {
                         let pid_str = meta.prompt_id.as_deref().unwrap_or("");
-                        if !meta.is_replay && !pid_str.is_empty() {
+                        if !dedup_drop && !meta.is_replay && !pid_str.is_empty() {
                             match &notif.request.update {
                                 acp::SessionUpdate::AgentMessageChunk(chunk) => {
                                     if let acp::ContentBlock::Text(ref tc) = chunk.content {

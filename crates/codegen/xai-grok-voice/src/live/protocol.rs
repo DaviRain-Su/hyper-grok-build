@@ -691,7 +691,7 @@ mod tests {
         let chunks = chunk_live_context(&text);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), 500);
-        assert_eq!(chunks[0].bytes().count(), 500);
+        assert_eq!(chunks[0].len(), 500);
         assert_eq!(chunks[1].len(), 100);
     }
 
@@ -704,7 +704,7 @@ mod tests {
         let chunks = chunk_live_context(&text);
         assert_eq!(chunks.len(), 2);
         for chunk in &chunks {
-            assert!(chunk.bytes().count() <= CONTEXT_CHUNK_BYTES);
+            assert!(chunk.len() <= CONTEXT_CHUNK_BYTES);
             // Re-encoding must round-trip: no broken code points.
             assert_eq!(chunk.chars().count(), chunk.chars().count());
         }
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chars().count(), 125);
         assert_eq!(chunks[1].chars().count(), 1);
-        assert!(chunks[0].bytes().count() <= CONTEXT_CHUNK_BYTES);
+        assert!(chunks[0].len() <= CONTEXT_CHUNK_BYTES);
     }
 
     // --- call-id ---

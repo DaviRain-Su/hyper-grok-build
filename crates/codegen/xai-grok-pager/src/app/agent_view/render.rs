@@ -2343,6 +2343,14 @@ impl AgentView {
         };
         let mut prompt_cursor_pos: Option<(u16, u16)> = None;
         let mut prompt_post_flush: Option<crate::terminal::overlay::PostFlush> = None;
+        // Hit regions are frame-local. Clearing before modal precedence is
+        // important: a permission/question overlay must never leave the prior
+        // Live footer clickable underneath it.
+        #[cfg(feature = "codex-live")]
+        {
+            self.hit_live_mute_button.clear();
+            self.hit_live_stop_button.clear();
+        }
         if permission_view_h > 0 {
             let perm_area = layout.prompt;
             if let Some(perm) = self.permission_queue.front() {
@@ -2769,7 +2777,9 @@ impl AgentView {
             // (permission, question, rewind, jump, cancel-turn) above.
             #[cfg(feature = "codex-live")]
             if let Some(live_state) = live_visualizer {
-                crate::live::visualizer::render(buf, layout.prompt, live_state);
+                let hits = crate::live::visualizer::render(buf, layout.prompt, live_state);
+                self.hit_live_mute_button.set(hits.mute);
+                self.hit_live_stop_button.set(hits.stop);
             } else {
                 let collapsed = !prompt_focused && appearance.prompt.collapse_unfocused;
                 let saved_scroll = if collapsed {

@@ -605,7 +605,7 @@ mod tests {
             "error_code key present"
         );
         // error code 4 (supported, no token) must follow as unsigned int 4.
-        assert!(decoded.iter().any(|&b| b == 0x04), "error code 4 present");
+        assert!(decoded.contains(&0x04), "error code 4 present");
     }
 
     #[tokio::test]

@@ -134,7 +134,7 @@ fn broker_terminal_exactly_once() {
     assert!(
         d1.terminal[0]
             .final_message
-            .starts_with("Agent Final Message:")
+            .starts_with("\"Agent Final Message\":")
     );
     assert_eq!(d1.mark_terminal, vec!["del-1".to_string()]);
 
@@ -225,7 +225,7 @@ fn broker_decision_to_commands_uses_commentary_channel() {
         }],
         terminal: vec![TerminalFinal {
             delegation_id: "del-1".to_string(),
-            final_message: "Agent Final Message: done".to_string(),
+            final_message: "\"Agent Final Message\":\n\ndone".to_string(),
         }],
         mark_terminal: vec!["del-1".to_string()],
     };
@@ -249,7 +249,7 @@ fn broker_decision_to_commands_uses_commentary_channel() {
             text,
         } => {
             assert_eq!(delegation_id, "del-1");
-            assert!(text.starts_with("Agent Final Message:"));
+            assert!(text.starts_with("\"Agent Final Message\":"));
         }
         _ => panic!("expected CompleteDelegation"),
     }
@@ -423,7 +423,35 @@ fn visualizer_levels_flood_does_not_panic() {
 }
 
 #[test]
-fn visualizer_user_transcript_accumulates() {
+fn visualizer_user_transcript_cumulative_resend_coalesces() {
+    // OMP `#addTranscript`: input transcripts are cumulative re-sends. When
+    // incoming `starts_with` the current, use incoming (the server re-sent the
+    // accumulated text). This replaces the old space-join append that
+    // duplicated cumulative input across deltas.
+    let mut vis = LiveVisualizerState::default();
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Input,
+        text: "Hello".to_string(),
+    });
+    assert_eq!(vis.user_transcript, "Hello");
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Input,
+        text: "Hello world".to_string(),
+    });
+    assert_eq!(vis.user_transcript, "Hello world");
+    // A trailing duplicate (current ends_with incoming) is kept as-is.
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Input,
+        text: "world".to_string(),
+    });
+    assert_eq!(vis.user_transcript, "Hello world");
+}
+
+#[test]
+fn visualizer_user_transcript_incremental_chunks_concatenate() {
+    // OMP `#addTranscript`: when incoming is NOT a prefix-superset and NOT a
+    // trailing duplicate, it is a new incremental chunk → concatenate (no
+    // space, matching OMP which appends raw text).
     let mut vis = LiveVisualizerState::default();
     vis.apply_event(&LiveEvent::Transcript {
         kind: TranscriptKind::Input,
@@ -431,7 +459,7 @@ fn visualizer_user_transcript_accumulates() {
     });
     vis.apply_event(&LiveEvent::Transcript {
         kind: TranscriptKind::Input,
-        text: "world".to_string(),
+        text: " world".to_string(),
     });
     assert_eq!(vis.user_transcript, "Hello world");
 }
@@ -507,21 +535,34 @@ fn visualizer_narrow_detection() {
 fn visualizer_render_wide_does_not_panic() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+    let area = Rect::new(0, 0, 80, 10);
+    let mut buf = Buffer::empty(area);
     let state = LiveVisualizerState::default();
-    crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, 10), &state);
-    // Should have rendered something (not all empty).
+    let hits = crate::live::visualizer::render(&mut buf, area, &state);
+    // Should have rendered something (not all empty), with both controls
+    // clipped inside the footer row.
     assert!(buf.area().width > 0);
+    assert!(
+        hits.mute
+            .is_some_and(|rect| area.contains((rect.x, rect.y).into()))
+    );
+    assert!(
+        hits.stop
+            .is_some_and(|rect| area.contains((rect.x, rect.y).into()))
+    );
 }
 
 #[test]
 fn visualizer_render_narrow_does_not_panic() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    let mut buf = Buffer::empty(Rect::new(0, 0, 30, 10));
+    let area = Rect::new(0, 0, 30, 10);
+    let mut buf = Buffer::empty(area);
     let state = LiveVisualizerState::default();
-    crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 30, 10), &state);
+    let hits = crate::live::visualizer::render(&mut buf, area, &state);
     assert!(buf.area().width > 0);
+    assert!(hits.mute.is_some(), "narrow footer keeps the mute target");
+    assert!(hits.stop.is_some(), "narrow footer keeps the stop target");
 }
 
 // ── Config tests ────────────────────────────────────────────────────────────
@@ -555,8 +596,7 @@ fn live_config_with_sideband() {
 #[test]
 fn live_prompts_wrap_final_message() {
     let wrapped = crate::live::prompts::wrap_agent_final_message("All done");
-    assert!(wrapped.starts_with("Agent Final Message:"));
-    assert!(wrapped.contains("All done"));
+    assert_eq!(wrapped, "\"Agent Final Message\":\n\nAll done");
 }
 
 #[test]
@@ -717,12 +757,15 @@ fn command_queue_complete_delegation_queued_when_channel_full() {
         text: "final".to_string(),
     });
 
-    // The CompleteDelegation should be queued in pending_cmds.
+    // The CompleteDelegation should be queued in pending_cmds (as a
+    // PendingCritical with a stable sequence ID).
     assert_eq!(runtime.pending_cmds.len(), 1);
     assert!(matches!(
-        &runtime.pending_cmds[0],
+        &runtime.pending_cmds[0].cmd,
         LiveCommand::CompleteDelegation { delegation_id, .. } if delegation_id == "del-1"
     ));
+    // Sequence IDs are monotonic starting at 1.
+    assert_eq!(runtime.pending_cmds[0].seq, 1);
 
     // Simulate the receiver draining the channel by dropping the old sender
     // and creating a new one. Actually, we can just test drain_pending_cmds
@@ -773,7 +816,7 @@ fn command_queue_shutdown_queued_when_channel_full() {
     // Try to send Shutdown — should be queued.
     runtime.send_cmd(LiveCommand::Shutdown);
     assert_eq!(runtime.pending_cmds.len(), 1);
-    assert!(matches!(runtime.pending_cmds[0], LiveCommand::Shutdown));
+    assert!(matches!(runtime.pending_cmds[0].cmd, LiveCommand::Shutdown));
 }
 
 #[test]
@@ -782,7 +825,7 @@ fn command_queue_teardown_clears_pending() {
     use crate::live::state::LiveRuntime;
 
     let mut runtime = LiveRuntime::default();
-    runtime.pending_cmds.push(LiveCommand::Shutdown);
+    runtime.send_cmd(LiveCommand::Shutdown);
     runtime.teardown();
     assert!(runtime.pending_cmds.is_empty());
 }
@@ -825,6 +868,252 @@ fn transcript_multi_delta_then_final_flushes_once() {
     vis.reset_turn();
     assert!(vis.assistant_transcript.is_empty());
     assert!(!vis.assistant_flushed);
+}
+
+// ── OMP exact transcript merge semantics (issue #2) ─────────────────────────
+//
+// The visualizer must implement OMP's `#addTranscript` / `#finishTranscript`
+// merge rather than naive append/replace. These tests exercise the pure merge
+// helpers plus the integrated `apply_event` path for both roles.
+
+#[test]
+fn omp_add_transcript_cumulative_chunks_use_incoming() {
+    // `#addTranscript`: if incoming starts_with current, use incoming (the
+    // server re-sent the accumulated text). No duplication.
+    use crate::live::state::{RoleTurnState, merge_add_transcript};
+    let mut turn = RoleTurnState::default();
+    let a = merge_add_transcript("", "Hello", &mut turn);
+    assert_eq!(a, "Hello");
+    assert!(turn.active);
+    // Cumulative resend: incoming starts_with current.
+    let b = merge_add_transcript("Hello", "Hello world", &mut turn);
+    assert_eq!(b, "Hello world");
+    // Further cumulative resend.
+    let c = merge_add_transcript("Hello world", "Hello world, done.", &mut turn);
+    assert_eq!(c, "Hello world, done.");
+}
+
+#[test]
+fn omp_add_transcript_incremental_chunks_concatenate() {
+    // `#addTranscript`: if incoming is neither a prefix-superset nor a trailing
+    // duplicate, it is a new incremental chunk → concatenate.
+    use crate::live::state::{RoleTurnState, merge_add_transcript};
+    let mut turn = RoleTurnState::default();
+    let a = merge_add_transcript("", "Hello", &mut turn);
+    assert_eq!(a, "Hello");
+    // " world" does not start_with "Hello" and "Hello" does not end_with
+    // " world" → concatenate.
+    let b = merge_add_transcript("Hello", " world", &mut turn);
+    assert_eq!(b, "Hello world");
+}
+
+#[test]
+fn omp_add_transcript_suffix_duplicate_keeps_current() {
+    // `#addTranscript`: if current ends_with incoming, keep current (incoming
+    // is a trailing duplicate already present).
+    use crate::live::state::{RoleTurnState, merge_add_transcript};
+    let mut turn = RoleTurnState::default();
+    let _ = merge_add_transcript("", "Hello world", &mut turn);
+    // "world" is a trailing duplicate.
+    let b = merge_add_transcript("Hello world", "world", &mut turn);
+    assert_eq!(b, "Hello world");
+}
+
+#[test]
+fn omp_add_transcript_starts_new_turn_after_final() {
+    // `#addTranscript`: start a role-local turn if the current is empty OR
+    // finalized. After a turn.done finalizes, the next delta starts fresh
+    // (clears the prior turn's text) — the visualizer shows the CURRENT user
+    // turn, not an accumulation across turns.
+    let mut vis = LiveVisualizerState::default();
+    // First user turn.
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Input,
+        text: "first turn".to_string(),
+    });
+    vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::User,
+        transcript: "first turn".to_string(),
+    });
+    assert_eq!(vis.user_transcript, "first turn");
+    assert!(!vis.user_turn.active);
+    // Second user turn: the first delta starts a new turn (current was
+    // finalized) → replaces, does not append to "first turn".
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Input,
+        text: "second turn".to_string(),
+    });
+    assert_eq!(vis.user_transcript, "second turn");
+    assert!(vis.user_turn.active);
+}
+
+#[test]
+fn omp_add_transcript_ignores_late_equal_and_suffix_after_final() {
+    use crate::live::state::{RoleTurnState, merge_add_transcript, merge_finish_transcript};
+
+    let mut turn = RoleTurnState::default();
+    let current = merge_finish_transcript("", "Hello world", &mut turn);
+    assert_eq!(turn.finalized.as_deref(), Some("Hello world"));
+
+    let equal = merge_add_transcript(&current, "Hello world", &mut turn);
+    assert_eq!(equal, "Hello world");
+    assert!(!turn.active);
+    assert_eq!(turn.finalized.as_deref(), Some("Hello world"));
+
+    let suffix = merge_add_transcript(&equal, "world", &mut turn);
+    assert_eq!(suffix, "Hello world");
+    assert!(!turn.active);
+    assert_eq!(turn.finalized.as_deref(), Some("Hello world"));
+}
+
+#[test]
+fn omp_add_transcript_different_delta_after_final_starts_new_turn() {
+    use crate::live::state::{RoleTurnState, merge_add_transcript, merge_finish_transcript};
+
+    let mut turn = RoleTurnState::default();
+    let first = merge_finish_transcript("", "same words", &mut turn);
+    let second = merge_add_transcript(&first, "new prelude", &mut turn);
+    assert_eq!(second, "new prelude");
+    assert!(turn.active);
+    assert!(
+        turn.finalized.is_none(),
+        "new active turn clears old final marker"
+    );
+
+    // A new turn is allowed to finalize to text used by an older turn. It is
+    // not mistaken for a duplicate because the intervening add cleared the
+    // role-local finalized marker.
+    let third = merge_finish_transcript(&second, "same words", &mut turn);
+    assert_eq!(third, "same words");
+    assert!(!turn.active);
+    assert_eq!(turn.finalized.as_deref(), Some("same words"));
+}
+
+#[test]
+fn omp_finish_transcript_preserves_longer_current_starting_with_final() {
+    // `#finishTranscript`: preserve a longer current when it starts_with the
+    // final text (the active incremental build may be ahead of the finalized
+    // snapshot).
+    use crate::live::state::{RoleTurnState, merge_finish_transcript};
+    let mut turn = RoleTurnState::default();
+    turn.active = true;
+    // The active current is longer and starts_with the final snapshot.
+    let merged = merge_finish_transcript("Hello world, done.", "Hello world", &mut turn);
+    assert_eq!(merged, "Hello world, done.");
+    assert!(!turn.active);
+    assert_eq!(turn.finalized.as_deref(), Some("Hello world"));
+}
+
+#[test]
+fn omp_finish_transcript_dedup_repeated_final() {
+    // `#finishTranscript`: dedup a repeated final — the finalized text is
+    // unchanged, so the current is returned as-is and no re-flush is signaled.
+    use crate::live::state::{RoleTurnState, merge_finish_transcript};
+    let mut turn = RoleTurnState::default();
+    let first = merge_finish_transcript("", "final text", &mut turn);
+    assert_eq!(first, "final text");
+    assert_eq!(turn.finalized.as_deref(), Some("final text"));
+    // Repeated final — unchanged.
+    let second = merge_finish_transcript("final text", "final text", &mut turn);
+    assert_eq!(second, "final text");
+    // The decision helper signals no change (the integrated path uses the
+    // `changed` flag to skip re-flushing).
+}
+
+#[test]
+fn omp_finish_transcript_different_final_after_final_starts_new_turn() {
+    use crate::live::state::{RoleTurnState, merge_finish_transcript};
+
+    let mut turn = RoleTurnState::default();
+    let first = merge_finish_transcript("", "old finalized prefix", &mut turn);
+    assert_eq!(first, "old finalized prefix");
+
+    // Because the prior turn is already final, a different final establishes
+    // another turn directly. It must not preserve the old current merely
+    // because the old text happens to start with the new final.
+    let second = merge_finish_transcript(&first, "old", &mut turn);
+    assert_eq!(second, "old");
+    assert_eq!(turn.finalized.as_deref(), Some("old"));
+}
+
+#[test]
+fn omp_assistant_final_scrollback_contains_full_turn_exactly_once() {
+    // The final assistant scrollback must contain the full merged/final turn
+    // exactly once. A duplicate `turn.done` with the same final text must not
+    // re-trigger a scrollback flush (the `assistant_flushed` flag is only
+    // reset when the finalized text actually changes).
+    let mut vis = LiveVisualizerState::default();
+    // Streaming output deltas (cumulative).
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "Hello".to_string(),
+    });
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "Hello world".to_string(),
+    });
+    // Final turn.done.
+    let changed = vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "Hello world".to_string(),
+    });
+    assert!(changed);
+    assert!(!vis.assistant_flushed, "finalized turn needs a flush");
+    assert_eq!(vis.assistant_transcript, "Hello world");
+    // Simulate the scrollback flush.
+    vis.assistant_flushed = true;
+
+    // Duplicate turn.done with the same final text → no change, no re-flush.
+    let changed2 = vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "Hello world".to_string(),
+    });
+    assert!(!changed2, "duplicate final must not signal a change");
+    assert!(
+        vis.assistant_flushed,
+        "duplicate final must not reset the flush flag"
+    );
+    assert_eq!(vis.assistant_transcript, "Hello world");
+}
+
+#[test]
+fn omp_same_text_final_in_a_new_assistant_turn_flushes_again() {
+    let mut vis = LiveVisualizerState::default();
+    assert!(vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "same final".to_string(),
+    }));
+    vis.assistant_flushed = true;
+
+    // A genuinely new active turn clears the role-local final marker.
+    assert!(vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "different partial".to_string(),
+    }));
+    assert!(vis.assistant_turn.finalized.is_none());
+
+    // It may finish with text identical to an older turn; that is a new final
+    // and must re-arm the exactly-once scrollback flush.
+    assert!(vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "same final".to_string(),
+    }));
+    assert!(!vis.assistant_flushed);
+    assert_eq!(vis.assistant_transcript, "same final");
+}
+
+#[test]
+fn omp_finish_transcript_shorter_final_replaces_when_current_not_prefix() {
+    // `#finishTranscript`: when the current does NOT start_with the final text,
+    // the finalized text replaces the current (establish the final).
+    use crate::live::state::{RoleTurnState, merge_finish_transcript};
+    let mut turn = RoleTurnState::default();
+    turn.active = true;
+    // Current "response" does not start_with "final response".
+    let merged = merge_finish_transcript("response", "final response", &mut turn);
+    assert_eq!(merged, "final response");
+    assert!(!turn.active);
+    assert_eq!(turn.finalized.as_deref(), Some("final response"));
 }
 
 // ── Regression: visualizer layout (issue #6) ────────────────────────────────
@@ -962,9 +1251,11 @@ fn broker_cancel_produces_no_terminal_message() {
 // `drain_pending_cmds` only retries `try_send` at event-loop top. If the
 // voice channel is still full, the loop can sleep with no capacity wake, so
 // a final `CompleteDelegation` may remain forever. The capacity-aware async
-// drain (`pending_critical_drain`) awaits the bounded channel's `send` so a
-// stranded final eventually sends when the receiver frees capacity — even
-// with no unrelated app event.
+// drain arm snapshots the head critical command (WITHOUT removing it), awaits
+// the bounded channel's `send`, and — only on a confirmed successful send —
+// forgets exactly that entry by its stable sequence ID. On timeout or
+// cancellation the entry stays queued. This is cancellation-safe: a dropped
+// pending `send` future can never lose a final command.
 
 #[tokio::test]
 async fn critical_drain_delivers_after_capacity_freed_with_no_app_event() {
@@ -987,7 +1278,7 @@ async fn critical_drain_delivers_after_capacity_freed_with_no_app_event() {
     // in pending_cmds (send_cmd queues critical commands).
     runtime.send_cmd(LiveCommand::CompleteDelegation {
         delegation_id: "del-final".to_string(),
-        text: "Agent Final Message: done".to_string(),
+        text: "\"Agent Final Message\":\n\ndone".to_string(),
     });
     assert!(runtime.has_pending_critical());
     assert_eq!(runtime.pending_cmds.len(), 1);
@@ -996,14 +1287,16 @@ async fn critical_drain_delivers_after_capacity_freed_with_no_app_event() {
     assert_eq!(runtime.drain_pending_cmds(), 0);
     assert!(runtime.has_pending_critical());
 
-    // The async drain arm pops the head critical command (owns it exclusively)
-    // and awaits `send().await`. No unrelated app event fires here — the wake
-    // must come from capacity, not an app event.
-    let (cmd, tx_clone) = runtime
-        .take_pending_critical_head()
+    // The async drain arm SNAPSHOTS the head critical command (does NOT
+    // remove it) and awaits `send().await`. No unrelated app event fires
+    // here — the wake must come from capacity, not an app event.
+    let (seq, cmd, tx_clone) = runtime
+        .snapshot_pending_critical_head()
         .expect("pending critical command present");
-    // Popped — no longer pending (the arm owns delivery).
-    assert!(!runtime.has_pending_critical());
+    // Snapshot did NOT remove the entry — it stays queued until the send is
+    // confirmed (cancellation-safe).
+    assert!(runtime.has_pending_critical());
+    assert_eq!(runtime.pending_cmds.len(), 1);
 
     // Receiver frees capacity AFTER the drain arm armed its `send().await`.
     let send_task = tokio::spawn(async move {
@@ -1020,10 +1313,13 @@ async fn critical_drain_delivers_after_capacity_freed_with_no_app_event() {
         .expect("send task joined")
         .expect("final CompleteDelegation sent after capacity freed");
 
-    // The command was delivered directly by the arm (it owned the send), so
-    // nothing remains pending.
+    // Confirmed successful send → forget exactly this entry by sequence ID.
+    assert!(runtime.forget_pending_critical(seq));
+    // Nothing remains pending (the entry was removed exactly once).
     assert!(!runtime.has_pending_critical());
     assert!(runtime.pending_cmds.is_empty());
+    // Forgetting again is a no-op (never sent twice).
+    assert!(!runtime.forget_pending_critical(seq));
 
     // And the receiver observes the final.
     let received = rx.recv().await.expect("final received");
@@ -1033,15 +1329,73 @@ async fn critical_drain_delivers_after_capacity_freed_with_no_app_event() {
             text,
         } => {
             assert_eq!(delegation_id, "del-final");
-            assert!(text.starts_with("Agent Final Message:"));
+            assert!(text.starts_with("\"Agent Final Message\":"));
         }
         other => panic!("expected CompleteDelegation, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn critical_drain_returns_command_to_front_on_timeout() {
+async fn critical_drain_cancellation_leaves_command_queued() {
+    // Cancellation-safety: if a higher-priority select arm wins while the
+    // drain arm's `send().await` is pending, the future is dropped but the
+    // snapshotted entry MUST stay queued (it was never removed). The final
+    // command is never lost.
     use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    // 1-slot channel — fill it and keep it full so the send never completes.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<LiveCommand>(1);
+    runtime.cmd_tx = Some(tx);
+    runtime
+        .cmd_tx
+        .as_ref()
+        .unwrap()
+        .try_send(LiveCommand::ToggleMute)
+        .unwrap();
+
+    // Enqueue a critical command, then snapshot it (as the arm does).
+    runtime.send_cmd(LiveCommand::CompleteDelegation {
+        delegation_id: "del-cancel".to_string(),
+        text: "\"Agent Final Message\":\n\ncancelled".to_string(),
+    });
+    let (seq, cmd, tx_clone) = runtime
+        .snapshot_pending_critical_head()
+        .expect("pending critical command present");
+    // The entry is STILL queued (snapshot doesn't remove).
+    assert!(runtime.has_pending_critical());
+    assert_eq!(runtime.pending_cmds.len(), 1);
+    assert_eq!(runtime.pending_cmds[0].seq, seq);
+
+    // Arm a send that will be CANCELLED before it completes (the channel
+    // stays full, so `send` would block forever; we cancel it).
+    let send_task = tokio::spawn(async move {
+        // This blocks forever (channel stays full); the task is aborted below.
+        tx_clone.send(cmd).await
+    });
+    // Yield once so the task arms its send.
+    tokio::task::yield_now().await;
+    // Cancel the send (simulating a higher-priority select arm winning).
+    send_task.abort();
+    let _ = send_task.await;
+
+    // The entry MUST still be queued — cancellation never removed it.
+    assert!(runtime.has_pending_critical());
+    assert_eq!(runtime.pending_cmds.len(), 1);
+    assert_eq!(runtime.pending_cmds[0].seq, seq);
+    // We never called forget, so the command is intact.
+    assert!(matches!(
+        &runtime.pending_cmds[0].cmd,
+        LiveCommand::CompleteDelegation { delegation_id, .. }
+            if delegation_id == "del-cancel"
+    ));
+}
+
+#[tokio::test]
+async fn critical_drain_timeout_keeps_command_queued() {
+    use crate::live::state::LiveRuntime;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     let mut runtime = LiveRuntime::default();
     // 1-slot channel — fill it and keep it full so the send times out.
@@ -1054,24 +1408,30 @@ async fn critical_drain_returns_command_to_front_on_timeout() {
         .try_send(LiveCommand::ToggleMute)
         .unwrap();
 
-    // Enqueue a critical command, then pop it (as the arm does).
+    // Enqueue a critical command, then snapshot it (as the arm does).
     runtime.send_cmd(LiveCommand::CompleteDelegation {
         delegation_id: "del-to".to_string(),
-        text: "Agent Final Message: timeout".to_string(),
+        text: "\"Agent Final Message\":\n\ntimeout".to_string(),
     });
-    let (cmd, _tx_clone) = runtime
-        .take_pending_critical_head()
+    let (seq, cmd, tx_clone) = runtime
+        .snapshot_pending_critical_head()
         .expect("pending critical command present");
-    assert!(!runtime.has_pending_critical());
+    // Snapshot didn't remove the entry.
+    assert_eq!(runtime.pending_cmds.len(), 1);
 
-    // Simulate a timed-out send: return the command to the front.
-    runtime.return_pending_critical_head(cmd);
+    // Simulate a timed-out send: the send times out (channel stays full), so
+    // we do NOT call forget — the entry stays queued for the next iteration.
+    let send_result = timeout(Duration::from_millis(10), tx_clone.send(cmd)).await;
+    assert!(send_result.is_err(), "send must time out (channel full)");
+    // On timeout, the arm does NOT forget — the entry stays queued.
     assert!(runtime.has_pending_critical());
     assert_eq!(runtime.pending_cmds.len(), 1);
-    // It must be at the front (retried in order).
+    assert_eq!(runtime.pending_cmds[0].seq, seq);
+    // It must be retried in order (still the head).
     assert!(matches!(
-        &runtime.pending_cmds[0],
-        LiveCommand::CompleteDelegation { delegation_id, .. } if delegation_id == "del-to"
+        &runtime.pending_cmds[0].cmd,
+        LiveCommand::CompleteDelegation { delegation_id, .. }
+            if delegation_id == "del-to"
     ));
 }
 

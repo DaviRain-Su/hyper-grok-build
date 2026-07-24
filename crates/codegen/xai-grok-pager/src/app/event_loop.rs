@@ -1949,7 +1949,7 @@ pub(crate) async fn run(
                     generation,
                     draft,
                 };
-                crate::live::state::set_live_active_for_test(true);
+                crate::live::state::set_live_active(true);
                 tracing::info!("codex live pipeline started (/live)");
                 presenter.request_presentation(&mut app, terminal, false);
             }
@@ -2098,30 +2098,48 @@ pub(crate) async fn run(
         // timeout. This guarantees a stranded final command eventually sends
         // even when no unrelated app event arrives to wake the loop, without
         // indefinitely blocking the TUI (the timeout re-arms an explicit
-        // retry each iteration). The arm owns the head critical command
-        // exclusively (popped from `pending_cmds`); on a timeout it is
-        // returned to the front for the next iteration. When there is nothing
-        // pending (or Live is off / no channel), this future never resolves
-        // and the arm is inert.
+        // retry each iteration).
+        //
+        // **Cancellation-safety:** the head critical command is SNAPSHOTTED
+        // (cloned) without removal, carrying a stable sequence ID. The entry
+        // stays in `pending_cmds` until a confirmed successful `send().await`,
+        // at which point `forget_pending_critical(seq)` removes exactly that
+        // ID once. If a higher-priority `tokio::select` arm wins while the
+        // send is pending (cancellation), the future is dropped but the entry
+        // remains queued — the final command is never lost. On timeout the
+        // entry likewise stays queued for the next iteration. The same final
+        // command is never sent twice: a successful send consumes the slot, and
+        // the loop-top `drain_pending_cmds` reaper may also deliver it via
+        // `try_send` (in which case `forget_pending_critical` is a no-op on an
+        // already-removed entry).
         let live_critical_drain = async {
             #[cfg(feature = "codex-live")]
             {
                 use tokio::time::timeout;
                 const LIVE_CRITICAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(120);
-                match app.live_runtime.take_pending_critical_head() {
-                    Some((cmd, tx)) => {
-                        if timeout(LIVE_CRITICAL_DRAIN_TIMEOUT, tx.send(cmd.clone()))
-                            .await
-                            .is_ok()
-                        {
-                            // Sent — the command stays removed (delivered).
-                            // Reap any remaining non-critical / now-fittable
-                            // commands on the next loop-top drain.
-                        } else {
-                            // Timed out — return the command for an explicit
-                            // retry on the next iteration.
-                            app.live_runtime.return_pending_critical_head(cmd);
+                match app.live_runtime.snapshot_pending_critical_head() {
+                    Some((seq, cmd, tx)) => {
+                        match timeout(LIVE_CRITICAL_DRAIN_TIMEOUT, tx.send(cmd)).await {
+                            Ok(Ok(())) => {
+                                // Confirmed send — remove exactly this entry by
+                                // its sequence ID.
+                                app.live_runtime.forget_pending_critical(seq);
+                            }
+                            Ok(Err(_closed)) => {
+                                // The pipeline receiver is gone; retrying this
+                                // immediately would hot-loop forever. No queued
+                                // command can be delivered through this channel.
+                                app.live_runtime.cmd_tx = None;
+                                app.live_runtime.pending_cmds.clear();
+                            }
+                            Err(_elapsed) => {
+                                // Timed out: the entry was never removed and is
+                                // retried on the next iteration.
+                            }
                         }
+                        // If this future is cancelled by another select arm,
+                        // the entry likewise stays queued because mutation only
+                        // happens after a resolved send outcome.
                     }
                     None => std::future::pending().await,
                 }
@@ -2957,6 +2975,13 @@ pub(crate) async fn run(
 
         presenter.present_if_dirty(&mut app, terminal);
     }
+
+    // Every loop-exit rail (including ACP/leader disconnect) tears Live down
+    // explicitly rather than relying only on sender Drop. This restores the
+    // draft, finalizes a partial spoken transcript, clears the process-global
+    // active flag, and releases microphone/speaker resources deterministically.
+    #[cfg(feature = "codex-live")]
+    crate::live::acp_bridge::on_session_disconnect(&mut app);
 
     app.notification_service.shutdown();
 

@@ -278,8 +278,6 @@ fn test_app() -> AppView {
         #[cfg(feature = "codex-live")]
         live_runtime: crate::live::state::LiveRuntime::default(),
         #[cfg(feature = "codex-live")]
-        live_event_rx: None,
-        #[cfg(feature = "codex-live")]
         live_mode_enabled: false,
     }
 }

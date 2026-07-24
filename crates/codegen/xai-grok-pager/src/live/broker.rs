@@ -5,7 +5,7 @@
 //! - accumulate `AgentMessageChunk` text per delegation,
 //! - flush the accumulated assistant segment as 500-byte-safe commentary at
 //!   tool boundaries,
-//! - emit the terminal assistant segment wrapped as `"Agent Final Message:"`
+//! - emit the terminal assistant segment wrapped as `"Agent Final Message":`
 //!   and send `CompleteDelegation` exactly once,
 //! - unify `TurnCompleted`, `PromptResponse` errors, and cancel/failure
 //!   ordering with an idempotent terminal state,
@@ -98,12 +98,21 @@ impl LiveDelegationBroker {
         self.agent_id = Some(agent_id);
     }
 
-    /// Register a new delegation (called when `LiveEvent::Delegation` submits
-    /// text and the prompt pipeline returns a `prompt_id`).
-    pub fn register_delegation(&mut self, delegation_id: String) {
-        self.accumulators
-            .entry((self.generation, delegation_id))
-            .or_default();
+    /// Reserve a new delegation id for this generation before dispatch.
+    ///
+    /// Returns `true` only for the first `delegation.created` carrying this id.
+    /// A duplicate frame returns `false`, allowing the event handler to avoid
+    /// submitting the same coding task twice.
+    pub fn register_delegation(&mut self, delegation_id: String) -> bool {
+        use std::collections::hash_map::Entry;
+
+        match self.accumulators.entry((self.generation, delegation_id)) {
+            Entry::Vacant(entry) => {
+                entry.insert(DelegationAccumulator::default());
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
     }
 
     /// Observe an accepted, non-replay `AgentMessageChunk` for the bound
@@ -168,7 +177,7 @@ impl LiveDelegationBroker {
     /// session + a registered delegation's `prompt_id`.
     ///
     /// Emits the terminal final message (last assistant segment wrapped as
-    /// `"Agent Final Message:"`) and marks the delegation terminal. Idempotent:
+    /// `"Agent Final Message":`) and marks the delegation terminal. Idempotent:
     /// if the terminal was already sent, this is a no-op.
     pub fn observe_turn_completed(
         &mut self,
@@ -430,7 +439,7 @@ mod tests {
         assert!(
             d1.terminal[0]
                 .final_message
-                .starts_with("Agent Final Message:")
+                .starts_with("\"Agent Final Message\":")
         );
         assert_eq!(d1.mark_terminal, vec!["del-1".to_string()]);
 
@@ -535,7 +544,7 @@ mod tests {
             }],
             terminal: vec![TerminalFinal {
                 delegation_id: "del-1".to_string(),
-                final_message: "Agent Final Message: done".to_string(),
+                final_message: "\"Agent Final Message\":\n\ndone".to_string(),
             }],
             mark_terminal: vec!["del-1".to_string()],
         };
@@ -559,7 +568,7 @@ mod tests {
                 text,
             } => {
                 assert_eq!(delegation_id, "del-1");
-                assert!(text.starts_with("Agent Final Message:"));
+                assert!(text.starts_with("\"Agent Final Message\":"));
             }
             _ => panic!("expected CompleteDelegation"),
         }

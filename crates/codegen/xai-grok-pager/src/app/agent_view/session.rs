@@ -201,6 +201,10 @@ impl AgentView {
             privacy_banner: Default::default(),
             hit_upgrade_cta: Default::default(),
             hit_voice_stop_button: Default::default(),
+            #[cfg(feature = "codex-live")]
+            hit_live_mute_button: Default::default(),
+            #[cfg(feature = "codex-live")]
+            hit_live_stop_button: Default::default(),
             hit_scrollbar: Default::default(),
             scrollbar_dragging: false,
             dropdown_items_area: None,

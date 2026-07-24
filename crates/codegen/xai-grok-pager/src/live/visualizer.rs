@@ -36,9 +36,20 @@ pub fn is_narrow(area: Rect) -> bool {
     area.width < NARROW_WIDTH_THRESHOLD
 }
 
-/// Render the Live visualizer into the given buffer area (replaces the editor).
+/// Clickable controls painted by the visualizer in the current frame.
+///
+/// Rectangles are clipped to the rendered area, so callers never retain a hit
+/// target for text that was truncated off-screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisualizerHitAreas {
+    pub mute: Option<Rect>,
+    pub stop: Option<Rect>,
+}
+
+/// Render the Live visualizer into the given buffer area (replaces the editor)
+/// and return its clickable mute/stop controls.
 /// Called from the agent view's `draw` method when Live is active.
-pub fn render(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState) {
+pub fn render(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState) -> VisualizerHitAreas {
     let narrow = is_narrow(area);
     let height = if narrow {
         VISUALIZER_NARROW_HEIGHT
@@ -63,13 +74,18 @@ pub fn render(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState) {
         ));
 
     if narrow {
-        render_narrow(buf, area, state, block);
+        render_narrow(buf, area, state, block)
     } else {
-        render_full(buf, area, state, block);
+        render_full(buf, area, state, block)
     }
 }
 
-fn render_full(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block: Block) {
+fn render_full(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &LiveVisualizerState,
+    block: Block,
+) -> VisualizerHitAreas {
     let chunks = ratatui::layout::Layout::vertical([
         // Row 1: top border (the block provides it, so this is 0-height filler).
         ratatui::layout::Constraint::Length(0),
@@ -89,11 +105,11 @@ fn render_full(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block:
     let theme = crate::theme::Theme::current();
 
     // Waveform row 1 (output level).
-    let level_bar = render_waveform(state.level, theme.accent_user);
+    let level_bar = render_waveform(state.level, theme.accent_user, 40);
     Paragraph::new(level_bar).render(chunks[1], buf);
 
     // Waveform row 2 (peak decay).
-    let decay_bar = render_waveform(state.peak_decay, theme.accent_assistant);
+    let decay_bar = render_waveform(state.peak_decay, theme.accent_assistant, 40);
     Paragraph::new(decay_bar).render(chunks[2], buf);
 
     // User transcript.
@@ -108,18 +124,26 @@ fn render_full(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block:
     Paragraph::new(transcript).render(chunks[3], buf);
 
     // Phase footer.
-    let phase_line = render_phase_footer(
+    let footer = render_phase_footer(
         state.phase,
         &state.error_message,
         state.muted,
         state.level,
         state.delegation_active,
         theme.accent_user,
+        false,
     );
-    Paragraph::new(phase_line).render(chunks[4], buf);
+    let hit_areas = footer.hit_areas(chunks[4]);
+    Paragraph::new(footer.line).render(chunks[4], buf);
+    hit_areas
 }
 
-fn render_narrow(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block: Block) {
+fn render_narrow(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &LiveVisualizerState,
+    block: Block,
+) -> VisualizerHitAreas {
     // The block has a top border (1 row). With 3 total rows, `block.inner(area)`
     // gives 2 rows. We use a 2-row layout: phase+waveform combined, transcript.
     let inner = block.inner(area);
@@ -135,23 +159,25 @@ fn render_narrow(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, bloc
 
     let theme = crate::theme::Theme::current();
 
-    // Phase footer + waveform on one line.
-    let phase_line = render_phase_footer(
+    // Compact status + clickable controls + a short waveform on one line.
+    // The full keyboard labels are shortened after the colon (for example,
+    // `Space: mute` → `[mute]`) so both mouse targets survive narrow layouts.
+    let footer = render_phase_footer(
         state.phase,
         &state.error_message,
         state.muted,
         state.level,
         state.delegation_active,
         theme.accent_user,
+        true,
     );
+    let hit_areas = footer.hit_areas(chunks[0]);
     let peak = state.level.max(state.peak_decay);
-    let bar = render_waveform(peak, theme.accent_user);
-    let combined = Line::from(vec![
-        phase_line.spans[0].clone(),
-        Span::raw(" "),
-        bar.spans[0].clone(),
-    ]);
-    Paragraph::new(combined).render(chunks[0], buf);
+    let bar = render_waveform(peak, theme.accent_user, 8);
+    let mut spans = footer.line.spans;
+    spans.push(Span::raw(" "));
+    spans.extend(bar.spans);
+    Paragraph::new(Line::from(spans)).render(chunks[0], buf);
 
     // Transcript.
     let transcript = if state.user_transcript.is_empty() {
@@ -163,24 +189,63 @@ fn render_narrow(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, bloc
         ))
     };
     Paragraph::new(transcript).render(chunks[1], buf);
+    hit_areas
 }
 
-/// Render a single waveform row as a bar of `█` characters proportional to
-/// the level.
-fn render_waveform(level: f64, color: Color) -> Line<'static> {
+/// Render a waveform as a bar of `█` characters proportional to the level.
+fn render_waveform(level: f64, color: Color, max_width: usize) -> Line<'static> {
     let level = level.clamp(0.0, 1.0);
-    let width = ((level * 40.0).round() as usize).min(40);
+    let width = ((level * max_width as f64).round() as usize).min(max_width);
     let bar: String = "█".repeat(width);
-    let padding: String = " ".repeat(40usize.saturating_sub(width));
+    let padding: String = " ".repeat(max_width.saturating_sub(width));
     Line::from(vec![
         Span::styled(bar, Style::default().fg(color)),
         Span::raw(padding),
     ])
 }
 
-/// Render the phase footer line.
-/// Render the phase footer line. Derives a display status from the core
-/// transport phase + mute + output level + delegation active.
+struct PhaseFooter {
+    line: Line<'static>,
+    mute_offset: u16,
+    mute_width: u16,
+    stop_offset: u16,
+    stop_width: u16,
+}
+
+impl PhaseFooter {
+    fn hit_areas(&self, area: Rect) -> VisualizerHitAreas {
+        VisualizerHitAreas {
+            mute: clipped_hit_rect(area, self.mute_offset, self.mute_width),
+            stop: clipped_hit_rect(area, self.stop_offset, self.stop_width),
+        }
+    }
+}
+
+fn clipped_hit_rect(area: Rect, offset: u16, width: u16) -> Option<Rect> {
+    if area.height == 0 || area.width == 0 || width == 0 {
+        return None;
+    }
+    let right = area.x.saturating_add(area.width);
+    let x = area.x.saturating_add(offset);
+    (x < right).then(|| Rect::new(x, area.y, width.min(right - x), 1))
+}
+
+fn display_width(text: &str) -> u16 {
+    unicode_width::UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+}
+
+fn compact_hint(hint: &str) -> String {
+    let label = hint
+        .split_once(':')
+        .map(|(_, label)| label.trim())
+        .filter(|label| !label.is_empty())
+        .unwrap_or(hint);
+    format!("[{label}]")
+}
+
+/// Render the phase footer line and retain the exact offsets of its clickable
+/// controls. Derives a display status from the core transport phase + mute +
+/// output level + delegation active.
 fn render_phase_footer(
     phase: LivePhase,
     error: &Option<String>,
@@ -188,7 +253,8 @@ fn render_phase_footer(
     level: f64,
     delegation_active: bool,
     color: Color,
-) -> Line<'static> {
+    compact: bool,
+) -> PhaseFooter {
     // OMP output-active threshold: the voice core treats output audio above
     // 0.015 as "actively speaking". Using the same threshold here keeps the
     // visualizer's speaking/listening flip aligned with the transport's own
@@ -229,19 +295,41 @@ fn render_phase_footer(
     let mute_hint = rust_i18n::t!(mute_hint_key);
     let stop_hint = rust_i18n::t!("live.hint.stop");
 
+    let status_text = if compact {
+        status_label.to_string()
+    } else {
+        format!(" {status_label} ")
+    };
+    let gap = if compact { " " } else { "  " };
+    let mute_text = if compact {
+        compact_hint(&mute_hint)
+    } else {
+        mute_hint.to_string()
+    };
+    let stop_text = if compact {
+        compact_hint(&stop_hint)
+    } else {
+        stop_hint.to_string()
+    };
+
+    let mute_offset = display_width(&status_text).saturating_add(display_width(gap));
+    let mute_width = display_width(&mute_text);
+    let stop_offset = mute_offset
+        .saturating_add(mute_width)
+        .saturating_add(display_width(gap));
+    let stop_width = display_width(&stop_text);
+
     let mut spans = vec![
-        Span::styled(
-            format!(" {status_label} "),
-            status_style.add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("{mute_hint}  {stop_hint}"),
-            Style::default().fg(color),
-        ),
+        Span::styled(status_text, status_style.add_modifier(Modifier::BOLD)),
+        Span::raw(gap),
+        Span::styled(mute_text, Style::default().fg(color)),
+        Span::raw(gap),
+        Span::styled(stop_text, Style::default().fg(color)),
     ];
 
-    if let Some(msg) = error {
+    // Narrow mode already has to share one row with a mini waveform; the full
+    // error text remains available in wide mode and in the textual status.
+    if !compact && let Some(msg) = error {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             truncate(msg, 40),
@@ -249,7 +337,13 @@ fn render_phase_footer(
         ));
     }
 
-    Line::from(spans)
+    PhaseFooter {
+        line: Line::from(spans),
+        mute_offset,
+        mute_width,
+        stop_offset,
+        stop_width,
+    }
 }
 
 /// Truncate a string to `max` chars, appending `…` if truncated.

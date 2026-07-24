@@ -19,7 +19,7 @@ ignored = ["xai-ratatui-inline"]
 # NOT depend on this crate (that would be a cargo cycle). The pager invokes this
 # crate via the `xai_grok_pager::minimal_hook` fn-pointer seam, installed by the
 # composition-root binary; see `install()`.
-xai-grok-pager = { path = "../xai-grok-pager" }
+xai-grok-pager = { path = "../xai-grok-pager", default-features = false }
 
 # Rendering primitives (must match the pager's versions).
 ratatui = { workspace = true, features = ["crossterm", "unstable-widget-ref"] }
@@ -44,6 +44,6 @@ xai-token-estimation = { workspace = true }
 # The unit tests reuse the pager's test-only view-model constructors
 # (`test_agent_view`, yolo/auto setters), gated behind its test-only
 # helpers.
-xai-grok-pager = { path = "../xai-grok-pager", features = ["test-support"] }
+xai-grok-pager = { path = "../xai-grok-pager", default-features = false, features = ["test-support"] }
 
 [features]

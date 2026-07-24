@@ -97,6 +97,34 @@ impl AgentView {
             && self.cancel_turn_view.is_none()
             && self.question_view.is_none()
     }
+    /// Whether an agent-owned modal, viewer, or focused overlay must receive
+    /// Space/Esc before Codex Live's global mute/stop shortcuts.
+    ///
+    /// Keep this aligned with the early-return surfaces in `handle_input_inner`:
+    /// Live replaces only the ordinary composer and must never steal input from
+    /// permission/question/plan flows or from a viewer layered above it.
+    #[cfg(feature = "codex-live")]
+    pub(crate) fn live_key_intercept_blocked(&self) -> bool {
+        !self.no_input_overlay_pending()
+            || self.active_modal.is_some()
+            || self.extensions_modal.is_some()
+            || self.persona_detail.is_some()
+            || self.agents_modal.is_some()
+            || self.block_viewer.is_some()
+            || self.line_viewer.is_some()
+            || self.image_viewer.is_some()
+            || self.video_viewer.is_some()
+            || self.gboom.is_some()
+            || self.inline_edit.is_some()
+            || self.rewind_state.is_some()
+            || self.jump_state.is_some()
+            || self.btw_state.is_some()
+            || self.scrollback_search.is_some()
+            || self.active_subagent.is_some()
+            || self.show_goal_detail
+            || self.show_workflows
+            || self.prompt.any_dropdown_open()
+    }
     /// Whether FocusGained should move focus from Scrollback → Prompt.
     ///
     /// Needs-input overlays (permission / plan / cancel-turn / question) always

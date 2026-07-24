@@ -1121,6 +1121,12 @@ pub struct AgentView {
     pub hit_upgrade_cta: HitArea,
     /// Stop button in the voice record indicator row (`[stop]`), far right.
     pub hit_voice_stop_button: HitArea,
+    /// Mute/unmute control in the Codex Live visualizer footer.
+    #[cfg(feature = "codex-live")]
+    pub hit_live_mute_button: HitArea,
+    /// Stop control in the Codex Live visualizer footer.
+    #[cfg(feature = "codex-live")]
+    pub hit_live_stop_button: HitArea,
     /// Scrollbar track for the scrollback pane (for click-to-jump / drag).
     pub hit_scrollbar: HitArea,
     /// Whether a scrollbar drag is in progress on the scrollback scrollbar.

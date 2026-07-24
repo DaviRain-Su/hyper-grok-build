@@ -206,6 +206,14 @@ impl AgentView {
                 {
                     return InputOutcome::Action(Action::SubmitFollowUp(text));
                 }
+                #[cfg(feature = "codex-live")]
+                if self.hit_live_mute_button.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::LiveToggleMute);
+                }
+                #[cfg(feature = "codex-live")]
+                if self.hit_live_stop_button.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::LiveStop);
+                }
                 if self.hit_voice_stop_button.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::VoiceToggle);
                 }
@@ -1254,12 +1262,42 @@ mod tests {
     use super::*;
     use crate::app::agent::AgentState;
     use crate::app::agent_view::PromptMode;
+    #[cfg(feature = "codex-live")]
+    use crate::app::agent_view::test_fixtures::make_agent;
     use crate::app::agent_view::test_fixtures::{
         make_running_agent, running_agent_local_only, test_pasted_image,
     };
     use crossterm::event::KeyModifiers;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+
+    #[cfg(feature = "codex-live")]
+    #[test]
+    fn live_visualizer_mouse_controls_dispatch_actions() {
+        let mut agent = make_agent();
+        agent
+            .hit_live_mute_button
+            .set(Some(Rect::new(10, 20, 6, 1)));
+        agent
+            .hit_live_stop_button
+            .set(Some(Rect::new(18, 20, 6, 1)));
+
+        let click = |column| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(
+            agent.handle_mouse(&click(10)),
+            InputOutcome::Action(Action::LiveToggleMute)
+        ));
+        assert!(matches!(
+            agent.handle_mouse(&click(18)),
+            InputOutcome::Action(Action::LiveStop)
+        ));
+    }
+
     /// Render the queue, locate the action-button cell where `hit` resolves
     /// to `selected_id`, and dispatch a left-click on it; returns the outcome.
     fn click_queue_button(

@@ -2139,3 +2139,5 @@ mod background_tasks;
 mod models;
 mod mcp;
 mod git_head;
+#[cfg(feature = "codex-live")]
+mod live;

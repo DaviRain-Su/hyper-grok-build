@@ -139,6 +139,19 @@ pub(super) fn dispatch_live_stop(app: &mut AppView) -> Vec<Effect> {
     for cmd in cmds {
         app.live_send_cmd(cmd);
     }
+    // `observe_cancel_all` deliberately returns terminal identities without a
+    // success payload. Best-effort an explicit wrapped cancellation while the
+    // command channel has room; session close remains the terminal guarantee
+    // if a saturated channel cannot accept these before teardown.
+    let cancelled = crate::live::prompts::wrap_agent_final_message(
+        "The delegated coding task was cancelled because Live stopped.",
+    );
+    for delegation_id in &cancel_decision.mark_terminal {
+        app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
+            delegation_id: delegation_id.clone(),
+            text: cancelled.clone(),
+        });
+    }
     // Mark all delegations terminal in the registry.
     let delegation_ids: Vec<(u64, String)> = app.live_runtime.delegations.keys().cloned().collect();
     for (generation, delegation_id) in delegation_ids {
@@ -173,6 +186,18 @@ pub(super) fn dispatch_live_toggle_mute(app: &mut AppView) -> Vec<Effect> {
     }
     app.live_toggle_mute();
     vec![]
+}
+
+/// Complete a delegation that could not enter the prompt pipeline. This keeps
+/// the Live model from waiting forever while deliberately leaving every
+/// pre-existing user queue entry untouched.
+fn reject_delegation_submit(app: &mut AppView, generation: u64, delegation_id: &str, reason: &str) {
+    app.live_runtime
+        .mark_delegation_terminal(generation, delegation_id);
+    app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
+        delegation_id: delegation_id.to_string(),
+        text: crate::live::prompts::wrap_agent_final_message(reason),
+    });
 }
 
 /// Handle a `LiveEvent::Delegation` — submit literal plain text through the
@@ -214,6 +239,13 @@ pub(super) fn dispatch_live_delegation_submit(
     if bound_generation != generation {
         app.live_runtime
             .mark_delegation_terminal(generation, &delegation_id);
+        return vec![];
+    }
+
+    // Defense in depth: `handle_live_event` rejects duplicate created frames
+    // before creating this action, but a duplicated/delayed action must also
+    // never submit the same coding task twice.
+    if app.live_runtime.has_delegation(generation, &delegation_id) {
         return vec![];
     }
 
@@ -268,11 +300,37 @@ pub(super) fn dispatch_live_delegation_submit(
     // (Restoring after `restore_draft` is load-bearing: `set_text("")` drains
     // prompt images, so an earlier restore would be wiped by the draft
     // restore.)
+    // Snapshot the exact local queue identity before calling the generic
+    // prompt dispatcher. A Live delegation must never merge with, drain, or
+    // hide a pre-existing user prompt. `immediate_server_send_eligible`
+    // intentionally refuses immediate sends while local work is queued, so
+    // there is no safe acceptance path in that case.
+    let (delegation_queue_id, had_pending_user_prompt) = app
+        .agents
+        .get(&agent_id)
+        .map(|agent| {
+            (
+                agent.session.next_queue_id,
+                !agent.session.pending_prompts.is_empty(),
+            )
+        })
+        .unwrap_or((0, true));
+    if had_pending_user_prompt {
+        reject_delegation_submit(
+            app,
+            generation,
+            &delegation_id,
+            "Delegation failed: the agent already has queued user work",
+        );
+        return vec![];
+    }
+
     let stashed_images = app
         .agents
         .get_mut(&agent_id)
         .map(|agent| agent.prompt.drain_images())
         .unwrap_or_default();
+    let delegation_text = text.clone();
 
     let effects = super::prompt::dispatch_send_prompt_inner(
         app, text, false, // consume_input = false — preserve the composer
@@ -289,41 +347,58 @@ pub(super) fn dispatch_live_delegation_submit(
     // `Effect::SendPrompt` was returned, the prompt was not accepted (queued,
     // reconnecting, etc.) — fail the delegation explicitly and leave no queued
     // delegation behind.
-    let prompt_id = effects
-        .iter()
-        .find_map(|e| match e {
-            Effect::SendPrompt {
-                prompt_id,
-                agent_id: eff_agent,
-                session_id: eff_session,
-                ..
-            } if *eff_agent == agent_id && eff_session.0.as_ref() == bound_session.as_str() => {
-                Some(prompt_id.clone())
-            }
-            _ => None,
+    // If generic dispatch enqueued the delegation but could not drain it
+    // (model switch, replay, command-running state, queue edit, etc.), remove
+    // exactly the row minted from our `next_queue_id` snapshot. Never clear or
+    // reorder unrelated user rows.
+    let removed_unsent_queue_row = app.agents.get_mut(&agent_id).is_some_and(|agent| {
+        let before = agent.session.pending_prompts.len();
+        agent
+            .session
+            .pending_prompts
+            .retain(|queued| queued.id != delegation_queue_id);
+        agent.session.pending_prompts.len() != before
+    });
+
+    let prompt_id = (!removed_unsent_queue_row)
+        .then(|| {
+            effects.iter().find_map(|e| match e {
+                Effect::SendPrompt {
+                    prompt_id,
+                    text: effect_text,
+                    agent_id: eff_agent,
+                    session_id: eff_session,
+                    ..
+                } if *eff_agent == agent_id
+                    && eff_session.0.as_ref() == bound_session.as_str()
+                    && effect_text == &delegation_text =>
+                {
+                    Some(prompt_id.clone())
+                }
+                _ => None,
+            })
         })
+        .flatten()
         .filter(|pid| !pid.is_empty());
 
     let prompt_id = match prompt_id {
         Some(pid) => pid,
         None => {
-            // Prompt was not accepted — mark terminal and send an explicit
-            // failure completion so the Live model is not left waiting. No
-            // delegation is registered, so no untracked work remains.
-            app.live_runtime
-                .mark_delegation_terminal(generation, &delegation_id);
-            app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
-                delegation_id: delegation_id.clone(),
-                text: crate::live::prompts::wrap_agent_final_message(
-                    "Delegation failed: prompt was not accepted",
-                ),
-            });
+            // Prompt was not accepted. The exact queue-id rollback above has
+            // already removed any local delegation row while preserving all
+            // user work, so it is safe to report terminal failure.
+            reject_delegation_submit(
+                app,
+                generation,
+                &delegation_id,
+                "Delegation failed: prompt was not accepted",
+            );
             // Restore the composer images before returning (no draft restore
             // runs on this path, so reattach directly).
-            if !stashed_images.is_empty() {
-                if let Some(agent) = app.agents.get_mut(&agent_id) {
-                    agent.prompt.set_images(stashed_images);
-                }
+            if !stashed_images.is_empty()
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent.prompt.set_images(stashed_images);
             }
             return effects;
         }
@@ -347,10 +422,10 @@ pub(super) fn dispatch_live_delegation_submit(
     // Reattach the composer images AFTER the draft restore. The delegation
     // path never owns the user's images; restoring here guarantees the user's
     // draft images survive the delegation regardless of the draft snapshot.
-    if !stashed_images.is_empty() {
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.prompt.set_images(stashed_images);
-        }
+    if !stashed_images.is_empty()
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+    {
+        agent.prompt.set_images(stashed_images);
     }
 
     effects

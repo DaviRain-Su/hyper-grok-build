@@ -76,6 +76,11 @@ rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"
 # env vars below for those platforms.
 # See: https://github.com/tikv/jemallocator/issues/122
 [env]
+# `audiopus_sys` otherwise prefers a host pkg-config result even with its
+# `static` feature. Force the pinned bundled Opus source so normal and release
+# builds use the same ABI/license payload on every supported target.
+LIBOPUS_NO_PKG = "1"
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 SYSTEM_DEPS_DAV1D_BUILD_INTERNAL = "auto"
 AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"

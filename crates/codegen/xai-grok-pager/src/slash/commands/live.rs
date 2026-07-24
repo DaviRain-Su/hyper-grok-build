@@ -14,7 +14,7 @@
 //! `/voice` subscription tier.
 
 use crate::app::actions::Action;
-use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand};
 
 /// `/live` — toggle the Codex Live voice session.
 pub struct LiveCommand;
@@ -30,6 +30,13 @@ impl SlashCommand for LiveCommand {
 
     fn usage(&self) -> &str {
         "/live"
+    }
+
+    /// Hide the experimental command from completion when policy disables it.
+    /// Directly typed invocations still reach the dispatch-layer gate and are
+    /// a silent no-op, so a stale suggestion cannot bypass the kill switch.
+    fn visible(&self, _ctx: &AppCtx) -> bool {
+        crate::live::state::live_enabled()
     }
 
     /// Session-scoped: requires an agent screen with a bound ACP session.

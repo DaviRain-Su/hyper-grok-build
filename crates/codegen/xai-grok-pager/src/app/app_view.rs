@@ -1179,10 +1179,6 @@ pub struct AppView {
     /// feature is enabled.
     #[cfg(feature = "codex-live")]
     pub live_runtime: crate::live::state::LiveRuntime,
-    /// Codex Live event receiver (bounded), polled in the event loop's
-    /// lowest-priority arm. `None` when no Live session is active.
-    #[cfg(feature = "codex-live")]
-    pub live_event_rx: Option<tokio::sync::mpsc::Receiver<crate::live::LiveEvent>>,
     /// The Codex Live gate (resolved at startup). When false, `/live` is a
     /// silent no-op.
     #[cfg(feature = "codex-live")]
@@ -1578,8 +1574,6 @@ impl AppView {
             #[cfg(feature = "codex-live")]
             live_runtime: crate::live::state::LiveRuntime::default(),
             #[cfg(feature = "codex-live")]
-            live_event_rx: None,
-            #[cfg(feature = "codex-live")]
             live_mode_enabled: false,
         }
     }
@@ -1920,8 +1914,10 @@ impl AppView {
     /// Hard teardown of the Live session: send Shutdown, drop the channel,
     /// reset state, forget delegations. Idempotent.
     pub fn live_reset(&mut self) {
+        // OMP finalizes any transient spoken-assistant transcript when Live
+        // stops, even if no `turn.done` arrived before disconnect/teardown.
+        crate::live::handle::finish_live_assistant_transcript(self);
         self.live_runtime.teardown();
-        self.live_event_rx = None;
     }
     #[cfg(feature = "codex-live")]
     /// Send a best-effort command into the Live pipeline (no-op if not up).
@@ -1946,7 +1942,7 @@ impl AppView {
     /// Sync the Live gate into slash surfaces.
     pub fn apply_live_mode_enabled(&mut self, enabled: bool) {
         self.live_mode_enabled = enabled;
-        crate::live::state::set_live_enabled_for_test(enabled);
+        crate::live::state::set_live_enabled(enabled);
     }
     /// Esc handling shared by the agent and dashboard surfaces: while voice is
     /// active, Esc aborts it (and consumes the key) rather than falling into the
@@ -2740,33 +2736,22 @@ impl AppView {
                     return outcome;
                 }
                 // Codex Live keyboard: Space toggles mute, Esc/Ctrl+C stops.
-                // This is placed AFTER voice_esc_outcome and modal handling
-                // (import_claude_modal, permission modals) so those take
-                // precedence. The agent's own modal/permission/AskUserQuestion
-                // handling inside `handle_input` also takes precedence because
-                // those modal checks run before key dispatch in the agent's
-                // input handler — BUT we need to check Live BEFORE the agent's
-                // input handler would consume Space/Esc for the prompt editor.
-                // So we intercept here, but only when Live is active and bound
-                // to this agent (no modal/permission/AskUserQuestion pending).
+                // This runs after app-level modal/voice handling but before the
+                // ordinary agent composer can consume Space/Esc. The agent-owned
+                // overlay predicate below yields to every modal, plan/question
+                // flow, viewer, and focused overlay layered above the composer.
                 #[cfg(feature = "codex-live")]
                 if self.live_active()
                     && let Event::Key(key) = ev
                     && key.kind == KeyEventKind::Press
                 {
-                    // Only intercept when the bound agent is the active one
-                    // and no agent-level modal/permission/AskUserQuestion
-                    // is pending. We check the agent's modal state to
-                    // respect higher-priority modal handling.
-                    let agent_modal_active = self.agents.get(&id).is_some_and(|a| {
-                        a.active_modal.is_some()
-                            || a.permission_queue.front().is_some()
-                            || a.question_view.is_some()
-                            || a.cancel_turn_view.is_some()
-                            || a.rewind_state.is_some()
-                            || a.jump_state.is_some()
-                    });
-                    if !agent_modal_active {
+                    // Respect every agent-level input owner before treating
+                    // these keys as Live controls.
+                    let agent_overlay_active = self
+                        .agents
+                        .get(&id)
+                        .is_some_and(|agent| agent.live_key_intercept_blocked());
+                    if !agent_overlay_active {
                         if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
                             return InputOutcome::Action(Action::LiveToggleMute);
                         }
@@ -5190,6 +5175,12 @@ impl AppView {
         let mut needs_redraw = false;
         needs_redraw |= self.minimal_state.transcript.is_some();
         needs_redraw |= self.poll_clipboard_focus_tip();
+        #[cfg(feature = "codex-live")]
+        if self.live_active() && self.live_runtime.visualizer.peak_decay > 0.0 {
+            let before = self.live_runtime.visualizer.peak_decay;
+            self.live_runtime.visualizer.decay_peak(0.88);
+            needs_redraw |= self.live_runtime.visualizer.peak_decay != before;
+        }
         if matches!(self.active_view, ActiveView::Welcome) {
             self.welcome_tick = self.welcome_tick.wrapping_add(1);
             if let Some(expires_at) = self.welcome_toast.as_ref().map(|(_, at)| *at) {
@@ -5539,6 +5530,10 @@ impl AppView {
             return TickDemand::Fast;
         }
         if self.voice_listening() {
+            return TickDemand::Fast;
+        }
+        #[cfg(feature = "codex-live")]
+        if self.live_active() && self.live_runtime.visualizer.peak_decay > 0.0 {
             return TickDemand::Fast;
         }
         if self.session_picker_content_loading {
@@ -5997,8 +5992,6 @@ pub(crate) mod tests {
             #[cfg(feature = "codex-live")]
             live_runtime: crate::live::state::LiveRuntime::default(),
             #[cfg(feature = "codex-live")]
-            live_event_rx: None,
-            #[cfg(feature = "codex-live")]
             live_mode_enabled: false,
         }
     }
@@ -6282,6 +6275,73 @@ pub(crate) mod tests {
             "release builds must not request animation ticks just because \
              tracing_rx exists (always true after startup)"
         );
+    }
+    #[cfg(feature = "codex-live")]
+    #[test]
+    fn live_peak_decay_arms_then_releases_animation_ticks() {
+        let mut app = test_app_with_agent();
+        let agent_id = super::super::agent::AgentId(0);
+        app.live_runtime.state = crate::live::state::LiveState::Active {
+            agent_id,
+            session_id: "test-session".to_string(),
+            generation: 1,
+            draft: crate::live::state::DraftSnapshot::default(),
+        };
+        app.live_runtime.visualizer.peak_decay = 0.8;
+
+        assert!(app.needs_animation());
+        let before = app.live_runtime.visualizer.peak_decay;
+        assert!(app.tick());
+        assert!(app.live_runtime.visualizer.peak_decay < before);
+
+        for _ in 0..128 {
+            app.tick();
+        }
+        assert_eq!(app.live_runtime.visualizer.peak_decay, 0.0);
+        assert!(
+            !app.needs_animation(),
+            "a silent Live session must not keep the 30 fps clock armed"
+        );
+    }
+    #[cfg(feature = "codex-live")]
+    #[test]
+    fn plan_approval_keeps_space_and_esc_priority_over_live_controls() {
+        let mut app = test_app_with_agent();
+        let agent_id = super::super::agent::AgentId(0);
+        app.live_runtime.state = crate::live::state::LiveState::Active {
+            agent_id,
+            session_id: "test-session".to_string(),
+            generation: 1,
+            draft: crate::live::state::DraftSnapshot::default(),
+        };
+
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "plan-call".into(),
+            plan_content: Some("# Plan\n\n- verify Live input priority".into()),
+        };
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let mut plan = crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt::default(),
+            response_tx,
+        );
+        plan.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
+        let agent = app.agents.get_mut(&agent_id).unwrap();
+        agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
+        agent.plan_approval_view = Some(plan);
+
+        let space = app.handle_input(&key_event(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(
+            matches!(space, InputOutcome::Changed),
+            "plan approval should consume Space, got {space:?}"
+        );
+        assert_eq!(app.agents[&agent_id].prompt.text(), " ");
+        assert!(app.live_active(), "Space must not stop the Live session");
+
+        let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(esc, InputOutcome::Changed));
+        assert!(app.live_active(), "Esc must stay owned by plan approval");
     }
     #[test]
     fn needs_animation_gates_prompt_history_tick_delivery() {
