@@ -149,29 +149,59 @@ impl CodexLiveTransport {
 
     async fn connect_inner(&mut self) -> Result<(), String> {
         let (peer, media_rx) = LiveMediaPeer::new();
-        // Forward media events to the callbacks while we set up signaling.
-        // Media failures are propagated as LiveServerEvent::Error so the
-        // session receives exactly one Error event and tears down — matching
-        // OMP's #handlePeerFailure → #reportFailure → callbacks.onEvent({type:
-        // "error", message}).
+        // Subscribe to the peer's lifecycle signal watch *before* any media
+        // callback can fire (create_offer installs peer/data-channel callbacks
+        // that may report failures). The media-forward task races this watch
+        // against the bounded event channel so a media failure is surfaced as
+        // a `LiveServerEvent::Error` (→ the session's fatal watch) even when
+        // the event queue is saturated with control events — the watch is the
+        // authoritative, non-sheddable failure path.
+        let mut signal_rx = peer.subscribe_signals();
         let callbacks = Arc::clone(&self.callbacks);
         let media_forward = tokio::spawn(async move {
-            while let Ok(event) = media_rx.recv_async().await {
-                match event {
-                    MediaEvent::Event(payload) => {
-                        if let Some(ev) = parse_live_server_event(&payload) {
-                            callbacks.on_event(ev);
+            loop {
+                tokio::select! {
+                    biased;
+                    // Authoritative failure path: the peer published
+                    // `PeerSignal::Failed` via its non-sheddable watch. This
+                    // fires regardless of event-channel state, so a media
+                    // failure is never silently lost when the bounded event
+                    // queue is saturated with control events.
+                    res = signal_rx.changed() => {
+                        if res.is_err() {
+                            // Sender dropped (peer torn down). Exit quietly.
+                            break;
+                        }
+                        if let super::media::PeerSignal::Failed(msg) =
+                            signal_rx.borrow().clone()
+                        {
+                            callbacks.on_event(LiveServerEvent::Error { message: msg });
+                            break;
                         }
                     }
-                    MediaEvent::OutputLevel(level) => callbacks.on_output_level(level),
-                    MediaEvent::Failure(msg) => {
-                        // Propagate the media failure as an Error event exactly
-                        // once. The peer is already closing; the session's
-                        // error handler will emit Error → Closing → Closed.
-                        callbacks.on_event(LiveServerEvent::Error { message: msg });
-                        // The media-forward task ends here; the peer's own
-                        // close() handles resource teardown.
-                        break;
+                    event = media_rx.recv_async() => {
+                        let Ok(event) = event else { break; };
+                        match event {
+                            MediaEvent::Event(payload) => {
+                                if let Some(ev) = parse_live_server_event(&payload) {
+                                    callbacks.on_event(ev);
+                                }
+                            }
+                            MediaEvent::OutputLevel(level) => {
+                                callbacks.on_output_level(level)
+                            }
+                            MediaEvent::Failure(msg) => {
+                                // In-band failure. The peer's non-sheddable
+                                // watch is the authoritative path; this is
+                                // belt-and-suspenders. Either way exactly one
+                                // Error reaches the session's fatal watch
+                                // (the callback's `report_fatal` is once-only).
+                                callbacks.on_event(LiveServerEvent::Error {
+                                    message: msg,
+                                });
+                                break;
+                            }
+                        }
                     }
                 }
             }

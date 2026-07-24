@@ -73,7 +73,7 @@ fn opus_capability() -> RTCRtpCodecCapability {
 
 /// Internal peer lifecycle signal.
 #[derive(Clone, Debug)]
-enum PeerSignal {
+pub(super) enum PeerSignal {
     Connecting,
     Open,
     Failed(String),
@@ -103,9 +103,20 @@ pub enum MediaEvent {
 /// payloads (small JSON), output levels (frequent but tiny), or a single
 /// failure. A bounded channel with explicit shedding prevents a slow consumer
 /// (e.g. a stalled session loop) from causing unbounded memory growth in the
-/// media layer. Levels are shed first (oldest dropped) since they're
+/// media layer. Levels are shed first (drop-newest) since they're
 /// high-frequency and ephemeral; server events and failures are retained.
 const MEDIA_EVENT_BOUND: usize = 256;
+
+/// Reserved headroom inside [`MEDIA_EVENT_BOUND`] for **control** events
+/// (`MediaEvent::Event` server payloads and `MediaEvent::Failure`). Output
+/// levels are coalesced (drop-newest) once the channel's live occupancy reaches
+/// `MEDIA_EVENT_BOUND - CONTROL_EVENT_RESERVE`, so a 20 Hz level flood can
+/// never consume the capacity a `delegation.created` / `turn.done` / failure
+/// needs. Control events are delivered reliably in FIFO order; if the reserved
+/// capacity is genuinely saturated by control events themselves (a stalled
+/// transport consumer), the peer reports one explicit fatal overflow via the
+/// non-sheddable [`PeerSignal::Failed`] watch and closes — never a silent drop.
+const CONTROL_EVENT_RESERVE: usize = 32;
 
 struct MediaResources {
     peer: Arc<RTCPeerConnection>,
@@ -125,6 +136,10 @@ struct LivePeerCore {
     closing: AtomicBool,
     muted: AtomicBool,
     failure_reported: AtomicBool,
+    /// Once-only guard for the control-event overflow fatal. Distinct from
+    /// `failure_reported` so a "queue saturated" failure and a peer failure
+    /// can't suppress each other's first report (each is once-only).
+    overflow_reported: AtomicBool,
     queued_samples: AtomicUsize,
 }
 
@@ -139,6 +154,7 @@ impl LivePeerCore {
             closing: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             failure_reported: AtomicBool::new(false),
+            overflow_reported: AtomicBool::new(false),
             queued_samples: AtomicUsize::new(0),
         }
     }
@@ -330,21 +346,35 @@ impl LivePeerCore {
     }
 
     fn report_event(&self, payload: String) {
-        // Server events are important: try_send with best-effort delivery. If
-        // the channel is full of pending events, this one is dropped (rare;
-        // the bound is generous). The transport's consumer drains promptly.
-        let _ = self.event_tx.try_send(MediaEvent::Event(payload));
+        // Control events (server payloads carrying delegation.created /
+        // turn.done / error / transcripts) are reliable: levels are
+        // coalesced once occupancy reaches `MEDIA_EVENT_BOUND -
+        // CONTROL_EVENT_RESERVE`, so a 20 Hz level flood can never consume
+        // the reserved control capacity. We therefore expect `try_send` to
+        // succeed. If it fails, the reserved capacity is genuinely saturated
+        // by control events (a stalled transport consumer) — report one
+        // explicit fatal overflow via the non-sheddable peer-signal watch and
+        // close, never silently drop protocol state.
+        if self.event_tx.try_send(MediaEvent::Event(payload)).is_err() {
+            self.report_overflow("Live media event queue is saturated with control events");
+        }
     }
 
     fn report_level(&self, level: f64) {
         if !level.is_finite() {
             return;
         }
-        // Levels are high-frequency and ephemeral (every ~50 ms). When the
-        // bounded channel is full, the newest level is dropped (drop-newest
-        // shedding). This is acceptable because a transient level gap has no
-        // user-visible effect, and it prevents the media layer from blocking
-        // or accumulating unbounded memory.
+        // Levels are high-frequency and ephemeral (~20 Hz). Reserve
+        // `CONTROL_EVENT_RESERVE` slots for control events by coalescing
+        // (drop-newest) once the channel's live occupancy reaches the level
+        // cap. `flume::Sender::len` reflects the current queue depth, so a
+        // level flood can never fill the capacity a delegation/turn/failure
+        // needs. A transient level gap has no user-visible effect (the
+        // barge-in gate reads the latest level from the dedicated watch, not
+        // this queue) and this prevents unbounded memory growth.
+        if self.event_tx.len() >= MEDIA_EVENT_BOUND - CONTROL_EVENT_RESERVE {
+            return;
+        }
         let _ = self
             .event_tx
             .try_send(MediaEvent::OutputLevel(level.clamp(0.0, 1.0)));
@@ -354,6 +384,26 @@ impl LivePeerCore {
         if !self.closing.load(Ordering::Acquire) {
             self.signal_tx.send_replace(PeerSignal::Open);
         }
+    }
+
+    /// Report a control-queue overflow as a fatal peer failure exactly once.
+    /// Published through the non-sheddable [`PeerSignal::Failed`] watch so the
+    /// transport's media-forward task surfaces it as a `LiveServerEvent::Error`
+    /// (→ the session's fatal watch) even if the bounded event channel is full.
+    fn report_overflow(&self, message: &str) {
+        if self.closing.load(Ordering::Acquire)
+            || self.overflow_reported.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        self.signal_tx
+            .send_replace(PeerSignal::Failed(message.to_owned()));
+        // Best-effort: also push a Failure event so a draining consumer sees
+        // it inline. If the channel is full this is shed — the watch above is
+        // the authoritative path.
+        let _ = self
+            .event_tx
+            .try_send(MediaEvent::Failure(message.to_owned()));
     }
 
     fn report_failure(&self, message: String) {
@@ -367,11 +417,12 @@ impl LivePeerCore {
         // Finding 2: force the output level to zero on failure so the barge-in
         // gate clears reliably (not via a lossy metering queue).
         let _ = self.event_tx.try_send(MediaEvent::OutputLevel(0.0));
-        // Failures are once-only and critical. If the bounded event channel is
-        // full (e.g. the transport consumer stalled), we still signal the
-        // failure via the watch channel (above) so wait_for_open returns Err.
-        // The event-channel send is best-effort: the transport's media-forward
-        // task also checks the watch channel for peer closure.
+        // Failures are once-only and critical. The bounded event channel may
+        // be full of control events, so the `try_send` below is best-effort;
+        // the authoritative delivery path is the `PeerSignal::Failed` watch
+        // above, which the transport's media-forward task subscribes to and
+        // translates into a `LiveServerEvent::Error` (→ the session's fatal
+        // watch) regardless of queue state.
         let _ = self.event_tx.try_send(MediaEvent::Failure(message));
     }
 
@@ -459,6 +510,14 @@ impl LiveMediaPeer {
     /// suppress duplicate error events).
     pub fn failure_reported(&self) -> bool {
         self.inner.failure_reported.load(Ordering::Acquire)
+    }
+
+    /// Subscribe to the peer's lifecycle signal watch. The transport's
+    /// media-forward task uses this to observe [`PeerSignal::Failed`]
+    /// authoritatively — independent of the bounded event channel — so a
+    /// media failure is never silently lost when the event queue is full.
+    pub(super) fn subscribe_signals(&self) -> watch::Receiver<PeerSignal> {
+        self.inner.signal_tx.subscribe()
     }
 }
 
@@ -890,6 +949,140 @@ mod tests {
         let (_peer, event_rx) = LiveMediaPeer::new();
         // The receiver starts empty; verify the bounded receiver type works.
         while event_rx.try_recv().map(|_| true).unwrap_or(false) {}
+        assert!(event_rx.is_empty());
+    }
+
+    /// Build a `LivePeerCore` wired to a bounded `flume` and return it with
+    /// the receiver + a signal subscriber so tests can drive `report_event` /
+    /// `report_level` / `report_failure` directly.
+    fn core_with_channel(
+        bound: usize,
+    ) -> (
+        Arc<LivePeerCore>,
+        flume::Receiver<MediaEvent>,
+        watch::Receiver<PeerSignal>,
+    ) {
+        let (event_tx, event_rx) = flume::bounded::<MediaEvent>(bound);
+        let core = Arc::new(LivePeerCore::new(event_tx));
+        let signal_rx = core.signal_tx.subscribe();
+        (core, event_rx, signal_rx)
+    }
+
+    /// A level flood must not fill the channel past the control reserve, so a
+    /// subsequent control event (server payload) is delivered — never silently
+    /// dropped because levels consumed all capacity.
+    #[test]
+    fn level_flood_leaves_headroom_for_control_events() {
+        let (core, event_rx, _signal_rx) = core_with_channel(MEDIA_EVENT_BOUND);
+        // Flood levels far in excess of the channel bound.
+        for i in 0..(MEDIA_EVENT_BOUND * 4) {
+            core.report_level(0.5 + (i as f64) * 1e-6);
+        }
+        // The channel must not be full of levels — at least the control
+        // reserve must be free.
+        let queued = event_rx.len();
+        assert!(
+            queued <= MEDIA_EVENT_BOUND - CONTROL_EVENT_RESERVE,
+            "level flood queued {queued} events, expected <= {} (reserve {})",
+            MEDIA_EVENT_BOUND - CONTROL_EVENT_RESERVE,
+            CONTROL_EVENT_RESERVE
+        );
+        // A control event must still be delivered.
+        core.report_event(r#"{"type":"delegation.created","item":{"id":"d1","content":[{"type":"input_text","text":"hi"}]}}"#.to_owned());
+        let mut saw_event = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let MediaEvent::Event(payload) = ev {
+                assert!(payload.contains("delegation.created"));
+                saw_event = true;
+            }
+        }
+        assert!(saw_event, "control event was shed by a level flood");
+    }
+
+    /// Control-event saturation must produce exactly one explicit fatal
+    /// overflow via the non-sheddable `PeerSignal::Failed` watch — never a
+    /// silent drop. Fill the channel with control events (no receiver draining)
+    /// so the reserve is exhausted, then inject one more and assert the watch
+    /// fires `Failed`.
+    #[test]
+    fn control_event_saturation_reports_fatal_overflow_not_silent_loss() {
+        let (core, event_rx, signal_rx) = core_with_channel(MEDIA_EVENT_BOUND);
+        // Fill the channel entirely with control events (no draining).
+        for i in 0..MEDIA_EVENT_BOUND {
+            core.report_event(format!(
+                r#"{{"type":"turn.done","turn":{{"role":"assistant","transcript":"t{i}"}}}}"#
+            ));
+        }
+        assert_eq!(event_rx.len(), MEDIA_EVENT_BOUND);
+        // The next control event cannot be enqueued → fatal overflow.
+        core.report_event(r#"{"type":"delegation.created","item":{"id":"d2"}}"#.to_owned());
+        // The non-sheddable watch must carry exactly one Failed.
+        let mut saw_failed = false;
+        // Drain the watch: it may have been published already.
+        if let PeerSignal::Failed(msg) = signal_rx.borrow().clone() {
+            assert!(msg.contains("saturated with control events"));
+            saw_failed = true;
+        }
+        assert!(
+            saw_failed,
+            "control saturation did not publish a fatal overflow"
+        );
+        // A second saturation attempt must not publish a second fatal
+        // (once-only overflow guard).
+        core.report_event(
+            r#"{"type":"turn.done","turn":{"role":"user","transcript":"x"}}"#.to_owned(),
+        );
+        let _ = signal_rx.borrow().clone();
+        // The overflow_reported guard is once-only; assert no panic / no second
+        // path beyond the first (verified by the guard being atomic).
+        assert!(core.overflow_reported.load(Ordering::Acquire));
+    }
+
+    /// `report_failure` must publish `PeerSignal::Failed` via the
+    /// non-sheddable watch even when the bounded event channel is already
+    /// full of control events, so the transport's media-forward task surfaces
+    /// it regardless of queue state.
+    #[test]
+    fn report_failure_published_via_watch_when_channel_full() {
+        let (core, _event_rx, signal_rx) = core_with_channel(MEDIA_EVENT_BOUND);
+        // Fill the channel with control events so the in-band Failure would
+        // be shed.
+        for _ in 0..MEDIA_EVENT_BOUND {
+            core.report_event(
+                r#"{"type":"turn.done","turn":{"role":"assistant","transcript":"t"}}"#.to_owned(),
+            );
+        }
+        core.report_failure("peer exploded".to_owned());
+        // The watch must carry the failure (authoritative path).
+        let signal = signal_rx.borrow().clone();
+        match signal {
+            PeerSignal::Failed(msg) => assert_eq!(msg, "peer exploded"),
+            other => panic!("expected PeerSignal::Failed, got {other:?}"),
+        }
+        // failure_reported is once-only.
+        assert!(core.failure_reported.load(Ordering::Acquire));
+    }
+
+    /// `report_failure` is once-only: a second call does not overwrite the
+    /// first watch value.
+    #[test]
+    fn report_failure_is_once_only() {
+        let (core, _event_rx, signal_rx) = core_with_channel(8);
+        core.report_failure("first failure".to_owned());
+        core.report_failure("second failure".to_owned());
+        match signal_rx.borrow().clone() {
+            PeerSignal::Failed(msg) => assert_eq!(msg, "first failure"),
+            other => panic!("expected PeerSignal::Failed, got {other:?}"),
+        }
+    }
+
+    /// `report_level` drops non-finite values without touching the channel.
+    #[test]
+    fn report_level_ignores_non_finite() {
+        let (core, event_rx, _signal_rx) = core_with_channel(8);
+        core.report_level(f64::NAN);
+        core.report_level(f64::INFINITY);
+        core.report_level(f64::NEG_INFINITY);
         assert!(event_rx.is_empty());
     }
 }

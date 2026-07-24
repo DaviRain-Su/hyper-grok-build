@@ -150,12 +150,25 @@ pub(super) fn server_event_to_live_event(event: LiveServerEvent) -> Option<LiveE
 
 /// Adapter that turns transport callbacks into events on an mpsc sender.
 ///
-/// Non-level events (transcript, delegation, turn) are forwarded to
-/// `event_tx` (the pager-facing channel) via best-effort `try_send`. Output
-/// levels are written to a dedicated `watch::Sender<f64>` (`output_level_tx`)
-/// so the session's barge-in gate always reads the **latest** level directly
-/// from shared state — never a stale value from a lossy queue. The latest level
-/// is also forwarded to the pager as a lossy `LiveEvent::Levels` for meter UI.
+/// Control events — `Delegation` (`delegation.created`) and `Turn`
+/// (`turn.done`) — are delivered **reliably and in order** to `event_tx` (the
+/// pager-facing channel). `Transcript` deltas are coalesced/shed under pressure
+/// (a missing intermediate delta is recoverable; the final `turn.done` carries
+/// the full transcript). Output levels are written to a dedicated
+/// `watch::Sender<f64>` (`output_level_tx`) so the session's barge-in gate
+/// always reads the **latest** level directly from shared state — never a stale
+/// value from a lossy queue — and the latest level is also forwarded to the
+/// pager as a lossy `LiveEvent::Levels` for meter UI.
+///
+/// # Queue headroom (no silent control loss)
+/// Levels and transcript deltas are coalesced (drop-newest) once the pager
+/// channel's available capacity drops to [`CALLBACK_CONTROL_RESERVE`], so a
+/// 20 Hz level/transcript flood can never consume the capacity a delegation or
+/// final turn needs. If a control event's `try_send` nevertheless fails (the
+/// reserved capacity is genuinely saturated by control events — a stalled
+/// pager consumer), the sink publishes one explicit fatal overflow via the
+/// non-sheddable `fatal_tx` watch and the session closes — never a silent drop
+/// of protocol state.
 ///
 /// **Critical (fatal) events** are delivered through a dedicated
 /// `watch::Sender<Option<LiveEvent>>` (`fatal_tx`) guarded by an
@@ -179,21 +192,52 @@ pub(super) struct CallbackSink {
     pub fatal_tx: watch::Sender<Option<LiveEvent>>,
     /// Guards `fatal_tx` so only the first fatal event is published.
     fatal_reported: Arc<AtomicBool>,
+    /// Reserved headroom (in slots) in `event_tx` for control events. Levels
+    /// and transcript deltas are coalesced once the channel's available
+    /// capacity drops to this many slots. Production uses
+    /// [`CALLBACK_CONTROL_RESERVE`]; tests may pass a smaller value.
+    control_reserve: usize,
 }
+
+/// Reserved headroom in the pager-facing `event_tx` channel for **control**
+/// events (`Delegation`, `Turn`). Output levels and `Transcript` deltas are
+/// coalesced once the channel's available capacity drops to this many slots,
+/// so a level/transcript flood can never consume the capacity a delegation or
+/// final turn needs. Sized for the pager's 128-slot channel.
+pub(super) const CALLBACK_CONTROL_RESERVE: usize = 32;
 
 impl CallbackSink {
     /// Build a sink from the pager-facing `event_tx`. The caller retains the
-    /// `watch::Receiver`s for the session loop.
+    /// `watch::Receiver`s for the session loop. Uses the production
+    /// [`CALLBACK_CONTROL_RESERVE`] headroom.
     pub fn new(
         event_tx: mpsc::Sender<LiveEvent>,
         output_level_tx: watch::Sender<f64>,
         fatal_tx: watch::Sender<Option<LiveEvent>>,
+    ) -> Self {
+        Self::with_reserve(
+            event_tx,
+            output_level_tx,
+            fatal_tx,
+            CALLBACK_CONTROL_RESERVE,
+        )
+    }
+
+    /// Build a sink with an explicit control-event reserve (for tests with
+    /// small channels). Production should use [`CallbackSink::new`].
+    #[allow(dead_code)]
+    pub fn with_reserve(
+        event_tx: mpsc::Sender<LiveEvent>,
+        output_level_tx: watch::Sender<f64>,
+        fatal_tx: watch::Sender<Option<LiveEvent>>,
+        control_reserve: usize,
     ) -> Self {
         Self {
             event_tx,
             output_level_tx,
             fatal_tx,
             fatal_reported: Arc::new(AtomicBool::new(false)),
+            control_reserve,
         }
     }
 
@@ -212,35 +256,86 @@ impl CallbackSink {
     pub fn fatal_reported(&self) -> bool {
         self.fatal_reported.load(Ordering::Acquire)
     }
+
+    /// Deliver a **control** event (`Delegation`, `Turn`) reliably and in
+    /// order. Levels and transcript deltas are coalesced before they can fill
+    /// [`CALLBACK_CONTROL_RESERVE`] headroom, so this normally succeeds. If
+    /// the reserved capacity is genuinely saturated by control events (a
+    /// stalled pager consumer) or the receiver is gone, publish one explicit
+    /// fatal overflow via the non-sheddable `fatal_tx` watch so the session
+    /// closes — never a silent drop of protocol state.
+    fn send_control(&self, event: LiveEvent) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.event_tx.try_send(event.clone()) {
+            self.report_fatal(LiveEvent::Error {
+                message:
+                    "Live event queue is saturated with control events; closing to avoid silent protocol loss"
+                        .to_owned(),
+            });
+        }
+        // `TrySendError::Closed(_)` is ignored — the session is shutting down
+        // and a control event during teardown is not a protocol-correctness
+        // violation (the fatal watch, if not already set, is published by the
+        // session's own close path).
+    }
+
+    /// Forward a **sheddable** event (`Transcript` delta, `Levels`) with
+    /// drop-newest coalescing. Reserves `control_reserve` headroom for control
+    /// events: once the pager channel's available capacity drops to the
+    /// reserve, the event is dropped rather than consuming a control slot. The
+    /// reliable state (e.g. the level `watch`) is unaffected.
+    fn send_sheddable(&self, event: LiveEvent) {
+        // `mpsc::Sender::capacity` returns the number of messages the channel
+        // can currently accept. Keep at least `control_reserve` slots free for
+        // control events. A reserve >= the channel capacity sheds all
+        // sheddable events (used by tests that want only control traffic).
+        if self.event_tx.capacity() <= self.control_reserve {
+            return;
+        }
+        let _ = self.event_tx.try_send(event);
+    }
 }
 
 impl super::transport::LiveTransportCallbacks for CallbackSink {
     fn on_event(&self, event: LiveServerEvent) {
-        if let Some(live_event) = server_event_to_live_event(event.clone()) {
-            // Critical (Error) events are NOT forwarded to event_tx here —
-            // the session emits exactly one awaited Error itself after
-            // receiving the fatal watch signal. Forwarding here would risk
-            // duplicate or shed errors.
-            if matches!(live_event, LiveEvent::Error { .. }) {
-                self.report_fatal(live_event);
-                return;
+        if let Some(live_event) = server_event_to_live_event(event) {
+            match live_event {
+                // Critical (Error) events are NOT forwarded to event_tx here —
+                // the session emits exactly one awaited Error itself after
+                // receiving the fatal watch signal. Forwarding here would
+                // risk duplicate or shed errors.
+                LiveEvent::Error { .. } => {
+                    self.report_fatal(live_event);
+                }
+                // Control events (Delegation, Turn) are reliable and in order;
+                // a saturated control queue becomes one explicit fatal overflow.
+                LiveEvent::Delegation { .. } | LiveEvent::Turn { .. } => {
+                    self.send_control(live_event);
+                }
+                // Transcript deltas and levels are coalesced under pressure.
+                LiveEvent::Transcript { .. } | LiveEvent::Levels(_) => {
+                    self.send_sheddable(live_event);
+                }
+                // Phase/Closed are emitted by the session itself; a callback
+                // never produces them. Defensive: treat as sheddable.
+                LiveEvent::Phase(_) | LiveEvent::Closed => {
+                    self.send_sheddable(live_event);
+                }
             }
-            // Non-critical events (transcript, delegation, turn): best-effort.
-            // If the receiver is gone the session is shutting down.
-            let _ = self.event_tx.try_send(live_event);
         }
     }
 
     fn on_output_level(&self, level: f64) {
         // Write the latest level to the shared watch state (reliable for the
-        // barge-in gate) and forward a lossy meter event to the pager.
+        // barge-in gate) and forward a lossy, coalesced meter event to the
+        // pager. The watch is authoritative; the queued event is best-effort
+        // and never consumes control-event headroom.
         let clamped = if level.is_finite() && level >= 0.0 {
             level.min(1.0)
         } else {
             0.0
         };
         let _ = self.output_level_tx.send(clamped);
-        let _ = self.event_tx.try_send(LiveEvent::Levels(clamped));
+        self.send_sheddable(LiveEvent::Levels(clamped));
     }
 }
 
@@ -259,7 +354,9 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (output_level_tx, output_level_rx) = watch::channel(0.0);
         let (fatal_tx, fatal_rx) = watch::channel(None);
-        let sink = CallbackSink::new(event_tx, output_level_tx, fatal_tx);
+        // Use a small reserve so sheddable events (transcript/levels) still
+        // flow in these unit tests while control headroom remains protected.
+        let sink = CallbackSink::with_reserve(event_tx, output_level_tx, fatal_tx, 4);
         (sink, event_rx, output_level_rx, fatal_rx)
     }
 
@@ -350,5 +447,189 @@ mod tests {
         assert!(sink.fatal_reported());
         // Re-check with explicit load to verify ordering.
         assert!(sink.fatal_reported.load(Ordering::Acquire));
+    }
+
+    /// Build a sink with an explicit channel bound + control reserve, for the
+    /// reliability tests below.
+    fn make_sink_with(
+        bound: usize,
+        reserve: usize,
+    ) -> (
+        CallbackSink,
+        mpsc::Receiver<LiveEvent>,
+        watch::Receiver<f64>,
+        watch::Receiver<Option<LiveEvent>>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(bound);
+        let (output_level_tx, output_level_rx) = watch::channel(0.0);
+        let (fatal_tx, fatal_rx) = watch::channel(None);
+        let sink = CallbackSink::with_reserve(event_tx, output_level_tx, fatal_tx, reserve);
+        (sink, event_rx, output_level_rx, fatal_rx)
+    }
+
+    /// A delegation (`delegation.created`) arriving after a level flood must
+    /// be delivered — the level flood cannot consume the reserved control
+    /// headroom. The receiver is not drained during the flood.
+    #[tokio::test]
+    async fn level_flood_cannot_consume_delegation_slot() {
+        // Channel of 16, reserve of 8: levels stop at 8 queued, leaving 8 for
+        // control.
+        let (sink, mut event_rx, _level_rx, fatal_rx) = make_sink_with(16, 8);
+        // Flood levels well past the bound.
+        for i in 0..256 {
+            sink.on_output_level(0.1 + (i as f64) * 1e-4);
+        }
+        // Now inject a delegation — it must arrive (reliable control path).
+        sink.on_event(LiveServerEvent::DelegationCreated {
+            id: "del-1".into(),
+            content: vec![super::super::protocol::LiveInputTextContent::input_text(
+                "do work",
+            )],
+        });
+        // Drain: the delegation must be present. Levels may have been coalesced.
+        let mut saw_delegation = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let LiveEvent::Delegation { id, .. } = ev {
+                assert_eq!(id, "del-1");
+                saw_delegation = true;
+            }
+        }
+        assert!(saw_delegation, "delegation was shed by a level flood");
+        // No fatal should have been published (no control saturation).
+        assert!(fatal_rx.borrow().is_none());
+    }
+
+    /// A final turn (`turn.done`) arriving after a transcript delta flood
+    /// must be delivered reliably; transcript deltas may be coalesced but the
+    /// final turn is never silently dropped.
+    #[tokio::test]
+    async fn final_turn_survives_transcript_flood() {
+        let (sink, mut event_rx, _level_rx, fatal_rx) = make_sink_with(16, 8);
+        // Flood transcript deltas.
+        for i in 0..256 {
+            sink.on_event(LiveServerEvent::TranscriptAdded {
+                kind: super::super::protocol::TranscriptKind::Output,
+                text: format!("delta-{i}"),
+            });
+        }
+        // Inject the final turn.
+        sink.on_event(LiveServerEvent::TurnDone {
+            role: super::super::protocol::LiveRole::Assistant,
+            transcript: "final answer".into(),
+        });
+        let mut saw_turn = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let LiveEvent::Turn { transcript, .. } = ev {
+                assert_eq!(transcript, "final answer");
+                saw_turn = true;
+            }
+        }
+        assert!(saw_turn, "final turn was shed by a transcript flood");
+        assert!(fatal_rx.borrow().is_none());
+    }
+
+    /// When the control-event queue is genuinely saturated by control events
+    /// (a stalled pager consumer), a further delegation must publish one
+    /// explicit fatal overflow via the non-sheddable `fatal_tx` watch — never
+    /// a silent drop. Transcript deltas under the same saturation are shed
+    /// silently (coalesced), not fatal.
+    #[tokio::test]
+    async fn control_saturation_reports_fatal_overflow_not_silent_loss() {
+        // Channel of 4, reserve of 2: control fills the 4 slots, then a 5th
+        // control event saturates the reserve.
+        let (sink, event_rx, _level_rx, fatal_rx) = make_sink_with(4, 2);
+        // Fill all 4 slots with control events (no draining).
+        for i in 0..4 {
+            sink.on_event(LiveServerEvent::TurnDone {
+                role: super::super::protocol::LiveRole::User,
+                transcript: format!("t{i}"),
+            });
+        }
+        assert_eq!(event_rx.len(), 4);
+        // A transcript delta under saturation is coalesced (shed), not fatal.
+        sink.on_event(LiveServerEvent::TranscriptAdded {
+            kind: super::super::protocol::TranscriptKind::Input,
+            text: "shed me".into(),
+        });
+        assert!(
+            fatal_rx.borrow().is_none(),
+            "transcript shedding must not be fatal"
+        );
+        // A fifth control event must trigger the fatal overflow.
+        sink.on_event(LiveServerEvent::DelegationCreated {
+            id: "del-fatal".into(),
+            content: vec![super::super::protocol::LiveInputTextContent::input_text(
+                "x",
+            )],
+        });
+        let published = fatal_rx.borrow().clone();
+        match published {
+            Some(LiveEvent::Error { message }) => {
+                assert!(
+                    message.contains("saturated with control events"),
+                    "unexpected fatal message: {message}"
+                );
+            }
+            other => panic!("expected fatal overflow, got {other:?}"),
+        }
+    }
+
+    /// Levels and transcripts are coalesced once the reserve is reached: they
+    /// never consume the final `reserve` slots, leaving them for control.
+    #[tokio::test]
+    async fn sheddable_events_stop_at_reserve_boundary() {
+        // Channel of 8, reserve of 4: sheddable events stop at 4 queued.
+        let (sink, event_rx, _level_rx, _fatal_rx) = make_sink_with(8, 4);
+        for i in 0..64 {
+            sink.on_output_level(0.3 + (i as f64) * 1e-4);
+        }
+        assert!(
+            event_rx.len() <= 4,
+            "level flood queued {} events, expected <= 4 (reserve boundary)",
+            event_rx.len()
+        );
+        // The reliable watch still carries the latest level.
+        // (Verified in on_output_level_updates_watch_and_forwards_lossy_event.)
+    }
+
+    /// `report_fatal` is once-only: a second control-saturation does not
+    /// publish a second fatal (and does not clear the watch).
+    #[tokio::test]
+    async fn control_saturation_fatal_is_once_only() {
+        // Channel of 2: two control events fill it; the third saturates.
+        let (sink, _event_rx, _level_rx, fatal_rx) = make_sink_with(2, 1);
+        sink.on_event(LiveServerEvent::DelegationCreated {
+            id: "d1".into(),
+            content: vec![],
+        });
+        sink.on_event(LiveServerEvent::DelegationCreated {
+            id: "d2".into(),
+            content: vec![],
+        });
+        // No fatal yet (channel full but not overflowing).
+        assert!(
+            fatal_rx.borrow().is_none(),
+            "fatal published before saturation"
+        );
+        // Third control event saturates → fatal.
+        sink.on_event(LiveServerEvent::TurnDone {
+            role: super::super::protocol::LiveRole::Assistant,
+            transcript: "t".into(),
+        });
+        let first = fatal_rx.borrow().clone();
+        assert!(
+            matches!(first, Some(LiveEvent::Error { .. })),
+            "saturation did not publish a fatal"
+        );
+        // A fourth control event must not clear/replace the fatal (once-only).
+        sink.on_event(LiveServerEvent::TurnDone {
+            role: super::super::protocol::LiveRole::User,
+            transcript: "t2".into(),
+        });
+        let second = fatal_rx.borrow().clone();
+        assert!(
+            matches!(second, Some(LiveEvent::Error { .. })),
+            "fatal watch was cleared by a second saturation"
+        );
     }
 }

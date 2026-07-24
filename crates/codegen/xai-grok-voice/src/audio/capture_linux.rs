@@ -218,9 +218,7 @@ fn spawn_recorder(sample_rate: u32) -> Result<(Recorder, Child), VoiceError> {
         Ok(child) => Ok((recorder, child)),
         Err(err) if recorder == Recorder::PwRecord && args.iter().any(|a| a == "--raw") => {
             if stderr_rejects_raw_flag(err_message(&err)) {
-                tracing::warn!(
-                    "pw-record rejected --raw; retrying without it (older PipeWire)"
-                );
+                tracing::warn!("pw-record rejected --raw; retrying without it (older PipeWire)");
                 let fallback = Recorder::pw_record_args(sample_rate, false);
                 spawn_recorder_with_args(recorder, &fallback).map(|child| (recorder, child))
             } else {
@@ -250,10 +248,7 @@ fn stderr_rejects_raw_flag(msg: &str) -> bool {
             || msg.contains("无效的选项"))
 }
 
-fn spawn_recorder_with_args(
-    recorder: Recorder,
-    args: &[String],
-) -> Result<Child, VoiceError> {
+fn spawn_recorder_with_args(recorder: Recorder, args: &[String]) -> Result<Child, VoiceError> {
     let mut cmd = Command::new(recorder.program());
     cmd.args(args)
         .stdin(Stdio::null())
