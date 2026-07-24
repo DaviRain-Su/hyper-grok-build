@@ -1060,6 +1060,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
          - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
+         - Brief the subagent like a colleague who just walked into the room: state the goal, what you've already tried, and hand over exact file paths and line numbers — don't delegate understanding. Once a subagent owns a scope, let it finish; don't redo its searches in parallel.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.{oracle_section}\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
@@ -1500,6 +1501,8 @@ mod tests {
         assert!(desc.contains("same failure persists"), "{desc}");
         assert!(desc.contains("review your approach"), "{desc}");
         assert!(desc.contains("Verification Handoff"), "{desc}");
+        // Briefing craft (phistory absorption): no delegated understanding.
+        assert!(desc.contains("don't delegate understanding"), "{desc}");
 
         // Without an oracle in the roster the section must disappear (other
         // products sharing this builder may not ship one).
