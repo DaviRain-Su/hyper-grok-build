@@ -25,11 +25,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, client_async};
 
 use super::attestation::generate_codex_attestation;
 use super::media::{LiveMediaPeer, MediaEvent};
@@ -240,12 +243,11 @@ impl CodexLiveTransport {
             "session": build_live_session_payload(&self.config.instructions, &self.config.voice),
         });
 
-        let client = build_reqwest_client(self.config.sideband_base.as_deref()).map_err(|e| {
-            LiveSignalingError {
+        let client =
+            build_reqwest_client(&self.config.codex_base).map_err(|e| LiveSignalingError {
                 status: 0,
                 message: format!("failed to build signaling client: {e}"),
-            }
-        })?;
+            })?;
 
         let mut headers = reqwest::header::HeaderMap::new();
         apply_session_headers(
@@ -343,13 +345,14 @@ impl CodexLiveTransport {
         call_id: &str,
         attestation: &Option<String>,
     ) -> Result<(), String> {
-        let url = build_live_sideband_url_with_base(call_id, self.config.sideband_base.as_deref());
+        let url_str =
+            build_live_sideband_url_with_base(call_id, self.config.sideband_base.as_deref());
         let auth =
             self.auth.bearer_account().await.ok_or_else(|| {
                 "No Codex credential is available for the live sideband.".to_string()
             })?;
 
-        let mut request = url
+        let mut request = url_str
             .as_str()
             .into_client_request()
             .map_err(|e| format!("sideband request: {e}"))?;
@@ -361,23 +364,50 @@ impl CodexLiveTransport {
             attestation.as_deref(),
         );
 
-        // tokio-tungstenite does not read env proxies; the transport resolves
-        // the proxy URL itself (mirroring the shell's resolve_proxy_for_host)
-        // and reqwest handles it for signaling. The sideband wss connection
-        // does not yet apply the resolved proxy (tokio-tungstenite lacks
-        // built-in proxy support); this is a known platform gap documented in
-        // the module comments.
-        let _ = resolve_sideband_proxy(self.config.sideband_base.as_deref());
-        let connect = tokio::time::timeout(
-            SIDEBAND_CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(request),
-        )
-        .await
-        .map_err(|_| "Codex live sideband connection timed out".to_string())?
-        .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
+        // Parse the sideband URL to get the target host and port.
+        let sideband_url =
+            url::Url::parse(&url_str).map_err(|e| format!("invalid sideband URL: {e}"))?;
+        let target_host = sideband_url
+            .host_str()
+            .ok_or_else(|| "sideband URL has no host".to_string())?;
+        let target_port = sideband_url.port_or_known_default().unwrap_or(443);
 
-        let (ws, _) = connect;
-        let (mut ws_write, mut ws_read) = ws.split();
+        // Resolve the proxy for the sideband host (from sideband_base or
+        // default api.openai.com). If a proxy is configured and not bypassed
+        // by NO_PROXY, open a CONNECT tunnel; otherwise connect directly.
+        let sideband_host = sideband_host(self.config.sideband_base.as_deref());
+        let proxy_url = resolve_proxy_for_host(&sideband_host);
+
+        let ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>> =
+            if let Some(proxy_url) = proxy_url {
+                // CONNECT tunnel through the proxy, then TLS.
+                let tunnel = open_connect_tunnel(&proxy_url, target_host, target_port)
+                    .await
+                    .map_err(|e| format!("sideband proxy CONNECT failed: {e}"))?;
+                let tls_stream = tls_wrap(tunnel, target_host)
+                    .await
+                    .map_err(|e| format!("sideband proxy TLS handshake failed: {e}"))?;
+                let (ws, _resp) = tokio::time::timeout(
+                    SIDEBAND_CONNECT_TIMEOUT,
+                    client_async(request, MaybeTlsStream::Rustls(tls_stream)),
+                )
+                .await
+                .map_err(|_| "Codex live sideband connection timed out".to_string())?
+                .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
+                ws
+            } else {
+                // Direct connection (no proxy).
+                let connect = tokio::time::timeout(
+                    SIDEBAND_CONNECT_TIMEOUT,
+                    tokio_tungstenite::connect_async(request),
+                )
+                .await
+                .map_err(|_| "Codex live sideband connection timed out".to_string())?
+                .map_err(|e| format!("Codex live sideband connection failed: {e}"))?;
+                connect.0
+            };
+
+        let (mut ws_write, mut ws_read) = ws_stream.split();
 
         let (sideband_tx, mut sideband_rx) = mpsc::channel::<String>(64);
         self.sideband_tx = Some(sideband_tx);
@@ -610,17 +640,15 @@ fn apply_session_headers_ws(
     }
 }
 
-/// Build a reqwest client that honors standard HTTP proxy / NO_PROXY env vars.
-/// reqwest's default builder reads `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when
-/// a `Proxy` is configured; we resolve the proxy ourselves (mirroring the
-/// shell's `resolve_proxy_for_host`) and attach it so signaling naturally
-/// honors the environment without a dependency on the shell crate (avoiding a
-/// cycle). The proxy host is derived from the sideband base (or the default
-/// `api.openai.com`) so NO_PROXY matches the actual target.
-fn build_reqwest_client(sideband_base: Option<&str>) -> Result<reqwest::Client, reqwest::Error> {
+/// Build a reqwest client that honors standard HTTP proxy / NO_PROXY env vars
+/// for the **signaling** endpoint. The proxy host is derived from `codex_base`
+/// so NO_PROXY matches the actual signaling target. reqwest reads
+/// `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` when a `Proxy` is configured.
+fn build_reqwest_client(codex_base: &str) -> Result<reqwest::Client, reqwest::Error> {
     let mut builder =
         reqwest::Client::builder().user_agent(format!("Codex Desktop/{}", "xai-grok-voice"));
-    if let Some(proxy_url) = resolve_sideband_proxy(sideband_base)
+    let signaling_host = url_host(codex_base);
+    if let Some(proxy_url) = resolve_proxy_for_host(&signaling_host)
         && let Ok(proxy) = reqwest::Proxy::all(&proxy_url)
     {
         builder = builder.proxy(proxy);
@@ -628,21 +656,15 @@ fn build_reqwest_client(sideband_base: Option<&str>) -> Result<reqwest::Client, 
     builder.build()
 }
 
-/// Resolve the proxy URL for the sideband/signaling from the standard env vars
-/// (HTTPS_PROXY > HTTP_PROXY), respecting NO_PROXY for the sideband host. The
-/// target host is derived from `sideband_base` (if set) or defaults to
-/// `api.openai.com`. This duplicates the shell's `resolve_proxy_for_host`
-/// logic inline rather than depending on the shell crate (which would create a
-/// dependency cycle: shell → voice → shell). The signaling reqwest client
-/// honors it natively; the sideband wss connection uses tokio-tungstenite,
-/// which does not read env proxies — the resolved proxy URL is available for
-/// future sideband proxy support but is not yet wired into the wss connect.
-fn resolve_sideband_proxy(sideband_base: Option<&str>) -> Option<String> {
-    let target_host = sideband_host(sideband_base);
+/// Resolve the proxy URL for a given target host from the standard env vars
+/// (HTTPS_PROXY > HTTP_PROXY), respecting NO_PROXY. This is the same logic as
+/// `xai-grok-shell::agent::proxy::resolve_proxy_for_host`, duplicated inline to
+/// avoid a dependency cycle (shell → voice → shell).
+fn resolve_proxy_for_host(target_host: &str) -> Option<String> {
     let no_proxy = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default();
-    if is_host_bypassed(&target_host, &no_proxy) {
+    if is_host_bypassed(target_host, &no_proxy) {
         return None;
     }
     if let Ok(url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")) {
@@ -660,27 +682,156 @@ fn resolve_sideband_proxy(sideband_base: Option<&str>) -> Option<String> {
     None
 }
 
+/// Extract the host (lowercased, without scheme/path/port) from a URL string.
+/// Used to derive the NO_PROXY target for the signaling endpoint.
+fn url_host(url: &str) -> String {
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("wss://"))
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or(url);
+    after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        // Strip port if present.
+        .split(':')
+        .next()
+        .unwrap_or(after_scheme)
+        .to_ascii_lowercase()
+}
+
 /// Derive the target host for NO_PROXY matching from the sideband base URL
 /// (or the default `api.openai.com`). Strips the scheme and path, keeping only
-/// the host[:port].
+/// the host (without port, for NO_PROXY suffix matching).
 fn sideband_host(sideband_base: Option<&str>) -> String {
     let base = sideband_base
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.trim())
         .unwrap_or("https://api.openai.com/v1/live/");
-    // Strip scheme.
-    let after_scheme = base
-        .strip_prefix("wss://")
-        .or_else(|| base.strip_prefix("ws://"))
-        .or_else(|| base.strip_prefix("https://"))
-        .or_else(|| base.strip_prefix("http://"))
-        .unwrap_or(base);
-    // Take everything before the first '/' (the path).
-    after_scheme
-        .split('/')
-        .next()
-        .unwrap_or("api.openai.com")
-        .to_ascii_lowercase()
+    url_host(base)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP CONNECT proxy tunnel for the sideband WebSocket
+// ---------------------------------------------------------------------------
+
+/// Lazily-initialized TLS client configuration using webpki root certificates
+/// (matching tokio-tungstenite's `rustls-tls-webpki-roots` backend).
+static TLS_CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+
+fn get_tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    // OnceLock::get_or_init always succeeds.
+    Ok(TLS_CONFIG
+        .get_or_init(|| {
+            let mut root_store = rustls::RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            Arc::new(config)
+        })
+        .clone())
+}
+
+/// Perform a TLS handshake over an existing TCP stream using rustls with
+/// webpki root certificates.
+async fn tls_wrap(
+    stream: TcpStream,
+    server_name: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
+    let tls_config = get_tls_config().map_err(|e| format!("TLS config: {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
+    let dns_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(|e| format!("invalid TLS server name '{server_name}': {e}"))?;
+    connector
+        .connect(dns_name, stream)
+        .await
+        .map_err(|e| format!("TLS handshake failed: {e}"))
+}
+
+/// Open a raw TCP tunnel through an HTTP CONNECT proxy. Sends
+/// `CONNECT host:port HTTP/1.1` and verifies a 200 response. Returns the
+/// `TcpStream` positioned after the CONNECT response headers.
+async fn open_connect_tunnel(
+    proxy_url: &str,
+    target_host: &str,
+    target_port: u16,
+) -> Result<TcpStream, String> {
+    let (proxy_host, proxy_port) =
+        parse_proxy_url(proxy_url).map_err(|e| format!("invalid proxy URL '{proxy_url}': {e}"))?;
+
+    let proxy_addr = format!("{proxy_host}:{proxy_port}");
+    let stream = TcpStream::connect(&proxy_addr)
+        .await
+        .map_err(|e| format!("failed to connect to proxy at {proxy_addr}: {e}"))?;
+
+    let connect_req = format!(
+        "CONNECT {target_host}:{target_port} HTTP/1.1\r\n\
+         Host: {target_host}:{target_port}\r\n\
+         \r\n"
+    );
+    let (reader_half, mut writer_half) = stream.into_split();
+    writer_half
+        .write_all(connect_req.as_bytes())
+        .await
+        .map_err(|e| format!("proxy CONNECT write failed: {e}"))?;
+    writer_half
+        .flush()
+        .await
+        .map_err(|e| format!("proxy CONNECT flush failed: {e}"))?;
+
+    let mut reader = BufReader::new(reader_half);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .await
+        .map_err(|e| format!("proxy CONNECT read failed: {e}"))?;
+    if !status_line.starts_with("HTTP/1.1 200") && !status_line.starts_with("HTTP/1.0 200") {
+        return Err(format!("proxy CONNECT failed: {}", status_line.trim()));
+    }
+    // Consume remaining response headers.
+    loop {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("proxy CONNECT header read failed: {e}"))?;
+        if line.trim().is_empty() {
+            break;
+        }
+    }
+    // Assert the BufReader's internal buffer is empty before reuniting.
+    let remaining = reader.buffer();
+    if !remaining.is_empty() {
+        return Err(format!(
+            "proxy sent {} unexpected byte(s) after CONNECT response headers",
+            remaining.len()
+        ));
+    }
+    reader
+        .into_inner()
+        .reunite(writer_half)
+        .map_err(|e| format!("proxy stream reunite failed: {e}"))
+}
+
+/// Parse a proxy URL into (host, port). Accepted formats: `http://host:port`,
+/// `http://host` (defaults to 80), `host:port`.
+fn parse_proxy_url(url: &str) -> Result<(String, u16), String> {
+    let without_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if let Some((host, port_str)) = authority.rsplit_once(':') {
+        let port: u16 = port_str
+            .parse()
+            .map_err(|_| format!("invalid proxy port in '{url}'"))?;
+        Ok((host.to_string(), port))
+    } else {
+        Ok((authority.to_string(), 80))
+    }
 }
 
 /// Check whether `host` is in the `no_proxy` list (matches the shell helper).
@@ -718,21 +869,216 @@ fn sdp_answer_is_valid(body: &str) -> bool {
     trimmed.starts_with("v=0") || trimmed.starts_with("v= 0")
 }
 
-/// Normalize an error response body into a single bounded line. Never logs the
-/// full body wholesale beyond the cap; matches OMP `boundedErrorBody`. The cap
-/// is applied on a UTF-8 char boundary so a multibyte char at the boundary is
-/// never split (which would panic on byte-slicing).
+/// Normalize an error response body into a single bounded, **redacted** line.
+/// Strips bearer tokens, session secrets, cookies, and URLs with userinfo
+/// before surfacing. Never logs the full body wholesale beyond the cap.
+///
+/// Redaction is conservative: any substring matching common secret patterns
+/// (`Bearer ...`, `token=...`, `cookie: ...`, `session_id=...`, etc.) is
+/// replaced with `[REDACTED]`. URLs containing userinfo (`user:pass@host`) are
+/// also redacted. After redaction the body is whitespace-collapsed and
+/// truncated to `MAX_ERROR_BODY_LENGTH` chars.
 fn bounded_error_body(body: &str, status: u16) -> String {
-    let normalized: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = redact_secrets(body);
+    let normalized: String = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
         return format!("HTTP {status}");
     }
     if normalized.chars().count() <= MAX_ERROR_BODY_LENGTH {
         return normalized;
     }
-    // Truncate at a char boundary just before the cap.
     let truncated: String = normalized.chars().take(MAX_ERROR_BODY_LENGTH).collect();
     format!("{truncated}…")
+}
+
+/// Redact secret-bearing substrings from a response body. Replaces:
+/// - `Bearer <token>` → `Bearer [REDACTED]`
+/// - `token=<value>` / `access_token=<value>` → `token=[REDACTED]`
+/// - `cookie:<value>` / `Cookie: <value>` → `Cookie: [REDACTED]`
+/// - `session_id=<value>` / `session-id: <value>` → `session_id=[REDACTED]`
+/// - `password=<value>` / `passwd=<value>` → `password=[REDACTED]`
+/// - URLs with userinfo: `https://user:pass@host` → `https://[REDACTED]@host`
+///
+/// This is intentionally conservative — it's better to over-redact than to
+/// leak a credential. The patterns are case-insensitive.
+fn redact_secrets(body: &str) -> String {
+    // Work on bytes/chars to avoid regex catastrophic backtracking and to keep
+    // the scan single-pass and bounded. We build the output incrementally so we
+    // never re-scan already-redacted text (which would risk infinite loops).
+    let lower = body.to_ascii_lowercase();
+    let bytes = body.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0usize;
+
+    let secret_keys: &[&str] = &[
+        "access_token",
+        "refresh_token",
+        "token",
+        "session_id",
+        "session-id",
+        "password",
+        "passwd",
+        "secret",
+        "api_key",
+        "apikey",
+        "credential",
+        "authorization",
+    ];
+
+    let schemes: &[&str] = &["https://", "http://", "wss://", "ws://"];
+
+    while i < n {
+        // --- Bearer token: "Bearer " + non-ws token ---
+        if lower[i..].starts_with("bearer ") {
+            out.push_str(&body[i..i + 7]);
+            let mut j = i + 7;
+            while j < n && !bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j > i + 7 {
+                out.push_str("[REDACTED]");
+            }
+            i = j;
+            continue;
+        }
+
+        // --- Cookie header: "cookie:" up to newline ---
+        if lower[i..].starts_with("cookie:") {
+            out.push_str(&body[i..i + 7]);
+            let mut j = i + 7;
+            while j < n && bytes[j] != b'\n' {
+                j += 1;
+            }
+            out.push_str(" [REDACTED]");
+            i = j;
+            continue;
+        }
+
+        // --- key=value / key: value / "key":"value" / "key": "value" for known secret keys ---
+        // Detect a word boundary before the key (allow a leading quote).
+        let at_word_boundary =
+            i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
+        if at_word_boundary {
+            // Optionally consume a leading double-quote for JSON-style keys.
+            let key_pos = if bytes[i] == b'"' { i + 1 } else { i };
+            if let Some((key_len, sep_len, _had_quote)) =
+                match_secret_key(&lower, key_pos, secret_keys)
+            {
+                let value_start = key_pos + key_len + sep_len;
+                // Emit the quote + key + separator from original text.
+                out.push_str(&body[i..value_start]);
+                // If the value begins with a double-quote (JSON string),
+                // skip it and scan until the closing quote; otherwise scan
+                // until whitespace / , / } / ".
+                let mut j = value_start;
+                let value_quoted = j < n && bytes[j] == b'"';
+                if value_quoted {
+                    j += 1; // skip opening quote
+                    let val_begin = j;
+                    while j < n && bytes[j] != b'"' {
+                        j += 1;
+                    }
+                    if j > val_begin {
+                        out.push('"');
+                        out.push_str("[REDACTED]");
+                        if j < n {
+                            out.push('"');
+                            j += 1; // skip closing quote
+                        }
+                    } else {
+                        // empty string value
+                        out.push('"');
+                        if j < n {
+                            out.push('"');
+                            j += 1;
+                        }
+                    }
+                } else {
+                    let val_begin = j;
+                    while j < n
+                        && !bytes[j].is_ascii_whitespace()
+                        && bytes[j] != b','
+                        && bytes[j] != b'}'
+                        && bytes[j] != b'"'
+                    {
+                        j += 1;
+                    }
+                    if j > val_begin {
+                        out.push_str("[REDACTED]");
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        // --- URL with userinfo: scheme://user:pass@host → scheme://[REDACTED]@host ---
+        if let Some(scheme) = schemes.iter().find(|s| lower[i..].starts_with(*s)) {
+            let after_scheme = i + scheme.len();
+            // Find next '/' or end within the authority.
+            let mut slash = after_scheme;
+            while slash < n && bytes[slash] != b'/' {
+                slash += 1;
+            }
+            // Look for '@' in the authority.
+            let mut at = None;
+            let mut k = after_scheme;
+            while k < slash {
+                if bytes[k] == b'@' {
+                    at = Some(k);
+                    break;
+                }
+                k += 1;
+            }
+            if let Some(at_pos) = at {
+                out.push_str(scheme);
+                out.push_str("[REDACTED]");
+                i = at_pos; // keep the '@' and host in output
+                continue;
+            }
+            // No userinfo — emit the scheme and continue scanning the rest.
+            out.push_str(scheme);
+            i = after_scheme;
+            continue;
+        }
+
+        // Default: copy one UTF-8 character. We only branch above on ASCII
+        // prefixes, so non-ASCII bytes fall through here. Copy the whole char
+        // to avoid splitting multi-byte sequences.
+        let rest = &body[i..];
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
+}
+
+/// If `s[pos..]` (already lowercased) starts with one of `keys` followed by a
+/// recognized separator, returns `(key_len, sep_len, had_quote)`. Recognized
+/// separators: `=`, `: ` (colon-space), `":` (JSON `"key":value`),
+/// `": ` (JSON `"key": value`). `had_quote` indicates the JSON quoted form.
+fn match_secret_key(s: &str, pos: usize, keys: &[&str]) -> Option<(usize, usize, bool)> {
+    let rest = &s[pos..];
+    for key in keys {
+        if let Some(after) = rest.strip_prefix(key) {
+            if after.starts_with('=') {
+                return Some((key.len(), 1, false));
+            }
+            if after.starts_with(": ") {
+                return Some((key.len(), 2, false));
+            }
+            // JSON quoted form: key immediately followed by `"` then `:` or `": `.
+            if after.starts_with("\":") {
+                if after.starts_with("\": ") {
+                    return Some((key.len(), 3, true));
+                }
+                return Some((key.len(), 2, true));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -820,7 +1166,7 @@ mod tests {
         );
         assert_eq!(
             sideband_host(Some("wss://proxy.corp.net:8443/live")),
-            "proxy.corp.net:8443"
+            "proxy.corp.net"
         );
     }
 
@@ -830,5 +1176,123 @@ mod tests {
             sideband_host(Some("https://api.staging.openai.com/v1/live")),
             "api.staging.openai.com"
         );
+    }
+
+    #[test]
+    fn url_host_extracts_from_codex_base() {
+        assert_eq!(url_host("https://chatgpt.com/backend-api"), "chatgpt.com");
+        assert_eq!(
+            url_host("https://api.staging.openai.com/v1/live"),
+            "api.staging.openai.com"
+        );
+    }
+
+    #[test]
+    fn parse_proxy_url_extracts_host_and_port() {
+        let (host, port) = parse_proxy_url("http://proxy.example.com:3128").unwrap();
+        assert_eq!(host, "proxy.example.com");
+        assert_eq!(port, 3128);
+    }
+
+    #[test]
+    fn parse_proxy_url_defaults_port_to_80() {
+        let (host, port) = parse_proxy_url("http://proxy.example.com").unwrap();
+        assert_eq!(host, "proxy.example.com");
+        assert_eq!(port, 80);
+    }
+
+    // --- Error body redaction tests (finding 8) ---
+
+    #[test]
+    fn redact_bearer_token_from_error_body() {
+        let body = r#"{"error":"Authorization failed","header":"Bearer sk-abc123secret"}"#;
+        let redacted = redact_secrets(body);
+        assert!(
+            !redacted.contains("sk-abc123secret"),
+            "bearer token must be redacted: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_token_key_value_from_error_body() {
+        let body = r#"{"error":"bad token","token":"sk-secret-value-123"}"#;
+        let redacted = redact_secrets(body);
+        assert!(
+            !redacted.contains("sk-secret-value-123"),
+            "token value must be redacted: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_session_id_from_error_body() {
+        let body = "session_id=abc123secret&other=data";
+        let redacted = redact_secrets(body);
+        assert!(
+            !redacted.contains("abc123secret"),
+            "session_id must be redacted: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_password_from_error_body() {
+        let body = "password=hunter2&user=admin";
+        let redacted = redact_secrets(body);
+        assert!(
+            !redacted.contains("hunter2"),
+            "password must be redacted: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_with_userinfo() {
+        let body = "Failed to connect to https://admin:secret@internal.example.com/api";
+        let redacted = redact_secrets(body);
+        assert!(
+            !redacted.contains("admin:secret"),
+            "URL userinfo must be redacted: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]@internal.example.com"));
+    }
+
+    #[test]
+    fn redact_cookie_header() {
+        let body = "Cookie: session=secret123; token=abc\nNext line";
+        let redacted = redact_secrets(body);
+        assert!(
+            !redacted.contains("secret123"),
+            "cookie value must be redacted: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_multiple_secrets_in_one_body() {
+        let body = r#"{"token":"tok123","password":"pw456","session_id":"sid789"}"#;
+        let redacted = redact_secrets(body);
+        assert!(!redacted.contains("tok123"));
+        assert!(!redacted.contains("pw456"));
+        assert!(!redacted.contains("sid789"));
+    }
+
+    #[test]
+    fn redact_preserves_non_secret_content() {
+        let body = "Internal server error: database connection refused";
+        let redacted = redact_secrets(body);
+        assert_eq!(redacted, body);
+    }
+
+    #[test]
+    fn bounded_error_body_redacts_secrets_before_truncation() {
+        let body = format!(
+            "Bearer {} {}",
+            "sk-super-secret-token",
+            "x".repeat(MAX_ERROR_BODY_LENGTH * 2)
+        );
+        let out = bounded_error_body(&body, 500);
+        assert!(
+            !out.contains("sk-super-secret-token"),
+            "secret must be redacted even when body is truncated: {out}"
+        );
+        assert!(out.contains("[REDACTED]"));
     }
 }

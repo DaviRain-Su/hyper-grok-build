@@ -43,6 +43,14 @@ flume = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["rustls-tls", "json"] }
 opus = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
+# TLS connector for the sideband WebSocket CONNECT proxy tunnel (rustls with
+# webpki roots, matching tokio-tungstenite's TLS backend). Only pulled in by
+# `live` so `--no-default-features` and `--features audio` link none of them.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+], optional = true }
+webpki-roots = { version = "1.0", optional = true }
 uuid = { workspace = true, optional = true }
 webrtc = { workspace = true, optional = true }
 
@@ -68,7 +76,7 @@ audio = ["dep:cpal"]
 # neither. When this feature is off the `live` module is absent and the pager's
 # `codex-live` feature compiles to test doubles (see `cfg(feature = "codex-live")`
 # in the pager).
-live = ["audio", "dep:audiopus_sys", "dep:base64", "dep:bytes", "dep:flume", "dep:opus", "dep:parking_lot", "dep:reqwest", "dep:uuid", "dep:webrtc"]
+live = ["audio", "dep:audiopus_sys", "dep:base64", "dep:bytes", "dep:flume", "dep:opus", "dep:parking_lot", "dep:reqwest", "dep:tokio-rustls", "dep:webpki-roots", "dep:uuid", "dep:webrtc"]
 
 # cpal is only used by the non-Linux capture backend (and the Windows live
 # speaker playback backend). Gating it to non-Linux keeps `alsa-sys` (a NEEDED

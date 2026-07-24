@@ -775,6 +775,8 @@ async fn receive_output_audio(
             Err(e) => {
                 if let Some(core) = core.upgrade() {
                     core.report_failure(format!("Failed to decode live speaker audio: {e}"));
+                    // Clear output activity so the barge-in gate resets.
+                    core.report_level(0.0);
                 }
                 return;
             }
@@ -794,6 +796,8 @@ fn write_output(
                 && !core.closing.load(Ordering::Acquire)
             {
                 core.report_failure(format!("Live speaker playback failed: {e}"));
+                // Clear output activity so the barge-in gate resets promptly.
+                core.report_level(0.0);
             }
             false
         }
@@ -877,15 +881,8 @@ mod tests {
     #[test]
     fn media_event_channel_is_bounded() {
         let (_peer, event_rx) = LiveMediaPeer::new();
-        // Fill the channel past its bound; try_send must eventually fail.
-        let mut sent = 0usize;
-        while event_rx.try_recv().map(|_| true).unwrap_or(false) {
-            sent += 1;
-        }
-        // The receiver starts empty; verify it's bounded by sending events
-        // through the core directly. We can't access event_tx from here, but
-        // we can verify the receiver type is bounded by checking that
-        // `is_empty` works (bounded and unbounded both support it).
+        // The receiver starts empty; verify the bounded receiver type works.
+        while event_rx.try_recv().map(|_| true).unwrap_or(false) {}
         assert!(event_rx.is_empty());
     }
 }

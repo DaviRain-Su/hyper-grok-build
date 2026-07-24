@@ -24,6 +24,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -113,12 +114,20 @@ pub async fn run_live_session(
     let user_muted = Arc::new(AtomicBool::new(false));
 
     // Levels flow on a dedicated internal channel so the session loop can drive
-    // the barge-in gate and forward them to the pager.
+    // the barge-in gate and forward them to the pager. This is a **lossy**
+    // channel (try_send) — levels are high-frequency and ephemeral.
     let (levels_tx, mut levels_rx) = mpsc::channel::<f64>(64);
+
+    // Critical (fatal) events from the transport/media: the session monitors
+    // this channel in its main select! and tears down deterministically when a
+    // critical event arrives. This is **not** lossy — critical events use a
+    // bounded channel with try_send but the session always drains it promptly.
+    let (critical_tx, mut critical_rx) = mpsc::channel::<LiveEvent>(8);
 
     let callbacks = Arc::new(CallbackSink {
         event_tx: event_tx.clone(),
         levels_tx,
+        critical_tx,
     });
 
     // Open mic capture concurrently with the transport connect (both take
@@ -168,7 +177,21 @@ pub async fn run_live_session(
     }
 
     if shutdown_during_connect {
-        // The connect future was dropped at scope exit. Clean up.
+        // The connect future was dropped at scope exit. We must await capture
+        // cleanup before emitting Closed — the capture task was spawned and may
+        // still be opening the mic device. Await it (with a timeout) and stop
+        // the handle if it succeeded, so the device is released.
+        let capture_result = tokio::time::timeout(Duration::from_secs(5), capture_task).await;
+        match capture_result {
+            Ok(Ok(Ok(handle))) => {
+                // Capture opened successfully — stop it to release the device.
+                handle.stop();
+            }
+            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                // Capture failed or timed out — nothing to stop. The task is
+                // dropped, which cancels it if still running (timeout case).
+            }
+        }
         transport.close().await;
         phase(LivePhase::Closed);
         let _ = event_tx.send(LiveEvent::Closed).await;
@@ -222,10 +245,24 @@ pub async fn run_live_session(
     // The session loop drives both mic-PCM forward (barge-in gated / muted) and
     // command handling. The mic PCM channel (`pcm_rx`) was filled by the
     // capture task above; capture stays open for the session's lifetime.
+    //
+    // The loop also monitors `critical_rx` for fatal transport/media errors.
+    // When a critical event arrives, the loop breaks and the shutdown path
+    // emits Error → Closing → Closed exactly once.
     let mut capture = Some(capture);
     loop {
         tokio::select! {
             biased;
+            // Critical (fatal) events from the transport/media — must not be
+            // shed. When one arrives, break the loop and tear down.
+            critical = critical_rx.recv() => {
+                if let Some(LiveEvent::Error { .. }) = critical {
+                    // A fatal error was already forwarded to event_tx by the
+                    // CallbackSink. Break the loop to tear down (Error →
+                    // Closing → Closed).
+                    break;
+                }
+            }
             // Output levels: update the barge-in gate state and forward to pager.
             level = levels_rx.recv() => {
                 if let Some(level) = level {

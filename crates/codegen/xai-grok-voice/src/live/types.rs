@@ -153,16 +153,35 @@ pub(super) fn server_event_to_live_event(event: LiveServerEvent) -> Option<LiveE
 /// `event_tx` (the pager-facing channel). Output levels are sent to a separate
 /// internal `levels_tx` so the session loop can drive the echo gate (muting the
 /// mic while the model is speaking) *and* forward the level to the pager.
+///
+/// **Critical** events (fatal errors from the media peer or sideband) are sent
+/// through `critical_tx` — a dedicated channel the session monitors in its main
+/// `select!` so it can tear down deterministically. Critical events are also
+/// forwarded to `event_tx` as `LiveEvent::Error` so the pager sees them. The
+/// `critical_tx` channel ensures the error is never shed (unlike the lossy
+/// `levels_tx` / `event_tx` `try_send` paths).
 pub(super) struct CallbackSink {
     pub event_tx: mpsc::Sender<LiveEvent>,
     pub levels_tx: mpsc::Sender<f64>,
+    /// Critical (fatal) events that the session must act on. Sent through this
+    /// channel *in addition to* `event_tx` so the session loop can detect them
+    /// and tear down. The sender is bounded(8) — enough for a few simultaneous
+    /// failures without shedding the critical one.
+    pub critical_tx: mpsc::Sender<LiveEvent>,
 }
 
 impl super::transport::LiveTransportCallbacks for CallbackSink {
     fn on_event(&self, event: LiveServerEvent) {
-        if let Some(live_event) = server_event_to_live_event(event) {
+        if let Some(live_event) = server_event_to_live_event(event.clone()) {
             // best-effort: if the receiver is gone the session is shutting down.
-            let _ = self.event_tx.try_send(live_event);
+            let _ = self.event_tx.try_send(live_event.clone());
+            // Critical events (Error) go through the dedicated critical channel
+            // so the session loop can detect them and tear down. Non-critical
+            // events (transcript, delegation, turn) are not sent here — they're
+            // informational and don't require teardown.
+            if matches!(live_event, LiveEvent::Error { .. }) {
+                let _ = self.critical_tx.try_send(live_event);
+            }
         }
     }
 
