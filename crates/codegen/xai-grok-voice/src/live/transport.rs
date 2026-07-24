@@ -34,8 +34,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use super::attestation::generate_codex_attestation;
 use super::media::{LiveMediaPeer, MediaEvent};
 use super::protocol::{
-    LiveClientMessage, LiveServerEvent, build_live_session_payload, build_live_sideband_url,
-    parse_live_call_id, parse_live_server_event,
+    LiveClientMessage, LiveServerEvent, build_live_session_payload,
+    build_live_sideband_url_with_base, parse_live_call_id, parse_live_server_event,
 };
 use super::types::{LiveAuth, LiveConfig, SharedLiveAuth};
 
@@ -92,6 +92,9 @@ pub struct CodexLiveTransport {
     sideband_tx: Option<mpsc::Sender<String>>,
     sideband_writer: Option<JoinHandle<()>>,
     sideband_reader: Option<JoinHandle<()>>,
+    /// Shared flag set by `close_inner` so the sideband reader knows the close
+    /// was deliberate and suppresses the unexpected-close error event.
+    sideband_closed_flag: Option<Arc<AtomicBool>>,
     connected: AtomicBool,
     closed: AtomicBool,
     /// Once-only 401 forced refresh: the first signaling 401 triggers a single
@@ -115,6 +118,7 @@ impl CodexLiveTransport {
             sideband_tx: None,
             sideband_writer: None,
             sideband_reader: None,
+            sideband_closed_flag: None,
             connected: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             refreshed: AtomicBool::new(false),
@@ -143,6 +147,10 @@ impl CodexLiveTransport {
     async fn connect_inner(&mut self) -> Result<(), String> {
         let (peer, media_rx) = LiveMediaPeer::new();
         // Forward media events to the callbacks while we set up signaling.
+        // Media failures are propagated as LiveServerEvent::Error so the
+        // session receives exactly one Error event and tears down — matching
+        // OMP's #handlePeerFailure → #reportFailure → callbacks.onEvent({type:
+        // "error", message}).
         let callbacks = Arc::clone(&self.callbacks);
         let media_forward = tokio::spawn(async move {
             while let Ok(event) = media_rx.recv_async().await {
@@ -153,11 +161,13 @@ impl CodexLiveTransport {
                         }
                     }
                     MediaEvent::OutputLevel(level) => callbacks.on_output_level(level),
-                    MediaEvent::Failure(_msg) => {
-                        // Failures are surfaced by the peer as an error event
-                        // via the sideband path; the transport's `close` is
-                        // driven by the session. Stop forwarding once the peer
-                        // is gone.
+                    MediaEvent::Failure(msg) => {
+                        // Propagate the media failure as an Error event exactly
+                        // once. The peer is already closing; the session's
+                        // error handler will emit Error → Closing → Closed.
+                        callbacks.on_event(LiveServerEvent::Error { message: msg });
+                        // The media-forward task ends here; the peer's own
+                        // close() handles resource teardown.
                         break;
                     }
                 }
@@ -230,9 +240,11 @@ impl CodexLiveTransport {
             "session": build_live_session_payload(&self.config.instructions, &self.config.voice),
         });
 
-        let client = build_reqwest_client().map_err(|e| LiveSignalingError {
-            status: 0,
-            message: format!("failed to build signaling client: {e}"),
+        let client = build_reqwest_client(self.config.sideband_base.as_deref()).map_err(|e| {
+            LiveSignalingError {
+                status: 0,
+                message: format!("failed to build signaling client: {e}"),
+            }
         })?;
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -272,11 +284,23 @@ impl CodexLiveTransport {
                 message: format!("Codex live signaling failed ({status}): {detail}"),
             });
         }
+        // Sanitize the SDP answer: verify it looks like an SDP body (starts
+        // with `v=0`) before returning it. A non-SDP 2xx body (e.g. an HTML
+        // interstitial or a JSON error that slipped through) is rejected so
+        // tokens/secrets in the body are never surfaced or passed to the
+        // WebRTC stack. The SDP body itself contains no secrets (it's a
+        // media description), but an unexpected body type might.
         let answer = body_text;
         if answer.trim().is_empty() {
             return Err(LiveSignalingError {
                 status,
                 message: "Codex live signaling returned an empty SDP answer".to_owned(),
+            });
+        }
+        if !sdp_answer_is_valid(&answer) {
+            return Err(LiveSignalingError {
+                status,
+                message: "Codex live signaling returned a non-SDP response body".to_owned(),
             });
         }
         let call_id =
@@ -319,7 +343,7 @@ impl CodexLiveTransport {
         call_id: &str,
         attestation: &Option<String>,
     ) -> Result<(), String> {
-        let url = build_live_sideband_url(call_id);
+        let url = build_live_sideband_url_with_base(call_id, self.config.sideband_base.as_deref());
         let auth =
             self.auth.bearer_account().await.ok_or_else(|| {
                 "No Codex credential is available for the live sideband.".to_string()
@@ -337,11 +361,13 @@ impl CodexLiveTransport {
             attestation.as_deref(),
         );
 
-        // tokio-tungstenite honors HTTP(S)_PROXY via its connector only when
-        // explicitly configured; reqwest handles env proxies for signaling.
-        // The sideband wss connection itself goes direct (or through a
-        // system-configured TLS proxy). This matches the OMP behavior where
-        // the sideband uses the resolved proxy URL.
+        // tokio-tungstenite does not read env proxies; the transport resolves
+        // the proxy URL itself (mirroring the shell's resolve_proxy_for_host)
+        // and reqwest handles it for signaling. The sideband wss connection
+        // does not yet apply the resolved proxy (tokio-tungstenite lacks
+        // built-in proxy support); this is a known platform gap documented in
+        // the module comments.
+        let _ = resolve_sideband_proxy(self.config.sideband_base.as_deref());
         let connect = tokio::time::timeout(
             SIDEBAND_CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async(request),
@@ -357,8 +383,13 @@ impl CodexLiveTransport {
         self.sideband_tx = Some(sideband_tx);
 
         let callbacks = Arc::clone(&self.callbacks);
-        let closed = self.closed.load(Ordering::Acquire);
-        let _ = closed;
+        // The transport's `closed` AtomicBool is not in an Arc, so we create a
+        // shared flag for the reader. It's set to true by `close_inner` before
+        // the reader is aborted, so if `closed` is true when the reader exits,
+        // the close was deliberate and no error event is emitted.
+        let closed_flag = Arc::new(AtomicBool::new(self.closed.load(Ordering::Acquire)));
+        let closed_flag_for_close = Arc::clone(&closed_flag);
+        let failure_reported = Arc::new(AtomicBool::new(false));
         let reader = tokio::spawn(async move {
             loop {
                 match ws_read.next().await {
@@ -373,8 +404,19 @@ impl CodexLiveTransport {
                         // Sideband is text-only; ignore binary frames.
                     }
                     Some(Ok(_)) => continue,
-                    Some(Err(_)) => break,
-                    None => break,
+                    Some(Err(_)) | None => {
+                        // Propagate sideband EOF/error as an Error event
+                        // exactly once — but only if this wasn't a deliberate
+                        // shutdown (OMP: #reportFailure checks state).
+                        if !closed_flag.load(Ordering::Acquire)
+                            && !failure_reported.swap(true, Ordering::AcqRel)
+                        {
+                            callbacks.on_event(LiveServerEvent::Error {
+                                message: "Codex live sideband closed unexpectedly".to_owned(),
+                            });
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -390,6 +432,7 @@ impl CodexLiveTransport {
 
         self.sideband_reader = Some(reader);
         self.sideband_writer = Some(writer);
+        self.sideband_closed_flag = Some(closed_flag_for_close);
         Ok(())
     }
 
@@ -438,6 +481,11 @@ impl CodexLiveTransport {
             return;
         }
         self.connected.store(false, Ordering::Release);
+        // Signal the sideband reader that this is a deliberate close so it
+        // suppresses the unexpected-close error event.
+        if let Some(flag) = self.sideband_closed_flag.take() {
+            flag.store(true, Ordering::Release);
+        }
         // Close the sideband first so no new messages are queued.
         if let Some(tx) = self.sideband_tx.take() {
             drop(tx);
@@ -462,6 +510,9 @@ impl Drop for CodexLiveTransport {
         }
         // Best-effort async teardown if we're on a runtime; otherwise the
         // peer's own Drop handles its resources.
+        if let Some(flag) = self.sideband_closed_flag.take() {
+            flag.store(true, Ordering::Release);
+        }
         if let Ok(handle) = tokio::runtime::Handle::try_current()
             && let Some(peer) = self.peer.take()
         {
@@ -564,16 +615,12 @@ fn apply_session_headers_ws(
 /// a `Proxy` is configured; we resolve the proxy ourselves (mirroring the
 /// shell's `resolve_proxy_for_host`) and attach it so signaling naturally
 /// honors the environment without a dependency on the shell crate (avoiding a
-/// cycle).
-fn build_reqwest_client() -> Result<reqwest::Client, reqwest::Error> {
+/// cycle). The proxy host is derived from the sideband base (or the default
+/// `api.openai.com`) so NO_PROXY matches the actual target.
+fn build_reqwest_client(sideband_base: Option<&str>) -> Result<reqwest::Client, reqwest::Error> {
     let mut builder =
         reqwest::Client::builder().user_agent(format!("Codex Desktop/{}", "xai-grok-voice"));
-    // Honor the standard proxy env vars. reqwest reads `HTTP_PROXY`/
-    // `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` when `Proxy::all`/`http`/`https`
-    // is added, but only if the env var is present; we add an `all` proxy
-    // derived from HTTPS_PROXY/HTTP_PROXY so the signaling POST goes through
-    // the corporate egress when configured.
-    if let Some(proxy_url) = resolve_sideband_proxy()
+    if let Some(proxy_url) = resolve_sideband_proxy(sideband_base)
         && let Ok(proxy) = reqwest::Proxy::all(&proxy_url)
     {
         builder = builder.proxy(proxy);
@@ -582,18 +629,20 @@ fn build_reqwest_client() -> Result<reqwest::Client, reqwest::Error> {
 }
 
 /// Resolve the proxy URL for the sideband/signaling from the standard env vars
-/// (HTTPS_PROXY > HTTP_PROXY), respecting NO_PROXY for the OpenAI host. This
-/// duplicates the shell's `resolve_proxy_for_host` logic inline rather than
-/// depending on the shell crate (which would create a dependency cycle:
-/// shell → voice → shell). The signaling reqwest client honors it natively;
-/// the sideband wss connection uses tokio-tungstenite, which does not read
-/// env proxies, so the transport itself must apply the resolved proxy.
-fn resolve_sideband_proxy() -> Option<String> {
-    let target_host = "api.openai.com";
+/// (HTTPS_PROXY > HTTP_PROXY), respecting NO_PROXY for the sideband host. The
+/// target host is derived from `sideband_base` (if set) or defaults to
+/// `api.openai.com`. This duplicates the shell's `resolve_proxy_for_host`
+/// logic inline rather than depending on the shell crate (which would create a
+/// dependency cycle: shell → voice → shell). The signaling reqwest client
+/// honors it natively; the sideband wss connection uses tokio-tungstenite,
+/// which does not read env proxies — the resolved proxy URL is available for
+/// future sideband proxy support but is not yet wired into the wss connect.
+fn resolve_sideband_proxy(sideband_base: Option<&str>) -> Option<String> {
+    let target_host = sideband_host(sideband_base);
     let no_proxy = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default();
-    if is_host_bypassed(target_host, &no_proxy) {
+    if is_host_bypassed(&target_host, &no_proxy) {
         return None;
     }
     if let Ok(url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")) {
@@ -609,6 +658,29 @@ fn resolve_sideband_proxy() -> Option<String> {
         }
     }
     None
+}
+
+/// Derive the target host for NO_PROXY matching from the sideband base URL
+/// (or the default `api.openai.com`). Strips the scheme and path, keeping only
+/// the host[:port].
+fn sideband_host(sideband_base: Option<&str>) -> String {
+    let base = sideband_base
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim())
+        .unwrap_or("https://api.openai.com/v1/live/");
+    // Strip scheme.
+    let after_scheme = base
+        .strip_prefix("wss://")
+        .or_else(|| base.strip_prefix("ws://"))
+        .or_else(|| base.strip_prefix("https://"))
+        .or_else(|| base.strip_prefix("http://"))
+        .unwrap_or(base);
+    // Take everything before the first '/' (the path).
+    after_scheme
+        .split('/')
+        .next()
+        .unwrap_or("api.openai.com")
+        .to_ascii_lowercase()
 }
 
 /// Check whether `host` is in the `no_proxy` list (matches the shell helper).
@@ -634,6 +706,16 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
         }
     }
     false
+}
+
+/// Validate that a response body looks like an SDP answer before returning it
+/// to the WebRTC stack. SDP bodies always start with `v=0` (per RFC 4566). A
+/// body that doesn't match is rejected so non-SDP responses (which might carry
+/// tokens or session secrets in error JSON/HTML) are never surfaced or passed
+/// to the peer connection's SDP parser.
+fn sdp_answer_is_valid(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("v=0") || trimmed.starts_with("v= 0")
 }
 
 /// Normalize an error response body into a single bounded line. Never logs the
@@ -708,5 +790,45 @@ mod tests {
         for chunk in super::super::protocol::chunk_live_context(&text) {
             assert!(chunk.len() <= 500);
         }
+    }
+
+    #[test]
+    fn sdp_answer_is_valid_accepts_standard_sdp() {
+        assert!(sdp_answer_is_valid("v=0\r\no=- 123 1 IN IP4 0.0.0.0\r\n"));
+        assert!(sdp_answer_is_valid("  v=0\n..."));
+        assert!(sdp_answer_is_valid("v= 0\r\n"));
+    }
+
+    #[test]
+    fn sdp_answer_is_valid_rejects_non_sdp() {
+        assert!(!sdp_answer_is_valid(r#"{"error":"token_secret"}"#));
+        assert!(!sdp_answer_is_valid("<html>interstitial</html>"));
+        assert!(!sdp_answer_is_valid("not an sdp"));
+        assert!(!sdp_answer_is_valid(""));
+    }
+
+    #[test]
+    fn sideband_host_derives_from_default() {
+        assert_eq!(sideband_host(None), "api.openai.com");
+    }
+
+    #[test]
+    fn sideband_host_derives_from_custom_base() {
+        assert_eq!(
+            sideband_host(Some("https://custom.example.com/v1/live/")),
+            "custom.example.com"
+        );
+        assert_eq!(
+            sideband_host(Some("wss://proxy.corp.net:8443/live")),
+            "proxy.corp.net:8443"
+        );
+    }
+
+    #[test]
+    fn sideband_host_strips_path_and_scheme() {
+        assert_eq!(
+            sideband_host(Some("https://api.staging.openai.com/v1/live")),
+            "api.staging.openai.com"
+        );
     }
 }

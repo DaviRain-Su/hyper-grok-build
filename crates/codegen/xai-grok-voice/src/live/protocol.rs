@@ -425,6 +425,15 @@ pub fn parse_live_call_id(location: Option<&str>) -> Option<String> {
 /// Build the Frameless Bidi sideband WebSocket URL for an accepted Codex call.
 /// `https://api.openai.com/v1/live/<callId>` → `wss://api.openai.com/v1/live/<callId>`.
 pub fn build_live_sideband_url(call_id: &str) -> String {
+    build_live_sideband_url_with_base(call_id, None)
+}
+
+/// Build the sideband WebSocket URL, optionally overriding the default
+/// `https://api.openai.com/v1/live/` base. When `sideband_base` is `Some`, it
+/// is used as-is (protocol upgraded to `wss:` if it's `https:`); when `None`,
+/// the default `wss://api.openai.com/v1/live/` is used. The call id is
+/// percent-encoded.
+pub fn build_live_sideband_url_with_base(call_id: &str, sideband_base: Option<&str>) -> String {
     // `encodeURIComponent` equivalent: percent-encode everything but the
     // unreserved set (A-Za-z0-9-_.~). `rtc_` ids are already in that set, so
     // this is a no-op for valid ids but stays safe for a malformed value.
@@ -439,7 +448,23 @@ pub fn build_live_sideband_url(call_id: &str) -> String {
             }
         })
         .collect();
-    format!("wss://api.openai.com/v1/live/{encoded}")
+    match sideband_base {
+        Some(base) if !base.trim().is_empty() => {
+            let base = base.trim_end_matches('/');
+            // Upgrade https: → wss:, http: → ws:; if already ws/wss keep as-is.
+            if base.starts_with("wss://") || base.starts_with("ws://") {
+                format!("{base}/{encoded}")
+            } else if let Some(stripped) = base.strip_prefix("https://") {
+                format!("wss://{stripped}/{encoded}")
+            } else if let Some(stripped) = base.strip_prefix("http://") {
+                format!("ws://{stripped}/{encoded}")
+            } else {
+                // No scheme: assume wss.
+                format!("wss://{base}/{encoded}")
+            }
+        }
+        _ => format!("wss://api.openai.com/v1/live/{encoded}"),
+    }
 }
 
 #[cfg(test)]
@@ -748,6 +773,41 @@ mod tests {
         assert_eq!(
             build_live_sideband_url("rtc a/b"),
             "wss://api.openai.com/v1/live/rtc%20a%2Fb"
+        );
+    }
+
+    #[test]
+    fn sideband_url_with_custom_base_uses_it() {
+        assert_eq!(
+            build_live_sideband_url_with_base(
+                "rtc_abc",
+                Some("https://custom.example.com/v1/live")
+            ),
+            "wss://custom.example.com/v1/live/rtc_abc"
+        );
+    }
+
+    #[test]
+    fn sideband_url_with_wss_base_keeps_scheme() {
+        assert_eq!(
+            build_live_sideband_url_with_base("rtc_abc", Some("wss://proxy.corp.net/live")),
+            "wss://proxy.corp.net/live/rtc_abc"
+        );
+    }
+
+    #[test]
+    fn sideband_url_with_none_base_uses_default() {
+        assert_eq!(
+            build_live_sideband_url_with_base("rtc_abc", None),
+            "wss://api.openai.com/v1/live/rtc_abc"
+        );
+    }
+
+    #[test]
+    fn sideband_url_with_empty_base_uses_default() {
+        assert_eq!(
+            build_live_sideband_url_with_base("rtc_abc", Some("")),
+            "wss://api.openai.com/v1/live/rtc_abc"
         );
     }
 }
