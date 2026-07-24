@@ -1,5 +1,48 @@
 THIRD-PARTY NOTICES
 ================================================================================
+PART 0 — ADAPTED SOURCE PORTS
+================================================================================
+
+--------------------------------------------------------------------------------
+oh-my-pi (OMP) — Codex Live native media + protocol
+--------------------------------------------------------------------------------
+Source:  https://github.com/can1357/oh-my-pi
+Ref:     v17.1.1, commit e9c8a35f5aa7c441d8962dc7e67478af5ab21f55
+License: MIT
+
+Copyright notice:
+  Copyright (c) can1357 and the oh-my-pi contributors
+
+Files adapted (substantially) into crates/codegen/xai-grok-voice/src/live/:
+  - protocol.rs   ← packages/coding-agent/src/live/protocol.ts
+  - transport.rs  ← packages/coding-agent/src/live/transport.ts
+  - attestation.rs ← packages/coding-agent/src/live/attestation.ts
+                   and crates/pi-natives/src/devicecheck.rs
+  - media.rs      ← crates/pi-natives/src/live.rs
+  - playback.rs   ← interface shape from crates/pi-natives/src/audio.rs
+                   (PlaybackStream/PlaybackWriter); platform backends are
+                   original (no maudio dependency).
+
+Adaptations:
+  The originals are a Bun/TypeScript host driving an N-API Rust addon via
+  threadsafe callbacks and miniaudio (maudio) for capture/playback. These ports
+  reimplement the wire protocol, signaling, WebRTC/Opus media, DeviceCheck
+  attestation, and CBOR encoding in pure async Rust, reusing this crate's
+  existing PCM16 capture backends and adding platform subprocess/cpal speaker
+  playback. Exact wire behavior (model id, headers, serde payloads, chunking,
+  call-id parsing, sideband URL, retry/timeouts, once-only 401 refresh,
+  echo gate, mute, packet-loss concealment, output-level RMS, bounded queues)
+  is preserved.
+
+License text: see Part II — MIT
+
+Additional requirements / notices:
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the adapted code (MIT requirement).
+  Pinned dependency versions (webrtc 0.17.2, opus 0.3.1, audiopus_sys 0.2.2
+  static, flume 0.11) match the OMP native media stack for ABI parity.
+
+================================================================================
 PART I — PER-PACKAGE ENTRIES
 ================================================================================
 

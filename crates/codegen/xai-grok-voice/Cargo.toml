@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "xai-grok-voice"
 version = "0.1.0"
 edition.workspace = true
-description = "Voice dictation (streaming STT) for Grok Build CLI"
+description = "Voice dictation (streaming STT) and Codex Live voice sessions for Grok Build CLI"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -21,10 +21,30 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
-# Sanctioned TTY detach for the capture subprocesses (Linux system recorders,
-# macOS `__mic-capture` self-exec helper) — workspace rule: never spawn a raw
-# `std::process::Command`.
+# Sanctioned TTY detach for the capture/playback subprocesses (Linux system
+# recorders/players, macOS `__mic-capture`/`__speaker-play` self-exec helpers)
+# — workspace rule: never spawn a raw `std::process::Command`.
 xai-tty-utils = { workspace = true }
+
+# --- Codex Live subsystem (`live` feature) --------------------------------
+# Pinned to match the OMP (oh-my-pi v17.1.1, commit e9c8a35) native media stack
+# that the `live` module ports, so the WebRTC/Opus ABI stays compatible. All are
+# optional and only pulled in by `live`, so `--no-default-features` and
+# `--features audio` link none of them.
+audiopus_sys = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+flume = { workspace = true, optional = true }
+# Reqwest for the Codex realtime signaling POST. Honors `HTTP_PROXY`/`NO_PROXY`
+# env proxies natively (reqwest reads them via its `reqwest::Proxy` machinery
+# only when explicitly configured, so the live transport reads the same env
+# vars itself — see `live::transport::proxy` — and passes the resolved proxy
+# URL into the client builder).
+reqwest = { workspace = true, optional = true, features = ["rustls-tls", "json"] }
+opus = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+webrtc = { workspace = true, optional = true }
 
 [features]
 # `audio` = "microphone capture is compiled in". It's enabled on every OS for
@@ -40,10 +60,21 @@ default = ["audio"]
 # test needs.
 default-bazel = []
 audio = ["dep:cpal"]
+# `live` = "Codex Live voice session support is compiled in". The pager enables
+# this via its own `codex-live` feature so the `/live` command can drive a
+# real-time bidirectional voice session (WebRTC/Opus) against the Codex
+# sideband. `live` implies `audio` (a live session needs mic capture) and pins
+# the WebRTC/Opus stack; `--no-default-features` and `--features audio` compile
+# neither. When this feature is off the `live` module is absent and the pager's
+# `codex-live` feature compiles to test doubles (see `cfg(feature = "codex-live")`
+# in the pager).
+live = ["audio", "dep:audiopus_sys", "dep:base64", "dep:bytes", "dep:flume", "dep:opus", "dep:parking_lot", "dep:reqwest", "dep:uuid", "dep:webrtc"]
 
-# cpal is only used by the non-Linux capture backend. Gating it to non-Linux
-# keeps `alsa-sys` (a NEEDED `libasound.so.2`) out of the static musl build; on
-# Linux the `audio` feature compiles the subprocess recorder backend instead.
+# cpal is only used by the non-Linux capture backend (and the Windows live
+# speaker playback backend). Gating it to non-Linux keeps `alsa-sys` (a NEEDED
+# `libasound.so.2`) out of the static musl build; on Linux the `audio` feature
+# compiles the subprocess recorder backend instead, and the live speaker plays
+# back through a system player subprocess too.
 [target.'cfg(not(target_os = "linux"))'.dependencies.cpal]
 version = "0.15"
 optional = true

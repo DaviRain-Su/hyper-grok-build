@@ -111,6 +111,11 @@ async-lsp = { version = "0.2.3", features = ["tokio", "tracing"] }
 async-openai = { version = "0.33.0", features = ["responses"] }
 async-stream = "0.3"
 async-trait = "0.1"
+# Pinned for the xai-grok-voice `live` subsystem (Codex Live WebRTC media):
+# `audiopus_sys` is built statically so the release binary links no system
+# libopus. Versions match the OMP (oh-my-pi v17.1.1, commit e9c8a35) native
+# media stack that this subsystem ports, to keep Opus/WebRTC ABI compatible.
+audiopus_sys = { version = "0.2.2", features = ["static"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 backon = { version = "1.6" }
 backtrace = "0.3"
@@ -133,6 +138,8 @@ derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref"
 dhat = "0.3"
 dirs = "5.0"
 documented = "0.9"
+# Bounded async channel for the live media input/playback queues (OMP port).
+flume = "0.11"
 dunce = "1"
 educe = "0.6.0"
 enum_delegate = "0.2"
@@ -190,6 +197,8 @@ opentelemetry-http = { version = "0.32", features = ["reqwest-blocking"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "reqwest-blocking-client", "tls-roots"] }
 opentelemetry-proto = { version = "0.32", features = ["gen-tonic"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["spec_unstable_metrics_views"] }
+# Pure-Rust Opus codec bindings for the live media encoder/decoder (OMP port).
+opus = "0.3.1"
 parking_lot = "0.12.4"
 pbjson-build = "0.9"
 pdf_oxide = { version = "0.3.43", features = ["rendering"] }
@@ -272,6 +281,9 @@ vte = "0.15.0"
 wait-timeout = "0.2"
 walkdir = "2"
 webbrowser = { version = "1.0.4" }
+# WebRTC peer + Opus media for the Codex Live subsystem (OMP port). Pinned to
+# match the OMP native media stack (v17.1.1, commit e9c8a35) for ABI parity.
+webrtc = "0.17.2"
 which = "8"
 whoami = "1.4"
 wildmatch = "2"
