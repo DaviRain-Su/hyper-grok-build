@@ -1038,6 +1038,20 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
         isolation_param,
     } = *naming;
 
+    // Oracle guidance is only meaningful when the roster actually ships an
+    // `oracle` agent (design-oracle.md Layer A + user-named compliance).
+    let oracle_section = if subagents.iter().any(|s| s.name == "oracle") {
+        format!(
+            "\n\n\
+             Consulting the oracle:\n\
+             - The **oracle** is a read-only deep-analysis advisor. Consult it when the same failure persists across your own repeated fix attempts, when the root cause is unclear, when weighing architecture or risky-change trade-offs, before large refactors or deletions, or when the user asks you to rethink, double-check, or review your approach — don't keep grinding alone on a problem that needs deeper analysis.\n\
+             - If the user explicitly asks for the oracle (e.g. \"use oracle\", \"ask the oracle\", \"spawn oracle on ...\"), you MUST spawn it with {subagent_type_param}=\"oracle\" right away instead of answering alone.\n\
+             - The oracle makes no edits: execute its Recommendation yourself, then run the checks from its Verification Handoff."
+        )
+    } else {
+        String::new()
+    };
+
     let out = format!(
         "Start a subagent that works on a task independently and reports back.\n\n\
          Agent types:\n\n\
@@ -1046,7 +1060,7 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
          - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
-         - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
+         - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.{oracle_section}\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
          - The resumed agent must use the same subagent_type as the source.\n\n\
@@ -1468,6 +1482,31 @@ mod tests {
         assert!(ORACLE_PROMPT.contains("do not claim you ran them"));
         assert!(ORACLE_PROMPT.contains("Never keep searching merely to appear thorough"));
         assert!(ORACLE_PROMPT.rfind("### Recommendation").is_some());
+    }
+
+    #[test]
+    fn task_description_includes_oracle_guidance_only_when_rostered() {
+        let descriptor_naming = plain_tool_naming();
+        let naming = literal_naming();
+        let roster: Vec<SubagentDescriptor> = BUILTIN_SUBAGENTS
+            .iter()
+            .map(|b| b.to_descriptor(&descriptor_naming))
+            .collect();
+        let desc = build_task_description(&roster, &naming);
+        assert!(desc.contains("Consulting the oracle:"), "{desc}");
+        // User-named compliance: the parent must spawn, not answer alone.
+        assert!(desc.contains("you MUST spawn it"), "{desc}");
+        // Layer-A self-awareness triggers.
+        assert!(desc.contains("same failure persists"), "{desc}");
+        assert!(desc.contains("review your approach"), "{desc}");
+        assert!(desc.contains("Verification Handoff"), "{desc}");
+
+        // Without an oracle in the roster the section must disappear (other
+        // products sharing this builder may not ship one).
+        let no_oracle: Vec<SubagentDescriptor> =
+            roster.into_iter().filter(|d| d.name != "oracle").collect();
+        let desc = build_task_description(&no_oracle, &naming);
+        assert!(!desc.contains("Consulting the oracle:"), "{desc}");
     }
 
     #[test]

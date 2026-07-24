@@ -490,7 +490,7 @@ Hyper 可占据的位置（power user）：
 
 | ID | 不变式（不是功能名） | 主要来源 | Hyper 落点 | 批次 | 状态 | 设计/备注 |
 |----|----------------------|----------|------------|------|------|-----------|
-| A1 | 弱模型硬撑时能请到**更强只读顾问**且模型真的更强 | Amp Oracle | subagents oracle + pin + 触发；对话点名（无 `/oracle`） | P1 | **design** | [design-oracle.md](./design-oracle.md) |
+| A1 | 弱模型硬撑时能请到**更强只读顾问**且模型真的更强 | Amp Oracle | subagents oracle + pin + 触发；对话点名（无 `/oracle`） | P1 | **done**（Phase 0/1） | [design-oracle.md](./design-oracle.md)；spawn 同模型 toast + `/doctor` pin 检查 + 触发文案已落地；Phase 2 harness 信号可选未做 |
 | A2 | 用户能**审** agent 改动：接受 / 拒绝 / 部分接受 | Amp Changes | hunk-tracker + TUI | P1 | idea | |
 | A3 | 会话/费用/子代理成本**可透视** | 竞品空白 / 自研 | pager dashboard | P1 | idea | |
 | A4 | 钉定模型失败时有**可观测 fallback** | omp multi-key | models / auth / config | P1 | idea | |

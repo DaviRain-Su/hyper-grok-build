@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **设计文档**（优先于 Amp Modes；Modes 已缓停） |
+| 状态 | **Phase 0/1 已落地**（2026-07-24：spawn 同模型 toast、`/doctor` pin 检查、`spawn_subagent` 触发文案、user-guide 更新）；Phase 2 harness 信号未排期 |
 | 日期 | 2026-07-23 |
 | 修订 | 2026-07-23：用户强制入口 = **对话里说 oracle**；**不做** `/oracle` slash |
 | 动机 | 主会话常用较弱/便宜模型（如 Grok）；Oracle 存在但常「不会被叫」或「叫了也同模型」 |

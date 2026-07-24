@@ -56,6 +56,10 @@ pub(crate) const VSCODE_SSH_NON_ASCII_ID: DiagnosticId =
     DiagnosticId::new("clipboard", "vscode-ssh-non-ascii");
 pub(crate) const VOICE_NO_INPUT_DEVICE_ID: DiagnosticId =
     DiagnosticId::new("voice", "no-input-device");
+pub(crate) const ORACLE_MODEL_UNPINNED_ID: DiagnosticId =
+    DiagnosticId::new("agents", "oracle-model-unpinned");
+pub(crate) const ORACLE_MODEL_SAME_AS_SESSION_ID: DiagnosticId =
+    DiagnosticId::new("agents", "oracle-model-same-as-session");
 
 impl DiagnosticReport {
     pub fn issue_count(&self) -> usize {

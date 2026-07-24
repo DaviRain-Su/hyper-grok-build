@@ -74,6 +74,10 @@ pub(super) fn collect_live_doctor_report_for_terminal(
     if crate::app::voice_mode_enabled() {
         crate::diagnostics::apply_voice_probe(&mut report, true);
     }
+    crate::diagnostics::apply_oracle_model_pin_probe(
+        &mut report,
+        agent.session.models.current_model_id_str(),
+    );
     Some(report)
 }
 

@@ -867,3 +867,155 @@
         );
     }
 
+    /// design-oracle.md Phase 1: an oracle resolving to the SAME model as the
+    /// parent session is no upgrade — spawn must surface a non-fatal pin hint.
+    #[test]
+    fn oracle_spawn_with_same_model_as_parent_shows_pin_warning() {
+        use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+
+        let mut app = make_app_with_agent("sess-parent");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .models
+            .current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.5")));
+
+        let mut update = test_subagent_spawned("sess-parent", "child-oracle");
+        let XaiSessionUpdate::SubagentSpawned {
+            subagent_type,
+            model,
+            ..
+        } = &mut update
+        else {
+            panic!("fixture must be SubagentSpawned");
+        };
+        *subagent_type = "oracle".into();
+        *model = Some("grok-4.5".into());
+
+        let _ = handle(
+            make_ext_session_notification("sess-parent", update),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let toast = agent
+            .toast
+            .as_ref()
+            .expect("same-model oracle spawn must toast the pin hint");
+        assert!(
+            toast.0.contains("same model"),
+            "toast should explain the same-model problem: {}",
+            toast.0
+        );
+    }
+
+    /// A stronger pinned model (or a non-oracle agent) must NOT warn.
+    #[test]
+    fn oracle_spawn_with_stronger_model_shows_no_warning() {
+        use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+
+        let mut app = make_app_with_agent("sess-parent");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .models
+            .current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.5")));
+
+        let mut update = test_subagent_spawned("sess-parent", "child-oracle");
+        let XaiSessionUpdate::SubagentSpawned {
+            subagent_type,
+            model,
+            ..
+        } = &mut update
+        else {
+            panic!("fixture must be SubagentSpawned");
+        };
+        *subagent_type = "oracle".into();
+        *model = Some("openai/gpt-5.6".into());
+
+        let _ = handle(
+            make_ext_session_notification("sess-parent", update),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.toast.is_none(),
+            "stronger pinned oracle must not warn: {:?}",
+            agent.toast
+        );
+    }
+
+    /// Same-model inheritance is fine for every other agent type.
+    #[test]
+    fn non_oracle_spawn_with_same_model_shows_no_warning() {
+        use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+
+        let mut app = make_app_with_agent("sess-parent");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .models
+            .current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.5")));
+
+        let mut update = test_subagent_spawned("sess-parent", "child-explore");
+        let XaiSessionUpdate::SubagentSpawned { model, .. } = &mut update else {
+            panic!("fixture must be SubagentSpawned");
+        };
+        *model = Some("grok-4.5".into());
+
+        let _ = handle(
+            make_ext_session_notification("sess-parent", update),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.toast.is_none(),
+            "non-oracle same-model spawn must not warn: {:?}",
+            agent.toast
+        );
+    }
+    /// Older servers omit the spawn `model` field: no warn, and the subagent
+    /// state must still be recorded (oracle review regression case).
+    #[test]
+    fn oracle_spawn_with_omitted_model_shows_no_warning() {
+        use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+
+        let mut app = make_app_with_agent("sess-parent");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .models
+            .current = Some(acp::ModelId::new(std::sync::Arc::from("grok-4.5")));
+
+        let mut update = test_subagent_spawned("sess-parent", "child-oracle");
+        let XaiSessionUpdate::SubagentSpawned {
+            subagent_type, ..
+        } = &mut update
+        else {
+            panic!("fixture must be SubagentSpawned");
+        };
+        *subagent_type = "oracle".into();
+        // model stays None (fixture default) — older-server shape.
+
+        let _ = handle(
+            make_ext_session_notification("sess-parent", update),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.toast.is_none(),
+            "omitted model must not warn: {:?}",
+            agent.toast
+        );
+        assert!(
+            agent.subagent_sessions.contains_key("child-oracle"),
+            "subagent state must still be registered"
+        );
+    }

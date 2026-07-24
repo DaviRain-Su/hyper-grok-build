@@ -83,6 +83,9 @@ fn collect_report_with(
 ) -> DiagnosticReport {
     let mut report = crate::diagnostics::view(snapshot.into());
     crate::diagnostics::apply_voice_probe(&mut report, true);
+    // No live session headless — the same-as-session arm needs a model id the
+    // standalone report does not have.
+    crate::diagnostics::apply_oracle_model_pin_probe(&mut report, None);
     report
 }
 

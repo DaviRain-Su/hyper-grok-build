@@ -34,8 +34,8 @@ pub(crate) use model::probe_requires_live_tui;
 pub(crate) use model::{
     CLIPBOARD_DELIVERY_UNAVAILABLE_ID, CLIPBOARD_DELIVERY_UNVERIFIED_ID,
     FOCUS_TRACKING_UNAVAILABLE_ID, ITERM2_CLIPBOARD_PERMISSION_ID, NEWLINE_FALLBACK_ID,
-    NOTIFICATION_PROTOCOL_FALLBACK_ID, SANDBOX_PROFILE_CONFLICT_ID, VOICE_NO_INPUT_DEVICE_ID,
-    VSCODE_SSH_NON_ASCII_ID,
+    NOTIFICATION_PROTOCOL_FALLBACK_ID, ORACLE_MODEL_SAME_AS_SESSION_ID, ORACLE_MODEL_UNPINNED_ID,
+    SANDBOX_PROFILE_CONFLICT_ID, VOICE_NO_INPUT_DEVICE_ID, VSCODE_SSH_NON_ASCII_ID,
 };
 pub use model::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
@@ -91,6 +91,79 @@ fn voice_missing_finding(error: String) -> DiagnosticFinding {
                 .to_owned(),
         ),
     }
+}
+
+/// Oracle model-pin check (design-oracle.md Phase 1).
+///
+/// The Oracle only pays off when it runs on a *stronger* model than the
+/// working session. Two recommendation-level findings:
+///
+///   * no `[subagents.models] oracle` pin at all → the oracle silently
+///     inherits whatever model the session uses;
+///   * the pin equals `session_model` (when the caller knows it) → pinning
+///     changed nothing.
+///
+/// `session_model` is `None` for headless `grok doctor` (no live session), so
+/// only the unpinned case is reported there.
+pub fn apply_oracle_model_pin_probe(report: &mut DiagnosticReport, session_model: Option<&str>) {
+    let pins = crate::views::agents_modal::load_agent_model_pins();
+    for finding in oracle_model_pin_findings(&pins, session_model) {
+        report.findings.push(finding);
+    }
+}
+
+/// Map-injectable core of [`apply_oracle_model_pin_probe`] so tests can drive
+/// it without touching the real `~/.grok/config.toml`.
+pub(crate) fn oracle_model_pin_findings(
+    pins: &std::collections::HashMap<String, String>,
+    session_model: Option<&str>,
+) -> Vec<DiagnosticFinding> {
+    let mut findings = Vec::new();
+    // Normalize: an empty or whitespace-only `oracle = ""` line is not a pin —
+    // it would never resolve in the model registry and silently behaves as
+    // unpinned, so classify it that way (oracle review, Medium).
+    let pin = pins
+        .get("oracle")
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty());
+    let Some(pin) = pin else {
+        findings.push(DiagnosticFinding {
+            id: ORACLE_MODEL_UNPINNED_ID,
+            disposition: FindingDisposition::Recommendation,
+            message: "Oracle advisor has no pinned model and will inherit the session model; a \
+                      same-model oracle does not provide a stronger second opinion."
+                .to_owned(),
+            remediation: None,
+            automatic_remediation: None,
+            note: Some(
+                "Pin a stronger model: `/agents` → select `oracle` → `m`, or set \
+                 `[subagents.models] oracle = \"<model-slug>\"` in config.toml (example: a GPT or \
+                 Claude model you have credentials for). See user-guide 16-subagents.md."
+                    .to_owned(),
+            ),
+        });
+        return findings;
+    };
+    if let Some(current) = session_model.map(str::trim)
+        && current == pin
+    {
+        findings.push(DiagnosticFinding {
+            id: ORACLE_MODEL_SAME_AS_SESSION_ID,
+            disposition: FindingDisposition::Recommendation,
+            message: format!(
+                "Oracle advisor is pinned to `{pin}`, the same model this session is using; the \
+                 consultation gains no stronger-model perspective."
+            ),
+            remediation: None,
+            automatic_remediation: None,
+            note: Some(
+                "Re-pin the oracle to a stronger model via `/agents` → `oracle` → `m`, or edit \
+                 `[subagents.models] oracle` in config.toml."
+                    .to_owned(),
+            ),
+        });
+    }
+    findings
 }
 
 /// Broad classification of a startup warning.
@@ -3030,5 +3103,51 @@ mod tests {
         )
         .expect("fixture");
         assert!(summarize_warnings(&[w], true).is_none());
+    }
+
+    #[test]
+    fn oracle_pin_findings_flag_unpinned_oracle() {
+        let pins = std::collections::HashMap::new();
+        let findings = oracle_model_pin_findings(&pins, Some("grok-4.5"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, ORACLE_MODEL_UNPINNED_ID);
+        assert_eq!(findings[0].disposition, FindingDisposition::Recommendation);
+    }
+
+    #[test]
+    fn oracle_pin_findings_flag_pin_equal_to_session_model() {
+        let pins =
+            std::collections::HashMap::from([("oracle".to_string(), "grok-4.5".to_string())]);
+        let findings = oracle_model_pin_findings(&pins, Some("grok-4.5"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, ORACLE_MODEL_SAME_AS_SESSION_ID);
+    }
+
+    #[test]
+    fn oracle_pin_findings_accept_stronger_pin_and_unknown_session_model() {
+        let pins =
+            std::collections::HashMap::from([("oracle".to_string(), "openai/gpt-5.6".to_string())]);
+        // Stronger pin: no finding, whether or not the session model is known.
+        assert!(oracle_model_pin_findings(&pins, Some("grok-4.5")).is_empty());
+        assert!(oracle_model_pin_findings(&pins, None).is_empty());
+    }
+
+    #[test]
+    fn oracle_pin_findings_treat_empty_and_whitespace_pins_as_unpinned() {
+        for raw in ["", "   ", "\t "] {
+            let pins = std::collections::HashMap::from([("oracle".to_string(), raw.to_string())]);
+            let findings = oracle_model_pin_findings(&pins, Some("grok-4.5"));
+            assert_eq!(findings.len(), 1, "pin {raw:?}");
+            assert_eq!(findings[0].id, ORACLE_MODEL_UNPINNED_ID, "pin {raw:?}");
+        }
+    }
+
+    #[test]
+    fn oracle_pin_findings_trims_whitespace_around_valid_pin() {
+        let pins =
+            std::collections::HashMap::from([("oracle".to_string(), "  grok-4.5 ".to_string())]);
+        let findings = oracle_model_pin_findings(&pins, Some("grok-4.5"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, ORACLE_MODEL_SAME_AS_SESSION_ID);
     }
 }

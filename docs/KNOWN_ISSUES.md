@@ -18,7 +18,8 @@ Last reviewed: 2026-07-23 (v0.2.110 release).
 | ID | Severity | Topic | Notes |
 |----|----------|--------|--------|
 | Modes | deferred | Amp-style low–ultra agent modes | **缓停** — [design-modes.md](./design-modes.md) §0。现有模型配置已够；不作为发布缺口。 |
-| Oracle | design | Stronger-model pin + trigger UX | 类型已有；缺口见 [design-oracle.md](./design-oracle.md)。 |
+| Oracle | done (Phase 0/1) | Stronger-model pin + trigger UX | spawn 同模型 toast、`/doctor` pin 检查、`spawn_subagent` 触发文案已落地 — [design-oracle.md](./design-oracle.md)。Phase 2 harness 信号未排期。 |
+| Flaky test | low | `scrollback::entry::tests::test_truncated_height_cache_hits_when_key_unchanged` | 仅全量并行跑时偶败（约 1/5 概率），单跑必过；疑似并行测试间全局外观/主题状态污染，属既有隔离缺口，非功能回归。 |
 | Non-Darwin Unix process ID | low | BSD without libproc | `is_grok_process` falls back to liveness-only on non-Linux non-macOS Unix. Rare for Hyper targets (we ship Linux/macOS/Windows). |
 
 ## Fixed in tree

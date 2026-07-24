@@ -277,6 +277,17 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             let persona_display = persona.clone();
             let role_display = role.clone();
             let model_display = model.clone();
+            // Oracle upgrade (design-oracle.md Phase 1): an oracle that resolves
+            // to the SAME model as the parent session is no upgrade at all —
+            // the point is a *stronger* second opinion. Warn (non-fatal) so the
+            // user pins `[subagents.models] oracle` to something stronger.
+            if subagent_type == "oracle"
+                && let Some(child_model) = model.as_deref()
+                && agent.session.models.current_model_id_str() == Some(child_model)
+            {
+                let msg = rust_i18n::t!("warn.oracle_same_model").into_owned();
+                agent.show_toast(&msg);
+            }
             agent.subagent_sessions.insert(
                 child_session_id.clone(),
                 SubagentInfo {

@@ -89,6 +89,11 @@ Typical setup: cheap/fast model on the main session, frontier model on `oracle` 
 
 If the working model keeps thrashing instead of calling Oracle, **say so in the chat** — there is no `/oracle` slash. For example: “用 oracle 看为什么测试还红”, “ask oracle why this still fails”, or “spawn oracle on the root cause”. Pin a stronger model first so the consult is worth the cost.
 
+**Observability.** Two guards keep the pin honest:
+
+- If an `oracle` subagent spawns and its resolved model is the **same** as the session's, a toast warns: *"Oracle is using the same model as this session — pin a stronger one via `/agents` → `oracle` → `m`."*
+- `/doctor` reports a recommendation when Oracle has no `[subagents.models]` pin at all — and, in the TUI, when the pin equals the session model.
+
 The built-in Oracle is bounded by default: 12 model/tool-use rounds, 40 tool calls, and 180 seconds total wall-clock time. Thirty seconds are reserved for finalization. Near a limit, Grok Build tells Oracle to stop investigating and return its best structured recommendation; if it ignores the warning, the hard tool/time limit cancels it. The Oracle response contract includes findings, evidence, alternatives, risks, a verification handoff, confidence, and a final recommendation.
 
 Design notes (pin warnings, chat-trigger obedience): repository `docs/design-oracle.md`.

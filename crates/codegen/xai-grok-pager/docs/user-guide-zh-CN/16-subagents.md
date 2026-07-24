@@ -72,6 +72,19 @@ Oracle 模式将快速工作模型与更强的分析模型配对：主智能体�
 
 通过 `/agents` → 选择 `oracle` → `m`（或在 `config.toml` 中设置 `[subagents.models] oracle = "..."`）将 oracle 固定到你配置中最强的模型。若不固定，它会继承会话模型，从而失去该模式的意义。
 
+**主智能体应在何时咨询 Oracle**（由它自己通过 `spawn_subagent` 决定；Hyper 不会像某些云产品那样每轮自动跑 Oracle）：
+
+- 同一个测试或错误在多次修改后仍然失败
+- 根因不明、架构取舍、或高风险变更
+- 你要求它重新思考、审查方案或听取第二意见
+
+如果工作模型一直硬撑而不咨询 Oracle，**直接在对话里点名** —— 没有 `/oracle` 斜杠命令。例如："用 oracle 看为什么测试还红"、"ask oracle why this still fails"、"spawn oracle on the root cause"。请先钉好更强的模型，让这次咨询物有所值。
+
+**可观测性。** 两道护栏保证钉定生效：
+
+- 如果 `oracle` 子智能体启动时解析出的模型与会话**相同**，会弹出提示："Oracle 正使用与会话相同的模型 — 请通过 `/agents` → `oracle` → `m` 钉一个更强的模型"。
+- 当 Oracle 完全没有 `[subagents.models]` 钉定时，`/doctor` 会给出建议；在 TUI 中，钉定模型与会话模型相同也会提示。
+
 内置 Oracle 默认有边界：12 轮模型/工具使用、40 次工具调用，以及 180 秒总墙钟时间。其中 30 秒预留给收尾。接近限制时，Grok Build 会要求 Oracle 停止调查并返回其最佳结构化建议；若它忽略警告，则由硬性的工具/时间限制取消它。Oracle 响应契约包括 findings、evidence、alternatives、risks、verification handoff、confidence 与最终建议。
 
 自定义或覆盖的智能体定义可使用相同的 YAML frontmatter 字段：
