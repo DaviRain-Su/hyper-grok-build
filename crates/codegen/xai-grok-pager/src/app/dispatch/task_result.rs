@@ -1133,6 +1133,95 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::CreditLimitRecheckComplete { agent_id, meta } => {
             handle_credit_limit_recheck_complete(app, agent_id, meta)
         }
+        TaskResult::ChangesLoaded {
+            agent_id,
+            files,
+            hunks,
+            post_action,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            match agent.active_modal.as_mut() {
+                // Modal already open: update in place (oracle: preserve
+                // selection by hunk id; an empty result just renders the
+                // empty state instead of stranding stale rows).
+                Some(crate::views::modal::ActiveModal::Changes { state }) => {
+                    let prev_id = state.selected_hunk().map(|h| h.id.clone());
+                    state.files = files;
+                    state.hunks = hunks;
+                    state.selected = prev_id
+                        .and_then(|id| state.hunks.iter().position(|h| h.id == id))
+                        .unwrap_or(0);
+                    state.clamp_selection();
+                    state.action_in_flight = false;
+                }
+                // Fresh open (not a post-action refetch): install the modal.
+                _ if !post_action => {
+                    let mut state =
+                        crate::views::changes_modal::ChangesModalState::new(files, hunks);
+                    state.clamp_selection();
+                    if state.is_empty() {
+                        agent.show_toast(&rust_i18n::t!("changes.empty").into_owned());
+                    } else {
+                        agent.active_modal = Some(crate::views::modal::ActiveModal::Changes {
+                            state: Box::new(state),
+                        });
+                    }
+                }
+                // Post-action refetch after the user closed the modal —
+                // dropping it is the point: a closed modal stays closed.
+                _ => {}
+            }
+            vec![]
+        }
+        TaskResult::ChangesFailed { agent_id, error } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            match agent.active_modal.as_mut() {
+                Some(crate::views::modal::ActiveModal::Changes { state }) => {
+                    state.action_in_flight = false;
+                    state.message = Some(error);
+                }
+                _ => agent.show_toast(&error),
+            }
+            vec![]
+        }
+        TaskResult::ChangesActionDone {
+            agent_id,
+            success,
+            error,
+            affected_count,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if let Some(crate::views::modal::ActiveModal::Changes { state }) =
+                agent.active_modal.as_mut()
+            {
+                state.action_in_flight = false;
+            }
+            if !success {
+                let msg = error.unwrap_or_else(|| "action failed".to_string());
+                agent.show_toast(&msg);
+                return vec![];
+            }
+            // Zero affected hunks on a file/all action means the view was
+            // stale (oracle: the shell succeeds with no effect — say so).
+            if affected_count == Some(0) {
+                agent.show_toast(&rust_i18n::t!("changes.stale_noop").into_owned());
+            }
+            // Refetch so the modal reflects the landed action.
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::FetchChanges {
+                agent_id,
+                session_id,
+                post_action: true,
+            }]
+        }
         TaskResult::LogoutComplete => {
             app.auth_state = AuthState::Pending { error: None };
             app.access_gate_shown_logged = false;

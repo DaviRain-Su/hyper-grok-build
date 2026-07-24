@@ -292,6 +292,10 @@ pub enum ActiveModal {
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
+    /// Changes review modal (A2): pending hunks with accept/reject.
+    Changes {
+        state: Box<crate::views::changes_modal::ChangesModalState>,
+    },
     /// Settings modal (F2, /settings, palette). Boxed — large state.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
@@ -647,6 +651,7 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Changes { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
@@ -678,6 +683,7 @@ impl ActiveModal {
             ActiveModal::DocViewer { title, .. } => title.clone().into(),
             ActiveModal::ShortcutsHelp { .. } => rust_i18n::t!("modal.title.keyboard_shortcuts"),
             ActiveModal::MemoryBrowser { .. } => rust_i18n::t!("modal.title.memory"),
+            ActiveModal::Changes { .. } => rust_i18n::t!("changes.title"),
             ActiveModal::Settings { .. } => rust_i18n::t!("modal.title.settings"),
             ActiveModal::ResetSettingsConfirm { .. } => {
                 rust_i18n::t!("modal.title.reset_setting")

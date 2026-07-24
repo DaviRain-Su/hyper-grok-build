@@ -674,6 +674,20 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
                 return dispatch_readiness(app);
             }
+            CommandResult::Changes => {
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                let Some(session_id) = agent.session.session_id.clone() else {
+                    agent.show_toast("No session yet — start one to review changes.");
+                    return vec![];
+                };
+                return vec![Effect::FetchChanges {
+                    agent_id: agent.session.id,
+                    session_id,
+                    post_action: false,
+                }];
+            }
             CommandResult::Action(Action::ExitSession) => {
                 if consume_input {
                     agent.prompt.set_text("");

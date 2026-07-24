@@ -477,6 +477,44 @@ impl AgentView {
             }
         }
 
+        // Changes review: chrome for close/shortcut clicks, then delegate.
+        if let ActiveModal::Changes { state } = modal {
+            let shortcuts = crate::views::changes_modal::build_shortcuts(state);
+            let chrome_cfg = mw::ModalWindowConfig {
+                title: "",
+                tabs: None,
+                shortcuts: &shortcuts,
+                sizing: mw::ModalSizing::large(),
+                fold_info: None,
+            };
+            let outcome = mw::handle_modal_key(&mut state.window, key, &chrome_cfg);
+            fn delegate(
+                outcome: crate::views::changes_modal::ChangesModalOutcome,
+            ) -> (bool, InputOutcome) {
+                use crate::views::changes_modal::ChangesModalOutcome as Out;
+                match outcome {
+                    Out::Changed => (false, InputOutcome::Changed),
+                    Out::Unchanged => (false, InputOutcome::Unchanged),
+                    Out::Closed => (true, InputOutcome::Changed),
+                    Out::Act(kind) => (false, InputOutcome::Action(Action::ChangesAction(kind))),
+                    Out::Refresh => (false, InputOutcome::Action(Action::OpenChanges)),
+                }
+            }
+            let (close, out) = match outcome {
+                ModalWindowOutcome::CloseRequested => (true, InputOutcome::Changed),
+                ModalWindowOutcome::ShortcutActivated(id) => state
+                    .handle_shortcut_id(id)
+                    .map(delegate)
+                    .unwrap_or((false, InputOutcome::Changed)),
+                ModalWindowOutcome::Unhandled => delegate(state.handle_key(key)),
+                _ => (false, InputOutcome::Changed),
+            };
+            if close {
+                self.active_modal = None;
+            }
+            return out;
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup,
@@ -561,6 +599,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Changes { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
@@ -1733,6 +1772,32 @@ impl AgentView {
             }
         }
 
+        // Changes review (mouse): chrome handles close + footer shortcut clicks.
+        if let Some(ActiveModal::Changes { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            return match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ModalWindowOutcome::ShortcutActivated(id) => match state.handle_shortcut_id(id) {
+                    Some(crate::views::changes_modal::ChangesModalOutcome::Act(kind)) => {
+                        InputOutcome::Action(Action::ChangesAction(kind))
+                    }
+                    Some(crate::views::changes_modal::ChangesModalOutcome::Closed) => {
+                        self.active_modal = None;
+                        InputOutcome::Changed
+                    }
+                    Some(crate::views::changes_modal::ChangesModalOutcome::Refresh) => {
+                        InputOutcome::Action(Action::OpenChanges)
+                    }
+                    _ => InputOutcome::Changed,
+                },
+                _ => InputOutcome::Changed,
+            };
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::Settings { state }) = &mut self.active_modal {
             let outcome =
@@ -2560,6 +2625,8 @@ impl AgentView {
                 }
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Changes { state } = active_modal {
+                crate::views::changes_modal::render_changes_modal(buf, area, state, &theme);
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal

@@ -491,7 +491,7 @@ Hyper 可占据的位置（power user）：
 | ID | 不变式（不是功能名） | 主要来源 | Hyper 落点 | 批次 | 状态 | 设计/备注 |
 |----|----------------------|----------|------------|------|------|-----------|
 | A1 | 弱模型硬撑时能请到**更强只读顾问**且模型真的更强 | Amp Oracle | subagents oracle + pin + 触发；对话点名（无 `/oracle`） | P1 | **done**（Phase 0/1） | [design-oracle.md](./design-oracle.md)；spawn 同模型 toast + `/doctor` pin 检查 + 触发文案已落地；Phase 2 harness 信号可选未做 |
-| A2 | 用户能**审** agent 改动：接受 / 拒绝 / 部分接受 | Amp Changes | hunk-tracker + TUI | P1 | idea | |
+| A2 | 用户能**审** agent 改动：接受 / 拒绝 / 部分接受 | Amp Changes | hunk-tracker + TUI | P1 | **done**（A2a） | `/changes` 审阅面板：hunk 按文件分组 + 补丁预览 + a/x 单块、A/X 整文件、^A/^X 全部（外部改动与文件/全部拒绝需 y/n 确认且标明不可撤销）；动作经 ACP hunk-action/file-action/all-action；部分接受（行级）与 undo 未做 |
 | A3 | 会话/费用/子代理成本**可透视** | 竞品空白 / 自研 | pager dashboard | P1 | idea | |
 | A4 | 钉定模型失败时有**可观测 fallback** | omp multi-key | models / auth / config | P1 | idea | |
 | A5 | 流中违规可 **abort→注入→同点重试**，规则不常驻 context | omp stream rules | sampler 流式层 | P2 | idea | 非 PreToolUse 替代 |

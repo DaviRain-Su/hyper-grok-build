@@ -109,6 +109,10 @@ pub enum Action {
     ImportClaudeConfirm,
     /// User cancelled the import modal — close without applying.
     ImportClaudeCancel,
+    /// Open the changes review modal (fetch pending hunks first).
+    OpenChanges,
+    /// Dispatch a review action (accept/reject) from the changes modal.
+    ChangesAction(crate::views::changes_modal::ChangesActionKind),
     /// Hide the import-claude menu row by recording the current `.claude/`
     /// content hash as "seen". Doesn't import anything, doesn't change
     /// runtime fallback behavior. The menu reappears only if `.claude/`
@@ -1386,6 +1390,20 @@ pub struct DoctorFixTarget {
 }
 #[derive(Debug)]
 pub enum Effect {
+    /// Fetch pending changes (files + hunks) for the review modal.
+    /// `post_action`: this is a refetch after an action landed (must not
+    /// reopen a closed modal).
+    FetchChanges {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        post_action: bool,
+    },
+    /// Run one review action (accept/reject hunk/file/all).
+    ChangesAction {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        kind: crate::views::changes_modal::ChangesActionKind,
+    },
     /// Create a new ACP session.
     CreateSession {
         agent_id: AgentId,
@@ -2181,6 +2199,27 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         models: Option<acp::SessionModelState>,
+    },
+    /// Pending changes (files + hunks) loaded for the review modal.
+    ChangesLoaded {
+        agent_id: AgentId,
+        files: Vec<crate::views::changes_modal::FileSummaryDto>,
+        hunks: Vec<crate::views::changes_modal::HunkDto>,
+        /// `true` for refetches after an action landed — those must not
+        /// reopen a modal the user closed meanwhile (oracle).
+        post_action: bool,
+    },
+    /// The pending-changes fetch failed.
+    ChangesFailed {
+        agent_id: AgentId,
+        error: String,
+    },
+    /// A review action (accept/reject) completed.
+    ChangesActionDone {
+        agent_id: AgentId,
+        success: bool,
+        error: Option<String>,
+        affected_count: Option<usize>,
     },
     /// Session creation failed.
     SessionFailed {

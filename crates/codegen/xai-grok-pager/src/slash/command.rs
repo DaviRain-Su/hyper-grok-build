@@ -50,6 +50,8 @@ pub enum CommandResult {
     /// Run the repo-readiness probe set against the active session's
     /// workspace and push the report to the scrollback.
     Readiness,
+    /// Fetch pending hunks and open the changes review modal (A2).
+    Changes,
     /// Command failed with an error message.
     Error(String),
     /// Command produced a user-visible message.

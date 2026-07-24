@@ -1496,3 +1496,119 @@ pub(super) fn unregister_active_session_best_effort_in(
         Err(e) => tracing::warn!(?e, "Failed to unregister active session"),
     }
 }
+
+/// Fetch pending changes (files + hunks) from the hunk-tracker and map them
+/// into `TaskResult::ChangesLoaded`. Two ACP calls in sequence: file
+/// summaries for the header rows, then the hunks with their patches.
+pub(super) async fn fetch_changes(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    tx: AcpAgentTx,
+    post_action: bool,
+) -> TaskResult {
+    let sid = session_id.0.to_string();
+    let call = |method: &'static str, params: serde_json::Value| {
+        let tx = tx.clone();
+        async move {
+            let req = acp::ExtRequest::new(
+                method,
+                serde_json::value::to_raw_value(&params)
+                    .expect("serialize hunk-tracker params")
+                    .into(),
+            );
+            acp_send(req, &tx).await
+        }
+    };
+    let parse = |resp: Result<acp::ExtResponse, acp::Error>| -> Result<serde_json::Value, String> {
+        let resp = resp.map_err(|e| format!("hunk-tracker request failed: {e}"))?;
+        let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap_or_default();
+        // An extension-level error object is a FAILURE, not an empty result
+        // (oracle: silently defaulting to {} turns failures into "no pending
+        // changes" — the worst possible review-surface lie).
+        if let Some(err) = wrapper.get("error") {
+            return Err(format!("hunk-tracker error: {}", err));
+        }
+        wrapper
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "hunk-tracker response had no result payload".to_string())
+    };
+    let files_params = serde_json::json!({ "sessionId": sid });
+    let hunks_params = serde_json::json!({ "sessionId": sid });
+    let files_inner = match parse(call("x.ai/hunk-tracker/get-files", files_params).await) {
+        Ok(v) => v,
+        Err(e) => return TaskResult::ChangesFailed { agent_id, error: e },
+    };
+    let hunks_inner = match parse(call("x.ai/hunk-tracker/get-hunks", hunks_params).await) {
+        Ok(v) => v,
+        Err(e) => return TaskResult::ChangesFailed { agent_id, error: e },
+    };
+    let files: Vec<crate::views::changes_modal::FileSummaryDto> =
+        match serde_json::from_value(files_inner["files"].clone()) {
+            Ok(f) => f,
+            Err(e) => {
+                return TaskResult::ChangesFailed {
+                    agent_id,
+                    error: format!("couldn't parse the files response: {e}"),
+                };
+            }
+        };
+    let hunks: Vec<crate::views::changes_modal::HunkDto> =
+        match serde_json::from_value(hunks_inner["hunks"].clone()) {
+            Ok(h) => h,
+            Err(e) => {
+                return TaskResult::ChangesFailed {
+                    agent_id,
+                    error: format!("couldn't parse the hunks response: {e}"),
+                };
+            }
+        };
+    TaskResult::ChangesLoaded {
+        agent_id,
+        files,
+        hunks,
+        post_action,
+    }
+}
+
+/// Run one review action (accept/reject hunk/file/all) and report the outcome
+/// via `TaskResult::ChangesActionDone`.
+pub(super) async fn send_changes_action(
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    kind: crate::views::changes_modal::ChangesActionKind,
+    tx: AcpAgentTx,
+) -> TaskResult {
+    let req = acp::ExtRequest::new(
+        kind.method(),
+        serde_json::value::to_raw_value(&kind.params(&session_id.0.to_string()))
+            .expect("serialize hunk action params")
+            .into(),
+    );
+    match acp_send(req, &tx).await {
+        Ok(resp) => {
+            let wrapper: serde_json::Value = serde_json::from_str(resp.0.get()).unwrap_or_default();
+            let inner = wrapper.get("result").unwrap_or(&wrapper);
+            let outcome: crate::views::changes_modal::ActionResponseDto =
+                serde_json::from_value(inner.clone()).unwrap_or(
+                    crate::views::changes_modal::ActionResponseDto {
+                        success: false,
+                        error: Some("couldn't parse the action response".to_string()),
+                        affected_count: None,
+                    },
+                );
+            TaskResult::ChangesActionDone {
+                agent_id,
+                success: outcome.success,
+                error: outcome.error,
+                affected_count: outcome.affected_count,
+            }
+        }
+        Err(e) => TaskResult::ChangesActionDone {
+            agent_id,
+            success: false,
+            error: Some(format!("action request failed: {e}")),
+            affected_count: None,
+        },
+    }
+}

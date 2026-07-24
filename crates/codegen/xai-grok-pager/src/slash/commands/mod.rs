@@ -8,6 +8,7 @@ pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
+pub mod changes;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
@@ -140,6 +141,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
         Arc::new(readiness::ReadinessCommand),
+        Arc::new(changes::ChangesCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
@@ -269,6 +271,7 @@ mod tests {
             "btw",
             "cd",
             "changelog",
+            "changes",
             "chat",
             "clear",
             "cloud",
@@ -335,6 +338,7 @@ mod tests {
             "rename",
             "repo-check",
             "resume",
+            "review",
             "rewind",
             "scroll-debug",
             "session-info",

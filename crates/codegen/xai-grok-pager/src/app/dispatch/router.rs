@@ -208,6 +208,38 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ImportClaudeSettings => dispatch_import_claude(app),
         Action::ImportClaudeConfirm => dispatch_import_claude_confirm(app),
         Action::ImportClaudeCancel => dispatch_import_claude_cancel(app),
+        Action::OpenChanges => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&agent_id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::FetchChanges {
+                agent_id,
+                session_id,
+                post_action: false,
+            }]
+        }
+        Action::ChangesAction(kind) => {
+            let ActiveView::Agent(agent_id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get(&agent_id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::ChangesAction {
+                agent_id,
+                session_id,
+                kind,
+            }]
+        }
         Action::DismissClaudeImport => dispatch_dismiss_claude_import(app),
         Action::LoadSession(session_id, session_cwd, chat_kind) => {
             dispatch_load_session(app, session_id, session_cwd, chat_kind)

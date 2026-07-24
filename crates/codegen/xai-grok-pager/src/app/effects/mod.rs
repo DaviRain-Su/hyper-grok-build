@@ -62,6 +62,22 @@ pub(crate) fn execute(
             ulog::info("pager quit", None, None);
             return (true, meta);
         }
+        Effect::FetchChanges {
+            agent_id,
+            session_id,
+            post_action,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { fetch_changes(agent_id, session_id, tx, post_action).await });
+        }
+        Effect::ChangesAction {
+            agent_id,
+            session_id,
+            kind,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { send_changes_action(agent_id, session_id, kind, tx).await });
+        }
         Effect::SetWorkingDir { path } => {
             if let Err(e) = std::env::set_current_dir(&path) {
                 tracing::warn!(error = %e, "project picker: failed to set_current_dir");
