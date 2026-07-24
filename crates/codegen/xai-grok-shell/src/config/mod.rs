@@ -1146,6 +1146,17 @@ fn apply_requirements_inner(
     enforce_str!("models", "web_search", config.models.web_search);
     enforce_str!("cli", "channel", config.cli.channel);
     enforce_str!("cli", "minimum_version", config.cli.minimum_version);
+    enforce_str!("cli", "maximum_version", config.cli.maximum_version);
+    enforce_str!(
+        "cli",
+        "required_minimum_version",
+        config.cli.required_minimum_version
+    );
+    enforce_str!(
+        "cli",
+        "required_maximum_version",
+        config.cli.required_maximum_version
+    );
     if let Some(val) = req_str(req, "endpoints", "xai_api_base_url")
         && config.endpoints.xai_api_base_url != val
     {
@@ -1311,12 +1322,17 @@ pub fn apply_sandbox(
     #[cfg(target_os = "linux")]
     let requires_read_deny = xai_grok_sandbox::requires_read_deny(&sandbox_profile, &workspace);
     #[cfg(target_os = "linux")]
+    let requires_hook_write_deny =
+        xai_grok_sandbox::requires_hook_write_deny(&sandbox_profile, &workspace);
+    #[cfg(target_os = "linux")]
+    let requires_bwrap = requires_read_deny || requires_hook_write_deny;
+    #[cfg(target_os = "linux")]
     {
         let refuse_unprotected = |detail: &str| {
             eprintln!(
-                "error: this sandbox could not enforce its read-deny set on Linux \
-                 (bubblewrap missing/unusable, or a deny glob exceeded its expansion \
-                 limit — see any message above). Install bubblewrap with \
+                "error: this sandbox could not enforce its mount-namespace deny set \
+                 on Linux (bubblewrap missing/unusable, or a deny glob exceeded its \
+                 expansion limit — see any message above). Install bubblewrap with \
                  `apt install -y bubblewrap` if needed. Refusing to start with denied \
                  paths unprotected.{detail}"
             );
@@ -1325,7 +1341,7 @@ pub fn apply_sandbox(
             Some(mut cmd) => {
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
-                if requires_read_deny {
+                if requires_bwrap {
                     refuse_unprotected(&format!(" (bwrap exec failed: {err})"));
                     std::process::exit(1);
                 }
@@ -1335,7 +1351,19 @@ pub fn apply_sandbox(
                      Install bubblewrap: apt install -y bubblewrap"
                 );
             }
-            None if requires_read_deny && !xai_grok_sandbox::is_inside_bwrap() => {
+            None if requires_bwrap && xai_grok_sandbox::is_inside_bwrap() => {
+                if requires_hook_write_deny
+                    && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
+                {
+                    eprintln!(
+                        "error: sandbox reports bwrap but required hook write-deny \
+                         mounts are missing or writable ({e}); refusing to start \
+                         (possible __GROK_INSIDE_BWRAP spoof)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            None if requires_bwrap => {
                 refuse_unprotected("");
                 std::process::exit(1);
             }
@@ -1344,7 +1372,12 @@ pub fn apply_sandbox(
     }
     if sandbox_profile != xai_grok_sandbox::ProfileName::Off {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));
+        let requires_protection = {
+            let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));
+            let needs_hooks =
+                xai_grok_sandbox::requires_hook_write_deny(&sandbox_profile, &workspace);
+            is_custom || needs_hooks
+        };
         let mut sandbox = xai_grok_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
             eprintln!("warning: sandbox could not be applied: {e}");
@@ -1352,14 +1385,27 @@ pub fn apply_sandbox(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             #[cfg(target_os = "macos")]
-            let unappliable_custom = is_custom && !sandbox.is_applied();
+            let unappliable = requires_protection && !sandbox.is_applied();
             #[cfg(target_os = "linux")]
-            let unappliable_custom =
-                is_custom && !sandbox.is_applied() && !xai_grok_sandbox::is_inside_bwrap();
-            if unappliable_custom {
+            let unappliable = requires_protection
+                && !sandbox.is_applied()
+                && !xai_grok_sandbox::is_inside_bwrap();
+            if unappliable {
                 eprintln!(
-                    "error: could not apply the '{}' sandbox profile; refusing to start rather than run unsandboxed.",
+                    "error: could not apply the '{}' sandbox profile (including \
+                     direct global-hook write protection); refusing to start.",
                     sandbox.profile()
+                );
+                std::process::exit(1);
+            }
+            #[cfg(target_os = "linux")]
+            if requires_hook_write_deny
+                && xai_grok_sandbox::is_inside_bwrap()
+                && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
+            {
+                eprintln!(
+                    "error: required hook write-deny mounts not verified after apply ({e}); \
+                     refusing to start"
                 );
                 std::process::exit(1);
             }

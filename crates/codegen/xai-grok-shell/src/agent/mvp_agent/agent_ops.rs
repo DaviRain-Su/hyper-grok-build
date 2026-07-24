@@ -3,6 +3,7 @@
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
+use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
 /// `preferred` model, else catalog `current`, else first with own credentials.
 fn byok_from_models(
     models: &indexmap::IndexMap<String, ModelEntry>,
@@ -411,9 +412,6 @@ impl MvpAgent {
     /// Must be called right after construction: entries registered on the
     /// constructor-created default instance are NOT migrated.
     pub fn set_activity(&mut self, activity: crate::agent::activity::AgentActivity) {
-        self.subagent_coordinator
-            .borrow_mut()
-            .set_running_gauge(activity.subagent_gauge());
         self.activity = activity;
     }
     /// Install the channel that fans new session cwds into the leader's
@@ -1339,6 +1337,7 @@ impl MvpAgent {
             image_gen_enabled: cfg.resolve_image_gen().value,
             image_edit_enabled: cfg.resolve_image_edit().value,
             model_override: cfg.resolve_image_gen_model_override(),
+            edit_model_override: cfg.resolve_image_edit_model_override(),
             tier_restricted,
         }
     }
@@ -1534,8 +1533,6 @@ impl MvpAgent {
         }
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let activity = crate::agent::activity::AgentActivity::default();
-        let mut subagent_coordinator = crate::agent::subagent::SubagentCoordinator::new();
-        subagent_coordinator.set_running_gauge(activity.subagent_gauge());
         let instance = Self {
             sessions: RefCell::new(HashMap::new()),
             activity,
@@ -1604,7 +1601,9 @@ impl MvpAgent {
             model_unavailable_sessions: RefCell::new(std::collections::HashMap::new()),
             subagent_event_tx,
             subagent_event_rx: RefCell::new(Some(subagent_event_rx)),
-            subagent_coordinator: RefCell::new(subagent_coordinator),
+            subagent_presentation: RefCell::new(
+                crate::agent::subagent::SubagentPresentation::new(),
+            ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_unblock_jwt_retry_in_flight: Arc::new(
@@ -1895,46 +1894,74 @@ impl MvpAgent {
     /// Cancel a subagent by id, returning a typed outcome that backs the pager's
     /// `x.ai/subagent/cancel`. Active/pending → cancelled (a finish follows);
     /// already-finished → its terminal status; unknown id → `NotFound`.
-    pub fn cancel_subagent(
+    pub async fn cancel_subagent(
         &self,
         subagent_id: &str,
     ) -> xai_grok_tools::implementations::grok_build::task::types::SubagentCancelOutcome {
-        self.subagent_coordinator.borrow_mut().cancel_with_outcome(subagent_id)
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.clone(),
+            )
+            .cancel(subagent_id)
+            .await
     }
-    /// List running subagent seeds for a given parent session.
-    ///
-    /// Synchronously collects seeds from the coordinator, suitable for
-    /// async resolution via `resolve_running_list()` after the borrow is
-    /// dropped.
-    pub(crate) fn list_running_subagents(
+    pub(crate) async fn list_running_subagents(
         &self,
         parent_session_id: &str,
-    ) -> Vec<crate::agent::subagent::RunningSubagentListSeed> {
-        self.subagent_coordinator.borrow().list_running_for_parent(parent_session_id)
+    ) -> Vec<
+        xai_grok_tools::implementations::grok_build::task::types::SubagentInspection,
+    > {
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.clone(),
+            )
+            .list_running(parent_session_id)
+            .await
     }
-    /// Return fork provenance metadata for a subagent.
-    pub(crate) fn provenance_for_subagent(
+    pub(crate) async fn inspect_subagent(
         &self,
         subagent_id: &str,
-    ) -> crate::agent::subagent::SubagentProvenance {
-        self.subagent_coordinator.borrow().provenance_for(subagent_id)
+    ) -> Option<
+        xai_grok_tools::implementations::grok_build::task::types::SubagentInspection,
+    > {
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.clone(),
+            )
+            .inspect(subagent_id)
+            .await
     }
-    /// Return `(parent_session_id, child_session_id)` for a subagent.
-    pub(crate) fn session_ids_for_subagent(
+    pub(crate) async fn query_subagent(
         &self,
         subagent_id: &str,
-    ) -> Option<(String, String)> {
-        self.subagent_coordinator.borrow().session_ids_for(subagent_id)
+        block: bool,
+        timeout_ms: Option<u64>,
+    ) -> Option<
+        xai_grok_tools::implementations::grok_build::task::types::SubagentSnapshot,
+    > {
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.clone(),
+            )
+            .query(subagent_id, block, timeout_ms)
+            .await
     }
-    /// Synchronous lookup of a single subagent by ID.
-    ///
-    /// Returns `Option<SnapshotLookup>` which must be resolved
-    /// asynchronously via `resolve_snapshot()` after the borrow is dropped.
-    pub(crate) fn lookup_subagent(
+    pub(super) async fn spawned_subagent_refs_for_prompt(
         &self,
-        subagent_id: &str,
-    ) -> Option<crate::agent::subagent::SnapshotLookup> {
-        self.subagent_coordinator.borrow().lookup(subagent_id)
+        parent_session_id: &str,
+        prompt_id: &str,
+    ) -> Vec<crate::upload::trace::SubagentSpawnedRef> {
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                self.subagent_event_tx.clone(),
+            )
+            .spawned_refs_for_prompt(parent_session_id, prompt_id)
+            .await
+            .into_iter()
+            .map(|child| crate::upload::trace::SubagentSpawnedRef {
+                subagent_id: child.subagent_id,
+                child_session_id: child.child_session_id,
+                subagent_type: child.subagent_type,
+                description: child.description,
+                persona: child.persona,
+                resumed_from: child.resumed_from,
+            })
+            .collect()
     }
     /// List all background tasks for a session.
     /// Routes through the session's tool bridge to the TerminalBackend.
@@ -3153,19 +3180,19 @@ impl MvpAgent {
             })?;
         tool_ctx.subagent_event_tx = Some(self.subagent_event_tx.clone());
         tool_ctx.synthetic_trace_tx = self
-            .subagent_coordinator
+            .subagent_presentation
             .borrow()
             .synthetic_trace_tx
             .clone();
         if let Some(ref shared) = tool_ctx.synthetic_trace_tx_shared {
             *shared.lock().unwrap_or_else(|e| e.into_inner()) = self
-                .subagent_coordinator
+                .subagent_presentation
                 .borrow()
                 .synthetic_trace_tx
                 .clone();
         }
         tool_ctx.is_turn_active = Some(
-            self.subagent_coordinator.borrow().turn_active_flag(),
+            self.subagent_presentation.borrow().turn_active_flag(),
         );
         tool_ctx.monitor_event_buffer = Some(self.monitor_event_buffer.clone());
         tool_ctx.subagent_depth = 0;

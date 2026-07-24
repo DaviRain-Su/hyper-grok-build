@@ -61,6 +61,15 @@ impl Recorder {
         let rate = rate.to_string();
         match self {
             Recorder::PwRecord => vec![
+                // `--raw` is load-bearing: without it `pw-record` treats
+                // `--format`/`--rate`/`--channels` as a libsndfile container
+                // subformat and wraps stdout in a container — WAV on
+                // PipeWire < 1.6 (unwritable to a pipe: "this file format
+                // does not support pipe writing", exit 1 — e.g. Ubuntu 24.04
+                // / Debian 12 ship 1.0/1.2), AU with a header on ≥ 1.6. Raw
+                // mode fwrites pure PCM16 frames, which is what the reader
+                // expects from every backend.
+                "--raw".into(),
                 "--rate".into(),
                 rate,
                 "--channels".into(),
@@ -307,6 +316,10 @@ mod tests {
         assert!(parec.contains(&"--channels=1".to_string()));
 
         let pw = Recorder::PwRecord.args(48_000);
+        // Raw mode is required: without it pw-record wraps stdout in a
+        // libsndfile container (WAV on PipeWire < 1.6, which cannot be
+        // written to a pipe at all; AU with a header on >= 1.6).
+        assert!(pw.contains(&"--raw".to_string()));
         let r = pw.iter().position(|a| a == "--rate").unwrap();
         assert_eq!(pw[r + 1], "48000");
         let f = pw.iter().position(|a| a == "--format").unwrap();

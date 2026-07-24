@@ -198,6 +198,7 @@ impl AgentView {
             hit_cancel_button: Default::default(),
             hit_announcement_hide: Default::default(),
             hit_announcement_cta: Default::default(),
+            privacy_banner: Default::default(),
             hit_upgrade_cta: Default::default(),
             hit_voice_stop_button: Default::default(),
             hit_scrollbar: Default::default(),

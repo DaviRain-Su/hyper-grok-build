@@ -74,6 +74,7 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
+wildmatch = { workspace = true }
 xai-grok-env = { workspace = true }
 serde_yaml = { workspace = true }
 shellexpand = "3.1"

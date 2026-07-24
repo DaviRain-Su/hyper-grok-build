@@ -513,6 +513,10 @@ pub enum Action {
     /// persisted to `[ui].language` and applied live via
     /// `rust_i18n::set_locale` — no restart required.
     SetLanguage(String),
+    /// Enable/disable the Ctrl+Space / F8 voice-dictation shortcut. SHELL-owned;
+    /// persisted to `[ui].voice_keybind_enabled`. Takes effect on the next
+    /// keypress; `/voice` is unaffected.
+    SetVoiceKeybindEnabled(bool),
     /// Set the voice capture mode (`toggle` | `hold`). SHELL-owned; persisted to
     /// `[ui].voice_capture_mode`. Takes effect for the next Ctrl+Space press.
     SetVoiceCaptureMode(String),
@@ -616,6 +620,9 @@ pub enum Action {
     OpenCommandPalette,
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
+    /// Open the onboarding tutorial overlay (`/tutorial` or the command
+    /// palette).
+    OpenTutorial,
     /// Open the reset-settings confirmation dialog for a specific key.
     /// Moves the Settings modal state into `ResetSettingsConfirm` so
     /// the underlying modal survives the confirm dialog.
@@ -2868,7 +2875,6 @@ pub enum TaskResult {
     },
     DoctorFixApplied {
         target: DoctorFixTarget,
-        shell: crate::diagnostics::ShellKind,
         result: Result<crate::diagnostics::FixOutcome, String>,
     },
 }

@@ -500,6 +500,7 @@ struct SettingsUpdateNotification {
     privacy_banner_reshow_days: Option<u64>,
     session_picker_grouped: Option<bool>,
     tips: Option<Vec<String>>,
+    slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
     announcements: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
     gate_message: Option<String>,
     gate_url: Option<String>,
@@ -797,9 +798,8 @@ pub struct MvpAgent {
             >,
         >,
     >,
-    /// Active subagent tracking — owns all subagent lifecycle state.
-    /// LEADER-SAFE(per-session): keyed by subagent_id, no cross-session iteration.
-    subagent_coordinator: RefCell<crate::agent::subagent::SubagentCoordinator>,
+    /// Shell-only presentation state; lifecycle lives in the channel actor.
+    subagent_presentation: RefCell<crate::agent::subagent::SubagentPresentation>,
     /// Shared buffer for mid-turn monitor event notifications.
     /// Pushed by the `InjectNotification` handler when a turn is active and the
     /// notification has `Next` priority. Drained by the session turn loop
@@ -1687,6 +1687,7 @@ impl MvpAgent {
                 block_waited: false,
                 explicitly_killed: false,
                 owner_session_id: None,
+                description: None,
             };
             let notification = crate::extensions::notification::SessionNotification {
                 session_id: session_id.clone(),
@@ -2092,6 +2093,7 @@ impl MvpAgent {
                     .and_then(|s| s.privacy_banner_reshow_days),
                 session_picker_grouped: rs.and_then(|s| s.session_picker_grouped),
                 tips: rs.and_then(|s| s.tips.clone()),
+                slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),
                 announcements: rs.and_then(|s| s.announcements.clone()),
                 gate_message: rs.and_then(|s| s.gate_message.clone()),
                 gate_url: rs.and_then(|s| s.gate_url.clone()),

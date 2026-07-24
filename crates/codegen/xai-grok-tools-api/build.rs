@@ -29,6 +29,22 @@ fn main() {
             ".xai.grok.tools.v1.ToolConfigEntry.description_override",
             "#[serde(default)]",
         )
+        .field_attribute(
+            ".xai.grok.tools.v1.FinalizeToolServerConfigRequest.client_callback_addr",
+            "#[serde(default)]",
+        )
+        .field_attribute(
+            ".xai.grok.tools.v1.FinalizeToolServerConfigRequest.session_id",
+            "#[serde(default)]",
+        )
+        .field_attribute(
+            ".xai.grok.tools.v1.FinalizeToolServerConfigRequest.client_callback_secret",
+            "#[serde(default)]",
+        )
+        .field_attribute(
+            ".xai.grok.tools.v1.FinalizeToolServerConfigResponse.callback_status",
+            "#[serde(default)]",
+        )
         .compile_protos(&["proto/grok-tools.proto"], &["proto/"])
         .unwrap();
 }

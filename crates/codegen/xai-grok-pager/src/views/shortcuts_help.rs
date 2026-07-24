@@ -192,12 +192,14 @@ pub fn build_entries(
                 continue;
             }
             // The voice chord (`Ctrl+Space`) is hidden when the voice gate is
-            // off (remote kill switch / `GROK_VOICE_MODE=0`). Unlike the old
-            // `Ctrl+Shift+M`, `Ctrl+Space` decodes the same with or without the
-            // Kitty keyboard protocol (it just toggles instead of hold-to-talk
-            // without it), so it's shown on every terminal once the gate is on.
+            // off (remote kill switch / `GROK_VOICE_MODE=0`) or the user turned
+            // the Voice shortcut setting off — don't advertise keys that do
+            // nothing. `Ctrl+Space` decodes the same with or without the Kitty
+            // keyboard protocol (it just toggles instead of hold-to-talk), so
+            // it's shown on every terminal once the gates are on.
             // EnableVoiceMode is slash-only and already dropped above.
-            if def.id == crate::actions::ActionId::VoiceToggle && !crate::app::voice_mode_enabled()
+            if def.id == crate::actions::ActionId::VoiceToggle
+                && (!crate::app::voice_mode_enabled() || !crate::app::voice_keybind_enabled())
             {
                 continue;
             }
@@ -511,6 +513,7 @@ fn picker_config(non_sel: &[bool]) -> PickerConfig<'_> {
         filter_label: None,
         filter_key_hint: None,
         filter_active: false,
+        header_note: None,
         action_keys: &[],
         disable_search: false,
         compact_bottom_bar: false,
@@ -1391,6 +1394,7 @@ pub fn render_modal(
         &[],
         Some(theme.bg_base),
         false,
+        0,
         inner_x + inner_width - 1,
     );
     state.hit_areas = Some(PickerHitAreas {

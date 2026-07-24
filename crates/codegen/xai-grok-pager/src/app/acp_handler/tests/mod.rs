@@ -1843,6 +1843,7 @@ pub(super) fn task_completed_notif(
                 block_waited: false,
                 explicitly_killed: false,
                 owner_session_id: None,
+                description: None,
             },
             will_wake,
         },

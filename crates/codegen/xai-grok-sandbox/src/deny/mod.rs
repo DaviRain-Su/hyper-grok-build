@@ -112,6 +112,112 @@ fn emit_seatbelt_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<
     Ok(())
 }
 
+/// Emit write-only Seatbelt deny rules (hook sources stay readable).
+#[cfg(all(feature = "enforce", target_os = "macos"))]
+fn emit_seatbelt_write_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<()> {
+    caps.add_platform_rule(format!("(deny file-write* {filter})"))?;
+    for action in SEATBELT_WRITE_DENY_ACTIONS {
+        caps.add_platform_rule(format!("(deny {action} {filter})"))?;
+    }
+    Ok(())
+}
+
+// Unlink blocks rename of the node; create blocks replacement. Specific
+// sub-actions (not bare file-write*) win against later allow-write* grants.
+#[cfg(all(feature = "enforce", target_os = "macos"))]
+const SEATBELT_ANCESTOR_NODE_DENY_ACTIONS: &[&str] = &["file-write-unlink", "file-write-create"];
+
+#[cfg(all(feature = "enforce", target_os = "macos"))]
+fn emit_seatbelt_ancestor_node_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<()> {
+    for action in SEATBELT_ANCESTOR_NODE_DENY_ACTIONS {
+        caps.add_platform_rule(format!("(deny {action} {filter})"))?;
+    }
+    Ok(())
+}
+
+/// Leaf parent up to deepest containing writable root; outside all roots → empty.
+#[cfg(all(feature = "enforce", target_os = "macos"))]
+pub(crate) fn ancestors_within_writable_roots(
+    path: &Path,
+    writable_roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let root = writable_roots
+        .iter()
+        .filter(|r| path == r.as_path() || path.starts_with(r))
+        .max_by_key(|r| r.components().count());
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for anc in xai_grok_config::existing_ancestor_chain(path) {
+        if anc == *root || anc.starts_with(root) {
+            out.push(anc);
+        }
+    }
+    if path != root.as_path() && root.exists() && !out.iter().any(|p| p == root) {
+        out.push(root.clone());
+    }
+    out
+}
+
+/// Write-only deny for hook sources. Linux is a no-op (bwrap).
+#[cfg(all(feature = "enforce", unix))]
+pub(crate) fn apply_write_deny_paths_to_capability_set(
+    caps: &mut CapabilitySet,
+    entries: &[(PathBuf, bool)],
+    writable_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut rule_paths = Vec::new();
+        let mut ancestor_seen = std::collections::HashSet::new();
+        for (path, is_dir) in entries {
+            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let use_subpath = *is_dir || deny_path_is_dir(&canonical);
+            for form in macos_deny_aliases(path, &canonical) {
+                let Some(escaped) = escape_seatbelt_path(&form) else {
+                    anyhow::bail!("cannot escape write-deny path {form:?} for Seatbelt");
+                };
+                if use_subpath {
+                    emit_seatbelt_write_deny(caps, &format!("(literal \"{escaped}\")"))?;
+                    emit_seatbelt_write_deny(caps, &format!("(subpath \"{escaped}\")"))?;
+                } else {
+                    emit_seatbelt_write_deny(caps, &format!("(literal \"{escaped}\")"))?;
+                }
+                rule_paths.push(form);
+            }
+            for anc in ancestors_within_writable_roots(path, writable_roots) {
+                if !ancestor_seen.insert(anc.clone()) {
+                    continue;
+                }
+                let anc_canon = dunce::canonicalize(&anc).unwrap_or_else(|_| anc.clone());
+                for form in macos_deny_aliases(&anc, &anc_canon) {
+                    let Some(escaped) = escape_seatbelt_path(&form) else {
+                        anyhow::bail!(
+                            "cannot escape ancestor write-deny path {form:?} for Seatbelt"
+                        );
+                    };
+                    emit_seatbelt_ancestor_node_deny(caps, &format!("(literal \"{escaped}\")"))?;
+                    rule_paths.push(form);
+                }
+            }
+        }
+        let _ = caps.remove_exact_file_caps_for_paths(&rule_paths);
+        tracing::info!(
+            count = entries.len(),
+            "Applied Seatbelt write-deny for Grok-owned direct hook sources"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (caps, writable_roots);
+    }
+    Ok(())
+}
+
 /// Apply kernel-level deny rules for the given paths.
 ///
 /// On macOS, adds Seatbelt read-deny + write-deny (incl. specific write
@@ -237,6 +343,49 @@ mod tests {
     // is unused on `--no-default-features`.
     #[cfg(all(feature = "enforce", unix))]
     use super::*;
+
+    #[test]
+    #[cfg(all(feature = "enforce", target_os = "macos"))]
+    fn ancestors_pin_under_writable_root_not_home() {
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-anc-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let grok = tmp.join("grok");
+        let sessions = grok.join("sessions");
+        let leaf = sessions.join("extra-hooks");
+        std::fs::create_dir_all(&leaf).unwrap();
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let roots = [grok.clone(), ws.clone()];
+        let pin = ancestors_within_writable_roots(&leaf, &roots);
+        assert!(
+            pin.iter().any(|p| p == &sessions),
+            "must pin sessions under GROK_HOME: {pin:?}"
+        );
+        assert!(
+            pin.iter().any(|p| p == &grok),
+            "must pin GROK_HOME grant root: {pin:?}"
+        );
+        assert!(
+            !pin.iter().any(|p| p == &tmp),
+            "must not pin above writable roots: {pin:?}"
+        );
+
+        let outside = tmp.join("outside").join("hooks");
+        std::fs::create_dir_all(&outside).unwrap();
+        let pin_out = ancestors_within_writable_roots(&outside, &roots);
+        assert!(
+            pin_out.is_empty(),
+            "source outside writable roots: leaf-only: {pin_out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     #[cfg(all(feature = "enforce", unix))]

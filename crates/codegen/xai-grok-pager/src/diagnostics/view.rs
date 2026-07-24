@@ -7,7 +7,8 @@ use crate::diagnostics::probes::{
 use crate::diagnostics::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
     DiagnosticReport, FindingDisposition, KeyboardFact, ManualRemediation, NewlineFact, ProbeNote,
-    ProbeStatus, RuntimeFact, TerminalWarning, WarningCategory,
+    ProbeStatus, RuntimeFact, TerminalWarning, TmuxFacts, TmuxOptionFact, TmuxSupportFact,
+    WarningCategory,
 };
 use crate::terminal::TerminalName;
 
@@ -227,6 +228,14 @@ fn facts(
             multiplexer: ctx.multiplexer,
             byobu: ctx.byobu,
             ssh: ctx.is_ssh,
+            tmux: TmuxFacts {
+                extended_keys: tmux_option_fact(&snapshot.common.tmux.extended_keys),
+                set_clipboard: tmux_option_fact(&snapshot.common.tmux.set_clipboard),
+                allow_passthrough_support: tmux_support_fact(
+                    &snapshot.common.tmux.allow_passthrough_support,
+                ),
+                allow_passthrough: tmux_option_fact(&snapshot.common.tmux.allow_passthrough),
+            },
             color: ColorFacts {
                 level: match snapshot.color_level {
                     RuntimeEvidence::Available(level) => RuntimeFact::Available(level),
@@ -508,8 +517,7 @@ fn finding(warning: TerminalWarning, disposition: FindingDisposition) -> Option<
             fix,
             config_path: warning.config_path,
         }),
-        automatic_remediation: (id == crate::diagnostics::SSH_WRAP_ID)
-            .then(crate::diagnostics::ssh_wrap_automatic_remediation),
+        automatic_remediation: crate::diagnostics::automatic_remediation_for(id),
         note: warning.note,
     })
 }
@@ -594,6 +602,24 @@ fn probe_notes(snapshot: &DiagnosticSnapshot<'_>) -> Vec<ProbeNote> {
         );
     }
     notes
+}
+
+fn tmux_option_fact(result: &TmuxProbeResult<String>) -> TmuxOptionFact {
+    match result {
+        TmuxProbeResult::Available(value) => TmuxOptionFact::Available(value.to_owned()),
+        TmuxProbeResult::Unsupported => TmuxOptionFact::Unsupported,
+        TmuxProbeResult::Unavailable => TmuxOptionFact::Unavailable,
+        TmuxProbeResult::Error(_) => TmuxOptionFact::Error,
+    }
+}
+
+fn tmux_support_fact(result: &TmuxProbeResult<()>) -> TmuxSupportFact {
+    match result {
+        TmuxProbeResult::Available(()) => TmuxSupportFact::Supported,
+        TmuxProbeResult::Unsupported => TmuxSupportFact::Unsupported,
+        TmuxProbeResult::Unavailable => TmuxSupportFact::Unavailable,
+        TmuxProbeResult::Error(_) => TmuxSupportFact::Error,
+    }
 }
 
 fn probe_note<T>(notes: &mut Vec<ProbeNote>, probe: &'static str, result: &TmuxProbeResult<T>) {

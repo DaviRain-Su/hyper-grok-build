@@ -425,6 +425,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 image_gen_enabled: true,
                                 image_edit_enabled: true,
                                 model_override: None,
+                                edit_model_override: None,
                                 tier_restricted: false,
                             },
                             VideoGenConfig::Enabled {
@@ -467,6 +468,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
             session_env,
             notification_handle,
             owner_session_id: None,
+            subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
             state_path: self.resolve_state_path(session_id),
@@ -590,6 +592,7 @@ pub mod test_support {
                 session_env,
                 notification_handle: ToolNotificationHandle::noop(),
                 owner_session_id: None,
+                subagent: None,
                 parent_scheduler_handle: None,
                 skills: vec![],
                 state_path: session_root.join("tool_state.json"),

@@ -71,6 +71,281 @@ fn doctor_json_bypasses_unrelated_startup_state() {
 
 #[test]
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_fix_without_id_lists_tmux_fixes_from_current_probe_evidence() {
+    let binary = pager_binary().expect("real pager binary is required when selected");
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    let fake_bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let tmux = fake_bin.join("tmux");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\ncase \"$*\" in\n  *\"show-option -gv allow-passthrough\"*) exit 0;;\n  *\"show-option -gqv extended-keys\"*) printf off;;\n  *\"show-option -gqv allow-passthrough\"*) printf off;;\n  *\"show-option -gqv set-clipboard\"*) printf off;;\n  *\"display-message\"*) printf x;;\n  *) exit 1;;\nesac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix"],
+        &[
+            ("TMUX", "/tmp/tmux/default,1,0"),
+            ("PATH", fake_bin.to_str().unwrap()),
+        ],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for handle in ["tmux-clipboard", "dcs-passthrough"] {
+        assert!(stdout.contains(handle), "{stdout}");
+    }
+    assert!(!stdout.contains("Set up local SSH wrapping"), "{stdout}");
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_tmux_fix_probes_are_bounded_and_never_write_on_timeout() {
+    let binary = pager_binary().expect("real pager binary is required when selected");
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    let fake_bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let tmux = fake_bin.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\nsleep 30\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for args in [
+        ["doctor", "fix", "", ""],
+        ["doctor", "fix", "tmux-clipboard", "--yes"],
+    ] {
+        let actual = args
+            .iter()
+            .copied()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let output = run_pager(
+            &binary,
+            &home,
+            &grok_home,
+            "/bin/bash",
+            &actual,
+            &[
+                ("TMUX", "/tmp/tmux/default,1,0"),
+                ("PATH", fake_bin.to_str().unwrap()),
+            ],
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(12));
+        if actual.len() == 2 {
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"No automatic fixes are available here.\n");
+        } else {
+            assert_eq!(output.status.code(), Some(1));
+        }
+        assert!(!home.join(".tmux.conf").exists());
+    }
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_tmux_fix_kills_background_pipe_holders_after_leader_exit() {
+    let binary = pager_binary().expect("real pager binary is required when selected");
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    let fake_bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let tmux = fake_bin.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\nsleep 30 &\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for args in [
+        vec!["doctor", "fix"],
+        vec!["doctor", "fix", "tmux-clipboard", "--yes"],
+    ] {
+        let started = std::time::Instant::now();
+        let output = run_pager(
+            &binary,
+            &home,
+            &grok_home,
+            "/bin/bash",
+            &args,
+            &[
+                ("TMUX", "/tmp/tmux/default,1,0"),
+                ("PATH", fake_bin.to_str().unwrap()),
+            ],
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(12));
+        if args.len() == 2 {
+            assert!(output.status.success());
+        } else {
+            assert_eq!(output.status.code(), Some(1));
+        }
+        assert!(!home.join(".tmux.conf").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_tmux_fix_kills_term_ignoring_redirected_descendants() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let binary = pager_binary().expect("real pager binary is required when selected");
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    let fake_bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let tmux = fake_bin.join("tmux");
+    let pid_file = temp.path().join("descendant.pid");
+    std::fs::write(
+        &tmux,
+        format!(
+            "#!/bin/sh\n( trap '' TERM; echo $$ > '{}'; exec sleep 30 ) >/dev/null 2>&1 &\nexit 0\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for args in [
+        vec!["doctor", "fix"],
+        vec!["doctor", "fix", "tmux-clipboard", "--yes"],
+    ] {
+        let _ = std::fs::remove_file(&pid_file);
+        let output = run_pager(
+            &binary,
+            &home,
+            &grok_home,
+            "/bin/bash",
+            &args,
+            &[
+                ("TMUX", "/tmp/tmux/default,1,0"),
+                ("PATH", fake_bin.to_str().unwrap()),
+            ],
+        );
+        assert!(output.status.success() || output.status.code() == Some(1));
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            // SAFETY: kill(pid, 0) only probes liveness for the positive child PID.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY: same liveness probe; ESRCH is the expected result.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "descendant {pid} survived"
+        );
+        assert!(!home.join(".tmux.conf").exists());
+    }
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_irrelevant_unsafe_byobu_does_not_break_ssh_or_plain_tmux() {
+    let binary = pager_binary().expect("real pager binary is required when selected");
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+
+    let ssh = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix", "ssh-wrap", "--yes"],
+        &[("BYOBU_CONFIG_DIR", "relative")],
+    );
+    assert!(
+        ssh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ssh.stderr)
+    );
+    assert!(home.join(".bashrc").exists());
+
+    let plain = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix"],
+        &[
+            ("BYOBU_CONFIG_DIR", "relative"),
+            ("TMUX", "/tmp/tmux/default,1,0"),
+        ],
+    );
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_hostile_home_and_byobu_create_no_config_files() {
+    let binary = pager_binary()
+        .expect("real pager binary is required when selected")
+        .canonicalize()
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("qhome");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+    for (key, value) in [("HOME", "."), ("BYOBU_CONFIG_DIR", "relative")] {
+        let mut command = base_pager_command(&binary, &home, &grok_home, "/bin/bash");
+        command
+            .current_dir(temp.path())
+            .env(key, value)
+            .env("TMUX", "/tmp/tmux/default,1,0")
+            .env("BYOBU_BACKEND", "tmux")
+            .args(["doctor", "fix", "tmux-clipboard", "--yes"]);
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!temp.path().join(".tmux.conf").exists());
+        assert!(!temp.path().join("relative/.tmux.conf").exists());
+    }
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn doctor_fix_without_id_lists_only_applicable_automatic_fixes() {
     let binary = pager_binary().expect("real pager binary is required when selected");
     let temp = tempfile::tempdir().unwrap();
@@ -117,6 +392,66 @@ fn doctor_fix_without_id_lists_only_applicable_automatic_fixes() {
         String::from_utf8(output.stdout).unwrap(),
         "No automatic fixes are available here.\n"
     );
+}
+
+#[test]
+#[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
+fn doctor_tmux_fix_yes_writes_only_actual_home_tmux_config() {
+    let binary = pager_binary().expect("real pager binary is required when this test is selected");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let grok_home = temp.path().join("grok-home");
+    let fake_bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&grok_home).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let tmux = fake_bin.join("tmux");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\ncase \"$*\" in\n  *\"show-option -gv allow-passthrough\"*) exit 0;;\n  *\"show-option -gqv allow-passthrough\"*) printf off;;\n  *\"show-option -gqv set-clipboard\"*) printf off;;\n  *\"display-message\"*) printf x;;\n  *) exit 1;;\nesac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let output = run_pager(
+        &binary,
+        &home,
+        &grok_home,
+        "/bin/bash",
+        &["doctor", "fix", "tmux-clipboard", "--yes"],
+        &[
+            ("TMUX", "/tmp/tmux/default,1,0"),
+            ("PATH", fake_bin.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Added `set -g set-clipboard on`"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Reload tmux with `tmux source-file"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Run /doctor again to verify the live setting"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".tmux.conf")).unwrap(),
+        "# >>> grok doctor >>>\n# >>> terminal.tmux-clipboard >>>\nset -g set-clipboard on\n# <<< terminal.tmux-clipboard <<<\n# <<< grok doctor <<<"
+    );
+    assert!(!grok_home.join(".tmux.conf").exists());
 }
 
 #[test]

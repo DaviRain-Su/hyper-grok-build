@@ -402,18 +402,24 @@ pub const GIT_AUTH_SUPPRESSION_ENVS: [(&str, &str); 4] = [
 ///
 /// Respects `GIT_BIN_PATH` for hermetic git in Bazel test sandboxes.
 pub fn git_command() -> std::process::Command {
+    let mut hermetic_exec_path: Option<std::path::PathBuf> = None;
     let git = match std::env::var("GIT_BIN_PATH") {
         Ok(p) => {
             let p = std::path::PathBuf::from(p);
-            if p.is_relative() {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(&p)
-                    .to_string_lossy()
-                    .into_owned()
+            let p = if p.is_relative() {
+                std::env::current_dir().unwrap_or_default().join(&p)
             } else {
-                p.to_string_lossy().into_owned()
+                p
+            };
+            // git-minimal spawns subcommands (`git stash` → `git
+            // update-index`) through its exec path, which is baked to a
+            // build-machine prefix. Helpers live next to the binary, so point
+            // the exec path there. Skip the host-fallback wrapper: host git
+            // must keep its own exec path.
+            if p.file_name().is_some_and(|name| name == "git") {
+                hermetic_exec_path = p.parent().map(std::path::Path::to_path_buf);
             }
+            p.to_string_lossy().into_owned()
         }
         Err(_) => "git".to_string(),
     };
@@ -423,6 +429,9 @@ pub fn git_command() -> std::process::Command {
     cmd.envs(pager_env());
     for &(key, val) in &GIT_AUTH_SUPPRESSION_ENVS {
         cmd.env(key, val);
+    }
+    if let Some(exec_path) = hermetic_exec_path {
+        cmd.env("GIT_EXEC_PATH", exec_path);
     }
     cmd.arg("--no-optional-locks");
     cmd

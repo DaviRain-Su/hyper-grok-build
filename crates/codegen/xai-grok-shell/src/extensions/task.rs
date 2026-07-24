@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 use xai_grok_tools::types::{KillOutcome, TaskSnapshot};
 
 use xai_grok_tools::implementations::grok_build::task::types::{
-    SubagentCancelOutcome, SubagentSnapshot, SubagentSnapshotStatus,
+    SubagentCancelOutcome, SubagentInspection, SubagentProvenance, SubagentSnapshot,
+    SubagentSnapshotStatus,
 };
 
 use crate::agent::MvpAgent;
-use crate::agent::subagent::{ResolvedRunningSubagent, is_running, resolve_running_list};
 use crate::session::ExtMethodResult;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
@@ -140,23 +140,41 @@ struct SubagentLiveSnapshotDto {
     error_count: u32,
 }
 
-impl From<ResolvedRunningSubagent> for SubagentLiveSnapshotDto {
-    fn from(r: ResolvedRunningSubagent) -> Self {
+impl From<SubagentInspection> for SubagentLiveSnapshotDto {
+    fn from(inspection: SubagentInspection) -> Self {
+        let SubagentInspection {
+            snapshot,
+            parent_session_id,
+            child_session_id,
+            ..
+        } = inspection;
+        let SubagentSnapshotStatus::Running {
+            turn_count,
+            tool_call_count,
+            tokens_used,
+            context_window_tokens,
+            context_usage_pct,
+            tools_used,
+            error_count,
+        } = snapshot.status
+        else {
+            unreachable!("list_running returns only active children");
+        };
         Self {
-            subagent_id: r.subagent_id,
-            parent_session_id: r.parent_session_id,
-            child_session_id: r.child_session_id,
-            subagent_type: r.subagent_type,
-            description: r.description,
-            started_at_epoch_ms: r.started_at_epoch_ms,
-            duration_ms: r.duration_ms,
-            turn_count: r.turn_count,
-            tool_call_count: r.tool_call_count,
-            tokens_used: r.tokens_used,
-            context_window_tokens: r.context_window_tokens,
-            context_usage_pct: r.context_usage_pct,
-            tools_used: r.tools_used,
-            error_count: r.error_count,
+            subagent_id: snapshot.subagent_id,
+            parent_session_id,
+            child_session_id,
+            subagent_type: snapshot.subagent_type,
+            description: snapshot.description,
+            started_at_epoch_ms: snapshot.started_at_epoch_ms,
+            duration_ms: snapshot.duration_ms,
+            turn_count,
+            tool_call_count,
+            tokens_used,
+            context_window_tokens,
+            context_usage_pct,
+            tools_used,
+            error_count,
         }
     }
 }
@@ -238,7 +256,7 @@ impl SubagentSnapshotDto {
         snap: SubagentSnapshot,
         parent_session_id: String,
         child_session_id: String,
-        provenance: crate::agent::subagent::SubagentProvenance,
+        provenance: SubagentProvenance,
     ) -> Self {
         let mut dto = SubagentSnapshotDto {
             subagent_id: snap.subagent_id,
@@ -392,7 +410,8 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         "x.ai/subagent/cancel" => {
             let req: CancelSubagentRequest = parse(args)?;
             tracing::info!(subagent_id = %req.subagent_id, "Cancelling subagent via ext method");
-            let outcome = SubagentCancelOutcomeDto::from(agent.cancel_subagent(&req.subagent_id));
+            let outcome =
+                SubagentCancelOutcomeDto::from(agent.cancel_subagent(&req.subagent_id).await);
             respond(Ok::<_, String>(CancelSubagentResponse {
                 subagent_id: req.subagent_id,
                 cancelled: outcome.cancelled_bool(),
@@ -404,51 +423,38 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             let block = req.block.unwrap_or(false);
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
 
-            let ids = agent.session_ids_for_subagent(&req.subagent_id);
-            let (parent_sid, child_sid) = ids.unwrap_or_default();
-            let provenance = agent.provenance_for_subagent(&req.subagent_id);
-
-            let to_dto = |snap: SubagentSnapshot| {
-                SubagentSnapshotDto::from_snapshot(
-                    snap,
-                    parent_sid.clone(),
-                    child_sid.clone(),
-                    provenance.clone(),
-                )
-            };
-
-            // Sync lookup, drop borrow, then resolve async.
-            let lookup = agent.lookup_subagent(&req.subagent_id);
-            let snapshot = crate::agent::subagent::resolve_snapshot(lookup).await;
-
-            if block && snapshot.as_ref().is_some_and(is_running) {
-                // Poll every 200ms until done or timeout.
-                let deadline =
-                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                    let lookup = agent.lookup_subagent(&req.subagent_id);
-                    let snap = crate::agent::subagent::resolve_snapshot(lookup).await;
-                    let still_running = snap.as_ref().is_some_and(is_running);
-                    if !still_running || tokio::time::Instant::now() >= deadline {
-                        return respond(Ok::<_, String>(GetSubagentResponse {
-                            snapshot: snap.map(&to_dto),
-                        }));
-                    }
-                }
-            } else {
-                respond(Ok::<_, String>(GetSubagentResponse {
-                    snapshot: snapshot.map(to_dto),
-                }))
-            }
+            let snapshot = agent
+                .query_subagent(&req.subagent_id, block, Some(timeout_ms))
+                .await;
+            let inspection = agent.inspect_subagent(&req.subagent_id).await;
+            let (parent_session_id, child_session_id, provenance) = inspection
+                .map(|inspection| {
+                    (
+                        inspection.parent_session_id,
+                        inspection.child_session_id,
+                        SubagentProvenance {
+                            fork_parent_prompt_id: inspection.fork_parent_prompt_id,
+                            resumed_from: inspection.resumed_from,
+                        },
+                    )
+                })
+                .unwrap_or_default();
+            respond(Ok::<_, String>(GetSubagentResponse {
+                snapshot: snapshot.map(|snapshot| {
+                    SubagentSnapshotDto::from_snapshot(
+                        snapshot,
+                        parent_session_id,
+                        child_session_id,
+                        provenance,
+                    )
+                }),
+            }))
         }
         "x.ai/subagent/list_running" => {
             let req: ListRunningSubagentsRequest = parse(args)?;
-            // Sync: collect seeds from coordinator, drop borrow.
-            let seeds = agent.list_running_subagents(&req.session_id);
-            // Async: resolve live signals concurrently.
-            let resolved = resolve_running_list(seeds).await;
-            let subagents = resolved
+            let subagents = agent
+                .list_running_subagents(&req.session_id)
+                .await
                 .into_iter()
                 .map(SubagentLiveSnapshotDto::from)
                 .collect();
@@ -517,21 +523,28 @@ mod tests {
 
     #[test]
     fn from_resolved_running_subagent_maps_all_fields() {
-        let resolved = ResolvedRunningSubagent {
-            subagent_id: "s".into(),
+        let resolved = SubagentInspection {
+            snapshot: SubagentSnapshot {
+                subagent_id: "s".into(),
+                subagent_type: "plan".into(),
+                description: "d".into(),
+                started_at_epoch_ms: 100,
+                duration_ms: 200,
+                persona: None,
+                status: SubagentSnapshotStatus::Running {
+                    turn_count: 1,
+                    tool_call_count: 3,
+                    tokens_used: 500,
+                    context_window_tokens: 1000,
+                    context_usage_pct: 50,
+                    tools_used: vec!["read_file".into()],
+                    error_count: 0,
+                },
+            },
             parent_session_id: "p".into(),
             child_session_id: "c".into(),
-            subagent_type: "plan".into(),
-            description: "d".into(),
-            started_at_epoch_ms: 100,
-            duration_ms: 200,
-            turn_count: 1,
-            tool_call_count: 3,
-            tokens_used: 500,
-            context_window_tokens: 1000,
-            context_usage_pct: 50,
-            tools_used: vec!["read_file".into()],
-            error_count: 0,
+            fork_parent_prompt_id: None,
+            resumed_from: None,
         };
         let dto = SubagentLiveSnapshotDto::from(resolved);
         assert_eq!(dto.subagent_id, "s");
@@ -782,146 +795,6 @@ mod tests {
         assert!(req.timeout_ms.is_none());
     }
 
-    // ── Polling control-flow tests ──────────────────────────────────────
-
-    #[test]
-    fn block_true_with_completed_snapshot_returns_immediately() {
-        // When block=true but the snapshot is already completed,
-        // the handler should NOT enter the polling loop.
-        let snap = SubagentSnapshot {
-            subagent_id: "sub-done".into(),
-            subagent_type: "explore".into(),
-            description: "d".into(),
-            started_at_epoch_ms: 0,
-            duration_ms: 100,
-            persona: None,
-            status: SubagentSnapshotStatus::Completed {
-                output: "done".into(),
-                tool_calls: 1,
-                turns: 1,
-                worktree_path: None,
-            },
-        };
-        // The handler's decision: `block && is_running(&snap)` → false
-        let block = true;
-        let should_poll = block && is_running(&snap);
-        assert!(
-            !should_poll,
-            "completed snapshot should not trigger polling loop"
-        );
-    }
-
-    #[test]
-    fn block_false_with_running_snapshot_skips_polling() {
-        let snap = SubagentSnapshot {
-            subagent_id: "sub-run".into(),
-            subagent_type: "explore".into(),
-            description: "d".into(),
-            started_at_epoch_ms: 0,
-            duration_ms: 100,
-            persona: None,
-            status: SubagentSnapshotStatus::Running {
-                turn_count: 1,
-                tool_call_count: 2,
-                tokens_used: 1000,
-                context_window_tokens: 256_000,
-                context_usage_pct: 1,
-                tools_used: vec![],
-                error_count: 0,
-            },
-        };
-        // The handler's decision: `block && is_running(&snap)` → false
-        let block = false;
-        let should_poll = block && is_running(&snap);
-        assert!(
-            !should_poll,
-            "block=false should not trigger polling loop even if running"
-        );
-    }
-
-    #[test]
-    fn block_true_with_running_snapshot_enters_polling() {
-        let snap = SubagentSnapshot {
-            subagent_id: "sub-run".into(),
-            subagent_type: "explore".into(),
-            description: "d".into(),
-            started_at_epoch_ms: 0,
-            duration_ms: 100,
-            persona: None,
-            status: SubagentSnapshotStatus::Running {
-                turn_count: 1,
-                tool_call_count: 2,
-                tokens_used: 1000,
-                context_window_tokens: 256_000,
-                context_usage_pct: 1,
-                tools_used: vec![],
-                error_count: 0,
-            },
-        };
-        // The handler's decision: `block && is_running(&snap)` → true
-        let block = true;
-        let should_poll = block && is_running(&snap);
-        assert!(
-            should_poll,
-            "block=true + running should trigger polling loop"
-        );
-    }
-
-    #[test]
-    fn polling_loop_exits_when_snapshot_transitions_to_completed() {
-        // Simulates the polling loop's exit condition when a snapshot
-        // transitions from running to completed between iterations.
-        let completed_snap = SubagentSnapshot {
-            subagent_id: "sub-1".into(),
-            subagent_type: "explore".into(),
-            description: "d".into(),
-            started_at_epoch_ms: 0,
-            duration_ms: 500,
-            persona: None,
-            status: SubagentSnapshotStatus::Completed {
-                output: "found it".into(),
-                tool_calls: 3,
-                turns: 1,
-                worktree_path: None,
-            },
-        };
-        // The polling loop checks: `!is_running(&snap) || deadline_passed`
-        // When the snapshot becomes completed, `!is_running` is true → exits.
-        assert!(
-            !is_running(&completed_snap),
-            "completed snapshot should cause polling loop exit"
-        );
-    }
-
-    #[test]
-    fn polling_loop_exits_on_deadline_even_if_still_running() {
-        let running_snap = SubagentSnapshot {
-            subagent_id: "sub-1".into(),
-            subagent_type: "explore".into(),
-            description: "d".into(),
-            started_at_epoch_ms: 0,
-            duration_ms: 100,
-            persona: None,
-            status: SubagentSnapshotStatus::Running {
-                turn_count: 1,
-                tool_call_count: 1,
-                tokens_used: 1000,
-                context_window_tokens: 256_000,
-                context_usage_pct: 1,
-                tools_used: vec![],
-                error_count: 0,
-            },
-        };
-        // Simulate: deadline has passed, but snapshot is still running.
-        // The polling loop checks: `!is_running(&snap) || deadline_passed`
-        let deadline_passed = true;
-        let should_exit = !is_running(&running_snap) || deadline_passed;
-        assert!(
-            should_exit,
-            "deadline expiry should cause polling loop exit even if still running"
-        );
-    }
-
     #[test]
     fn snapshot_dto_resumed_provenance_serializes() {
         let snap = SubagentSnapshot {
@@ -941,7 +814,7 @@ mod tests {
                 error_count: 0,
             },
         };
-        let provenance = crate::agent::subagent::SubagentProvenance {
+        let provenance = SubagentProvenance {
             fork_parent_prompt_id: Some("prompt-5".into()),
             resumed_from: Some("source-agent-id".into()),
         };

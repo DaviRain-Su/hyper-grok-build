@@ -50,6 +50,7 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
     let mut state = dashboard_state_from_persisted(app);
     state.gc_stale_refs(&dashboard_alive_fn(&app.agents));
     state.adopt_slash_mru(app.slash_mru.clone());
+    state.adopt_command_tags(app.command_tags.clone());
     state.set_screen_mode(app.screen_mode);
     state.set_recap_visible(app.session_recap_available);
     state.set_voice_visible(app.voice_mode_enabled);

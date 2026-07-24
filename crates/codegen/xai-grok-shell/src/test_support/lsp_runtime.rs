@@ -1,14 +1,10 @@
 use crate::agent::subagent::SubagentSpawnContext;
-use crate::session::SessionCommand;
 use agent_client_protocol as acp;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_tools::implementations::grok_build::task::types::{
-    SubagentOwner, SubagentRequest, SubagentResult,
-};
 pub(crate) type GatewayOut = <acp::AgentSide as xai_acp_lib::AcpSide>::OutMessage;
 pub(crate) fn test_gateway() -> GatewaySender {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -19,24 +15,11 @@ pub(crate) fn test_gateway_with_receiver() -> (GatewaySender, mpsc::UnboundedRec
     let (tx, rx) = mpsc::unbounded_channel();
     (GatewaySender::new(tx), rx)
 }
-/// `ctx_with_toggle` with a wired `parent_cmd_tx`.
-pub(crate) fn ctx_with_toggle_and_cmd_tx(
-    toggle: HashMap<String, bool>,
-) -> (
-    SubagentSpawnContext,
-    mpsc::UnboundedReceiver<SessionCommand>,
-) {
-    let mut ctx = ctx_with_toggle(toggle);
-    let (tx, rx) = mpsc::unbounded_channel();
-    ctx.parent_cmd_tx = Some(tx);
-    (ctx, rx)
-}
 pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnContext {
     let (tx, _rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
         lsp: None,
         parent_max_turns: None,
-        gateway: test_gateway(),
         client_hooks: Default::default(),
         sampling_config: xai_grok_sampler::SamplerConfig {
             api_key: None,
@@ -48,6 +31,8 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             api_backend: Default::default(),
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
             context_window: 256_000,
             client_version: None,
             force_http1: false,
@@ -72,7 +57,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         alpha_test_key: None,
         auth_method_id: acp::AuthMethodId::new("test"),
         model_id: acp::ModelId::new("test"),
-        storage_mode: crate::config::StorageMode::Local,
         auth: None,
         parent_cwd: PathBuf::from("/tmp"),
         parent_session_id: "test-parent".into(),
@@ -121,7 +105,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         gcs_bucket_url: None,
         gcs_upload_method: None,
         hook_registry: None,
-        hook_workspace_root: String::new(),
         parent_depth: 0,
         inference_idle_timeout_secs: 600,
         auto_compact_threshold_tiers: crate::agent::subagent::AutoCompactThresholdTiers::default(),
@@ -142,7 +125,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         managed_mcp_state: crate::session::managed_mcp::ManagedMcpStateHandle::default(),
         managed_mcp_proxy_base_url: String::new(),
         parent_mcp_pool: None,
-        parent_tool_snapshot: None,
+        parent_tool_definitions: None,
         parent_skills: None,
         parent_skills_config: xai_grok_agent::prompt::skills::SkillsConfig::default(),
         parent_compat: xai_grok_tools::types::compat::CompatConfig::default(),
@@ -152,37 +135,10 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
             .to_string(),
         auto_wake_enabled: true,
         goal_loop_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        parent_blocking_wait_depth: std::sync::Arc::new(
-            crate::tools::tool_context::BlockingWaitState::new(),
-        ),
         parent_terminal_backend: None,
         parent_notification_handle: None,
         parent_scheduler_handle: None,
     }
-}
-pub(crate) fn make_request(
-    subagent_type: &str,
-) -> (SubagentRequest, oneshot::Receiver<SubagentResult>) {
-    let (tx, rx) = oneshot::channel();
-    let req = SubagentRequest {
-        id: uuid::Uuid::now_v7().to_string(),
-        prompt: "do something".into(),
-        description: "test task".into(),
-        subagent_type: subagent_type.into(),
-        parent_session_id: "test-parent".into(),
-        parent_prompt_id: Some("parent-prompt".into()),
-        resume_from: None,
-        cwd: None,
-        runtime_overrides: Default::default(),
-        run_in_background: false,
-        surface_completion: true,
-        await_to_completion: false,
-        fork_context: false,
-        owner: SubagentOwner::Task,
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-        result_tx: tx,
-    };
-    (req, rx)
 }
 #[derive(Default)]
 pub(crate) struct DummyLspDispatch;

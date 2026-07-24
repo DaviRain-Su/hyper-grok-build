@@ -191,6 +191,9 @@ pub struct BackgroundTaskSnapshotWire {
     pub kind: String,
     /// RFC3339 start timestamp.
     pub started_at: String,
+    /// Model-supplied label when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// One live scheduled task (`/loop`), a slim DTO over the scheduler's

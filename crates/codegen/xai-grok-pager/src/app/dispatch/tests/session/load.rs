@@ -2189,6 +2189,77 @@ fn welcome_esc_drops_in_flight_fetch_response() {
         "in-flight fetch must not repopulate the closed welcome picker"
     );
 }
+/// Build-mode sibling of the chat Esc test, pinning Esc-during-load: with the
+/// fast foreign lane landed (hidden by the Grok default → CTA) and the native
+/// fetch still in flight, Esc must really dismiss the picker — drop the
+/// loading flag (a lingering flag holds `show_picker` in a spinner limbo that
+/// ignores input) and stale the fetch so its late response cannot resurrect
+/// the picker.
+#[test]
+fn build_welcome_esc_during_load_dismisses_without_resurrection() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app();
+    assert!(!app.chat_mode);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let seq = app.session_picker_list_seq;
+    assert!(app.session_picker_loading);
+    let mut foreign = make_picker_entry("claude-1", "/repo");
+    foreign.source = "claude".into();
+    app.session_picker_entries = Some(vec![foreign]);
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let out = app.handle_input(&esc);
+    assert!(
+        matches!(
+            out,
+            crate::app::app_view::InputOutcome::Action(Action::SessionPickerClosed)
+        ),
+        "welcome Esc must surface SessionPickerClosed, got {out:?}"
+    );
+    assert!(
+        app.session_picker_entries.is_none(),
+        "Esc clears the welcome picker"
+    );
+    let _ = dispatch(Action::SessionPickerClosed, &mut app);
+    assert!(
+        !app.session_picker_loading,
+        "dismissal must end the loading limbo (`show_picker` keys off it)"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("native-late", "/repo")],
+            partial: None,
+            seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.session_picker_entries.is_none(),
+        "late native response must not resurrect the closed picker"
+    );
+}
+/// The spinner-only loading picker (nothing landed yet) still owns Esc: it
+/// must dismiss the picker instead of dead-keying into the menu it covers.
+#[test]
+fn build_welcome_esc_dismisses_spinner_only_loading_picker() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app();
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    assert!(app.session_picker_loading);
+    assert!(app.session_picker_entries.is_none());
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let out = app.handle_input(&esc);
+    assert!(
+        matches!(
+            out,
+            crate::app::app_view::InputOutcome::Action(Action::SessionPickerClosed)
+        ),
+        "Esc on the loading picker must close it, got {out:?}"
+    );
+    let _ = dispatch(Action::SessionPickerClosed, &mut app);
+    assert!(!app.session_picker_loading, "picker fully dismissed");
+}
 /// Build-mode canary: modal close must not bump the list seq — an in-flight
 /// plain fetch keeps its pre-existing land-after-close behavior.
 #[test]

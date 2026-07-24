@@ -618,10 +618,11 @@ impl SessionActor {
             .as_ref()
             .map(|reservations| reservations.snapshot())
             .unwrap_or_default();
+        let parent_session_id = Some(self.session_id_string());
         let (respond_to, rx) = tokio::sync::oneshot::channel();
         if tx
             .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-                session_id: self.session_info.id.0.to_string(),
+                parent_session_id,
                 suppress_ids,
                 respond_to,
             }))

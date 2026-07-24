@@ -271,6 +271,12 @@ pub async fn set_language(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.language = Some(value)).await
 }
 
+/// Persist `[ui].voice_keybind_enabled` via `update_config`. When `false` the
+/// Ctrl+Space / F8 voice chord is ignored (`/voice` still works).
+pub async fn set_voice_keybind_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.voice_keybind_enabled = Some(value)).await
+}
+
 /// Persist `[ui].default_selected_permission` via `update_config`. Value is
 /// one of the canonical strings from `DEFAULT_SELECTED_PERMISSION_CHOICES`
 /// (`default` | `allow_once` | `allow_always` | `reject`); `default` is the

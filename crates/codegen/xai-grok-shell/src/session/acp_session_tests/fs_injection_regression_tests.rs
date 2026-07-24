@@ -51,6 +51,7 @@ async fn tool_bridge_routes_writes_through_injected_fs() {
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
+        subagent: None,
         parent_scheduler_handle: None,
         skills: vec![],
         state_path: std::env::temp_dir().join("grok-test-fs/tool_state.json"),

@@ -17,6 +17,7 @@ pub enum DeployError {
     /// window passes. Distinct from the generic `ResourceExhausted` so clients
     /// can render the retry hint.
     RateLimited,
+    ArchiveTooLarge,
     Internal,
     Unauthenticated,
     InvalidArgument,
@@ -27,7 +28,7 @@ pub enum DeployError {
 }
 impl DeployError {
     /// Every kind, for exhaustive iteration in tests.
-    pub const ALL: [DeployError; 17] = [
+    pub const ALL: [DeployError; 18] = [
         Self::UrlConflict,
         Self::UrlModeration,
         Self::IdempotencyConflict,
@@ -38,6 +39,7 @@ impl DeployError {
         Self::ProviderUnavailable,
         Self::ProjectLimitExceeded,
         Self::RateLimited,
+        Self::ArchiveTooLarge,
         Self::Internal,
         Self::Unauthenticated,
         Self::InvalidArgument,
@@ -59,6 +61,7 @@ impl DeployError {
             Self::ProviderUnavailable => "deploy_provider_unavailable",
             Self::ProjectLimitExceeded => "deploy_project_limit_exceeded",
             Self::RateLimited => "deploy_rate_limited",
+            Self::ArchiveTooLarge => "deploy_archive_too_large",
             Self::Internal => "deploy_internal",
             Self::Unauthenticated => "deploy_unauthenticated",
             Self::InvalidArgument => "deploy_invalid_argument",
@@ -82,6 +85,7 @@ impl DeployError {
             "deploy_provider_unavailable" => Self::ProviderUnavailable,
             "deploy_project_limit_exceeded" => Self::ProjectLimitExceeded,
             "deploy_rate_limited" => Self::RateLimited,
+            "deploy_archive_too_large" => Self::ArchiveTooLarge,
             "deploy_internal" => Self::Internal,
             "deploy_unauthenticated" => Self::Unauthenticated,
             "deploy_invalid_argument" => Self::InvalidArgument,

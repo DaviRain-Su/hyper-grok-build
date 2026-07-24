@@ -1316,6 +1316,50 @@ fn managed_config_stale_for_far_future_sync() {
     );
 }
 
+/// Unreadable requirements (PermissionDenied) with no fail_closed marker must
+/// still arm the gate so clear_orphan cannot wipe policy that may still be
+/// fail_closed on disk.
+#[test]
+#[cfg(unix)]
+fn unreadable_requirements_treats_fail_closed_as_armed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let req = home.join(crate::loader::REQUIREMENTS_FILENAME);
+    std::fs::write(&req, "fail_closed = true\n").unwrap();
+    assert!(
+        fail_closed_policy_armed_at(home),
+        "readable fail_closed requirements must arm the gate"
+    );
+
+    // Drop read perms so read_to_string fails with PermissionDenied (not NotFound).
+    std::fs::set_permissions(&req, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Restore on drop so tempfile cleanup can remove the file.
+    struct RestorePerms<'a>(&'a std::path::Path);
+    impl Drop for RestorePerms<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    let _restore = RestorePerms(&req);
+
+    assert!(
+        fail_closed_policy_armed_at(home),
+        "unreadable requirements must treat fail_closed as armed (no wipe)"
+    );
+}
+
+/// Absent requirements + no fail_closed marker → not armed (safe to clear).
+#[test]
+fn missing_requirements_and_marker_not_armed() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        !fail_closed_policy_armed_at(dir.path()),
+        "NotFound requirements with no marker must not arm fail_closed"
+    );
+}
+
 // The is-managed claim gate tests live in a sibling child module (this file is
 // past the 1k-line mark); same private access via the #[path] include below.
 #[path = "claim_tests.rs"]

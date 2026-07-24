@@ -141,17 +141,22 @@ impl ToolBridge {
         template: &str,
         placeholders: &serde_json::Value,
     ) -> Option<String> {
-        let registry = &*self.registry;
-        let result;
-        {
-            result = registry
-                .resources
-                .lock()
-                .await
-                .get::<TemplateRenderer>()
-                .and_then(|r| r.render_with_extra(template, placeholders).ok());
-        }
-        result
+        self.registry
+            .resources
+            .lock()
+            .await
+            .get::<TemplateRenderer>()
+            .and_then(|renderer| renderer.render_with_extra(template, placeholders).ok())
+    }
+
+    /// Return the finalized template renderer for multi-part prompt assembly.
+    pub async fn template_renderer_snapshot(&self) -> Option<TemplateRenderer> {
+        self.registry
+            .resources
+            .lock()
+            .await
+            .get::<TemplateRenderer>()
+            .cloned()
     }
 
     pub async fn register_mcp_tools<T>(
@@ -829,6 +834,7 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: owner.map(|s| s.to_string()),
+            description: None,
         }
     }
 

@@ -303,6 +303,7 @@ struct ProcessState {
     /// Session that owns this process. Used to scope kill operations so
     /// subagent teardown only kills the subagent's own tasks.
     owner_session_id: Option<String>,
+    description: Option<String>,
 }
 
 impl ProcessState {
@@ -442,6 +443,7 @@ impl ProcessState {
             explicitly_killed: self.explicitly_killed,
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
+            description: self.description.clone(),
         }
     }
 }
@@ -516,6 +518,10 @@ struct LocalTerminalActor {
     /// a subagent reusing this backend can't clobber the parent's shadows.
     search_shadows: SearchShadowConfig,
 
+    /// Shell-environment policy baked in at construction (like `search_shadows`);
+    /// `None` inherits the full environment.
+    shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+
     /// Persistent shell state (env vars, cwd, functions, aliases).
     /// Lazily initialized on first command when `persistent_shell` is true.
     #[cfg(unix)]
@@ -542,11 +548,13 @@ impl LocalTerminalActor {
         foreground_block_budget: Duration,
         output_file_cap: u64,
         scope: crate::util::ProcessScope,
+        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
         Self {
             cmd_rx,
             cancel_token,
             scope,
+            shell_env_policy,
             processes: HashMap::new(),
             completion_waiters: HashMap::new(),
             completed_task_snapshots: HashMap::new(),
@@ -598,8 +606,14 @@ impl LocalTerminalActor {
         #[cfg(not(unix))]
         let login_env: Option<&HashMap<String, String>> = None;
 
-        let (child, process_group) =
-            spawn_shell_command(command, cwd, env, login_env, self.search_shadows)?;
+        let (child, process_group) = spawn_shell_command(
+            command,
+            cwd,
+            env,
+            login_env,
+            self.search_shadows,
+            self.shell_env_policy.as_ref(),
+        )?;
         Ok(SpawnResult {
             child,
             process_group,
@@ -658,22 +672,12 @@ impl LocalTerminalActor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        if let Some(login) = self.login_env.as_ref() {
-            for (key, value) in login {
-                if key != "PATH" && std::env::var_os(key).is_none() {
-                    cmd.env(key, value);
-                }
-            }
-        }
-        cmd.envs(shell_state::shell_env_overrides());
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
-        cmd.envs(crate::util::pager_env());
-        if let Some(path) = self.login_env.as_ref().and_then(|l| l.get("PATH")) {
-            cmd.env("PATH", path);
-        }
-        crate::util::apply_grok_agent_marker(&mut cmd);
+        apply_child_env(
+            &mut cmd,
+            self.shell_env_policy.as_ref(),
+            self.login_env.as_ref(),
+            env,
+        );
 
         cmd.fd_mappings(prep.fd_mappings)
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
@@ -722,7 +726,7 @@ impl LocalTerminalActor {
             return;
         }
         let shell = shell_state::ShellKind::detect();
-        match shell_state::ShellState::init(shell, cwd).await {
+        match shell_state::ShellState::init(shell, cwd, self.shell_env_policy.as_ref()).await {
             Ok(state) => self.shell_state = Some(state),
             Err(e) => {
                 tracing::warn!("persistent shell init failed, using empty state: {e}");
@@ -791,17 +795,9 @@ impl LocalTerminalActor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        // Apply SHELL_ENV_OVERRIDES (TERM=dumb, NO_COLOR, GROK_AGENT=1, etc.)
-        // + request env + pager env. Agent marker is re-applied last so request
-        // env cannot clear it.
-        cmd.envs(shell_state::shell_env_overrides());
-
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
-
-        cmd.envs(crate::util::pager_env());
-        crate::util::apply_grok_agent_marker(&mut cmd);
+        // The persistent backend restores login state from its snapshot, so no
+        // login-env layering here.
+        apply_child_env(&mut cmd, self.shell_env_policy.as_ref(), None, env);
 
         cmd.fd_mappings(prep.fd_mappings)
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
@@ -1095,6 +1091,7 @@ impl LocalTerminalActor {
             explicitly_killed: false,
             state_dump_handle,
             owner_session_id: request.owner_session_id.clone(),
+            description: request.description.filter(|d| !d.trim().is_empty()),
         };
 
         // Send an initial empty notification so the TUI shows the execution
@@ -1238,6 +1235,7 @@ impl LocalTerminalActor {
                 None
             },
             owner_session_id: request.owner_session_id.clone(),
+            description: request.description.filter(|d| !d.trim().is_empty()),
         };
 
         // Store under task_id — this is the key that get_task/kill_task will use
@@ -1618,6 +1616,7 @@ impl LocalTerminalActor {
                     block_waited: p.block_waited,
                     explicitly_killed: p.explicitly_killed,
                     owner_session_id: p.owner_session_id.clone(),
+                    description: p.description.clone(),
                 };
                 self.completed_task_snapshots.insert(id.clone(), snapshot);
             }
@@ -2044,15 +2043,25 @@ impl LocalTerminalActor {
                 // "Monitor" row (matching the original-spawn path) rather than a
                 // bash-highlighted "[monitor] …".
                 let is_monitor = process.kind == crate::computer::types::TaskKind::Monitor;
-                let monitor_description = if is_monitor {
+                // Recover monitor label once; reuse for backgrounded notify + pipeline.
+                // Filter empty/whitespace the same way as spawn so `[monitor] `
+                // / blank recovery does not stick as Some("") and block the
+                // command fallback for the re-spawned pipeline label.
+                let recovered_monitor_description = if is_monitor {
                     process
                         .display_command
                         .as_deref()
                         .and_then(|d| d.strip_prefix("[monitor] "))
                         .map(str::to_string)
+                        .filter(|d| !d.trim().is_empty())
                 } else {
                     None
                 };
+                let effective_description = process
+                    .description
+                    .clone()
+                    .filter(|d| !d.trim().is_empty())
+                    .or_else(|| recovered_monitor_description.clone());
                 let reparent_command = if is_monitor {
                     process.command.clone()
                 } else {
@@ -2072,20 +2081,16 @@ impl LocalTerminalActor {
                     },
                     output_file: process.output_file.clone(),
                     task_id: task_id.clone(),
-                    monitor_description,
-                    // Reparent path has no model tool description; monitors use
-                    // `monitor_description` above.
-                    description: None,
+                    monitor_description: recovered_monitor_description,
+                    description: effective_description.clone(),
                 });
 
                 // Re-spawn the monitor pipeline so events continue streaming.
                 // The old pipeline died with the child's runtime.
                 if process.kind == crate::computer::types::TaskKind::Monitor {
                     let pipeline_task_id = task_id.clone();
-                    let pipeline_description = process
-                        .display_command
-                        .clone()
-                        .unwrap_or_else(|| process.command.clone());
+                    let pipeline_description =
+                        effective_description.unwrap_or_else(|| process.command.clone());
                     // Weak so the reparented monitor doesn't pin the backend.
                     let pipeline_terminal = backend_weak.clone();
                     let pipeline_notif = new_handle.clone();
@@ -2127,6 +2132,31 @@ pub struct LocalTerminalBackend {
     cancel_token: CancellationToken,
 }
 
+/// Grouped inputs for [`LocalTerminalBackend::new_inner`], so call sites read as
+/// named fields instead of a telescoping list of positional `bool`s. Constructors
+/// override only the fields they vary via `..Default::default()`.
+struct LocalTerminalConfig {
+    memory_config: Option<CgroupMemoryConfig>,
+    use_spawn_local: bool,
+    persistent_shell: bool,
+    login_shell_capture: bool,
+    search_shadows: SearchShadowConfig,
+    shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+}
+
+impl Default for LocalTerminalConfig {
+    fn default() -> Self {
+        Self {
+            memory_config: None,
+            use_spawn_local: false,
+            persistent_shell: false,
+            login_shell_capture: true,
+            search_shadows: SearchShadowConfig::default(),
+            shell_env_policy: None,
+        }
+    }
+}
+
 impl LocalTerminalBackend {
     /// Create a new LocalTerminalBackend and spawn the actor task.
     ///
@@ -2134,7 +2164,7 @@ impl LocalTerminalBackend {
     /// If `memory_config` is provided, a cgroupv2 memory limit is enforced on
     /// all spawned commands (Linux only; silently degrades to no-op elsewhere).
     pub fn new() -> Self {
-        Self::new_inner(None, false, false, true, SearchShadowConfig::default())
+        Self::new_inner(LocalTerminalConfig::default())
     }
 
     /// Create a new LocalTerminalBackend with persistent shell state.
@@ -2143,31 +2173,29 @@ impl LocalTerminalBackend {
     /// and shell options persist across command invocations. The user's login shell
     /// (bash or zsh) is detected and its rc files are loaded once on first command.
     pub fn with_persistent_shell() -> Self {
-        Self::new_inner(None, false, true, true, SearchShadowConfig::default())
+        Self::new_inner(LocalTerminalConfig {
+            persistent_shell: true,
+            ..Default::default()
+        })
     }
 
     /// Create a new LocalTerminalBackend with cgroup memory limits.
     ///
     /// See [`CgroupMemoryConfig`] for details on the soft/hard limit model.
     pub fn with_memory_limit(config: CgroupMemoryConfig) -> Self {
-        Self::new_inner(
-            Some(config),
-            false,
-            false,
-            true,
-            SearchShadowConfig::default(),
-        )
+        Self::new_inner(LocalTerminalConfig {
+            memory_config: Some(config),
+            ..Default::default()
+        })
     }
 
     /// Create a new LocalTerminalBackend with both memory limits and persistent shell.
     pub fn with_memory_limit_and_persistent_shell(config: CgroupMemoryConfig) -> Self {
-        Self::new_inner(
-            Some(config),
-            false,
-            true,
-            true,
-            SearchShadowConfig::default(),
-        )
+        Self::new_inner(LocalTerminalConfig {
+            memory_config: Some(config),
+            persistent_shell: true,
+            ..Default::default()
+        })
     }
 
     /// Create a new LocalTerminalBackend using spawn_local (for single-threaded runtimes).
@@ -2175,33 +2203,51 @@ impl LocalTerminalBackend {
     /// `search_shadows` is the host-resolved `find`→`bfs` / `grep`→`ugrep` enable
     /// state, baked into this backend (see [`SearchShadowConfig`]).
     pub fn new_local(search_shadows: SearchShadowConfig) -> Self {
-        Self::new_inner(None, true, false, true, search_shadows)
+        Self::new_inner(LocalTerminalConfig {
+            use_spawn_local: true,
+            search_shadows,
+            ..Default::default()
+        })
     }
 
     pub fn new_local_with_login_shell_capture(
         search_shadows: SearchShadowConfig,
         login_shell_capture: bool,
+        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
-        Self::new_inner(None, true, false, login_shell_capture, search_shadows)
+        Self::new_inner(LocalTerminalConfig {
+            use_spawn_local: true,
+            login_shell_capture,
+            search_shadows,
+            shell_env_policy,
+            ..Default::default()
+        })
     }
 
     /// Create a new LocalTerminalBackend using spawn_local with persistent shell.
     ///
     /// `search_shadows` is the host-resolved `find`→`bfs` / `grep`→`ugrep` enable
     /// state, baked into this backend (see [`SearchShadowConfig`]).
-    pub fn new_local_with_persistent_shell(search_shadows: SearchShadowConfig) -> Self {
-        Self::new_inner(None, true, true, true, search_shadows)
+    pub fn new_local_with_persistent_shell(
+        search_shadows: SearchShadowConfig,
+        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+    ) -> Self {
+        Self::new_inner(LocalTerminalConfig {
+            use_spawn_local: true,
+            persistent_shell: true,
+            search_shadows,
+            shell_env_policy,
+            ..Default::default()
+        })
     }
 
     /// Create a new LocalTerminalBackend using spawn_local with memory limits.
     pub fn new_local_with_memory_limit(config: CgroupMemoryConfig) -> Self {
-        Self::new_inner(
-            Some(config),
-            true,
-            false,
-            true,
-            SearchShadowConfig::default(),
-        )
+        Self::new_inner(LocalTerminalConfig {
+            memory_config: Some(config),
+            use_spawn_local: true,
+            ..Default::default()
+        })
     }
 
     /// Test-only: a spawn_local backend that enrolls spawned children into
@@ -2222,6 +2268,7 @@ impl LocalTerminalBackend {
             FOREGROUND_BLOCK_BUDGET,
             MAX_OUTPUT_FILE_BYTES,
             scope,
+            None,
         )
     }
 
@@ -2238,6 +2285,7 @@ impl LocalTerminalBackend {
             FOREGROUND_BLOCK_BUDGET,
             MAX_OUTPUT_FILE_BYTES,
             crate::util::global_process_scope().clone(),
+            None,
         )
     }
 
@@ -2254,6 +2302,7 @@ impl LocalTerminalBackend {
             budget,
             MAX_OUTPUT_FILE_BYTES,
             crate::util::global_process_scope().clone(),
+            None,
         )
     }
 
@@ -2270,16 +2319,19 @@ impl LocalTerminalBackend {
             FOREGROUND_BLOCK_BUDGET,
             output_file_cap,
             crate::util::global_process_scope().clone(),
+            None,
         )
     }
 
-    fn new_inner(
-        memory_config: Option<CgroupMemoryConfig>,
-        use_spawn_local: bool,
-        persistent_shell: bool,
-        login_shell_capture: bool,
-        search_shadows: SearchShadowConfig,
-    ) -> Self {
+    fn new_inner(config: LocalTerminalConfig) -> Self {
+        let LocalTerminalConfig {
+            memory_config,
+            use_spawn_local,
+            persistent_shell,
+            login_shell_capture,
+            search_shadows,
+            shell_env_policy,
+        } = config;
         Self::new_with_ttl(
             memory_config,
             use_spawn_local,
@@ -2290,6 +2342,7 @@ impl LocalTerminalBackend {
             foreground_block_budget_from_env(),
             output_file_cap_from_env(),
             crate::util::global_process_scope().clone(),
+            shell_env_policy,
         )
     }
 
@@ -2303,6 +2356,7 @@ impl LocalTerminalBackend {
         foreground_block_budget: Duration,
         output_file_cap: u64,
         scope: crate::util::ProcessScope,
+        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_SIZE);
         let cancel_token = CancellationToken::new();
@@ -2329,6 +2383,7 @@ impl LocalTerminalBackend {
                 foreground_block_budget,
                 output_file_cap,
                 scope,
+                shell_env_policy,
             );
             actor.run().await;
         };
@@ -2920,19 +2975,107 @@ async fn capture_login_env() -> HashMap<String, String> {
     }
 }
 
-/// Spawn the shell command and attach the child to a [`ProcessGroup`].
+/// Layer login-shell captured vars (except `PATH`) onto `cmd`, dropping those the
+/// active policy filters out and those already set in grok's own environment.
+#[cfg(unix)]
+fn layer_login_env_vars(
+    cmd: &mut tokio::process::Command,
+    login_env: Option<&HashMap<String, String>>,
+    active_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+) {
+    if let Some(login) = login_env {
+        for (key, value) in login {
+            // `var_os` reads grok's own process env (not the possibly cleared
+            // child env): a login var already present in grok's environment is
+            // left alone. Capture is filtered through the policy so an rc export
+            // cannot bypass it.
+            if key != "PATH"
+                && std::env::var_os(key).is_none()
+                && active_policy.is_none_or(|p| p.allows_with_inherit(key))
+            {
+                cmd.env(key, value);
+            }
+        }
+    }
+}
+
+/// Layer per-request env (`.envrc`, ACP, session settings) onto `cmd`, dropping
+/// names the active policy excludes so a request-supplied secret cannot bypass
+/// it. Honors `exclude`/`include_only`/default excludes, not `inherit`, since
+/// request env is provided explicitly rather than inherited.
+fn layer_request_env(
+    cmd: &mut tokio::process::Command,
+    env: &HashMap<String, String>,
+    active_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+) {
+    for (key, value) in env {
+        if active_policy.is_none_or(|p| p.allows(key)) {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// Re-inject the login-shell `PATH` last (so rc-file additions win), unless the
+/// active policy filters `PATH` out.
+#[cfg(unix)]
+fn layer_login_path(
+    cmd: &mut tokio::process::Command,
+    login_env: Option<&HashMap<String, String>>,
+    active_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+) {
+    if let Some(path) = login_env.and_then(|l| l.get("PATH"))
+        && active_policy.is_none_or(|p| p.allows_with_inherit("PATH"))
+    {
+        cmd.env("PATH", path);
+    }
+}
+
+/// Compose the child environment on `cmd` in one place, in a fixed order:
+/// policy base, login-shell capture, grok control vars, request env, pager
+/// vars, login `PATH` last, then the agent marker. Untrusted layers (login
+/// capture and request env) pass through the policy name filter so an excluded
+/// name cannot re-enter; grok's own control vars, login `PATH`, and the marker
+/// are applied unfiltered and last. `login_env` is `None` for the persistent
+/// backend, which restores login state from its own snapshot.
 ///
-/// The returned `ProcessGroup` is what the teardown helpers
-/// ([`send_sigterm_to_group`], [`send_sigkill_to_group`]) dispatch to:
-/// `killpg` on Unix; `TerminateJobObject` on Windows. This gives
-/// grandchild teardown for fan-out workloads (npm install, git clone,
-/// cargo build) on both platforms.
+/// Layers are applied incrementally rather than composed into one map and
+/// installed via `env_clear`: the default policy is a no-op, and the common
+/// path must inherit grok's environment untouched (including non-UTF-8 vars).
+/// A base env is cleared and rebuilt only when a policy is active. Request env
+/// is filtered by name only, so `inherit = none` still admits explicitly
+/// provided `.envrc`/ACP vars.
+///
+/// Unix only: the Windows spawn path applies the policy inline (it has no
+/// login-shell capture and uses the shell-invocation env instead of overrides).
+#[cfg(unix)]
+fn apply_child_env(
+    cmd: &mut tokio::process::Command,
+    policy: Option<&crate::util::ShellEnvironmentPolicy>,
+    login_env: Option<&HashMap<String, String>>,
+    request_env: &HashMap<String, String>,
+) {
+    let active_policy = policy.filter(|p| !p.is_noop());
+    // 1. Base env: cleared and rebuilt from the policy only when one is active.
+    crate::util::shell_env_policy::install_policy_base_env(cmd, active_policy);
+    // 2. Login-shell capture (filtered). 3. Grok control vars. 4. Request env
+    // (filtered). 5. Pager vars. 6. Login PATH last. 7. Agent marker wins.
+    layer_login_env_vars(cmd, login_env, active_policy);
+    cmd.envs(shell_state::shell_env_overrides());
+    layer_request_env(cmd, request_env, active_policy);
+    cmd.envs(crate::util::pager_env());
+    layer_login_path(cmd, login_env, active_policy);
+    crate::util::apply_grok_agent_marker(cmd);
+}
+
+/// Spawn the shell command and attach the child to a [`ProcessGroup`] for
+/// grandchild teardown (`killpg` on Unix, `TerminateJobObject` on Windows).
 fn spawn_shell_command(
     command: &str,
     cwd: &std::path::Path,
     env: &HashMap<String, String>,
     login_env: Option<&HashMap<String, String>>,
     search_shadows: SearchShadowConfig,
+    shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
 ) -> std::io::Result<(tokio::process::Child, crate::util::ProcessGroup)> {
     // `login_env` and `search_shadows` are only consumed by the `#[cfg(unix)]`
     // shell wrapper below; keep them live on Windows to avoid unused-arg warnings.
@@ -2966,30 +3109,7 @@ fn spawn_shell_command(
             // detach_from_tty() handles both session and process group creation.
             .kill_on_drop(true);
 
-        if let Some(login) = login_env {
-            for (key, value) in login {
-                if key != "PATH" && std::env::var_os(key).is_none() {
-                    cmd.env(key, value);
-                }
-            }
-        }
-        // Apply env vars from the request (e.g., .envrc, color vars, ACP-provided vars).
-        cmd.envs(shell_state::shell_env_overrides());
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
-        cmd.envs(crate::util::pager_env());
-
-        // Inject the user's login-shell PATH LAST so tools installed via rc
-        // files (.bashrc, .zshrc, virtualenvs) are always discoverable. The
-        // request env often carries a copy of the parent process's PATH which
-        // doesn't include rc-file additions — applying login PATH after the
-        // request env ensures those additions aren't clobbered.
-        if let Some(path) = login_env.and_then(|l| l.get("PATH")) {
-            cmd.env("PATH", path);
-        }
-        // Agent marker must win over request/login env.
-        crate::util::apply_grok_agent_marker(&mut cmd);
+        apply_child_env(&mut cmd, shell_env_policy, login_env, env);
 
         // Detach from the controlling terminal so subprocesses cannot open
         // /dev/tty and compete with the TUI for terminal input.
@@ -3018,18 +3138,21 @@ fn spawn_shell_command(
         let inv = xai_grok_config::shell::shell_command_argv(command);
         let mut cmd = tokio::process::Command::new(&inv.program);
         cmd.args(&inv.args)
-            .envs(inv.env)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+        // Policy base first (cleared + rebuilt only when a policy is active), then
+        // the shell-invocation env, the filtered request env, pager vars, and the
+        // agent marker last. Mirrors the unix ordering in `apply_child_env`;
+        // `inv.env` is grok's trusted shell setup, so it is not filtered.
+        let active_policy = shell_env_policy.filter(|p| !p.is_noop());
+        crate::util::shell_env_policy::install_policy_base_env(&mut cmd, active_policy);
+        cmd.envs(inv.env);
+        layer_request_env(&mut cmd, env, active_policy);
         cmd.envs(crate::util::pager_env());
-        // Agent marker must win over request env.
         crate::util::apply_grok_agent_marker(&mut cmd);
 
         // Set creation flags inline rather than via crate::util::detach_command
@@ -3142,7 +3265,40 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         }
+    }
+
+    #[tokio::test]
+    async fn run_background_preserves_description_on_snapshot() {
+        let backend = LocalTerminalBackend::new();
+        let mut with_desc = make_request("sleep 30");
+        with_desc.description = Some("build frontend".to_string());
+        let handle = backend.run_background(with_desc).await.unwrap();
+        let snap = backend
+            .get_task(&handle.task_id)
+            .await
+            .expect("running task snapshot");
+        assert_eq!(snap.description.as_deref(), Some("build frontend"));
+        let listed = backend.list_tasks().await;
+        let listed_snap = listed
+            .iter()
+            .find(|t| t.task_id == handle.task_id)
+            .expect("task listed");
+        assert_eq!(listed_snap.description.as_deref(), Some("build frontend"));
+        let _ = backend.kill_task(&handle.task_id).await;
+
+        let without = make_request("sleep 30");
+        let handle = backend.run_background(without).await.unwrap();
+        let snap = backend
+            .get_task(&handle.task_id)
+            .await
+            .expect("running task snapshot");
+        assert!(
+            snap.description.is_none(),
+            "absent description must stay None"
+        );
+        let _ = backend.kill_task(&handle.task_id).await;
     }
 
     /// Poll `get_task` every 25ms until the task reports `completed`, returning
@@ -3168,6 +3324,79 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    #[test]
+    fn layer_request_env_drops_names_the_policy_excludes() {
+        use crate::util::{EnvironmentVariablePattern, ShellEnvironmentPolicy};
+
+        let glob = EnvironmentVariablePattern::new_case_insensitive;
+        let policy = ShellEnvironmentPolicy {
+            exclude: vec![glob("AWS_*")],
+            include_only: vec![glob("PATH"), glob("SAFE_*")],
+            ..Default::default()
+        };
+        let env = HashMap::from([
+            ("PATH".to_string(), "/bin".to_string()),
+            ("SAFE_FLAG".to_string(), "1".to_string()),
+            ("AWS_SECRET".to_string(), "leak".to_string()),
+            ("OTHER".to_string(), "x".to_string()),
+        ]);
+
+        let mut cmd = tokio::process::Command::new("true");
+        layer_request_env(&mut cmd, &env, Some(&policy));
+        let applied: HashMap<String, String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(applied.get("PATH").map(String::as_str), Some("/bin"));
+        assert_eq!(applied.get("SAFE_FLAG").map(String::as_str), Some("1"));
+        assert!(!applied.contains_key("AWS_SECRET"));
+        assert!(!applied.contains_key("OTHER"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_child_env_layers_in_fixed_order() {
+        use crate::util::{EnvironmentVariablePattern, ShellEnvironmentPolicy};
+
+        let policy = ShellEnvironmentPolicy {
+            exclude: vec![EnvironmentVariablePattern::new_case_insensitive("*SECRET*")],
+            set: HashMap::from([("GROK_TEST_BASE".to_string(), "1".to_string())]),
+            ..Default::default()
+        };
+        let login = HashMap::from([
+            ("GROK_TEST_LOGIN".to_string(), "l".to_string()),
+            ("PATH".to_string(), "/login/bin".to_string()),
+        ]);
+        let request = HashMap::from([
+            ("GROK_TEST_REQ".to_string(), "r".to_string()),
+            ("PATH".to_string(), "/req/bin".to_string()),
+            ("GROK_TEST_SECRET".to_string(), "s".to_string()),
+        ]);
+
+        let mut cmd = tokio::process::Command::new("true");
+        apply_child_env(&mut cmd, Some(&policy), Some(&login), &request);
+        let env: HashMap<String, String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+
+        assert_eq!(env.get("GROK_TEST_BASE").map(String::as_str), Some("1"));
+        assert_eq!(env.get("GROK_TEST_LOGIN").map(String::as_str), Some("l"));
+        assert_eq!(env.get("GROK_TEST_REQ").map(String::as_str), Some("r"));
+        // Request env is filtered by the policy.
+        assert!(!env.contains_key("GROK_TEST_SECRET"));
+        // Login PATH is applied last and wins over the request PATH.
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/login/bin"));
+        // The agent marker wins over every layer.
+        assert_eq!(
+            env.get(crate::util::GROK_AGENT_ENV).map(String::as_str),
+            Some(crate::util::GROK_AGENT_ENV_VALUE)
+        );
     }
 
     #[tokio::test]
@@ -3220,6 +3449,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3251,6 +3481,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3314,6 +3545,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let start = Instant::now();
@@ -3385,6 +3617,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3431,6 +3664,7 @@ mod tests {
             foreground_block_budget: Some(Duration::from_millis(300)),
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let start = Instant::now();
@@ -3482,6 +3716,7 @@ mod tests {
             foreground_block_budget: Some(Duration::MAX),
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let start = Instant::now();
@@ -3533,6 +3768,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3591,6 +3827,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3627,6 +3864,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         // Start background task
@@ -3667,6 +3905,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let handle = backend.run_background(request).await.unwrap();
@@ -3707,6 +3946,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3782,6 +4022,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3848,6 +4089,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3883,6 +4125,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3917,6 +4160,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3947,6 +4191,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         backend.run(request).await.unwrap();
@@ -3986,6 +4231,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         backend.run(request).await.unwrap();
@@ -4034,6 +4280,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -4067,6 +4314,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let handle = backend.run_background(request).await.unwrap();
@@ -4111,6 +4359,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -4143,6 +4392,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         };
 
         let start = Instant::now();

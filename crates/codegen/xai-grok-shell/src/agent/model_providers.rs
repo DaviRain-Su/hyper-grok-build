@@ -13,6 +13,11 @@ pub struct ModelProviderConfig {
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
     pub extra_headers: IndexMap<String, String>,
+    /// Query parameters folded into every request URL; inherited by models.
+    pub query_params: IndexMap<String, String>,
+    /// Header name to environment variable; inherited by models, resolved at
+    /// client build.
+    pub env_http_headers: IndexMap<String, String>,
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
     pub context_window: Option<u64>,
@@ -175,6 +180,8 @@ impl ConfigModelOverride {
             api_key,
             api_backend,
             extra_headers,
+            query_params,
+            env_http_headers,
             auth_provider,
             auth,
             context_window,
@@ -186,8 +193,15 @@ impl ConfigModelOverride {
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
         merged.context_window = merged.context_window.or(*context_window);
+        // Inherited wholesale only when the model sets none of its own.
         if merged.extra_headers.is_empty() {
             merged.extra_headers = extra_headers.clone();
+        }
+        if merged.query_params.is_empty() {
+            merged.query_params = query_params.clone();
+        }
+        if merged.env_http_headers.is_empty() {
+            merged.env_http_headers = env_http_headers.clone();
         }
         let model_sets_own_api_key = self
             .api_key
@@ -913,5 +927,84 @@ mod tests {
             .expect("blank api_key must not fail-close a working gateway");
         assert_eq!(provider.name.as_str(), "model_provider:gateway");
         assert!(!provider.is_fail_closed());
+    }
+
+    #[test]
+    fn model_inherits_provider_query_params_and_env_http_headers() {
+        let toml_cfg: toml::Value = toml::from_str(
+            r#"
+            [model_providers.gateway]
+            base_url = "https://gateway.example/v1"
+            api_key = "sk-provider"
+
+            [model_providers.gateway.query_params]
+            api-version = "2026-07-22"
+
+            [model_providers.gateway.env_http_headers]
+            X-Tenant-Token = "GATEWAY_TENANT_TOKEN"
+
+            [model.via-gateway]
+            model = "m"
+            model_provider = "gateway"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&toml_cfg).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("via-gateway").expect("model should exist");
+        assert_eq!(
+            model
+                .info
+                .query_params
+                .get("api-version")
+                .map(String::as_str),
+            Some("2026-07-22"),
+            "the model inherits the provider's query params"
+        );
+        assert_eq!(
+            model
+                .info
+                .env_http_headers
+                .get("X-Tenant-Token")
+                .map(String::as_str),
+            Some("GATEWAY_TENANT_TOKEN"),
+            "the model inherits the provider's env_http_headers mapping (unresolved names)"
+        );
+    }
+
+    #[test]
+    fn model_query_params_shadow_provider_query_params() {
+        let toml_cfg: toml::Value = toml::from_str(
+            r#"
+            [model_providers.gateway]
+            base_url = "https://gateway.example/v1"
+            api_key = "sk-provider"
+
+            [model_providers.gateway.query_params]
+            api-version = "provider"
+
+            [model.via-gateway]
+            model = "m"
+            model_provider = "gateway"
+
+            [model.via-gateway.query_params]
+            api-version = "model"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&toml_cfg).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("via-gateway").expect("model should exist");
+        assert_eq!(
+            model
+                .info
+                .query_params
+                .get("api-version")
+                .map(String::as_str),
+            Some("model"),
+            "a model that sets its own query params inherits none of the provider's"
+        );
     }
 }

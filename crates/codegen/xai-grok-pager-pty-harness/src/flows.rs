@@ -78,6 +78,16 @@ pub fn inference_request_count(content: &ContentController) -> usize {
 /// `default_coding_data_retention_opt_out()`. The mock server accepts any
 /// bearer. Pair with [`oauth_credential_ops`].
 pub fn seed_fake_oauth(content: &ContentController, user: &str) {
+    seed_fake_oauth_with_opt_out(content, user, false);
+}
+
+/// Like [`seed_fake_oauth`], but with `coding_data_retention_opt_out: true` —
+/// the auth-side precondition for the coding-data privacy upsell banner.
+pub fn seed_fake_oauth_coding_data_opted_out(content: &ContentController, user: &str) {
+    seed_fake_oauth_with_opt_out(content, user, true);
+}
+
+fn seed_fake_oauth_with_opt_out(content: &ContentController, user: &str, opted_out: bool) {
     let grok_home = content.home().join(".grok");
     std::fs::create_dir_all(&grok_home).expect("create temp .grok");
     std::fs::write(
@@ -94,7 +104,7 @@ pub fn seed_fake_oauth(content: &ContentController, user: &str) {
     "refresh_token": "pty-test-refresh-token",
     "oidc_issuer": "https://auth.x.ai",
     "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828",
-    "coding_data_retention_opt_out": false
+    "coding_data_retention_opt_out": {opted_out}
   }}
 }}"#
         ),

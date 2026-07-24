@@ -559,7 +559,7 @@ grok -p "Your prompt here"
 | `-p, --single <PROMPT>` | The prompt to send (required)                         |
 | `-m, --model <MODEL>`   | Model to use (e.g., `grok-build`)               |
 | `-s, --session-id <ID>` | Create or resume a headless session with this ID      |
-| `-r, --resume <ID>`     | Resume an existing session (errors if not found)      |
+| `-r, --resume <ID_OR_TITLE>` | Resume an existing session by ID, or by title for the current directory, ignoring letter case (a sole explicitly renamed title wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values are always treated as IDs) |
 | `-c, --continue`        | Continue the most recent session in current directory |
 | `--cwd <PATH>`          | Working directory                                     |
 | `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json`      |

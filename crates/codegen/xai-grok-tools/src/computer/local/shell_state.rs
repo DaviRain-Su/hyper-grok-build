@@ -272,6 +272,7 @@ impl ShellState {
     pub async fn init(
         shell: ShellKind,
         cwd: &Path,
+        shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
     ) -> Result<Self, crate::computer::types::ComputerError> {
         let dump_script = shell.dump_script();
         let dump_fn = shell.dump_function_name();
@@ -297,6 +298,21 @@ impl ShellState {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
+        // Apply the policy before the `export -p` snapshot so the replayed state
+        // is already filtered; otherwise the restore would undo it. No-op unless set.
+        //
+        // SECURITY: this filters the base env only. Variables an rc file exports
+        // during login are captured in the replay snapshot and are not
+        // re-filtered by `exclude`/`include_only` on the persistent backend, so
+        // warn when a policy is active. The non-persistent backend has no such
+        // gap (it filters login capture directly).
+        if shell_env_policy.is_some_and(|p| !p.is_noop()) {
+            tracing::warn!(
+                "shell_environment_policy filters the persistent shell's base env only; \
+                 variables exported by rc files enter the replay snapshot unfiltered"
+            );
+        }
+        crate::util::apply_shell_environment_policy(&mut cmd, shell_env_policy);
         cmd.envs(crate::util::pager_env());
         let mut child = cmd.spawn().map_err(|e| {
             crate::computer::types::ComputerError::io(format!(
@@ -839,7 +855,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
         assert!(state.cwd.is_absolute());
         // The snapshot should contain at least some env var exports
         assert!(
@@ -858,7 +874,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Run "export GROK_TEST_VAR=hello" and capture the new state
         let prep = state
@@ -964,7 +980,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // cd to /tmp (macOS resolves to /private/tmp via symlink)
         let (code, _) = run_command(&mut state, "cd /tmp").await;
@@ -987,7 +1003,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Export a variable
         let (code, _) = run_command(&mut state, "export MY_TEST_VAR=persistent_value").await;
@@ -1006,7 +1022,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         let (code, _) = run_command(&mut state, "export GPG_TTY=/grok-sentinel-tty").await;
         assert_eq!(code, 0);
@@ -1026,7 +1042,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
 
         let (code, _) = run_command(&mut state, "export GPG_TTY=/grok-sentinel-tty").await;
         assert_eq!(code, 0);
@@ -1046,7 +1062,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
 
         let prep = state
             .prepare_command(
@@ -1091,7 +1107,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Define a function
         let (code, _) = run_command(&mut state, "greet() { echo \"hello $1\"; }").await;
@@ -1109,7 +1125,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Define an alias
         let (code, _) = run_command(&mut state, "alias ll='ls -la'").await;
@@ -1136,7 +1152,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         let prep = state.prepare_command("true", None, shadows, None).unwrap();
         // Shadows enabled → the self-resolving find/grep functions are always
@@ -1175,7 +1191,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Set up some state
         let (_, _) = run_command(&mut state, "export SURVIVE_TEST=yes").await;

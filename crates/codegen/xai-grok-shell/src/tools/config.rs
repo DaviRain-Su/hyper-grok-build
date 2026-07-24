@@ -220,6 +220,8 @@ impl ShellToolsetConfig {
             api_backend: Default::default(),
             auth_scheme: Default::default(),
             extra_headers: indexmap::IndexMap::new(),
+            query_params: indexmap::IndexMap::new(),
+            env_http_headers: indexmap::IndexMap::new(),
             context_window: 256_000,
             client_version: None,
             reasoning_effort: None,

@@ -1,8 +1,14 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
-use super::handle_request::{canonical_total_tokens, usage_is_incomplete};
+use super::handle_request::{
+    canonical_total_tokens, record_subagent_usage, usage_is_incomplete,
+};
 use crate::test_support::lsp_runtime::{
-    DummyLspDispatch, ctx_with_toggle, make_request, test_gateway,
+    DummyLspDispatch, ctx_with_toggle, test_gateway_with_receiver,
+};
+use xai_grok_subagent_resolution::resolve_effective_overrides;
+use xai_grok_tools::implementations::grok_build::task::coordinator::{
+    ChildCompletion, CompletionDisposition,
 };
 use xai_tool_types::SubagentReasoningEffort;
 #[test]
@@ -74,6 +80,78 @@ fn budget_trigger_codes_and_reasons_are_stable() {
     assert!(SubagentBudgetTrigger::MaxToolCalls.is_hard());
     assert!(SubagentBudgetTrigger::Timeout.is_hard());
     assert!(! SubagentBudgetTrigger::FinalizingTurns.is_hard());
+}
+#[tokio::test]
+async fn usage_ack_precedes_terminal_presentation() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
+    ctx.parent_cmd_tx = Some(parent_cmd_tx);
+    let by_model = vec![(
+            "test-model".to_string(),
+            xai_chat_state::UsageTotals {
+                input_tokens: 10,
+                output_tokens: 4,
+                ..Default::default()
+            },
+        )];
+    let mut fold = Box::pin(
+        record_subagent_usage(
+            ctx.parent_cmd_tx.as_ref(),
+            Some(by_model),
+            Some("parent-prompt".to_string()),
+            false,
+        ),
+    );
+    let command = tokio::select! {
+            command = parent_cmd_rx.recv() => command.expect("usage command"),
+            result = &mut fold => panic!("usage fold returned before parent command: {result}"),
+        };
+    let SessionCommand::RecordSubagentUsage { respond_to, .. } = command else {
+        panic!("expected RecordSubagentUsage");
+    };
+    assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, &mut fold)
+                .await
+                .is_err(),
+            "child return must wait for usage acknowledgement"
+        );
+    assert!(parent_cmd_rx.try_recv().is_err());
+    respond_to.send(()).expect("usage ack");
+    assert!(fold.await);
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    let mut request = auto_wake_test_request("usage-order");
+    request.run_in_background = false;
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.spawned_notification_emitted = true;
+    present_child_completion(
+        ChildCompletion {
+            request,
+            result: SubagentResult {
+                success: true,
+                subagent_id: "usage-order".to_string(),
+                child_session_id: "usage-order".to_string(),
+                ..Default::default()
+            },
+            completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: true,
+                backgrounded: false,
+                waiter_delivered: false,
+                explicitly_killed: false,
+                should_surface: false,
+            },
+        },
+        &gateway,
+    );
+    assert!(matches!(
+            parent_cmd_rx.try_recv(),
+            Ok(SessionCommand::XaiSessionNotification {
+                notification: SessionNotification {
+                    update: SessionUpdate::SubagentFinished { .. },
+                    ..
+                }
+            })
+        ));
 }
 /// Invariant: resolving a subagent applies the parent session's
 /// `--tools`/`--disallowed-tools`/`--permission-mode` — driven through
@@ -239,412 +317,6 @@ fn no_parent_lsp_means_child_gets_none() {
     assert!(ctx.lsp.is_none());
 }
 #[test]
-fn is_subagent_enabled_returns_true_for_absent_names() {
-    let ctx = ctx_with_toggle(HashMap::from([("plan".to_string(), false)]));
-    assert!(
-            ctx.is_subagent_enabled("explore"),
-            "absent key should default to enabled"
-        );
-    assert!(
-            ctx.is_subagent_enabled("general-purpose"),
-            "absent key should default to enabled"
-        );
-    assert!(
-            ctx.is_subagent_enabled("custom-agent"),
-            "absent key should default to enabled"
-        );
-}
-#[test]
-fn is_subagent_enabled_returns_false_for_disabled_names() {
-    let ctx = ctx_with_toggle(
-        HashMap::from([
-            ("plan".to_string(), false),
-            ("code-reviewer".to_string(), false),
-            ("explore".to_string(), true),
-        ]),
-    );
-    assert!(
-            !ctx.is_subagent_enabled("plan"),
-            "plan = false should be disabled"
-        );
-    assert!(
-            !ctx.is_subagent_enabled("code-reviewer"),
-            "code-reviewer = false should be disabled"
-        );
-    assert!(
-            ctx.is_subagent_enabled("explore"),
-            "explore = true should be enabled"
-        );
-}
-#[test]
-fn lookup_returns_none_for_unknown_id() {
-    let coordinator = SubagentCoordinator::new();
-    assert!(coordinator.lookup("nonexistent").is_none());
-}
-#[test]
-fn lookup_returns_ready_for_completed_subagent() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .move_to_completed(
-            "sub-1",
-            "test task".to_string(),
-            "explore".to_string(),
-            SubagentResult {
-                success: true,
-                output: std::sync::Arc::from("found 3 files"),
-                subagent_id: "sub-1".to_string(),
-                child_session_id: "sub-1".to_string(),
-                tool_calls: 5,
-                turns: 2,
-                duration_ms: 1234,
-                ..Default::default()
-            },
-            None,
-        );
-    let lookup = coordinator.lookup("sub-1");
-    assert!(lookup.is_some());
-    assert!(
-            matches!(lookup, Some(SnapshotLookup::Ready(ref snap)) if snap.subagent_id == "sub-1"),
-            "completed subagent should return Ready variant"
-        );
-}
-#[tokio::test]
-async fn resolve_snapshot_returns_none_for_none_input() {
-    let result = resolve_snapshot(None).await;
-    assert!(result.is_none());
-}
-#[tokio::test]
-async fn resolve_snapshot_returns_ready_unchanged() {
-    let snap = SubagentSnapshot {
-        subagent_id: "sub-1".to_string(),
-        description: "test".to_string(),
-        subagent_type: "explore".to_string(),
-        status: SubagentSnapshotStatus::Completed {
-            output: "done".to_string(),
-            tool_calls: 3,
-            turns: 1,
-            worktree_path: None,
-        },
-        started_at_epoch_ms: 0,
-        duration_ms: 100,
-        persona: None,
-    };
-    let result = resolve_snapshot(Some(SnapshotLookup::Ready(snap))).await;
-    let result = result.expect("Ready should resolve to Some");
-    assert_eq!(result.subagent_id, "sub-1");
-    assert!(matches!(
-            result.status,
-            SubagentSnapshotStatus::Completed { .. }
-        ));
-}
-#[tokio::test]
-async fn resolve_snapshot_populates_running_from_signals() {
-    use crate::session::signals::SessionSignalsHandle;
-    let signals_handle = SessionSignalsHandle::new();
-    signals_handle.increment_turn();
-    signals_handle.record_tool_call("bash");
-    signals_handle.record_tool_call("read_file");
-    signals_handle.record_tool_call("bash");
-    tokio::task::yield_now().await;
-    let seed = RunningSnapshotSeed {
-        subagent_id: "sub-running".to_string(),
-        description: "running task".to_string(),
-        subagent_type: "general-purpose".to_string(),
-        started_at_epoch_ms: 1000,
-        duration_ms: 5000,
-        persona: None,
-        signals_handle,
-    };
-    let result = resolve_snapshot(Some(SnapshotLookup::NeedsSignals(seed))).await;
-    let snap = result.expect("NeedsSignals should resolve to Some");
-    assert_eq!(snap.subagent_id, "sub-running");
-    assert_eq!(snap.duration_ms, 5000);
-    match &snap.status {
-        SubagentSnapshotStatus::Running {
-            turn_count,
-            tool_call_count,
-            tools_used,
-            ..
-        } => {
-            assert_eq!(*turn_count, 1, "should have 1 turn");
-            assert_eq!(*tool_call_count, 3, "should have 3 tool calls");
-            assert!(
-                    tools_used.contains(&"bash".to_string()),
-                    "tools_used should contain bash"
-                );
-            assert!(
-                    tools_used.contains(&"read_file".to_string()),
-                    "tools_used should contain read_file"
-                );
-        }
-        other => panic!("expected Running, got {other:?}"),
-    }
-}
-#[test]
-fn is_running_returns_true_for_running_variant() {
-    let snap = SubagentSnapshot {
-        subagent_id: "s".to_string(),
-        description: "d".to_string(),
-        subagent_type: "t".to_string(),
-        status: SubagentSnapshotStatus::Running {
-            turn_count: 0,
-            tool_call_count: 0,
-            tokens_used: 0,
-            context_window_tokens: 0,
-            context_usage_pct: 0,
-            tools_used: vec![],
-            error_count: 0,
-        },
-        started_at_epoch_ms: 0,
-        duration_ms: 0,
-        persona: None,
-    };
-    assert!(is_running(&snap));
-}
-#[test]
-fn is_running_returns_false_for_completed_variant() {
-    let snap = SubagentSnapshot {
-        subagent_id: "s".to_string(),
-        description: "d".to_string(),
-        subagent_type: "t".to_string(),
-        status: SubagentSnapshotStatus::Completed {
-            output: "done".to_string(),
-            tool_calls: 0,
-            turns: 0,
-            worktree_path: None,
-        },
-        started_at_epoch_ms: 0,
-        duration_ms: 0,
-        persona: None,
-    };
-    assert!(!is_running(&snap));
-}
-#[test]
-fn lookup_returns_initializing_for_pending_subagent() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-pending".to_string(),
-            subagent_type: "general-purpose".to_string(),
-            description: "pending task".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    let lookup = coordinator.lookup("sub-pending");
-    assert!(
-            matches!(
-                lookup,
-                Some(SnapshotLookup::Ready(ref snap))
-                    if snap.subagent_id == "sub-pending"
-                    && matches!(snap.status, SubagentSnapshotStatus::Initializing)
-            ),
-            "pending subagent should return Ready(Initializing)"
-        );
-}
-/// The running gauge must track `pending.len() + active.len()` through the
-/// full lifecycle: it feeds `AgentActivity::is_busy`, which gates the
-/// leader auto-update shutdown.
-#[tokio::test]
-async fn running_gauge_tracks_pending_and_active() {
-    use std::sync::atomic::Ordering;
-    let mut coordinator = SubagentCoordinator::new();
-    let gauge = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    coordinator.set_running_gauge(gauge.clone());
-    assert_eq!(gauge.load(Ordering::Relaxed), 0);
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-gauge".to_string(),
-            subagent_type: "general-purpose".to_string(),
-            description: "gauge task".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    assert_eq!(
-            gauge.load(Ordering::Relaxed),
-            1,
-            "pending counts as running"
-        );
-    coordinator
-        .insert(
-            dummy_tracker("sub-gauge", "parent-session", "general-purpose", "gauge task"),
-        );
-    assert_eq!(gauge.load(Ordering::Relaxed), 1, "active counts as running");
-    coordinator
-        .move_to_completed(
-            "sub-gauge",
-            "gauge task".into(),
-            "general-purpose".into(),
-            SubagentResult::default(),
-            None,
-        );
-    assert_eq!(gauge.load(Ordering::Relaxed), 0, "completed does not count");
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-gauge-2".to_string(),
-            subagent_type: "general-purpose".to_string(),
-            description: "gauge task 2".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    assert_eq!(gauge.load(Ordering::Relaxed), 1);
-    coordinator.move_pending_to_failed("sub-gauge-2", "worktree setup failed");
-    assert_eq!(gauge.load(Ordering::Relaxed), 0);
-    let late_gauge = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-gauge-3".to_string(),
-            subagent_type: "general-purpose".to_string(),
-            description: "gauge task 3".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    coordinator.set_running_gauge(late_gauge.clone());
-    assert_eq!(late_gauge.load(Ordering::Relaxed), 1);
-}
-#[test]
-fn mark_block_waited_sets_flag_on_completed() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .move_to_completed(
-            "sub-bw",
-            "test".into(),
-            "explore".into(),
-            SubagentResult {
-                success: true,
-                subagent_id: "sub-bw".into(),
-                child_session_id: "sub-bw".into(),
-                ..Default::default()
-            },
-            None,
-        );
-    assert!(!coordinator.is_block_waited("sub-bw"));
-    coordinator.mark_block_waited("sub-bw");
-    assert!(coordinator.is_block_waited("sub-bw"));
-}
-#[test]
-fn is_block_waited_returns_false_for_unknown_id() {
-    let coordinator = SubagentCoordinator::new();
-    assert!(!coordinator.is_block_waited("nonexistent"));
-}
-/// Race condition: caller cancels the blocking wait
-/// (receiver dropped) and the subagent completes before the query poll
-/// loop's next 200ms tick clears the flag. The completion handler's
-/// decision-time check must see the dead slot, clear `block_waited`,
-/// and let the auto-wake fire.
-#[tokio::test]
-async fn block_wait_decision_wakes_when_waiter_cancelled_before_poll_tick() {
-    let mut coordinator = SubagentCoordinator::new();
-    let tracker = dummy_tracker("sub-race", "session-A", "explore", "bg task");
-    coordinator.insert(tracker);
-    let (tx, rx) = oneshot::channel::<Option<SubagentSnapshot>>();
-    let slot: BlockWaitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
-    coordinator.register_block_wait("sub-race", slot.clone());
-    assert!(coordinator.is_block_waited("sub-race"));
-    drop(rx);
-    assert!(coordinator.is_block_waited("sub-race"));
-    assert!(
-            !coordinator.block_wait_delivered_or_live("sub-race"),
-            "cancelled waiter must not suppress the completion auto-wake"
-        );
-    assert!(
-            !coordinator.is_block_waited("sub-race"),
-            "decision must clear the stale block_waited flag"
-        );
-}
-/// A live waiter (receiver still open) keeps the wake suppressed — the
-/// poll loop will deliver the result within one tick.
-#[tokio::test]
-async fn block_wait_decision_suppresses_for_live_waiter() {
-    let mut coordinator = SubagentCoordinator::new();
-    let tracker = dummy_tracker("sub-live", "session-A", "explore", "bg task");
-    coordinator.insert(tracker);
-    let (tx, _rx) = oneshot::channel::<Option<SubagentSnapshot>>();
-    let slot: BlockWaitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
-    coordinator.register_block_wait("sub-live", slot.clone());
-    assert!(
-            coordinator.block_wait_delivered_or_live("sub-live"),
-            "live waiter will receive the result — wake would be redundant"
-        );
-    assert!(
-            coordinator.is_block_waited("sub-live"),
-            "flag stays set for a live waiter"
-        );
-}
-/// A consumed sender (result already delivered) keeps the wake
-/// suppressed even though the registration is gone.
-#[tokio::test]
-async fn block_wait_decision_suppresses_after_delivery() {
-    let mut coordinator = SubagentCoordinator::new();
-    let tracker = dummy_tracker("sub-dlv", "session-A", "explore", "bg task");
-    coordinator.insert(tracker);
-    let (tx, mut rx) = oneshot::channel::<Option<SubagentSnapshot>>();
-    let slot: BlockWaitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(tx)));
-    coordinator.register_block_wait("sub-dlv", slot.clone());
-    let tx = slot.borrow_mut().take().expect("sender parked");
-    let _ = tx.send(None);
-    assert!(rx.try_recv().is_ok(), "receiver got the result");
-    coordinator.unregister_block_wait("sub-dlv", &slot);
-    assert!(
-            coordinator.block_wait_delivered_or_live("sub-dlv"),
-            "already-delivered result must keep the wake suppressed"
-        );
-}
-#[tokio::test]
-async fn mark_explicitly_killed_active_then_propagates_to_completed() {
-    let mut coordinator = SubagentCoordinator::new();
-    let tracker = dummy_tracker("sub-ek", "session-A", "explore", "bg task");
-    coordinator.insert(tracker);
-    assert!(!coordinator.is_explicitly_killed("sub-ek"));
-    coordinator.mark_explicitly_killed("sub-ek");
-    assert!(coordinator.is_explicitly_killed("sub-ek"));
-    coordinator
-        .move_to_completed(
-            "sub-ek",
-            "bg task".into(),
-            "explore".into(),
-            SubagentResult {
-                success: false,
-                cancelled: true,
-                subagent_id: "sub-ek".into(),
-                child_session_id: "sub-ek".into(),
-                ..Default::default()
-            },
-            None,
-        );
-    assert!(
-            coordinator.is_explicitly_killed("sub-ek"),
-            "flag must propagate from active tracker to completed entry"
-        );
-}
-#[test]
 fn should_auto_wake_subagent_requires_background_and_enabled() {
     assert!(!should_auto_wake_subagent(
             false, false, true, false, false, false, true
@@ -697,7 +369,6 @@ fn should_auto_wake_subagent_requires_open_parent_channel() {
         ));
 }
 fn auto_wake_test_request(id: &str) -> SubagentRequest {
-    let (result_tx, _result_rx) = oneshot::channel();
     SubagentRequest {
         id: id.into(),
         prompt: String::new(),
@@ -714,7 +385,6 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
-        result_tx,
     }
 }
 /// Behavior-level: the action half of the subagent auto-wake.
@@ -783,120 +453,7 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
     assert!(trace_rx.try_recv().is_err());
 }
 #[test]
-fn mark_explicitly_killed_sets_flag_on_completed() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .move_to_completed(
-            "sub-ek-c",
-            "test".into(),
-            "explore".into(),
-            SubagentResult {
-                success: true,
-                subagent_id: "sub-ek-c".into(),
-                child_session_id: "sub-ek-c".into(),
-                ..Default::default()
-            },
-            None,
-        );
-    assert!(!coordinator.is_explicitly_killed("sub-ek-c"));
-    coordinator.mark_explicitly_killed("sub-ek-c");
-    assert!(coordinator.is_explicitly_killed("sub-ek-c"));
-}
-#[test]
-fn is_explicitly_killed_returns_false_for_unknown_id() {
-    let coordinator = SubagentCoordinator::new();
-    assert!(!coordinator.is_explicitly_killed("nonexistent"));
-}
-#[tokio::test]
-async fn block_waited_propagates_through_move_to_completed() {
-    let mut coordinator = SubagentCoordinator::new();
-    let mut tracker = dummy_tracker("sub-prop", "session-A", "explore", "bg task");
-    tracker.block_waited = true;
-    coordinator.insert(tracker);
-    coordinator
-        .move_to_completed(
-            "sub-prop",
-            "bg task".into(),
-            "explore".into(),
-            SubagentResult {
-                success: true,
-                subagent_id: "sub-prop".into(),
-                child_session_id: "sub-prop".into(),
-                ..Default::default()
-            },
-            None,
-        );
-    assert!(coordinator.is_block_waited("sub-prop"));
-}
-fn complete_dummy(coordinator: &mut SubagentCoordinator, id: &str, surface: bool) {
-    let mut tracker = dummy_tracker(id, "session-A", "explore", "task");
-    tracker.surface_completion = surface;
-    coordinator.insert(tracker);
-    coordinator
-        .move_to_completed(
-            id,
-            "task".into(),
-            "explore".into(),
-            SubagentResult {
-                success: true,
-                subagent_id: id.into(),
-                child_session_id: id.into(),
-                ..Default::default()
-            },
-            None,
-        );
-}
-#[tokio::test]
-async fn move_to_completed_surfaces_when_flag_true() {
-    let mut coordinator = SubagentCoordinator::new();
-    complete_dummy(&mut coordinator, "sub-surface", true);
-    let drained = coordinator.drain_pending_completions_for("");
-    assert_eq!(drained.len(), 1);
-    assert_eq!(drained[0].subagent_id, "sub-surface");
-}
-#[tokio::test]
-async fn move_to_completed_skips_buffer_when_flag_false() {
-    let mut coordinator = SubagentCoordinator::new();
-    complete_dummy(&mut coordinator, "sub-hidden", false);
-    assert!(coordinator.drain_pending_completions_for("").is_empty());
-    assert!(coordinator.lookup("sub-hidden").is_some());
-}
-fn fail_pending(coordinator: &mut SubagentCoordinator, id: &str, surface: bool) {
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: id.to_string(),
-            subagent_type: "explore".to_string(),
-            description: "task".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: surface,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    coordinator.move_pending_to_failed(id, "boom");
-}
-#[test]
-fn failure_completion_surfaces_when_flag_true() {
-    let mut coordinator = SubagentCoordinator::new();
-    fail_pending(&mut coordinator, "fail-surface", true);
-    let drained = coordinator.drain_pending_completions_for("");
-    assert_eq!(drained.len(), 1);
-    assert_eq!(drained[0].subagent_id, "fail-surface");
-    assert!(!drained[0].success);
-}
-#[test]
-fn failure_completion_skips_buffer_when_flag_false() {
-    let mut coordinator = SubagentCoordinator::new();
-    fail_pending(&mut coordinator, "fail-hidden", false);
-    assert!(coordinator.drain_pending_completions_for("").is_empty());
-    assert!(coordinator.lookup("fail-hidden").is_some());
-}
-#[test]
-fn is_running_returns_true_for_initializing_variant() {
+fn initializing_snapshot_is_running() {
     let snap = SubagentSnapshot {
         subagent_id: "s".to_string(),
         description: "d".to_string(),
@@ -906,275 +463,7 @@ fn is_running_returns_true_for_initializing_variant() {
         duration_ms: 0,
         persona: None,
     };
-    assert!(is_running(&snap));
-}
-#[test]
-fn remove_pending_clears_entry() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-1".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "test".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    assert!(coordinator.lookup("sub-1").is_some());
-    coordinator.remove_pending("sub-1");
-    assert!(
-            coordinator.lookup("sub-1").is_none(),
-            "pending entry should be gone after remove_pending"
-        );
-}
-#[test]
-fn move_pending_to_failed_creates_completed_entry() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-fail".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "will fail during init".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    coordinator.move_pending_to_failed("sub-fail", "Sampling client error: bad config");
-    assert!(!coordinator.pending.contains_key("sub-fail"));
-    let lookup = coordinator.lookup("sub-fail");
-    assert!(lookup.is_some(), "failed subagent should be queryable");
-    match lookup.unwrap() {
-        SnapshotLookup::Ready(snap) => {
-            assert_eq!(snap.subagent_id, "sub-fail");
-            assert!(
-                    matches!(snap.status, SubagentSnapshotStatus::Failed { .. }),
-                    "status should be Failed"
-                );
-            if let SubagentSnapshotStatus::Failed { error } = &snap.status {
-                assert!(
-                        error.contains("Sampling client error"),
-                        "error should contain specific message, got: {error}"
-                    );
-            }
-        }
-        _ => panic!("expected Ready snapshot for completed-as-failed subagent"),
-    }
-}
-#[test]
-fn move_pending_to_failed_fires_completion_notify() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-notify".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "notify test".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    coordinator.move_pending_to_failed("sub-notify", "test error");
-    let summaries = coordinator.drain_pending_completions_for("");
-    assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].subagent_id, "sub-notify");
-    assert!(!summaries[0].success);
-}
-#[test]
-fn move_pending_to_failed_noop_for_unknown_id() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator.move_pending_to_failed("nonexistent", "error");
-    assert!(coordinator.completed.is_empty());
-}
-#[test]
-fn move_pending_to_cancelled_creates_cancelled_entry() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-killed".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "killed while initializing".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    coordinator.move_pending_to_cancelled("sub-killed", "Subagent was cancelled");
-    assert!(!coordinator.pending.contains_key("sub-killed"));
-    match coordinator.lookup("sub-killed") {
-        Some(SnapshotLookup::Ready(snap)) => {
-            assert!(
-                matches!(snap.status, SubagentSnapshotStatus::Cancelled { .. }),
-                "killed-while-pending should be Cancelled, got {:?}",
-                snap.status
-            )
-        }
-        _ => {
-            panic!("expected Ready cancelled snapshot for killed-while-pending subagent")
-        }
-    }
-}
-fn completed_with_output(
-    id: &str,
-    text: &str,
-    persisted_output_dir: Option<PathBuf>,
-) -> CompletedSubagent {
-    CompletedSubagent {
-        subagent_id: id.into(),
-        parent_session_id: String::new(),
-        owner: SubagentOwner::Task,
-        parent_prompt_id: None,
-        child_session_id: String::new(),
-        description: "task".into(),
-        subagent_type: "explore".into(),
-        persona: None,
-        started_at: std::time::Instant::now(),
-        completed_at: std::time::Instant::now(),
-        result: SubagentResult {
-            success: true,
-            output: std::sync::Arc::from(text),
-            ..Default::default()
-        },
-        resumed_from: None,
-        child_cwd: String::new(),
-        worktree_path: None,
-        snapshot_ref: None,
-        effective_model_id: String::new(),
-        block_waited: false,
-        explicitly_killed: false,
-        completion_output_cap: None,
-        persisted_output_dir,
-    }
-}
-fn lookup_output(coordinator: &SubagentCoordinator, id: &str) -> String {
-    match coordinator.lookup(id) {
-        Some(SnapshotLookup::Ready(snap)) => {
-            match snap.status {
-                SubagentSnapshotStatus::Completed { output, .. } => output,
-                other => panic!("expected Completed status, got {other:?}"),
-            }
-        }
-        other => {
-            panic!(
-                "expected Ready lookup, got {:?}",
-                other.map(|_| "NeedsSignals/other")
-            )
-        }
-    }
-}
-#[test]
-fn lookup_degrades_to_placeholder_when_output_file_is_missing() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .completed
-        .insert(
-            "sub-gone".to_string(),
-            completed_with_output("sub-gone", "", Some(dir.path().to_path_buf())),
-        );
-    assert_eq!(
-            lookup_output(&coordinator, "sub-gone"),
-            OUTPUT_UNAVAILABLE_PLACEHOLDER,
-            "an entry whose output.json is gone must degrade, not fail the query"
-        );
-}
-#[test]
-fn lookup_serves_unpersisted_output_from_memory() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .completed
-        .insert("sub-mem".to_string(), completed_with_output("sub-mem", "output", None));
-    assert_eq!(
-            lookup_output(&coordinator, "sub-mem"),
-            "output",
-            "an entry with nothing on disk must serve its in-memory output"
-        );
-}
-#[test]
-fn completed_entries_are_capped_oldest_first() {
-    let mut coordinator = SubagentCoordinator::new();
-    let base = std::time::Instant::now();
-    for i in 0..(MAX_COMPLETED_ENTRIES + 2) {
-        let mut entry = completed_with_output(
-            &format!("sub-{i}"),
-            "",
-            Some(std::path::PathBuf::from("/nonexistent")),
-        );
-        entry.completed_at = base + std::time::Duration::from_millis(i as u64);
-        coordinator.completed.insert(format!("sub-{i}"), entry);
-    }
-    coordinator.enforce_completed_cap();
-    assert_eq!(
-            coordinator.completed.len(),
-            MAX_COMPLETED_ENTRIES,
-            "the completed map must be capped at MAX_COMPLETED_ENTRIES"
-        );
-    assert!(
-            !coordinator.completed.contains_key("sub-0")
-                && !coordinator.completed.contains_key("sub-1"),
-            "the oldest completions must be evicted first"
-        );
-    assert!(
-            coordinator.completed.contains_key("sub-2"),
-            "entries within the cap must survive"
-        );
-}
-#[test]
-fn move_to_completed_clears_persisted_output_after_the_summary_clone() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let full_output = "final report".repeat(100);
-    assert!(write_subagent_output(dir.path(), &full_output));
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .move_to_completed(
-            "sub-e2e",
-            "task".into(),
-            "explore".into(),
-            SubagentResult {
-                success: true,
-                output: std::sync::Arc::from(full_output.as_str()),
-                subagent_id: "sub-e2e".into(),
-                child_session_id: "sub-e2e".into(),
-                ..Default::default()
-            },
-            Some(dir.path().to_path_buf()),
-        );
-    let entry = coordinator.completed.get("sub-e2e").expect("entry inserted");
-    assert!(
-            entry.result.output.is_empty(),
-            "a persisted entry must not keep the output in memory"
-        );
-    assert_eq!(
-            lookup_output(&coordinator, "sub-e2e"),
-            full_output,
-            "lookup must serve the persisted output from disk"
-        );
-    let summaries = coordinator.drain_pending_completions_for("");
-    assert_eq!(
-            &*summaries[0].output, full_output,
-            "the completion summary must carry the full output"
-        );
+    assert!(snap.is_running());
 }
 #[test]
 fn persist_gate_only_persists_successful_nonempty_outputs() {
@@ -1209,382 +498,6 @@ fn subagent_output_roundtrips_through_output_json() {
     assert_eq!(read_subagent_output(&dir.path().join("missing")), None);
     std::fs::write(dir.path().join("output.json"), "not json").expect("corrupt file");
     assert_eq!(read_subagent_output(dir.path()), None);
-}
-#[test]
-fn cancel_with_outcome_fires_pending_token() {
-    let mut coordinator = SubagentCoordinator::new();
-    let token = CancellationToken::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-cancel".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "will be cancelled".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: token.clone(),
-        });
-    let outcome = coordinator.cancel_with_outcome("sub-cancel");
-    assert!(
-            matches!(outcome, SubagentCancelOutcome::Cancelled),
-            "cancelling pending should return Cancelled"
-        );
-    assert!(
-            token.is_cancelled(),
-            "pending cancel must fire the spawn token"
-        );
-    assert!(
-            coordinator.lookup("sub-cancel").is_some(),
-            "pending entry stays queryable until the spawn future tears it down"
-        );
-}
-#[tokio::test]
-async fn cancel_with_outcome_returns_variant_for_active_finished_unknown() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator.insert(dummy_tracker("sub-active", "session-A", "explore", "task"));
-    assert!(matches!(
-            coordinator.cancel_with_outcome("sub-active"),
-            SubagentCancelOutcome::Cancelled
-        ));
-    coordinator
-        .move_to_completed(
-            "sub-done",
-            "done".to_string(),
-            "explore".to_string(),
-            SubagentResult {
-                success: true,
-                subagent_id: "sub-done".to_string(),
-                ..Default::default()
-            },
-            None,
-        );
-    assert!(matches!(
-            coordinator.cancel_with_outcome("sub-done"),
-            SubagentCancelOutcome::AlreadyFinished { status } if status == "completed"
-        ));
-    assert!(matches!(
-            coordinator.cancel_with_outcome("nonexistent"),
-            SubagentCancelOutcome::NotFound
-        ));
-}
-#[test]
-fn cancel_by_parent_prompt_id_fires_matching_pending_token() {
-    let mut coordinator = SubagentCoordinator::new();
-    let token_a = CancellationToken::new();
-    let token_b = CancellationToken::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-p1".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "child of prompt-A".to_string(),
-            persona: None,
-            parent_prompt_id: Some("prompt-A".to_string()),
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: token_a.clone(),
-        });
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-p2".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "child of prompt-B".to_string(),
-            persona: None,
-            parent_prompt_id: Some("prompt-B".to_string()),
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: token_b.clone(),
-        });
-    coordinator.cancel_by_parent_prompt_id("prompt-A");
-    assert!(token_a.is_cancelled(), "prompt-A token must fire");
-    assert!(
-            coordinator.lookup("sub-p1").is_some(),
-            "prompt-A entry stays queryable until spawn teardown"
-        );
-    assert!(!token_b.is_cancelled(), "prompt-B token must not fire");
-    assert!(coordinator.lookup("sub-p2").is_some());
-}
-#[test]
-fn completed_takes_precedence_over_pending_in_lookup() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-dup".to_string(),
-            subagent_type: "explore".to_string(),
-            description: "duplicate".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: String::new(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    coordinator
-        .move_to_completed(
-            "sub-dup",
-            "duplicate".to_string(),
-            "explore".to_string(),
-            SubagentResult {
-                success: true,
-                output: std::sync::Arc::from("done"),
-                subagent_id: "sub-dup".to_string(),
-                child_session_id: "child-dup".to_string(),
-                ..Default::default()
-            },
-            None,
-        );
-    let lookup = coordinator.lookup("sub-dup");
-    assert!(
-            matches!(
-                lookup,
-                Some(SnapshotLookup::Ready(ref snap))
-                    if matches!(snap.status, SubagentSnapshotStatus::Completed { .. })
-            ),
-            "completed should take precedence over pending"
-        );
-}
-#[test]
-fn list_running_for_parent_returns_empty_when_no_active() {
-    let coordinator = SubagentCoordinator::new();
-    let seeds = coordinator.list_running_for_parent("parent-1");
-    assert!(seeds.is_empty());
-}
-fn dummy_tracker(
-    subagent_id: &str,
-    parent_session_id: &str,
-    subagent_type: &str,
-    description: &str,
-) -> SubagentTracker {
-    use crate::session::feedback_manager::{FeedbackManager, FeedbackManagerConfig};
-    use crate::session::handle::SessionHandle;
-    use crate::session::info::Info;
-    use crate::session::plan_mode::PlanModeTracker;
-    use crate::session::signals::SessionSignalsHandle;
-    use std::sync::atomic::AtomicBool;
-    let gateway = test_gateway();
-    let cwd = xai_grok_paths::AbsPathBuf::new(PathBuf::from("/tmp")).unwrap();
-    let fs: Arc<dyn xai_grok_workspace::file_system::AsyncFileSystem> = Arc::new(
-        xai_grok_workspace::file_system::LocalFs::new(PathBuf::from("/tmp")),
-    );
-    let terminal: Arc<dyn crate::terminal::AsyncTerminalRunner> = Arc::new(
-        crate::terminal::TerminalRunner::new(
-            Arc::new(test_gateway()),
-            acp::SessionId::new("test"),
-        ),
-    );
-    let tool_context = crate::tools::ToolContext::new(
-        cwd,
-        Some(gateway),
-        Some(acp::SessionId::new("test")),
-        fs,
-        terminal,
-        xai_hunk_tracker::HunkTrackerHandle::noop(),
-    );
-    let signals_handle = SessionSignalsHandle::new();
-    let feedback_manager = FeedbackManager::new(
-        "test",
-        None,
-        FeedbackManagerConfig::default(),
-    );
-    let handle = SessionHandle {
-        cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
-        persistence_tx: tokio::sync::mpsc::unbounded_channel().0,
-        current_prompt_id: Arc::new(std::sync::Mutex::new(None)),
-        pending_interactions: Arc::new(
-            std::sync::Mutex::new(std::collections::HashMap::new()),
-        ),
-        info: Info {
-            id: acp::SessionId::new(subagent_id),
-            cwd: "/tmp".into(),
-        },
-        max_turns: None,
-        resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
-        hunk_tracker_handle: xai_hunk_tracker::HunkTrackerHandle::noop(),
-        chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
-        signals_handle,
-        gateway_enabled: Arc::new(AtomicBool::new(false)),
-        mcp_servers: vec![],
-        initial_client_mcp_servers: vec![],
-        display_cwd: None,
-        feedback_manager: Arc::new(feedback_manager),
-        upload_queue: Arc::new(OnceLock::new()),
-        upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        tool_context,
-        model_id: acp::ModelId::new("test"),
-        reasoning_effort: None,
-        yolo_mode: false,
-        origin_client: None,
-        code_nav_enabled: false,
-        ask_user_question_enabled: true,
-        plan_mode: Arc::new(
-            parking_lot::Mutex::new(PlanModeTracker::new(PathBuf::from("/tmp"))),
-        ),
-        force_compact: Arc::new(AtomicBool::new(false)),
-        permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
-        attribution_callback: None,
-        agent_name: "grok-build".to_string(),
-        managed_mcp_proxy_base_url: String::new(),
-        session_default_agent_profile: None,
-        allowed_subagent_types: None,
-        hook_registry: None,
-        workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-        terminal_backend: None,
-        tools_notification_handle: None,
-        scheduler_handle: None,
-    };
-    SubagentTracker {
-        subagent_id: subagent_id.into(),
-        parent_session_id: parent_session_id.into(),
-        owner: SubagentOwner::Task,
-        parent_prompt_id: None,
-        child_session_id: acp::SessionId::new(subagent_id),
-        subagent_type: subagent_type.into(),
-        persona: None,
-        description: description.into(),
-        started_at: std::time::Instant::now(),
-        child_handle: handle,
-        child_thread: crate::session::SessionThread::from_handle(
-            std::thread::spawn(|| {}),
-        ),
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-        resumed_from: None,
-        child_cwd: String::new(),
-        worktree_path: None,
-        effective_model_id: String::new(),
-        run_in_background: false,
-        surface_completion: true,
-        completion_output_cap: None,
-        color: None,
-        block_waited: false,
-        explicitly_killed: false,
-    }
-}
-#[tokio::test]
-async fn active_summaries_for_filters_by_parent_session_id() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator.insert(dummy_tracker("sub-1", "session-A", "explore", "task 1"));
-    coordinator.insert(dummy_tracker("sub-2", "session-B", "plan", "task 2"));
-    coordinator.insert(dummy_tracker("sub-3", "session-A", "general-purpose", "task 3"));
-    let summaries_a = coordinator.active_summaries_for("session-A");
-    assert_eq!(summaries_a.len(), 2);
-    let ids_a: Vec<&str> = summaries_a.iter().map(|s| s.subagent_id.as_str()).collect();
-    assert!(ids_a.contains(&"sub-1"));
-    assert!(ids_a.contains(&"sub-3"));
-    let summaries_b = coordinator.active_summaries_for("session-B");
-    assert_eq!(summaries_b.len(), 1);
-    assert_eq!(summaries_b[0].subagent_id, "sub-2");
-    assert_eq!(summaries_b[0].subagent_type, "plan");
-    assert_eq!(summaries_b[0].description, "task 2");
-    let summaries_none = coordinator.active_summaries_for("session-C");
-    assert!(summaries_none.is_empty());
-}
-#[tokio::test]
-async fn drain_pending_completions_filters_by_owner_session() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator.insert(dummy_tracker("sub-a", "session-A", "explore", "task a"));
-    coordinator.insert(dummy_tracker("sub-b", "session-B", "plan", "task b"));
-    for id in ["sub-a", "sub-b"] {
-        coordinator
-            .move_to_completed(
-                id,
-                format!("task {id}"),
-                "explore".to_string(),
-                SubagentResult {
-                    success: true,
-                    output: std::sync::Arc::from("done"),
-                    subagent_id: id.to_string(),
-                    child_session_id: id.to_string(),
-                    ..Default::default()
-                },
-                None,
-            );
-    }
-    let b = coordinator.drain_pending_completions_for("session-B");
-    assert_eq!(b.len(), 1);
-    assert_eq!(b[0].subagent_id, "sub-b");
-    assert_eq!(b[0].owner_session_id, "session-B");
-    let a = coordinator.drain_pending_completions_for("session-A");
-    assert_eq!(a.len(), 1);
-    assert_eq!(a[0].subagent_id, "sub-a");
-    assert!(coordinator.drain_pending_completions_for("").is_empty());
-}
-#[tokio::test]
-async fn active_summaries_returns_all_regardless_of_parent() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator.insert(dummy_tracker("sub-1", "session-A", "explore", "task 1"));
-    coordinator.insert(dummy_tracker("sub-2", "session-B", "plan", "task 2"));
-    let all = coordinator.active_summaries();
-    assert_eq!(all.len(), 2);
-}
-/// Spawns issued from inside a child session (loop iterations) re-parent
-/// to the root session via the running tracker's child→parent mapping.
-#[tokio::test]
-async fn parent_of_child_session_maps_to_root() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert(
-            dummy_tracker(
-                "iter-child-sess",
-                "root-session",
-                "general-purpose",
-                "loop iteration",
-            ),
-        );
-    assert_eq!(
-            coordinator
-                .parent_of_child_session("iter-child-sess")
-                .as_deref(),
-            Some("root-session")
-        );
-    assert_eq!(coordinator.parent_of_child_session("unknown-sess"), None);
-}
-#[tokio::test]
-async fn resolve_running_list_returns_empty_for_empty_seeds() {
-    let resolved = resolve_running_list(vec![]).await;
-    assert!(resolved.is_empty());
-}
-#[tokio::test]
-async fn resolve_running_list_populates_fields_from_signals() {
-    use crate::session::signals::SessionSignalsHandle;
-    let signals = SessionSignalsHandle::new();
-    signals.increment_turn();
-    signals.record_tool_call("grep");
-    tokio::task::yield_now().await;
-    let seed = RunningSubagentListSeed {
-        subagent_id: "sub-1".to_string(),
-        parent_session_id: "parent-1".to_string(),
-        child_session_id: "child-1".to_string(),
-        subagent_type: "explore".to_string(),
-        description: "find endpoints".to_string(),
-        started_at_epoch_ms: 1000,
-        duration_ms: 2000,
-        signals_handle: signals,
-    };
-    let resolved = resolve_running_list(vec![seed]).await;
-    assert_eq!(resolved.len(), 1);
-    let r = &resolved[0];
-    assert_eq!(r.subagent_id, "sub-1");
-    assert_eq!(r.parent_session_id, "parent-1");
-    assert_eq!(r.child_session_id, "child-1");
-    assert_eq!(r.subagent_type, "explore");
-    assert_eq!(r.turn_count, 1);
-    assert_eq!(r.tool_call_count, 1);
-    assert!(r.tools_used.contains(&"grep".to_string()));
 }
 #[test]
 fn explicit_override_takes_precedence_over_role() {
@@ -2330,7 +1243,6 @@ fn fork_context_normalized_only_for_summarized() {
         ));
 }
 fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
-    let (result_tx, _) = oneshot::channel();
     SubagentRequest {
         id: "bootstrap-test".into(),
         prompt: "plan".into(),
@@ -2347,7 +1259,6 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         fork_context,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
-        result_tx,
     }
 }
 #[tokio::test]
@@ -2545,160 +1456,6 @@ async fn copy_session_data_preserves_parent_chat_history() {
             "child should have inherited parent chat history"
         );
 }
-#[tokio::test]
-async fn handle_subagent_request_rejects_disabled_agent() {
-    let toggle = HashMap::from([("explore".to_string(), false)]);
-    let ctx = ctx_with_toggle(toggle);
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_request("explore");
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    assert!(!result.success, "disabled subagent should fail");
-    assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("[subagents.toggle]"),
-            "error should mention [subagents.toggle], got: {:?}",
-            result.error
-        );
-}
-#[tokio::test]
-async fn handle_subagent_request_allows_when_absent_from_toggle() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_request("explore");
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    if !result.success {
-        assert!(
-                !result
-                    .error
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("[subagents.toggle]"),
-                "should not be rejected by toggle gate when absent from toggle, \
-                 but got: {:?}",
-                result.error
-            );
-    }
-}
-#[tokio::test]
-async fn handle_subagent_request_rejects_nonexistent_cwd() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (mut request, result_rx) = make_request("explore");
-    request.cwd = Some("/nonexistent/path/that/does/not/exist".into());
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    assert!(!result.success, "nonexistent cwd should fail");
-    assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("does not exist"),
-            "error should mention path does not exist, got: {:?}",
-            result.error
-        );
-}
-#[tokio::test]
-async fn handle_subagent_request_rejects_file_as_cwd() {
-    let tmp_dir = tempfile::TempDir::new().unwrap();
-    let tmp_file = tmp_dir.path().join("grok-test-cwd-file");
-    std::fs::write(&tmp_file, b"not a directory").unwrap();
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (mut request, result_rx) = make_request("explore");
-    request.cwd = Some(tmp_file.to_string_lossy().to_string());
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    assert!(!result.success, "file-as-cwd should fail");
-    assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("not a directory"),
-            "error should mention not a directory, got: {:?}",
-            result.error
-        );
-}
-#[tokio::test]
-async fn handle_subagent_request_valid_cwd_passes_validation() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (mut request, result_rx) = make_request("explore");
-    request.cwd = Some("/tmp".into());
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    if !result.success {
-        let err = result.error.as_deref().unwrap_or("");
-        assert!(
-                !err.contains("does not exist") && !err.contains("not a directory"),
-                "valid cwd should pass validation, but got cwd error: {err}"
-            );
-    }
-}
-#[tokio::test]
-async fn handle_subagent_request_quoted_cwd_passes_validation() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (mut request, result_rx) = make_request("explore");
-    request.cwd = Some("\"/tmp".into());
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    if !result.success {
-        let err = result.error.as_deref().unwrap_or("");
-        assert!(
-                !err.contains("does not exist") && !err.contains("not a directory"),
-                "quoted cwd should be sanitized before validation, but got cwd error: {err}"
-            );
-    }
-}
 fn make_validation_ctx(toggle: HashMap<String, bool>) -> SubagentValidationContext {
     SubagentValidationContext {
         parent_cwd: PathBuf::from("/tmp"),
@@ -2849,23 +1606,6 @@ fn validate_subagent_type_recognizes_cli_agent_by_name() {
         ));
 }
 #[test]
-#[serial_test::serial]
-fn subagent_await_budget_default_and_override() {
-    unsafe { std::env::remove_var("GROK_SUBAGENT_AWAIT_BUDGET_MS") };
-    assert_eq!(SUBAGENT_AWAIT_BUDGET, std::time::Duration::from_secs(600));
-    assert_eq!(subagent_await_budget(), SUBAGENT_AWAIT_BUDGET);
-    unsafe { std::env::set_var("GROK_SUBAGENT_AWAIT_BUDGET_MS", "1500") };
-    assert_eq!(
-            subagent_await_budget(),
-            std::time::Duration::from_millis(1500)
-        );
-    unsafe { std::env::set_var("GROK_SUBAGENT_AWAIT_BUDGET_MS", "0") };
-    assert_eq!(subagent_await_budget(), SUBAGENT_AWAIT_BUDGET);
-    unsafe { std::env::set_var("GROK_SUBAGENT_AWAIT_BUDGET_MS", "not-a-number") };
-    assert_eq!(subagent_await_budget(), SUBAGENT_AWAIT_BUDGET);
-    unsafe { std::env::remove_var("GROK_SUBAGENT_AWAIT_BUDGET_MS") };
-}
-#[test]
 fn summarize_tool_config_uses_name_override_and_strips_namespace() {
     use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
     use xai_grok_tools::types::tool::ToolKind;
@@ -2989,281 +1729,8 @@ fn subagent_keeps_default_flavor_when_parent_model_is_non_strict() {
             "a non-strict parent model must leave subagents on the default harness",
         );
 }
-fn make_background_request(
-    subagent_type: &str,
-) -> (SubagentRequest, oneshot::Receiver<SubagentResult>) {
-    let (mut req, rx) = make_request(subagent_type);
-    req.run_in_background = true;
-    (req, rx)
-}
-#[tokio::test]
-async fn background_unknown_type_records_failure_completion() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_background_request("totally-invented-type");
-    assert_background_pre_spawn_failure(
-            ctx,
-            &coordinator,
-            &gateway,
-            request,
-            result_rx,
-            "Unknown subagent type",
-        )
-        .await;
-}
-async fn assert_background_pre_spawn_failure(
-    ctx: SubagentSpawnContext,
-    coordinator: &std::cell::RefCell<SubagentCoordinator>,
-    gateway: &GatewaySender,
-    request: SubagentRequest,
-    result_rx: oneshot::Receiver<SubagentResult>,
-    expected_error_substring: &str,
-) {
-    let subagent_id = request.id.clone();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, coordinator, gateway)).await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    assert!(!result.success);
-    let err = result.error.as_deref().unwrap_or("");
-    assert!(
-            err.contains(expected_error_substring),
-            "expected error substring {expected_error_substring:?} in {err:?}",
-        );
-    let lookup = coordinator.borrow().lookup(&subagent_id);
-    match lookup {
-        Some(SnapshotLookup::Ready(snap)) => {
-            assert_eq!(snap.subagent_id, subagent_id);
-            assert!(matches!(snap.status, SubagentSnapshotStatus::Failed { .. }));
-        }
-        _ => panic!("expected Ready(Failed) snapshot"),
-    }
-    let summaries = coordinator.borrow_mut().drain_pending_completions_for("");
-    assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].subagent_id, subagent_id);
-    assert!(!summaries[0].success);
-}
-#[tokio::test]
-async fn background_disabled_type_records_failure_completion() {
-    let toggle = HashMap::from([("explore".to_string(), false)]);
-    let ctx = ctx_with_toggle(toggle);
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_background_request("explore");
-    assert_background_pre_spawn_failure(
-            ctx,
-            &coordinator,
-            &gateway,
-            request,
-            result_rx,
-            "[subagents.toggle]",
-        )
-        .await;
-}
-#[tokio::test]
-async fn background_not_allowed_type_records_failure_completion() {
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.allowed_subagent_types = Some(vec!["plan".to_string()]);
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_background_request("explore");
-    assert_background_pre_spawn_failure(
-            ctx,
-            &coordinator,
-            &gateway,
-            request,
-            result_rx,
-            "not allowed",
-        )
-        .await;
-}
-async fn assert_blocking_pre_spawn_does_not_push_summary(
-    ctx: SubagentSpawnContext,
-    coordinator: &std::cell::RefCell<SubagentCoordinator>,
-    gateway: &GatewaySender,
-    request: SubagentRequest,
-    result_rx: oneshot::Receiver<SubagentResult>,
-) {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, coordinator, gateway)).await;
-        })
-        .await;
-    let result = result_rx.await.expect("should receive result");
-    assert!(!result.success);
-    let summaries = coordinator.borrow_mut().drain_pending_completions_for("");
-    assert!(
-            summaries.is_empty(),
-            "blocking-mode pre-spawn failure must not push completion summaries: {summaries:?}",
-        );
-}
-#[tokio::test]
-async fn blocking_unknown_type_does_not_push_completion_summary() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_request("totally-invented-type");
-    assert_blocking_pre_spawn_does_not_push_summary(
-            ctx,
-            &coordinator,
-            &gateway,
-            request,
-            result_rx,
-        )
-        .await;
-}
-#[tokio::test]
-async fn blocking_disabled_type_does_not_push_completion_summary() {
-    let toggle = HashMap::from([("explore".to_string(), false)]);
-    let ctx = ctx_with_toggle(toggle);
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_request("explore");
-    assert_blocking_pre_spawn_does_not_push_summary(
-            ctx,
-            &coordinator,
-            &gateway,
-            request,
-            result_rx,
-        )
-        .await;
-}
-#[tokio::test]
-async fn blocking_not_allowed_type_does_not_push_completion_summary() {
-    let mut ctx = ctx_with_toggle(HashMap::new());
-    ctx.allowed_subagent_types = Some(vec!["plan".to_string()]);
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (request, result_rx) = make_request("explore");
-    assert_blocking_pre_spawn_does_not_push_summary(
-            ctx,
-            &coordinator,
-            &gateway,
-            request,
-            result_rx,
-        )
-        .await;
-}
-#[tokio::test]
-async fn background_failure_summary_includes_description() {
-    let ctx = ctx_with_toggle(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let gateway = test_gateway();
-    let (mut request, _result_rx) = make_background_request("invented");
-    request.description = "find auth middleware".into();
-    let id = request.id.clone();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let summaries = coordinator.borrow_mut().drain_pending_completions_for("");
-    assert_eq!(summaries.len(), 1);
-    let s = &summaries[0];
-    assert_eq!(s.subagent_id, id);
-    assert_eq!(s.subagent_type, "invented");
-    assert_eq!(s.description, "find auth middleware");
-}
-#[tokio::test]
-async fn background_unknown_type_emits_subagent_finished_notification() {
-    use crate::test_support::lsp_runtime::{
-        ctx_with_toggle_and_cmd_tx, test_gateway_with_receiver,
-    };
-    let (ctx, mut cmd_rx) = ctx_with_toggle_and_cmd_tx(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
-    let (request, _result_rx) = make_background_request("invented-type");
-    let subagent_id = request.id.clone();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway))
-                .await;
-        })
-        .await;
-    let mut found_persisted = false;
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        if let SessionCommand::XaiSessionNotification { notification } = cmd
-            && let SessionUpdate::SubagentFinished {
-                subagent_id: id,
-                status,
-                error,
-                ..
-            } = &notification.update
-        {
-            assert_eq!(*id, subagent_id);
-            assert_eq!(status, "failed");
-            assert!(
-                    error
-                        .as_deref()
-                        .is_some_and(|e| e.contains("Unknown subagent type")),
-                );
-            found_persisted = true;
-        }
-    }
-    assert!(
-            found_persisted,
-            "must persist SubagentFinished via parent_cmd_tx"
-        );
-    let mut found_live = false;
-    while let Ok(msg) = gateway_rx.try_recv() {
-        if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg {
-            let req: &acp::ExtNotification = &args.request;
-            assert_eq!(req.method.as_ref(), "x.ai/session_notification");
-            let body = req.params.get();
-            assert!(body.contains("subagent_finished"));
-            assert!(body.contains(&subagent_id));
-            assert!(body.contains("\"status\":\"failed\""));
-            assert!(body.contains("Unknown subagent type"));
-            assert!(body.contains("\"will_wake\":false"));
-            found_live = true;
-            break;
-        }
-    }
-    assert!(found_live, "must broadcast SubagentFinished via gateway");
-}
-/// The promote-guard teardown emits EXACTLY ONE cancelled `SubagentFinished`
-/// (on both the persist + gateway channels), delivers a cancelled result, and
-/// leaves the entry queryable as `Cancelled`.
-#[tokio::test]
-async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish() {
-    use crate::test_support::lsp_runtime::{
-        ctx_with_toggle_and_cmd_tx, test_gateway_with_receiver,
-    };
-    let (ctx, mut cmd_rx) = ctx_with_toggle_and_cmd_tx(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
-    let (request, result_rx) = make_request("explore");
-    let subagent_id = request.id.clone();
-    let child_session_id = acp::SessionId::new(subagent_id.clone());
-    coordinator
-        .borrow_mut()
-        .insert_pending(PendingSubagent {
-            subagent_id: subagent_id.clone(),
-            subagent_type: "explore".to_string(),
-            description: "killed while pending".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: ctx.parent_session_id.clone(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    let child_handle = dummy_tracker(&subagent_id, "test-parent", "explore", "task")
-        .child_handle;
-    let meta_dir = std::env::temp_dir()
-        .join(format!("subagent-promote-test-{subagent_id}"));
-    let gcs_ctx = GcsUploadContext {
+fn test_gcs_context(ctx: &SubagentSpawnContext) -> GcsUploadContext {
+    GcsUploadContext {
         bucket_url: None,
         upload_method: None,
         model_id: None,
@@ -3275,154 +1742,104 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
         parent_prompt_id: None,
         depth: 0,
         auth_manager: ctx.auth_manager.clone(),
-    };
-    cancel_pending_subagent_at_promote(
-            request,
-            &child_handle,
-            &subagent_id,
-            &child_session_id,
-            &meta_dir,
-            &coordinator,
-            &gateway,
-            &ctx.parent_session_id,
-            ctx.parent_cmd_tx.as_ref(),
+    }
+}
+#[tokio::test]
+async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
+    ctx.parent_cmd_tx = Some(parent_cmd_tx);
+    let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+    let request = auto_wake_test_request("promote-cancel");
+    let meta_dir = tempfile::tempdir().expect("meta dir");
+    let result = cancel_pending_shell_child(
+            &child_cmd_tx,
+            &request.id,
+            &acp::SessionId::new(request.id.clone()),
+            meta_dir.path(),
             None,
             false,
             42,
-            &gcs_ctx,
+            &test_gcs_context(&ctx),
         )
         .await;
+    assert!(matches!(
+            child_cmd_rx.try_recv(),
+            Ok(SessionCommand::Shutdown)
+        ));
+    assert!(result.cancelled);
+    assert!(!result.success);
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.spawned_notification_emitted = true;
+    present_child_completion(
+        ChildCompletion {
+            request,
+            result,
+            completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: false,
+                backgrounded: false,
+                waiter_delivered: false,
+                explicitly_killed: false,
+                should_surface: false,
+            },
+        },
+        &gateway,
+    );
     let mut persisted = 0;
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        if let SessionCommand::XaiSessionNotification { notification } = cmd
-            && let SessionUpdate::SubagentFinished { subagent_id: id, status, .. } = &notification
-                .update
-        {
-            assert_eq!(*id, subagent_id);
-            assert_eq!(status, "cancelled");
+    while let Ok(command) = parent_cmd_rx.try_recv() {
+        if matches!(
+                command,
+                SessionCommand::XaiSessionNotification {
+                    notification: SessionNotification {
+                        update: SessionUpdate::SubagentFinished { status, .. },
+                        ..
+                    }
+                } if status == "cancelled"
+            ) {
             persisted += 1;
         }
     }
-    assert_eq!(persisted, 1, "exactly one persisted SubagentFinished");
+    assert_eq!(persisted, 1);
     let mut live = 0;
-    while let Ok(msg) = gateway_rx.try_recv() {
-        if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg {
-            let body = args.request.params.get();
-            if body.contains("subagent_finished") {
-                assert!(body.contains(&subagent_id));
-                assert!(body.contains("\"status\":\"cancelled\""));
-                live += 1;
-            }
+    while let Ok(message) = gateway_rx.try_recv() {
+        if matches!(
+                message,
+                xai_acp_lib::AcpClientMessage::ExtNotification(args)
+                    if args.request.params.get().contains("\"status\":\"cancelled\"")
+            ) {
+            live += 1;
         }
     }
-    assert_eq!(live, 1, "exactly one live SubagentFinished");
-    let result = result_rx.await.expect("result delivered to oneshot");
-    assert!(result.cancelled, "result must be cancelled");
-    assert!(!result.success);
-    match coordinator.borrow().lookup(&subagent_id) {
-        Some(SnapshotLookup::Ready(snap)) => {
-            assert!(
-                matches!(snap.status, SubagentSnapshotStatus::Cancelled { .. }),
-                "expected Cancelled, got {:?}",
-                snap.status
-            )
-        }
-        _ => panic!("expected Ready(Cancelled) snapshot after promote-abort"),
-    }
+    assert_eq!(live, 1);
 }
-/// Drive `cancel_pending_subagent_at_promote` against a real `worktree` and
-/// assert it still emits EXACTLY ONE cancelled finish + leaves the entry
-/// queryable as Cancelled. The caller asserts the worktree dir's fate.
 async fn run_promote_cancel_with_worktree(
     worktree: &Path,
     worktree_freshly_created: bool,
 ) {
-    use crate::test_support::lsp_runtime::{
-        ctx_with_toggle_and_cmd_tx, test_gateway_with_receiver,
-    };
-    let (ctx, mut cmd_rx) = ctx_with_toggle_and_cmd_tx(HashMap::new());
-    let coordinator = std::cell::RefCell::new(SubagentCoordinator::new());
-    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
-    let (request, result_rx) = make_request("explore");
-    let subagent_id = request.id.clone();
-    let child_session_id = acp::SessionId::new(subagent_id.clone());
-    coordinator
-        .borrow_mut()
-        .insert_pending(PendingSubagent {
-            subagent_id: subagent_id.clone(),
-            subagent_type: "explore".to_string(),
-            description: "killed while pending".to_string(),
-            persona: None,
-            parent_prompt_id: None,
-            parent_session_id: ctx.parent_session_id.clone(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    let child_handle = dummy_tracker(&subagent_id, "test-parent", "explore", "task")
-        .child_handle;
-    let meta_dir = std::env::temp_dir().join(format!("subagent-wt-test-{subagent_id}"));
-    let gcs_ctx = GcsUploadContext {
-        bucket_url: None,
-        upload_method: None,
-        model_id: None,
-        cwd: None,
-        isolation_mode: None,
-        capability_mode: None,
-        reasoning_effort: None,
-        role_name: None,
-        parent_prompt_id: None,
-        depth: 0,
-        auth_manager: ctx.auth_manager.clone(),
-    };
-    cancel_pending_subagent_at_promote(
-            request,
-            &child_handle,
-            &subagent_id,
-            &child_session_id,
-            &meta_dir,
-            &coordinator,
-            &gateway,
-            &ctx.parent_session_id,
-            ctx.parent_cmd_tx.as_ref(),
+    let ctx = ctx_with_toggle(HashMap::new());
+    let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
+    let meta_dir = tempfile::tempdir().expect("meta dir");
+    let result = cancel_pending_shell_child(
+            &child_cmd_tx,
+            "worktree-cancel",
+            &acp::SessionId::new("worktree-cancel"),
+            meta_dir.path(),
             Some(worktree),
             worktree_freshly_created,
             42,
-            &gcs_ctx,
+            &test_gcs_context(&ctx),
         )
         .await;
-    let mut persisted = 0;
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        if let SessionCommand::XaiSessionNotification { notification } = cmd
-            && matches!(notification.update, SessionUpdate::SubagentFinished { .. })
-        {
-            persisted += 1;
-        }
-    }
-    assert_eq!(persisted, 1, "exactly one persisted SubagentFinished");
-    let mut live = 0;
-    while let Ok(msg) = gateway_rx.try_recv() {
-        if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg
-            && args.request.params.get().contains("subagent_finished")
-        {
-            live += 1;
-        }
-    }
-    assert_eq!(live, 1, "exactly one live SubagentFinished");
-    let result = result_rx.await.expect("result delivered to oneshot");
-    assert!(result.cancelled, "result must be cancelled");
     assert!(matches!(
-            coordinator.borrow().lookup(&subagent_id),
-            Some(SnapshotLookup::Ready(snap)) if matches!(snap.status, SubagentSnapshotStatus::Cancelled { .. })
+            child_cmd_rx.try_recv(),
+            Ok(SessionCommand::Shutdown)
         ));
+    assert!(result.cancelled);
 }
-/// The promote-abort teardown removes a FRESHLY-created worktree (this
-/// subagent's own, pristine) but PRESERVES a resumed subagent's reused
-/// worktree (it aliases the source's dir — deleting it would lose the
-/// source's working state). Exactly one cancelled finish emits either way.
+/// A pending cancel removes a freshly-created worktree but preserves a
+/// resumed child worktree owned by its source.
 #[tokio::test]
 async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
     xai_test_utils::require_git!();
@@ -3462,143 +1879,6 @@ async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
             "the source's working state must be left untouched"
         );
 }
-#[test]
-fn record_pre_spawn_failure_populates_completed_and_summary() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .record_pre_spawn_failure(
-            "sub-x".to_string(),
-            "invented".to_string(),
-            "bg job".to_string(),
-            Some("prompt-1".to_string()),
-            "parent-1".to_string(),
-            SubagentOwner::Task,
-            "Unknown subagent type: invented",
-            true,
-        );
-    let lookup = coordinator.lookup("sub-x");
-    match lookup {
-        Some(SnapshotLookup::Ready(snap)) => {
-            assert_eq!(snap.subagent_id, "sub-x");
-            match &snap.status {
-                SubagentSnapshotStatus::Failed { error } => {
-                    assert!(error.contains("Unknown subagent type"));
-                }
-                other => panic!("expected Failed, got {other:?}"),
-            }
-        }
-        _ => panic!("expected Ready snapshot for recorded pre-spawn failure"),
-    }
-    let summaries = coordinator.drain_pending_completions_for("");
-    assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].subagent_id, "sub-x");
-    assert_eq!(summaries[0].subagent_type, "invented");
-    assert_eq!(summaries[0].description, "bg job");
-    assert!(!summaries[0].success);
-}
-#[test]
-fn record_pre_spawn_failure_skips_buffer_when_flag_false() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .record_pre_spawn_failure(
-            "sub-hidden-pre".to_string(),
-            "invented".to_string(),
-            "bg job".to_string(),
-            None,
-            "parent-1".to_string(),
-            SubagentOwner::Task,
-            "Unknown subagent type: invented",
-            false,
-        );
-    assert!(coordinator.drain_pending_completions_for("").is_empty());
-    assert!(coordinator.lookup("sub-hidden-pre").is_some());
-}
-#[tokio::test]
-async fn record_pre_spawn_failure_notifies_waiters() {
-    let mut coordinator = SubagentCoordinator::new();
-    let notify = coordinator.completion_notify();
-    let waiter = notify.notified();
-    coordinator
-        .record_pre_spawn_failure(
-            "sub-y".to_string(),
-            "invented".to_string(),
-            "bg job".to_string(),
-            None,
-            "parent-1".to_string(),
-            SubagentOwner::Task,
-            "error",
-            true,
-        );
-    tokio::time::timeout(std::time::Duration::from_millis(50), waiter)
-        .await
-        .expect("notify_waiters must wake pre-armed waiter");
-}
-#[tokio::test]
-async fn record_pre_spawn_failure_notifies_all_waiters() {
-    let mut coordinator = SubagentCoordinator::new();
-    let notify = coordinator.completion_notify();
-    let waiter_a = notify.notified();
-    let waiter_b = notify.notified();
-    coordinator
-        .record_pre_spawn_failure(
-            "sub-multi".to_string(),
-            "invented".to_string(),
-            "bg job".to_string(),
-            None,
-            "parent-1".to_string(),
-            SubagentOwner::Task,
-            "error",
-            true,
-        );
-    let timeout = std::time::Duration::from_millis(50);
-    tokio::time::timeout(timeout, waiter_a).await.expect("waiter_a must wake");
-    tokio::time::timeout(timeout, waiter_b).await.expect("waiter_b must wake");
-}
-#[test]
-fn record_pre_spawn_failure_clears_stale_pending_entry() {
-    let mut coordinator = SubagentCoordinator::new();
-    coordinator
-        .insert_pending(PendingSubagent {
-            subagent_id: "sub-z".to_string(),
-            subagent_type: "invented".to_string(),
-            description: "stale".to_string(),
-            persona: None,
-            parent_prompt_id: Some("prompt-X".to_string()),
-            parent_session_id: "parent-1".to_string(),
-            owner: SubagentOwner::Task,
-            started_at: std::time::Instant::now(),
-            run_in_background: true,
-            surface_completion: true,
-            color: None,
-            cancel_token: CancellationToken::new(),
-        });
-    assert!(coordinator.pending.contains_key("sub-z"));
-    coordinator
-        .record_pre_spawn_failure(
-            "sub-z".to_string(),
-            "invented".to_string(),
-            "bg job".to_string(),
-            Some("prompt-X".to_string()),
-            "parent-1".to_string(),
-            SubagentOwner::Task,
-            "Unknown subagent type: invented",
-            true,
-        );
-    assert!(!coordinator.pending.contains_key("sub-z"));
-    match coordinator.lookup("sub-z") {
-        Some(SnapshotLookup::Ready(snap)) => {
-            assert!(matches!(snap.status, SubagentSnapshotStatus::Failed { .. }));
-        }
-        _ => panic!("expected Ready(Failed) post-collision"),
-    }
-    assert!(
-            !coordinator
-                .outstanding_for_prompt("prompt-X")
-                .iter()
-                .any(|id| id == "sub-z"),
-            "outstanding_for_prompt must not still list a recorded-failed id",
-        );
-}
 fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
     crate::agent::config::ModelEntry {
         info: crate::agent::config::ModelInfo {
@@ -3614,6 +1894,8 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             api_backend: Default::default(),
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(256_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -3910,6 +2192,8 @@ fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingCo
         top_p: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        query_params: Default::default(),
+        env_http_headers: Default::default(),
         context_window: NonZeroU64::new(256_000).expect("non-zero context window"),
         reasoning_effort: None,
         stream_tool_calls: None,

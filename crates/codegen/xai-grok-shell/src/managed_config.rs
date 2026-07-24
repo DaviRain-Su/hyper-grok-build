@@ -137,6 +137,12 @@ fn team_principal_signed_in() -> std::io::Result<bool> {
 /// configured and no team signed in (logout). A configured deployment key keeps
 /// its files (original "never auto-deletes" behavior). Runs at startup and on
 /// logout; best-effort.
+///
+/// **fail_closed:** when the marker or on-disk requirements opt in to fail-closed
+/// (or requirements exist but are unreadable), do **not** wipe. A personal/User
+/// principal (or signed-out auth) must not escape enforced policy by swapping
+/// `auth.json` and letting orphan clear delete the artifacts. Non-fail-closed
+/// team policy still clears on logout as before.
 pub fn clear_orphan() {
     if resolve_deployment_key().is_some() {
         return;
@@ -153,6 +159,12 @@ pub fn clear_orphan() {
     let Some(_lock) = try_lock_managed_config(&home) else {
         return; // another process is syncing; retry next call
     };
+    if xai_grok_config::fail_closed_policy_armed_at(&home) {
+        tracing::info!(
+            "keeping fail_closed managed policy on disk; no team principal present to own a clear"
+        );
+        return;
+    }
     remove_managed_config_files(&home);
 }
 

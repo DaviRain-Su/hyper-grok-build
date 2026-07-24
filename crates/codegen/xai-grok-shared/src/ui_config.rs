@@ -92,6 +92,11 @@ pub struct UiConfig {
     /// `[voice].language` for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_stt_language: Option<String>,
+    /// Whether the Ctrl+Space / F8 voice-dictation shortcut is active. Written
+    /// by the settings modal; unset defaults to `true` (shortcut on). When
+    /// `false` the chord is ignored — `/voice` still starts dictation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_keybind_enabled: Option<bool>,
     /// When `true`, registers `Ctrl+R` (while scrollback is focused) to toggle
     /// terminal mouse reporting (mouse capture) so users can hand selection back
     /// to the terminal for native click-drag copy/paste. Opt-in only; unset/false
@@ -268,6 +273,7 @@ impl Default for UiConfig {
             hunk_tracker_mode: None,
             voice_capture_mode: None,
             voice_stt_language: None,
+            voice_keybind_enabled: None,
             mouse_reporting_toggle: None,
             remember_tool_approvals: None,
             cancel_subagents_on_turn_cancel: None,

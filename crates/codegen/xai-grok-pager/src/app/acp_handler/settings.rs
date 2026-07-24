@@ -129,11 +129,21 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             agent.set_sharing_enabled(v);
         }
     }
+    // Env overrides win over live updates too, mirroring the startup
+    // resolution in event_loop — otherwise the proxy's explicit `false`
+    // (sent for kill-switch semantics) clobbers a local test override
+    // moments after launch.
     if let Some(v) = update.privacy_notice_rollout {
-        app.privacy_notice_rollout = v;
+        app.privacy_notice_rollout =
+            xai_grok_config::env_bool("GROK_PRIVACY_NOTICE_ROLLOUT").unwrap_or(v);
     }
     if let Some(v) = update.privacy_banner_reshow_days {
-        app.privacy_banner_reshow_days = Some(v);
+        app.privacy_banner_reshow_days = Some(
+            std::env::var("GROK_PRIVACY_BANNER_RESHOW_DAYS")
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(v),
+        );
     }
     // Tier before voice: same payload may set "API Key" and voice_mode_enabled=false.
     // Always recompute is_api_key_auth from the tier so a later Free/SuperGrok
@@ -310,6 +320,19 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         } else {
             app.tip = None;
         }
+    }
+
+    // Re-resolve dropdown tags only when the update carries the field. Some(None) =
+    // remote cleared (drop remote layer); Some(Some(map)) = set; outer None = field
+    // absent (older shell) → keep the tags resolved at startup. Env + local
+    // [slash_command_tags] always apply via resolve_slash_command_tags.
+    if let Some(remote_tags) = update.slash_command_tags.as_ref() {
+        use xai_grok_shell::util::config::resolve_slash_command_tags;
+        let effective_config = xai_grok_shell::config::load_effective_config().ok();
+        let empty_toml = toml::Value::Table(Default::default());
+        let tags_config = effective_config.as_ref().unwrap_or(&empty_toml);
+        *app.command_tags.borrow_mut() =
+            resolve_slash_command_tags(tags_config, remote_tags.as_ref());
     }
 
     tracing::info!("settings updated via x.ai/settings/update");
@@ -504,6 +527,12 @@ pub(super) struct PagerSettingsUpdate {
     session_picker_grouped: Option<bool>,
     #[serde(default)]
     tips: Option<Vec<String>>,
+    /// Free-form per-command slash-dropdown tags (canonical name → tag).
+    /// Presence-aware and tolerant: omit = no update (older shell), `null` =
+    /// remote cleared, map = set, malformed = warn + treat as absent so a
+    /// bad value never fails the whole `PagerSettingsUpdate` parse.
+    #[serde(default, deserialize_with = "deserialize_settings_update_tags")]
+    slash_command_tags: Option<Option<std::collections::BTreeMap<String, String>>>,
     // `announcements` is deliberately NOT consumed here: every shell writer of
     // remote_settings also emits gen-ordered `x.ai/announcements/update`
     // (emit_announcements_if_changed), and a gen-less apply on this path could
@@ -546,6 +575,33 @@ where
     Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
+/// Presence-aware + tolerant tags map for live settings updates.
+/// Only invoked when the field is present (`#[serde(default)]` covers omit).
+/// - JSON null → `Some(None)` (explicit remote clear)
+/// - valid object → `Some(Some(map))`
+/// - malformed → warn + `Ok(None)` (leave tags alone; do not fail the struct)
+fn deserialize_settings_update_tags<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<std::collections::BTreeMap<String, String>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        v => match serde_json::from_value::<std::collections::BTreeMap<String, String>>(v) {
+            Ok(m) => Ok(Some(Some(m))),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "malformed slash_command_tags in settings update; leaving tags unchanged"
+                );
+                Ok(None)
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod presence_aware_dto_tests {
     use super::*;
@@ -582,6 +638,63 @@ mod presence_aware_dto_tests {
             some_v.permission_mode,
             Some(Some("always-approve".into())),
             "string must be Some(Some(_))"
+        );
+    }
+
+    #[test]
+    fn slash_command_tags_dto_absent_null_map_and_malformed() {
+        // 1. field absent → outer None (leave tags alone)
+        let absent: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "tips": ["hello"],
+        }))
+        .expect("absent slash_command_tags must not fail parse");
+        assert_eq!(absent.slash_command_tags, None, "omit must be None");
+        assert_eq!(absent.tips.as_deref(), Some(&["hello".to_string()][..]));
+
+        // 2. explicit null → Some(None) (remote cleared)
+        let null_v: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "slash_command_tags": null,
+        }))
+        .expect("null slash_command_tags must parse");
+        assert_eq!(
+            null_v.slash_command_tags,
+            Some(None),
+            "explicit null must be Some(None)"
+        );
+
+        // 3. valid map → Some(Some(map))
+        let map_v: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "slash_command_tags": {"workflows": "new"},
+        }))
+        .expect("valid slash_command_tags map must parse");
+        let tags = map_v
+            .slash_command_tags
+            .as_ref()
+            .and_then(|inner| inner.as_ref())
+            .expect("expected Some(Some(map))");
+        assert_eq!(tags.get("workflows").map(String::as_str), Some("new"));
+        assert_eq!(tags.len(), 1);
+
+        // 4. malformed must NOT fail the whole struct; sibling fields still apply
+        let bad: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "slash_command_tags": ["oops"],
+            "tips": ["still-applied"],
+            "permission_mode": "always-approve",
+        }))
+        .expect("malformed slash_command_tags must not fail PagerSettingsUpdate parse");
+        assert_eq!(
+            bad.slash_command_tags, None,
+            "malformed tags treated as absent"
+        );
+        assert_eq!(
+            bad.tips.as_deref(),
+            Some(&["still-applied".to_string()][..]),
+            "sibling tips must still parse"
+        );
+        assert_eq!(
+            bad.permission_mode,
+            Some(Some("always-approve".into())),
+            "sibling permission_mode must still parse"
         );
     }
 }

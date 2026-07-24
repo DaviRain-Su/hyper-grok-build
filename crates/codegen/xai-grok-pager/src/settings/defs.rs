@@ -1441,6 +1441,36 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: true,
             hidden_in_minimal: false,
         },
+        // SHELL-owned, persisted to `[ui].voice_keybind_enabled`. Default ON —
+        // `None` (inherit) reads as `true`. Disables only the Ctrl+Space / F8
+        // chord; `/voice` (and Esc / the recording-row `[stop]`) keep working.
+        SettingMeta {
+            key: "voice_keybind_enabled",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shell,
+            label: "Voice shortcut",
+            description: "Enable the Ctrl+Space / F8 shortcut for voice dictation. \
+                          When off, the keys are ignored; /voice still starts \
+                          dictation.",
+            keywords: &[
+                "voice",
+                "dictation",
+                "mic",
+                "microphone",
+                "speech",
+                "stt",
+                "keybinding",
+                "hotkey",
+                "ctrl+space",
+                "f8",
+                "disable",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.voice_keybind_enabled.unwrap_or(true),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHELL-owned, persisted to `[ui].voice_capture_mode`. The `hold` choice
         // is hidden on terminals without key-release reporting (see
         // `effective_enum_choices`) and falls back to `toggle` at runtime.

@@ -158,6 +158,9 @@ fn parse_prompt_json(json_str: &str) -> anyhow::Result<Vec<acp::ContentBlock>> {
 pub struct HeadlessOptions {
     pub session_id: Option<String>,
     pub resume: Option<String>,
+    /// The composition root pinned (or definitively missed) `resume` before
+    /// the OS sandbox; materialization must not re-run local title selection.
+    pub resume_title_pinned: bool,
     pub cwd: Option<PathBuf>,
     pub yolo: bool,
     pub trust: bool,
@@ -805,12 +808,20 @@ async fn apply_headless_model_and_effort(
 /// Startup-materialization context for headless (`-p`) runs. Never chat:
 /// `HeadlessOptions` carries no chat flag, so headless resume targets are
 /// always disk/GCS Build sessions.
-fn headless_materialize_ctx(has_worktree: bool) -> crate::app::session_startup::MaterializeCtx {
+fn headless_materialize_ctx(
+    has_worktree: bool,
+    resume_title_pinned: bool,
+) -> crate::app::session_startup::MaterializeCtx {
     crate::app::session_startup::MaterializeCtx {
         has_worktree,
         allow_remote_restore:
             crate::app::session_startup::MaterializeCtx::default_allow_remote_restore(),
         chat_mode: false,
+        title_resolution: if resume_title_pinned {
+            crate::app::session_startup::TitleResolution::PinnedPreSandbox
+        } else {
+            crate::app::session_startup::TitleResolution::Allowed
+        },
     }
 }
 
@@ -983,7 +994,7 @@ pub async fn run_single_turn(
 
     let cwd_str = cwd.to_string_lossy().to_string();
     let materialized = session_startup::materialize_startup_for_cwd(
-        headless_materialize_ctx(options.worktree.is_some()),
+        headless_materialize_ctx(options.worktree.is_some(), options.resume_title_pinned),
         intent,
         &cwd_str,
     )
@@ -1850,13 +1861,25 @@ mod tests {
     }
 
     /// Headless materialization is never chat, regardless of worktree flag —
-    /// resume targets stay disk/GCS Build sessions.
+    /// resume targets stay disk/GCS Build sessions. The pre-sandbox pin flag
+    /// must carry through so a pinned target is never re-title-selected.
     #[test]
     fn headless_materialize_ctx_stays_non_chat() {
+        use crate::app::session_startup::TitleResolution;
         for has_worktree in [false, true] {
-            let ctx = headless_materialize_ctx(has_worktree);
-            assert!(!ctx.chat_mode);
-            assert_eq!(ctx.has_worktree, has_worktree);
+            for pinned in [false, true] {
+                let ctx = headless_materialize_ctx(has_worktree, pinned);
+                assert!(!ctx.chat_mode);
+                assert_eq!(ctx.has_worktree, has_worktree);
+                assert_eq!(
+                    ctx.title_resolution,
+                    if pinned {
+                        TitleResolution::PinnedPreSandbox
+                    } else {
+                        TitleResolution::Allowed
+                    }
+                );
+            }
         }
     }
 

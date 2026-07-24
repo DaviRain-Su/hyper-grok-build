@@ -1093,6 +1093,16 @@ impl PromptWidget {
         self.slash_controller.set_mru(mru);
     }
 
+    /// Adopt the shared per-command tag map so this prompt's slash dropdown
+    /// renders the same tags as other agent prompts and the dashboard dispatch.
+    /// Injected by `AppView`, which owns the single process map.
+    pub(crate) fn adopt_command_tags(
+        &mut self,
+        command_tags: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
+    ) {
+        self.slash_controller.set_command_tags(command_tags);
+    }
+
     pub(crate) fn set_recap_visible(&mut self, visible: bool) {
         self.slash_controller
             .registry_mut()

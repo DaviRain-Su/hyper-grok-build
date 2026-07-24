@@ -195,6 +195,7 @@ impl SessionActor {
                 SubagentCancelRequest, SubagentCancelTarget, SubagentEvent,
             };
             let _ = event_tx.send(SubagentEvent::Cancel(SubagentCancelRequest {
+                parent_session_id: Some(self.session_id_string()),
                 target: SubagentCancelTarget::ParentPromptId(parent_prompt_id.to_string()),
                 respond_to: tokio::sync::oneshot::channel().0,
             }));

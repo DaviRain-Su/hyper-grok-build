@@ -1355,6 +1355,155 @@ async fn logout_clears_team_config() {
     );
 }
 
+/// Seed on-disk fail_closed policy for clear_orphan keep tests.
+/// `with_managed_files` writes managed_config + sig sidecars.
+/// `with_marker` stamps a fail_closed sync marker for team-ms-fail-closed.
+fn seed_fail_closed_orphan_artifacts(
+    home: &std::path::Path,
+    with_managed_files: bool,
+    with_marker: bool,
+) {
+    if with_managed_files {
+        std::fs::write(home.join("managed_config.toml"), TEAM_MANAGED).unwrap();
+        std::fs::write(home.join("managed_config.sig.json"), r#"{"key_id":"v1"}"#).unwrap();
+        std::fs::write(home.join("managed_identity.sig.json"), r#"{"key_id":"v1"}"#).unwrap();
+    }
+    std::fs::write(
+        home.join("requirements.toml"),
+        format!("fail_closed = true\n{TEAM_REQUIREMENTS}"),
+    )
+    .unwrap();
+    if with_marker {
+        xai_grok_shell::config::mark_managed_config_synced(xai_grok_shell::config::SyncMarker {
+            principal: Some("team-ms-fail-closed"),
+            had_managed_config: with_managed_files,
+            had_requirements: true,
+            key_fingerprint: None,
+            fail_closed: true,
+        });
+    }
+}
+
+/// fail_closed escape fix: personal (User) auth with leftover MS fail_closed
+/// artifacts must NOT be wiped by `clear_orphan` — that was the offline
+/// switch-to-personal escape (managed files deleted, session ALLOW unrestricted).
+#[test]
+#[serial]
+fn clear_orphan_keeps_fail_closed_when_switched_to_personal() {
+    let home = test_home().clone();
+    reset(&home);
+    seed_fail_closed_orphan_artifacts(&home, true, true);
+
+    // Personal User principal (no team_id) — the escape repro.
+    let scope = xai_grok_shell::auth::GrokComConfig::default().auth_scope();
+    let auth = serde_json::json!({
+        scope: {
+            "key": "personal-token",
+            "auth_mode": "oidc",
+            "create_time": "2026-01-01T00:00:00Z",
+            "expires_at": FAR_FUTURE,
+            "user_id": "user-1",
+        }
+    });
+    std::fs::write(home.join("auth.json"), auth.to_string()).unwrap();
+
+    xai_grok_shell::managed_config::clear_orphan();
+
+    assert!(
+        home.join("requirements.toml").exists(),
+        "fail_closed requirements must survive personal identity switch"
+    );
+    assert!(
+        home.join("managed_config.toml").exists(),
+        "fail_closed managed_config must survive personal identity switch"
+    );
+    assert!(
+        home.join("managed_config.sig.json").exists(),
+        "sig sidecar must survive personal identity switch under fail_closed"
+    );
+    assert!(
+        home.join("managed_config_cache.json").exists(),
+        "fail_closed marker must survive personal identity switch"
+    );
+}
+
+/// Signed-out logout with fail_closed still keeps policy (same as personal switch).
+#[test]
+#[serial]
+fn clear_orphan_keeps_fail_closed_when_signed_out() {
+    let home = test_home().clone();
+    reset(&home);
+    seed_fail_closed_orphan_artifacts(&home, false, true);
+    // No auth.json = signed out.
+    xai_grok_shell::managed_config::clear_orphan();
+
+    assert!(
+        home.join("requirements.toml").exists(),
+        "signed-out must not wipe fail_closed requirements"
+    );
+    assert!(
+        home.join("managed_config_cache.json").exists(),
+        "signed-out must not wipe fail_closed marker"
+    );
+}
+
+/// Marker stripped but requirements still say fail_closed = true: still keep.
+#[test]
+#[serial]
+fn clear_orphan_keeps_fail_closed_requirements_without_marker() {
+    let home = test_home().clone();
+    reset(&home);
+    seed_fail_closed_orphan_artifacts(&home, false, false);
+    // No marker, no team auth.
+    xai_grok_shell::managed_config::clear_orphan();
+
+    assert!(
+        home.join("requirements.toml").exists(),
+        "on-disk fail_closed requirements must be kept even without a marker"
+    );
+}
+
+/// Unreadable requirements (PermissionDenied) with no fail_closed marker must
+/// still keep artifacts — cannot confirm disarmed, so clear_orphan must not wipe.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn clear_orphan_keeps_unreadable_requirements_without_marker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = test_home().clone();
+    reset(&home);
+    seed_fail_closed_orphan_artifacts(&home, true, false);
+    // No fail_closed marker; requirements exist with fail_closed = true but will
+    // be made unreadable so the flag cannot be parsed.
+    let req = home.join("requirements.toml");
+    std::fs::set_permissions(&req, std::fs::Permissions::from_mode(0o000)).unwrap();
+    struct RestorePerms<'a>(&'a std::path::Path);
+    impl Drop for RestorePerms<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    let _restore = RestorePerms(&req);
+
+    assert!(
+        xai_grok_config::fail_closed_policy_armed_at(&home),
+        "unreadable requirements must arm fail_closed"
+    );
+    xai_grok_shell::managed_config::clear_orphan();
+
+    // Restore so exists() / cleanup can inspect the tree.
+    drop(_restore);
+    assert!(
+        home.join("requirements.toml").exists(),
+        "unreadable requirements must not be wiped by clear_orphan"
+    );
+    assert!(
+        home.join("managed_config.toml").exists(),
+        "managed_config must survive when requirements are unreadable"
+    );
+}
+
 /// An expired token for a still-signed-in team is not a logout: cold-start
 /// tokens are routinely expired before refresh, so the clear is expiry-agnostic.
 #[test]

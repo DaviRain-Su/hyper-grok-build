@@ -331,6 +331,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         let agent = app.agents.get_mut(&agent_id).unwrap();
         agent.prompt.set_compact(app.appearance.prompt.compact);
         agent.prompt.adopt_slash_mru(app.slash_mru.clone());
+        agent.prompt.adopt_command_tags(app.command_tags.clone());
         agent
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
@@ -671,6 +672,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         let agent = app.agents.get_mut(&agent_id).unwrap();
         agent.prompt.set_compact(app.appearance.prompt.compact);
         agent.prompt.adopt_slash_mru(app.slash_mru.clone());
+        agent.prompt.adopt_command_tags(app.command_tags.clone());
         agent
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);

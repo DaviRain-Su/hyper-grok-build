@@ -271,6 +271,8 @@ fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
     let mut specs = Vec::new();
     let mut errors = Vec::new();
 
+    // Best-effort listing: a bad dirent is recorded and skipped so sibling
+    // hooks still load. (Sandbox fail-closed listing lives in xai_grok_config.)
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
@@ -285,7 +287,7 @@ fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
         }
     };
 
-    let mut json_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut json_files = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -297,9 +299,11 @@ fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
                 continue;
             }
         };
-
         let path = entry.path();
-        if !is_valid_hook_file(&path) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !xai_grok_config::is_direct_hook_json_name(name) || !path.is_file() {
             continue;
         }
         json_files.push(path);
@@ -330,21 +334,12 @@ fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
 }
 
 /// Check whether a path is a valid hook file (*.json, not hidden/temp).
+#[cfg(test)]
 fn is_valid_hook_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-
-    if path.extension().and_then(|e| e.to_str()) != Some("json") {
-        return false;
-    }
-    if name.starts_with('.') {
-        return false;
-    }
-    if name.ends_with('~') || name.ends_with(".swp") || name.ends_with(".swo") {
-        return false;
-    }
-    path.is_file()
+    xai_grok_config::is_direct_hook_json_name(name) && path.is_file()
 }
 
 #[cfg(test)]

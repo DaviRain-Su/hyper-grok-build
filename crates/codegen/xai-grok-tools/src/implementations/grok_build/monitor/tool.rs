@@ -83,7 +83,7 @@ impl xai_tool_runtime::Tool for MonitorTool {
             .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
 
         let resolved_timeout = input.resolved_timeout_ms();
-        let description = input.description.clone();
+        let description = input.description;
 
         let (terminal, notification_handle, cwd, session_folder, owner_session_id) = {
             let res = resources.lock().await;
@@ -127,16 +127,18 @@ impl xai_tool_runtime::Tool for MonitorTool {
                 output_file,
                 notification_handle: notification_handle.clone(),
                 tool_call_id: ctx.call_id.as_str().to_owned(),
-                display_command: Some(format!("[monitor] {}", input.description)),
+                display_command: Some(format!("[monitor] {description}")),
                 auto_background_on_timeout: false,
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Monitor,
                 owner_session_id,
+                description: Some(description.clone()).filter(|d| !d.trim().is_empty()),
             })
             .await
             .map_err(|e| xai_tool_runtime::ToolError::custom("process_manager", e.to_string()))?;
 
         let task_id = bg_handle.task_id.clone();
+        let tray_description = Some(description.clone()).filter(|d| !d.trim().is_empty());
 
         // Notify the pager so the monitor appears in the tasks pane
         // (same notification that bash background tasks send).
@@ -155,15 +157,15 @@ impl xai_tool_runtime::Tool for MonitorTool {
             },
             output_file: bg_handle.output_file.clone(),
             task_id: task_id.clone(),
-            monitor_description: Some(input.description.clone()),
-            description: None,
+            monitor_description: tray_description.clone(),
+            description: tray_description,
         });
 
         // Spawn the stdout processing pipeline.
         // Reads the output file, processes lines through the rate limiter,
         // and emits MonitorEvent notifications.
         let pipeline_task_id = task_id.clone();
-        let pipeline_description = description.clone();
+        let pipeline_description = description;
         // Weak handle: the pipeline must not keep the session's terminal backend
         // (and the monitored process) alive past session end. See
         // `run_monitor_pipeline`.
@@ -449,6 +451,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
+                description: None,
             })
             .await
             .expect("spawn monitor");
@@ -525,6 +528,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
+                description: None,
             })
             .await
             .expect("spawn monitor");
@@ -594,6 +598,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("child-session".to_string()),
+                description: None,
             })
             .await
             .expect("spawn monitor");

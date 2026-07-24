@@ -89,6 +89,7 @@ pub struct DiagnosticFacts {
     pub multiplexer: MultiplexerKind,
     pub byobu: Option<ByobuBackend>,
     pub ssh: bool,
+    pub tmux: TmuxFacts,
     pub color: ColorFacts,
     pub keyboard: Option<KeyboardFact>,
     pub newline: Option<NewlineFact>,
@@ -105,6 +106,30 @@ pub enum VoiceFacts {
     Device { name: String, detail: String },
     /// Audio is compiled in but no default input / recorder exists.
     Missing { error: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TmuxFacts {
+    pub extended_keys: TmuxOptionFact,
+    pub set_clipboard: TmuxOptionFact,
+    pub allow_passthrough_support: TmuxSupportFact,
+    pub allow_passthrough: TmuxOptionFact,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TmuxOptionFact {
+    Available(String),
+    Unsupported,
+    Unavailable,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TmuxSupportFact {
+    Supported,
+    Unsupported,
+    Unavailable,
+    Error,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

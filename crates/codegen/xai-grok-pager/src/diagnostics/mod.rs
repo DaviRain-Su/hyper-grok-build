@@ -20,12 +20,15 @@ pub use doctor_format::format_doctor;
 #[cfg(test)]
 pub(crate) use fix::test_fix_plan;
 pub use fix::{
-    AutomaticRemediation, FixError, FixOutcome, FixPlan, FixRequest, FixStatus, PlannedChange,
-    SSH_WRAP_FIX_COMMAND, SSH_WRAP_ID, SSH_WRAP_ONE_OFF, ShellKind, apply_fix, configured_report,
+    AutomaticRemediation, DCS_PASSTHROUGH_ID, FixActivation, FixError, FixOutcome, FixPlan,
+    FixRequest, FixStatus, PlannedChange, SSH_WRAP_FIX_COMMAND, SSH_WRAP_ID, SSH_WRAP_ONE_OFF,
+    ShellKind, TMUX_CLIPBOARD_ID, TMUX_EXTENDED_KEYS_ID, apply_fix, configured_report,
     managed_alias_configured, plan_fix, resolve_fix_id, ssh_wrap_automatic_remediation,
+    verify_persistent_fix,
 };
 pub(crate) use fix::{
-    format_applicable_automatic_fixes, format_fix_preview, human_fix_command, select_fix_plan,
+    automatic_fix_choices, automatic_remediation_for, format_applicable_automatic_fixes,
+    format_fix_preview, format_fix_success, human_fix_command, select_fix_plan,
 };
 pub(crate) use model::probe_requires_live_tui;
 pub(crate) use model::{
@@ -37,7 +40,7 @@ pub(crate) use model::{
 pub use model::{
     ClipboardFacts, ColorFacts, DataControlFact, DiagnosticFacts, DiagnosticFinding, DiagnosticId,
     DiagnosticReport, FindingDisposition, KeyboardFact, ManualRemediation, NewlineFact, ProbeNote,
-    ProbeStatus, RuntimeFact, VoiceFacts,
+    ProbeStatus, RuntimeFact, TmuxFacts, TmuxOptionFact, TmuxSupportFact, VoiceFacts,
 };
 pub use view::{DiagnosticSnapshot, view};
 
@@ -298,7 +301,12 @@ pub(crate) fn collect_startup_warnings_from(
         warnings.extend(diagnose_clipboard_from_facts(tmux, &config_path));
     }
 
-    if ctx.kitty_skip_reason() == Some("tmux_extended_keys_off") {
+    if ctx.is_tmux_backed()
+        && matches!(
+            &tmux.extended_keys,
+            probes::TmuxProbeResult::Available(value) if value == "off"
+        )
+    {
         let mut warning = TerminalWarning::new(
             WarningCategory::TmuxExtendedKeysOff,
             "`extended-keys` is off in tmux, so some shortcuts may not work",
@@ -619,7 +627,7 @@ pub(crate) fn collect_notification_warnings_with_method(
         let mut warning = TerminalWarning::new(
             WarningCategory::DcsPassthrough,
             "`allow-passthrough` is off in tmux, so terminal notifications are blocked",
-            Some("set -g allow-passthrough on"),
+            Some("set -wg allow-passthrough on"),
             Some(&config_path),
         );
         warning.note = Some(tmux_reload_note(&config_path));
@@ -774,7 +782,7 @@ pub fn diagnose_clipboard_from_values(
         let mut warning = TerminalWarning::new(
             WarningCategory::DcsPassthrough,
             "`allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions",
-            Some("set -g allow-passthrough on"),
+            Some("set -wg allow-passthrough on"),
             Some(config_path),
         );
         warning.note = Some(tmux_reload_note(config_path));
@@ -1430,7 +1438,7 @@ mod tests {
         let w = diagnose_clipboard_from_values(Some("on"), true, Some("off"), "~/.tmux.conf");
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].category, WarningCategory::DcsPassthrough);
-        assert_eq!(w[0].fix.as_deref(), Some("set -g allow-passthrough on"));
+        assert_eq!(w[0].fix.as_deref(), Some("set -wg allow-passthrough on"));
     }
 
     #[test]
@@ -2128,7 +2136,7 @@ mod tests {
             TerminalWarning::new(
                 WarningCategory::DcsPassthrough,
                 "DCS passthrough is disabled",
-                Some("set -g allow-passthrough on"),
+                Some("set -wg allow-passthrough on"),
                 Some("~/.tmux.conf"),
             ),
             TerminalWarning::new(
@@ -2306,7 +2314,13 @@ mod tests {
 
     fn collect_extended_keys_warnings(ctx: &TerminalContext) -> Vec<TerminalWarning> {
         let query = FakeTmuxQuery::healthy_modern();
-        collect_startup_warnings(ctx, &query, false, true)
+        let mut snapshot = test_snapshot(ctx, &query, false, true, false, None);
+        snapshot.tmux.extended_keys = ctx
+            .tmux_extended_keys
+            .clone()
+            .map(probes::TmuxProbeResult::Available)
+            .unwrap_or(probes::TmuxProbeResult::Unavailable);
+        super::collect_startup_warnings(&snapshot)
             .into_iter()
             .filter(|w| w.category == WarningCategory::TmuxExtendedKeysOff)
             .collect()
@@ -2666,7 +2680,7 @@ mod tests {
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].category, WarningCategory::DcsPassthrough);
         assert!(w[0].message.contains("notification"));
-        assert_eq!(w[0].fix.as_deref(), Some("set -g allow-passthrough on"));
+        assert_eq!(w[0].fix.as_deref(), Some("set -wg allow-passthrough on"));
     }
 
     #[test]

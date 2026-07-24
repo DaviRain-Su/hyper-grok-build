@@ -172,6 +172,29 @@ service GrokToolsService {
 }
 
 // ============================================================================
+// CLIENT CALLBACK SERVICE
+// ============================================================================
+
+/// GrokToolsCallbackService is implemented by the client/host process and
+/// dialed by grok-tools-server during finalize when callback fields are set.
+///
+/// The contract is deliberately minimal — the server owns all subagent
+/// knowledge (type registry, prompts, toolset resolution, and lifecycle state
+/// in the shared coordinator actor); the host only does genuinely host-side work:
+///
+/// - `SpawnSubagent`: execute one resolved child request to completion.
+///   The RPC spans the whole request; cancellation is the call's cancellation.
+/// - `SendNotification`: fire-and-forget push of serde-tagged notification
+///   JSON (e.g. `SubagentCompleted`) into the host's conversation stream.
+service GrokToolsCallbackService {
+  /// Rust sends one tool notification to the host process.
+  rpc SendNotification(ToolNotificationMsg) returns (NotificationAck);
+
+  /// Execute one resolved child request and return its final result.
+  rpc SpawnSubagent(SpawnSubagentRequest) returns (SubagentResultMsg);
+}
+
+// ============================================================================
 // TOOL SERVER CONFIG MESSAGES (finalize-time configuration)
 // ============================================================================
 
@@ -207,6 +230,23 @@ message FinalizeToolServerConfigRequest {
   /// Behavior preset name (e.g. "current", "legacy-0.4.10").
   /// Applied to all version-managed tools. Defaults to "current" when empty.
   optional string behavior_preset = 5;
+
+  /// Optional host callback address. When set, grok-tools-server dials this
+  /// client-hosted gRPC endpoint during finalize and injects callback-backed
+  /// resource views for notifications and subagents. The server accepts bare
+  /// "host:port" addresses and assumes "http://".
+  optional string client_callback_addr = 6;
+
+  /// Logical session identifier used for callback correlation and resource
+  /// scoping (SessionIdResource / OwnerSessionId). If omitted while a callback
+  /// address is present, the server uses its generated process session id.
+  optional string session_id = 7;
+
+  /// Per-session bearer secret required by the client-hosted callback service.
+  /// Only used when client_callback_addr is set.
+  optional string client_callback_secret = 8;
+
+  reserved 9;
 }
 
 /// Per-tool configuration entry.
@@ -281,6 +321,13 @@ message VersionWarning {
   string message = 4;
 }
 
+/// Status of the optional callback connection established during finalize.
+message CallbackStatus {
+  bool connected = 1;
+  repeated string active_surfaces = 2;
+  optional string message = 3;
+}
+
 /// Response from finalizing the tool server configuration.
 message FinalizeToolServerConfigResponse {
   bool success = 1;
@@ -293,6 +340,78 @@ message FinalizeToolServerConfigResponse {
   /// Deprecation/lifecycle warnings for resolved versions.
   /// Empty when all versions are Active.
   repeated VersionWarning version_warnings = 4;
+
+  /// Optional status for the finalize-time callback dial.
+  optional CallbackStatus callback_status = 5;
+}
+
+// ============================================================================
+// CALLBACK MESSAGES
+// ============================================================================
+
+message ToolNotificationMsg {
+  string session_id = 1;
+  /// serde(tag = "type") JSON for xai_grok_tools::notification::ToolNotification.
+  string notification_json = 2;
+  /// Monotonically increasing sequence number for observability.
+  uint64 sequence = 3;
+}
+
+message NotificationAck {}
+
+/// Execute one resolved child request.
+///
+/// The server resolves everything from its own registry and finalized
+/// toolset before dialing: `system_prompt` is the complete production
+/// subagent base template + definition body rendered with the child's actual
+/// (possibly randomized) tool names, and `tool_names` is selected from the
+/// canonical production AgentDefinition. The host executes the request with
+/// the supplied tool names and working directory.
+///
+/// Lifecycle (backgrounding, foreground budget, query/cancel, completion
+/// surfacing) is owned by the server-side coordinator actor; the host keeps
+/// no lifecycle state. Cancellation = the gRPC call's cancellation.
+message SpawnSubagentRequest {
+  string id = 1;
+  string prompt = 2;
+  string description = 3;
+  string subagent_type = 4;
+  string parent_session_id = 5;
+  optional string parent_prompt_id = 6;
+  /// Resume a previously completed child: the server validates source identity
+  /// and workspace; the host replays non-system turns, installs the freshly
+  /// rendered `system_prompt`, and appends `prompt`.
+  optional string resume_from = 7;
+  optional string cwd = 8;
+  reserved 9, 10, 11, 12, 13;
+  /// Complete rendered production system prompt for the child.
+  optional string system_prompt = 14;
+  /// Client-facing names of the tools the child may use.
+  repeated string tool_names = 15;
+  /// Optional user message prepended before the task prompt.
+  optional string initial_user_message = 16;
+}
+
+message SubagentResultMsg {
+  bool success = 1;
+  string output = 2;
+  optional string error = 3;
+  bool cancelled = 4;
+  /// Deprecated: identity is stamped by the server.
+  string subagent_id = 5;
+  /// Deprecated: identity is stamped by the server.
+  string child_session_id = 6;
+  uint32 tool_calls = 7;
+  uint32 turns = 8;
+  uint64 duration_ms = 9;
+  /// Legacy total/context usage fallback.
+  uint64 tokens_used = 10;
+  /// Deprecated: workspace is stamped by the server.
+  optional string worktree_path = 11;
+  /// Deprecated: delivery state is owned by the server.
+  bool backgrounded = 12;
+  optional uint64 output_tokens_used = 13;
+  optional uint64 total_tokens_used = 14;
 }
 
 // ============================================================================
@@ -641,6 +760,13 @@ message ToolInfo {
   /// Populated by ListTools pre-finalization from the fully-qualified
   /// registry key (e.g. "GrokBuild:grep" → namespace="GrokBuild").
   string namespace = 19;
+
+  // 20-21 were `allowed_capability_modes` / `tool_kind`, exposed so remote
+  // clients could filter child subagent toolsets themselves. The server now
+  // resolves child toolsets from its own registry and sends the result in
+  // SpawnSubagentRequest, so nothing consumes them. No released pin ever
+  // read them.
+  reserved 20, 21;
 }
 
 /// Describes an output format supported by a tool

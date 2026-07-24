@@ -629,10 +629,10 @@ pub struct WelcomeRenderParams<'a> {
     pub gate: Option<&'a xai_grok_shell::auth::GateInfo>,
     pub subscription_tier: Option<&'a str>,
     pub session_picker_grouped: bool,
-    /// Source filter (local/remote/all) for the session picker.
+    /// Source filter for the session picker.
     pub session_picker_source_filter: crate::views::session_picker::SourceFilter,
     /// Process-wide `--chat`: the picker lists backend conversations only, so
-    /// the Local/Remote source filter and local deep search are hidden.
+    /// the source filter and local deep search are hidden.
     pub chat_mode: bool,
     /// Live working directory (tracks `Effect::SetWorkingDir`), used to pin
     /// the current repo's session group to the top of the picker.
@@ -1800,7 +1800,16 @@ fn render_welcome_done(
         if p.session_picker_loading {
             1
         } else {
-            (picker_count as u16).min(15) + 3 // +3 for title + search + gap
+            // Reserve a row for the pinned hidden-external hint when shown.
+            let hint_row = u16::from(
+                !p.chat_mode
+                    && crate::views::session_picker::hidden_external_hint(
+                        p.session_picker,
+                        p.session_picker_source_filter,
+                    )
+                    .is_some(),
+            );
+            (picker_count as u16).min(15) + 3 + hint_row // +3 for title + search + gap
         }
     } else {
         0
@@ -2067,11 +2076,10 @@ fn render_welcome_done(
                 width: tip_centered.width.saturating_sub(inset * 2),
                 height: tip_centered.height,
             };
-            let (accept_r, customize_r, legal_r) =
-                render_privacy_banner(tip_inset, buf, theme, p.mouse_pos);
-            privacy_banner_accept_rect = Some(accept_r);
-            privacy_banner_customize_rect = Some(customize_r);
-            privacy_banner_legal_rect = Some(legal_r);
+            let rects = crate::views::privacy_banner::render(tip_inset, buf, theme, p.mouse_pos);
+            privacy_banner_accept_rect = Some(rects.accept);
+            privacy_banner_customize_rect = Some(rects.customize);
+            privacy_banner_legal_rect = Some(rects.legal);
         } else if let Some(ver) = p.pending_update_version
             && layout.tip.height > 0
         {
@@ -2216,147 +2224,6 @@ fn render_welcome_done(
     }
 }
 
-/// Legal line copy — used for both render spans and mouse hit width.
-const PRIVACY_BANNER_LEGAL: &str = "Learn more and read Terms and Privacy Policy.";
-
-/// Welcome privacy banner: copy left, `[Customize in settings]` / `[Accept]` right.
-/// Returns (accept_rect, customize_rect, legal_rect) for mouse hit-testing.
-fn render_privacy_banner(
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-    mouse_pos: Option<(u16, u16)>,
-) -> (Rect, Rect, Rect) {
-    let customize_label = "[Customize in settings]";
-    let accept_label = "[Accept]";
-    let right_w = (customize_label.len() + 1 + accept_label.len()) as u16;
-    // Buttons render whole or not at all: a clipped/overflowing [Accept]
-    // must never leave a click target in the blank margin (a stray click
-    // there would silently opt the user in).
-    let buttons_fit = area.width > right_w;
-    let left_w = if buttons_fit {
-        area.width - right_w - 1
-    } else {
-        area.width
-    };
-
-    let left = Rect {
-        x: area.x,
-        y: area.y,
-        width: left_w,
-        height: area.height.min(2),
-    };
-    let right = Rect {
-        x: area.x + left_w + 1,
-        y: area.y,
-        width: right_w,
-        height: 1,
-    };
-
-    let hovered = |r: Rect| {
-        mouse_pos.is_some_and(|(mx, my)| r.contains(ratatui::layout::Position::new(mx, my)))
-    };
-
-    let legal_w = if left.width as usize >= PRIVACY_BANNER_LEGAL.len() {
-        PRIVACY_BANNER_LEGAL.len()
-    } else {
-        "Learn more".len().min(left.width as usize)
-    };
-    // The legal line only exists when the slot really has a second row —
-    // otherwise its rect would make the blank row below clickable.
-    let legal_rect = if area.height >= 2 {
-        Rect {
-            x: left.x,
-            y: left.y.saturating_add(1),
-            width: legal_w as u16,
-            height: 1,
-        }
-    } else {
-        Rect::default()
-    };
-
-    // Figma node 8698:3806: title fg/primary, description fg/secondary,
-    // legal line fg/tertiary with underlined links in the same color.
-    // The whole legal line is one click target, so its links brighten together.
-    let link_fg = if hovered(legal_rect) {
-        theme.gray_bright
-    } else {
-        theme.gray
-    };
-    let link = Style::default()
-        .fg(link_fg)
-        .add_modifier(Modifier::UNDERLINED);
-    let gray = Style::default().fg(theme.gray);
-    let title = Span::styled("Help improve Grok", Style::default().fg(theme.text_primary));
-    let desc = "Allow your sessions to improve SpaceXAI's models.";
-    // Drop trailing spans whole rather than clipping mid-word when narrow.
-    let line1 = if left.width as usize >= "Help improve Grok  ".len() + desc.len() {
-        Line::from(vec![
-            title,
-            Span::raw("  "),
-            Span::styled(desc, Style::default().fg(theme.gray_bright)),
-        ])
-    } else {
-        Line::from(title)
-    };
-    // Span pieces must reassemble to PRIVACY_BANNER_LEGAL.
-    let line2 = if left.width as usize >= PRIVACY_BANNER_LEGAL.len() {
-        Line::from(vec![
-            Span::styled("Learn more", link),
-            Span::styled(" and read ", gray),
-            Span::styled("Terms", link),
-            Span::styled(" and ", gray),
-            Span::styled("Privacy Policy", link),
-            Span::styled(".", gray),
-        ])
-    } else {
-        Line::from(Span::styled("Learn more", link))
-    };
-    Paragraph::new(vec![line1, line2]).render(left, buf);
-
-    if !buttons_fit {
-        return (Rect::default(), Rect::default(), legal_rect);
-    }
-    let customize_rect = Rect {
-        x: right.x,
-        y: right.y,
-        width: customize_label.len() as u16,
-        height: 1,
-    };
-    let accept_rect = Rect {
-        x: right.x + customize_label.len() as u16 + 1,
-        y: right.y,
-        width: accept_label.len() as u16,
-        height: 1,
-    };
-    // Hover treatment mirrors the plugin CTA buttons.
-    let customize_style = if hovered(customize_rect) {
-        Style::default().fg(theme.text_primary).bg(theme.bg_hover)
-    } else {
-        Style::default().fg(theme.gray_bright)
-    };
-    let accept_style = if hovered(accept_rect) {
-        Style::default().fg(theme.link_fg).bg(theme.bg_hover)
-    } else {
-        Style::default().fg(theme.text_primary)
-    };
-    buf.set_stringn(
-        customize_rect.x,
-        customize_rect.y,
-        customize_label,
-        customize_rect.width as usize,
-        customize_style,
-    );
-    buf.set_stringn(
-        accept_rect.x,
-        accept_rect.y,
-        accept_label,
-        accept_rect.width as usize,
-        accept_style,
-    );
-    (accept_rect, customize_rect, legal_rect)
-}
-
 /// Context for session picker rendering.
 pub(crate) struct SessionPickerRenderCtx<'a> {
     pub(crate) state: &'a mut crate::views::picker::PickerState,
@@ -2376,7 +2243,7 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     pub(crate) tick: u64,
     /// When true, entries are grouped by `repo_name` with non-selectable headers.
     pub(crate) grouped: bool,
-    /// Source filter (local/remote/all) for filtering session entries.
+    /// Source filter for filtering session entries.
     pub(crate) source_filter: crate::views::session_picker::SourceFilter,
     /// Process-wide `--chat`: hides the source-filter chip and the
     /// deep-search/filter footer hints (see `WelcomeRenderParams::chat_mode`).
@@ -2544,6 +2411,12 @@ pub(crate) fn render_session_picker(
         }));
     }
 
+    let hidden_hint = if ctx.chat_mode {
+        None
+    } else {
+        crate::views::session_picker::hidden_external_hint(ctx.sessions, ctx.source_filter)
+    };
+
     // Build shortcuts for fullscreen mode. Chat mode drops the worktree /
     // deep-search / filter hints (local-Build-row actions).
     let worktree_shortcut: &'static str = "ctrl+w";
@@ -2593,6 +2466,7 @@ pub(crate) fn render_session_picker(
         filter_label: (!ctx.chat_mode).then(|| ctx.source_filter.label()),
         filter_key_hint: (!ctx.chat_mode).then_some("f"),
         filter_active: !ctx.chat_mode && ctx.source_filter.is_active(),
+        header_note: hidden_hint.as_deref(),
         action_keys: &[],
         disable_search: false,
         compact_bottom_bar: false,
@@ -2608,6 +2482,7 @@ pub(crate) fn render_session_picker(
         &picker_entries,
         &config,
         ctx.loading,
+        ctx.tick,
     )
 }
 
@@ -2906,7 +2781,7 @@ mod tests {
             gate: None,
             subscription_tier: None,
             session_picker_grouped: false,
-            session_picker_source_filter: crate::views::session_picker::SourceFilter::All,
+            session_picker_source_filter: crate::views::session_picker::SourceFilter::default(),
             chat_mode: false,
             cwd: std::path::Path::new("/repo"),
             credit_balance: None,
@@ -3081,7 +2956,7 @@ mod tests {
                     entries_query,
                     tick: 0,
                     grouped: false,
-                    source_filter: crate::views::session_picker::SourceFilter::All,
+                    source_filter: crate::views::session_picker::SourceFilter::default(),
                     chat_mode: true,
                 },
             );
@@ -3114,6 +2989,83 @@ mod tests {
         assert!(
             unstamped.contains("Searching session content"),
             "in-flight search without the stamp must render the header:\n{unstamped}"
+        );
+    }
+
+    /// The hidden-external hint stays pinned on the welcome picker's default
+    /// Grok view when scanned foreign rows exist — even when the native list
+    /// overflows the viewport — and never renders under `--chat` (foreign
+    /// scanning is disabled there, so the hint is dead weight).
+    #[test]
+    fn hidden_external_hint_renders_outside_chat_mode() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = crate::theme::Theme::default();
+        let area = Rect::new(0, 0, 80, 20);
+        // More native rows than the viewport fits: a trailing list row would
+        // scroll out of view, a pinned row must not.
+        let mut entries: Vec<SessionPickerEntry> = (0..30)
+            .map(|i| make_entry(&format!("s{i}"), &format!("native session {i}"), "repo"))
+            .collect();
+        let mut foreign = make_entry("f1", "Claude work", "repo");
+        foreign.source = "claude".into();
+        entries.push(foreign);
+
+        let render = |chat_mode: bool| -> String {
+            let mut buf = Buffer::empty(area);
+            let mut state = PickerState::default();
+            render_session_picker(
+                area,
+                &mut buf,
+                &theme,
+                &mut SessionPickerRenderCtx {
+                    state: &mut state,
+                    sessions: Some(&entries),
+                    cwd: std::path::Path::new("/repo"),
+                    loading: false,
+                    pending_hint: None,
+                    shortcuts_area: None,
+                    content_results: None,
+                    content_loading: false,
+                    entries_query: None,
+                    tick: 0,
+                    grouped: false,
+                    source_filter: crate::views::session_picker::SourceFilter::default(),
+                    chat_mode,
+                },
+            );
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| {
+                            buf.cell((x, y))
+                                .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let build_mode = render(false);
+        assert!(
+            build_mode.contains("1 external session hidden \u{b7} f to show"),
+            "default Grok filter must pin the hidden-external hint:\n{build_mode}"
+        );
+        assert!(
+            build_mode.find("external session hidden") < build_mode.find("native session 0"),
+            "the hint must be pinned above the first list row:\n{build_mode}"
+        );
+        assert!(
+            !build_mode.contains("Claude work"),
+            "the foreign row itself stays hidden under the default filter:\n{build_mode}"
+        );
+
+        let chat = render(true);
+        assert!(
+            !chat.contains("external session"),
+            "chat mode must not render the hidden-external hint:\n{chat}"
         );
     }
 
@@ -3259,6 +3211,7 @@ mod tests {
             filter_label: None,
             filter_key_hint: None,
             filter_active: false,
+            header_note: None,
             action_keys: &[],
             disable_search: false,
             compact_bottom_bar: false,

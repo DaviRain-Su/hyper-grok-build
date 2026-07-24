@@ -45,6 +45,14 @@ pub struct ManagedConfigRequest {
 pub struct ManagedTextInspection {
     original_text: Option<String>,
     unmanaged_text: String,
+    requested_items: Vec<ManagedItemState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedItemState {
+    Absent,
+    Exact,
+    NeedsUpdate,
 }
 
 impl ManagedTextInspection {
@@ -55,6 +63,10 @@ impl ManagedTextInspection {
     /// Source outside the writer-owned outer block.
     pub fn unmanaged_text(&self) -> &str {
         &self.unmanaged_text
+    }
+
+    pub fn requested_item_state(&self, index: usize) -> Option<ManagedItemState> {
+        self.requested_items.get(index).copied()
     }
 }
 
@@ -206,6 +218,20 @@ impl ManagedConfig {
         let parent_plan = ParentPlan::capture(parent)?;
         let original = source::read_source(&target_path)?;
         let text = original.text(&target_path)?;
+        let requested_items = request
+            .items
+            .iter()
+            .map(|item| {
+                format::item_state(
+                    text,
+                    &request.namespace,
+                    &request.owned_item_prefix,
+                    item,
+                    &request.comments,
+                    &target_path,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let rendered = format::render_update(
             text,
             &request.namespace,
@@ -217,6 +243,7 @@ impl ManagedConfig {
         let inspection = ManagedTextInspection {
             original_text: original.bytes.as_ref().map(|_| text.to_owned()),
             unmanaged_text: rendered.unmanaged_text,
+            requested_items,
         };
         let updated = rendered.updated.into_bytes();
         let changes =
@@ -242,6 +269,13 @@ impl ManagedConfig {
 
     pub fn apply(plan: ManagedConfigPlan) -> Result<ManagedConfigOutcome, ManagedConfigError> {
         transaction::apply(plan, &transaction::NoopObserver)
+    }
+
+    /// Verify that the exact source path, parent identities, symlink target,
+    /// bytes, mode, and file identity captured by `plan` are unchanged without
+    /// publishing its proposed update.
+    pub fn verify_unchanged(plan: &ManagedConfigPlan) -> Result<(), ManagedConfigError> {
+        source::revalidate(plan)
     }
 
     #[cfg(test)]

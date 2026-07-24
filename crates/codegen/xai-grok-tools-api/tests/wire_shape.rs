@@ -21,6 +21,19 @@ fn full_entry() -> ToolConfigEntry {
     }
 }
 
+fn finalize_request_minimal() -> xai_grok_tools_api::FinalizeToolServerConfigRequest {
+    xai_grok_tools_api::FinalizeToolServerConfigRequest {
+        tools: vec![],
+        truncation: None,
+        system_reminders_enabled: false,
+        initial_tool_state_json: None,
+        behavior_preset: None,
+        client_callback_addr: None,
+        session_id: None,
+        client_callback_secret: None,
+    }
+}
+
 #[test]
 fn tool_config_entry_serializes_to_pinned_json_shape() {
     let value = serde_json::to_value(full_entry()).expect("serialize");
@@ -99,4 +112,39 @@ fn explicit_null_map_is_rejected() {
         result.is_err(),
         "null params_name_overrides must be rejected (omit the key or send {{}})"
     );
+}
+
+#[test]
+fn finalize_request_callback_fields_are_optional_and_snake_case() {
+    let mut req = finalize_request_minimal();
+    req.client_callback_addr = Some("http://127.0.0.1:50051".to_owned());
+    req.session_id = Some("session-123".to_owned());
+    req.client_callback_secret = Some("secret-123".to_owned());
+
+    let value = serde_json::to_value(&req).expect("serialize");
+    assert_eq!(
+        value.get("client_callback_addr"),
+        Some(&serde_json::json!("http://127.0.0.1:50051"))
+    );
+    assert_eq!(
+        value.get("session_id"),
+        Some(&serde_json::json!("session-123"))
+    );
+    assert_eq!(
+        value.get("client_callback_secret"),
+        Some(&serde_json::json!("secret-123"))
+    );
+}
+
+#[test]
+fn finalize_request_callback_fields_default_when_absent() {
+    let back: xai_grok_tools_api::FinalizeToolServerConfigRequest =
+        serde_json::from_value(serde_json::json!({
+            "tools": [],
+            "system_reminders_enabled": false,
+        }))
+        .expect("deserialize sparse finalize request");
+    assert_eq!(back.client_callback_addr, None);
+    assert_eq!(back.session_id, None);
+    assert_eq!(back.client_callback_secret, None);
 }

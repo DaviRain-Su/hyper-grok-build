@@ -2295,6 +2295,27 @@ fn sanitize_user_error_collapses_disk_full() {
             "couldn't create worktree: failed to get HEAD commit from source"
         );
 }
+/// Production ordering of the deferred worktree resume failure: the
+/// detail is sanitized FIRST, then composed — sanitizing the composed
+/// message would collapse a disk-full chain whole and erase the title
+/// hint for a deferred local-miss target.
+#[test]
+fn worktree_resume_failure_sanitizes_detail_before_hint() {
+    let raw = "failed to copy index: No space left on device (os error 28)";
+    let msg = worktree_resume_failure_message(
+        Some("typo title"),
+        &sanitize_user_error(raw),
+    );
+    assert_eq!(
+            msg,
+            format!(
+                "couldn't resume worktree session: No space left on device; {}",
+                crate::app::session_title_resolve::title_miss_hint("typo title")
+            )
+        );
+    let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
+    assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
+}
 /// A resume-picker entry converts to a **dormant** dashboard roster row
 /// (the non-leader idle source) preserving title, cwd, model, worktree
 /// flag, origin, and last-change time.

@@ -266,6 +266,17 @@ fn clone_cli_command(url: &str, branch: Option<&str>, dest: &Path) -> std::proce
     cmd
 }
 
+/// Probe whether `url` is a reachable git repository via a timed
+/// `git ls-remote`, without touching any cache. Used to reject non-git URLs
+/// (e.g. MCP endpoints) at add time instead of persisting a source that
+/// fails on every scan.
+pub fn probe_git_remote(url: &str) -> Result<(), String> {
+    let url = xai_grok_agent::plugins::git_install::validate_git_url(url)?;
+    let mut cmd = git_command();
+    cmd.args(["ls-remote", "--", url, "HEAD"]);
+    run_git_timed(&mut cmd, "ls-remote", NETWORK_OP_TIMEOUT)
+}
+
 fn fetch_cli_command(repo_dir: &Path, branch: Option<&str>) -> std::process::Command {
     let mut cmd = git_command();
     cmd.current_dir(repo_dir).args([
@@ -511,6 +522,30 @@ mod tests {
             git_failure_message("fetch", "something unusual\n"),
             "git fetch failed: something unusual"
         );
+    }
+
+    #[test]
+    fn probe_git_remote_accepts_git_repo() {
+        if !git_available() {
+            eprintln!("skipping git-dependent test: git binary not available");
+            return;
+        }
+        let remote = tempfile::tempdir().unwrap();
+        init_remote_repo(remote.path());
+        let url = remote.path().to_string_lossy().to_string();
+        probe_git_remote(&url).unwrap();
+    }
+
+    #[test]
+    fn probe_git_remote_rejects_non_repo() {
+        if !git_available() {
+            eprintln!("skipping git-dependent test: git binary not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let url = dir.path().to_string_lossy().to_string();
+        let err = probe_git_remote(&url).unwrap_err();
+        assert!(err.contains("ls-remote failed"), "{err}");
     }
 
     #[test]

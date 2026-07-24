@@ -561,28 +561,6 @@ pub(crate) fn reset_marker_cache_for_test() {
     *MARKER_CACHE.write().expect("MARKER_CACHE poisoned") = None;
 }
 
-/// Expand a leading bare `~` or `~/` to the home directory. Returns the path
-/// unchanged if home cannot be resolved or the input has no leading tilde.
-///
-/// `~user/` (other-user home) is **not** supported — this is a config field,
-/// not a shell input, so the surface is intentionally narrow.
-///
-/// Shared by `extensions/skills.rs` (skills paths from `[paths] extra_skill_dirs`)
-/// and `inspect.rs` (rules paths from `[paths] extra_rule_dirs`) so both call
-/// sites apply identical normalisation.
-pub fn expand_home(s: &str) -> std::path::PathBuf {
-    if let Some(stripped) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
-    } else if s == "~"
-        && let Some(home) = dirs::home_dir()
-    {
-        return home;
-    }
-    std::path::PathBuf::from(s)
-}
-
 /// Like [`is_claude_import_marked`], but logs a one-time `info!` line on the
 /// first true result per process so users can see the runtime cutoff is active.
 ///
@@ -2072,43 +2050,6 @@ extra_rule_dirs = ["/c/rules"]
         assert_eq!(
             parsed["paths"]["extra_rule_dirs"][0].as_str().unwrap(),
             "/bar/rules"
-        );
-    }
-
-    #[test]
-    fn expand_home_passthrough_for_absolute_path() {
-        assert_eq!(
-            expand_home("/abs/path"),
-            std::path::PathBuf::from("/abs/path")
-        );
-    }
-
-    #[test]
-    fn expand_home_passthrough_for_relative_path() {
-        assert_eq!(
-            expand_home("rel/path"),
-            std::path::PathBuf::from("rel/path")
-        );
-    }
-
-    #[test]
-    fn expand_home_bare_tilde() {
-        let home = dirs::home_dir().expect("home_dir required for this test");
-        assert_eq!(expand_home("~"), home);
-    }
-
-    #[test]
-    fn expand_home_tilde_slash() {
-        let home = dirs::home_dir().expect("home_dir required for this test");
-        assert_eq!(expand_home("~/foo/bar"), home.join("foo/bar"));
-    }
-
-    #[test]
-    fn expand_home_does_not_handle_user_tilde() {
-        // Documented limitation: `~bob/path` is treated as a literal relative path.
-        assert_eq!(
-            expand_home("~bob/path"),
-            std::path::PathBuf::from("~bob/path")
         );
     }
 

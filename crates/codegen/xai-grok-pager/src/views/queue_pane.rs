@@ -373,6 +373,79 @@ pub enum QueueEvent {
 /// Maximum height (in lines) the queue pane will request.
 const MAX_QUEUE_HEIGHT: u16 = 3;
 
+/// Hit-test + hover state for one per-row action button (`[edit]`,
+/// `[Send now]`, `[cancel]`). Rect and row binding are rebound on every
+/// `QueuePane::render`; hover persists across frames so a stationary
+/// pointer keeps its highlight.
+#[derive(Default)]
+struct RowActionButton {
+    /// Screen rect from the last render; `None` when the button didn't render.
+    rect: Option<Rect>,
+    /// Entry id the rendered button acts on.
+    entry_id: Option<u64>,
+    /// Entry id whose button is under the mouse, if any. Drives the button's
+    /// hover fg color.
+    hovered_id: Option<u64>,
+}
+
+impl RowActionButton {
+    /// Drop the previous frame's rect/row binding (start of each render).
+    fn reset(&mut self) {
+        self.rect = None;
+        self.entry_id = None;
+    }
+
+    /// Bind the just-rendered button to its screen rect and row.
+    fn bind(&mut self, rect: Rect, id: u64) {
+        self.rect = Some(rect);
+        self.entry_id = Some(id);
+    }
+
+    /// Row id the button acts on when `(col, row)` hits its rect. `fallback`
+    /// is the pane's selected row id.
+    fn hit(&self, col: u16, row: u16, fallback: Option<u64>) -> Option<u64> {
+        let rect = self.rect?;
+        if rect.contains((col, row).into()) {
+            self.entry_id.or(fallback)
+        } else {
+            None
+        }
+    }
+
+    /// Update the hover from the mouse position. Returns `true` if it
+    /// changed (caller redraws).
+    fn update_hover(&mut self, col: u16, row: u16, fallback: Option<u64>) -> bool {
+        let over = self.rect.is_some_and(|r| r.contains((col, row).into()));
+        let new_id = if over {
+            self.entry_id.or(fallback)
+        } else {
+            None
+        };
+        if new_id != self.hovered_id {
+            self.hovered_id = new_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear the hover (mouse left the queue pane). Returns `true` if it was
+    /// previously hovered (caller should redraw).
+    fn clear_hover(&mut self) -> bool {
+        if self.hovered_id.is_some() {
+            self.hovered_id = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the button bound to row `id` is under the mouse.
+    fn is_hovered_for(&self, id: u64) -> bool {
+        self.hovered_id == Some(id)
+    }
+}
+
 /// Self-contained queue pane component.
 ///
 /// Does NOT own the queue data — entries are rebuilt each frame from
@@ -395,14 +468,12 @@ pub struct QueuePane {
     pub overlay: OverlayState,
     /// Previous queue length — used for auto-show detection.
     prev_len: usize,
-    send_now_rect: Option<Rect>,
-    send_now_entry_id: Option<u64>,
-    /// Entry id whose `[Interject]` button is under the mouse, if any. Drives
-    /// the button's hover fg color (brightens like the `[Dashboard]` button).
-    hovered_send_now_id: Option<u64>,
-    delete_button_rect: Option<Rect>,
-    delete_button_entry_id: Option<u64>,
-    pub(crate) hovered_delete_id: Option<u64>,
+    /// `[Send now]` (force-interject) action button.
+    send_now: RowActionButton,
+    /// `[cancel]` (row delete) action button.
+    delete_button: RowActionButton,
+    /// `[edit]` (queued-row edit) action button.
+    edit_button: RowActionButton,
     /// Entry id of the row currently under the mouse cursor, if any. Drives
     /// the hover affordance: the hovered row reveals its action buttons just
     /// like the selected row does when the pane is focused.
@@ -440,12 +511,9 @@ impl QueuePane {
             last_theme: Theme::current_kind(),
             overlay: OverlayState::hidden(),
             prev_len: 0,
-            send_now_rect: None,
-            send_now_entry_id: None,
-            hovered_send_now_id: None,
-            delete_button_rect: None,
-            delete_button_entry_id: None,
-            hovered_delete_id: None,
+            send_now: RowActionButton::default(),
+            delete_button: RowActionButton::default(),
+            edit_button: RowActionButton::default(),
             hovered_row_id: None,
             last_inner: None,
         }
@@ -687,73 +755,51 @@ impl QueuePane {
     /// Hit-test the action-row `[Interject]` button. Returns the id of the row
     /// the button belongs to (the hovered row, else the selected row).
     pub fn send_now_click(&self, col: u16, row: u16) -> Option<u64> {
-        let rect = self.send_now_rect?;
-        if rect.contains((col, row).into()) {
-            self.send_now_entry_id.or_else(|| self.selected_id())
-        } else {
-            None
-        }
+        self.send_now.hit(col, row, self.selected_id())
     }
 
     /// Hit-test the action-row `[cancel]` button (removes the row).
     pub fn delete_click(&self, col: u16, row: u16) -> Option<u64> {
-        let rect = self.delete_button_rect?;
-        if rect.contains((col, row).into()) {
-            self.delete_button_entry_id.or_else(|| self.selected_id())
-        } else {
-            None
-        }
+        self.delete_button.hit(col, row, self.selected_id())
     }
 
+    /// Hit-test the action-row `[edit]` button (opens the queued-row edit).
+    pub fn edit_click(&self, col: u16, row: u16) -> Option<u64> {
+        self.edit_button.hit(col, row, self.selected_id())
+    }
+
+    /// Update the `[cancel]` hover. Returns `true` if it changed (caller redraws).
     pub fn update_delete_hover(&mut self, col: u16, row: u16) -> bool {
-        let over = self
-            .delete_button_rect
-            .is_some_and(|r| r.contains((col, row).into()));
-        let new_id = if over {
-            self.delete_button_entry_id.or_else(|| self.selected_id())
-        } else {
-            None
-        };
-        if new_id != self.hovered_delete_id {
-            self.hovered_delete_id = new_id;
-            true
-        } else {
-            false
-        }
+        let selected = self.selected_id();
+        self.delete_button.update_hover(col, row, selected)
     }
 
-    pub fn clear_delete_hover(&mut self) {
-        self.hovered_delete_id = None;
+    /// Clear the `[cancel]` hover. Returns `true` if it was previously hovered.
+    pub fn clear_delete_hover(&mut self) -> bool {
+        self.delete_button.clear_hover()
     }
 
-    /// Update whether the mouse is over the `[Interject]` button. Drives the
-    /// button's hover fg color. Returns `true` if it changed (caller redraws).
+    /// Update the `[Interject]` hover (drives the brighten-on-hover fg, same
+    /// as the `[Dashboard]` button). Returns `true` if it changed.
     pub fn update_send_now_hover(&mut self, col: u16, row: u16) -> bool {
-        let over = self
-            .send_now_rect
-            .is_some_and(|r| r.contains((col, row).into()));
-        let new_id = if over {
-            self.send_now_entry_id.or_else(|| self.selected_id())
-        } else {
-            None
-        };
-        if new_id != self.hovered_send_now_id {
-            self.hovered_send_now_id = new_id;
-            true
-        } else {
-            false
-        }
+        let selected = self.selected_id();
+        self.send_now.update_hover(col, row, selected)
     }
 
-    /// Clear the `[Interject]` hover (mouse left the queue pane). Returns
-    /// `true` if it was previously hovered (caller should redraw).
+    /// Clear the `[Interject]` hover. Returns `true` if it was previously hovered.
     pub fn clear_send_now_hover(&mut self) -> bool {
-        if self.hovered_send_now_id.is_some() {
-            self.hovered_send_now_id = None;
-            true
-        } else {
-            false
-        }
+        self.send_now.clear_hover()
+    }
+
+    /// Update the `[edit]` hover. Returns `true` if it changed (caller redraws).
+    pub fn update_edit_hover(&mut self, col: u16, row: u16) -> bool {
+        let selected = self.selected_id();
+        self.edit_button.update_hover(col, row, selected)
+    }
+
+    /// Clear the `[edit]` hover. Returns `true` if it was previously hovered.
+    pub fn clear_edit_hover(&mut self) -> bool {
+        self.edit_button.clear_hover()
     }
 
     /// Update which row the mouse is hovering over (the row, not just its
@@ -910,14 +956,14 @@ impl QueuePane {
             }
         }
 
-        // Action buttons (optional [Send now] then [cancel], right-aligned). They
-        // render for the row under the mouse (hover affordance) or, when the
-        // pane is focused, the selected row. Hover takes precedence so mouse
-        // users can act on any row without focusing/selecting it first.
-        self.send_now_rect = None;
-        self.send_now_entry_id = None;
-        self.delete_button_rect = None;
-        self.delete_button_entry_id = None;
+        // Action buttons (optional [Send now], then [edit], then [cancel],
+        // right-aligned). They render for the row under the mouse (hover
+        // affordance) or, when the pane is focused, the selected row. Hover
+        // takes precedence so mouse users can act on any row without
+        // focusing/selecting it first.
+        self.send_now.reset();
+        self.delete_button.reset();
+        self.edit_button.reset();
         let action_idx = self
             .hovered_row_id
             .and_then(|id| self.entries.iter().position(|e| e.id == id))
@@ -941,42 +987,69 @@ impl QueuePane {
                 && rel < inner.height as usize
             {
                 let screen_y = inner.y + rel as u16;
+                let btn_style = Style::default().fg(theme.gray);
+                // Right-to-left walk. A button renders only when its whole
+                // label fits at or right of `inner.x`: saturating toward 0
+                // would paint into the left gutter and overlap already-placed
+                // buttons (checked_sub underflow = "doesn't fit", not x = 0).
+                let mut right = inner.x + inner.width;
+                let fits = |right: u16, w: u16| right.checked_sub(w).filter(|&x| x >= inner.x);
+
                 let cancel_label = "[cancel]";
                 let cancel_w = cancel_label.len() as u16;
-                // Compact action wording; same mouse hit-test as before (force-interject).
-                let interject_label = "[Send now]";
-                let interject_w = interject_label.len() as u16;
-                let btn_style = Style::default().fg(theme.gray);
-                let mut right = inner.x + inner.width;
-
-                right = right.saturating_sub(cancel_w);
-                let cancel_x = right;
-                let hovered = self.hovered_delete_id == Some(entry.id);
-                let cancel_style = if hovered {
-                    Style::default().fg(theme.accent_error)
-                } else {
-                    btn_style
-                };
-                buf.set_string_safe(cancel_x, screen_y, cancel_label, cancel_style);
-                self.delete_button_rect = Some(Rect::new(cancel_x, screen_y, cancel_w, 1));
-                self.delete_button_entry_id = Some(entry.id);
-
-                if is_turn_running {
-                    // Place [Send now] flush against [cancel] (no gap) — a gap
-                    // would let the queued message behind the row leak through
-                    // the seam between the two buttons.
-                    right = right.saturating_sub(interject_w);
-                    let interject_x = right;
-                    // Brighten the fg on hover (same hover color as the
-                    // [Dashboard] button) so it reads as clickable.
-                    let interject_style = if self.hovered_send_now_id == Some(entry.id) {
-                        Style::default().fg(theme.text_primary)
+                if let Some(cancel_x) = fits(right, cancel_w) {
+                    right = cancel_x;
+                    let cancel_style = if self.delete_button.is_hovered_for(entry.id) {
+                        Style::default().fg(theme.accent_error)
                     } else {
                         btn_style
                     };
-                    buf.set_string_safe(interject_x, screen_y, interject_label, interject_style);
-                    self.send_now_rect = Some(Rect::new(interject_x, screen_y, interject_w, 1));
-                    self.send_now_entry_id = Some(entry.id);
+                    buf.set_string_safe(cancel_x, screen_y, cancel_label, cancel_style);
+                    self.delete_button
+                        .bind(Rect::new(cancel_x, screen_y, cancel_w, 1), entry.id);
+
+                    // [edit] sits flush against [cancel] (no gap) — a gap
+                    // would let the queued message behind the row leak through
+                    // the seam. Unlike [Send now] it renders regardless of
+                    // turn state — the keyboard `e` edit works either way.
+                    let edit_label = "[edit]";
+                    let edit_w = edit_label.len() as u16;
+                    if let Some(edit_x) = fits(right, edit_w) {
+                        right = edit_x;
+                        let edit_style = if self.edit_button.is_hovered_for(entry.id) {
+                            Style::default().fg(theme.text_primary)
+                        } else {
+                            btn_style
+                        };
+                        buf.set_string_safe(edit_x, screen_y, edit_label, edit_style);
+                        self.edit_button
+                            .bind(Rect::new(edit_x, screen_y, edit_w, 1), entry.id);
+                    }
+
+                    if is_turn_running {
+                        // Compact action wording; same mouse hit-test as before
+                        // (force-interject). Leftmost in the chain, flush
+                        // against [edit] for the same no-seam reason.
+                        let interject_label = "[Send now]";
+                        let interject_w = interject_label.len() as u16;
+                        if let Some(interject_x) = fits(right, interject_w) {
+                            // Brighten the fg on hover (same hover color as the
+                            // [Dashboard] button) so it reads as clickable.
+                            let interject_style = if self.send_now.is_hovered_for(entry.id) {
+                                Style::default().fg(theme.text_primary)
+                            } else {
+                                btn_style
+                            };
+                            buf.set_string_safe(
+                                interject_x,
+                                screen_y,
+                                interject_label,
+                                interject_style,
+                            );
+                            self.send_now
+                                .bind(Rect::new(interject_x, screen_y, interject_w, 1), entry.id);
+                        }
+                    }
                 }
             }
         }
@@ -1521,9 +1594,9 @@ mod tests {
 
     // -- Action-button rendering (hover + layout) ----------------------------
 
-    /// The `[Interject]` and `[cancel]` buttons render flush against each other
-    /// so the queued message behind the row can't leak through a seam between
-    /// them (no gap).
+    /// The `[Interject]`, `[edit]`, and `[cancel]` buttons render flush
+    /// against each other so the queued message behind the row can't leak
+    /// through a seam between them (no gap).
     #[test]
     fn action_buttons_render_flush_with_no_gap() {
         let mut pane = QueuePane::new();
@@ -1539,16 +1612,122 @@ mod tests {
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         let layout_cfg = crate::appearance::LayoutConfig::default();
-        // Focused + turn running → both buttons render for the selected row.
+        // Focused + turn running → all three buttons render for the selected row.
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
 
-        let interject = pane.send_now_rect.expect("interject button renders");
-        let delete = pane.delete_button_rect.expect("delete button renders");
+        let edit = pane.edit_button.rect.expect("edit button renders");
+        let interject = pane.send_now.rect.expect("interject button renders");
+        let delete = pane.delete_button.rect.expect("delete button renders");
         assert_eq!(
             interject.x + interject.width,
-            delete.x,
-            "[Interject] must sit flush against [cancel] (no gap to leak through)"
+            edit.x,
+            "[Interject] must sit flush against [edit] (no gap to leak through)"
         );
+        assert_eq!(
+            edit.x + edit.width,
+            delete.x,
+            "[edit] must sit flush against [cancel] (no gap to leak through)"
+        );
+    }
+
+    /// `[edit]` renders even when no turn is running — the keyboard `e` edit
+    /// works regardless of turn state — while `[Send now]` stays hidden, and
+    /// the chain stays flush: [edit][cancel].
+    #[test]
+    fn edit_button_renders_when_turn_not_running() {
+        let mut pane = QueuePane::new();
+        let mut local = std::collections::VecDeque::new();
+        local.push_back(local_prompt(1, "msg"));
+        pane.sync_from_merged(&local, &[], None, None, &Default::default());
+        let ids = pane.entry_ids();
+        pane.list_state.select_by_id(ids[0]);
+
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        // Focused + turn NOT running → [edit] and [cancel], no [Send now].
+        pane.render(area, &mut buf, true, &layout_cfg, None, false);
+
+        assert!(
+            pane.send_now.rect.is_none(),
+            "[Send now] only renders mid-turn"
+        );
+        let edit = pane
+            .edit_button
+            .rect
+            .expect("edit button renders while idle");
+        let cancel = pane.delete_button.rect.expect("cancel button renders");
+        assert_eq!(pane.edit_button.entry_id, Some(ids[0]));
+        assert_eq!(
+            edit.x + edit.width,
+            cancel.x,
+            "[edit] must sit flush against [cancel] when [Send now] is hidden"
+        );
+    }
+
+    /// On panes too narrow for the full `[Send now][edit][cancel]` chain, a
+    /// button that can't fully fit at or right of the content area's left
+    /// edge is dropped instead of saturating toward x = 0 — otherwise rects
+    /// land outside `inner` and overlap, mis-routing clicks (send-now is
+    /// hit-tested before edit, so overlapped cells would fire it).
+    #[test]
+    fn narrow_pane_drops_buttons_that_do_not_fit() {
+        let layout_cfg = crate::appearance::LayoutConfig::default();
+        // Probe the left padding once so the width sweep spans inner widths
+        // from 1 (nothing fits) past 24 (the full chain fits).
+        let pad_left = {
+            let mut pane = QueuePane::new();
+            let mut local = std::collections::VecDeque::new();
+            local.push_back(local_prompt(1, "msg"));
+            pane.sync_from_merged(&local, &[], None, None, &Default::default());
+            let area = Rect::new(0, 0, 80, 1);
+            let mut buf = Buffer::empty(area);
+            pane.render(area, &mut buf, true, &layout_cfg, None, true);
+            pane.last_inner.expect("inner recorded").x
+        };
+
+        for is_running in [true, false] {
+            for width in (pad_left + 1)..=(pad_left + 26) {
+                let mut pane = QueuePane::new();
+                let mut local = std::collections::VecDeque::new();
+                local.push_back(local_prompt(1, "msg"));
+                pane.sync_from_merged(&local, &[], None, None, &Default::default());
+                let ids = pane.entry_ids();
+                pane.list_state.select_by_id(ids[0]);
+
+                let area = Rect::new(0, 0, width, 1);
+                let mut buf = Buffer::empty(area);
+                pane.render(area, &mut buf, true, &layout_cfg, None, is_running);
+
+                let inner = pane.last_inner.expect("inner recorded");
+                let rects = [
+                    ("edit", pane.edit_button.rect),
+                    ("send_now", pane.send_now.rect),
+                    ("cancel", pane.delete_button.rect),
+                ];
+                let mut placed: Vec<(&str, Rect)> = rects
+                    .iter()
+                    .filter_map(|&(name, rect)| rect.map(|r| (name, r)))
+                    .collect();
+                for (name, r) in &placed {
+                    assert!(
+                        r.x >= inner.x && r.x + r.width <= inner.x + inner.width,
+                        "{name} rect {r:?} must stay inside inner {inner:?} \
+                         at width {width} (running={is_running})"
+                    );
+                }
+                placed.sort_by_key(|(_, r)| r.x);
+                for pair in placed.windows(2) {
+                    let (an, a) = pair[0];
+                    let (bn, b) = pair[1];
+                    assert!(
+                        a.x + a.width <= b.x,
+                        "{an} and {bn} rects must not overlap at width {width} \
+                         (running={is_running}): {a:?} vs {b:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Hovering a row reveals that row's action buttons even when the pane is
@@ -1567,8 +1746,9 @@ mod tests {
 
         // Unfocused with no hover → no action buttons at all.
         pane.render(area, &mut buf, false, &layout_cfg, None, true);
-        assert!(pane.delete_button_rect.is_none());
-        assert!(pane.send_now_rect.is_none());
+        assert!(pane.delete_button.rect.is_none());
+        assert!(pane.send_now.rect.is_none());
+        assert!(pane.edit_button.rect.is_none());
 
         // Hover the second row → its buttons appear (still unfocused).
         let inner = pane.last_inner.expect("inner area recorded during render");
@@ -1579,16 +1759,19 @@ mod tests {
         pane.render(area, &mut buf, false, &layout_cfg, None, true);
 
         let ids = pane.entry_ids();
-        assert_eq!(pane.delete_button_entry_id, Some(ids[1]));
-        assert_eq!(pane.send_now_entry_id, Some(ids[1]));
-        assert!(pane.delete_button_rect.is_some());
-        assert!(pane.send_now_rect.is_some());
+        assert_eq!(pane.delete_button.entry_id, Some(ids[1]));
+        assert_eq!(pane.send_now.entry_id, Some(ids[1]));
+        assert_eq!(pane.edit_button.entry_id, Some(ids[1]));
+        assert!(pane.delete_button.rect.is_some());
+        assert!(pane.send_now.rect.is_some());
+        assert!(pane.edit_button.rect.is_some());
 
         // Moving off the rows clears the hover and hides the buttons again.
         assert!(pane.clear_row_hover());
         pane.render(area, &mut buf, false, &layout_cfg, None, true);
-        assert!(pane.delete_button_rect.is_none());
-        assert!(pane.send_now_rect.is_none());
+        assert!(pane.delete_button.rect.is_none());
+        assert!(pane.send_now.rect.is_none());
+        assert!(pane.edit_button.rect.is_none());
     }
 
     /// Hovering a row paints the dim hover bg across that row (matching the
@@ -1649,14 +1832,14 @@ mod tests {
 
         // Focused + turn running → [Interject] renders for the selected row.
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
-        let rect = pane.send_now_rect.expect("interject button renders");
+        let rect = pane.send_now.rect.expect("interject button renders");
         let non_hover_fg = buf[(rect.x, rect.y)].fg;
         assert_eq!(non_hover_fg, theme.gray, "plain button uses gray fg");
 
         // Hover the [Interject] button → fg becomes text_primary.
         assert!(pane.update_send_now_hover(rect.x, rect.y));
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
-        let rect = pane.send_now_rect.expect("interject button still renders");
+        let rect = pane.send_now.rect.expect("interject button still renders");
         for x in rect.x..rect.x + rect.width {
             assert_eq!(buf[(x, rect.y)].fg, theme.text_primary, "col {x}");
         }
@@ -1695,15 +1878,20 @@ mod tests {
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
 
         assert!(
-            pane.delete_button_rect.is_none(),
+            pane.delete_button.rect.is_none(),
             "off-screen hovered row must not bind the cancel button to row 0"
         );
         assert!(
-            pane.send_now_rect.is_none(),
+            pane.send_now.rect.is_none(),
             "off-screen hovered row must not bind the interject button to row 0"
         );
-        assert_eq!(pane.delete_button_entry_id, None);
-        assert_eq!(pane.send_now_entry_id, None);
+        assert!(
+            pane.edit_button.rect.is_none(),
+            "off-screen hovered row must not bind the edit button to row 0"
+        );
+        assert_eq!(pane.delete_button.entry_id, None);
+        assert_eq!(pane.send_now.entry_id, None);
+        assert_eq!(pane.edit_button.entry_id, None);
     }
 
     /// The `[cancel]` button's right edge reaches the full content-area width
@@ -1723,7 +1911,7 @@ mod tests {
         let layout_cfg = crate::appearance::LayoutConfig::default();
         pane.render(area, &mut buf, true, &layout_cfg, None, true);
 
-        let cancel = pane.delete_button_rect.expect("cancel button renders");
+        let cancel = pane.delete_button.rect.expect("cancel button renders");
         assert_eq!(
             cancel.x + cancel.width,
             area.x + area.width,
@@ -1756,7 +1944,7 @@ mod tests {
             .list_state
             .scrollbar_area()
             .expect("scrollbar shown for 5 rows in a height-3 pane");
-        let cancel = pane.delete_button_rect.expect("cancel button renders");
+        let cancel = pane.delete_button.rect.expect("cancel button renders");
         assert!(
             sb.x >= cancel.x + cancel.width,
             "scrollbar (x={}) must sit clear of [cancel] (right edge {})",

@@ -722,6 +722,30 @@ fn most_recent_local_summary_for_cwd_in_view(
     Ok(best)
 }
 
+/// Sync, local-only session summaries for `cwd` (hidden sessions filtered).
+/// For startup paths that must resolve a resume target before the
+/// irreversible OS sandbox is applied; async callers use [`list_summaries`].
+///
+/// Listing failures propagate so pre-sandbox callers can fail closed;
+/// individual unreadable summaries are skipped, matching the async path's
+/// tolerance for a single corrupt file.
+pub fn local_summaries_for_cwd_sync(cwd: &str) -> io::Result<Vec<Summary>> {
+    local_summaries_for_cwd_sync_in_root(cwd, &grok_home().join("sessions"))
+}
+
+fn local_summaries_for_cwd_sync_in_root(
+    cwd: &str,
+    sessions_root: &Path,
+) -> io::Result<Vec<Summary>> {
+    let view = storage_view(sessions_root).map_err(io::Error::other)?;
+    let dirs = view.session_dirs(Some(cwd)).map_err(io::Error::other)?;
+    Ok(dirs
+        .iter()
+        .filter_map(|dir| read_summary_from_dir(dir).ok())
+        .filter(|s| !s.is_hidden())
+        .collect())
+}
+
 /// Best-effort lookup of the sandbox profile persisted with a session that is
 /// about to be resumed, used at startup to restore the session's profile before
 /// the (irreversible) OS sandbox is applied.

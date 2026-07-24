@@ -1,36 +1,38 @@
-//! E2E enforcement tests for kernel-enforced profile `deny` paths.
-//!
-//! Drives the GENERIC path-deny primitive via a custom sandbox profile whose
-//! `deny` list names concrete files. `SandboxManager::apply` is process-wide and
-//! irreversible, so kernel enforcement is verified in an isolated subprocess.
-//!
-//! On Linux, read-deny requires bwrap bind-over; the subprocess re-execs inside
-//! bwrap when `bwrap` is available. macOS uses Seatbelt platform rules directly
-//! via `SandboxManager::apply`.
+//! E2E path-deny and Grok hook write-deny (subprocess; arm64-tagged).
+//! Soft-skips when enforcement is unavailable; only
+//! `SANDBOX_E2E_REQUIRE_ENFORCEMENT` hard-requires a usable backend.
 
 #![cfg(all(unix, feature = "enforce"))]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCENARIO_ENV: &str = "SANDBOX_E2E_SCENARIO";
 const WORKSPACE_ENV: &str = "SANDBOX_E2E_WORKSPACE";
-/// Custom profile name, comma-joined deny targets, and comma-joined control
-/// files, passed to the subprocess so one entry point drives every deny case
-/// (exact paths and globs alike).
+const GROK_HOME_ENV: &str = "SANDBOX_E2E_GROK_HOME";
+const HOME_ENV: &str = "SANDBOX_E2E_HOME";
 const PROFILE_ENV: &str = "SANDBOX_E2E_PROFILE";
 const TARGETS_ENV: &str = "SANDBOX_E2E_TARGETS";
 const CONTROLS_ENV: &str = "SANDBOX_E2E_CONTROLS";
-/// Paths NOT present at apply time that match a deny glob; the macOS runtime
-/// regex must deny creating them post-launch (the differentiator vs exact paths).
 const POSTLAUNCH_ENV: &str = "SANDBOX_E2E_POSTLAUNCH";
 const MARKER: &str = "deny-paths-e2e-marker-9f3c1a";
+const REQUIRE_ENV: &str = "SANDBOX_E2E_REQUIRE_ENFORCEMENT";
+
+fn apply_fixture_env(cmd: &mut Command, home: &Path, grok_home: &Path, workspace: &Path) {
+    cmd.env(WORKSPACE_ENV, workspace.as_os_str())
+        .env(HOME_ENV, home.as_os_str())
+        .env(GROK_HOME_ENV, grok_home.as_os_str())
+        .env("HOME", home.as_os_str())
+        .env("GROK_HOME", grok_home.as_os_str());
+}
 
 /// Re-invoke this test binary as a subprocess driving `profile` over `targets`
 /// (denied) and `controls` (must stay readable). `postlaunch` paths are created
 /// AFTER apply to exercise the macOS runtime-regex (post-launch) coverage.
 fn run_scenario(
+    home: &Path,
+    grok_home: &Path,
     workspace: &Path,
     profile: &str,
     targets: &[&str],
@@ -38,9 +40,10 @@ fn run_scenario(
     postlaunch: &[&str],
 ) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    let output = Command::new(exe)
+    let mut cmd = Command::new(exe);
+    apply_fixture_env(&mut cmd, home, grok_home, workspace);
+    let output = cmd
         .env(SCENARIO_ENV, "block_deny")
-        .env(WORKSPACE_ENV, workspace.as_os_str())
         .env(PROFILE_ENV, profile)
         .env(TARGETS_ENV, targets.join(","))
         .env(CONTROLS_ENV, controls.join(","))
@@ -51,11 +54,80 @@ fn run_scenario(
         .arg("subprocess_entry")
         .output()
         .expect("failed to spawn subprocess");
-    // All assertions read stderr; the subprocess prints only diagnostics there.
     (
         output.status,
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// Re-invoke as a subprocess for the direct-hook write-deny scenarios.
+fn run_hook_write_deny_scenario(
+    home: &Path,
+    grok_home: &Path,
+    workspace: &Path,
+    scenario: &str,
+) -> (std::process::ExitStatus, String) {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut cmd = Command::new(exe);
+    apply_fixture_env(&mut cmd, home, grok_home, workspace);
+    let output = cmd
+        .env(SCENARIO_ENV, scenario)
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("subprocess_entry")
+        .output()
+        .expect("failed to spawn subprocess");
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Soft-skip when the platform cannot enforce kernel denials.
+/// Only `SANDBOX_E2E_REQUIRE_ENFORCEMENT` hard-requires enforcement; generic
+/// CI/`GITHUB_ACTIONS` alone must not (remote arm64 may lack usable bwrap).
+fn skip_if_enforcement_unavailable() -> bool {
+    let require = std::env::var(REQUIRE_ENV).is_ok();
+
+    let support = xai_grok_sandbox::SandboxManager::support_info();
+    if !support.is_supported {
+        if require {
+            panic!(
+                "enforcement required ({REQUIRE_ENV}) but sandbox unsupported: {}",
+                support.details
+            );
+        }
+        eprintln!("skipping: sandbox not supported ({})", support.details);
+        return true;
+    }
+
+    #[cfg(target_os = "linux")]
+    if !bwrap_available() {
+        if require {
+            panic!(
+                "enforcement required ({REQUIRE_ENV}) but bwrap unavailable \
+                 (required for Linux path / hook write-deny)"
+            );
+        }
+        eprintln!("skipping: bwrap not installed (required for Linux path / hook write-deny)");
+        return true;
+    }
+
+    false
+}
+
+fn unique_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "grok-sandbox-e2e-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dunce::canonicalize(&dir).expect("canonicalize temp dir")
 }
 
 /// Decode a comma-joined env list (empty/missing -> empty vec).
@@ -78,6 +150,18 @@ fn is_permission_denied(e: &std::io::Error) -> bool {
         e.raw_os_error(),
         Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::EROFS)
     )
+}
+
+/// Unlink of a read-only bind-mounted leaf can return EBUSY (ResourceBusy) on
+/// Linux bubblewrap rather than EACCES/EPERM — still an effective denial.
+fn is_unlink_denied(e: &std::io::Error) -> bool {
+    is_permission_denied(e) || e.raw_os_error() == Some(libc::EBUSY)
+}
+
+/// Rename of a RO bind-mount leaf/mountpoint can return EXDEV or EBUSY — still
+/// an effective denial (no destination created).
+fn is_rename_denied(e: &std::io::Error) -> bool {
+    is_permission_denied(e) || matches!(e.raw_os_error(), Some(libc::EXDEV) | Some(libc::EBUSY))
 }
 
 /// Spawn a child command and `exit(1)` if its stdout exposes the secret MARKER.
@@ -162,7 +246,8 @@ fn profile_from_env() -> xai_grok_sandbox::ProfileName {
 
 // ── Subprocess entry point ──────────────────────────────────────────────
 
-/// `#[ignore]`d — only runs when invoked by the parent test via `run_scenario`.
+/// `#[ignore]`d — only runs when invoked by the parent test via `run_scenario`
+/// / `run_hook_write_deny_scenario`.
 #[test]
 #[ignore]
 fn subprocess_entry() {
@@ -173,24 +258,46 @@ fn subprocess_entry() {
     let workspace = std::env::var(WORKSPACE_ENV).expect(WORKSPACE_ENV);
     let workspace = dunce::canonicalize(&workspace).expect("canonicalize workspace");
     let workspace = workspace.as_path();
-    let targets = list_from_env(TARGETS_ENV);
-    let controls = list_from_env(CONTROLS_ENV);
 
+    // Isolate HOME/GROK_HOME before any config OnceLock init.
+    let home = PathBuf::from(std::env::var(HOME_ENV).expect(HOME_ENV));
+    let grok_home = PathBuf::from(std::env::var(GROK_HOME_ENV).expect(GROK_HOME_ENV));
+    // SAFETY: isolated subprocess; set before sandbox/config first use.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("GROK_HOME", &grok_home);
+    }
+
+    match scenario.as_str() {
+        "block_deny" => subprocess_block_deny(workspace),
+        "hook_write_deny" => subprocess_hook_write_deny(workspace, /* first_run */ false),
+        "hook_write_deny_first_run" => {
+            subprocess_hook_write_deny(workspace, /* first_run */ true)
+        }
+        "hook_write_deny_marker_spoof" => subprocess_hook_write_deny_marker_spoof(&grok_home),
+        other => {
+            eprintln!("unknown scenario: {other}");
+            std::process::exit(99);
+        }
+    }
+}
+
+fn subprocess_profile_and_bwrap_reexec(profile: &xai_grok_sandbox::ProfileName, workspace: &Path) {
     #[cfg(target_os = "linux")]
     {
         if !xai_grok_sandbox::is_inside_bwrap() {
             // Drive the REAL routing the shell uses at startup — computing the
-            // custom profile's deny set (exact paths AND launch-time glob
-            // expansion), building placeholders, and failing closed on a partial
-            // bind — rather than hand-rolling a single-path `bwrap_reexec_command`.
-            match xai_grok_sandbox::bwrap_reexec_for_profile(&profile_from_env(), workspace) {
+            // profile's deny / write-deny set, building the plan, and failing
+            // closed on a partial bind — rather than hand-rolling a single-path
+            // `bwrap_reexec_command`.
+            match xai_grok_sandbox::bwrap_reexec_for_profile(profile, workspace) {
                 Some(mut cmd) => {
                     use std::os::unix::process::CommandExt;
                     let err = cmd.exec(); // returns only if exec failed
                     eprintln!("bwrap re-exec failed: {err}");
                     std::process::exit(2);
                 }
-                // Outside bwrap with no command means the read-deny set could not
+                // Outside bwrap with no command means the deny set could not
                 // be secured. The shell fails closed here; mirror that.
                 None => {
                     eprintln!("FAIL: bwrap_reexec_for_profile returned None outside bwrap");
@@ -199,88 +306,395 @@ fn subprocess_entry() {
             }
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (profile, workspace);
+    }
+}
 
-    match scenario.as_str() {
-        "block_deny" => {
-            let mut sandbox = xai_grok_sandbox::SandboxManager::new(profile_from_env(), workspace);
-            if let Err(e) = sandbox.apply(workspace) {
-                eprintln!("sandbox apply failed: {e}");
-                std::process::exit(3);
-            }
-            if !sandbox.is_applied() {
-                eprintln!("sandbox was not applied (unsupported platform?)");
-                std::process::exit(4);
-            }
+fn subprocess_block_deny(workspace: &Path) {
+    let targets = list_from_env(TARGETS_ENV);
+    let controls = list_from_env(CONTROLS_ENV);
+    let profile = profile_from_env();
+    subprocess_profile_and_bwrap_reexec(&profile, workspace);
 
-            // Each denied target must be read-, write-, and rename-denied — via the
-            // read_file tool (in-process), `bash`/`grep` (cat child), and the shell
-            // a subagent uses (sh -c child). Targets exercise nested glob matches
-            // (`sub/dir/key.pem`) and the denied-directory (subpath) path alike.
-            for rel in &targets {
-                let path = workspace.join(rel);
-                assert_read_blocked(rel, &path);
-                assert_write_denied(rel, &path);
-                assert_rename_bypass_blocked(rel, &path, workspace);
-            }
+    let mut sandbox = xai_grok_sandbox::SandboxManager::new(profile, workspace);
+    if let Err(e) = sandbox.apply(workspace) {
+        eprintln!("sandbox apply failed: {e}");
+        std::process::exit(3);
+    }
+    if !sandbox.is_applied() {
+        eprintln!("sandbox was not applied (unsupported platform?)");
+        std::process::exit(4);
+    }
 
-            // Non-denied control files (incl. a sibling of a glob match) stay readable.
-            for rel in &controls {
-                match fs::read_to_string(workspace.join(rel)) {
-                    Ok(c) if c.contains("hello") => eprintln!("OK: {rel} control readable"),
-                    Ok(_) => {
-                        eprintln!("FAIL: control {rel} readable but missing marker");
-                        std::process::exit(1);
-                    }
-                    Err(e) => {
-                        eprintln!("FAIL: control {rel} should stay readable: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
+    for rel in &targets {
+        let path = workspace.join(rel);
+        assert_read_blocked(rel, &path);
+        assert_write_denied(rel, &path);
+        assert_rename_bypass_blocked(rel, &path, workspace);
+    }
 
-            // macOS-only: the runtime regex denies paths that match a glob even
-            // when created AFTER apply — the differentiator vs the exact-path flow
-            // (and the macOS-airtight half of the documented asymmetry). On Linux
-            // post-launch matches are best-effort and NOT covered, so skip there.
-            #[cfg(target_os = "macos")]
-            for rel in list_from_env(POSTLAUNCH_ENV) {
-                match fs::write(workspace.join(&rel), MARKER) {
-                    Err(e) if is_permission_denied(&e) => {
-                        eprintln!("OK: {rel} post-launch write denied")
-                    }
-                    Err(e) => {
-                        eprintln!("FAIL: unexpected {rel} post-launch write error: {e}");
-                        std::process::exit(1);
-                    }
-                    Ok(()) => {
-                        eprintln!("FAIL: {rel} post-launch matching path was writable");
-                        std::process::exit(1);
-                    }
-                }
+    for rel in &controls {
+        match fs::read_to_string(workspace.join(rel)) {
+            Ok(c) if c.contains("hello") => eprintln!("OK: {rel} control readable"),
+            Ok(_) => {
+                eprintln!("FAIL: control {rel} readable but missing marker");
+                std::process::exit(1);
             }
-            // A NON-matching post-launch path must still be writable — proves the
-            // denial above is the glob, not a blanket workspace write-deny.
-            #[cfg(target_os = "macos")]
-            if !list_from_env(POSTLAUNCH_ENV).is_empty() {
-                match fs::write(workspace.join("late-control.txt"), "hello") {
-                    Ok(()) => eprintln!("OK: post-launch control writable"),
-                    Err(e) => {
-                        eprintln!("FAIL: non-matching post-launch path should be writable: {e}");
-                        std::process::exit(1);
-                    }
-                }
+            Err(e) => {
+                eprintln!("FAIL: control {rel} should stay readable: {e}");
+                std::process::exit(1);
             }
-
-            std::process::exit(0);
         }
-        other => {
-            eprintln!("unknown scenario: {other}");
-            std::process::exit(99);
+    }
+
+    #[cfg(target_os = "macos")]
+    for rel in list_from_env(POSTLAUNCH_ENV) {
+        match fs::write(workspace.join(&rel), MARKER) {
+            Err(e) if is_permission_denied(&e) => {
+                eprintln!("OK: {rel} post-launch write denied")
+            }
+            Err(e) => {
+                eprintln!("FAIL: unexpected {rel} post-launch write error: {e}");
+                std::process::exit(1);
+            }
+            Ok(()) => {
+                eprintln!("FAIL: {rel} post-launch matching path was writable");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if !list_from_env(POSTLAUNCH_ENV).is_empty() {
+        match fs::write(workspace.join("late-control.txt"), "hello") {
+            Ok(()) => eprintln!("OK: post-launch control writable"),
+            Err(e) => {
+                eprintln!("FAIL: non-matching post-launch path should be writable: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    std::process::exit(0);
+}
+
+/// Assert a path cannot be created via `create_dir` (mkdir denied).
+fn assert_mkdir_denied(label: &str, path: &Path) {
+    match fs::create_dir(path) {
+        Err(e) if is_permission_denied(&e) => eprintln!("OK: {label} mkdir denied"),
+        Err(e) => {
+            eprintln!("FAIL: unexpected {label} mkdir error: {e}");
+            std::process::exit(1);
+        }
+        Ok(()) => {
+            eprintln!("FAIL: {label} mkdir was permitted");
+            let _ = fs::remove_dir(path);
+            std::process::exit(1);
         }
     }
 }
 
+/// Assert a path cannot be unlinked.
+fn assert_unlink_denied(label: &str, path: &Path) {
+    match fs::remove_file(path) {
+        Err(e) if is_unlink_denied(&e) => eprintln!("OK: {label} unlink denied"),
+        other => {
+            eprintln!("FAIL: {label} unlink expected denial, got {other:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Assert a rename of `from` out of the deny set fails.
+fn assert_rename_denied(label: &str, from: &Path, to: &Path) {
+    match fs::rename(from, to) {
+        Err(e) if is_rename_denied(&e) => eprintln!("OK: {label} rename denied"),
+        other => {
+            eprintln!("FAIL: {label} rename expected denial, got {other:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Assert a non-denied sibling path is writable.
+fn assert_write_ok(label: &str, path: &Path) {
+    match fs::write(path, "ok") {
+        Ok(()) => eprintln!("OK: {label} writable"),
+        Err(e) => {
+            eprintln!("FAIL: {label} should be writable: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Marker spoof: claim to be inside bwrap without real RO mounts — verify must fail.
+/// Linux-only (verify is a no-op on macOS). Isolated subprocess; no shared env mutation.
+fn subprocess_hook_write_deny_marker_spoof(_grok_home: &Path) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("OK: marker spoof N/A on non-linux");
+        std::process::exit(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Fixture already has hooks/ + hooks-paths from parent.
+        // SAFETY: isolated subprocess.
+        unsafe {
+            std::env::set_var("__GROK_INSIDE_BWRAP", "1");
+        }
+        match xai_grok_sandbox::verify_hook_write_deny_enforced() {
+            Ok(()) => {
+                eprintln!("FAIL: marker alone must not satisfy write-deny verification");
+                std::process::exit(1);
+            }
+            Err(msg) => {
+                if msg.contains("read-only")
+                    || msg.contains("NotReadOnly")
+                    || msg.contains("hook write-deny")
+                    || msg.contains("effectively read-only")
+                {
+                    eprintln!("OK: marker spoof refused ({msg})");
+                    std::process::exit(0);
+                }
+                eprintln!("FAIL: unexpected verify error: {msg}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Workspace-profile Grok-owned hook write-deny probes (existing sources + first-run).
+fn subprocess_hook_write_deny(workspace: &Path, first_run: bool) {
+    let home = PathBuf::from(std::env::var(GROK_HOME_ENV).expect(GROK_HOME_ENV));
+
+    let profile = xai_grok_sandbox::ProfileName::Workspace;
+    subprocess_profile_and_bwrap_reexec(&profile, workspace);
+
+    let mut sandbox = xai_grok_sandbox::SandboxManager::new(profile, workspace);
+    if let Err(e) = sandbox.apply(workspace) {
+        eprintln!("sandbox apply failed: {e}");
+        std::process::exit(3);
+    }
+    // Seatbelt is the macOS enforcement path; on Linux the write-denies are
+    // primarily the bwrap ro-binds established above.
+    #[cfg(target_os = "macos")]
+    if !sandbox.is_applied() {
+        eprintln!("sandbox was not applied");
+        std::process::exit(4);
+    }
+
+    let hooks_dir = home.join("hooks");
+    let hooks_paths = home.join("hooks-paths");
+
+    if first_run {
+        // Fixed slots are ensured as real host paths before apply; they exist
+        // and must be write-denied (not private placeholders).
+        if !hooks_dir.is_dir() {
+            eprintln!("FAIL: first-run expected real hooks dir to be ensured");
+            std::process::exit(1);
+        }
+        if !hooks_paths.is_file() {
+            eprintln!("FAIL: first-run expected real hooks-paths file to be ensured");
+            std::process::exit(1);
+        }
+        assert_write_denied("hooks-paths (first-run)", &hooks_paths);
+        assert_mkdir_denied("hooks nested (first-run)", &hooks_dir.join("nested"));
+        assert_write_denied(
+            "hooks nested file (first-run)",
+            &hooks_dir.join("planted.json"),
+        );
+        eprintln!("OK: first-run Grok hook slots denied");
+    } else {
+        // Existing hook content stays readable.
+        let keep = hooks_dir.join("keep.json");
+        match fs::read_to_string(&keep) {
+            Ok(c) if c.contains("keep-me") => eprintln!("OK: hooks readable"),
+            other => {
+                eprintln!("FAIL: expected readable hook, got {other:?}");
+                std::process::exit(1);
+            }
+        }
+
+        assert_write_denied("hooks file", &hooks_dir.join("planted.json"));
+        assert_write_denied("hooks-paths", &hooks_paths);
+        let dynamic = home.join("sessions").join("extra-hooks");
+        assert_write_denied("dynamic target", &dynamic.join("x.json"));
+
+        assert_unlink_denied("hooks-paths", &hooks_paths);
+        assert_rename_denied("hooks", &keep, &home.join("keep.exfil"));
+        assert_mkdir_denied("hooks nested dir", &hooks_dir.join("nested-deny"));
+
+        // Parent-rename bypass: renaming `sessions` must fail; leaf stays protected.
+        let sessions = home.join("sessions");
+        let sessions_old = home.join("sessions-old");
+        match fs::rename(&sessions, &sessions_old) {
+            Err(e) if is_rename_denied(&e) => {
+                eprintln!("OK: parent rename denied");
+            }
+            other => {
+                // If rename somehow succeeded, the lexical target must still
+                // not be a writable fresh tree — but success is a hard fail.
+                let _ = fs::rename(&sessions_old, &sessions);
+                eprintln!("FAIL: parent rename expected denial, got {other:?}");
+                std::process::exit(1);
+            }
+        }
+        // Sibling under sessions still writable (ancestor pin is node-only on macOS;
+        // on Linux the sessions dir is a RW mountpoint so creates inside still work).
+        assert_write_ok(
+            "sessions sibling",
+            &sessions.join(format!("runtime-{}.lock", std::process::id())),
+        );
+
+        // Configured source under workspace (writable grant root): parent rename
+        // denied; sibling under the same parent remains writable.
+        let ws_parent = workspace.join("extra-parent");
+        let ws_hooks = ws_parent.join("vendor-hooks");
+        if ws_hooks.is_dir() {
+            assert_write_denied("ws configured", &ws_hooks.join("x.json"));
+            let renamed = workspace.join("extra-parent-old");
+            match fs::rename(&ws_parent, &renamed) {
+                Err(e) if is_rename_denied(&e) => {
+                    eprintln!("OK: workspace parent rename denied");
+                }
+                other => {
+                    let _ = fs::rename(&renamed, &ws_parent);
+                    eprintln!("FAIL: workspace parent rename expected denial, got {other:?}");
+                    std::process::exit(1);
+                }
+            }
+            assert_write_ok(
+                "workspace sibling under parent",
+                &ws_parent.join(format!("sib-{}.lock", std::process::id())),
+            );
+        }
+    }
+
+    // Nested userns: exploit must run *inside* unshare; seccomp must make
+    // unshare fail (non-success). Host hooks must stay unchanged.
+    #[cfg(target_os = "linux")]
+    if !first_run {
+        let planted = hooks_dir.join("userns-plant.json");
+        let alias = home.join("userns-alias");
+        let inner = format!(
+            "mkdir -p '{alias}' && mount --bind '{home}' '{alias}' && \
+             echo nested > '{alias}/hooks/userns-plant.json'",
+            alias = alias.display(),
+            home = home.display(),
+        );
+        let sh = format!("unshare -Ur -m sh -c {inner:?}");
+        // Confirm `unshare` exists so failure is not a missing binary.
+        let which = Command::new("sh")
+            .args(["-c", "command -v unshare"])
+            .output()
+            .expect("command -v unshare");
+        if !which.status.success() {
+            eprintln!("FAIL: unshare binary missing; cannot assert seccomp denial");
+            std::process::exit(1);
+        }
+        let out = Command::new("sh")
+            .args(["-c", &sh])
+            .output()
+            .expect("spawn unshare probe");
+        if out.status.success() {
+            eprintln!(
+                "FAIL: unshare exploit succeeded (seccomp should EPERM); stderr={}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::process::exit(1);
+        }
+        let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        // Kernel/seccomp typically surfaces EPERM; also accept "not permitted".
+        if !(err.contains("not permitted")
+            || err.contains("operation not permitted")
+            || err.contains("eperm")
+            || out.status.code() == Some(1))
+        {
+            eprintln!(
+                "FAIL: expected seccomp EPERM-style denial, got status={:?} stderr={err}",
+                out.status
+            );
+            std::process::exit(1);
+        }
+        if planted.exists()
+            && let Ok(c) = fs::read_to_string(&planted)
+            && c.contains("nested")
+        {
+            eprintln!("FAIL: nested userns rewrote host hooks");
+            std::process::exit(1);
+        }
+        eprintln!("OK: nested userns did not rewrite hooks");
+    }
+
+    // Root-only: even if CAP_SYS_ADMIN were present, --cap-drop ALL should deny
+    // mount; skip when not uid 0.
+    #[cfg(target_os = "linux")]
+    if !first_run {
+        let uid = unsafe { libc::getuid() };
+        if uid == 0 {
+            let m = Command::new("mount")
+                .args([
+                    "-o",
+                    "bind",
+                    "/",
+                    &home.join("cap-drop-probe").display().to_string(),
+                ])
+                .output();
+            if let Ok(o) = m
+                && o.status.success()
+            {
+                eprintln!("FAIL: mount succeeded despite --cap-drop ALL");
+                std::process::exit(1);
+            }
+            eprintln!("OK: cap-drop mount denied as root");
+        } else {
+            eprintln!("OK: cap-drop root probe skipped (non-root)");
+        }
+    }
+
+    // Parent grants remain creatable: Grok runtime sibling, workspace, temp.
+    assert_write_ok(
+        "grok runtime sibling",
+        &home.join(format!("leader-{}.lock", std::process::id())),
+    );
+    assert_write_ok("workspace sibling", &workspace.join("fresh.rs"));
+    let tmp = std::env::temp_dir().join(format!("hook-wd-tmp-{}", std::process::id()));
+    assert_write_ok("temp sibling", &tmp);
+    let _ = fs::remove_file(&tmp);
+
+    eprintln!("OK: hook write-deny e2e passed");
+    std::process::exit(0);
+}
+
 // ── Parent test cases ───────────────────────────────────────────────────
+
+/// Create isolated HOME + GROK_HOME fixture dirs for a scenario.
+fn fixture_homes(
+    tag: &str,
+) -> (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    TempDirGuard,
+    TempDirGuard,
+    TempDirGuard,
+) {
+    let home = unique_temp_dir(&format!("{tag}-home"));
+    let grok = unique_temp_dir(&format!("{tag}-grok"));
+    let workspace = unique_temp_dir(&format!("{tag}-ws"));
+    // Empty global sandbox config under fixture GROK_HOME so generic tests do
+    // not inherit the developer/runner's ~/.grok/sandbox.toml.
+    fs::write(grok.join("sandbox.toml"), "").expect("empty global sandbox.toml");
+    (
+        home.clone(),
+        grok.clone(),
+        workspace.clone(),
+        TempDirGuard(home),
+        TempDirGuard(grok),
+        TempDirGuard(workspace),
+    )
+}
 
 /// Drive one deny case end-to-end: define a custom profile whose `deny` list is
 /// `deny_entries` (exact paths and/or globs), create each `target` (with the
@@ -295,46 +709,12 @@ fn run_deny_case(
     controls: &[&str],
     postlaunch: &[&str],
 ) {
-    // When set, missing prerequisites must FAIL loudly instead of skipping, so a
-    // CI lane can guarantee the deny enforcement is actually exercised.
-    let require = std::env::var("SANDBOX_E2E_REQUIRE_ENFORCEMENT").is_ok();
-
-    let support = xai_grok_sandbox::SandboxManager::support_info();
-    if !support.is_supported {
-        if require {
-            panic!(
-                "SANDBOX_E2E_REQUIRE_ENFORCEMENT set but sandbox unsupported: {}",
-                support.details
-            );
-        }
-        eprintln!("skipping: sandbox not supported ({})", support.details);
+    if skip_if_enforcement_unavailable() {
         return;
     }
 
-    #[cfg(target_os = "linux")]
-    if !bwrap_available() {
-        if require {
-            panic!(
-                "SANDBOX_E2E_REQUIRE_ENFORCEMENT set but bwrap unavailable (required for Linux read-deny)"
-            );
-        }
-        eprintln!("skipping: bwrap not installed (required for Linux read-deny)");
-        return;
-    }
+    let (home, grok, tmp, _ch, _cg, _cw) = fixture_homes(tag);
 
-    let tmp = std::env::temp_dir().join(format!(
-        "grok-sandbox-e2e-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&tmp).expect("create temp workspace");
-    let tmp = dunce::canonicalize(&tmp).expect("canonicalize temp workspace");
-    let _cleanup = TempDirGuard(tmp.clone());
-
-    // Define the custom profile whose `deny` list holds the entries under test.
     let deny_list = deny_entries
         .iter()
         .map(|p| format!("\"{p}\""))
@@ -347,9 +727,11 @@ fn run_deny_case(
     )
     .expect("write sandbox.toml");
 
-    // Create each denied target with the MARKER (parents created as needed, e.g.
-    // `sub/dir/` for a nested glob match, `secretdir/` for a denied directory)
-    // plus each readable control.
+    // Ensure Grok fixed slots exist so workspace-based custom profiles can
+    // resolve hook write-deny without depending on the real user tree.
+    fs::create_dir_all(grok.join("hooks")).expect("mkdir fixture hooks");
+    fs::write(grok.join("hooks-paths"), b"").expect("write fixture hooks-paths");
+
     for rel in targets {
         let path = tmp.join(rel);
         if let Some(parent) = path.parent() {
@@ -365,7 +747,7 @@ fn run_deny_case(
         fs::write(&path, "hello workspace").expect("write control");
     }
 
-    let (status, stderr) = run_scenario(&tmp, profile, targets, controls, postlaunch);
+    let (status, stderr) = run_scenario(&home, &grok, &tmp, profile, targets, controls, postlaunch);
     assert!(
         status.success(),
         "[{tag}] custom-profile deny should block read/write/rename\nstderr: {stderr}"
@@ -390,8 +772,6 @@ fn run_deny_case(
             "[{tag}] expected non-denied control '{rel}' to stay readable\nstderr: {stderr}"
         );
     }
-    // The post-launch (runtime-regex) coverage is macOS-only; Linux best-effort
-    // expansion does not cover files created after launch.
     #[cfg(target_os = "macos")]
     for rel in postlaunch {
         assert!(
@@ -406,28 +786,32 @@ fn run_deny_case(
             "[{tag}] expected non-matching post-launch path to stay writable\nstderr: {stderr}"
         );
     }
+
+    // Generic harness must not leave vendor stubs under fixture HOME.
+    assert!(
+        !home.join(".claude").exists(),
+        "generic deny must not create ~/.claude under fixture HOME"
+    );
+    assert!(
+        !home.join(".cursor").exists(),
+        "generic deny must not create ~/.cursor under fixture HOME"
+    );
 }
 
 #[test]
 fn deny_exact_paths_block_read_write_rename() {
-    // Exact-path entries: two files plus a directory (exercised via a file inside
-    // it), covering the literal-file and the subpath / Linux dir-placeholder paths.
     run_deny_case(
         "exact",
         "denytest",
         &[".env", "src/server.pem", "secretdir"],
         &[".env", "src/server.pem", "secretdir/inner.pem"],
         &["readable.txt"],
-        &[], // exact paths have no runtime/post-launch coverage to assert
+        &[],
     );
 }
 
 #[test]
 fn deny_globs_block_read_write_rename() {
-    // Glob entries exercising: nested `*.pem`, a `.env` at root AND nested, and a
-    // trailing-`**` prefix dir. The control inside a matched directory
-    // (`sub/dir/keep.txt`) proves the glob denies only matches, not the whole tree.
-    // `postlaunch` (`late.pem`) pins the macOS runtime-regex post-launch coverage.
     run_deny_case(
         "glob",
         "denyglob",
@@ -436,6 +820,232 @@ fn deny_globs_block_read_write_rename() {
         &["readable.txt", "sub/dir/keep.txt"],
         &["late.pem"],
     );
+}
+
+/// Hard-linked registry file must refuse sandbox startup (writable alias).
+#[test]
+fn hardlinked_hooks_paths_refuses_startup() {
+    if skip_if_enforcement_unavailable() {
+        return;
+    }
+    let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook-hl");
+    fs::create_dir_all(grok.join("hooks")).unwrap();
+    let reg = grok.join("hooks-paths");
+    let alias = grok.join("hooks-paths-alias");
+    fs::write(&reg, b"").unwrap();
+    fs::hard_link(&reg, &alias).unwrap();
+
+    let (status, stderr) =
+        run_hook_write_deny_scenario(&home, &grok, &workspace, "hook_write_deny");
+    assert!(
+        !status.success(),
+        "hard-linked hooks-paths must refuse startup\nstderr: {stderr}"
+    );
+    // Plan/materialization path should surface hard-link or identity failure.
+    assert!(
+        stderr.contains("hard-link")
+            || stderr.contains("HardLink")
+            || stderr.contains("hook write-deny")
+            || stderr.contains("nlink"),
+        "expected hard-link refusal signal\nstderr: {stderr}"
+    );
+}
+
+/// Workspace profile: Grok-owned direct hook sources are write-denied but readable;
+/// create / overwrite / unlink / rename / mkdir fail; absolute hooks-paths
+/// targets are denied; parent rename is blocked; Grok/CWD/temp siblings stay writable.
+#[test]
+fn workspace_protects_direct_hook_sources() {
+    if skip_if_enforcement_unavailable() {
+        return;
+    }
+
+    let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook");
+
+    fs::create_dir_all(grok.join("hooks")).expect("mkdir hooks");
+    fs::write(grok.join("hooks").join("keep.json"), r#"{"keep-me":true}"#)
+        .expect("write keep.json");
+    let dynamic = grok.join("sessions").join("extra-hooks");
+    fs::create_dir_all(&dynamic).expect("mkdir dynamic hooks target");
+    fs::write(dynamic.join("x.json"), r#"{"x":1}"#).expect("write dynamic hook");
+    // Configured target under workspace (absolute) for grant-root ancestor pins.
+    let ws_hooks = workspace.join("extra-parent").join("vendor-hooks");
+    fs::create_dir_all(&ws_hooks).expect("mkdir ws vendor hooks");
+    fs::write(ws_hooks.join("x.json"), r#"{"x":1}"#).expect("write ws hook");
+    fs::write(
+        grok.join("hooks-paths"),
+        format!("{}\n{}\n", dynamic.display(), ws_hooks.display()),
+    )
+    .expect("write hooks-paths");
+
+    let (status, stderr) =
+        run_hook_write_deny_scenario(&home, &grok, &workspace, "hook_write_deny");
+    assert!(
+        status.success(),
+        "hook write-deny e2e failed: {status}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("OK: hook write-deny e2e passed"),
+        "missing pass marker\nstderr: {stderr}"
+    );
+    for needle in [
+        "OK: hooks readable",
+        "OK: hooks file write denied",
+        "OK: hooks-paths write denied",
+        "OK: dynamic target write denied",
+        "OK: hooks-paths unlink denied",
+        "OK: hooks rename denied",
+        "OK: hooks nested dir mkdir denied",
+        "OK: parent rename denied",
+        "OK: sessions sibling writable",
+        "OK: workspace parent rename denied",
+        "OK: workspace sibling under parent writable",
+        "OK: grok runtime sibling writable",
+        "OK: workspace sibling writable",
+        "OK: temp sibling writable",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "expected '{needle}'\nstderr: {stderr}"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    assert!(
+        stderr.contains("OK: nested userns did not rewrite hooks"),
+        "expected nested userns check\nstderr: {stderr}"
+    );
+}
+
+/// Hard-linked or symlinked discovery JSON under hooks/ must refuse startup.
+#[test]
+fn hardlinked_hooks_json_refuses_startup() {
+    if skip_if_enforcement_unavailable() {
+        return;
+    }
+    let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook-json-hl");
+    fs::create_dir_all(grok.join("hooks")).unwrap();
+    fs::write(grok.join("hooks-paths"), b"").unwrap();
+    let active = grok.join("hooks").join("active.json");
+    let alias = grok.join("hooks").join("active-alias.json");
+    fs::write(&active, r#"{"hooks":{}}"#).unwrap();
+    fs::hard_link(&active, &alias).unwrap();
+
+    let (status, stderr) =
+        run_hook_write_deny_scenario(&home, &grok, &workspace, "hook_write_deny");
+    assert!(
+        !status.success(),
+        "hard-linked hooks JSON must refuse startup\nstderr: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_hooks_json_refuses_startup() {
+    if skip_if_enforcement_unavailable() {
+        return;
+    }
+    let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook-json-sym");
+    fs::create_dir_all(grok.join("hooks")).unwrap();
+    fs::write(grok.join("hooks-paths"), b"").unwrap();
+    let real = grok.join("real-active.json");
+    let active = grok.join("hooks").join("active.json");
+    fs::write(&real, r#"{"hooks":{}}"#).unwrap();
+    std::os::unix::fs::symlink(&real, &active).unwrap();
+
+    let (status, stderr) =
+        run_hook_write_deny_scenario(&home, &grok, &workspace, "hook_write_deny");
+    assert!(
+        !status.success(),
+        "symlinked hooks JSON must refuse startup\nstderr: {stderr}"
+    );
+}
+
+/// First-run: missing fixed slots are created as real Grok state before apply,
+/// then write-denied. Parent asserts post-exit host tree is valid (no vendor stubs).
+#[test]
+fn workspace_protects_direct_hook_sources_first_run() {
+    if skip_if_enforcement_unavailable() {
+        return;
+    }
+
+    let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook-fr");
+    // Intentionally leave hooks/ and hooks-paths absent (first-run ensure path).
+
+    let (status, stderr) =
+        run_hook_write_deny_scenario(&home, &grok, &workspace, "hook_write_deny_first_run");
+    assert!(
+        status.success(),
+        "hook write-deny first-run e2e failed: {status}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("OK: hook write-deny e2e passed"),
+        "missing pass marker\nstderr: {stderr}"
+    );
+    for needle in [
+        "OK: first-run Grok hook slots denied",
+        "OK: hooks-paths (first-run) write denied",
+        "OK: hooks nested (first-run) mkdir denied",
+        "OK: hooks nested file (first-run) write denied",
+        "OK: grok runtime sibling writable",
+        "OK: workspace sibling writable",
+        "OK: temp sibling writable",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "expected '{needle}'\nstderr: {stderr}"
+        );
+    }
+
+    // Post-exit host: Grok slots exist and are valid; no vendor artifacts.
+    assert!(
+        grok.join("hooks").is_dir(),
+        "post-exit: hooks dir must exist as a real directory"
+    );
+    assert!(
+        grok.join("hooks-paths").is_file(),
+        "post-exit: hooks-paths must exist as a real file"
+    );
+    assert_eq!(
+        fs::read(grok.join("hooks-paths")).expect("read hooks-paths"),
+        b"",
+        "post-exit: first-run hooks-paths must be empty"
+    );
+    assert!(
+        !home.join(".claude").exists(),
+        "post-exit: must not create ~/.claude"
+    );
+    assert!(
+        !home.join(".cursor").exists(),
+        "post-exit: must not create ~/.cursor"
+    );
+}
+
+/// Marker spoof in an isolated subprocess (no env-mutating unit test).
+#[test]
+fn hook_write_deny_refuses_marker_spoof() {
+    // Always runnable on Linux unit path via soft-skip only when not requiring
+    // kernel enforcement — marker spoof only needs the verify API.
+    #[cfg(not(target_os = "linux"))]
+    {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (home, grok, workspace, _ch, _cg, _cw) = fixture_homes("hook-spoof");
+        fs::create_dir_all(grok.join("hooks")).unwrap();
+        fs::write(grok.join("hooks").join("x.json"), b"{}").unwrap();
+        fs::write(grok.join("hooks-paths"), b"").unwrap();
+        let (status, stderr) =
+            run_hook_write_deny_scenario(&home, &grok, &workspace, "hook_write_deny_marker_spoof");
+        assert!(
+            status.success(),
+            "marker spoof e2e failed: {status}\nstderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("OK: marker spoof refused"),
+            "expected spoof refusal\nstderr: {stderr}"
+        );
+    }
 }
 
 struct TempDirGuard(std::path::PathBuf);

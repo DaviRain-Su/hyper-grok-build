@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::implementations::grok_build::task::types::{
     SessionIdResource, SubagentEvent, SubagentEventSender, SubagentLoopUnitActiveRequest,
     SubagentOwner, SubagentQueryRequest, SubagentRequest, SubagentRuntimeOverrides,
-    SubagentSnapshotStatus,
+    SubagentSnapshotStatus, SubagentSpawnRequest,
 };
 use crate::notification::types::ToolNotificationHandle;
 use crate::notification::{
@@ -526,6 +526,7 @@ impl SchedulerActor {
                     .0
                     .send(SubagentEvent::Query(SubagentQueryRequest {
                         subagent_id: prev_id.clone(),
+                        parent_session_id: Some(parent_session_id.clone()),
                         block: false,
                         timeout_ms: None,
                         respond_to,
@@ -675,12 +676,14 @@ impl SchedulerActor {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: CancellationToken::new(),
-            result_tx,
         };
 
         if events
             .0
-            .send(SubagentEvent::Spawn(Box::new(request)))
+            .send(SubagentEvent::Spawn(SubagentSpawnRequest {
+                request: Box::new(request),
+                result_tx,
+            }))
             .is_err()
         {
             let mut res = self.resources.lock().await;
@@ -1818,7 +1821,7 @@ mod tests {
         let SubagentEvent::Spawn(spawn) = next_event(rx).await else {
             panic!("expected subagent spawn");
         };
-        spawn
+        spawn.request
     }
 
     async fn answer_loop_unit_active(

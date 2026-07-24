@@ -76,6 +76,7 @@ pub enum PromptAudience {
     Subagent,
 }
 use xai_grok_tools::bridge::ToolBridge;
+use xai_grok_tools::types::template_renderer::TemplateRenderer;
 /// Agent-specific inputs for system prompt rendering.
 ///
 /// Serializable (JSON/YAML) so users can dump it and inspect fields.
@@ -259,12 +260,21 @@ impl PromptContext {
     /// MiniJinja so that `${{ tools.by_kind.* }}` variables resolve
     /// correctly regardless of prompt mode.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
+        let renderer = tool_bridge.template_renderer_snapshot().await?;
+        self.render_with_renderer(&renderer)
+    }
+    /// Render the full system prompt from a finalized tool-name renderer.
+    ///
+    /// Hosts that do not own a [`ToolBridge`] use this path so they still
+    /// consume the production base-template and prompt-body composition.
+    pub fn render_with_renderer(&self, renderer: &TemplateRenderer) -> Option<String> {
         let placeholders = self.placeholders();
+        let render = |template: &str| renderer.render_with_extra(template, &placeholders).ok();
         let prompt = match self.prompt_mode {
             PromptMode::Extend => {
                 let decrypted;
                 let base = match &self.system_prompt {
-                    TemplateOverride::Custom(s) => s.as_str(),
+                    TemplateOverride::Custom(template) => template.as_str(),
                     TemplateOverride::Codex => {
                         decrypted = apply_patch_template();
                         &decrypted
@@ -278,21 +288,14 @@ impl PromptContext {
                         &decrypted
                     }
                 };
-                let mut p = tool_bridge.render_prompt(base, &placeholders).await?;
-                if let Some(ref body) = self.prompt_body {
-                    p.push_str("\n\n");
-                    let rendered_body = tool_bridge
-                        .render_prompt(body, &placeholders)
-                        .await
-                        .unwrap_or_else(|| body.clone());
-                    p.push_str(&rendered_body);
+                let mut prompt = render(base)?;
+                if let Some(body) = &self.prompt_body {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&render(body).unwrap_or_else(|| body.clone()));
                 }
-                p
+                prompt
             }
-            PromptMode::Full => {
-                let body = self.prompt_body.as_deref().unwrap_or("");
-                tool_bridge.render_prompt(body, &placeholders).await?
-            }
+            PromptMode::Full => render(self.prompt_body.as_deref().unwrap_or(""))?,
         };
         Some(prompt)
     }

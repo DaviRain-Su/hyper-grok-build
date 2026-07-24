@@ -175,6 +175,19 @@ impl TemplateRenderer {
         render_with_env(template, &self.ctx)
     }
 
+    /// Return the finalized canonical-to-client parameter names by tool kind.
+    pub fn param_names(&self) -> HashMap<ToolKind, HashMap<String, String>> {
+        self.ctx
+            .params
+            .iter()
+            .filter_map(|(kind, names)| {
+                serde_json::from_value(serde_json::Value::String(kind.clone()))
+                    .ok()
+                    .map(|kind| (kind, names.clone()))
+            })
+            .collect()
+    }
+
     /// Render `${{ ... }}` placeholders in every `description` string within a
     /// JSON Schema, in place — recursing into nested objects, array `items`, and
     /// `$defs`. Property keys are remapped separately; this resolves

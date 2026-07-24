@@ -15,6 +15,7 @@
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
+use indexmap::IndexMap;
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
@@ -662,9 +663,38 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// Resolve `env_http_headers` (`header -> env var`) into `headers` via `getenv`, skipping unset/blank/invalid entries and trimming values.
+fn apply_env_http_headers(
+    env_http_headers: &IndexMap<String, String>,
+    getenv: impl Fn(&str) -> Option<String>,
+    headers: &mut HeaderMap,
+) {
+    for (key, env_var) in env_http_headers {
+        let Some(value) = getenv(env_var) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let (Ok(name), Ok(header_value)) = (
+            HeaderName::try_from(key.as_str()),
+            HeaderValue::from_str(value),
+        ) else {
+            tracing::warn!(
+                header = %key,
+                env_var = %env_var,
+                "skipping env_http_header with an invalid header name or value"
+            );
+            continue;
+        };
+        headers.insert(name, header_value);
+    }
+}
+
 /// HTTP client for sampling. Cheap to clone; carries an `Arc`-backed
-/// `reqwest::Client` and the default headers/request-defaults computed
-/// from a [`SamplerConfig`] at construction time.
+/// `reqwest::Client` and the default headers/request-defaults computed from a
+/// [`SamplerConfig`] at construction time.
 #[derive(Clone)]
 pub struct SamplingClient {
     http: reqwest::Client,
@@ -680,6 +710,8 @@ pub struct SamplingClient {
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Per-request header injection (OTel traceparent).
     header_injector: Option<crate::config::SharedHeaderInjector>,
+    /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
+    endpoint: EndpointTemplate,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -711,6 +743,74 @@ struct ClientDefaults {
     /// Session reasoning effort. Needed for Codex wire rewrite: async-openai
     /// only types through `xhigh`, so Max/Ultra must be restored post-serialize.
     reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+}
+
+/// Endpoint URL builder, resolved once at client construction so each request
+/// only appends its path.
+#[derive(Clone, Debug)]
+enum EndpointTemplate {
+    /// No query params and no query on the base URL (or an unparseable base):
+    /// append the path to the base verbatim.
+    Plain(String),
+    /// Query params configured: `{prefix}/{path}{suffix}`. `suffix` starts with
+    /// `?` and folds any base-URL params, with a configured key winning over the
+    /// same key in `base_url` (percent-encoded, no duplicates).
+    WithQuery { prefix: String, suffix: String },
+}
+
+impl EndpointTemplate {
+    fn new(base_url: &str, query_params: &IndexMap<String, String>) -> Self {
+        let base = base_url.trim_end_matches('/').to_string();
+        // The fast path is safe only when there is nothing to fold: no configured
+        // params and no query already on the base (which would otherwise land
+        // before the appended path).
+        if query_params.is_empty() && !base.contains('?') {
+            return Self::Plain(base);
+        }
+        let mut url = match reqwest::Url::parse(&base) {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::warn!(
+                    url = %base,
+                    %error,
+                    "failed to parse base URL for endpoint; sending without folded query"
+                );
+                return Self::Plain(base);
+            }
+        };
+        let overridden: std::collections::HashSet<&str> =
+            query_params.keys().map(String::as_str).collect();
+        let kept: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| !overridden.contains(k.as_ref()))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let prefix = {
+            let mut prefix_url = url.clone();
+            prefix_url.set_query(None);
+            prefix_url.as_str().trim_end_matches('/').to_string()
+        };
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.clear();
+            for (key, value) in &kept {
+                pairs.append_pair(key, value);
+            }
+            for (key, value) in query_params {
+                pairs.append_pair(key, value);
+            }
+        }
+        let suffix = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+        Self::WithQuery { prefix, suffix }
+    }
+
+    fn url_for_path(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        match self {
+            Self::Plain(base) => format!("{base}/{path}"),
+            Self::WithQuery { prefix, suffix } => format!("{prefix}/{path}{suffix}"),
+        }
+    }
 }
 
 // =============================================================================
@@ -839,6 +939,14 @@ impl SamplingClient {
             headers.insert(header_name, header_value);
         }
 
+        // Resolve here, not into `extra_headers`, so an env-sourced secret stays
+        // out of persisted state.
+        apply_env_http_headers(
+            &config.env_http_headers,
+            |var| std::env::var(var).ok(),
+            &mut headers,
+        );
+
         // Add x-grok-client-version header for version gating at the proxy.
         if let Some(client_version) = config.client_version.as_ref()
             && let Ok(header_value) = HeaderValue::from_str(client_version)
@@ -928,6 +1036,8 @@ impl SamplingClient {
             reasoning_effort: config.reasoning_effort,
         };
 
+        let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
+
         Ok(Self {
             http,
             default_headers: headers,
@@ -936,6 +1046,7 @@ impl SamplingClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
+            endpoint,
         })
     }
 
@@ -1097,9 +1208,7 @@ impl SamplingClient {
     }
 
     fn endpoint(&self, path: &str) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        let path = path.trim_start_matches('/');
-        format!("{base}/{path}")
+        self.endpoint.url_for_path(path)
     }
 
     fn apply_defaults(&self, mut request: ChatCompletionRequest) -> Result<ChatCompletionRequest> {
@@ -2366,6 +2475,8 @@ mod tests {
             api_backend: ApiBackend::ChatCompletions,
             auth_scheme: AuthScheme::Bearer,
             extra_headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            env_http_headers: IndexMap::new(),
             context_window: 8192,
             force_http1: false,
             max_retries: None,
@@ -2629,6 +2740,56 @@ mod tests {
         cfg.extra_headers
             .insert("x-XAI-token-auth".to_string(), "xai-grok-cli".to_string());
         let _client = SamplingClient::new(cfg).expect("client with extra headers should construct");
+    }
+
+    #[test]
+    fn apply_env_http_headers_resolves_trims_skips_and_overrides() {
+        let mut map = IndexMap::new();
+        map.insert("x-tenant-token".to_string(), "TENANT".to_string());
+        map.insert("x-blank".to_string(), "BLANK".to_string());
+        map.insert("x-missing".to_string(), "MISSING".to_string());
+        map.insert("x-override".to_string(), "OVERRIDE".to_string());
+        map.insert("x invalid".to_string(), "INVALID".to_string());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-override"),
+            HeaderValue::from_static("static"),
+        );
+
+        apply_env_http_headers(
+            &map,
+            |var| match var {
+                // Leading space + trailing newline exercises trimming.
+                "TENANT" => Some(" tenant-secret\n".to_string()),
+                "BLANK" => Some("   ".to_string()),
+                "OVERRIDE" => Some("from-env".to_string()),
+                "INVALID" => Some("value".to_string()),
+                _ => None,
+            },
+            &mut headers,
+        );
+
+        assert_eq!(headers.get("x-tenant-token").unwrap(), "tenant-secret");
+        assert!(headers.get("x-blank").is_none());
+        assert!(headers.get("x-missing").is_none());
+        // A resolved env value overrides an existing header of the same name.
+        assert_eq!(headers.get("x-override").unwrap(), "from-env");
+        // An invalid header name is skipped rather than panicking.
+        assert!(headers.get("x invalid").is_none());
+    }
+
+    #[test]
+    fn endpoint_appends_path_before_a_base_url_query_without_configured_params() {
+        let template =
+            EndpointTemplate::new("https://gateway.example/v1?api-version=x", &IndexMap::new());
+        let url = template.url_for_path("responses");
+        assert!(
+            url.starts_with("https://gateway.example/v1/responses?"),
+            "url: {url}"
+        );
+        assert!(url.contains("api-version=x"), "url: {url}");
+        assert!(!url.contains("x/responses"), "url: {url}");
     }
 
     #[test]

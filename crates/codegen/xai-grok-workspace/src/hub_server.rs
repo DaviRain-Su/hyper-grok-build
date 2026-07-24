@@ -277,6 +277,7 @@ async fn tasks_snapshot(toolset: &FinalizedToolset) -> TasksSnapshotResponse {
                         TaskKind::Monitor => "monitor".to_owned(),
                     },
                     started_at: DateTime::<Utc>::from(t.start_time).to_rfc3339(),
+                    description: t.description,
                 }
             })
             .collect(),
@@ -1441,6 +1442,11 @@ mod tests {
         assert_eq!(task.task_id, bg.task_id);
         assert_eq!(task.kind, "bash");
         assert!(
+            task.description.is_none(),
+            "start_background_sleep does not set description: {:?}",
+            task.description
+        );
+        assert!(
             DateTime::parse_from_rfc3339(&task.started_at).is_ok(),
             "started_at must be RFC3339: {}",
             task.started_at
@@ -1450,6 +1456,24 @@ mod tests {
             "no scheduler resource in this toolset: {:?}",
             snap.scheduled_tasks
         );
+        {
+            use crate::handle::tests::terminal_run_request;
+            let mut req = terminal_run_request("sleep 30", out_dir.path(), "snap-desc-task");
+            req.description = Some("build frontend".into());
+            let desc_bg = session
+                .terminal_backend()
+                .run_background(req)
+                .await
+                .expect("start described background task");
+            let snap = snapshot(&handler).await;
+            let described = snap
+                .background_tasks
+                .iter()
+                .find(|t| t.task_id == desc_bg.task_id)
+                .expect("described task in snapshot");
+            assert_eq!(described.description.as_deref(), Some("build frontend"));
+            session.terminal_backend().kill_task(&desc_bg.task_id).await;
+        }
         session.terminal_backend().kill_task(&bg.task_id).await;
         let snap = snapshot(&handler).await;
         assert!(

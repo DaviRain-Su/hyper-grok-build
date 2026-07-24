@@ -747,6 +747,14 @@ pub fn build_session_entry_data(
     )
 }
 
+/// [`crate::views::session_picker::hidden_external_hint`].
+pub fn hidden_external_hint(
+    entries: Option<&[SessionPickerEntry]>,
+    source_filter: SourceFilter,
+) -> Option<String> {
+    crate::views::session_picker::hidden_external_hint(entries, source_filter)
+}
+
 /// [`crate::views::session_picker::build_grouped_picker_entries`].
 pub fn build_grouped_picker_entries<'a>(
     entries_data: &'a [SessionPickerEntry],

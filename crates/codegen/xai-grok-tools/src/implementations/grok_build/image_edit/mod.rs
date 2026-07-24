@@ -26,7 +26,7 @@ use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 
-const XAI_IMAGINE_MODEL: &str = "grok-imagine-image-quality";
+pub(crate) const XAI_IMAGINE_EDIT_MODEL: &str = "grok-imagine-image-quality";
 
 /// Size/dimension limits for reference images sent to the Imagine API.
 /// Tighter than the vision path; the backend returns 400 when exceeded.
@@ -353,7 +353,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         let url = format!("{base}/images/edits");
 
         let mut payload = serde_json::json!({
-            "model": XAI_IMAGINE_MODEL,
+            "model": client.edit_model(),
             "prompt": input.prompt,
             "n": 1,
             "resolution": "1k",

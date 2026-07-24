@@ -55,12 +55,14 @@ pub(crate) fn dispatch_initial_prompt(app: &mut AppView, prompt: String) -> Vec<
     effects
 }
 
-pub(super) fn collect_live_doctor_report(
+pub(super) fn collect_live_doctor_report_for_terminal(
     app: &AppView,
     agent_id: AgentId,
+    terminal: &crate::terminal::TerminalContext,
 ) -> Option<crate::diagnostics::DiagnosticReport> {
     let agent = app.agents.get(&agent_id)?;
-    let mut report = crate::slash::commands::doctor::DoctorCommand::report(
+    let mut report = crate::slash::commands::doctor::DoctorCommand::report_for_terminal(
+        terminal,
         app.screen_mode,
         crate::diagnostics::TuiRuntimeRequest {
             workspace: &agent.session.cwd,
@@ -88,7 +90,8 @@ pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
     };
-    let Some(report) = collect_live_doctor_report(app, agent_id) else {
+    let terminal = crate::terminal::terminal_context().clone();
+    let Some(report) = collect_live_doctor_report_for_terminal(app, agent_id, &terminal) else {
         return vec![];
     };
 
@@ -108,7 +111,7 @@ pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<
             return vec![Effect::PlanDoctorFix {
                 target,
                 report: Box::new(report),
-                terminal: crate::terminal::terminal_context().clone(),
+                terminal,
                 request,
             }];
         }
@@ -136,9 +139,6 @@ pub(super) fn open_doctor_fix_question(
         return;
     }
     let preview = crate::diagnostics::format_fix_preview(&plan);
-    agent
-        .scrollback
-        .push_block(RenderBlock::system(preview.clone()));
     let question = Question {
         question: "Apply this fix?".to_owned(),
         options: vec![
@@ -150,7 +150,7 @@ pub(super) fn open_doctor_fix_question(
             },
             QuestionOption {
                 label: "Cancel".to_owned(),
-                description: "Do not change your shell configuration.".to_owned(),
+                description: "Do not change the configuration.".to_owned(),
                 preview: None,
                 id: None,
             },

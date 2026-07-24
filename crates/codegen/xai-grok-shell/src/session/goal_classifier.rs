@@ -16,7 +16,8 @@ pub(crate) mod evidence;
 
 use crate::session::events::{Event, GoalClassifierFailOpenReason};
 use crate::session::goal_planner::{
-    GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt, RoleSpawnOverride, spawn_with_fail_open_retry,
+    GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
+    RoleSpawnOverride, spawn_with_fail_open_retry,
 };
 use crate::session::goal_role_tools::RoleToolNames;
 use crate::session::goal_tracker::GoalClassifierVerdict;
@@ -25,7 +26,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use xai_file_utils::events::EventWriter;
-use xai_grok_tools::implementations::grok_build::task::types::SubagentOwner;
+use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+use xai_grok_tools::implementations::grok_build::task::types::{
+    SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
+};
 
 // Constants
 
@@ -512,6 +516,8 @@ pub(crate) struct ChannelSpawner {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
     >,
+    pub(crate) foreground_wait:
+        Option<xai_grok_tools::implementations::grok_build::task::types::SubagentForegroundWait>,
     pub(crate) parent_session_id: String,
     pub(crate) parent_prompt_id: Option<String>,
     pub(crate) cwd: Option<String>,
@@ -595,10 +601,6 @@ impl ChannelSpawner {
         harness_agent_type: Option<String>,
         resume_from: Option<&str>,
     ) -> Result<String, SpawnError> {
-        use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentEvent, SubagentRequest, SubagentRuntimeOverrides,
-        };
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let request = SubagentRequest {
             id: id.to_string(),
             prompt,
@@ -620,20 +622,19 @@ impl ChannelSpawner {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            result_tx,
         };
-        if self
-            .event_tx
-            .send(SubagentEvent::Spawn(Box::new(request)))
-            .is_err()
-        {
-            return Err(SpawnError::Transport(
-                "subagent coordinator channel closed".to_string(),
-            ));
-        }
-        let result = result_rx
+        let backend = ChannelBackend::new(self.event_tx.clone());
+        let result = backend
+            .spawn_with_foreground_wait(request, self.foreground_wait.as_ref())
             .await
-            .map_err(|_| SpawnError::Transport("subagent result channel dropped".to_string()))?;
+            .map_err(|error| SpawnError::Transport(error.to_string()))?;
+        if result.backgrounded {
+            let _ = backend.cancel(&result.subagent_id).await;
+            return Err(SpawnError::Runtime {
+                message: GOAL_ROLE_AWAIT_BUDGET_EXCEEDED.to_owned(),
+                cancelled: true,
+            });
+        }
         if !result.success {
             let message = result.error.unwrap_or_else(|| "unknown error".to_string());
             return Err(SpawnError::Runtime {
@@ -2457,6 +2458,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
             event_tx: tx,
+            foreground_wait: None,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
@@ -2507,6 +2509,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
             event_tx: tx,
+            foreground_wait: None,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
@@ -2577,6 +2580,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
             event_tx: tx,
+            foreground_wait: None,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
@@ -5872,6 +5876,7 @@ mod tests {
 
         let spawner: Arc<dyn GoalClassifierSpawner> = Arc::new(ChannelSpawner {
             event_tx: tx,
+            foreground_wait: None,
             parent_session_id: "parent".into(),
             parent_prompt_id: None,
             cwd: None,
@@ -6245,6 +6250,7 @@ mod tests {
 
         let spawner = ChannelSpawner {
             event_tx,
+            foreground_wait: None,
             parent_session_id: "parent-session".into(),
             parent_prompt_id: None,
             cwd: None,

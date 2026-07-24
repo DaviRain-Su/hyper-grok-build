@@ -735,6 +735,9 @@ auto_update = true
         "worktree_type",
         "session_registry",
         "minimum_version",
+        "maximum_version",
+        "required_minimum_version",
+        "required_maximum_version",
     ];
     /// Assert that every `CliConfig` `Option<T>` field NOT in `present` is
     /// absent from `table`.

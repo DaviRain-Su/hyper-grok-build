@@ -1144,6 +1144,7 @@ fn location_picker_config<'a>() -> crate::views::picker::PickerConfig<'a> {
         filter_label: None,
         filter_key_hint: None,
         filter_active: false,
+        header_note: None,
         action_keys: &[],
         disable_search: false,
         compact_bottom_bar: false,
@@ -1409,6 +1410,17 @@ impl DashboardState {
     ) {
         self.dispatch.adopt_slash_mru(mru.clone());
         self.peek_reply.adopt_slash_mru(mru);
+    }
+
+    /// Adopt the shared per-command tag map (owned by `AppView`) into both the
+    /// dispatch input and the peek-reply input so dashboard slash completion
+    /// renders the same tags as agent prompts.
+    pub(crate) fn adopt_command_tags(
+        &mut self,
+        command_tags: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>,
+    ) {
+        self.dispatch.adopt_command_tags(command_tags.clone());
+        self.peek_reply.adopt_command_tags(command_tags);
     }
 
     pub(crate) fn set_screen_mode(&mut self, mode: crate::app::ScreenMode) {

@@ -132,6 +132,7 @@ fn test_app() -> AppView {
         new_session_worktree_mode: crate::app::app_view::WorktreeMode::Never,
         fork_worktree_mode: crate::app::app_view::WorktreeMode::Ask,
         restore_code: None,
+        resume_local_miss: None,
         agent_override: None,
         bootstrap_acp_commands: Vec::new(),
         auth_methods: vec![acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
@@ -180,6 +181,7 @@ fn test_app() -> AppView {
         slash_mru: std::rc::Rc::new(std::cell::RefCell::new(
             crate::slash::mru::SlashMru::new_in_memory(),
         )),
+        command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_prompt_focused: false,
         welcome_tip_typing_dismissed: false,
         welcome_menu_index: None,
@@ -260,6 +262,7 @@ fn test_app() -> AppView {
         session_picker_grouped: false,
         cancel_rewind_enabled: true,
         session_recap_available: false,
+        tutorial: None,
         dashboard: None,
         dashboard_return: None,
         dashboard_persisted: None,

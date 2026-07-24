@@ -682,6 +682,12 @@ mod tests {
             extra_headers: [("x-team".to_owned(), "codegen".to_owned())]
                 .into_iter()
                 .collect(),
+            query_params: [("api-version".to_owned(), "2026-07-22".to_owned())]
+                .into_iter()
+                .collect(),
+            env_http_headers: [("x-tenant-token".to_owned(), "TENANT_TOKEN_VAR".to_owned())]
+                .into_iter()
+                .collect(),
             context_window: Some(200_000),
             auto_compact_threshold_percent: Some(80),
             system_prompt_label: Some("label".into()),

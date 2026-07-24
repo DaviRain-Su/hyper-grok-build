@@ -513,6 +513,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                     block_waited: false,
                     explicitly_killed: false,
                     owner_session_id: None,
+                    description: None,
                 },
                 Some("get_command_or_subagent_output"),
             );
@@ -1528,7 +1529,6 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                         *captured_task.lock().unwrap() = req.suppress_ids.clone();
                         let mk = |id: &str| SubagentCompletionSummary {
                             subagent_id: id.into(),
-                            owner_session_id: String::new(),
                             subagent_type: "general-purpose".into(),
                             description: format!("desc {id}"),
                             success: true,
@@ -1666,6 +1666,7 @@ fn completed_bash_task(id: &str) -> xai_grok_tools::computer::types::TaskSnapsho
         block_waited: false,
         explicitly_killed: false,
         owner_session_id: None,
+        description: None,
     }
 }
 /// Real-actor coverage for the `SessionCommand::IsBusy` predicate

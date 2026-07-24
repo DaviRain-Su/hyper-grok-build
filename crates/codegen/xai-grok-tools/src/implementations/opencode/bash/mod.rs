@@ -394,7 +394,9 @@ impl xai_tool_runtime::Tool for BashTool {
             auto_background_on_timeout: false, // OpenCode doesn't support auto-backgrounding
             foreground_block_budget: None,
             kind: crate::computer::types::TaskKind::Bash,
-            owner_session_id: None, // OpenCode doesn't use shared terminal backends
+            // OpenCode doesn't use shared terminal backends.
+            owner_session_id: None,
+            description: None,
         };
 
         let result = match backend.run(request).await {

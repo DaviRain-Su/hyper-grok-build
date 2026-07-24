@@ -117,54 +117,90 @@ impl SessionPickerLanes {
     }
 }
 
+/// Loading gate for a session picker surface's spinner: nothing to show yet —
+/// no loaded entry passes the source filter — while the native fetch or
+/// foreign scan is still in flight. The filter check (not `entries.is_none()`)
+/// matters because the fast foreign scan can land rows the default Grok view
+/// hides before the native list arrives; the empty state must wait until both
+/// lanes settle. Shared by rendering, redraw forcing, and tick demand so the
+/// three cannot drift (a spinner that renders without demanding ticks parks
+/// on its first frame).
+pub(crate) fn loading_spinner_active(
+    entries: Option<&[SessionPickerEntry]>,
+    source_filter: SourceFilter,
+    loading: bool,
+    lanes: &SessionPickerLanes,
+) -> bool {
+    let nothing_visible = entries.is_none_or(|entries| {
+        !entries
+            .iter()
+            .any(|entry| source_filter.matches(&entry.source))
+    });
+    nothing_visible && (loading || lanes.foreign_loading)
+}
+
 // ---------------------------------------------------------------------------
 // Source filter
 // ---------------------------------------------------------------------------
 
 /// Filter session entries by native, remote, or external source.
+///
+/// Default is [`Self::Grok`]: native Grok sessions only (local / remote /
+/// conversation), so `/resume` does not mix Claude/Codex/Cursor foreign
+/// sessions into the list. `f` cycles Grok → External → All → Local →
+/// Remote — External first so one press from the default reveals foreign
+/// sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceFilter {
+    /// Native Grok sessions only — excludes Claude/Codex/Cursor foreign rows.
     #[default]
-    All,
+    Grok,
     Local,
     Remote,
     External,
+    /// Every source, including foreign agent sessions.
+    All,
 }
 
 impl SourceFilter {
     pub fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
+            Self::Grok => "Grok",
             Self::Local => "Local",
             Self::Remote => "Remote",
             Self::External => "External",
+            Self::All => "All",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
+            Self::Grok => Self::External,
+            Self::External => Self::All,
             Self::All => Self::Local,
             Self::Local => Self::Remote,
-            Self::Remote => Self::External,
-            Self::External => Self::All,
+            Self::Remote => Self::Grok,
         }
     }
 
     /// Returns `true` when a non-default filter is selected.
     pub fn is_active(self) -> bool {
-        self != Self::All
+        self != Self::Grok
     }
 
     /// Returns `true` if a session with the given `source` string passes the filter.
     ///
     /// grok.com conversations carry `source == "conversation"` and live remotely,
-    /// so they pass the `Remote` filter (and `All`) but not `Local`.
+    /// so they pass the `Remote` filter (and `Grok` / `All`) but not `Local`.
+    /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and
+    /// `All`.
     pub fn matches(self, source: &str) -> bool {
         match self {
-            Self::All => true,
+            Self::Grok => !crate::app::is_foreign_picker_source(source),
             Self::Local => source == "local" || source == "both",
             Self::Remote => source == "remote" || source == "both" || source == "conversation",
             Self::External => crate::app::is_foreign_picker_source(source),
+            Self::All => true,
         }
     }
 }
@@ -818,6 +854,28 @@ pub(crate) fn build_content_header_label(
     }
 }
 
+/// Hint shown on the default `Grok` view when the foreign-session scan loaded
+/// Claude/Codex/Cursor entries it hides. Grok-only: `next(Grok) == External`
+/// makes the copy literally true, and reaching Local/Remote already cycles
+/// through External/All, so the discovery hint is only needed on the default
+/// state.
+pub(crate) fn hidden_external_hint(
+    entries: Option<&[SessionPickerEntry]>,
+    source_filter: SourceFilter,
+) -> Option<String> {
+    if source_filter != SourceFilter::Grok {
+        return None;
+    }
+    let hidden = entries?
+        .iter()
+        .filter(|entry| crate::app::is_foreign_picker_source(&entry.source))
+        .count();
+    (hidden > 0).then(|| {
+        let plural = if hidden == 1 { "" } else { "s" };
+        format!("{hidden} external session{plural} hidden \u{b7} f to show")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
@@ -1283,6 +1341,15 @@ mod tests {
 
     #[test]
     fn source_filter_matches() {
+        // Default Grok filter: native only (not Claude/Codex/Cursor).
+        assert!(SourceFilter::Grok.matches("local"));
+        assert!(SourceFilter::Grok.matches("remote"));
+        assert!(SourceFilter::Grok.matches("both"));
+        assert!(SourceFilter::Grok.matches("conversation"));
+        assert!(!SourceFilter::Grok.matches("claude"));
+        assert!(!SourceFilter::Grok.matches("codex"));
+        assert!(!SourceFilter::Grok.matches("cursor"));
+
         assert!(SourceFilter::All.matches("local"));
         assert!(SourceFilter::All.matches("remote"));
         assert!(SourceFilter::All.matches("both"));
@@ -1300,7 +1367,7 @@ mod tests {
         assert!(!SourceFilter::Remote.matches("local"));
         assert!(!SourceFilter::Remote.matches("cursor"));
 
-        // grok.com conversations are remote: visible under All + Remote, not Local.
+        // grok.com conversations are remote: visible under Grok + All + Remote, not Local.
         assert!(SourceFilter::All.matches("conversation"));
         assert!(SourceFilter::Remote.matches("conversation"));
         assert!(!SourceFilter::Local.matches("conversation"));
@@ -1316,11 +1383,15 @@ mod tests {
 
     #[test]
     fn source_filter_cycles() {
+        // External first: one press from the default reveals foreign sessions.
+        assert_eq!(SourceFilter::Grok.next(), SourceFilter::External);
+        assert_eq!(SourceFilter::External.next(), SourceFilter::All);
         assert_eq!(SourceFilter::All.next(), SourceFilter::Local);
         assert_eq!(SourceFilter::Local.next(), SourceFilter::Remote);
-        assert_eq!(SourceFilter::Remote.next(), SourceFilter::External);
-        assert_eq!(SourceFilter::External.next(), SourceFilter::All);
+        assert_eq!(SourceFilter::Remote.next(), SourceFilter::Grok);
+        assert_eq!(SourceFilter::Grok.label(), "Grok");
         assert_eq!(SourceFilter::External.label(), "External");
+        assert_eq!(SourceFilter::default(), SourceFilter::Grok);
     }
 
     #[test]
@@ -1339,6 +1410,9 @@ mod tests {
             entry_with_source("s5", "cursor"),
         ];
 
+        let grok = filter_session_entries(Some(&entries), "", SourceFilter::Grok);
+        assert_eq!(grok, vec![0, 1, 2]); // local + remote + both, no foreign
+
         let all = filter_session_entries(Some(&entries), "", SourceFilter::All);
         assert_eq!(all, vec![0, 1, 2, 3, 4, 5]);
 
@@ -1354,24 +1428,69 @@ mod tests {
 
     #[test]
     fn source_filter_empty_and_unknown_source() {
-        // Empty source string (e.g. from old data or test fixtures) should
-        // only pass the All filter, never Local or Remote.
+        // Empty / unknown source (e.g. from old data or test fixtures) is not
+        // foreign, so it passes Grok + All but never Local, Remote, or External.
+        assert!(SourceFilter::Grok.matches(""));
         assert!(SourceFilter::All.matches(""));
         assert!(!SourceFilter::Local.matches(""));
         assert!(!SourceFilter::Remote.matches(""));
+        assert!(!SourceFilter::External.matches(""));
 
-        // Unknown source values are also rejected by Local/Remote.
+        assert!(SourceFilter::Grok.matches("unknown"));
         assert!(SourceFilter::All.matches("unknown"));
         assert!(!SourceFilter::Local.matches("unknown"));
         assert!(!SourceFilter::Remote.matches("unknown"));
+        assert!(!SourceFilter::External.matches("unknown"));
     }
 
     #[test]
     fn source_filter_is_active() {
-        assert!(!SourceFilter::All.is_active());
+        assert!(!SourceFilter::Grok.is_active());
         assert!(SourceFilter::Local.is_active());
         assert!(SourceFilter::Remote.is_active());
         assert!(SourceFilter::External.is_active());
+        assert!(SourceFilter::All.is_active());
+    }
+
+    #[test]
+    fn hidden_external_hint_visibility() {
+        fn entry_with_source(id: &str, source: &str) -> SessionPickerEntry {
+            let mut e = make_entry(id, "r");
+            e.source = source.into();
+            e
+        }
+        let entries = vec![
+            entry_with_source("s0", "local"),
+            entry_with_source("s1", "claude"),
+            entry_with_source("s2", "codex"),
+        ];
+
+        // Only the default Grok view surfaces the hint (with the count).
+        assert_eq!(
+            hidden_external_hint(Some(&entries), SourceFilter::Grok).as_deref(),
+            Some("2 external sessions hidden \u{b7} f to show")
+        );
+        assert!(hidden_external_hint(Some(&entries), SourceFilter::Local).is_none());
+        assert!(hidden_external_hint(Some(&entries), SourceFilter::Remote).is_none());
+
+        // Singular count.
+        let one = vec![
+            entry_with_source("s0", "local"),
+            entry_with_source("s1", "cursor"),
+        ];
+        assert_eq!(
+            hidden_external_hint(Some(&one), SourceFilter::Grok).as_deref(),
+            Some("1 external session hidden \u{b7} f to show")
+        );
+
+        // External / All show foreign rows — no hint.
+        assert!(hidden_external_hint(Some(&entries), SourceFilter::External).is_none());
+        assert!(hidden_external_hint(Some(&entries), SourceFilter::All).is_none());
+
+        // No foreign entries loaded (native-only or no scan) — no hint.
+        let native = vec![entry_with_source("s0", "local")];
+        assert!(hidden_external_hint(Some(&native), SourceFilter::Grok).is_none());
+        assert!(hidden_external_hint(None, SourceFilter::Grok).is_none());
     }
 
     #[test]

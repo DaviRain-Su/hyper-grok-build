@@ -368,6 +368,21 @@ pub struct MonitorEvent {
     pub owner_session_id: Option<String>,
 }
 
+/// A background subagent reached a terminal state while the parent held a handle.
+#[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SubagentCompleted {
+    pub subagent_id: String,
+    pub subagent_type: String,
+    pub description: String,
+    pub status: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub error: Option<String>,
+    pub duration_ms: u64,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub owner_session_id: Option<String>,
+}
+
 /// A notification emitted by a tool during or after execution.
 /// These are sent to external consumers (TUI, logging, etc.) to provide
 /// real-time visibility into tool execution.
@@ -397,6 +412,9 @@ pub enum ToolNotification {
     /// Task completed notification which sends the exit code as well and notifies any client
     /// about the task being finished status
     TaskCompleted(TaskSnapshot),
+
+    /// A background subagent reached a terminal state.
+    SubagentCompleted(SubagentCompleted),
 
     /// The agent requested to enter plan mode.
     /// Consumers (gateway, TUI) use this to transition the client into
@@ -480,6 +498,7 @@ notification_variants! {
     BashExecutionFailed => BashExecutionFailed,
     FileWritten => FileWritten,
     TaskCompleted => TaskSnapshot,
+    SubagentCompleted => SubagentCompleted,
     PlanModeEntered => PlanModeEntered,
     PlanModeExited => PlanModeExited,
     UserQuestionAsked => UserQuestionAsked,

@@ -45,6 +45,18 @@ To block specific files (e.g. `.env` or credential paths) on top of a profile, d
 
 **strict** -- The most restrictive profile, for reviewing untrusted code. The agent can only read files within the current working directory and essential system paths. Writes are limited to CWD, `~/.grok/`, and temp directories. Child-process network access is blocked on Linux (no-op on macOS).
 
+### Direct global hook write protection
+
+Under `workspace`, `read-only`, and `strict` (and custom profiles that extend those bases), the Grok state directory remains writable for session/runtime files, but the kernel **write-denies** the Grok-owned direct disk paths used as user-global hook sources (they stay readable):
+
+- `~/.grok/hooks/` (hook directory)
+- `~/.grok/hooks-paths` (registry file; not loaded as hook JSON — only its absolute targets are)
+- Absolute targets listed in `hooks-paths` (relative lines are ignored; missing targets refuse sandbox start)
+
+On first launch under these profiles, Grok creates a real empty `hooks/` directory and empty `hooks-paths` file when they are missing (never symlinks or wrong types). Claude/Cursor global settings are **not** covered by this write-deny; discovery of those vendors remains separately gated by compatibility settings.
+
+A symlinked `$GROK_HOME` or a `hooks-paths` entry with a symlink component is refused at sandbox start (prevents retargeting). Existing parent directories of protected paths are pinned so they cannot be renamed out from under the deny (siblings remain writable). On Linux, nested user namespaces are disabled inside bubblewrap so mount binds cannot be rearranged. Project hooks remain gated by folder trust. The `devbox` profile does not apply this protection (disposable VMs). Profiles that require it refuse to start if the kernel policy cannot be applied (including Linux without verified read-only mounts).
+
 ---
 
 ## Custom Profiles
@@ -188,6 +200,25 @@ In practice, on Linux this means:
 
 - `web_search`, `web_fetch`, and the LLM API always have network access
 - `bash` commands like `curl`, `wget`, and `npm install` are blocked when `restrict_network` is enabled
+
+---
+
+## Shell Environment Policy
+
+The sandbox controls which files and network a subprocess can reach. The top-level `[shell_environment_policy]` table controls which environment variables it inherits, so a tool command the model runs cannot read a secret that happens to sit in your shell environment.
+
+```toml
+[shell_environment_policy]
+inherit = "core"                 # all (default) | core | none
+ignore_default_excludes = false  # also drop *KEY* / *SECRET* / *TOKEN*
+exclude = ["ACME_*", "CI_*"]     # drop these names
+include_only = ["PATH", "HOME"]  # if set, keep only these names
+set = { MY_FLAG = "1" }          # force these values
+```
+
+Grok builds the child environment in order: it starts from `inherit` (`all` keeps everything, `core` keeps a small platform set such as `PATH` and `HOME`, `none` starts empty); drops the built-in secret patterns `*KEY*`, `*SECRET*`, and `*TOKEN*` unless `ignore_default_excludes = true`; drops any `exclude` matches; applies `set`; and, when `include_only` is non-empty, keeps only the matching names. Patterns are case-insensitive globs (`*`, `?`).
+
+The default (`inherit = "all"`, `ignore_default_excludes = true`) leaves the environment untouched, so nothing changes until you configure a policy. On the non-persistent backend the policy also filters variables captured from your login shell, so an `.rc` file export cannot slip a secret past `exclude` or `include_only`. The persistent shell is one exception: it applies the policy to its base environment, but variables that an `.rc` file exports during login are replayed from a snapshot and are not re-filtered, so keep secrets out of shell startup files there. Enforcement covers the bash tool and terminals on macOS, Linux, and Windows.
 
 ---
 

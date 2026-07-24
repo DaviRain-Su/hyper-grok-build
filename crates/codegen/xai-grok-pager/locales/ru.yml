@@ -629,3 +629,5 @@ shortcuts_help.undo_desc: "Отменить последнее изменени�
 shortcuts_help.redo_desc: "Повторить последнее отменённое изменение промпта"
 shortcuts_help.undo_long_help: "Отменяет последнее изменение в редакторе промпта.\nВключает ввод, удаление, удаление строки/слова и очистку черновика."
 shortcuts_help.redo_long_help: "Повторяет последнее отменённое изменение в редакторе промпта.\nCtrl+Shift+Z — основной; Ctrl+R — альтернативный."
+settings.voice_keybind_enabled.label: "Голосовая комбинация"
+settings.voice_keybind_enabled.description: "Включает комбинацию Ctrl+Space / F8 для голосового ввода. Когда выключено, клавиши игнорируются; /voice по-прежнему запускает ввод."

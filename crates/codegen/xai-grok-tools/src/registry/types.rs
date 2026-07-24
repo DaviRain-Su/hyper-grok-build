@@ -210,6 +210,15 @@ pub struct ToolServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behavior_preset: Option<String>,
 }
+#[derive(Clone)]
+pub struct SubagentSessionResources {
+    pub backend: crate::implementations::grok_build::task::backend::SubagentBackendResource,
+    /// Same channel as [`Self::backend`]; required so `TaskCompletionReminder`
+    /// can drain completions onto the next tool result (shell parity).
+    pub event_sender: crate::implementations::grok_build::task::types::SubagentEventSender,
+    pub depth: crate::implementations::grok_build::task::types::SubagentDepthCounter,
+    pub session_id: crate::implementations::grok_build::task::types::SessionIdResource,
+}
 /// Everything a session provides at finalization time.
 ///
 /// This is the **public API boundary** — callers pass concrete, strongly-typed
@@ -231,6 +240,8 @@ pub struct SessionContext {
     /// Session ID that owns processes spawned by this session's tools.
     /// Used to scope kill operations on a shared terminal backend.
     pub owner_session_id: Option<String>,
+    /// Complete subagent capability for this session.
+    pub subagent: Option<SubagentSessionResources>,
     /// Parent's scheduler handle. When `Some`, the session reuses the parent's
     /// scheduler actor instead of spawning its own, so scheduled tasks survive
     /// subagent exit.
@@ -975,6 +986,12 @@ impl ToolRegistryBuilder {
         if let Some(owner_session_id) = ctx.owner_session_id {
             resources.insert(crate::types::resources::OwnerSessionId(owner_session_id));
         }
+        if let Some(subagent) = ctx.subagent {
+            resources.insert(subagent.backend);
+            resources.insert(subagent.event_sender);
+            resources.insert(subagent.depth);
+            resources.insert(subagent.session_id);
+        }
         let scheduler_notification_handle = ctx.notification_handle.clone();
         resources.insert(crate::types::resources::NotificationHandle(
             ctx.notification_handle,
@@ -1303,6 +1320,23 @@ impl FinalizedToolset {
             .map(|t| (t.client_name.clone(), t.metadata.kind().as_key().to_owned()))
             .collect()
     }
+    /// Map of client-facing tool name → typed [`ToolKind`].
+    ///
+    /// Unlike the finalize-request `ToolConfig`s (whose `kind` is `None` when
+    /// built from raw IDs over gRPC), the finalized tools always know their
+    /// real kind from the registry metadata — use this for kind-derived
+    /// metadata in server responses (e.g. capability-mode classification).
+    pub fn tool_kind_map(&self) -> HashMap<String, ToolKind> {
+        self.tools
+            .read()
+            .iter()
+            .map(|t| (t.client_name.clone(), t.metadata.kind()))
+            .collect()
+    }
+    /// Finalized canonical-to-client parameter names by tool kind.
+    pub fn template_param_names(&self) -> HashMap<ToolKind, HashMap<String, String>> {
+        self.renderer.param_names()
+    }
     pub async fn update_resource<T: Send + Sync + 'static>(&self, resource: T) {
         self.resources.lock().await.insert(resource);
     }
@@ -1420,6 +1454,9 @@ impl FinalizedToolset {
         let mut ctx = xai_tool_runtime::ToolCallContext::new(parent_ctx.call_id.clone());
         ctx.extensions.insert(self.resources.clone());
         ctx.extensions.insert_arc(Arc::clone(&self.renderer));
+        if let Some(cancellation) = parent_ctx.get::<xai_tool_runtime::Cancellation>() {
+            ctx.extensions.insert((*cancellation).clone());
+        }
         ctx.extensions.insert(
             crate::types::resources::InvokingToolParamNames::from_reverse_params(&reverse_params),
         );
@@ -1452,8 +1489,26 @@ impl FinalizedToolset {
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
     ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
+        self.call_with_cancellation(tool_name, tool_args, tool_call_id, cwd_override, None)
+            .await
+    }
+    /// Dispatch with cooperative cancellation exposed to the tool.
+    pub async fn call_with_cancellation(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
         use futures::StreamExt;
-        let mut stream = self.call_streaming(tool_name, tool_args, tool_call_id, cwd_override);
+        let mut stream = self.call_streaming_with_cancellation(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            cwd_override,
+            cancellation,
+        );
         while let Some(item) = stream.next().await {
             match item {
                 xai_tool_runtime::ToolStreamItem::Progress(_) => continue,
@@ -1483,6 +1538,23 @@ impl FinalizedToolset {
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
     ) -> xai_tool_runtime::ToolStream<ToolRunResult> {
+        self.call_streaming_with_cancellation(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            cwd_override,
+            None,
+        )
+    }
+    /// Streaming dispatch with cooperative cancellation exposed to the tool.
+    pub fn call_streaming_with_cancellation(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> xai_tool_runtime::ToolStream<ToolRunResult> {
         use futures::StreamExt;
         let this = Arc::clone(self);
         let tool_name = tool_name.to_owned();
@@ -1493,6 +1565,7 @@ impl FinalizedToolset {
                 tool_args,
                 &tool_call_id,
                 cwd_override,
+                cancellation,
             ) {
                 Ok(parts) => parts,
                 Err(e) => {
@@ -1542,6 +1615,7 @@ impl FinalizedToolset {
         tool_args: serde_json::Value,
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<DispatchParts, xai_tool_runtime::ToolError> {
         let (registry_id, output_converter, reverse_params) = {
             let tools = self.tools.read();
@@ -1580,6 +1654,10 @@ impl FinalizedToolset {
         );
         if let Some(cwd) = cwd_override {
             ctx.extensions.insert(xai_tool_runtime::Cwd(cwd));
+        }
+        if let Some(cancellation) = cancellation {
+            ctx.extensions
+                .insert(xai_tool_runtime::Cancellation(cancellation));
         }
         if let Some(ref version) = contract_version {
             ctx.extensions
@@ -1807,6 +1885,10 @@ pub fn generate_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     let generator = settings.into_generator();
     let schema = generator.into_root_schema_for::<T>();
     let mut value = serde_json::to_value(&schema).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("title");
+        obj.remove("description");
+    }
     if let Some(obj) = value.as_object_mut()
         && obj.get("type").and_then(|v| v.as_str()) == Some("object")
     {
@@ -2036,6 +2118,7 @@ mod tests {
             session_env: Arc::new(HashMap::new()),
             notification_handle: crate::notification::ToolNotificationHandle::noop(),
             owner_session_id: None,
+            subagent: None,
             parent_scheduler_handle: None,
             skills: vec![],
             state_path: tmp.path().join("state.json"),
@@ -4415,6 +4498,29 @@ mod tests {
             assert_eq!(skills.0.len(), 2, "should have exactly 2 skills");
         }
     }
+    /// generate_schema strips the boilerplate root `title` (struct name) and
+    /// root `description` (struct doc "Input for the <canonical> tool") so the
+    /// canonical name can't leak via parameters.description after randomization
+    /// renames the tool. $schema and per-property descriptions are retained.
+    #[test]
+    fn generate_schema_strips_root_title_and_description() {
+        let schema = generate_schema::<crate::implementations::grok_build::bash::BashToolInput>();
+        assert!(
+            schema.get("title").is_none(),
+            "root title (struct name) must be stripped: {schema}"
+        );
+        assert!(
+            schema.get("description").is_none(),
+            "root description (leaks canonical tool name) must be stripped: {schema}"
+        );
+        assert!(schema.get("$schema").is_some(), "$schema must be retained");
+        assert!(
+            schema["properties"]
+                .as_object()
+                .is_some_and(|p| !p.is_empty()),
+            "per-property schema must be retained: {schema}"
+        );
+    }
     fn toolset_with_viewer_ctx(
         viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
     ) -> (Arc<FinalizedToolset>, TempDir) {
@@ -4455,6 +4561,7 @@ mod tests {
                 serde_json::json!({"target_file": "noop"}),
                 "test-call",
                 None,
+                None,
             )
             .expect("prepare_dispatch succeeds");
         let wvc = parts
@@ -4472,6 +4579,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"target_file": "noop"}),
                 "test-call",
+                None,
                 None,
             )
             .expect("prepare_dispatch succeeds");

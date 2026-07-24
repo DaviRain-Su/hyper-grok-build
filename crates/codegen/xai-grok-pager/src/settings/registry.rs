@@ -641,6 +641,10 @@ pub fn current_value_for(
         "language" => Some(SettingValue::Enum(crate::i18n::canonical_language(
             ui.language.as_deref(),
         ))),
+        // SHELL — whether the Ctrl+Space / F8 chord is active; None → true.
+        "voice_keybind_enabled" => {
+            Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
+        }
         // SHELL — canonicalized from `[ui].voice_capture_mode`; None → "hold".
         "voice_capture_mode" => Some(SettingValue::Enum(canonical_voice_capture_mode(
             ui.voice_capture_mode.as_deref(),
@@ -1053,6 +1057,14 @@ mod tests {
                         "flash"
                     };
                     assert_eq!(*default, expected);
+                }
+                // voice_keybind_enabled: Option<bool>; None → true.
+                ("voice_keybind_enabled", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.voice_keybind_enabled.unwrap_or(true),
+                        "voice_keybind_enabled default drifts from UiConfig::default()",
+                    );
                 }
                 // voice_capture_mode: Option<String>; None → "hold".
                 ("voice_capture_mode", SettingKind::Enum { default, .. }) => {

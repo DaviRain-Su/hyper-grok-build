@@ -1,348 +1,204 @@
-//! Subagent coordinator drain task and spawn-context construction for [`MvpAgent`].
-//! Co-located child of `mvp_agent` (`use super::*`); tested by `tests/subagent_spawn_context_tests.rs`.
+//! Shell runner adapter and spawn-context construction for [`MvpAgent`].
+//! The shared coordinator actor lives in `xai-grok-tools`; this module plugs
+//! its `!Send` local-session runner into `spawn_local`.
 use super::*;
+use crate::session::repo_changes::UploadMethod;
+struct ShellChildRunner {
+    agent_ref: LocalRef<MvpAgent>,
+}
+impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
+    for ShellChildRunner
+{
+    type Control = crate::agent::subagent::ShellChildRuntime;
+    type CompletionData = crate::agent::subagent::ShellCompletionData;
+    type RunFuture = xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+        xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunOutput<
+            Self::CompletionData,
+        >,
+    >;
+    type ValidateFuture =
+        xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+            xai_grok_tools::implementations::grok_build::task::types::SubagentValidateTypeOutcome,
+        >;
+    type DescribeFuture =
+        xai_grok_tools::implementations::grok_build::task::coordinator::LocalBoxFuture<
+            xai_grok_tools::implementations::grok_build::task::types::SubagentDescribeOutcome,
+        >;
+    fn run(
+        &self,
+        run: xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunRequest<
+            Self::Control,
+        >,
+    ) -> Self::RunFuture {
+        let agent_ref = self.agent_ref.clone();
+        Box::pin(async move {
+            let xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunRequest {
+                request,
+                cancellation,
+                reporter,
+            } = run;
+            let this = agent_ref.get();
+            let parent_sid = request.parent_session_id.clone();
+            let Some(mut ctx) = this.try_build_subagent_spawn_context(&parent_sid) else {
+                tracing::warn!(
+                    parent_session_id = %parent_sid,
+                    subagent_id = %request.id,
+                    "Spawn for unknown or evicted parent session"
+                );
+                return xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunOutput {
+                    result: xai_grok_tools::implementations::grok_build::task::types::SubagentResult {
+                        success: false,
+                        error: Some(
+                            "Parent session not found (evicted or torn down); cannot spawn subagent."
+                                .to_owned(),
+                        ),
+                        subagent_id: request.id.clone(),
+                        child_session_id: request.id,
+                        ..Default::default()
+                    },
+                    completion_data: Default::default(),
+                    snapshot_ref: None,
+                };
+            };
+            let parent_handle = {
+                let parent_sid = acp::SessionId::new(parent_sid);
+                this.sessions.borrow().get(&parent_sid).cloned()
+            };
+            if let Some(handle) = parent_handle {
+                ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
+                ctx.client_hooks = handle.snapshot_client_hooks().await;
+                let definitions = handle.snapshot_tool_definitions().await;
+                ctx.parent_tool_definitions = (!definitions.is_empty()).then_some(definitions);
+            }
+            crate::agent::subagent::run_shell_child(
+                request,
+                ctx,
+                cancellation,
+                reporter,
+                &this.gateway,
+            )
+            .await
+        })
+    }
+    fn validate_type(
+        &self,
+        subagent_type: String,
+        parent_session_id: String,
+    ) -> Self::ValidateFuture {
+        let agent_ref = self.agent_ref.clone();
+        Box::pin(async move {
+            let this = agent_ref.get();
+            let ctx = this.build_subagent_validation_context(&parent_session_id);
+            crate::agent::subagent::validate_subagent_type(&subagent_type, &ctx)
+        })
+    }
+    fn describe_type(
+        &self,
+        subagent_type: String,
+        harness_agent_type: Option<String>,
+        parent_session_id: String,
+    ) -> Self::DescribeFuture {
+        let agent_ref = self.agent_ref.clone();
+        Box::pin(async move {
+            let this = agent_ref.get();
+            match this.try_build_subagent_spawn_context(&parent_session_id) {
+                Some(ctx) => crate::agent::subagent::describe_subagent_type(
+                    &subagent_type,
+                    harness_agent_type.as_deref(),
+                    &ctx,
+                ),
+                None => {
+                    tracing::warn!(
+                        parent_session_id,
+                        subagent_type,
+                        "DescribeType for unknown/evicted parent session, replying Unavailable",
+                    );
+                    xai_grok_tools::implementations::grok_build::task::types::SubagentDescribeOutcome::Unavailable
+                }
+            }
+        })
+    }
+    fn on_completed(
+        &self,
+        completion: xai_grok_tools::implementations::grok_build::task::coordinator::ChildCompletion<
+            Self::CompletionData,
+        >,
+    ) {
+        let gateway = self.agent_ref.get().gateway.clone();
+        crate::agent::subagent::present_child_completion(completion, &gateway);
+    }
+    fn running_count_changed(&self, running: usize) {
+        self.agent_ref
+            .get()
+            .activity
+            .subagent_gauge()
+            .store(running, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn persisted_output_ref(&self, completion_data: &Self::CompletionData) -> Option<String> {
+        completion_data
+            .persisted_output_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+    fn load_persisted_output(&self, reference: &str) -> Option<std::sync::Arc<str>> {
+        crate::agent::subagent::read_subagent_output(std::path::Path::new(reference))
+            .map(std::sync::Arc::from)
+    }
+}
 impl MvpAgent {
-    /// Start the subagent coordinator drain task.
+    /// Start the shared subagent coordinator actor.
     ///
-    /// Takes the `subagent_event_rx` receiver (once) and spawns a `spawn_local` task
-    /// that receives `SubagentRequest`s and delegates each to
-    /// `handle_subagent_request()` on its own `spawn_local` task.
+    /// Takes `subagent_event_rx` once and `spawn_local`s one
+    /// [`SubagentCoordinator`](xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinator)
+    /// that drains `ChannelBackend` events (`Spawn` / await / cancel / inspect)
+    /// through [`ShellChildRunner`]. The actor owns pending/active/completed
+    /// state, waiters, deadlines, and completion disposition; the runner only
+    /// builds shell child sessions via `run_shell_child`.
     ///
-    /// Uses `LocalRef` to reference `self` from
-    /// `spawn_local` closures. Idempotent: subsequent calls are no-ops.
+    /// Uses `LocalRef` so the `!Send` runner can touch `self` from the
+    /// `LocalSet`. Idempotent: subsequent calls are no-ops.
     pub(super) fn start_subagent_coordinator(&self) {
-        let Some(mut rx) = self.subagent_event_rx.borrow_mut().take() else {
+        let Some(rx) = self.subagent_event_rx.borrow_mut().take() else {
             return;
         };
         let agent_ref = LocalRef::new(self);
-        use crate::agent::subagent::{BlockWaitSlot, is_running, resolve_snapshot};
-        use xai_grok_tools::implementations::grok_build::task::types::{
-            SubagentCancelOutcome, SubagentCancelTarget, SubagentEvent,
+        let runner = ShellChildRunner {
+            agent_ref: agent_ref.clone(),
         };
+        let config =
+            xai_grok_tools::implementations::grok_build::task::coordinator::CoordinatorConfig {
+                foreground_budget:
+                    xai_grok_tools::implementations::grok_build::task::backend::env_duration_or(
+                        "GROK_SUBAGENT_AWAIT_BUDGET_MS",
+                        std::time::Duration::from_secs(600),
+                    ),
+                buffer_completions: true,
+                buffered_completion_output_cap: None,
+            };
+        tokio::task::spawn_local(
+            xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinator::new(
+                    rx,
+                    runner,
+                    config,
+                )
+                .run(),
+        );
+        let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::upload::turn::SyntheticTurnTraceRequest,
+        >();
+        self.subagent_presentation.borrow_mut().synthetic_trace_tx = Some(trace_tx);
         tokio::task::spawn_local({
             let agent_ref = agent_ref.clone();
             async move {
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        SubagentEvent::Spawn(boxed) => {
-                            let mut request = *boxed;
-                            {
-                                let this = agent_ref.get();
-                                let parent_is_session = this.sessions.borrow().contains_key(
-                                    &acp::SessionId::new(request.parent_session_id.clone()),
-                                );
-                                if !parent_is_session {
-                                    let child_sess = request.parent_session_id.clone();
-                                    let reparent = {
-                                        let coord = this.subagent_coordinator.borrow();
-                                        coord.parent_of_child_session(&child_sess).map(|root| {
-                                            (root, coord.loop_task_id_of_child_session(&child_sess))
-                                        })
-                                    };
-                                    if let Some((root, inherited_loop)) = reparent {
-                                        tracing::info!(
-                                            child_session_id = %child_sess,
-                                            root_session_id = %root,
-                                            subagent_id = %request.id,
-                                            "Re-parenting child-session spawn to root session"
-                                        );
-                                        request.parent_session_id = root;
-                                        request.surface_completion = false;
-                                        if request.runtime_overrides.loop_task_id.is_none() {
-                                            request.runtime_overrides.loop_task_id = inherited_loop;
-                                        }
-                                    }
-                                }
-                                if let Some(task_id) =
-                                    request.runtime_overrides.loop_task_id.clone()
-                                {
-                                    this.subagent_coordinator
-                                        .borrow_mut()
-                                        .record_loop_owner(&request.id, &task_id);
-                                }
-                            }
-                            let agent_ref = agent_ref.clone();
-                            tokio::task::spawn_local(async move {
-                                let this = agent_ref.get();
-                                let parent_sid = request.parent_session_id.clone();
-                                let Some(mut ctx) =
-                                    this.try_build_subagent_spawn_context(&parent_sid)
-                                else {
-                                    tracing::warn!(
-                                        parent_session_id = %parent_sid,
-                                        subagent_id = %request.id,
-                                        "Spawn for unknown/evicted parent session, failing request"
-                                    );
-                                    this.subagent_coordinator
-                                        .borrow_mut()
-                                        .remove_loop_owner(&request.id);
-                                    crate::agent::subagent::send_failure(
-                                        request,
-                                        "Parent session not found (evicted or torn down); cannot spawn subagent.",
-                                    );
-                                    return;
-                                };
-                                let parent_handle = {
-                                    let parent_sid_acp = acp::SessionId::new(parent_sid.clone());
-                                    this.sessions.borrow().get(&parent_sid_acp).cloned()
-                                };
-                                if let Some(handle) = parent_handle {
-                                    ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
-                                    ctx.client_hooks = handle.snapshot_client_hooks().await;
-                                    let parent_tools = handle.snapshot_tool_definitions().await;
-                                    ctx.parent_tool_snapshot =
-                                        (!parent_tools.is_empty()).then_some(parent_tools);
-                                }
-                                crate::agent::subagent::handle_subagent_request(
-                                    request,
-                                    ctx,
-                                    &this.subagent_coordinator,
-                                    &this.gateway,
-                                )
-                                .await;
-                            });
+                while let Some(request) = trace_rx.recv().await {
+                    tokio::task::spawn_local({
+                        let agent_ref = agent_ref.clone();
+                        async move {
+                            handle_synthetic_turn_trace(agent_ref, request).await;
                         }
-                        SubagentEvent::Query(query) => {
-                            let agent_ref = agent_ref.clone();
-                            tokio::task::spawn_local(async move {
-                                let subagent_id = query.subagent_id;
-                                let block = query.block;
-                                let timeout_ms = query.timeout_ms;
-                                let slot: BlockWaitSlot = std::rc::Rc::new(
-                                    std::cell::RefCell::new(Some(query.respond_to)),
-                                );
-                                let send_via_slot =
-                                    |slot: &BlockWaitSlot, snap| match slot.borrow_mut().take() {
-                                        Some(tx) => tx.send(snap).is_ok(),
-                                        None => false,
-                                    };
-                                let lookup = {
-                                    let this = agent_ref.get();
-                                    let result =
-                                        this.subagent_coordinator.borrow().lookup(&subagent_id);
-                                    if block && result.is_some() {
-                                        this.subagent_coordinator
-                                            .borrow_mut()
-                                            .register_block_wait(&subagent_id, slot.clone());
-                                    }
-                                    result
-                                };
-                                let snapshot = resolve_snapshot(lookup).await;
-                                let should_block =
-                                    block && snapshot.as_ref().is_some_and(is_running);
-                                if should_block {
-                                    let timeout_ms = timeout_ms.unwrap_or(30_000);
-                                    let deadline = tokio::time::Instant::now()
-                                        + tokio::time::Duration::from_millis(timeout_ms);
-                                    loop {
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(200))
-                                            .await;
-                                        let receiver_gone =
-                                            slot.borrow().as_ref().is_none_or(|tx| tx.is_closed());
-                                        if receiver_gone {
-                                            let this = agent_ref.get();
-                                            let mut coord = this.subagent_coordinator.borrow_mut();
-                                            coord.clear_block_waited(&subagent_id);
-                                            coord.unregister_block_wait(&subagent_id, &slot);
-                                            return;
-                                        }
-                                        let lookup = {
-                                            let this = agent_ref.get();
-                                            this.subagent_coordinator.borrow().lookup(&subagent_id)
-                                        };
-                                        let snap = resolve_snapshot(lookup).await;
-                                        let still_running = snap.as_ref().is_some_and(is_running);
-                                        if !still_running || tokio::time::Instant::now() >= deadline
-                                        {
-                                            {
-                                                let this = agent_ref.get();
-                                                let mut coord =
-                                                    this.subagent_coordinator.borrow_mut();
-                                                if still_running {
-                                                    coord.clear_block_waited(&subagent_id);
-                                                }
-                                                coord.unregister_block_wait(&subagent_id, &slot);
-                                            }
-                                            if !send_via_slot(&slot, snap) && !still_running {
-                                                let this = agent_ref.get();
-                                                this.subagent_coordinator
-                                                    .borrow_mut()
-                                                    .clear_block_waited(&subagent_id);
-                                            }
-                                            return;
-                                        }
-                                    }
-                                } else {
-                                    let delivered = send_via_slot(&slot, snapshot);
-                                    if block {
-                                        let this = agent_ref.get();
-                                        let mut coord = this.subagent_coordinator.borrow_mut();
-                                        coord.unregister_block_wait(&subagent_id, &slot);
-                                        if !delivered {
-                                            coord.clear_block_waited(&subagent_id);
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                        SubagentEvent::Cancel(request) => match request.target {
-                            SubagentCancelTarget::WorkflowRunId(run_id) => {
-                                let agent_ref = agent_ref.clone();
-                                tokio::task::spawn_local(async move {
-                                    let notify = {
-                                        let this = agent_ref.get();
-                                        let mut coord = this.subagent_coordinator.borrow_mut();
-                                        coord.cancel_workflow_children(&run_id);
-                                        coord.completion_notify()
-                                    };
-                                    loop {
-                                        let notified = notify.notified();
-                                        let outstanding = {
-                                            let this = agent_ref.get();
-                                            this.subagent_coordinator
-                                                .borrow()
-                                                .outstanding_for_workflow(&run_id)
-                                        };
-                                        if outstanding == 0 {
-                                            let _ = request
-                                                .respond_to
-                                                .send(SubagentCancelOutcome::Cancelled);
-                                            break;
-                                        }
-                                        notified.await;
-                                    }
-                                });
-                            }
-                            target => {
-                                let this = agent_ref.get();
-                                let outcome = {
-                                    let mut coord = this.subagent_coordinator.borrow_mut();
-                                    match target {
-                                        SubagentCancelTarget::SubagentId(ref subagent_id) => {
-                                            coord.mark_explicitly_killed(subagent_id);
-                                            coord.cancel_with_outcome(subagent_id)
-                                        }
-                                        SubagentCancelTarget::ParentPromptId(
-                                            ref parent_prompt_id,
-                                        ) => {
-                                            coord.cancel_by_parent_prompt_id(parent_prompt_id);
-                                            SubagentCancelOutcome::Cancelled
-                                        }
-                                        SubagentCancelTarget::WorkflowRunId(_) => {
-                                            unreachable!("handled above")
-                                        }
-                                    }
-                                };
-                                let _ = request.respond_to.send(outcome);
-                            }
-                        },
-                        SubagentEvent::ListActive(request) => {
-                            let this = agent_ref.get();
-                            let summaries = this
-                                .subagent_coordinator
-                                .borrow()
-                                .active_summaries_for(&request.parent_session_id);
-                            let _ = request.respond_to.send(summaries);
-                        }
-                        SubagentEvent::Completions(request) => {
-                            let this = agent_ref.get();
-                            let mut completions = this
-                                .subagent_coordinator
-                                .borrow_mut()
-                                .drain_pending_completions_for(&request.session_id);
-                            completions.retain(|c| !request.suppress_ids.contains(&c.subagent_id));
-                            let _ = request.respond_to.send(completions);
-                        }
-                        SubagentEvent::Outstanding(request) => {
-                            let this = agent_ref.get();
-                            let reply = this
-                                .subagent_coordinator
-                                .borrow()
-                                .outstanding_reply_for_prompt(&request.prompt_id);
-                            let _ = request.respond_to.send(reply);
-                        }
-                        SubagentEvent::ClearUsageNotApplied(request) => {
-                            let this = agent_ref.get();
-                            this.subagent_coordinator
-                                .borrow_mut()
-                                .clear_subagent_usage_not_applied(&request.prompt_id);
-                        }
-                        SubagentEvent::MarkUsageNotApplied(request) => {
-                            let this = agent_ref.get();
-                            this.subagent_coordinator
-                                .borrow_mut()
-                                .mark_subagent_usage_not_applied(&request.prompt_id);
-                            let _ = request.respond_to.send(());
-                        }
-                        SubagentEvent::ValidateType(request) => {
-                            let agent_ref = agent_ref.clone();
-                            tokio::task::spawn_local(async move {
-                                let this = agent_ref.get();
-                                let ctx = this
-                                    .build_subagent_validation_context(&request.parent_session_id);
-                                let outcome = crate::agent::subagent::validate_subagent_type(
-                                    &request.subagent_type,
-                                    &ctx,
-                                );
-                                let _ = request.respond_to.send(outcome);
-                            });
-                        }
-                        SubagentEvent::DescribeType(request) => {
-                            let agent_ref = agent_ref.clone();
-                            tokio::task::spawn_local(async move {
-                                use xai_grok_tools::implementations::grok_build::task::types::SubagentDescribeOutcome;
-                                let this = agent_ref.get();
-                                let outcome = match this
-                                    .try_build_subagent_spawn_context(&request.parent_session_id)
-                                {
-                                    Some(ctx) => crate::agent::subagent::describe_subagent_type(
-                                        &request.subagent_type,
-                                        request.harness_agent_type.as_deref(),
-                                        &ctx,
-                                    ),
-                                    None => {
-                                        tracing::warn!(
-                                            parent_session_id = %request.parent_session_id,
-                                            subagent_type = %request.subagent_type,
-                                            "DescribeType for unknown/evicted parent session, replying Unavailable",
-                                        );
-                                        SubagentDescribeOutcome::Unavailable
-                                    }
-                                };
-                                let _ = request.respond_to.send(outcome);
-                            });
-                        }
-                        SubagentEvent::LoopUnitActive(request) => {
-                            let this = agent_ref.get();
-                            let active = this
-                                .subagent_coordinator
-                                .borrow()
-                                .loop_unit_active(&request.task_id);
-                            let _ = request.respond_to.send(active);
-                        }
-                    }
+                    });
                 }
             }
         });
-        {
-            let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<
-                crate::upload::turn::SyntheticTurnTraceRequest,
-            >();
-            self.subagent_coordinator.borrow_mut().synthetic_trace_tx = Some(trace_tx);
-            tokio::task::spawn_local({
-                let agent_ref = agent_ref.clone();
-                async move {
-                    while let Some(request) = trace_rx.recv().await {
-                        tokio::task::spawn_local({
-                            let agent_ref = agent_ref.clone();
-                            async move {
-                                handle_synthetic_turn_trace(agent_ref, request).await;
-                            }
-                        });
-                    }
-                }
-            });
-        }
     }
     /// Lightweight context for the `SubagentEvent::ValidateType` drain arm;
     /// tolerates evicted parent sessions (returns built-in defaults + warns).
@@ -509,7 +365,6 @@ impl MvpAgent {
         };
         let (gcs_upload_method, gcs_bucket_url) = match self.trace_upload_config_snapshot() {
             Some(method) => {
-                use crate::session::repo_changes::UploadMethod;
                 let bucket = match &method {
                     UploadMethod::Direct { .. } => self
                         .cfg
@@ -552,7 +407,6 @@ impl MvpAgent {
         };
         Some(crate::agent::subagent::SubagentSpawnContext {
             lsp: parent_lsp,
-            gateway: self.gateway.clone(),
             client_hooks: Default::default(),
             sampling_config: self.sampling_config.borrow().clone(),
             managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
@@ -565,7 +419,6 @@ impl MvpAgent {
                 .cloned()
                 .unwrap_or_else(|| acp::AuthMethodId::new("default")),
             model_id: parent_model_id,
-            storage_mode: self.storage_mode,
             auth: self.current_or_buffered_auth(),
             parent_cwd: parent_cwd.clone(),
             parent_session_id: parent_session_id.to_string(),
@@ -632,7 +485,6 @@ impl MvpAgent {
             agent_config: Some(self.cfg.borrow().clone()),
             gcs_upload_method,
             hook_registry: parent_hook_registry,
-            hook_workspace_root: String::new(),
             permission_handle: {
                 let sessions = self.sessions.borrow();
                 sessions
@@ -664,7 +516,7 @@ impl MvpAgent {
             },
             managed_mcp_state: self.managed_mcp_cache.clone(),
             parent_mcp_pool: None,
-            parent_tool_snapshot: None,
+            parent_tool_definitions: None,
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
             parent_compat: self.cfg.borrow().compat_resolved,
@@ -698,15 +550,6 @@ impl MvpAgent {
                     .map(|h| h.tool_context.goal_loop_active_gate.clone())
                     .unwrap_or_else(|| {
                         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
-                    })
-            },
-            parent_blocking_wait_depth: {
-                let sessions = self.sessions.borrow();
-                sessions
-                    .get(&parent_sid)
-                    .map(|h| h.tool_context.blocking_wait_depth.clone())
-                    .unwrap_or_else(|| {
-                        std::sync::Arc::new(crate::tools::tool_context::BlockingWaitState::new())
                     })
             },
             parent_terminal_backend: parent_terminal_backend.clone(),

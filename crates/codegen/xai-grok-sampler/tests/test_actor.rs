@@ -80,6 +80,8 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         api_backend: ApiBackend::ChatCompletions,
         auth_scheme: Default::default(),
         extra_headers: IndexMap::new(),
+        query_params: IndexMap::new(),
+        env_http_headers: IndexMap::new(),
         context_window: 128_000,
         force_http1: false,
         // Keep retries minimal so tests don't take forever.

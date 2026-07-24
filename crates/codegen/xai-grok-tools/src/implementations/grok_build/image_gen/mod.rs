@@ -58,6 +58,7 @@ pub struct ImageGenClient {
     /// [`XAI_IMAGINE_MODEL`]). `image_edit` uses its own model and is
     /// unaffected.
     model: String,
+    edit_model: String,
     writer: super::storage::SessionFileWriter,
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the
@@ -81,6 +82,7 @@ impl ImageGenClient {
             base_url,
             extra_headers,
             model_override,
+            edit_model_override,
             tier_restricted,
             ..
         } = config
@@ -93,6 +95,10 @@ impl ImageGenClient {
             .clone()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| XAI_IMAGINE_MODEL.to_owned());
+        let edit_model = edit_model_override
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| super::image_edit::XAI_IMAGINE_EDIT_MODEL.to_owned());
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -138,6 +144,7 @@ impl ImageGenClient {
             http,
             base_url: base_url.clone(),
             model,
+            edit_model,
             writer: super::storage::SessionFileWriter::new(DEFAULT_IMAGE_DIR, "jpg"),
             api_key_provider,
             attribution_callback: None,
@@ -181,6 +188,10 @@ impl ImageGenClient {
 
     pub(crate) fn writer(&self) -> &super::storage::SessionFileWriter {
         &self.writer
+    }
+
+    pub(crate) fn edit_model(&self) -> &str {
+        &self.edit_model
     }
 
     pub async fn generate(
@@ -277,6 +288,7 @@ pub enum ImageGenConfig {
         /// ([`XAI_IMAGINE_MODEL`]). Driven by the remote
         /// `image_gen_model_override` config flag. `image_edit` is unaffected.
         model_override: Option<String>,
+        edit_model_override: Option<String>,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The tools stay advertised to the model, but
         /// `image_gen` / `image_edit` short-circuit at call time with the
@@ -483,6 +495,7 @@ mod tests {
             image_gen_enabled: false,
             image_edit_enabled: true,
             model_override: Some("grok-imagine-image".into()),
+            edit_model_override: None,
             tier_restricted: false,
         };
         assert!(cfg.has_credentials());
@@ -502,6 +515,7 @@ mod tests {
             image_gen_enabled: true,
             image_edit_enabled: true,
             model_override: model_override.map(String::from),
+            edit_model_override: None,
             tier_restricted: false,
         };
         // No override → default quality model.
@@ -521,6 +535,33 @@ mod tests {
                 .model,
             "grok-imagine-image"
         );
+    }
+
+    #[test]
+    fn client_selects_edit_model_from_override() {
+        let mk = |edit_model_override: Option<&str>| ImageGenConfig::Enabled {
+            api_key: "k".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: edit_model_override.map(String::from),
+            tier_restricted: false,
+        };
+        assert_eq!(
+            ImageGenClient::new(&mk(None), None).unwrap().edit_model(),
+            super::super::image_edit::XAI_IMAGINE_EDIT_MODEL
+        );
+        assert_eq!(
+            ImageGenClient::new(&mk(Some("  ")), None)
+                .unwrap()
+                .edit_model(),
+            super::super::image_edit::XAI_IMAGINE_EDIT_MODEL
+        );
+        let client = ImageGenClient::new(&mk(Some("grok-imagine-image-v2")), None).unwrap();
+        assert_eq!(client.edit_model(), "grok-imagine-image-v2");
+        assert_eq!(client.model, XAI_IMAGINE_MODEL);
     }
 
     #[tokio::test]
@@ -558,6 +599,7 @@ mod tests {
             image_gen_enabled: true,
             image_edit_enabled: true,
             model_override: None,
+            edit_model_override: None,
             tier_restricted: true,
         };
         let mut resources = crate::types::resources::Resources::new();

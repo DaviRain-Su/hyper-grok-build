@@ -1222,6 +1222,13 @@ pub struct SamplingConfig {
     /// Extra headers to send with requests (e.g., for BYOK scenarios).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub extra_headers: indexmap::IndexMap<String, String>,
+    /// Query parameters folded into every request URL (percent-encoded).
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub query_params: indexmap::IndexMap<String, String>,
+    /// Header name to environment variable; only the mapping persists, not the
+    /// resolved secret.
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub env_http_headers: indexmap::IndexMap<String, String>,
     /// Total context window size in tokens. Used for auto-compact thresholds.
     pub context_window: NonZeroU64,
     /// Reasoning effort level for reasoning models.

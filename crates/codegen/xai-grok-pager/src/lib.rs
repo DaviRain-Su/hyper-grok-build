@@ -54,6 +54,7 @@ pub mod share_cmd;
 pub mod slash;
 pub mod startup;
 pub mod tips;
+pub mod tutorial_docs;
 pub mod wrap_clipboard_image;
 pub mod wrap_cmd;
 pub(crate) mod wrap_filter;

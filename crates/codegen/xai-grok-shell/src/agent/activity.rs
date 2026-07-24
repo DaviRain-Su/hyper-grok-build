@@ -73,7 +73,7 @@ struct ActivityInner {
     /// (see module docs), and are purged whenever the list is locked.
     sessions: Mutex<Vec<SessionActivityEntry>>,
     /// Subagents currently initializing or running; kept in sync by
-    /// `SubagentCoordinator::sync_running_gauge`.
+    /// the shared coordinator's `running_count_changed` callback.
     subagents: Arc<AtomicUsize>,
 }
 
@@ -95,8 +95,8 @@ impl AgentActivity {
         });
     }
 
-    /// Shared gauge of initializing + running subagents; handed to the
-    /// `SubagentCoordinator`, which recomputes it on every state change.
+    /// Shared gauge of initializing + running subagents; updated from the
+    /// shared coordinator's lifecycle callback.
     pub(crate) fn subagent_gauge(&self) -> Arc<AtomicUsize> {
         self.inner.subagents.clone()
     }

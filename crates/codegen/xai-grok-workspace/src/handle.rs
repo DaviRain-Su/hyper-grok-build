@@ -5356,6 +5356,7 @@ pub(crate) mod tests {
             foreground_block_budget: None,
             kind: xai_grok_tools::computer::types::TaskKind::Bash,
             owner_session_id: None,
+            description: None,
         }
     }
     /// Start a `sleep 30` background task on `session`'s owned backend and

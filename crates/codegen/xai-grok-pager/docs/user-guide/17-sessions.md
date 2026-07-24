@@ -82,13 +82,15 @@ To switch between, rename, or close the sessions that are currently active (the 
 
 ### From the Command Line
 
-Resume a specific session by ID:
+Resume a specific session by ID or title:
 
 ```bash
-grok --resume <session-id>
+grok --resume <session-id-or-title>
 ```
 
-Run `grok --resume` without an ID to resume the most recent session for the current directory.
+A value that is not a session ID is matched against session titles for the current directory, ignoring letter case (a simple lowercase comparison) — handy after `/rename`. If several sessions share the title, a single manually renamed session wins over auto-generated duplicates; otherwise the command errors and lists the matching IDs. UUID-shaped values are always treated as session IDs, never titles. Scripts should prefer IDs.
+
+Run `grok --resume` without a value to resume the most recent session for the current directory.
 
 ### From the Welcome Screen
 
@@ -187,14 +189,14 @@ In headless mode, you manage sessions through command-line flags:
 # New session each time (default)
 grok -p "Hello"
 
-# Resume an existing session by ID (errors if it does not exist)
-grok -p "Continue where we left off" -r <session-id>
+# Resume an existing session by ID or title (errors if it does not exist)
+grok -p "Continue where we left off" -r <session-id-or-title>
 
 # Continue the most recent session in the current directory
 grok -p "What were we doing?" -c
 ```
 
-In headless mode, resume an existing session with `-r`/`--resume`, which errors if the session does not exist, or continue the most recent session in the current directory with `-c`/`--continue`. Pass the session ID from JSON output (see below) to `-r`.
+In headless mode, resume an existing session with `-r`/`--resume`, which errors if the session does not exist, or continue the most recent session in the current directory with `-c`/`--continue`. A non-ID value is matched against session titles for the current directory, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path) — scripts should pass the session ID from JSON output (see below) to `-r`.
 
 Use `-s`/`--session-id` only to **create** a new session with a **UUID** (errors if the value is not a UUID, or if that ID already has a session under the target session directory). It does **not** resume an existing session — that was the old hidden upsert behavior; use `-r`/`-c` instead. Combine `-s` with `-r`/`-c` only when also passing `--fork-session` (forks history into a new ID; optional `-s` names the child UUID). This matches Claude Code’s anti-overwrite model (client preflight under the write cwd; sequential use is reliable, concurrent same-ID is best-effort).
 

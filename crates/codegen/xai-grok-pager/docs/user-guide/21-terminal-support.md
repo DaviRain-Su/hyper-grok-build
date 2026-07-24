@@ -23,6 +23,28 @@ that appear only as silence during capture.
 `/terminal-setup`, `/terminal-check`, and `/terminal-info` remain aliases for
 `/doctor`.
 
+When Doctor finds an explicit unhealthy tmux setting, `/doctor fix` lists the
+available automatic fixes. Apply one named fix at a time, for example
+`/doctor fix tmux-clipboard` or `grok doctor fix dcs-passthrough --yes`.
+Doctor can persist these three tmux options:
+
+- `terminal.tmux-clipboard` — `set -g set-clipboard on`
+- `terminal.dcs-passthrough` — `set -wg allow-passthrough on`
+- `terminal.tmux-extended-keys` — `set -g extended-keys on`
+
+A tmux fix edits only the persistent config on the computer hosting the affected
+tmux server, including remote sessions. Plain tmux uses the real
+`$HOME/.tmux.conf`; Byobu-tmux uses its effective `BYOBU_CONFIG_DIR` and refuses
+to guess if that directory is unavailable or unsafe. Grok preserves the file's
+line endings and mode, makes a backup when changing an existing file, and
+refuses conflicting or ambiguous direct assignments.
+
+Grok deliberately does **not** run `tmux source-file` or change the live tmux
+server. Reload with the exact command shown after apply, or detach and reattach,
+then run `/doctor` again. Until reload, the live finding is expected to remain.
+The conservative config scan checks direct global assignments only; review
+sourced files, conditionals, plugins, and generated tmux setup yourself.
+
 ---
 
 ## Detected Terminals

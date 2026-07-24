@@ -46,13 +46,15 @@ use xai_grok_shell::leader::{
 };
 use xai_grok_update::{UpdateConfig, auto_update};
 
-/// Community builds skip the upstream min-version gate (it talks to x.ai).
-async fn enforce_minimum_version_or_exit(config: &UpdateConfig) {
+/// Community builds skip the upstream version-policy gate (fork releases
+/// follow their own cadence; the required-range check is for official builds).
+fn enforce_version_policy_or_exit_community() {
     if cfg!(feature = "community-build") {
         return;
     }
-    xai_grok_update::enforce_minimum_version_or_exit(config).await;
+    xai_grok_update::enforce_version_policy_or_exit();
 }
+
 /// Apply headless args to an existing config, only overriding values that are
 /// explicitly set. This allows environment defaults to be preserved when
 /// specific args are not provided.
@@ -1791,6 +1793,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
         return xai_grok_pager::wrap_cmd::run(wrap_args);
     }
+    args.pin_local_resume_target()?;
     let saved_profile = args.saved_resume_profile();
     let sandbox_profile_arg = match args.startup_sandbox_profile(saved_profile.as_deref()) {
         xai_grok_pager::app::cli::SandboxStartup::Apply(profile) => profile,
@@ -1857,7 +1860,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                          Use `grok-pager agent {flag}` instead."
                     );
                 }
-                enforce_minimum_version_or_exit(&update_config).await;
+                enforce_version_policy_or_exit_community();
                 return run_agent_command(
                     agent_args,
                     args.permission_mode_flag.clone(),
@@ -2051,7 +2054,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
         let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-        enforce_minimum_version_or_exit(&update_config).await;
+        enforce_version_policy_or_exit_community();
         let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
             args.yolo,
             args.permission_mode_flag.as_deref(),
@@ -2076,6 +2079,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             xai_grok_pager::headless::HeadlessOptions {
                 session_id: args.session_id.clone(),
                 resume: args.resume_session.or(args.load_session),
+                resume_title_pinned: args.resume_target_pinned,
                 cwd: args.cwd,
                 yolo: launch_yolo.yolo,
                 trust: args.trust,
@@ -2106,7 +2110,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
         )
         .await;
     }
-    enforce_minimum_version_or_exit(&update_config).await;
+    enforce_version_policy_or_exit_community();
     let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =

@@ -216,13 +216,6 @@ pub(crate) fn current_doctor_target(
         _ => None,
     }
 }
-pub(crate) fn doctor_target_is_current(app: &AppView, target: &DoctorFixTarget) -> bool {
-    app.agents.get(&target.agent_id).is_some_and(|agent| {
-        agent.session.session_id == target.session_id
-            && agent.session_binding_epoch == target.session_binding_epoch
-            && agent.session.cwd == target.cwd
-    })
-}
 pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, message: String) {
     let destination = app
         .agents
@@ -632,81 +625,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DoctorFixApplied {
-            target,
-            shell,
-            result,
-        } => {
+        TaskResult::DoctorFixApplied { target, result } => {
             let message = match result {
-                Ok(outcome) => {
-                    let report_agent = doctor_target_is_current(app, &target)
-                        .then_some(target.agent_id)
-                        .or_else(|| match app.active_view {
-                            ActiveView::Agent(id) if app.agents.contains_key(&id) => Some(id),
-                            _ => app.agents.keys().next().copied(),
-                        });
-                    let Some(report_agent) = report_agent else {
-                        let message = match outcome.status {
-                            crate::diagnostics::FixStatus::Applied => {
-                                format!(
-                                    "Set up SSH wrapping in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                            crate::diagnostics::FixStatus::AlreadyConfigured => {
-                                format!(
-                                    "SSH wrapping is already set up in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                        };
-                        deliver_doctor_message(app, target.agent_id, message);
-                        return vec![];
-                    };
-                    let Some(mut report) =
-                        super::prompt::collect_live_doctor_report(app, report_agent)
-                    else {
-                        unreachable!("report destination came from app.agents")
-                    };
-                    report = crate::diagnostics::configured_report(
-                        report,
-                        crate::diagnostics::managed_alias_configured(&outcome.changed_path, shell),
-                    );
-                    if report
-                        .findings
-                        .iter()
-                        .any(|finding| finding.id == outcome.id)
-                    {
-                        format!(
-                            "The change was applied, but Doctor still reports `{}`.",
-                            outcome.id
-                        )
-                    } else {
-                        let status = match outcome.status {
-                            crate::diagnostics::FixStatus::Applied => {
-                                format!(
-                                    "Set up SSH wrapping in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                            crate::diagnostics::FixStatus::AlreadyConfigured => {
-                                format!(
-                                    "SSH wrapping is already set up in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                        };
-                        let backup = outcome
-                            .backup_path
-                            .as_ref()
-                            .map(|path| format!("\nBackup: {}", path.display()))
-                            .unwrap_or_default();
-                        format!(
-                            "{status}{backup}\nStart a new shell to use the alias.\n\n{}",
-                            crate::diagnostics::format_doctor(&report)
-                        )
-                    }
-                }
+                Ok(outcome) => crate::diagnostics::format_fix_success(&outcome),
                 Err(error) if error.starts_with("Could not apply the fix:") => error,
                 Err(error) => format!("Could not apply the fix: {error}"),
             };

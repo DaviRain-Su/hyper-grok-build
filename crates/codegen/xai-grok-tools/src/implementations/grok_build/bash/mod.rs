@@ -2037,6 +2037,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
+                description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             };
 
             let handle = match backend.run_background(request).await {
@@ -2072,7 +2073,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 output_file: bg_output_file.clone(),
                 task_id: task_id.clone(),
                 monitor_description: None,
-                description: Some(input.description.clone()),
+                description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             });
 
             let retrieval_hint = Self::background_retrieval_hint(&resources, &task_id).await?;
@@ -2133,6 +2134,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
+                description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
             };
 
             let result = match backend.run(request).await {
@@ -2166,7 +2168,7 @@ impl xai_tool_runtime::Tool for BashTool {
                     output_file: output_file.clone(),
                     task_id: tool_call_id.as_str().to_owned(),
                     monitor_description: None,
-                    description: Some(input.description.clone()),
+                    description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
                 });
 
                 let retrieval_hint =
@@ -2233,7 +2235,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 truncated: result.truncated,
                 signal: result.signal,
                 timed_out: result.timed_out,
-                description: Some(input.description),
+                description: Some(input.description).filter(|d| !d.trim().is_empty()),
                 current_dir: cwd.to_string_lossy().to_string(),
                 output_file: output_file.to_string_lossy().to_string(),
                 total_bytes: result.total_bytes,

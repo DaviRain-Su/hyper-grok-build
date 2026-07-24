@@ -2,6 +2,7 @@ pub mod handle;
 pub mod types;
 
 pub use handle::AcknowledgedToolNotification;
+pub use handle::CappedToolNotificationReceiver;
 pub use handle::DurableNotificationTargets;
 pub use handle::NotificationAcknowledgementBatch;
 pub use handle::NotificationAcknowledgementError;

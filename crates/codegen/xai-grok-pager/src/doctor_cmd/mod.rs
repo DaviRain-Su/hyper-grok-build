@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::diagnostics::{DiagnosticReport, FixPlan, FixStatus, ShellKind};
+use crate::diagnostics::{DiagnosticReport, FixActivation, FixPlan, ShellKind};
 
 mod human;
 mod json;
@@ -28,7 +28,7 @@ pub enum DoctorCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq, clap::Args)]
 pub struct FixArgs {
-    /// Fix to apply. Use `ssh-wrap` or `terminal.ssh-wrap`. Omit it to list available automatic fixes.
+    /// Named fix to apply. Omit it to list available automatic fixes.
     pub id: Option<String>,
     /// Apply the displayed changes without confirmation.
     #[arg(long, requires = "id")]
@@ -106,11 +106,13 @@ fn run_fix(
     writer: &mut impl Write,
 ) -> Result<()> {
     let terminal = crate::terminal::standalone_terminal_context();
-    let report = configured_report_for_terminal(
-        collect_report_with(crate::diagnostics::probes::collect_standalone(&terminal)),
-        &terminal,
-    );
     let Some(value) = args.id.as_deref() else {
+        let report = configured_report_for_terminal(
+            collect_report_with(crate::diagnostics::probes::collect_standalone_fix(
+                &terminal, None,
+            )),
+            &terminal,
+        );
         write!(
             writer,
             "{}",
@@ -119,6 +121,13 @@ fn run_fix(
         return Ok(());
     };
     let id = crate::diagnostics::resolve_fix_id(value)?;
+    let report = configured_report_for_terminal(
+        collect_report_with(crate::diagnostics::probes::collect_standalone_fix(
+            &terminal,
+            Some(id),
+        )),
+        &terminal,
+    );
     let request = crate::diagnostics::FixRequest::from_environment(id)?;
     let plan = crate::diagnostics::plan_fix(request, &report, &terminal)?;
     apply_fix_plan(args, stdin_is_terminal, input, writer, &terminal, plan)
@@ -150,39 +159,36 @@ fn apply_fix_plan(
         }
     }
 
-    let shell = plan.shell;
     let outcome = crate::diagnostics::apply_fix(plan)?;
-    let post_report = crate::diagnostics::configured_report(
-        collect_report_with(crate::diagnostics::probes::collect_standalone(terminal)),
-        crate::diagnostics::managed_alias_configured(&outcome.changed_path, shell),
-    );
-    if post_report
-        .findings
-        .iter()
-        .any(|finding| finding.id == outcome.id)
-    {
+    if outcome.activation() == FixActivation::SatisfiedNow {
+        // Use the shell stored on the outcome (from planning), not `$SHELL`.
+        // `$SHELL` may be missing or no longer match the shell the plan targeted.
+        let post_report = crate::diagnostics::configured_report(
+            collect_report_with(crate::diagnostics::probes::collect_standalone(terminal)),
+            outcome.managed_alias_is_configured(),
+        );
+        if post_report
+            .findings
+            .iter()
+            .any(|finding| finding.id == outcome.id())
+        {
+            anyhow::bail!(
+                "The change was applied, but Doctor still reports `{}`.",
+                outcome.id()
+            );
+        }
+    } else if !crate::diagnostics::verify_persistent_fix(&outcome) {
         anyhow::bail!(
-            "The change was applied, but Doctor still reports `{}`.",
-            outcome.id
+            "The change was applied, but Doctor could not verify `{}` in persistent configuration.",
+            outcome.id()
         );
     }
 
-    match outcome.status {
-        FixStatus::Applied => writeln!(
-            writer,
-            "\nSet up SSH wrapping in {}.",
-            outcome.changed_path.display()
-        )?,
-        FixStatus::AlreadyConfigured => writeln!(
-            writer,
-            "\nSSH wrapping is already set up in {}.",
-            outcome.changed_path.display()
-        )?,
-    }
-    if let Some(backup) = outcome.backup_path {
-        writeln!(writer, "Backup: {}", backup.display())?;
-    }
-    writeln!(writer, "Start a new shell to use the alias.")?;
+    writeln!(
+        writer,
+        "\n{}",
+        crate::diagnostics::format_fix_success(&outcome)
+    )?;
     Ok(())
 }
 

@@ -222,7 +222,83 @@ fn findings_have_stable_semantic_ids_and_dispositions() {
         ssh_wrap.automatic_remediation,
         Some(crate::diagnostics::ssh_wrap_automatic_remediation())
     );
-    assert!(report.findings[0].automatic_remediation.is_none());
+    assert_eq!(
+        report.findings[0].automatic_remediation,
+        crate::diagnostics::automatic_remediation_for(DiagnosticId::new(
+            "terminal",
+            "tmux-clipboard"
+        ))
+    );
+}
+
+#[test]
+fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_changes() {
+    let mut terminal = TerminalContext {
+        brand: TerminalName::Iterm2,
+        env_brand: TerminalName::Iterm2,
+        multiplexer: MultiplexerKind::Tmux,
+        tmux_version: Some("tmux 3.4".to_owned()),
+        tmux_extended_keys: Some("off".to_owned()),
+        ..Default::default()
+    };
+    let report = view(snapshot(
+        &terminal,
+        TmuxProbeFacts {
+            version: TmuxProbeResult::Available("tmux 3.4".to_owned()),
+            extended_keys: TmuxProbeResult::Available("off".to_owned()),
+            set_clipboard: TmuxProbeResult::Available("off".to_owned()),
+            allow_passthrough_support: TmuxProbeResult::Available(()),
+            allow_passthrough: TmuxProbeResult::Available("off".to_owned()),
+            control_mode: TmuxProbeResult::Available(false),
+        },
+        available_runtime(),
+        false,
+    ));
+
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter_map(|finding| finding.automatic_remediation)
+            .map(|automatic| (automatic.fix_id, automatic.command))
+            .collect::<Vec<_>>(),
+        [
+            (
+                crate::diagnostics::TMUX_CLIPBOARD_ID,
+                "grok doctor fix terminal.tmux-clipboard",
+            ),
+            (
+                crate::diagnostics::DCS_PASSTHROUGH_ID,
+                "grok doctor fix terminal.dcs-passthrough",
+            ),
+            (
+                crate::diagnostics::TMUX_EXTENDED_KEYS_ID,
+                "grok doctor fix terminal.tmux-extended-keys",
+            ),
+        ]
+    );
+
+    terminal.tmux_extended_keys = Some("on".to_owned());
+    let healthy = view(snapshot(
+        &terminal,
+        TmuxProbeFacts {
+            version: TmuxProbeResult::Available("tmux 3.4".to_owned()),
+            extended_keys: TmuxProbeResult::Available("on".to_owned()),
+            set_clipboard: TmuxProbeResult::Available("external".to_owned()),
+            allow_passthrough_support: TmuxProbeResult::Available(()),
+            allow_passthrough: TmuxProbeResult::Available("all".to_owned()),
+            control_mode: TmuxProbeResult::Available(false),
+        },
+        available_runtime(),
+        false,
+    ));
+    for id in [
+        crate::diagnostics::TMUX_CLIPBOARD_ID,
+        crate::diagnostics::DCS_PASSTHROUGH_ID,
+        crate::diagnostics::TMUX_EXTENDED_KEYS_ID,
+    ] {
+        assert!(healthy.findings.iter().all(|finding| finding.id != id));
+    }
 }
 
 #[test]

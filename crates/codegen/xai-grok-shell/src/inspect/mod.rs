@@ -520,7 +520,7 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
     // have this limitation; rules need the same treatment in a follow-up.
     let extra_rule_prefixes: Vec<std::path::PathBuf> = extra_rule_dirs
         .iter()
-        .map(|d| crate::claude_import::expand_home(d))
+        .map(|d| crate::util::expand_home(d))
         .collect();
 
     configs

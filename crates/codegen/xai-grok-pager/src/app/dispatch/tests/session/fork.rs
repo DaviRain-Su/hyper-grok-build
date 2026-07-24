@@ -551,6 +551,64 @@ fn dispatch_fork_sets_forked_from_on_new_agent() {
     assert_eq!(new_agent.session.forked_from, Some(AgentId(0)));
 }
 
+/// GBT-4789 — dashboard attach follows the forked child.
+#[test]
+fn dispatch_fork_repoints_dashboard_attached_agent_to_child() {
+    let mut app = fork_test_app();
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+
+    dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
+
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(1)),
+        "fork must switch active view to the child"
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        Some(AgentId(1)),
+        "attached_agent must re-point to the forked child so overlay \
+         back-out (Left/Esc/Ctrl+\\) keeps working",
+    );
+}
+
+/// Fork must not invent dashboard attach when none was set.
+#[test]
+fn dispatch_fork_without_dashboard_attach_leaves_attached_none() {
+    let mut app = fork_test_app();
+    ensure_dashboard_state(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().attached_agent.is_none());
+
+    dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
+
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        None,
+        "fork must not enable overlay chrome when the parent was not attached",
+    );
+}
+
+#[test]
+fn dispatch_fork_keeps_stale_attach_on_other_agent() {
+    let mut app = fork_test_app();
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.next_agent_id = 2;
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(1));
+
+    dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
+
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(2)),
+        "fork must switch active view to the child"
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        Some(AgentId(1)),
+        "attach on a different agent must not be re-pointed to the fork child",
+    );
+}
+
 #[test]
 fn dispatch_fork_pushes_parent_marker_with_directive() {
     let mut app = fork_test_app();

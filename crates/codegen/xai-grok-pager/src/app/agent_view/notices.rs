@@ -97,6 +97,7 @@ impl AgentView {
     pub(crate) fn ephemeral_tip_needs_tick(&self) -> bool {
         self.ephemeral_tip.is_active()
             && !self.session_banner_active
+            && !self.privacy_banner.active
             && (!self.ephemeral_tip.active_is_ambient() || self.ephemeral_tip_can_render())
     }
 
@@ -152,6 +153,9 @@ impl AgentView {
         let occluded = !self.permission_queue.is_empty()
             || self.question_view.is_some()
             || self.active_modal.is_some()
+            // Privacy upsell banner owns the slot until acted on — a
+            // session-long occluder like the session announcement banner.
+            || self.privacy_banner.active
             // Subagent fullscreen takeover: draw early-returns into
             // draw_subagent_fullscreen and never paints the parent banner.
             || self.active_subagent.is_some()

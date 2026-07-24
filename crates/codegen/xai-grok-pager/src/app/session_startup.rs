@@ -360,6 +360,10 @@ pub enum MaterializedStartup {
         session_id: String,
         original_cwd: Option<PathBuf>,
         title: Option<String>,
+        /// The target missed local id/title resolution and was deferred to
+        /// the worktree resume handler; worktree failure messages append the
+        /// no-match hint only for this outcome (never inferred from shape).
+        deferred_local_miss: bool,
     },
     /// Fork from a resolved parent, then load the child.
     Fork {
@@ -368,6 +372,19 @@ pub enum MaterializedStartup {
         parent_title: Option<String>,
         new_session_id: Option<String>,
     },
+}
+/// Whether materialization may resolve a non-id resume arg by title locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleResolution {
+    /// No pre-sandbox pin ran (direct callers, tests): materialization owns
+    /// title selection.
+    Allowed,
+    /// The composition root already pinned — or definitively missed — the
+    /// target before the irreversible OS sandbox. Re-selecting by title here
+    /// would race a concurrent rename/create and resume a session whose
+    /// persisted profile was never checked; a pinned id that vanished must
+    /// also never be reinterpreted as a title.
+    PinnedPreSandbox,
 }
 /// Context for [`materialize_startup`] (interactive vs headless share this).
 #[derive(Debug, Clone, Copy)]
@@ -381,6 +398,8 @@ pub struct MaterializeCtx {
     /// the local disk store. Always `false` without the optional feature;
     /// setting it anyway errors rather than silently falling back to disk.
     pub chat_mode: bool,
+    /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
+    pub title_resolution: TitleResolution,
 }
 impl MaterializeCtx {
     /// `--resume` miss bails fast.
@@ -392,6 +411,11 @@ impl MaterializeCtx {
             has_worktree: args.worktree.is_some(),
             allow_remote_restore: Self::default_allow_remote_restore(),
             chat_mode: args.chat(),
+            title_resolution: if args.resume_target_pinned {
+                TitleResolution::PinnedPreSandbox
+            } else {
+                TitleResolution::Allowed
+            },
         }
     }
 }
@@ -493,6 +517,7 @@ pub async fn materialize_startup_for_cwd(
                 session_id: id,
                 original_cwd: None,
                 title,
+                deferred_local_miss: false,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -523,6 +548,7 @@ pub async fn materialize_startup_for_cwd(
                     session_id,
                     original_cwd: None,
                     title: None,
+                    deferred_local_miss: false,
                 });
             }
             let r = resolve_existing_session(ctx, &session_id, cwd).await?;
@@ -530,6 +556,7 @@ pub async fn materialize_startup_for_cwd(
                 session_id: r.id,
                 original_cwd: r.original_cwd,
                 title: r.title,
+                deferred_local_miss: r.deferred_local_miss,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -566,6 +593,9 @@ struct ResolvedExisting {
     id: String,
     original_cwd: Option<PathBuf>,
     title: Option<String>,
+    /// True only for the worktree-defer arm: the target missed local
+    /// id/title resolution.
+    deferred_local_miss: bool,
 }
 /// Resolve an existing session for strict resume (local / any-cwd / remote / worktree defer).
 async fn resolve_existing_session(
@@ -579,6 +609,7 @@ async fn resolve_existing_session(
             id: local_id,
             original_cwd: None,
             title: None,
+            deferred_local_miss: false,
         });
     }
     if let Some(original_cwd) = xai_grok_shell::session::resolve_local_session_any_cwd(session_id) {
@@ -595,7 +626,15 @@ async fn resolve_existing_session(
             id: session_id.to_string(),
             original_cwd: Some(PathBuf::from(original_cwd)),
             title: None,
+            deferred_local_miss: false,
         });
+    }
+    let arg_is_uuid = super::session_title_resolve::is_uuid_shaped(session_id);
+    if !arg_is_uuid
+        && ctx.title_resolution == TitleResolution::Allowed
+        && let Some(resolved) = resolve_session_by_title(session_id, cwd).await?
+    {
+        return Ok(resolved);
     }
     if ctx.has_worktree {
         tracing::info!(
@@ -603,18 +642,42 @@ async fn resolve_existing_session(
             "Session not found locally; deferring restore to worktree resume handler"
         );
         eprintln!(
-            "Session {} not found locally; it will be restored into the new worktree.",
+            "Session {:?} not found locally; it will be restored into the new worktree.",
             session_id
         );
         return Ok(ResolvedExisting {
             id: session_id.to_string(),
             original_cwd: None,
             title: None,
+            deferred_local_miss: !arg_is_uuid,
         });
     }
     if !ctx.allow_remote_restore {
+        if !arg_is_uuid {
+            anyhow::bail!(
+                "Session does not exist: {}",
+                super::session_title_resolve::title_miss_hint(session_id)
+            );
+        }
         anyhow::bail!("Session does not exist");
     }
+    let restored = restore_session_from_remote(session_id, cwd).await;
+    if arg_is_uuid {
+        return restored;
+    }
+    restored.map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#}; {}",
+            super::session_title_resolve::title_miss_hint(session_id)
+        )
+    })
+}
+/// Remote-restore tail of [`resolve_existing_session`], split out so non-id
+/// targets can wrap every failure with the title-miss hint.
+async fn restore_session_from_remote(
+    session_id: &str,
+    cwd: &str,
+) -> anyhow::Result<ResolvedExisting> {
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     if let Some((false, source)) =
@@ -626,7 +689,7 @@ async fn resolve_existing_session(
         );
     }
     eprintln!(
-        "Session {} not found locally, restoring from remote...",
+        "Session {:?} not found locally, restoring from remote...",
         session_id
     );
     let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config)
@@ -683,7 +746,32 @@ async fn resolve_existing_session(
         id: effective_id,
         original_cwd: None,
         title: None,
+        deferred_local_miss: false,
     })
+}
+/// Resolve a non-id resume arg as a session title among local sessions for `cwd`.
+///
+/// Matching/disambiguation rules live in [`super::session_title_resolve`]
+/// (shared with the pre-sandbox saved-profile peek); this adds the cwd-scoped
+/// listing and the resolved-id announcement. The arg is matched in memory and
+/// never used as a filesystem path.
+async fn resolve_session_by_title(
+    arg: &str,
+    cwd: &str,
+) -> anyhow::Result<Option<ResolvedExisting>> {
+    let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
+    let Some(chosen) = super::session_title_resolve::select_by_title(arg, &summaries)? else {
+        return Ok(None);
+    };
+    let id = chosen.info.id.to_string();
+    tracing::info!(session_id = %id, "Session resolved by title");
+    eprintln!("Resuming session {} (matched by title)", id);
+    Ok(Some(ResolvedExisting {
+        id,
+        original_cwd: None,
+        title: chosen.display_title_opt(),
+        deferred_local_miss: false,
+    }))
 }
 #[cfg(test)]
 mod tests {
@@ -898,6 +986,7 @@ mod tests {
             has_worktree: false,
             allow_remote_restore: true,
             chat_mode: true,
+            title_resolution: TitleResolution::Allowed,
         }
     }
     #[test]
@@ -948,6 +1037,7 @@ mod tests {
                 session_id,
                 original_cwd,
                 title,
+                ..
             } => {
                 assert_eq!(session_id, "conv-e2f1");
                 assert!(original_cwd.is_none());
@@ -1005,6 +1095,7 @@ mod tests {
             has_worktree: false,
             allow_remote_restore: false,
             chat_mode: false,
+            title_resolution: TitleResolution::Allowed,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -1084,6 +1175,159 @@ mod tests {
                 );
             }
             other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+    mod resume_by_title {
+        use super::*;
+        use crate::test_util::GrokHomeFixture;
+        fn local_ctx() -> MaterializeCtx {
+            MaterializeCtx {
+                has_worktree: false,
+                allow_remote_restore: false,
+                chat_mode: false,
+                title_resolution: TitleResolution::Allowed,
+            }
+        }
+        async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {
+            materialize_startup_for_cwd(
+                local_ctx(),
+                SessionStartupIntent::Resume {
+                    session_id: Some(arg.into()),
+                    most_recent_for_cwd: false,
+                },
+                cwd,
+            )
+            .await
+        }
+        /// Also covers letter-case insensitivity: the query case differs from
+        /// the stored title.
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn title_fallback_resumes_single_match_case_insensitively() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            let id = "bbbbbbbb-1111-2222-3333-444444444444";
+            fx.write_summary(
+                &cwd_str,
+                id,
+                serde_json::json!({ "generated_title": "Fix Login Bug", "title_is_manual": true }),
+            );
+            fx.write_summary(
+                &cwd_str,
+                "bbbbbbbb-1111-2222-3333-555555555555",
+                serde_json::json!({ "generated_title": "Other Work" }),
+            );
+            match resume("fix login bug", &cwd_str).await.unwrap() {
+                MaterializedStartup::Resume {
+                    session_id,
+                    original_cwd,
+                    title,
+                    ..
+                } => {
+                    assert_eq!(session_id, id);
+                    assert!(original_cwd.is_none());
+                    assert_eq!(title.as_deref(), Some("Fix Login Bug"));
+                }
+                other => panic!("expected Resume, got {other:?}"),
+            }
+        }
+        /// Id resolution stays authoritative: when the arg is an on-disk
+        /// session id, the title fallback is never consulted even though
+        /// another session carries that exact title.
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn id_hit_beats_title_fallback() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            fx.write_summary(
+                &cwd_str,
+                "release-notes",
+                serde_json::json!({ "generated_title": "id-owner" }),
+            );
+            fx.write_summary(
+                &cwd_str,
+                "cccccccc-1111-2222-3333-444444444444",
+                serde_json::json!({ "generated_title": "release-notes", "title_is_manual": true }),
+            );
+            match resume("release-notes", &cwd_str).await.unwrap() {
+                MaterializedStartup::Resume {
+                    session_id, title, ..
+                } => {
+                    assert_eq!(session_id, "release-notes");
+                    assert!(title.is_none());
+                }
+                other => panic!("expected Resume, got {other:?}"),
+            }
+        }
+        /// Provenance for the worktree failure hint: only the defer arm (a
+        /// local id/title miss under `--worktree`) flags the target; a
+        /// resolved local id — even a legacy non-UUID one — never does.
+        #[serial_test::serial(GROK_HOME)]
+        #[tokio::test]
+        async fn worktree_defer_flags_local_miss_and_local_hit_does_not() {
+            let mut fx = GrokHomeFixture::new();
+            let cwd_str = fx.cwd_str();
+            fx.write_summary(&cwd_str, "release-notes", serde_json::json!({}));
+            let worktree_ctx = MaterializeCtx {
+                has_worktree: true,
+                ..local_ctx()
+            };
+            let resume_intent = |arg: &str| SessionStartupIntent::Resume {
+                session_id: Some(arg.into()),
+                most_recent_for_cwd: false,
+            };
+            let hit =
+                materialize_startup_for_cwd(worktree_ctx, resume_intent("release-notes"), &cwd_str)
+                    .await
+                    .unwrap();
+            match hit {
+                MaterializedStartup::Resume {
+                    session_id,
+                    deferred_local_miss,
+                    ..
+                } => {
+                    assert_eq!(session_id, "release-notes");
+                    assert!(!deferred_local_miss, "resolved id must not flag a miss");
+                }
+                other => panic!("expected Resume, got {other:?}"),
+            }
+            let miss = materialize_startup_for_cwd(
+                worktree_ctx,
+                resume_intent("no such target"),
+                &cwd_str,
+            )
+            .await
+            .unwrap();
+            match miss {
+                MaterializedStartup::Resume {
+                    session_id,
+                    deferred_local_miss,
+                    ..
+                } => {
+                    assert_eq!(session_id, "no such target");
+                    assert!(deferred_local_miss, "defer must flag the local miss");
+                }
+                other => panic!("expected Resume, got {other:?}"),
+            }
+            let uuid_miss = materialize_startup_for_cwd(
+                worktree_ctx,
+                resume_intent("99999999-9999-4999-8999-999999999999"),
+                &cwd_str,
+            )
+            .await
+            .unwrap();
+            match uuid_miss {
+                MaterializedStartup::Resume {
+                    deferred_local_miss,
+                    ..
+                } => {
+                    assert!(
+                        !deferred_local_miss,
+                        "UUID defer must not flag a title-capable miss"
+                    );
+                }
+                other => panic!("expected Resume, got {other:?}"),
+            }
         }
     }
 }

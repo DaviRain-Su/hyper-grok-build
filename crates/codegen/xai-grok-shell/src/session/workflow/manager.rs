@@ -457,6 +457,7 @@ impl WorkflowManager {
             .send(
                 xai_grok_tools::implementations::grok_build::task::types::SubagentEvent::Cancel(
                     xai_grok_tools::implementations::grok_build::task::types::SubagentCancelRequest {
+                        parent_session_id: Some(self.session_id.clone()),
                         target: xai_grok_tools::implementations::grok_build::task::types::SubagentCancelTarget::WorkflowRunId(
                             run_id.to_owned(),
                         ),
@@ -877,10 +878,11 @@ mod tests {
         let spawn_req = subagent_rx.recv().await.expect("respawned agent");
         use xai_grok_tools::implementations::grok_build::task::types::SubagentResult;
         if let SubagentEvent::Spawn(req) = spawn_req {
+            let id = req.id.clone();
             let _ = req.result_tx.send(SubagentResult {
                 success: true,
                 output: std::sync::Arc::from("resumed output"),
-                subagent_id: req.id.clone(),
+                subagent_id: id,
                 ..Default::default()
             });
         } else {
@@ -940,10 +942,11 @@ mod tests {
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("respawned agent") else {
             panic!("expected respawn event");
         };
+        let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("resumed output"),
-            subagent_id: req.id.clone(),
+            subagent_id: id,
             ..Default::default()
         });
         assert!(matches!(
@@ -974,10 +977,11 @@ mod tests {
         let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("first spawn") else {
             panic!("expected spawn event");
         };
+        let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("one"),
-            subagent_id: req.id.clone(),
+            subagent_id: id,
             ..Default::default()
         });
         assert!(matches!(
@@ -1085,10 +1089,11 @@ mod tests {
             xai_grok_tools::implementations::grok_build::task::types::ModelOverrideProvenance::Tool,
             "script model overrides are untrusted tool provenance"
         );
+        let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("slow but done"),
-            subagent_id: req.id.clone(),
+            subagent_id: id,
             ..Default::default()
         });
         let outcome = outcome_rx.await.unwrap();
@@ -1240,11 +1245,12 @@ mod tests {
         assert_eq!(retry.resume_from.as_deref(), Some(first_id.as_str()));
         assert!(retry.prompt.contains("did not satisfy the output contract"));
         assert_eq!(retry.runtime_overrides.output_token_budget, None);
+        let retry_id = retry.id.clone();
         let _ = retry.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("```json\n{\"ok\": true}\n```"),
-            subagent_id: retry.id.clone(),
-            child_session_id: retry.id.clone(),
+            subagent_id: retry_id.clone(),
+            child_session_id: retry_id,
             tokens_used: 50,
             output_tokens_used: 50,
             total_tokens_used: 50,
@@ -1291,11 +1297,12 @@ mod tests {
             panic!("expected spawn");
         };
         assert_eq!(req.runtime_overrides.output_token_budget, None);
+        let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("done"),
-            subagent_id: req.id.clone(),
-            child_session_id: req.id.clone(),
+            subagent_id: id.clone(),
+            child_session_id: id,
             output_tokens_used: 120,
             total_tokens_used: 120,
             ..Default::default()
@@ -1328,11 +1335,12 @@ mod tests {
             panic!("expected spawn");
         };
         assert_eq!(req.runtime_overrides.output_token_budget, None);
+        let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("done"),
-            subagent_id: req.id.clone(),
-            child_session_id: req.id.clone(),
+            subagent_id: id.clone(),
+            child_session_id: id,
             output_tokens_used: 1,
             ..Default::default()
         });
@@ -1402,9 +1410,10 @@ mod tests {
         let SubagentEvent::Spawn(req) = spawn_req else {
             panic!("expected spawn event");
         };
+        let id = req.id.clone();
         let _ = req.result_tx.send(SubagentResult {
             backgrounded: true,
-            subagent_id: req.id.clone(),
+            subagent_id: id,
             ..Default::default()
         });
         let outcome = outcome_rx.await.unwrap();

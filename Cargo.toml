@@ -160,7 +160,7 @@ http = "1"
 http-body-util = "0.1"
 humantime-serde = "1"
 ignore = "0.4"
-image = { version = "0.25.9", default-features = false }
+image = { version = "0.25.10", default-features = false }
 indexmap = { version = "2", features = ["serde"] }
 indicatif = "0.18"
 infer = "0.19.0"
@@ -273,6 +273,7 @@ walkdir = "2"
 webbrowser = { version = "1.0.4" }
 which = "8"
 whoami = "1.4"
+wildmatch = "2"
 windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"

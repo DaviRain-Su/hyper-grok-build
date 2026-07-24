@@ -24,7 +24,7 @@ Grok processes the prompt, runs any necessary tools, and prints the result to st
 | `-m, --model <MODEL>`   | Model to use (e.g., `grok-build`)              |
 | `-s, --session-id <ID>` | Create a **new** session with this **UUID** (errors if invalid UUID or already in use under the target session directory; does not resume — use `-r`/`-c`) |
 | `--fork-session`        | With `-r`/`-c`, fork into a new session ID instead of appending to the original |
-| `-r, --resume <ID>`     | Resume an existing session (errors if not found)      |
+| `-r, --resume <ID_OR_TITLE>` | Resume an existing session by ID, or by title for the current directory, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path; scripts should prefer IDs) |
 | `-c, --continue`        | Continue the most recent session in current directory  |
 | `--cwd <PATH>`          | Set working directory                                 |
 | `--output-format <FMT>` | Output format: `plain`, `json`, `streaming-json`      |
@@ -256,7 +256,7 @@ grok -p "hello" --session-id "$(uuidgen | tr '[:upper:]' '[:lower:]')" --output-
 
 ### Resume (`-r`)
 
-The `-r/--resume` flag resumes a specific session by ID. It errors if the session does not exist:
+The `-r/--resume` flag resumes a specific session by ID, or by title for the current directory when the value is not an ID, ignoring letter case (a sole manually renamed match wins among duplicates; remaining duplicates error with their IDs; UUID-shaped values always take the ID path — scripts should prefer IDs). It errors if the session does not exist:
 
 ```bash
 # Get the session ID from a previous JSON response

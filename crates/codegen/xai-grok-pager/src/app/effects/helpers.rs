@@ -260,6 +260,10 @@ pub(crate) struct SessionFlags {
     /// Active auth is API key (not OAuth/session). Drives rate-limit copy in
     /// `format_acp_error`. Default `false` (OAuth copy) for tests.
     pub is_api_key_auth: bool,
+    /// Startup resume target deferred to the worktree handler after missing
+    /// local id/title resolution. Worktree failure messages append the
+    /// no-match hint only when the failing target equals this value.
+    pub resume_local_miss: Option<String>,
 }
 impl SessionFlags {
     /// Resolve the agent profile name from the flags.
@@ -1115,6 +1119,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("language", "Enum", &value));
             };
             xai_grok_shell::util::config::set_language(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "voice_keybind_enabled" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("voice_keybind_enabled", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_voice_keybind_enabled(b)
                 .await
                 .map_err(|e| e.to_string())
         }

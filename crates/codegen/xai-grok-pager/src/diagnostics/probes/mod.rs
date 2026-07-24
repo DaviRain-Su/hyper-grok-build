@@ -138,6 +138,63 @@ pub fn collect_doctor_tui<'a>(
 /// Collect standalone evidence without running live tmux subprocesses; skipped
 /// tmux evidence is reported unavailable so a stuck server cannot block doctor.
 pub fn collect_standalone<'a>(terminal: &'a TerminalContext) -> StandaloneDiagnosticSnapshot<'a> {
+    collect_standalone_with_tmux(terminal, unavailable_tmux())
+}
+
+/// Collect bounded live tmux facts for explicit fix planning.
+pub fn collect_standalone_fix<'a>(
+    terminal: &'a TerminalContext,
+    id: Option<crate::diagnostics::DiagnosticId>,
+) -> StandaloneDiagnosticSnapshot<'a> {
+    collect_standalone_with_tmux(terminal, collect_tmux_fix(terminal, id, &LiveTmuxProbe))
+}
+
+fn collect_tmux_fix(
+    terminal: &TerminalContext,
+    id: Option<crate::diagnostics::DiagnosticId>,
+    tmux: &dyn TmuxOptionQuery,
+) -> TmuxProbeFacts {
+    if !terminal.is_tmux_backed() {
+        return unavailable_tmux();
+    }
+    let wants = |candidate| id.is_none() || id == Some(candidate);
+    let set_clipboard = if wants(crate::diagnostics::TMUX_CLIPBOARD_ID) {
+        tmux.show_option("set-clipboard")
+    } else {
+        TmuxProbeResult::Unavailable
+    };
+    let extended_keys = if wants(crate::diagnostics::TMUX_EXTENDED_KEYS_ID) {
+        tmux.show_option("extended-keys")
+    } else {
+        TmuxProbeResult::Unavailable
+    };
+    let (allow_passthrough_support, allow_passthrough) =
+        if wants(crate::diagnostics::DCS_PASSTHROUGH_ID) {
+            let support = tmux.option_support("allow-passthrough");
+            let value = match &support {
+                TmuxProbeResult::Available(()) => tmux.show_option("allow-passthrough"),
+                TmuxProbeResult::Unsupported => TmuxProbeResult::Unsupported,
+                TmuxProbeResult::Unavailable => TmuxProbeResult::Unavailable,
+                TmuxProbeResult::Error(error) => TmuxProbeResult::Error(error.clone()),
+            };
+            (support, value)
+        } else {
+            (TmuxProbeResult::Unavailable, TmuxProbeResult::Unavailable)
+        };
+    TmuxProbeFacts {
+        version: TmuxProbeResult::Unavailable,
+        extended_keys,
+        set_clipboard,
+        allow_passthrough_support,
+        allow_passthrough,
+        control_mode: TmuxProbeResult::Unavailable,
+    }
+}
+
+fn collect_standalone_with_tmux<'a>(
+    terminal: &'a TerminalContext,
+    tmux: TmuxProbeFacts,
+) -> StandaloneDiagnosticSnapshot<'a> {
     let host_os = crate::host::HostOs::current();
     let display_server = crate::host::DisplayServer::current();
     let is_wayland = display_server == crate::host::DisplayServer::Wayland;
@@ -146,7 +203,7 @@ pub fn collect_standalone<'a>(terminal: &'a TerminalContext) -> StandaloneDiagno
     let container_no_display = xai_grok_shell::util::clipboard::is_containerized_without_display();
     collect_standalone_from(
         terminal,
-        unavailable_tmux(),
+        tmux,
         WaylandProbeFacts {
             is_wayland,
             data_control,
@@ -292,7 +349,7 @@ fn collect_tmux(
             .tmux_extended_keys
             .clone()
             .map(TmuxProbeResult::Available)
-            .unwrap_or(TmuxProbeResult::Unavailable),
+            .unwrap_or_else(|| tmux.show_option("extended-keys")),
         set_clipboard: tmux.show_option("set-clipboard"),
         allow_passthrough_support,
         allow_passthrough,
@@ -387,7 +444,11 @@ mod tests {
         );
         assert_eq!(
             fake.calls.into_inner(),
-            ["support:allow-passthrough", "set-clipboard"]
+            [
+                "support:allow-passthrough",
+                "extended-keys",
+                "set-clipboard"
+            ]
         );
     }
 
@@ -406,7 +467,12 @@ mod tests {
         assert_eq!(snapshot.tmux.control_mode, TmuxProbeResult::Available(true));
         assert_eq!(
             fake.calls.into_inner(),
-            ["support:allow-passthrough", "set-clipboard", "control-mode"]
+            [
+                "support:allow-passthrough",
+                "extended-keys",
+                "set-clipboard",
+                "control-mode",
+            ]
         );
     }
 

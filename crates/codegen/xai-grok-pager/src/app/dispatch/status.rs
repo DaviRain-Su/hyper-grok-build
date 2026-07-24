@@ -575,6 +575,23 @@ pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<E
     vec![]
 }
 
+/// Open the onboarding tutorial overlay (top-level modal — works over both
+/// the welcome screen and an agent session). Toggles: dispatching while
+/// open closes instead of stacking.
+pub(super) fn dispatch_open_tutorial(app: &mut AppView) -> Vec<Effect> {
+    // Minimal mode has no modal host: the overlay would render nothing
+    // while the app-level intercept swallowed all input.
+    if app.screen_mode.is_minimal() {
+        return vec![];
+    }
+    if app.tutorial.is_some() {
+        app.tutorial = None;
+        return vec![];
+    }
+    app.tutorial = Some(crate::views::tutorial::TutorialState::new());
+    vec![]
+}
+
 pub(super) fn dispatch_show_release_notes(
     app: &mut AppView,
     title: String,

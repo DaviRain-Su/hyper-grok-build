@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::stream;
 use serde_json::{Value, json};
@@ -246,7 +246,8 @@ struct StorageState {
 }
 
 /// Mock `/v1/chat/completions` + `/v1/responses` + `/v1/messages` +
-/// `/v1/models` + `/v1/settings` + `/v1/storage` server.
+/// `/v1/models` + `/v1/settings` + `/v1/storage` +
+/// `/v1/privacy/coding-data-retention` server.
 /// Logs all requests. Shuts down on drop.
 pub struct MockInferenceServer {
     addr: SocketAddr,
@@ -952,6 +953,32 @@ impl MockInferenceServer {
                                 Some(s) => Json(s).into_response(),
                                 None => StatusCode::NOT_FOUND.into_response(),
                             }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/privacy/coding-data-retention",
+                put({
+                    let log = log.clone();
+                    move |headers: HeaderMap, Json(body): Json<Value>| {
+                        let log = log.clone();
+                        async move {
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "PUT",
+                                "/v1/privacy/coding-data-retention",
+                                Some(&body),
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
+                            // Echo the received flag back like the real
+                            // cli-chat-proxy does on success.
+                            let opt_out = body
+                                .get("codingDataRetentionOptOut")
+                                .cloned()
+                                .unwrap_or(Value::Bool(false));
+                            Json(json!({ "codingDataRetentionOptOut": opt_out }))
                         }
                     }
                 }),
@@ -1672,6 +1699,39 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body, json!({ "allow_access": true }));
+    }
+
+    #[tokio::test]
+    async fn privacy_coding_data_retention_echoes_flag_and_logs() {
+        let server = MockInferenceServer::start().await.unwrap();
+        let url = format!("{}/privacy/coding-data-retention", server.url());
+
+        for flag in [false, true] {
+            let resp = reqwest::Client::new()
+                .put(&url)
+                .json(&json!({ "codingDataRetentionOptOut": flag }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let body: Value = resp.json().await.unwrap();
+            assert_eq!(body, json!({ "codingDataRetentionOptOut": flag }));
+        }
+
+        let entries = server.requests();
+        let puts: Vec<_> = entries
+            .iter()
+            .filter(|e| e.method == "PUT" && e.path == "/v1/privacy/coding-data-retention")
+            .collect();
+        assert_eq!(puts.len(), 2);
+        assert_eq!(
+            puts[0].body,
+            Some(json!({ "codingDataRetentionOptOut": false }))
+        );
+        assert_eq!(
+            puts[1].body,
+            Some(json!({ "codingDataRetentionOptOut": true }))
+        );
     }
 
     #[tokio::test]

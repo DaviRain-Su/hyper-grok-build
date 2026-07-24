@@ -51,7 +51,20 @@ pub enum DiagState {
     Starting,
     Connected,
     Disconnected,
+    Failed,
 }
+
+/// `/ready` `error_class` when [`DiagState::Failed`] (`hub_auth` / `hub_connect` / `unknown`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    HubAuth,
+    HubConnect,
+    Unknown,
+}
+
+/// Soft cap on `/ready` `error_detail` so guest-local messages stay short.
+const MAX_ERROR_DETAIL_BYTES: usize = 256;
 
 /// Response body for `/ready`. The field set is a frozen contract with the
 /// sandbox readiness gate: never rename or remove fields; additions are
@@ -66,6 +79,10 @@ struct ReadyBody {
     connected_at: Option<u64>,
     state_changed_at: u64,
     version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_class: Option<ErrorClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_detail: Option<String>,
 }
 
 /// Response body for `/statusz`: the `/ready` fields plus debug extras.
@@ -82,6 +99,14 @@ struct Inner {
     connected_at: Option<u64>,
     state_changed_at: u64,
     shutting_down: bool,
+    error_class: Option<ErrorClass>,
+    error_detail: Option<String>,
+}
+
+impl Inner {
+    fn is_failed(&self) -> bool {
+        matches!(self.state, DiagState::Failed)
+    }
 }
 
 /// Cloneable handle publishing hub lifecycle transitions to the server.
@@ -102,16 +127,17 @@ impl DiagHandle {
                 connected_at: None,
                 state_changed_at: now_ms(),
                 shutting_down: false,
+                error_class: None,
+                error_detail: None,
             })),
         }
     }
 
     /// Initial hello completed, or a reconnect's serve replay settled.
-    /// Ignored after [`Self::set_shutting_down`]: a reconnect that settles
-    /// during the shutdown drain must not republish `connected`.
+    /// No-op after [`Self::set_shutting_down`] or [`Self::set_failed`].
     pub fn set_connected(&self) {
         let mut inner = self.lock();
-        if inner.shutting_down {
+        if inner.shutting_down || inner.is_failed() {
             return;
         }
         inner.state = DiagState::Connected;
@@ -120,19 +146,34 @@ impl DiagHandle {
         inner.state_changed_at = now;
     }
 
-    /// Server socket dropped.
+    /// Server socket dropped. No-op after [`Self::set_failed`].
     pub fn set_disconnected(&self) {
         let mut inner = self.lock();
+        if inner.is_failed() {
+            return;
+        }
         inner.state = DiagState::Disconnected;
         inner.state_changed_at = now_ms();
     }
 
-    /// Latch `disconnected` for process shutdown: reported as `disconnected`
-    /// on `/ready`, and later `set_connected` calls become no-ops.
+    /// Latch disconnected for process shutdown; later `set_connected` no-ops.
+    /// No-op after [`Self::set_failed`].
     pub fn set_shutting_down(&self) {
         let mut inner = self.lock();
+        if inner.is_failed() {
+            return;
+        }
         inner.shutting_down = true;
         inner.state = DiagState::Disconnected;
+        inner.state_changed_at = now_ms();
+    }
+
+    /// Terminal connect failure on `/ready`. Sticky; callers dwell before exit.
+    pub fn set_failed(&self, error_class: ErrorClass, error_detail: impl Into<String>) {
+        let mut inner = self.lock();
+        inner.state = DiagState::Failed;
+        inner.error_class = Some(error_class);
+        inner.error_detail = Some(truncate_error_detail(error_detail.into()));
         inner.state_changed_at = now_ms();
     }
 
@@ -142,6 +183,7 @@ impl DiagHandle {
 
     fn ready_body(&self) -> ReadyBody {
         let inner = self.lock();
+        let failed = inner.is_failed();
         ReadyBody {
             launch_id: self.launch_id.clone(),
             state: inner.state,
@@ -149,6 +191,12 @@ impl DiagHandle {
             connected_at: inner.connected_at,
             state_changed_at: inner.state_changed_at,
             version: xai_grok_version::VERSION,
+            error_class: failed.then_some(inner.error_class).flatten(),
+            error_detail: if failed {
+                inner.error_detail.clone()
+            } else {
+                None
+            },
         }
     }
 
@@ -158,6 +206,17 @@ impl DiagHandle {
             os: env::consts::OS,
         }
     }
+}
+
+fn truncate_error_detail(detail: String) -> String {
+    if detail.len() <= MAX_ERROR_DETAIL_BYTES {
+        return detail;
+    }
+    let mut end = MAX_ERROR_DETAIL_BYTES;
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail[..end].to_owned()
 }
 
 fn now_ms() -> u64 {
@@ -410,6 +469,115 @@ mod tests {
         let (status, body) = get_json(port, "/ready").await;
         assert_eq!(status, 503);
         assert_eq!(body["state"], "disconnected");
+    }
+
+    #[tokio::test]
+    async fn ready_reports_failed_with_error_fields() {
+        let handle = DiagHandle::new(Some("nonce-fail".to_owned()));
+        let bound = serve(DiagListener::Tcp(0), handle.clone(), None)
+            .await
+            .expect("bind");
+        let port = bound.port.expect("tcp port");
+
+        handle.set_failed(ErrorClass::HubAuth, "handshake auth failed: HTTP 401");
+        let (status, body) = get_json(port, "/ready").await;
+
+        assert_eq!(status, 503, "failed is not ready");
+        assert_eq!(body["launch_id"], "nonce-fail");
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error_class"], "hub_auth");
+        assert_eq!(body["error_detail"], "handshake auth failed: HTTP 401");
+        assert!(body["state_changed_at"].is_u64());
+        assert!(body["pid"].is_u64());
+        assert!(body["version"].is_string());
+        let starting = DiagHandle::new(None);
+        let bound2 = serve(DiagListener::Tcp(0), starting, None)
+            .await
+            .expect("bind");
+        let (_, start_body) = get_json(bound2.port.expect("tcp port"), "/ready").await;
+        assert_eq!(start_body["state"], "starting");
+        assert!(
+            start_body.get("error_class").is_none(),
+            "error_class must be omitted unless failed"
+        );
+        assert!(
+            start_body.get("error_detail").is_none(),
+            "error_detail must be omitted unless failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_failed_hub_connect_and_unknown_classes() {
+        let handle = DiagHandle::new(None);
+        let bound = serve(DiagListener::Tcp(0), handle.clone(), None)
+            .await
+            .expect("bind");
+        let port = bound.port.expect("tcp port");
+
+        handle.set_failed(ErrorClass::HubConnect, "network error: connection refused");
+        let (status, body) = get_json(port, "/ready").await;
+        assert_eq!(status, 503);
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error_class"], "hub_connect");
+        assert_eq!(body["error_detail"], "network error: connection refused");
+
+        handle.set_failed(ErrorClass::Unknown, "something else");
+        let (status, body) = get_json(port, "/ready").await;
+        assert_eq!(status, 503);
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error_class"], "unknown");
+        assert_eq!(body["error_detail"], "something else");
+    }
+
+    #[tokio::test]
+    async fn failed_is_sticky_against_later_lifecycle_transitions() {
+        let handle = DiagHandle::new(None);
+        let bound = serve(DiagListener::Tcp(0), handle.clone(), None)
+            .await
+            .expect("bind");
+        let port = bound.port.expect("tcp port");
+
+        handle.set_failed(ErrorClass::HubAuth, "handshake auth failed: HTTP 401");
+        handle.set_connected();
+        handle.set_disconnected();
+        handle.set_shutting_down();
+
+        let (status, body) = get_json(port, "/ready").await;
+        assert_eq!(status, 503);
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["error_class"], "hub_auth");
+        assert_eq!(body["error_detail"], "handshake auth failed: HTTP 401");
+    }
+
+    #[test]
+    fn error_detail_is_truncated_to_cap() {
+        let handle = DiagHandle::new(None);
+        let long = "x".repeat(MAX_ERROR_DETAIL_BYTES + 64);
+        handle.set_failed(ErrorClass::Unknown, long);
+        let body = handle.ready_body();
+        let detail = body.error_detail.expect("detail");
+        assert_eq!(detail.len(), MAX_ERROR_DETAIL_BYTES);
+    }
+
+    #[test]
+    fn error_detail_truncation_respects_utf8_char_boundary() {
+        let mut long = "a".repeat(MAX_ERROR_DETAIL_BYTES - 1);
+        long.push('é');
+        assert_eq!(long.len(), MAX_ERROR_DETAIL_BYTES + 1);
+
+        let handle = DiagHandle::new(None);
+        handle.set_failed(ErrorClass::Unknown, long);
+        let detail = handle.ready_body().error_detail.expect("detail");
+        assert!(
+            detail.len() <= MAX_ERROR_DETAIL_BYTES,
+            "truncated length {}",
+            detail.len()
+        );
+        assert!(
+            detail.is_char_boundary(detail.len()),
+            "must not split a multi-byte char"
+        );
+        assert!(detail.ends_with('a') || detail.ends_with('é'));
     }
 
     #[cfg(unix)]

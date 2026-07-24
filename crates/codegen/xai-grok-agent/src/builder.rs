@@ -1045,6 +1045,7 @@ impl AgentBuilder {
                 session_env: self.session_env.unwrap_or_default(),
                 notification_handle: self.notification_handle.clone(),
                 owner_session_id: self.owner_session_id.clone(),
+                subagent: None,
                 parent_scheduler_handle: self.parent_scheduler_handle.take(),
                 skills: skill_info.clone(),
                 state_path,

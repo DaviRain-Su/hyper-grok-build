@@ -149,6 +149,7 @@ async fn provider_config_edit_invalidates_cached_token() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
     assert_eq!(
@@ -181,6 +182,7 @@ async fn provider_401_recovery_reminted_under_edited_config() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
     assert_eq!(
@@ -205,12 +207,38 @@ async fn provider_timeout_edit_does_not_invalidate_token() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: Some(5),
+            cwd: None,
         },
     );
     assert_eq!(
         retimed.cached_token().as_deref(),
         Some("tok-1"),
         "a timeout-only edit must not invalidate the cached token"
+    );
+}
+
+/// `cwd` is part of `token_identity`, so editing it invalidates the cache: the
+/// same helper in a different directory can mint a different token.
+#[tokio::test]
+async fn provider_cwd_edit_invalidates_cached_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = counting_provider("test-cwd-edit", dir.path());
+    provider.ensure_fresh_token(None).await.rotated().unwrap();
+
+    let moved = AuthProviderRef::new(
+        "test-cwd-edit".to_owned(),
+        AuthProviderConfig {
+            command: provider.config.command.clone(),
+            args: None,
+            token_ttl_secs: Some(3600),
+            timeout_secs: None,
+            cwd: Some("/some/other/dir".to_owned()),
+        },
+    );
+    assert_eq!(
+        moved.cached_token(),
+        None,
+        "a cwd edit must invalidate the cached token"
     );
 }
 
@@ -296,6 +324,7 @@ async fn provider_refresh_sets_expired_env() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
     assert_eq!(
@@ -325,6 +354,7 @@ async fn provider_concurrent_mints_single_flight() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
     let (a, b) = tokio::join!(
@@ -373,6 +403,7 @@ async fn provider_expiry_source_precedence() {
                 args: None,
                 token_ttl_secs,
                 timeout_secs: None,
+                cwd: None,
             },
         );
         let first = provider
@@ -430,6 +461,7 @@ async fn provider_unusable_expiry_still_mints() {
             args: None,
             token_ttl_secs: Some(u64::MAX),
             timeout_secs: None,
+            cwd: None,
         },
     );
     assert_eq!(
@@ -454,6 +486,7 @@ async fn provider_args_run_without_a_shell() {
             args: Some(vec!["tok-$HOME;42".to_owned()]),
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
     assert_eq!(
@@ -471,6 +504,7 @@ async fn provider_command_times_out() {
             args: None,
             token_ttl_secs: None,
             timeout_secs: Some(1),
+            cwd: None,
         },
     );
     let start = std::time::Instant::now();
@@ -496,6 +530,7 @@ async fn provider_zero_timeout_clamps_to_one_second() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: Some(0),
+            cwd: None,
         },
     );
     assert_eq!(
@@ -512,6 +547,7 @@ async fn provider_zero_timeout_clamps_to_one_second() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: Some(0),
+            cwd: None,
         },
     );
     assert!(
@@ -534,6 +570,7 @@ async fn mint_error_messages_distinguish_failure_modes() {
             args: None,
             token_ttl_secs: None,
             timeout_secs: Some(1),
+            cwd: None,
         },
     );
     let err = mint_provider_token(&timed_out, false, None)
@@ -549,6 +586,7 @@ async fn mint_error_messages_distinguish_failure_modes() {
             args: Some(vec![]),
             token_ttl_secs: None,
             timeout_secs: Some(5),
+            cwd: None,
         },
     );
     let err = mint_provider_token(&missing, false, None)
@@ -564,6 +602,7 @@ async fn mint_error_messages_distinguish_failure_modes() {
             args: None,
             token_ttl_secs: None,
             timeout_secs: Some(5),
+            cwd: None,
         },
     );
     let err = mint_provider_token(&empty_output, false, None)
@@ -585,6 +624,7 @@ async fn re_mint_hands_the_prior_token_back_to_the_command() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
 
@@ -620,6 +660,7 @@ async fn failed_401_remint_invalidates_the_cached_token() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
 
@@ -658,6 +699,7 @@ async fn failed_pre_turn_mint_does_not_serve_the_stale_token() {
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,
+            cwd: None,
         },
     );
 
@@ -689,6 +731,7 @@ async fn provider_output_over_cap_fails_closed() {
             args: None,
             token_ttl_secs: None,
             timeout_secs: Some(5),
+            cwd: None,
         },
     );
     let err = mint_provider_token(&provider, false, None)
@@ -759,5 +802,87 @@ async fn provider_helper_env_scrubs_first_party_credentials() {
         String::from_utf8_lossy(&output.stdout),
         "tok[]",
         "no first-party credential may survive into the helper env"
+    );
+}
+
+/// `resolve_program` branches: bare name via `PATH`, absolute as-is, relative
+/// against `cwd`.
+#[test]
+fn resolve_program_resolves_against_cwd() {
+    let cwd = std::path::Path::new("/work");
+    assert_eq!(
+        super::resolve_program("token-helper", Some(cwd)),
+        std::path::PathBuf::from("token-helper")
+    );
+    let abs = if cfg!(windows) {
+        r"C:\bin\helper.exe"
+    } else {
+        "/usr/local/bin/helper"
+    };
+    assert_eq!(
+        super::resolve_program(abs, Some(cwd)),
+        std::path::PathBuf::from(abs)
+    );
+    assert_eq!(
+        super::resolve_program("bin/helper", Some(cwd)),
+        cwd.join("bin/helper")
+    );
+    assert_eq!(
+        super::resolve_program("bin/helper", None),
+        std::path::PathBuf::from("bin/helper"),
+        "with no cwd a relative path is left to the process cwd"
+    );
+}
+
+/// The `args` form (the portable, no-shell shape a desktop/Windows helper
+/// should use) resolves a relative program against the provider's `cwd`.
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_resolves_relative_program_against_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("token.sh");
+    std::fs::write(&script, "#!/bin/sh\nprintf 'cwd-tok'\n").unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+
+    let provider = AuthProviderRef::new(
+        "test-cwd-relative".to_owned(),
+        AuthProviderConfig {
+            command: "./token.sh".to_owned(),
+            args: Some(vec![]),
+            token_ttl_secs: Some(3600),
+            timeout_secs: None,
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+        },
+    );
+    assert_eq!(
+        provider.ensure_fresh_token(None).await.rotated().as_deref(),
+        Some("cwd-tok")
+    );
+}
+
+/// `cwd` is the command's runtime directory: reading a file by relative name
+/// only succeeds if `current_dir` took effect (here via the shell form).
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_command_runs_in_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("token.txt"), "file-tok").unwrap();
+
+    let provider = AuthProviderRef::new(
+        "test-cwd-shell".to_owned(),
+        AuthProviderConfig {
+            command: "cat token.txt".to_owned(),
+            args: None,
+            token_ttl_secs: Some(3600),
+            timeout_secs: None,
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+        },
+    );
+    assert_eq!(
+        provider.ensure_fresh_token(None).await.rotated().as_deref(),
+        Some("file-tok")
     );
 }

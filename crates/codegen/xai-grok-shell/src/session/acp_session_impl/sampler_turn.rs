@@ -469,6 +469,8 @@ impl SessionActor {
                 top_p: None,
                 api_backend: Default::default(),
                 extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
@@ -493,6 +495,9 @@ impl SessionActor {
         let open_platform = crate::agent::config::open_platform_endpoint(&cfg.base_url);
         let use_bearer_resolver = gate.active() && open_platform.is_none();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
+        if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
+            let _ = am.auth().await;
+        }
         let auth_scheme = model_facts.auth_scheme;
         // Capture before `cfg` fields are moved into `SamplingConfig`. Catalog
         // identity wins; URL fallback above is accepted only when unambiguous.
@@ -588,6 +593,8 @@ impl SessionActor {
             api_backend: cfg.api_backend,
             auth_scheme,
             extra_headers,
+            query_params: cfg.query_params.clone(),
+            env_http_headers: cfg.env_http_headers.clone(),
             context_window: cfg.context_window.get(),
             client_version: creds.client_version,
             reasoning_effort: cfg.reasoning_effort,

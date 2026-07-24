@@ -3568,6 +3568,7 @@ pub fn render_extensions_modal(
             &non_selectable_clickable,
             Some(theme.bg_base),
             loading,
+            0,
             inner_x + inner_width - 1,
         );
         (content_hit.item_rects, content_hit.entry_indices)

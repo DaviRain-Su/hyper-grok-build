@@ -1458,6 +1458,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "language" => {
             let _ = dispatch(Action::SetLanguage("zh-CN".to_string()), app);
         }
+        "voice_keybind_enabled" => {
+            let _ = dispatch(Action::SetVoiceKeybindEnabled(false), app);
+        }
         "voice_capture_mode" => {
             let _ = dispatch(Action::SetVoiceCaptureMode("toggle".to_string()), app);
         }

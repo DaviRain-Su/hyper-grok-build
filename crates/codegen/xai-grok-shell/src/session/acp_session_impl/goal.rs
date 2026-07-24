@@ -642,6 +642,9 @@ impl SessionActor {
         let spawner: std::sync::Arc<dyn crate::session::goal_classifier::GoalClassifierSpawner> =
             std::sync::Arc::new(ChannelSpawner {
                 event_tx,
+                foreground_wait: Some(crate::tools::tool_context::subagent_foreground_wait(
+                    self.tool_context.blocking_wait_depth.clone(),
+                )),
                 parent_session_id: self.session_id_string(),
                 parent_prompt_id,
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),

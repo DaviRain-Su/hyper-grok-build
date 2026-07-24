@@ -92,6 +92,7 @@ fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
     let target = doctor_target(&app, id);
 
     app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+    let scrollback_len = app.agents[&id].scrollback.len();
     dispatch_task_result(
         TaskResult::DoctorFixPlanned {
             target: target.clone(),
@@ -102,6 +103,25 @@ fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
         &mut app,
     );
     assert_eq!(app.agents[&id].prompt.text(), "");
+    assert_eq!(
+        app.agents[&id].scrollback.len(),
+        scrollback_len,
+        "the confirmation preview belongs only in the question modal"
+    );
+    let question = app.agents[&id]
+        .question_view
+        .as_ref()
+        .expect("doctor question")
+        .questions
+        .first()
+        .expect("doctor question contents");
+    assert!(
+        question.options[0]
+            .preview
+            .as_deref()
+            .is_some_and(|preview| preview.contains("Doctor Fix")),
+        "the modal must retain the exact fix preview"
+    );
     app.agents.get_mut(&id).unwrap().question_view = None;
 
     dispatch_task_result(
@@ -146,7 +166,6 @@ fn doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback() 
     dispatch_task_result(
         TaskResult::DoctorFixApplied {
             target: target.clone(),
-            shell: crate::diagnostics::ShellKind::Bash,
             result: Err("stale plan".to_owned()),
         },
         &mut app,
@@ -160,7 +179,6 @@ fn doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback() 
     dispatch_task_result(
         TaskResult::DoctorFixApplied {
             target: target.clone(),
-            shell: crate::diagnostics::ShellKind::Bash,
             result: Err("apply failed".to_owned()),
         },
         &mut app,
@@ -175,7 +193,6 @@ fn doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback() 
     dispatch_task_result(
         TaskResult::DoctorFixApplied {
             target,
-            shell: crate::diagnostics::ShellKind::Bash,
             result: Err("validator failed".to_owned()),
         },
         &mut app,
@@ -187,33 +204,68 @@ fn doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback() 
 }
 
 #[test]
-fn doctor_apply_success_renders_refreshed_report() {
+fn doctor_apply_reload_success_does_not_claim_live_finding_disappeared() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let target = doctor_target(&app, id);
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join(".bashrc");
-    std::fs::write(
-        &path,
-        "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\n",
-    )
-    .unwrap();
+    let path = temp.path().join(".tmux.conf");
     dispatch_task_result(
         TaskResult::DoctorFixApplied {
             target,
-            shell: crate::diagnostics::ShellKind::Bash,
-            result: Ok(crate::diagnostics::FixOutcome {
-                id: crate::diagnostics::SSH_WRAP_ID,
-                status: crate::diagnostics::FixStatus::Applied,
-                changed_path: path,
-                backup_path: None,
-            }),
+            result: Ok(crate::diagnostics::FixOutcome::new_for_test(
+                crate::diagnostics::TMUX_CLIPBOARD_ID,
+                crate::diagnostics::FixStatus::Applied,
+                path.clone(),
+                None,
+                crate::diagnostics::FixActivation::RequiresReload,
+                None,
+            )),
+        },
+        &mut app,
+    );
+    let output = last_system_text(&app, id);
+    assert!(
+        output.starts_with(&format!(
+            "Added `set -g set-clipboard on` to `{}`.",
+            path.display()
+        )),
+        "{output}"
+    );
+    assert!(
+        output.contains("Reload tmux with `tmux source-file"),
+        "{output}"
+    );
+    assert!(output.contains("Run /doctor again to verify"), "{output}");
+    assert!(!output.contains("0 issues"), "{output}");
+    assert!(!output.contains("Environment\n"), "{output}");
+}
+
+#[test]
+fn doctor_apply_success_only_renders_resolution_instructions() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let target = doctor_target(&app, id);
+    let temp = tempfile::tempdir().unwrap();
+    dispatch_task_result(
+        TaskResult::DoctorFixApplied {
+            target,
+            result: Ok(crate::diagnostics::FixOutcome::new_for_test(
+                crate::diagnostics::SSH_WRAP_ID,
+                crate::diagnostics::FixStatus::Applied,
+                temp.path().join(".bashrc"),
+                None,
+                crate::diagnostics::FixActivation::SatisfiedNow,
+                Some(crate::diagnostics::ShellKind::Bash),
+            )),
         },
         &mut app,
     );
     let output = last_system_text(&app, id);
     assert!(output.starts_with("Set up SSH wrapping in"), "{output}");
-    assert!(output.contains("Environment\n"), "{output}");
+    assert!(output.contains("Start a new shell"), "{output}");
+    assert!(!output.contains("Environment\n"), "{output}");
+    assert!(!output.contains("Findings\n"), "{output}");
 }
 
 #[test]

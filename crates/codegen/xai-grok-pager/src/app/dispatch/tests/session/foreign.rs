@@ -361,6 +361,8 @@ fn welcome_selection_survives_foreign_insertion_with_viewport_offset() {
     app.session_picker_grouped = false;
     app.foreign_session_scan_seq = 8;
     app.session_picker_lanes.foreign_loading = true;
+    // Pin All: the insertion only shifts rows when foreign entries are visible.
+    app.session_picker_source_filter = SourceFilter::All;
     app.session_picker_entries = Some(vec![
         at(make_picker_entry("a", "/repo"), 20),
         at(make_picker_entry("b", "/repo"), 10),
@@ -397,7 +399,12 @@ fn modal_selection_survives_native_and_foreign_completion_races() {
             at(make_picker_entry("b", "/repo"), 10),
         ],
     );
-    if let Some(ActiveModal::SessionPicker { state, lanes, .. }) = get_active_agent_mut(&mut app)
+    if let Some(ActiveModal::SessionPicker {
+        state,
+        lanes,
+        source_filter,
+        ..
+    }) = get_active_agent_mut(&mut app)
         .unwrap()
         .active_modal
         .as_mut()
@@ -405,6 +412,8 @@ fn modal_selection_survives_native_and_foreign_completion_races() {
         state.selected = 2;
         state.scroll_offset = Some(1);
         lanes.foreign_loading = true;
+        // Pin All: the insertion only shifts rows when foreign entries are visible.
+        *source_filter = SourceFilter::All;
     }
 
     let _ = dispatch(
@@ -479,7 +488,8 @@ fn external_filter_clears_and_suppresses_native_content_state() {
     app.session_picker_content_results = Some(vec![content_hit("native-hit")]);
     app.session_picker_content_loading = true;
     app.session_picker_state.expanded.insert(0);
-    app.session_picker_source_filter = SourceFilter::Remote;
+    // Grok cycles straight into External.
+    app.session_picker_source_filter = SourceFilter::Grok;
     let old_detail_generation = app.session_picker_detail_generation;
 
     let effects = dispatch(Action::CycleSessionSourceFilter, &mut app);
@@ -573,7 +583,8 @@ fn modal_external_filter_clears_native_content_and_blocks_forced_search() {
         .active_modal
         .as_mut()
     {
-        *source_filter = SourceFilter::Remote;
+        // Grok cycles straight into External.
+        *source_filter = SourceFilter::Grok;
         *content_results = Some(vec![content_hit("native-hit")]);
         *content_loading = true;
         state.set_query("native");
@@ -597,6 +608,27 @@ fn modal_external_filter_clears_native_content_and_blocks_forced_search() {
     assert!(!*content_loading);
     assert!(state.expanded.is_empty());
     assert!(dispatch(Action::ForceDeepSearch, &mut app).is_empty());
+}
+
+#[test]
+fn cycle_reaches_every_filter_with_foreign_present() {
+    // One press from the default reveals externals, and Local/Remote stay
+    // reachable on the same plain cycle even with foreign rows loaded.
+    let mut app = test_app();
+    app.session_picker_entries = Some(vec![
+        make_picker_entry("native", "/repo"),
+        make_foreign_entry("foreign", "claude", "/repo"),
+    ]);
+    for expected in [
+        SourceFilter::External,
+        SourceFilter::All,
+        SourceFilter::Local,
+        SourceFilter::Remote,
+        SourceFilter::Grok,
+    ] {
+        let _ = dispatch(Action::CycleSessionSourceFilter, &mut app);
+        assert_eq!(app.session_picker_source_filter, expected);
+    }
 }
 
 #[test]

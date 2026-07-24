@@ -16,6 +16,7 @@
 pub mod campaigns;
 pub mod config_override;
 pub mod fs_atomic;
+pub mod global_hook_sources;
 mod loader;
 mod macos_managed;
 mod managed_cache;
@@ -31,6 +32,17 @@ pub mod version_overrides;
 pub use campaigns::{
     CampaignEntry, CampaignOverrides, filter_active_campaigns, ids_touching_paths,
 };
+pub use global_hook_sources::{
+    GlobalHookSource, GlobalHookSourceError, GlobalHookSourceKind, ResolvedGlobalHookSources,
+    ensure_grok_hook_slots, existing_ancestor_chain, is_direct_hook_json_name,
+    list_direct_hook_json_files, missing_configured_sources, path_has_symlink_component,
+    resolve_global_hook_sources, unique_ancestors_rootward,
+};
+
+#[cfg(unix)]
+pub use global_hook_sources::{
+    validate_direct_hook_json_file, validated_hook_json_files_for_sources,
+};
 pub use loader::{
     CampaignsState, ConfigLayers, MANAGED_CONFIG_FILENAME, ManagedConfigLayer,
     REQUIREMENTS_FILENAME, apply_version_overrides_with_registered, campaigns_application_disabled,
@@ -43,7 +55,7 @@ pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
 pub use managed_cache::{
     MANAGED_CONFIG_CACHE_FILE, ServingIdentity, SyncMarker, bump_rollback_floor,
     bump_rollback_floor_with_now, confirmed_team_switch, confirmed_team_switch_at,
-    is_managed_config_hard_stale_for, is_managed_config_stale_for,
+    fail_closed_policy_armed_at, is_managed_config_hard_stale_for, is_managed_config_stale_for,
     managed_config_identity_changed_at, managed_deployment_id, managed_policy_compromised_for,
     mark_managed_config_synced, mark_managed_config_synced_at, normalize_identity,
 };

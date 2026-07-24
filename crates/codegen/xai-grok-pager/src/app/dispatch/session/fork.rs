@@ -204,6 +204,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             .expect("just-inserted agent missing");
         agent.prompt.set_compact(app.appearance.prompt.compact);
         agent.prompt.adopt_slash_mru(app.slash_mru.clone());
+        agent.prompt.adopt_command_tags(app.command_tags.clone());
         agent
             .prompt
             .set_contextual_hints(app.contextual_hints.undo, app.contextual_hints.plan_mode);
@@ -241,6 +242,12 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             .push_block(RenderBlock::system(parent_marker));
     }
     switch_to_agent(app, new_id, SwitchCause::Fork);
+    if let Some(d) = app.dashboard.as_mut()
+        && d.attached_agent == Some(parent_id)
+    {
+        d.attached_agent = Some(new_id);
+        d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(new_id));
+    }
     if worktree {
         vec![Effect::CreateWorktreeSession {
             agent_id: new_id,

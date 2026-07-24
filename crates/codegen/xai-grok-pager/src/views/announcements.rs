@@ -274,6 +274,16 @@ pub fn first_session_announcement<'a>(
     first_session_announcement_at(announcements, hidden_ids, chrono::Utc::now())
 }
 
+/// Whether a live critical session announcement exists. Used by the banner
+/// slot ranking: critical outranks the privacy upsell banner (an outage
+/// notice must not be hidden by a persistent nag), promo does not.
+pub fn has_critical_session_announcement(
+    announcements: &[xai_grok_announcements::RemoteAnnouncement],
+    hidden_ids: &BTreeSet<String>,
+) -> bool {
+    first_critical_session_announcement_at(announcements, hidden_ids, chrono::Utc::now()).is_some()
+}
+
 /// [`first_session_announcement`] with an injectable clock.
 pub fn first_session_announcement_at<'a>(
     announcements: &'a [xai_grok_announcements::RemoteAnnouncement],

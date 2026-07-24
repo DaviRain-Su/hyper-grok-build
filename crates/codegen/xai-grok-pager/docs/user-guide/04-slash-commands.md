@@ -351,6 +351,16 @@ Browse the in-TUI How-to Guides, open the online Build docs, or jump straight to
 - `/docs web` opens https://docs.x.ai/build/overview in your browser.
 - `/docs <title>` opens a specific guide by case-insensitive title match.
 
+### `/tutorial`
+
+Open the onboarding tutorial: a short list of topics (your first prompt, attaching context, navigation, slash commands, worktrees, plan mode, customization, switching from another agent tool) — each a ~30-second read, with `→` flowing straight to the next topic. Nothing auto-shows — this command (or the command palette) is the way in.
+
+```
+/tutorial
+```
+
+Aliases: `/tour`, `/onboarding`
+
 ### `/import-claude`
 
 Open the Claude import modal to bring over `~/.claude` settings: permissions, environment variables, MCP servers, hooks, and paths.

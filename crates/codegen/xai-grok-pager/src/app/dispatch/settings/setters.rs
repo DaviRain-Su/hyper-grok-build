@@ -242,6 +242,39 @@ pub(in crate::app::dispatch) fn set_voice_capture_mode(
     }]
 }
 
+/// Mirror the voice-shortcut gate into `app.current_ui` (read live by the
+/// event-loop chord intercept) and the process-global mirror (read by key
+/// routing / view code without an `AppView`). Called by the commit path AND by
+/// [`apply_setting_rollback`](super::ui::apply_setting_rollback).
+pub(super) fn set_voice_keybind_enabled_inner(app: &mut AppView, new: bool) {
+    app.current_ui.voice_keybind_enabled = Some(new);
+    crate::app::VOICE_KEYBIND_ENABLED.store(new, std::sync::atomic::Ordering::Release);
+}
+
+/// Enable/disable the Ctrl+Space / F8 voice shortcut. SHELL-owned; persists to
+/// `[ui].voice_keybind_enabled` via `Effect::PersistSetting`. Applies on the
+/// next keypress (no restart). Only the chord is gated — `/voice`, Esc while
+/// listening, and the recording-row `[stop]` keep working.
+pub(in crate::app::dispatch) fn set_voice_keybind_enabled(
+    app: &mut AppView,
+    new: bool,
+) -> Vec<Effect> {
+    let prev_state = app.current_ui.voice_keybind_enabled;
+    let prev_effective = prev_state.unwrap_or(true);
+    if prev_effective == new && prev_state.is_some() {
+        return vec![];
+    }
+    set_voice_keybind_enabled_inner(app, new);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "voice_keybind_enabled", value = new, "setting changed");
+    app.show_toast(&save_success_toast("Voice shortcut", new));
+    vec![Effect::PersistSetting {
+        key: "voice_keybind_enabled",
+        value: crate::settings::SettingValue::Bool(new),
+        rollback_value: crate::settings::SettingValue::Bool(prev_effective),
+    }]
+}
+
 /// Mirror the STT language preference into `app.current_ui` and
 /// `app.voice_config.language` (may be the client-only `"auto"` sentinel; the
 /// voice crate resolves it at connect time). Called by the commit path AND by

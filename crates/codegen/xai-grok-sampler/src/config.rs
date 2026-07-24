@@ -60,6 +60,13 @@ pub struct SamplerConfig {
     /// the URL to derive headers; callers (the session) inject proxy auth
     /// and other access headers here before constructing the config.
     pub extra_headers: IndexMap<String, String>,
+    /// Query parameters folded into every request URL (percent-encoded).
+    #[serde(default)]
+    pub query_params: IndexMap<String, String>,
+    /// Header name to environment variable, resolved into request headers at
+    /// client build and never persisted.
+    #[serde(default)]
+    pub env_http_headers: IndexMap<String, String>,
     /// Total context window size in tokens. The sampler does not enforce
     /// it; it is informational metadata used by the session for compaction
     /// decisions.
@@ -157,6 +164,8 @@ impl Default for SamplerConfig {
             api_backend: ApiBackend::default(),
             auth_scheme: AuthScheme::default(),
             extra_headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            env_http_headers: IndexMap::new(),
             context_window: 0,
             force_http1: false,
             max_retries: None,

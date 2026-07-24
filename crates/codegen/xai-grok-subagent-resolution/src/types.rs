@@ -92,6 +92,24 @@ pub struct ResumeSourceData {
 /// Errors that can occur during subagent resolution.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
+    /// No production or session CLI definition has this name.
+    #[error("unknown subagent type \"{subagent_type}\"; available: {available:?}")]
+    Unknown {
+        subagent_type: String,
+        available: Vec<String>,
+    },
+
+    /// The definition exists but is disabled by the session toggle.
+    #[error("subagent \"{subagent_type}\" is disabled")]
+    Disabled { subagent_type: String },
+
+    /// The parent session restricts which child types may run.
+    #[error("subagent \"{subagent_type}\" is not allowed; allowed: {allowed:?}")]
+    NotAllowed {
+        subagent_type: String,
+        allowed: Vec<String>,
+    },
+
     /// Persona was explicitly requested but could not be resolved.
     #[error("persona resolution failed: {0}")]
     PersonaResolution(String),

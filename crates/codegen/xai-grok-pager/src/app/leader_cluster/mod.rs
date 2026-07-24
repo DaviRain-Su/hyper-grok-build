@@ -152,6 +152,7 @@ impl ClusterClient {
             chat_mode: self.app.chat_mode,
             screen_mode_label: Some(self.app.screen_mode.meta_label()),
             is_api_key_auth: self.app.is_api_key_auth,
+            resume_local_miss: self.app.resume_local_miss.clone(),
         };
         for eff in effs {
             let (_quit, _meta) = effects::execute(

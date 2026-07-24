@@ -1132,7 +1132,9 @@ pub(crate) async fn run(
     }
 
     {
-        use xai_grok_shell::util::config::{resolve_announcements, resolve_tips};
+        use xai_grok_shell::util::config::{
+            resolve_announcements, resolve_slash_command_tags, resolve_tips,
+        };
 
         let remote_announcements = remote_settings
             .as_ref()
@@ -1163,6 +1165,15 @@ pub(crate) async fn run(
             let grok_home = xai_grok_tools::util::grok_home::grok_home();
             app.tip = xai_grok_shell::util::tips::pick_and_advance(&app.tips, &grok_home);
         }
+
+        // Slash-command dropdown tags: remote base, local [slash_command_tags]
+        // wins per key. Mutate the shared map in place so every adopter sees it.
+        let remote_slash_tags = remote_settings
+            .as_ref()
+            .and_then(|s| s.slash_command_tags.as_ref());
+        let empty_toml = toml::Value::Table(Default::default());
+        let tags_config = effective_config.as_ref().unwrap_or(&empty_toml);
+        *app.command_tags.borrow_mut() = resolve_slash_command_tags(tags_config, remote_slash_tags);
     }
 
     let hints = xai_grok_shell::util::config::resolve_hints(
@@ -1331,6 +1342,13 @@ pub(crate) async fn run(
         app.voice_config.language =
             crate::settings::canonical_voice_stt_language(Some(pref)).to_string();
     }
+    // Seed the Voice shortcut gate's process-global mirror for key-routing and
+    // view code without an `AppView`; the chord intercept reads `current_ui`
+    // live and the settings setter updates both.
+    crate::app::VOICE_KEYBIND_ENABLED.store(
+        app.current_ui.voice_keybind_enabled.unwrap_or(true),
+        std::sync::atomic::Ordering::Release,
+    );
     // Resolve the per-tip contextual hints now that `current_ui` is hydrated and
     // propagate the prompt-relevant tips to any agents built at startup. New
     // agents adopt the gates at creation; settings toggles re-apply at runtime.
@@ -1576,12 +1594,19 @@ pub(crate) async fn run(
     // chokepoints self-gate when auth + folder trust is closed.
     use crate::app::session_startup::MaterializedStartup;
     let startup_action = match &materialized {
-        MaterializedStartup::Resume { session_id, .. } if args.worktree.is_some() => {
+        MaterializedStartup::Resume {
+            session_id,
+            deferred_local_miss,
+            ..
+        } if args.worktree.is_some() => {
             tracing::info!(
                 session_id,
                 restore_code = ?app.restore_code,
                 "RESTORE_CODE_DEBUG: worktree+resume path taken"
             );
+            // Materialization-time provenance for the worktree failure hint;
+            // the effect matches it against the exact deferred target.
+            app.resume_local_miss = deferred_local_miss.then(|| session_id.clone());
             Some(Action::NewWorktreeSession {
                 load_session_id: Some(session_id.clone()),
                 label: args.worktree.as_ref().filter(|s| !s.is_empty()).cloned(),
@@ -3112,12 +3137,19 @@ async fn drain_and_process(
         // Hold-to-talk under Kitty (press records, release stops), else tap
         // toggle. A release is only ours when a hold session owns it, so a bare
         // Space release (Ctrl lifted first) stops hold-to-talk without eating
-        // every Space release during normal typing.
+        // every Space release during normal typing. `[ui].voice_keybind_enabled`
+        // (read live, like `voice_capture_mode`) silences chord presses without
+        // touching `/voice` — see `voice_chord_claims_event` for the exact
+        // press/release/hold gating.
         if let Event::Key(ke) = ev
             && app.voice_mode_enabled
             && xai_grok_voice::AUDIO_SUPPORTED
             && is_voice_chord(ke)
-            && (ke.kind != KeyEventKind::Release || app.voice_hold_owned())
+            && voice_chord_claims_event(
+                ke.kind,
+                app.current_ui.voice_keybind_enabled.unwrap_or(true),
+                app.voice_hold_owned(),
+            )
         {
             // Hold-to-talk only when selected AND the terminal reports key
             // releases (Kitty protocol); otherwise fall back to a tap toggle.
@@ -3368,6 +3400,22 @@ fn voice_chord_action(
     }
 }
 
+/// Whether the event-loop intercept claims a voice-chord key event (pure for
+/// unit tests).
+///
+/// An active hold session owns its chord events end-to-end regardless of the
+/// Voice shortcut setting — its release only ever stops capture, so flipping
+/// the setting off mid-hold must not orphan it and wedge the mic open.
+/// Outside a hold, a bare release is never ours (normal typing) and a press
+/// honors the setting; an unclaimed press falls through to normal routing,
+/// where `ActionId::VoiceToggle` resolution is gated on the same setting.
+fn voice_chord_claims_event(kind: KeyEventKind, keybind_enabled: bool, hold_owned: bool) -> bool {
+    if hold_owned {
+        return true;
+    }
+    kind != KeyEventKind::Release && keybind_enabled
+}
+
 /// The voice-capture chord: **Ctrl+Space** or **F8**. A press needs the exact
 /// chord (matching the registry, so Shift+F8 / Ctrl+Alt+Space don't fire); a
 /// release matches the key alone (Space/F8), since on Kitty the Ctrl release can
@@ -3584,6 +3632,7 @@ fn process_effects(
         chat_mode: app.chat_mode,
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
+        resume_local_miss: app.resume_local_miss.clone(),
     };
     for eff in effs {
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
@@ -3697,6 +3746,39 @@ mod tests {
                 tag(voice_chord_action(hold, kitty, kind, listening, owned)),
                 want,
                 "voice_chord_action({hold},{kitty},{kind:?},{listening},{owned})"
+            );
+        }
+    }
+
+    /// Hold-owned events are claimed even with the setting off (a dropped
+    /// release would wedge the mic open — past regression); otherwise presses
+    /// honor the setting and bare releases are never claimed.
+    #[test]
+    fn voice_chord_claims_event_cases() {
+        let press = KeyEventKind::Press;
+        let repeat = KeyEventKind::Repeat;
+        let release = KeyEventKind::Release;
+        // (kind, keybind_enabled, hold_owned) -> claimed
+        let cases = [
+            // Hold-owned: everything claimed, setting on or off.
+            ((release, false, true), true),
+            ((release, true, true), true),
+            ((press, false, true), true),
+            ((repeat, false, true), true),
+            // No hold: press/repeat follow the setting.
+            ((press, true, false), true),
+            ((press, false, false), false),
+            ((repeat, true, false), true),
+            ((repeat, false, false), false),
+            // No hold: a bare release is never ours (normal typing).
+            ((release, true, false), false),
+            ((release, false, false), false),
+        ];
+        for ((kind, enabled, owned), want) in cases {
+            assert_eq!(
+                voice_chord_claims_event(kind, enabled, owned),
+                want,
+                "voice_chord_claims_event({kind:?},{enabled},{owned})"
             );
         }
     }

@@ -1,8 +1,6 @@
 //! Filesystem path tables for sandbox profiles.
 //!
-//! Collects device files, temp directories, sensitive deny-paths, and
-//! ecosystem (package-manager / toolchain) writable paths into helpers
-//! consumed by [`super::profiles`].
+//! Collects device files, temp directories, and essential writable paths.
 
 use std::path::{Path, PathBuf};
 

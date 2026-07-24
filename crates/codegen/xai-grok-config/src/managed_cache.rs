@@ -175,6 +175,30 @@ fn write_marker_atomically(home: &Path, json: &str) {
     }
 }
 
+/// Whether fail-closed managed policy is armed on disk for `home`.
+///
+/// True when the sync marker records `fail_closed`, on-disk `requirements.toml`
+/// parses as fail_closed, or `requirements.toml` exists but is unreadable
+/// (cannot confirm it is disarmed — must not let `clear_orphan` wipe).
+/// False only when neither the marker nor the file indicates fail_closed
+/// (including when the file is absent / `NotFound`).
+/// Companion to the signed session gate in [`managed_policy_compromised_for`].
+pub fn fail_closed_policy_armed_at(home: &Path) -> bool {
+    if read_managed_config_cache(home).is_some_and(|c| c.fail_closed) {
+        return true;
+    }
+    // Defense in depth: files remain after a stripped/corrupt marker.
+    match std::fs::read_to_string(home.join(crate::loader::REQUIREMENTS_FILENAME)) {
+        Ok(s) => prod_mc_cli_chat_proxy_types::fail_closed_flag_status(&s).is_enabled(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            // File present but unreadable: do not allow clear_orphan to wipe.
+            tracing::warn!("requirements.toml unreadable; treating as fail_closed armed: {e}");
+            true
+        }
+    }
+}
+
 /// The sync marker, or `None` if absent / unreadable / corrupt. Allow-on-unreadable:
 /// a read blip or torn write mustn't lock out a managed user. Unreadable/corrupt are
 /// logged (a corruption-to-disarm isn't silent) and self-heal on the next sync.

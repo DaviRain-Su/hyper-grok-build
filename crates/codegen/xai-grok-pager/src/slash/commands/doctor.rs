@@ -7,16 +7,17 @@ use crate::slash::command::{
     AppCtx, ArgItem, CommandExecCtx, CommandResult, DoctorRequest, SlashCommand,
 };
 
-const USAGE: &str = "Usage: /doctor [fix [ssh-wrap]]";
+const USAGE: &str =
+    "Usage: /doctor [fix [ssh-wrap|tmux-clipboard|dcs-passthrough|tmux-extended-keys]]";
 
 pub struct DoctorCommand;
 
 impl DoctorCommand {
-    pub(crate) fn report(
+    pub(crate) fn report_for_terminal(
+        terminal: &crate::terminal::TerminalContext,
         screen_mode: crate::app::ScreenMode,
         runtime: crate::diagnostics::TuiRuntimeRequest<'_>,
     ) -> crate::diagnostics::DiagnosticReport {
-        let terminal = crate::terminal::terminal_context();
         let query = crate::diagnostics::probes::LiveTmuxProbe;
         let snapshot = crate::diagnostics::probes::collect_doctor_tui(
             terminal,
@@ -54,7 +55,7 @@ impl SlashCommand for DoctorCommand {
     }
 
     fn usage(&self) -> &str {
-        "/doctor [fix [ssh-wrap]]"
+        "/doctor [fix [FIX]]"
     }
 
     fn takes_args(&self) -> bool {
@@ -62,36 +63,44 @@ impl SlashCommand for DoctorCommand {
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("[fix [ssh-wrap]]")
+        Some("[fix [FIX]]")
     }
 
     fn suggest_args(&self, _ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
         let query = args_query.trim();
-        if query.is_empty() || matches!(query, "fix ssh-wrap" | "fix terminal.ssh-wrap") {
+        if query.is_empty() {
             return None;
         }
-        let item = if query == "fix" || query.starts_with("fix ") {
-            ArgItem {
-                display: "ssh-wrap".into(),
-                match_text: "fix ssh-wrap terminal.ssh-wrap".into(),
-                insert_text: "fix ssh-wrap".into(),
-                description: "Set up SSH wrapping on this computer".into(),
-                locked: false,
-                action_id: None,
-                hidden: false,
+        if query == "fix" || query.starts_with("fix ") {
+            let value = query.strip_prefix("fix").unwrap_or_default().trim();
+            if !value.is_empty() && crate::diagnostics::resolve_fix_id(value).is_ok() {
+                return None;
             }
-        } else {
-            ArgItem {
-                display: "fix".into(),
-                match_text: "fix".into(),
-                insert_text: "fix".into(),
-                description: "Show automatic fixes available here".into(),
-                locked: false,
-                action_id: None,
-                hidden: false,
-            }
-        };
-        Some(vec![item])
+            let items = crate::diagnostics::automatic_fix_choices()
+                .filter(|(id, handle, _)| {
+                    value.is_empty() || handle.contains(value) || id.to_string().starts_with(value)
+                })
+                .map(|(id, handle, label)| ArgItem {
+                    display: handle.into(),
+                    match_text: format!("fix {handle} {id}"),
+                    insert_text: format!("fix {handle}"),
+                    description: label.into(),
+                    locked: false,
+                    action_id: None,
+                    hidden: false,
+                })
+                .collect::<Vec<_>>();
+            return (!items.is_empty()).then_some(items);
+        }
+        Some(vec![ArgItem {
+            display: "fix".into(),
+            match_text: "fix".into(),
+            insert_text: "fix".into(),
+            description: "Show automatic fixes available here".into(),
+            locked: false,
+            action_id: None,
+            hidden: false,
+        }])
     }
 
     fn session_scoped(&self) -> bool {
@@ -142,10 +151,31 @@ mod tests {
             run("fix"),
             CommandResult::Doctor(DoctorRequest::ListFixes)
         ));
-        for value in ["ssh-wrap", "terminal.ssh-wrap"] {
+        for (value, id) in [
+            ("ssh-wrap", crate::diagnostics::SSH_WRAP_ID),
+            ("terminal.ssh-wrap", crate::diagnostics::SSH_WRAP_ID),
+            ("tmux-clipboard", crate::diagnostics::TMUX_CLIPBOARD_ID),
+            (
+                "terminal.tmux-clipboard",
+                crate::diagnostics::TMUX_CLIPBOARD_ID,
+            ),
+            ("dcs-passthrough", crate::diagnostics::DCS_PASSTHROUGH_ID),
+            (
+                "terminal.dcs-passthrough",
+                crate::diagnostics::DCS_PASSTHROUGH_ID,
+            ),
+            (
+                "tmux-extended-keys",
+                crate::diagnostics::TMUX_EXTENDED_KEYS_ID,
+            ),
+            (
+                "terminal.tmux-extended-keys",
+                crate::diagnostics::TMUX_EXTENDED_KEYS_ID,
+            ),
+        ] {
             assert!(matches!(
                 run(&format!("fix {value}")),
-                CommandResult::Doctor(DoctorRequest::Fix(crate::diagnostics::SSH_WRAP_ID))
+                CommandResult::Doctor(DoctorRequest::Fix(parsed)) if parsed == id
             ));
         }
     }
@@ -186,6 +216,12 @@ mod tests {
             " fix ssh-wrap ",
             "fix terminal.ssh-wrap",
             "  fix terminal.ssh-wrap  ",
+            "fix tmux-clipboard",
+            "fix terminal.tmux-clipboard",
+            "fix dcs-passthrough",
+            "fix terminal.dcs-passthrough",
+            "fix tmux-extended-keys",
+            "fix terminal.tmux-extended-keys",
         ] {
             assert!(command.suggest_args(&context, query).is_none(), "{query:?}");
         }
