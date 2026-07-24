@@ -956,3 +956,276 @@ fn broker_cancel_produces_no_terminal_message() {
     let d2 = broker.observe_failure("sess-1", "pid-1", &delegations);
     assert!(d2.mark_terminal.is_empty());
 }
+
+// ── Regression: capacity-aware critical command drain (issue #1) ───────────
+//
+// `drain_pending_cmds` only retries `try_send` at event-loop top. If the
+// voice channel is still full, the loop can sleep with no capacity wake, so
+// a final `CompleteDelegation` may remain forever. The capacity-aware async
+// drain (`pending_critical_drain`) awaits the bounded channel's `send` so a
+// stranded final eventually sends when the receiver frees capacity — even
+// with no unrelated app event.
+
+#[tokio::test]
+async fn critical_drain_delivers_after_capacity_freed_with_no_app_event() {
+    use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    // 1-slot channel — fill it so the final can't try_send.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<LiveCommand>(1);
+    runtime.cmd_tx = Some(tx);
+
+    // Fill the single slot with a non-critical command.
+    runtime
+        .cmd_tx
+        .as_ref()
+        .unwrap()
+        .try_send(LiveCommand::ToggleMute)
+        .unwrap();
+
+    // Enqueue the final CompleteDelegation — channel is full, so it must land
+    // in pending_cmds (send_cmd queues critical commands).
+    runtime.send_cmd(LiveCommand::CompleteDelegation {
+        delegation_id: "del-final".to_string(),
+        text: "Agent Final Message: done".to_string(),
+    });
+    assert!(runtime.has_pending_critical());
+    assert_eq!(runtime.pending_cmds.len(), 1);
+
+    // The synchronous reaper can't deliver yet (channel still full).
+    assert_eq!(runtime.drain_pending_cmds(), 0);
+    assert!(runtime.has_pending_critical());
+
+    // The async drain arm pops the head critical command (owns it exclusively)
+    // and awaits `send().await`. No unrelated app event fires here — the wake
+    // must come from capacity, not an app event.
+    let (cmd, tx_clone) = runtime
+        .take_pending_critical_head()
+        .expect("pending critical command present");
+    // Popped — no longer pending (the arm owns delivery).
+    assert!(!runtime.has_pending_critical());
+
+    // Receiver frees capacity AFTER the drain arm armed its `send().await`.
+    let send_task = tokio::spawn(async move {
+        // `send` blocks until capacity; the receiver frees it below.
+        tx_clone.send(cmd).await
+    });
+
+    // Free capacity on the receiver side (drain the filler). This is the only
+    // event — there is no unrelated app event waking the loop.
+    let _filler = rx.recv().await.expect("filler command received");
+    // The stranded final now sends because capacity freed.
+    send_task
+        .await
+        .expect("send task joined")
+        .expect("final CompleteDelegation sent after capacity freed");
+
+    // The command was delivered directly by the arm (it owned the send), so
+    // nothing remains pending.
+    assert!(!runtime.has_pending_critical());
+    assert!(runtime.pending_cmds.is_empty());
+
+    // And the receiver observes the final.
+    let received = rx.recv().await.expect("final received");
+    match received {
+        LiveCommand::CompleteDelegation {
+            delegation_id,
+            text,
+        } => {
+            assert_eq!(delegation_id, "del-final");
+            assert!(text.starts_with("Agent Final Message:"));
+        }
+        other => panic!("expected CompleteDelegation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn critical_drain_returns_command_to_front_on_timeout() {
+    use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    // 1-slot channel — fill it and keep it full so the send times out.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<LiveCommand>(1);
+    runtime.cmd_tx = Some(tx);
+    runtime
+        .cmd_tx
+        .as_ref()
+        .unwrap()
+        .try_send(LiveCommand::ToggleMute)
+        .unwrap();
+
+    // Enqueue a critical command, then pop it (as the arm does).
+    runtime.send_cmd(LiveCommand::CompleteDelegation {
+        delegation_id: "del-to".to_string(),
+        text: "Agent Final Message: timeout".to_string(),
+    });
+    let (cmd, _tx_clone) = runtime
+        .take_pending_critical_head()
+        .expect("pending critical command present");
+    assert!(!runtime.has_pending_critical());
+
+    // Simulate a timed-out send: return the command to the front.
+    runtime.return_pending_critical_head(cmd);
+    assert!(runtime.has_pending_critical());
+    assert_eq!(runtime.pending_cmds.len(), 1);
+    // It must be at the front (retried in order).
+    assert!(matches!(
+        &runtime.pending_cmds[0],
+        LiveCommand::CompleteDelegation { delegation_id, .. } if delegation_id == "del-to"
+    ));
+}
+
+// ── Regression: centralized failure rail (issue #3) ─────────────────────────
+//
+// The previous design called `observe_failure` twice (once in `on_prompt_error`,
+// once in each caller). The second call returned an empty decision because the
+// broker is idempotent, so the explicit `CompleteDelegation` loop emitted
+// nothing. The central `on_prompt_failed` rail calls `observe_failure` exactly
+// once and enqueues the wrapped failure final for each `decision.mark_terminal`
+// on that same call. These broker-level tests verify the decision shape the
+// rail relies on: a single `observe_failure` returns exactly the delegations to
+// complete, and a duplicate returns nothing.
+
+#[test]
+fn broker_failure_returns_mark_terminal_for_completion_rail() {
+    let mut broker = LiveDelegationBroker::new(1);
+    broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
+    broker.register_delegation("del-1".to_string());
+    let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
+
+    // The FIRST observe_failure is the one the central rail uses — it must
+    // return the delegation id so the rail can enqueue CompleteDelegation.
+    let d = broker.observe_failure("sess-1", "pid-1", &delegations);
+    assert_eq!(d.mark_terminal, vec!["del-1".to_string()]);
+    // No broker-side terminal final on failure (the rail supplies the wrapped
+    // failure text as the CompleteDelegation payload).
+    assert!(d.terminal.is_empty());
+
+    // The duplicate (what the OLD second call did) returns nothing — proving
+    // the old rail's CompleteDelegation loop was dead code.
+    let d2 = broker.observe_failure("sess-1", "pid-1", &delegations);
+    assert!(d2.mark_terminal.is_empty());
+    assert!(d2.terminal.is_empty());
+}
+
+#[test]
+fn broker_failure_then_turn_completed_emits_no_second_final() {
+    // A failure rail marking terminal must suppress a later TurnCompleted's
+    // final — the central rail already sent the wrapped failure final, so a
+    // duplicate assistant final would double-complete the delegation.
+    let mut broker = LiveDelegationBroker::new(1);
+    broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
+    broker.register_delegation("del-1".to_string());
+    let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
+
+    let d_fail = broker.observe_failure("sess-1", "pid-1", &delegations);
+    assert_eq!(d_fail.mark_terminal.len(), 1);
+
+    // A late TurnCompleted for the same prompt must not emit a second final.
+    let d_turn = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
+    assert!(d_turn.terminal.is_empty());
+    assert!(d_turn.mark_terminal.is_empty());
+}
+
+// ── Regression: unmute hint + speaking threshold (issue #4) ─────────────────
+
+#[test]
+fn visualizer_speaking_threshold_is_omp_0_015() {
+    // The OMP output-active threshold is 0.015. A level just above it must
+    // read as "speaking" while muted; a level just below must read as
+    // "listening" (or "working" when a delegation is active). We exercise the
+    // threshold via the phase-footer rendering by checking the localized
+    // status label that lands in the rendered line.
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn status_text(level: f64, muted: bool, delegation_active: bool) -> String {
+        let mut state = LiveVisualizerState::default();
+        state.phase = LivePhase::Connected;
+        state.level = level;
+        state.muted = muted;
+        state.delegation_active = delegation_active;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
+        crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, 5), &state);
+        // The footer is the last row; collect its non-space symbols.
+        let footer_y = 4;
+        (0..80)
+            .map(|x| buf[(x, footer_y)].symbol().to_string())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    // Just above 0.015 → speaking (not muted).
+    let speaking = status_text(0.016, false, false);
+    assert!(
+        speaking.contains("Speaking"),
+        "level 0.016 must read as Speaking, got: {speaking}"
+    );
+
+    // Just below 0.015 → listening (not muted, no delegation).
+    let listening = status_text(0.014, false, false);
+    assert!(
+        listening.contains("Listening"),
+        "level 0.014 must read as Listening, got: {listening}"
+    );
+
+    // Muted always wins over speaking.
+    let muted = status_text(0.5, true, false);
+    assert!(
+        muted.contains("Muted"),
+        "muted must read as Muted even at high level, got: {muted}"
+    );
+}
+
+#[test]
+fn visualizer_muted_shows_unmute_hint() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut state = LiveVisualizerState::default();
+    state.phase = LivePhase::Connected;
+    state.muted = true;
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, VISUALIZER_HEIGHT));
+    crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, VISUALIZER_HEIGHT), &state);
+
+    let footer_y = VISUALIZER_HEIGHT - 1;
+    let footer: String = (0..80)
+        .map(|x| buf[(x, footer_y)].symbol().to_string())
+        .collect();
+    assert!(
+        footer.contains("unmute"),
+        "muted footer must show the unmute hint, got: {footer}"
+    );
+    assert!(
+        !footer.contains("Space: mute"),
+        "muted footer must not show the mute hint, got: {footer}"
+    );
+}
+
+#[test]
+fn visualizer_unmuted_shows_mute_hint() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut state = LiveVisualizerState::default();
+    state.phase = LivePhase::Connected;
+    state.muted = false;
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, VISUALIZER_HEIGHT));
+    crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, VISUALIZER_HEIGHT), &state);
+
+    let footer_y = VISUALIZER_HEIGHT - 1;
+    let footer: String = (0..80)
+        .map(|x| buf[(x, footer_y)].symbol().to_string())
+        .collect();
+    assert!(
+        footer.contains("Space: mute"),
+        "unmuted footer must show the mute hint, got: {footer}"
+    );
+    assert!(
+        !footer.contains("unmute"),
+        "unmuted footer must not show the unmute hint, got: {footer}"
+    );
+}

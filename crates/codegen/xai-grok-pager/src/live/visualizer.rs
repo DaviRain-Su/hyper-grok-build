@@ -189,6 +189,11 @@ fn render_phase_footer(
     delegation_active: bool,
     color: Color,
 ) -> Line<'static> {
+    // OMP output-active threshold: the voice core treats output audio above
+    // 0.015 as "actively speaking". Using the same threshold here keeps the
+    // visualizer's speaking/listening flip aligned with the transport's own
+    // activity detection (the prior 0.05 threshold lagged behind real speech).
+    const SPEAKING_LEVEL_THRESHOLD: f64 = 0.015;
     // Derive the display status: error > connecting > muted > speaking >
     // working > connected.
     let (status_key, status_style) = if error.is_some() {
@@ -202,7 +207,7 @@ fn render_phase_footer(
             LivePhase::Connected => {
                 if muted {
                     ("live.status.muted", Style::default().fg(Color::Yellow))
-                } else if level > 0.05 {
+                } else if level > SPEAKING_LEVEL_THRESHOLD {
                     ("live.status.speaking", Style::default().fg(Color::Green))
                 } else if delegation_active {
                     ("live.status.working", Style::default().fg(Color::Cyan))
@@ -214,7 +219,14 @@ fn render_phase_footer(
     };
 
     let status_label = rust_i18n::t!(status_key);
-    let mute_hint = rust_i18n::t!("live.hint.mute");
+    // Show the unmute hint while muted (Space will unmute), the mute hint
+    // otherwise — so the chord always matches the current state.
+    let mute_hint_key = if muted {
+        "live.hint.unmute"
+    } else {
+        "live.hint.mute"
+    };
+    let mute_hint = rust_i18n::t!(mute_hint_key);
     let stop_hint = rust_i18n::t!("live.hint.stop");
 
     let mut spans = vec![

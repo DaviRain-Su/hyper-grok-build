@@ -392,13 +392,24 @@ impl LiveRuntime {
     }
 
     /// Drain pending commands into the channel. Called at the top of each
-    /// event-loop tick. Returns the number of commands successfully sent.
+    /// event-loop tick (fast path: non-blocking `try_send`). Returns the
+    /// number of commands successfully sent.
+    ///
+    /// This is the synchronous reaper. Critical commands (`CompleteDelegation`,
+    /// `Shutdown`) that still can't fit are kept in `pending_cmds` and retried
+    /// by the capacity-aware async drain arm in the event loop (see
+    /// [`LiveRuntime::pending_critical_drain`]), which awaits the bounded
+    /// channel's `send` with a short timeout so a full channel can't leave a
+    /// final `CompleteDelegation` stranded when no unrelated app event ever
+    /// wakes the loop.
     pub fn drain_pending_cmds(&mut self) -> usize {
         if self.pending_cmds.is_empty() {
             return 0;
         }
         let Some(tx) = &self.cmd_tx else {
-            return 0; // Channel gone — clear pending (teardown will handle).
+            // Channel gone — drop pending (teardown will handle).
+            self.pending_cmds.clear();
+            return 0;
         };
         let mut sent = 0;
         let mut remaining = Vec::new();
@@ -411,6 +422,57 @@ impl LiveRuntime {
         }
         self.pending_cmds = remaining;
         sent
+    }
+
+    /// Whether there is at least one pending critical command
+    /// (`CompleteDelegation` or `Shutdown`) awaiting delivery. Used by the
+    /// event loop's capacity-aware async drain arm to decide whether to arm a
+    /// `send().await` wake.
+    pub fn has_pending_critical(&self) -> bool {
+        self.pending_cmds.iter().any(|c| {
+            matches!(
+                c,
+                LiveCommand::CompleteDelegation { .. } | LiveCommand::Shutdown
+            )
+        })
+    }
+
+    /// Pop the head pending critical command (`CompleteDelegation` or
+    /// `Shutdown`) plus a clone of the channel sender, for the event loop's
+    /// async drain arm. The command is REMOVED from `pending_cmds` so the arm
+    /// owns its delivery exclusively — it awaits `send().await` (which resolves
+    /// the moment the receiver frees capacity) racing a short timeout,
+    /// providing a capacity wake without indefinitely blocking the TUI.
+    ///
+    /// On a successful send the command is gone (delivered). On a timeout the
+    /// arm returns it to the front of the queue via
+    /// [`LiveRuntime::return_pending_critical_head`] so it is retried on the
+    /// next iteration (loop-top `drain_pending_cmds` first, then this arm
+    /// again if it still can't fit). Returns `None` when there are no pending
+    /// critical commands or no channel is bound.
+    pub fn take_pending_critical_head(
+        &mut self,
+    ) -> Option<(LiveCommand, tokio::sync::mpsc::Sender<LiveCommand>)> {
+        if !self.has_pending_critical() {
+            return None;
+        }
+        let tx = self.cmd_tx.clone()?;
+        // Find and remove the first critical command (preserve order of the
+        // rest).
+        let idx = self.pending_cmds.iter().position(|c| {
+            matches!(
+                c,
+                LiveCommand::CompleteDelegation { .. } | LiveCommand::Shutdown
+            )
+        })?;
+        let cmd = self.pending_cmds.remove(idx);
+        Some((cmd, tx))
+    }
+
+    /// Return a critical command to the FRONT of `pending_cmds` after a timed
+    /// out async send so it is retried in order on the next iteration.
+    pub fn return_pending_critical_head(&mut self, cmd: LiveCommand) {
+        self.pending_cmds.insert(0, cmd);
     }
 
     /// Hard teardown: drop the channel, reset state, forget delegations,

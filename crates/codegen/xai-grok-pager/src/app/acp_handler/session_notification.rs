@@ -1076,15 +1076,17 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     // Codex Live broker: feed the durable TurnCompleted rail to the broker.
     // The broker's exactly-once state handles duplicate rails (TurnCompleted
     // can arrive via both the durable rail and the legacy prompt_complete).
-    // Failure/cancel stop_reasons produce an explicit failure completion.
+    // Failure/cancel stop_reasons route through the single centralized
+    // `on_prompt_failed` rail (one `observe_failure` + one explicit
+    // `CompleteDelegation` per terminal delegation), so the final failure/cancel
+    // message is never dropped by a duplicate `observe_failure` returning an
+    // empty decision.
     #[cfg(feature = "codex-live")]
     if let Some((prompt_id, stop_reason, agent_result)) = live_terminal {
         let sid_str = session_notif.session_id.0.as_ref();
         let is_error = stop_reason == "error";
         let is_cancel = stop_reason == "cancelled";
         if is_error || is_cancel {
-            // Failure/cancel: append an explicit final failure/cancel context
-            // so the Live model is not left waiting.
             let msg = if is_error {
                 format!(
                     "Delegation failed: {}",
@@ -1093,28 +1095,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             } else {
                 "Delegation cancelled".to_string()
             };
-            crate::live::acp_bridge::on_prompt_error(app, sid_str, &prompt_id);
-            // Also send an explicit CompleteDelegation with the failure message.
-            let decision = app.live_runtime.broker.observe_failure(
-                sid_str,
-                &prompt_id,
-                &app.live_runtime.delegations,
-            );
-            let cmds = crate::live::broker::decision_to_commands(&decision);
-            for cmd in cmds {
-                app.live_send_cmd(cmd);
-            }
-            // Send an explicit final failure context for each terminal delegation.
-            for del_id in &decision.mark_terminal {
-                app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
-                    delegation_id: del_id.clone(),
-                    text: crate::live::prompts::wrap_agent_final_message(&msg),
-                });
-                if let Some(generation) = app.live_runtime.state.generation() {
-                    app.live_runtime
-                        .mark_delegation_terminal(generation, del_id);
-                }
-            }
+            crate::live::acp_bridge::on_prompt_failed(app, sid_str, &prompt_id, &msg);
         } else {
             // Normal completion: wrap the final assistant segment.
             crate::live::acp_bridge::on_turn_completed(app, sid_str, &prompt_id);

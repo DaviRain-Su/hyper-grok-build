@@ -63,8 +63,24 @@ pub fn on_turn_completed(app: &mut AppView, session_id: &str, prompt_id: &str) {
 }
 
 /// Hook: a prompt error / cancel / failure for `session_id`+`prompt_id`.
-/// Marks the delegation terminal without a final message (idempotent).
-pub fn on_prompt_error(app: &mut AppView, session_id: &str, prompt_id: &str) {
+///
+/// This is the SINGLE centralized failure/cancel rail. It calls
+/// `observe_failure` exactly once, enqueues one `CompleteDelegation` carrying
+/// the wrapped failure/cancel text for every delegation the broker marks
+/// terminal, and marks those delegations terminal in the runtime registry.
+///
+/// The previous design called `on_prompt_error` (which ran `observe_failure`
+/// and marked the registry terminal) and THEN called `observe_failure` a
+/// second time from each caller — but the second call returned an empty
+/// decision (the broker is idempotent: `terminal_sent` was already true), so
+/// the explicit `CompleteDelegation` loop emitted nothing and the final
+/// failure/cancel message was never sent. Centralizing here guarantees the
+/// final message is enqueued on the same call that marks terminal.
+///
+/// `message` is the human-readable failure/cancel reason (already formatted by
+/// the caller). It is wrapped via `prompts::wrap_agent_final_message` before
+/// being sent as the delegation's final text.
+pub fn on_prompt_failed(app: &mut AppView, session_id: &str, prompt_id: &str, message: &str) {
     if !app.live_active() {
         return;
     }
@@ -73,11 +89,20 @@ pub fn on_prompt_error(app: &mut AppView, session_id: &str, prompt_id: &str) {
         prompt_id,
         &app.live_runtime.delegations,
     );
+    // `decision_to_commands` emits commentary (none on failure) + the broker's
+    // own terminal finals (also none on failure — `observe_failure` only marks
+    // terminal). Send them for completeness/symmetry, then enqueue the explicit
+    // failure/cancel final for each delegation the broker just marked terminal.
     let cmds = decision_to_commands(&decision);
     for cmd in cmds {
         app.live_send_cmd(cmd);
     }
+    let wrapped = crate::live::prompts::wrap_agent_final_message(message);
     for del_id in &decision.mark_terminal {
+        app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
+            delegation_id: del_id.clone(),
+            text: wrapped.clone(),
+        });
         if let Some(generation) = app.live_runtime.state.generation() {
             app.live_runtime
                 .mark_delegation_terminal(generation, del_id);

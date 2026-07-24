@@ -458,7 +458,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         .map(|s| s.0.as_ref().to_string())
                 {
                     if is_error {
-                        crate::live::acp_bridge::on_prompt_error(app, &sid, pid);
+                        crate::live::acp_bridge::on_prompt_failed(
+                            app,
+                            &sid,
+                            pid,
+                            "Delegation failed: prompt response error",
+                        );
                     } else {
                         crate::live::acp_bridge::on_turn_completed(app, &sid, pid);
                     }
@@ -512,11 +517,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.show_toast(&format!("Send now failed — requeued: {error}"));
             }
             // Codex Live broker: a send-now failure is a prompt error for the
-            // delegation bound to this prompt_id.
+            // delegation bound to this prompt_id — route through the single
+            // centralized failure rail so the final message is enqueued.
             #[cfg(feature = "codex-live")]
             {
                 let sid_str = session_id.0.as_ref().to_string();
-                crate::live::acp_bridge::on_prompt_error(app, &sid_str, &prompt_id);
+                crate::live::acp_bridge::on_prompt_failed(
+                    app,
+                    &sid_str,
+                    &prompt_id,
+                    &format!("Delegation failed: send-now failed ({error})"),
+                );
             }
             vec![]
         }

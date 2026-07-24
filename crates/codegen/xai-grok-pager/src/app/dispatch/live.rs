@@ -253,6 +253,27 @@ pub(super) fn dispatch_live_delegation_submit(
     // (bypasses slash-command parsing and project-picker). This submits the
     // delegation text as a plain prompt without touching the user's draft,
     // images, or history.
+    //
+    // ── Composer image isolation ──────────────────────────────────────────
+    // `dispatch_send_prompt_inner`'s immediate-server-send eligibility gates
+    // on `agent.prompt.images.is_empty()`: with draft images attached AND a
+    // turn running, the literal delegation would otherwise be enqueued
+    // locally (no `Effect::SendPrompt` returned), the delegation would be
+    // reported as failed, and untracked work would execute later from the
+    // local queue. The delegation text is literal plain text with NO images of
+    // its own, so we temporarily detach the composer's images for the duration
+    // of the dispatch and reattach them AFTER any draft restore below. This
+    // lets the delegation take the same immediate-send path as any plain
+    // literal prompt while preserving the user's draft images byte-for-byte.
+    // (Restoring after `restore_draft` is load-bearing: `set_text("")` drains
+    // prompt images, so an earlier restore would be wiped by the draft
+    // restore.)
+    let stashed_images = app
+        .agents
+        .get_mut(&agent_id)
+        .map(|agent| agent.prompt.drain_images())
+        .unwrap_or_default();
+
     let effects = super::prompt::dispatch_send_prompt_inner(
         app, text, false, // consume_input = false — preserve the composer
         true,  // literal = true — bypass slash/picker
@@ -261,13 +282,24 @@ pub(super) fn dispatch_live_delegation_submit(
 
     // ── Extract the actual prompt_id from the returned Effect::SendPrompt ─
     // We read the prompt_id from the effect, NOT from `current_prompt_id`
-    // (which can be an older running prompt). If no `Effect::SendPrompt` was
-    // returned, the prompt was not accepted (queued, reconnecting, etc.) —
-    // fail the delegation explicitly.
+    // (which can be an older running prompt). The effect must match the exact
+    // bound agent_id and session_id — a mismatched effect (e.g. routed to a
+    // different agent/session by a generic path) is treated as not-accepted so
+    // no untracked delegation work executes. If no matching
+    // `Effect::SendPrompt` was returned, the prompt was not accepted (queued,
+    // reconnecting, etc.) — fail the delegation explicitly and leave no queued
+    // delegation behind.
     let prompt_id = effects
         .iter()
         .find_map(|e| match e {
-            Effect::SendPrompt { prompt_id, .. } => Some(prompt_id.clone()),
+            Effect::SendPrompt {
+                prompt_id,
+                agent_id: eff_agent,
+                session_id: eff_session,
+                ..
+            } if *eff_agent == agent_id && eff_session.0.as_ref() == bound_session.as_str() => {
+                Some(prompt_id.clone())
+            }
             _ => None,
         })
         .filter(|pid| !pid.is_empty());
@@ -276,16 +308,23 @@ pub(super) fn dispatch_live_delegation_submit(
         Some(pid) => pid,
         None => {
             // Prompt was not accepted — mark terminal and send an explicit
-            // failure completion so the Live model is not left waiting.
+            // failure completion so the Live model is not left waiting. No
+            // delegation is registered, so no untracked work remains.
             app.live_runtime
                 .mark_delegation_terminal(generation, &delegation_id);
-            // Send an explicit cancel/failure CompleteDelegation.
             app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
                 delegation_id: delegation_id.clone(),
                 text: crate::live::prompts::wrap_agent_final_message(
                     "Delegation failed: prompt was not accepted",
                 ),
             });
+            // Restore the composer images before returning (no draft restore
+            // runs on this path, so reattach directly).
+            if !stashed_images.is_empty() {
+                if let Some(agent) = app.agents.get_mut(&agent_id) {
+                    agent.prompt.set_images(stashed_images);
+                }
+            }
             return effects;
         }
     };
@@ -300,8 +339,19 @@ pub(super) fn dispatch_live_delegation_submit(
     );
 
     // Restore the draft (the literal submit with consume_input=false should
-    // not have cleared it, but restore anyway for safety).
+    // not have cleared it, but restore anyway for safety). This may clear
+    // prompt images via `set_text("")`, so the composer image reattach MUST
+    // run after it.
     crate::live::handle::restore_draft(app, agent_id, &draft);
+
+    // Reattach the composer images AFTER the draft restore. The delegation
+    // path never owns the user's images; restoring here guarantees the user's
+    // draft images survive the delegation regardless of the draft snapshot.
+    if !stashed_images.is_empty() {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.prompt.set_images(stashed_images);
+        }
+    }
 
     effects
 }

@@ -2091,6 +2091,47 @@ pub(crate) async fn run(
             }
         };
 
+        // Codex Live: capacity-aware critical-command drain. When a final
+        // `CompleteDelegation` (or `Shutdown`) couldn't fit via the loop-top
+        // `try_send` reaper, await the bounded channel's `send` — which
+        // resolves the instant the receiver frees capacity — racing a short
+        // timeout. This guarantees a stranded final command eventually sends
+        // even when no unrelated app event arrives to wake the loop, without
+        // indefinitely blocking the TUI (the timeout re-arms an explicit
+        // retry each iteration). The arm owns the head critical command
+        // exclusively (popped from `pending_cmds`); on a timeout it is
+        // returned to the front for the next iteration. When there is nothing
+        // pending (or Live is off / no channel), this future never resolves
+        // and the arm is inert.
+        let live_critical_drain = async {
+            #[cfg(feature = "codex-live")]
+            {
+                use tokio::time::timeout;
+                const LIVE_CRITICAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(120);
+                match app.live_runtime.take_pending_critical_head() {
+                    Some((cmd, tx)) => {
+                        if timeout(LIVE_CRITICAL_DRAIN_TIMEOUT, tx.send(cmd.clone()))
+                            .await
+                            .is_ok()
+                        {
+                            // Sent — the command stays removed (delivered).
+                            // Reap any remaining non-critical / now-fittable
+                            // commands on the next loop-top drain.
+                        } else {
+                            // Timed out — return the command for an explicit
+                            // retry on the next iteration.
+                            app.live_runtime.return_pending_critical_head(cmd);
+                        }
+                    }
+                    None => std::future::pending().await,
+                }
+            }
+            #[cfg(not(feature = "codex-live"))]
+            {
+                std::future::pending::<()>().await;
+            }
+        };
+
         tokio::select! {
             biased;
 
@@ -2416,6 +2457,28 @@ pub(crate) async fn run(
                 }
                 // Always re-arm: a cheap no-op fire while focused / not-yet-eligible.
                 recap_poll_at = Some(Instant::now() + RECAP_POLL_INTERVAL);
+            }
+
+            // Codex Live: capacity freed (or short retry timeout fired) for a
+            // pending critical command. The actual send is reaped by the
+            // loop-top `drain_pending_cmds` try_send on the next iteration;
+            // this arm only provides the wake so a full channel can't strand a
+            // final `CompleteDelegation` with no unrelated app event. Inert
+            // (pending forever) when nothing critical is pending or codex-live
+            // is off.
+            _ = live_critical_drain => {
+                #[cfg(feature = "codex-live")]
+                {
+                    // The arm already delivered the head critical command (or
+                    // returned it on timeout). Reap any remaining non-critical
+                    // / now-fittable commands via the loop-top reaper.
+                    let drained = app.live_runtime.drain_pending_cmds();
+                    if drained > 0 {
+                        presenter.request_presentation(&mut app, terminal, false);
+                    }
+                }
+                // When codex-live is off the drain future is forever-pending,
+                // so this arm never fires; no body is needed.
             }
 
             // Hot-reload: config file changed (dev mode) or initial load.

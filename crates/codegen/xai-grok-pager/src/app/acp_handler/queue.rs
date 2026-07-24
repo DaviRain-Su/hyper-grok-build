@@ -444,7 +444,11 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
     let result = super::super::turn_completion::apply_terminal_outcome(outcome, app, id, is_active);
 
     // Codex Live broker: feed the legacy prompt_complete rail to the broker.
-    // The broker's exactly-once state handles duplicate rails.
+    // The broker's exactly-once state handles duplicate rails. Failure/cancel
+    // stop_reasons route through the single centralized `on_prompt_failed`
+    // rail (one `observe_failure` + one explicit `CompleteDelegation` per
+    // terminal delegation), so the final message is never dropped by a
+    // duplicate `observe_failure` returning an empty decision.
     #[cfg(feature = "codex-live")]
     if let Some((prompt_id, stop_reason, agent_result)) = live_prompt_complete {
         let is_error = stop_reason == "error";
@@ -458,26 +462,7 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
             } else {
                 "Delegation cancelled".to_string()
             };
-            crate::live::acp_bridge::on_prompt_error(app, session_id, &prompt_id);
-            let decision = app.live_runtime.broker.observe_failure(
-                session_id,
-                &prompt_id,
-                &app.live_runtime.delegations,
-            );
-            let cmds = crate::live::broker::decision_to_commands(&decision);
-            for cmd in cmds {
-                app.live_send_cmd(cmd);
-            }
-            for del_id in &decision.mark_terminal {
-                app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
-                    delegation_id: del_id.clone(),
-                    text: crate::live::prompts::wrap_agent_final_message(&msg),
-                });
-                if let Some(generation) = app.live_runtime.state.generation() {
-                    app.live_runtime
-                        .mark_delegation_terminal(generation, del_id);
-                }
-            }
+            crate::live::acp_bridge::on_prompt_failed(app, session_id, &prompt_id, &msg);
         } else {
             crate::live::acp_bridge::on_turn_completed(app, session_id, &prompt_id);
         }
