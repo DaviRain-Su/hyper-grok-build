@@ -37,8 +37,10 @@ impl SlashCommand for LiveCommand {
         true
     }
 
+    /// Offered even when there is no bound session — `/live` with no session
+    /// defers to `PendingUnbound` and emits `CreateSession` for the same agent.
     fn offered_when_session_less(&self) -> bool {
-        false
+        true
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

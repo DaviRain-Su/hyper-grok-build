@@ -186,6 +186,32 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
     let mut plugins_changed_needs_skills_refetch = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
+
+    // Codex Live broker: extract TurnCompleted data before the agent borrow
+    // so we can feed it to the broker after the match block releases `agent`.
+    // Only non-replay, non-wake turns are fed (the broker's exactly-once
+    // state handles duplicate rails).
+    #[cfg(feature = "codex-live")]
+    let live_terminal: Option<(String, String, Option<String>)> = {
+        if meta.is_replay {
+            None
+        } else {
+            match &session_notif.update {
+                XaiSessionUpdate::TurnCompleted {
+                    prompt_id,
+                    stop_reason,
+                    agent_result,
+                    ..
+                } if !is_wake_prompt(prompt_id) => {
+                    Some((prompt_id.clone(), stop_reason.clone(), agent_result.clone()))
+                }
+                _ => None,
+            }
+        }
+    };
+    #[cfg(not(feature = "codex-live"))]
+    let _live_terminal: Option<()> = None;
+
     let changed = match session_notif.update {
         ref update @ (XaiSessionUpdate::AutoCompactStarted { .. }
         | XaiSessionUpdate::AutoCompactCompleted { .. }
@@ -1047,6 +1073,54 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             agent.last_seen_event_id = Some(id);
         }
     }
+    // Codex Live broker: feed the durable TurnCompleted rail to the broker.
+    // The broker's exactly-once state handles duplicate rails (TurnCompleted
+    // can arrive via both the durable rail and the legacy prompt_complete).
+    // Failure/cancel stop_reasons produce an explicit failure completion.
+    #[cfg(feature = "codex-live")]
+    if let Some((prompt_id, stop_reason, agent_result)) = live_terminal {
+        let sid_str = session_notif.session_id.0.as_ref();
+        let is_error = stop_reason == "error";
+        let is_cancel = stop_reason == "cancelled";
+        if is_error || is_cancel {
+            // Failure/cancel: append an explicit final failure/cancel context
+            // so the Live model is not left waiting.
+            let msg = if is_error {
+                format!(
+                    "Delegation failed: {}",
+                    agent_result.as_deref().unwrap_or("unknown error")
+                )
+            } else {
+                "Delegation cancelled".to_string()
+            };
+            crate::live::acp_bridge::on_prompt_error(app, sid_str, &prompt_id);
+            // Also send an explicit CompleteDelegation with the failure message.
+            let decision = app.live_runtime.broker.observe_failure(
+                sid_str,
+                &prompt_id,
+                &app.live_runtime.delegations,
+            );
+            let cmds = crate::live::broker::decision_to_commands(&decision);
+            for cmd in cmds {
+                app.live_send_cmd(cmd);
+            }
+            // Send an explicit final failure context for each terminal delegation.
+            for del_id in &decision.mark_terminal {
+                app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
+                    delegation_id: del_id.clone(),
+                    text: crate::live::prompts::wrap_agent_final_message(&msg),
+                });
+                if let Some(generation) = app.live_runtime.state.generation() {
+                    app.live_runtime
+                        .mark_delegation_terminal(generation, del_id);
+                }
+            }
+        } else {
+            // Normal completion: wrap the final assistant segment.
+            crate::live::acp_bridge::on_turn_completed(app, sid_str, &prompt_id);
+        }
+    }
+
     if let Some(outcome) = terminal_outcome {
         return super::super::turn_completion::apply_terminal_outcome(
             outcome, app, parent_id, is_active,

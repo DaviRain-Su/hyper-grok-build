@@ -188,6 +188,10 @@ pub struct LiveVisualizerState {
     /// Whether the assistant transcript has been flushed to scrollback this
     /// turn (prevents duplicate scrollback blocks).
     pub assistant_flushed: bool,
+    /// Whether the mic is muted (toggled by Space).
+    pub muted: bool,
+    /// Whether a delegation is currently active (working state).
+    pub delegation_active: bool,
 }
 
 impl Default for LiveVisualizerState {
@@ -201,6 +205,8 @@ impl Default for LiveVisualizerState {
             narrow: false,
             error_message: None,
             assistant_flushed: false,
+            muted: false,
+            delegation_active: false,
         }
     }
 }
@@ -300,6 +306,11 @@ pub struct LiveRuntime {
     pub muted: bool,
     /// The delegation broker (wired into ACP ingress).
     pub broker: crate::live::broker::LiveDelegationBroker,
+    /// Pending commands that couldn't be sent via `try_send` (channel full).
+    /// Drained at the top of each event-loop tick. `CompleteDelegation` and
+    /// `Shutdown` are always queued; commentary may be shed if the queue
+    /// itself is full.
+    pub pending_cmds: Vec<LiveCommand>,
 }
 
 impl LiveRuntime {
@@ -354,11 +365,52 @@ impl LiveRuntime {
             .contains_key(&(generation, delegation_id.to_string()))
     }
 
-    /// Send a best-effort command into the pipeline (no-op if it isn't up).
-    pub fn send_cmd(&self, cmd: LiveCommand) {
+    /// Send a best-effort command into the pipeline. If the channel is full,
+    /// `CompleteDelegation` and `Shutdown` are queued in `pending_cmds` for
+    /// reliable ordered delivery on the next drain. Commentary
+    /// (`AppendDelegationContext`) may be shed under pressure.
+    pub fn send_cmd(&mut self, cmd: LiveCommand) {
         if let Some(tx) = &self.cmd_tx {
-            let _ = tx.try_send(cmd);
+            if tx.try_send(cmd.clone()).is_ok() {
+                return;
+            }
+            // Channel full — queue critical commands, shed commentary.
+            match &cmd {
+                LiveCommand::CompleteDelegation { .. } | LiveCommand::Shutdown => {
+                    self.pending_cmds.push(cmd);
+                }
+                LiveCommand::AppendDelegationContext { .. }
+                | LiveCommand::AppendSessionContext { .. } => {
+                    // Commentary may be shed/throttled.
+                    tracing::debug!("Live commentary shed (channel full)");
+                }
+                LiveCommand::ToggleMute | LiveCommand::SetMuted(_) => {
+                    // Mute toggles are best-effort (not critical).
+                }
+            }
         }
+    }
+
+    /// Drain pending commands into the channel. Called at the top of each
+    /// event-loop tick. Returns the number of commands successfully sent.
+    pub fn drain_pending_cmds(&mut self) -> usize {
+        if self.pending_cmds.is_empty() {
+            return 0;
+        }
+        let Some(tx) = &self.cmd_tx else {
+            return 0; // Channel gone — clear pending (teardown will handle).
+        };
+        let mut sent = 0;
+        let mut remaining = Vec::new();
+        for cmd in self.pending_cmds.drain(..) {
+            if tx.try_send(cmd.clone()).is_ok() {
+                sent += 1;
+            } else {
+                remaining.push(cmd);
+            }
+        }
+        self.pending_cmds = remaining;
+        sent
     }
 
     /// Hard teardown: drop the channel, reset state, forget delegations,
@@ -371,6 +423,7 @@ impl LiveRuntime {
         self.delegations.clear();
         self.muted = false;
         self.broker.clear();
+        self.pending_cmds.clear();
         LIVE_ACTIVE.store(false, Ordering::Release);
     }
 

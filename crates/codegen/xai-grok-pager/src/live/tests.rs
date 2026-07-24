@@ -33,6 +33,7 @@ use crate::live::broker::{
 use crate::live::state::{
     DelegationEntry, DraftSnapshot, LiveRuntime, LiveState, LiveVisualizerState,
 };
+use crate::live::visualizer::{VISUALIZER_HEIGHT, VISUALIZER_NARROW_HEIGHT};
 use crate::live::{
     LiveCommand, LiveContextChannel, LiveEvent, LivePhase, LiveRole, TranscriptKind,
 };
@@ -691,4 +692,267 @@ fn real_auth_provider_trait_object_compiles() {
     fn accepts_provider(_p: &dyn LiveAuthProvider) {}
     let provider = CodexLiveAuth;
     accepts_provider(&provider);
+}
+
+// ── Regression: command queue reliability (issue #4) ───────────────────────
+
+#[test]
+fn command_queue_complete_delegation_queued_when_channel_full() {
+    use crate::live::LiveCommand;
+    use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    // Create a 1-slot channel.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<LiveCommand>(1);
+    // Clone before moving into runtime.
+    let tx_clone = tx.clone();
+    runtime.cmd_tx = Some(tx);
+
+    // Fill the channel with a mute toggle.
+    tx_clone.try_send(LiveCommand::ToggleMute).unwrap();
+
+    // Now try to send CompleteDelegation — channel is full.
+    runtime.send_cmd(LiveCommand::CompleteDelegation {
+        delegation_id: "del-1".to_string(),
+        text: "final".to_string(),
+    });
+
+    // The CompleteDelegation should be queued in pending_cmds.
+    assert_eq!(runtime.pending_cmds.len(), 1);
+    assert!(matches!(
+        &runtime.pending_cmds[0],
+        LiveCommand::CompleteDelegation { delegation_id, .. } if delegation_id == "del-1"
+    ));
+
+    // Simulate the receiver draining the channel by dropping the old sender
+    // and creating a new one. Actually, we can just test drain_pending_cmds
+    // after the channel has capacity (the _rx receiver is still alive but
+    // we can't drain it synchronously). Instead, verify the queue is
+    // non-empty and the command is correct.
+    // For a full drain test, we'd need a tokio runtime — but the queue
+    // logic is simple enough that the above assertion suffices.
+}
+
+#[test]
+fn command_queue_commentary_shed_when_channel_full() {
+    use crate::live::LiveCommand;
+    use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    let (tx, _rx) = tokio::sync::mpsc::channel::<LiveCommand>(1);
+    let tx_clone = tx.clone();
+    runtime.cmd_tx = Some(tx);
+
+    // Fill the channel.
+    tx_clone.try_send(LiveCommand::ToggleMute).unwrap();
+
+    // Try to send commentary — should be shed, not queued.
+    runtime.send_cmd(LiveCommand::AppendDelegationContext {
+        delegation_id: "del-1".to_string(),
+        text: "commentary".to_string(),
+        channel: LiveContextChannel::Commentary,
+    });
+
+    // Commentary should NOT be in pending_cmds.
+    assert!(runtime.pending_cmds.is_empty());
+}
+
+#[test]
+fn command_queue_shutdown_queued_when_channel_full() {
+    use crate::live::LiveCommand;
+    use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    let (tx, _rx) = tokio::sync::mpsc::channel::<LiveCommand>(1);
+    let tx_clone = tx.clone();
+    runtime.cmd_tx = Some(tx);
+
+    // Fill the channel.
+    tx_clone.try_send(LiveCommand::ToggleMute).unwrap();
+
+    // Try to send Shutdown — should be queued.
+    runtime.send_cmd(LiveCommand::Shutdown);
+    assert_eq!(runtime.pending_cmds.len(), 1);
+    assert!(matches!(runtime.pending_cmds[0], LiveCommand::Shutdown));
+}
+
+#[test]
+fn command_queue_teardown_clears_pending() {
+    use crate::live::LiveCommand;
+    use crate::live::state::LiveRuntime;
+
+    let mut runtime = LiveRuntime::default();
+    runtime.pending_cmds.push(LiveCommand::Shutdown);
+    runtime.teardown();
+    assert!(runtime.pending_cmds.is_empty());
+}
+
+// ── Regression: transcript scrollback (issue #5) ────────────────────────────
+
+#[test]
+fn transcript_multi_delta_then_final_flushes_once() {
+    let mut vis = LiveVisualizerState::default();
+
+    // Simulate multiple output deltas (streaming).
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "Hello".to_string(),
+    });
+    assert_eq!(vis.assistant_transcript, "Hello");
+
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "Hello world".to_string(),
+    });
+    assert_eq!(vis.assistant_transcript, "Hello world");
+
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "Hello world, done.".to_string(),
+    });
+    assert_eq!(vis.assistant_transcript, "Hello world, done.");
+
+    // The final Turn event provides the complete transcript.
+    vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "Hello world, done.".to_string(),
+    });
+    assert_eq!(vis.assistant_transcript, "Hello world, done.");
+    assert!(!vis.assistant_flushed); // needs scrollback flush
+
+    // After flush + reset, the next turn starts clean.
+    vis.assistant_flushed = true; // simulate flush
+    vis.reset_turn();
+    assert!(vis.assistant_transcript.is_empty());
+    assert!(!vis.assistant_flushed);
+}
+
+// ── Regression: visualizer layout (issue #6) ────────────────────────────────
+
+#[test]
+fn visualizer_wide_renders_all_rows() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut state = LiveVisualizerState::default();
+    state.phase = LivePhase::Connected;
+    state.level = 0.5;
+    state.user_transcript = "test transcript".to_string();
+
+    let area = Rect::new(0, 0, 80, VISUALIZER_HEIGHT);
+    let mut buf = Buffer::empty(area);
+    crate::live::visualizer::render(&mut buf, area, &state);
+
+    // The buffer should have non-empty content in the last row (footer).
+    let footer_y = area.y + area.height - 1;
+    let has_content = (0..area.width)
+        .map(|x| buf[(x, footer_y)].symbol())
+        .any(|s| s != " ");
+    assert!(has_content, "footer row must have rendered content");
+
+    // The transcript row (4th from top, 0-indexed: y=3) should have content.
+    let transcript_y = area.y + 3;
+    let has_transcript = (0..area.width)
+        .map(|x| buf[(x, transcript_y)].symbol())
+        .any(|s| s != " ");
+    assert!(has_transcript, "transcript row must have rendered content");
+}
+
+#[test]
+fn visualizer_narrow_renders_transcript_and_footer() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut state = LiveVisualizerState::default();
+    state.phase = LivePhase::Connected;
+    state.level = 0.5;
+    state.user_transcript = "narrow test".to_string();
+    state.muted = true;
+
+    let area = Rect::new(0, 0, 30, VISUALIZER_NARROW_HEIGHT);
+    let mut buf = Buffer::empty(area);
+    crate::live::visualizer::render(&mut buf, area, &state);
+
+    // The last row (transcript) should have content.
+    let transcript_y = area.y + area.height - 1;
+    let has_content = (0..area.width)
+        .map(|x| buf[(x, transcript_y)].symbol())
+        .any(|s| s != " ");
+    assert!(
+        has_content,
+        "narrow transcript row must have rendered content"
+    );
+
+    // The first content row (after border) should have the phase/mute status.
+    let phase_y = area.y + 1; // after top border
+    let has_phase = (0..area.width)
+        .map(|x| buf[(x, phase_y)].symbol())
+        .any(|s| s != " ");
+    assert!(has_phase, "narrow phase row must have rendered content");
+}
+
+// ── Regression: visual status (issue #7) ────────────────────────────────────
+
+#[test]
+fn visualizer_state_muted_field() {
+    let mut vis = LiveVisualizerState::default();
+    assert!(!vis.muted);
+    vis.muted = true;
+    assert!(vis.muted);
+}
+
+#[test]
+fn visualizer_state_delegation_active_field() {
+    let mut vis = LiveVisualizerState::default();
+    assert!(!vis.delegation_active);
+    vis.delegation_active = true;
+    assert!(vis.delegation_active);
+}
+
+// ── Regression: broker duplicate terminal rails (issue #3) ──────────────────
+
+#[test]
+fn broker_duplicate_turn_completed_is_noop() {
+    let mut broker = LiveDelegationBroker::new(1);
+    broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
+    broker.register_delegation("del-1".to_string());
+    let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
+
+    let d1 = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
+    assert_eq!(d1.terminal.len(), 1);
+
+    // Duplicate — should be a no-op.
+    let d2 = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
+    assert!(d2.terminal.is_empty());
+    assert!(d2.mark_terminal.is_empty());
+}
+
+#[test]
+fn broker_foreign_prompt_on_turn_completed_ignored() {
+    let mut broker = LiveDelegationBroker::new(1);
+    broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
+    broker.register_delegation("del-1".to_string());
+    let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
+
+    // Foreign prompt_id — should be ignored.
+    let d = broker.observe_turn_completed("sess-1", "pid-foreign", &delegations);
+    assert!(d.terminal.is_empty());
+    assert!(d.mark_terminal.is_empty());
+}
+
+#[test]
+fn broker_cancel_produces_no_terminal_message() {
+    let mut broker = LiveDelegationBroker::new(1);
+    broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
+    broker.register_delegation("del-1".to_string());
+    let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
+
+    // Cancel/failure — marks terminal but no final message.
+    let d = broker.observe_failure("sess-1", "pid-1", &delegations);
+    assert!(d.terminal.is_empty()); // no final message on failure
+    assert_eq!(d.mark_terminal, vec!["del-1".to_string()]);
+
+    // Duplicate failure — no-op.
+    let d2 = broker.observe_failure("sess-1", "pid-1", &delegations);
+    assert!(d2.mark_terminal.is_empty());
 }

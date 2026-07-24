@@ -2,7 +2,7 @@
 //! submission + scrollback transcript flush).
 
 use super::state::LiveState;
-use super::{LiveEvent, LiveRole, TranscriptKind};
+use super::{LiveEvent, LiveRole};
 use crate::app::actions::Action;
 use crate::app::agent::AgentId;
 use crate::app::app_view::AppView;
@@ -16,16 +16,10 @@ pub fn handle_live_event(app: &mut AppView, event: LiveEvent) -> (bool, Vec<Acti
 
     match &event {
         LiveEvent::Phase(_) | LiveEvent::Levels(_) | LiveEvent::Transcript { .. } => {
+            // Update visualizer state (streams all deltas). Do NOT flush
+            // individual output deltas to scrollback — only the final Turn
+            // event writes the complete transcript to scrollback exactly once.
             if app.live_runtime.visualizer.apply_event(&event) {
-                needs_draw = true;
-            }
-            // Flush assistant transcript to scrollback on Turn events.
-            if let LiveEvent::Transcript {
-                kind: TranscriptKind::Output,
-                text,
-            } = &event
-            {
-                flush_assistant_transcript_to_scrollback(app, text);
                 needs_draw = true;
             }
         }
@@ -33,7 +27,11 @@ pub fn handle_live_event(app: &mut AppView, event: LiveEvent) -> (bool, Vec<Acti
             if app.live_runtime.visualizer.apply_event(&event) {
                 needs_draw = true;
             }
-            // Flush the finalized assistant turn transcript to scrollback.
+            // Flush the FINALIZED assistant turn transcript to scrollback
+            // exactly once per turn. The visualizer's `assistant_flushed`
+            // flag is reset by `apply_event` on Turn { Assistant } so this
+            // is the single flush site. Do not flush partial first-token
+            // content from individual Transcript deltas.
             if *role == LiveRole::Assistant {
                 flush_assistant_transcript_to_scrollback(app, transcript);
                 app.live_runtime.visualizer.reset_turn();

@@ -6,16 +6,14 @@
 //! 2. Waveform row 1 (output level)
 //! 3. Waveform row 2 (peak decay)
 //! 4. User transcript (accumulated finalized input segments)
-//! 5. Phase footer (connecting / connected / closing / closed + error)
+//! 5. Phase footer (connecting / connected / speaking / working / muted / error)
 //!
 //! Narrow fallback: when the terminal width is too small for the full
-//! visualizer, a compact 3-row layout is used (phase + waveform + transcript).
+//! visualizer, a compact 3-row layout is used (phase+waveform + transcript).
 //!
 //! Keyboard:
 //! - Space toggles mute
 //! - Esc / Ctrl+C ends the session
-//! - Mouse hit areas: click on the waveform toggles mute, click on the footer
-//!   stops.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -110,34 +108,50 @@ fn render_full(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block:
     Paragraph::new(transcript).render(chunks[3], buf);
 
     // Phase footer.
-    let phase_line = render_phase_footer(state.phase, &state.error_message, theme.accent_user);
+    let phase_line = render_phase_footer(
+        state.phase,
+        &state.error_message,
+        state.muted,
+        state.level,
+        state.delegation_active,
+        theme.accent_user,
+    );
     Paragraph::new(phase_line).render(chunks[4], buf);
 }
 
 fn render_narrow(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block: Block) {
+    // The block has a top border (1 row). With 3 total rows, `block.inner(area)`
+    // gives 2 rows. We use a 2-row layout: phase+waveform combined, transcript.
+    let inner = block.inner(area);
+    block.render(area, buf);
+
     let chunks = ratatui::layout::Layout::vertical([
-        ratatui::layout::Constraint::Length(0),
-        // Phase + waveform combined.
-        ratatui::layout::Constraint::Length(1),
-        // Waveform.
+        // Phase + waveform combined row.
         ratatui::layout::Constraint::Length(1),
         // Transcript.
         ratatui::layout::Constraint::Length(1),
     ])
-    .split(block.inner(area));
-
-    block.render(area, buf);
+    .split(inner);
 
     let theme = crate::theme::Theme::current();
 
-    // Phase footer.
-    let phase_line = render_phase_footer(state.phase, &state.error_message, theme.accent_user);
-    Paragraph::new(phase_line).render(chunks[1], buf);
-
-    // Combined waveform (max of level and peak decay).
+    // Phase footer + waveform on one line.
+    let phase_line = render_phase_footer(
+        state.phase,
+        &state.error_message,
+        state.muted,
+        state.level,
+        state.delegation_active,
+        theme.accent_user,
+    );
     let peak = state.level.max(state.peak_decay);
     let bar = render_waveform(peak, theme.accent_user);
-    Paragraph::new(bar).render(chunks[2], buf);
+    let combined = Line::from(vec![
+        phase_line.spans[0].clone(),
+        Span::raw(" "),
+        bar.spans[0].clone(),
+    ]);
+    Paragraph::new(combined).render(chunks[0], buf);
 
     // Transcript.
     let transcript = if state.user_transcript.is_empty() {
@@ -148,7 +162,7 @@ fn render_narrow(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, bloc
             Style::default().fg(theme.text_primary),
         ))
     };
-    Paragraph::new(transcript).render(chunks[3], buf);
+    Paragraph::new(transcript).render(chunks[1], buf);
 }
 
 /// Render a single waveform row as a bar of `█` characters proportional to
@@ -165,24 +179,48 @@ fn render_waveform(level: f64, color: Color) -> Line<'static> {
 }
 
 /// Render the phase footer line.
-fn render_phase_footer(phase: LivePhase, error: &Option<String>, color: Color) -> Line<'static> {
-    let key = format!("live.phase.{}", phase_as_key(phase));
-    let label = rust_i18n::t!(&key);
-    let (phase_style, phase_str) = match phase {
-        LivePhase::Connected => (Style::default().fg(Color::Green), label.to_string()),
-        LivePhase::Closing | LivePhase::Closed => {
-            (Style::default().fg(Color::DarkGray), label.to_string())
+/// Render the phase footer line. Derives a display status from the core
+/// transport phase + mute + output level + delegation active.
+fn render_phase_footer(
+    phase: LivePhase,
+    error: &Option<String>,
+    muted: bool,
+    level: f64,
+    delegation_active: bool,
+    color: Color,
+) -> Line<'static> {
+    // Derive the display status: error > connecting > muted > speaking >
+    // working > connected.
+    let (status_key, status_style) = if error.is_some() {
+        ("live.status.error", Style::default().fg(Color::Red))
+    } else {
+        match phase {
+            LivePhase::Connecting => ("live.status.connecting", Style::default().fg(color)),
+            LivePhase::Closing | LivePhase::Closed => {
+                ("live.status.closed", Style::default().fg(Color::DarkGray))
+            }
+            LivePhase::Connected => {
+                if muted {
+                    ("live.status.muted", Style::default().fg(Color::Yellow))
+                } else if level > 0.05 {
+                    ("live.status.speaking", Style::default().fg(Color::Green))
+                } else if delegation_active {
+                    ("live.status.working", Style::default().fg(Color::Cyan))
+                } else {
+                    ("live.status.listening", Style::default().fg(Color::Green))
+                }
+            }
         }
-        LivePhase::Connecting => (Style::default().fg(color), label.to_string()),
     };
 
+    let status_label = rust_i18n::t!(status_key);
     let mute_hint = rust_i18n::t!("live.hint.mute");
     let stop_hint = rust_i18n::t!("live.hint.stop");
 
     let mut spans = vec![
         Span::styled(
-            format!(" {phase_str} "),
-            phase_style.add_modifier(Modifier::BOLD),
+            format!(" {status_label} "),
+            status_style.add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
@@ -200,16 +238,6 @@ fn render_phase_footer(phase: LivePhase, error: &Option<String>, color: Color) -
     }
 
     Line::from(spans)
-}
-
-/// Map a `LivePhase` to a locale key suffix.
-fn phase_as_key(phase: LivePhase) -> &'static str {
-    match phase {
-        LivePhase::Connecting => "connecting",
-        LivePhase::Connected => "connected",
-        LivePhase::Closing => "closing",
-        LivePhase::Closed => "closed",
-    }
 }
 
 /// Truncate a string to `max` chars, appending `…` if truncated.

@@ -74,7 +74,7 @@ audio = ["dep:cpal"]
 # sideband. `live` implies `audio` (a live session needs mic capture) and pins
 # the WebRTC/Opus stack; `--no-default-features` and `--features audio` compile
 # neither. When this feature is off the `live` module is absent and the pager's
-# `codex-live` feature compiles to test doubles (see `cfg(feature = "codex-live")`
+# `codex-live` feature compiles to a no-op gate (see `cfg(feature = "codex-live")`
 # in the pager).
 live = ["audio", "dep:audiopus_sys", "dep:base64", "dep:bytes", "dep:flume", "dep:opus", "dep:parking_lot", "dep:reqwest", "dep:tokio-rustls", "dep:webpki-roots", "dep:uuid", "dep:webrtc"]
 

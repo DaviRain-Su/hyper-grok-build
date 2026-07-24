@@ -5,7 +5,7 @@
 //! idempotently on session/view switch, close/exit/quit, ACP disconnect, and
 //! teardown.
 
-use crate::app::actions::{Action, Effect};
+use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::live::state::{DraftSnapshot, LiveState};
@@ -60,13 +60,13 @@ pub(super) fn dispatch_live_toggle(app: &mut AppView) -> Vec<Effect> {
         start_live_cold_start(app, agent_id, session_id, draft);
         vec![]
     } else {
-        // No bound session — dispatch NewSession (which emits CreateSession
-        // via the normal action path, respecting auth + folder-trust gates)
-        // and defer to PendingUnbound. The event loop's `resume_pending_live`
-        // detects the newly-established session and transitions to ColdStart
-        // exactly once.
+        // No bound session — emit `Effect::CreateSession` for the SAME agent
+        // (not `Action::NewSession`, which creates/switches to a new AgentId).
+        // The event loop's `resume_pending_live` detects the newly-established
+        // session for this same agent_id and transitions to ColdStart exactly
+        // once.
         app.live_runtime.state = LiveState::PendingUnbound { agent_id, draft };
-        crate::app::dispatch::dispatch(Action::NewSession, app)
+        super::session::lifecycle::skip_picker_and_create_session(app, agent_id)
     }
 }
 
@@ -177,12 +177,13 @@ pub(super) fn dispatch_live_toggle_mute(app: &mut AppView) -> Vec<Effect> {
 
 /// Handle a `LiveEvent::Delegation` — submit literal plain text through the
 /// prompt pipeline to the bound AgentSession, preserve the draft, capture the
-/// actual prompt_id, and register `(generation, delegation_id) ->
-/// (AgentId, SessionId, prompt_id, lifecycle)`.
+/// actual prompt_id from the returned `Effect::SendPrompt`, and register
+/// `(generation, delegation_id) -> (AgentId, SessionId, prompt_id, lifecycle)`.
 ///
-/// **Bound-session path**: validates the bound agent/session/generation before
-/// dispatch. Never uses generic whatever-is-active routing. Does not use
-/// empty-string fallbacks for prompt_id.
+/// **Bound-session path**: validates the bound agent/session/generation AND
+/// the active view before dispatch. Never uses generic whatever-is-active
+/// routing. Does not use empty-string fallbacks for prompt_id. Does not
+/// consume or mutate the user's composer text, images, or history.
 pub(super) fn dispatch_live_delegation_submit(
     app: &mut AppView,
     agent_id: AgentId,
@@ -191,6 +192,45 @@ pub(super) fn dispatch_live_delegation_submit(
     generation: u64,
     draft: DraftSnapshot,
 ) -> Vec<Effect> {
+    // ── Revalidate the Live binding immediately at dispatch time ──────────
+    // The state must still be Active with the same generation, agent, and
+    // session, and the active view must be the bound agent.
+    let (bound_agent, bound_session, bound_generation) = match &app.live_runtime.state {
+        LiveState::Active {
+            agent_id: aid,
+            session_id: sid,
+            generation: g,
+            ..
+        } => (*aid, sid.clone(), *g),
+        _ => {
+            // Live is no longer active — fail the delegation explicitly.
+            app.live_runtime
+                .mark_delegation_terminal(generation, &delegation_id);
+            return vec![];
+        }
+    };
+
+    // Generation mismatch — stale delegation from a prior session.
+    if bound_generation != generation {
+        app.live_runtime
+            .mark_delegation_terminal(generation, &delegation_id);
+        return vec![];
+    }
+
+    // Agent mismatch — the delegation was for a different agent.
+    if bound_agent != agent_id {
+        app.live_runtime
+            .mark_delegation_terminal(generation, &delegation_id);
+        return vec![];
+    }
+
+    // The active view must be the bound agent (never generic routing).
+    if !matches!(app.active_view, ActiveView::Agent(active) if active == agent_id) {
+        app.live_runtime
+            .mark_delegation_terminal(generation, &delegation_id);
+        return vec![];
+    }
+
     // Validate the bound agent still exists and has the expected session.
     let session_id = match app
         .agents
@@ -198,37 +238,54 @@ pub(super) fn dispatch_live_delegation_submit(
         .and_then(|a| a.session.session_id.as_ref())
         .map(|s| s.0.as_ref().to_string())
     {
-        Some(sid) => sid,
-        None => {
-            // Agent or session gone — cancel the delegation.
+        Some(sid) if sid == bound_session => sid,
+        _ => {
+            // Agent/session gone or mismatched — fail the delegation.
             app.live_runtime
                 .mark_delegation_terminal(generation, &delegation_id);
             return vec![];
         }
     };
 
-    // Restore the draft first (the SendPrompt path clears the textarea, but
-    // we want the draft preserved throughout).
-    crate::live::handle::restore_draft(app, agent_id, &draft);
+    // ── Submit literal text without consuming the composer ────────────────
+    // Use `dispatch_send_prompt_inner` with `consume_input=false` (does not
+    // clear the textarea, does not drain prompt images) and `literal=true`
+    // (bypasses slash-command parsing and project-picker). This submits the
+    // delegation text as a plain prompt without touching the user's draft,
+    // images, or history.
+    let effects = super::prompt::dispatch_send_prompt_inner(
+        app, text, false, // consume_input = false — preserve the composer
+        true,  // literal = true — bypass slash/picker
+        false, // is_follow_up = false
+    );
 
-    // Submit the text as a prompt to the bound agent session. This goes
-    // through the normal SendPrompt action → dispatch → effect pipeline.
-    let effects = crate::app::dispatch::dispatch(Action::SendPrompt(text), app);
+    // ── Extract the actual prompt_id from the returned Effect::SendPrompt ─
+    // We read the prompt_id from the effect, NOT from `current_prompt_id`
+    // (which can be an older running prompt). If no `Effect::SendPrompt` was
+    // returned, the prompt was not accepted (queued, reconnecting, etc.) —
+    // fail the delegation explicitly.
+    let prompt_id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::SendPrompt { prompt_id, .. } => Some(prompt_id.clone()),
+            _ => None,
+        })
+        .filter(|pid| !pid.is_empty());
 
-    // Capture the actual prompt_id from the agent's current_prompt_id (set
-    // by the dispatch). If the prompt wasn't accepted (no prompt_id), mark
-    // the delegation terminal and bail — no empty-string fallback.
-    let prompt_id = match app
-        .agents
-        .get(&agent_id)
-        .and_then(|a| a.session.current_prompt_id.clone())
-    {
-        Some(pid) if !pid.is_empty() => pid,
-        _ => {
-            // Prompt was not accepted — mark terminal and bail.
+    let prompt_id = match prompt_id {
+        Some(pid) => pid,
+        None => {
+            // Prompt was not accepted — mark terminal and send an explicit
+            // failure completion so the Live model is not left waiting.
             app.live_runtime
                 .mark_delegation_terminal(generation, &delegation_id);
-            crate::live::handle::restore_draft(app, agent_id, &draft);
+            // Send an explicit cancel/failure CompleteDelegation.
+            app.live_send_cmd(crate::live::LiveCommand::CompleteDelegation {
+                delegation_id: delegation_id.clone(),
+                text: crate::live::prompts::wrap_agent_final_message(
+                    "Delegation failed: prompt was not accepted",
+                ),
+            });
             return effects;
         }
     };
@@ -242,7 +299,8 @@ pub(super) fn dispatch_live_delegation_submit(
         prompt_id,
     );
 
-    // Restore the draft again after the prompt dispatch cleared the textarea.
+    // Restore the draft (the literal submit with consume_input=false should
+    // not have cleared it, but restore anyway for safety).
     crate::live::handle::restore_draft(app, agent_id, &draft);
 
     effects

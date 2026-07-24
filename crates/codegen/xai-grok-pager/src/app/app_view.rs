@@ -1925,7 +1925,9 @@ impl AppView {
     }
     #[cfg(feature = "codex-live")]
     /// Send a best-effort command into the Live pipeline (no-op if not up).
-    pub fn live_send_cmd(&self, cmd: crate::live::LiveCommand) {
+    /// Critical commands (`CompleteDelegation`, `Shutdown`) are queued for
+    /// reliable delivery if the channel is full.
+    pub fn live_send_cmd(&mut self, cmd: crate::live::LiveCommand) {
         self.live_runtime.send_cmd(cmd);
     }
     #[cfg(feature = "codex-live")]
@@ -4315,10 +4317,17 @@ impl AppView {
         let agent_mouse_pos = self.last_mouse_pos;
         // Compute the Live visualizer state for the active agent BEFORE the
         // destructuring borrow below, so the closure can use it without
-        // re-borrowing `self`.
+        // re-borrowing `self`. Sync the `muted` and `delegation_active` fields
+        // from the runtime so the visualizer reflects honest status.
         #[cfg(feature = "codex-live")]
-        let live_visualizer_state: Option<crate::live::state::LiveVisualizerState> =
-            self.live_visualizer_state_for_active().cloned();
+        let live_visualizer_state: Option<crate::live::state::LiveVisualizerState> = {
+            // Sync muted and delegation_active into the visualizer state.
+            self.live_runtime.visualizer.muted = self.live_runtime.muted;
+            self.live_runtime.visualizer.delegation_active =
+                !self.live_runtime.delegations.is_empty()
+                    && self.live_runtime.delegations.values().any(|d| !d.terminal);
+            self.live_visualizer_state_for_active().cloned()
+        };
         #[cfg(not(feature = "codex-live"))]
         let _live_visualizer_state: Option<()> = None;
         let Self {

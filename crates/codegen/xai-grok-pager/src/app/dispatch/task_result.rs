@@ -436,7 +436,36 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             http_status,
             prompt_id,
-        } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        } => {
+            // Capture the result/error status before handle_prompt_response consumes it.
+            #[cfg(feature = "codex-live")]
+            let is_error = result.is_err();
+            #[cfg(not(feature = "codex-live"))]
+            let _is_error = result.is_err();
+            let effects =
+                handle_prompt_response(app, agent_id, result, http_status, prompt_id.clone());
+            // Codex Live broker: feed the PromptResponse rail to the broker.
+            // The broker's exactly-once state handles duplicates with the
+            // durable TurnCompleted and legacy prompt_complete rails.
+            #[cfg(feature = "codex-live")]
+            {
+                if let Some(ref pid) = prompt_id
+                    && !pid.is_empty()
+                    && let Some(sid) = app
+                        .agents
+                        .get(&agent_id)
+                        .and_then(|a| a.session.session_id.as_ref())
+                        .map(|s| s.0.as_ref().to_string())
+                {
+                    if is_error {
+                        crate::live::acp_bridge::on_prompt_error(app, &sid, pid);
+                    } else {
+                        crate::live::acp_bridge::on_turn_completed(app, &sid, pid);
+                    }
+                }
+            }
+            effects
+        }
         TaskResult::SendPromptNowFailed {
             agent_id,
             session_id,
@@ -481,6 +510,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         )
                     });
                 agent.show_toast(&format!("Send now failed — requeued: {error}"));
+            }
+            // Codex Live broker: a send-now failure is a prompt error for the
+            // delegation bound to this prompt_id.
+            #[cfg(feature = "codex-live")]
+            {
+                let sid_str = session_id.0.as_ref().to_string();
+                crate::live::acp_bridge::on_prompt_error(app, &sid_str, &prompt_id);
             }
             vec![]
         }

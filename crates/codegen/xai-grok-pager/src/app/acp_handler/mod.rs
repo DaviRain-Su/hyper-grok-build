@@ -567,36 +567,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                     }
 
-                    // Codex Live broker: check for turn completion / prompt error.
-                    // If the agent's turn just finished (state is Idle and a
-                    // prompt_id was set), notify the broker. This catches the
-                    // TurnCompleted/PromptResponse/cancel paths in one place.
-                    #[cfg(feature = "codex-live")]
-                    if !meta.is_replay {
-                        let sid_str = notif.request.session_id.0.as_ref();
-                        if let Some(agent) = app.agents.get(&id) {
-                            // Turn completed: agent is Idle and had a prompt_id.
-                            if !agent.session.state.is_busy()
-                                && agent.session.current_prompt_id.is_none()
-                            {
-                                // Check all registered delegations for this session —
-                                // any whose prompt_id matches the just-finished turn
-                                // should be completed. We check by looking at the
-                                // delegations map for entries whose session_id matches.
-                                let delegations: Vec<(u64, String, String)> = app
-                                    .live_runtime
-                                    .delegations
-                                    .iter()
-                                    .filter(|((_, _), e)| e.session_id == sid_str && !e.terminal)
-                                    .map(|((g, d), e)| (*g, d.clone(), e.prompt_id.clone()))
-                                    .collect();
-                                for (_, _, pid) in &delegations {
-                                    crate::live::acp_bridge::on_turn_completed(app, sid_str, pid);
-                                }
-                            }
-                        }
-                    }
-
                     // Mutation always happens; redraw only when the matched
                     // agent is the visible one.
                     mutated && is_active

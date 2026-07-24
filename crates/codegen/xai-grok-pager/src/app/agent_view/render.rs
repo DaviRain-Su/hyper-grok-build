@@ -1036,7 +1036,26 @@ impl AgentView {
         } else if cancel_turn_view_h > 0 {
             cancel_turn_view_h
         } else {
-            base_prompt_height
+            #[cfg(feature = "codex-live")]
+            {
+                if live_visualizer.is_some() {
+                    // Codex Live visualizer: reserve the fixed height (5 wide,
+                    // 3 narrow) so the visualizer is not clipped by the normal
+                    // empty editor height.
+                    let narrow = inner_width < crate::live::visualizer::NARROW_WIDTH_THRESHOLD;
+                    if narrow {
+                        crate::live::visualizer::VISUALIZER_NARROW_HEIGHT
+                    } else {
+                        crate::live::visualizer::VISUALIZER_HEIGHT
+                    }
+                } else {
+                    base_prompt_height
+                }
+            }
+            #[cfg(not(feature = "codex-live"))]
+            {
+                base_prompt_height
+            }
         };
         let prompt_height =
             prompt_height.max(prompt_style.vpad_top + 1 + prompt_style.info_block(true));

@@ -1897,6 +1897,14 @@ pub(crate) async fn run(
         // Stop voice if the user has left the recording session (see method).
         app.enforce_voice_session_bound();
 
+        // Codex Live: drain pending commands that couldn't be sent via
+        // try_send (channel full). Critical commands (CompleteDelegation,
+        // Shutdown) are queued reliably and delivered in order.
+        #[cfg(feature = "codex-live")]
+        if app.live_runtime.drain_pending_cmds() > 0 {
+            presenter.request_presentation(&mut app, terminal, false);
+        }
+
         // Codex Live: enforce the session binding (stop on navigation away).
         #[cfg(feature = "codex-live")]
         dispatch::enforce_live_session_bound(&mut app);
