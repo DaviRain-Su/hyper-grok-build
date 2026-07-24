@@ -4,13 +4,34 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.111] — 2026-07-25
+
 ### Added
-- Add experimental `/live` full-duplex voice sessions powered by ChatGPT Codex OAuth and `gpt-live-1-codex`, with realtime transcripts, mute and barge-in controls, native WebRTC/Opus audio, and spoken model responses.
-- Let the Live assistant delegate coding work to the currently bound Hyper agent, relay tool-boundary progress, and return the agent's final result to the voice conversation.
+- **Codex Live voice sessions (`/live`)** — Full-duplex voice powered by ChatGPT Codex OAuth and `gpt-live-1-codex`, with realtime transcripts, mute and barge-in controls, native WebRTC/Opus audio, and spoken model responses. The Live assistant delegates coding work to the bound Hyper agent, relays tool-boundary progress, and returns the agent's final result to the voice conversation.
+- **Sideband protocol hardening** — Precise WebSocket close-frame diagnostics (code + reason preserved), binary frame treated as protocol failure, EOF-without-close detection, and once-only error reporting via atomic `failure_reported` guard.
+- **Error toast propagation** — Terminal transport/media errors are now preserved through to the user-facing toast (e.g. `"Live stopped: Codex live sideband closed (1008): policy changed"`) instead of a generic `"stopped unexpectedly"` message.
+- **Log security** — `redact_live_error_for_log()` strips Bearer tokens, access tokens, cookies, session IDs, and passwords before writing errors to persistent diagnostic logs, with bounded length truncation.
+- **Data-channel event gating** — Sideband-open atomic gate prevents duplicate `delegation.created`/transcript/turn events when both the sideband WebSocket and the data-channel deliver the same server payload.
+- **Command queue reliability** — Capacity-aware critical drain: `CompleteDelegation` and `Shutdown` are queued with stable sequence IDs when the channel is full; commentary events are shed under pressure without silent protocol loss.
+- **PCM hot-loop fix** — Closed PCM source no longer starves session teardown; the session remains responsive to `Shutdown`/`CompleteDelegation` commands after the microphone source ends.
+- **Config unification** — Codex base URL now resolved through `PlatformId::OpenAiCodex.base_url()`, sharing the same `GROK_OPENAI_CODEX_BASE_URL` override as normal Codex inference.
+- **Build isolation** — Linux musl target flags for RELRO/non-executable stack hardening in `.cargo/config.toml`.
+- **Documentation** — Complete Codex Live user guide in English and Simplified Chinese (`/live` slash command, audio requirements, environment variables).
+
+### Changed
+- Sync the community build with the upstream `0.2.111` monorepo line.
 
 ### Notes
 - `/live` uses an undocumented internal Codex Live protocol and may stop working when the backend changes. It is independent of the active coding provider but requires `grok login --openai`.
 - Existing `/voice` dictation is unchanged. `/voice` and `/live` are mutually exclusive so they never compete for the microphone.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.111
+```
 
 ## [0.2.110] — 2026-07-23
 
