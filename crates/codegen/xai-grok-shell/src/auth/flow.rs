@@ -1668,7 +1668,7 @@ mod tests {
             expires_at: None,
             oidc_issuer: None,
             oidc_client_id: None,
-        account_id: None,
+            account_id: None,
         }
     }
 

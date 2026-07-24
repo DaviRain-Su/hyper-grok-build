@@ -76,10 +76,7 @@ pub(crate) fn record_sticky_permanent_failure(
 }
 
 /// Clear sticky state for one RT (e.g. after a successful refresh under a new family).
-pub(crate) fn clear_sticky_for_refresh_token(
-    family: PlatformRefreshFamily,
-    refresh_token: &str,
-) {
+pub(crate) fn clear_sticky_for_refresh_token(family: PlatformRefreshFamily, refresh_token: &str) {
     let key = (family, fingerprint_refresh_token(refresh_token));
     let mut map = STICKY.lock().unwrap_or_else(|e| e.into_inner());
     map.remove(&key);
@@ -96,7 +93,10 @@ pub(crate) fn kimi_refresh_error_is_permanent(err: &super::kimi::oauth::RefreshE
     use super::kimi::oauth::RefreshError;
     match err {
         RefreshError::Unauthorized { .. } => true,
-        RefreshError::Fatal { status, description } => {
+        RefreshError::Fatal {
+            status,
+            description,
+        } => {
             // Only 4xx invalid_grant-style fatals stick; 5xx/Exhausted do not.
             (*status == 400 || *status == 401 || *status == 403)
                 && description.to_ascii_lowercase().contains("invalid_grant")
@@ -161,11 +161,8 @@ mod tests {
             "different RT must not inherit the sticky verdict"
         );
         assert!(
-            sticky_permanent_failure(
-                PlatformRefreshFamily::OpenAiCodex,
-                "rt-dead-token-aaaaaaaa"
-            )
-            .is_none(),
+            sticky_permanent_failure(PlatformRefreshFamily::OpenAiCodex, "rt-dead-token-aaaaaaaa")
+                .is_none(),
             "different family must not share the verdict"
         );
         clear_sticky_family(PlatformRefreshFamily::KimiCode);
@@ -181,21 +178,20 @@ mod tests {
         );
         clear_sticky_family(PlatformRefreshFamily::OpenAiCodex);
         assert!(
-            sticky_permanent_failure(
-                PlatformRefreshFamily::OpenAiCodex,
-                "rt-codex-dead-11111111"
-            )
-            .is_none()
+            sticky_permanent_failure(PlatformRefreshFamily::OpenAiCodex, "rt-codex-dead-11111111")
+                .is_none()
         );
     }
 
     #[test]
     fn kimi_permanent_classifier() {
         use super::super::kimi::oauth::RefreshError;
-        assert!(kimi_refresh_error_is_permanent(&RefreshError::Unauthorized {
-            status: 401,
-            description: "bad".into(),
-        }));
+        assert!(kimi_refresh_error_is_permanent(
+            &RefreshError::Unauthorized {
+                status: 401,
+                description: "bad".into(),
+            }
+        ));
         assert!(kimi_refresh_error_is_permanent(&RefreshError::Fatal {
             status: 400,
             description: "invalid_grant: expired".into(),

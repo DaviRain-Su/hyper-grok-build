@@ -1130,6 +1130,30 @@ fn subagents_config_models_empty_when_missing() {
     });
 }
 #[test]
+fn subagents_config_effort_parsed() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str(
+                r#"
+                [subagents]
+                enabled = true
+
+                [subagents.effort]
+                oracle = "high"
+                explore = "low"
+                "#,
+            )
+            .unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert!(sa.enabled);
+        assert_eq!(sa.effort.len(), 2);
+        assert_eq!(sa.effort.get("oracle").unwrap(), "high");
+        assert_eq!(sa.effort.get("explore").unwrap(), "low");
+        // Missing table → empty map (same default as models).
+        let bare: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
+        assert!(SubagentsConfig::resolve(false, &bare).effort.is_empty());
+    });
+}
+#[test]
 fn subagents_config_models_without_enabled() {
     without_grok_subagents(|| {
         let config: toml::Value = toml::from_str(

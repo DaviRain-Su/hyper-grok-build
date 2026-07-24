@@ -250,6 +250,18 @@ explore = "grok-build"               # route explore to a specific model
 
 按类型的模型覆盖对任意父会话生效。没有覆盖时，子智能体继承父会话的模型。
 
+### 按类型钉定推理强度（effort）
+
+可以为每种智能体类型钉定 effort 层级 —— 比如 `explore` 用便宜档位、`oracle` 用深想档位：
+
+```toml
+[subagents.effort]
+oracle = "high"      # 可选: none, minimal, low, medium, high, xhigh, max, ultra
+explore = "low"
+```
+
+优先级（从高到低）：单次 spawn 的显式覆盖 > 角色（role）的 `reasoning_effort` > 角色（persona）的 > 本 `[subagents.effort]` 钉定 > 智能体定义里的 `effort:` 字段 > 继承父会话的 effort。填写了未知档位的钉定会被忽略并记录日志警告。`/agents` 会在模型钉定旁边显示 effort 钉定（行内 `effort: <档位>`，展开详情中有 `pinned — [subagents.effort]` 说明）；编辑目前通过 `config.toml` 进行。
+
 你也可以从 TUI 管理模型固定：打开 `/agents`，选择一个智能体，然后按 `m`。会打开模型选择器，列出你有凭据的模型——输入以筛选，用 `↑`/`↓` 选择，按 Enter 固定。选择 **inherit**（第一行）可清除固定并重新跟随会话模型。已固定的智能体在列表中显示 `→ <model>`，并在展开详情中显示 `pinned — [subagents.models]` 说明。固定写入 `~/.grok/config.toml`，并在下一次子智能体生成时生效——无需重启。
 
 ### 自定义角色（Roles）与 Personas

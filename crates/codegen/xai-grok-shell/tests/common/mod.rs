@@ -357,5 +357,5 @@ pub fn test_sampler_config(
         header_injector: None,
         responses_codex_dialect: false,
         kimi_dialect: false,
-        }
+    }
 }

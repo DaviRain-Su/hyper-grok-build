@@ -1073,3 +1073,5 @@ readiness.suggest.readme: "добавьте README для контекста п�
 readiness.evidence.clean: "чисто"
 slash.readiness.desc: "Проверяет, готов ли репозиторий к автономной работе агента"
 readiness.suggest.git_dirty_few: "незакоммиченные изменения — закоммитьте, чтобы у агента были контрольные точки"
+agents.detail.effort_pinned: "  Усилие: %{level} (закреплено — [subagents.effort])"
+agents.detail.effort_definition: "  Усилие: %{level} (из определения агента)"

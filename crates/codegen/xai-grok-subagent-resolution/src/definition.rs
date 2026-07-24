@@ -243,9 +243,19 @@ pub fn resolve_runtime_config(
     personas: &HashMap<String, SubagentPersona>,
     cwd: Option<&Path>,
     definition: &AgentDefinition,
+    // User `[subagents.effort]` pin for `subagent_type` (None when unpinned).
+    config_effort_pin: Option<xai_tool_types::SubagentReasoningEffort>,
 ) -> EffectiveRuntimeConfig {
     let (role, role_name) = select_role(subagent_type, overrides, roles);
-    let mut runtime = crate::resolve_effective_overrides(overrides, role, personas, cwd, role_name);
+    let mut runtime = crate::resolve_subagent_spec(
+        overrides,
+        role,
+        personas,
+        cwd,
+        role_name,
+        config_effort_pin,
+        crate::DefinitionRuntimeDefaults::default(),
+    );
     apply_definition_runtime_defaults(&mut runtime, definition);
     runtime
 }

@@ -640,6 +640,7 @@ fn handle_reload_subagent_models(agent: &MvpAgent) -> ExtResult {
     let resolved = crate::config::SubagentsConfig::resolve(false, &disk_config);
     let count = resolved.models.len();
     agent.cfg.borrow_mut().subagent_model_overrides = resolved.models;
+    agent.cfg.borrow_mut().subagent_effort_overrides = resolved.effort;
     ExtMethodResult::success(serde_json::json!({ "reloaded": true, "pins": count }))
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))

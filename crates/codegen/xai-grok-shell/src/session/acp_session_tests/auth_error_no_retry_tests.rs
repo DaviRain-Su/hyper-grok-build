@@ -844,10 +844,8 @@ async fn reconstruct_full_config_prefers_codex_resolver_over_session_auth_manage
         .run_until(async {
             let dir = tempfile::tempdir().unwrap();
             let auth_path = dir.path().join("auth.json");
-            let _guard = xai_grok_test_support::EnvGuard::set(
-                "GROK_AUTH_PATH",
-                auth_path.to_str().unwrap(),
-            );
+            let _guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
             // Minimal valid Codex JWT payload with chatgpt_account_id claim.
             use base64::Engine as _;
             let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1393,7 +1391,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 header_injector: None,
                 responses_codex_dialect: false,
                 kimi_dialect: false,
-        };
+            };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, true, 85)
                 .await;
@@ -1489,7 +1487,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 header_injector: None,
                 responses_codex_dialect: false,
                 kimi_dialect: false,
-        };
+            };
             let _ = actor
                 .handle_set_session_model(cfg, false, false, true, 85)
                 .await;

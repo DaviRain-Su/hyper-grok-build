@@ -263,6 +263,18 @@ Per-type model overrides apply for any parent. Without an override, a subagent i
 
 You can also manage model pins from the TUI: open `/agents`, select an agent, and press `m`. A model picker opens listing the models you have credentials for — type to filter, choose with `↑`/`↓`, and press Enter to pin. Pick **inherit** (the first row) to clear the pin and follow the session model again. Pinned agents show `→ <model>` in the list and a `pinned — [subagents.models]` note in the expanded detail. Pins are written to `~/.grok/config.toml` and apply to the next subagent spawn — no restart needed.
 
+### Per-Type Reasoning Effort
+
+Pin an effort level per agent type — e.g. a cheap model for `explore`, a deep-thinking one for `oracle`:
+
+```toml
+[subagents.effort]
+oracle = "high"      # none, minimal, low, medium, high, xhigh, max, ultra
+explore = "low"
+```
+
+Precedence (highest first): an explicit per-spawn override, then a role's `reasoning_effort`, then a persona's, then this `[subagents.effort]` pin, then the agent definition's own `effort:` field, and finally the parent session's effort. Pins that name an unknown level are ignored with a log warning. `/agents` shows pinned effort next to the model pin (`effort: <level>` in the row, and a `pinned — [subagents.effort]` note in the expanded detail); editing is via `config.toml` for now.
+
 ### Custom Roles and Personas
 
 Define custom roles with their own capability and model defaults:

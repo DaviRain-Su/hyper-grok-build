@@ -209,6 +209,9 @@ pub(crate) struct SubagentSpawnContext {
     pub available_models: indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
+    /// Per-agent reasoning effort pins from `[subagents.effort]` (empty when
+    /// no pin table is configured).
+    pub subagent_effort_overrides: std::collections::HashMap<String, String>,
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
     /// Omitted agents default to enabled (`true`).
     pub subagent_toggle: std::collections::HashMap<String, bool>,

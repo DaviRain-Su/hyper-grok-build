@@ -69,9 +69,8 @@ pub(crate) fn task_model_error_for_catalog(
     available: &IndexMap<String, ModelEntry>,
     is_session_auth: bool,
 ) -> Option<String> {
-    let is_available = |entry: &ModelEntry| {
-        entry.info.user_selectable && entry.visible_for_auth(is_session_auth)
-    };
+    let is_available =
+        |entry: &ModelEntry| entry.info.user_selectable && entry.visible_for_auth(is_session_auth);
     if config::find_model_by_id(available, requested).is_some_and(&is_available) {
         return None;
     }
@@ -583,8 +582,7 @@ impl ModelsManager {
         // Live listing (blocking HTTP) — must leave the async context.
         let platforms = cfg.platforms.clone();
         let merged = crate::agent::platform_models_fetch::fetch_and_merge_platform_models(
-            prefetched,
-            &platforms,
+            prefetched, &platforms,
         );
         *self.inner.prefetched.write() = merged.clone();
         self.rebuild(&cfg, merged);
@@ -1920,7 +1918,10 @@ fn locked_platform_acp_infos(
         if platform.uses_oauth() {
             map.insert(meta_keys::REQUIRES_OAUTH_META_KEY.to_string(), true.into());
         } else {
-            map.insert(meta_keys::REQUIRES_API_KEY_META_KEY.to_string(), true.into());
+            map.insert(
+                meta_keys::REQUIRES_API_KEY_META_KEY.to_string(),
+                true.into(),
+            );
             map.insert(
                 meta_keys::API_KEY_ENV_META_KEY.to_string(),
                 serde_json::json!(platform.api_key_env_names()),
@@ -2291,7 +2292,8 @@ mod tests {
             .expect("locked platform model must be projected");
         let meta = locked.meta.as_ref().expect("lock meta present");
         assert_eq!(
-            meta.get(REQUIRES_API_KEY_META_KEY).and_then(|v| v.as_bool()),
+            meta.get(REQUIRES_API_KEY_META_KEY)
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
         assert_eq!(
@@ -3917,8 +3919,7 @@ mod tests {
         .cloned();
         available.insert(
             locked_id.clone(),
-            acp::ModelInfo::new(locked_id.clone(), "DeepSeek V4 Flash".to_string())
-                .meta(lock_meta),
+            acp::ModelInfo::new(locked_id.clone(), "DeepSeek V4 Flash".to_string()).meta(lock_meta),
         );
 
         let persisted = acp::ModelId::new("deepseek/deepseek-v4-flash");

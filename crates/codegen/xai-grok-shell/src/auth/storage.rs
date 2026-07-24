@@ -512,7 +512,9 @@ pub(crate) fn store_kimi_code_auth_after_refresh_locked(
 /// Remove the Kimi Code OAuth scope from auth.json.
 pub fn clear_kimi_code_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = resolve_auth_json_path(grok_home);
-    with_auth_json_scope_lock(&path, || clear_scope_from_auth_json(&path, KIMI_CODE_OAUTH_SCOPE))
+    with_auth_json_scope_lock(&path, || {
+        clear_scope_from_auth_json(&path, KIMI_CODE_OAUTH_SCOPE)
+    })
 }
 
 /// Read the OpenAI Codex (ChatGPT) OAuth credential, if present and correctly scoped.

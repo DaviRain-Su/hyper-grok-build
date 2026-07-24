@@ -235,6 +235,20 @@ pub struct SubagentsConfig {
     /// ```
     #[serde(default)]
     pub models: std::collections::HashMap<String, String>,
+    /// Per-subagent reasoning effort overrides.
+    /// Keys are agent names, values are effort levels: `none`, `minimal`,
+    /// `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Parsed from
+    /// `[subagents.effort]` in config.toml. Ranks below role/persona effort
+    /// overrides and above the agent definition's own `effort:` default —
+    /// mirroring how `[subagents.models]` ranks against model overrides.
+    ///
+    /// ```toml
+    /// [subagents.effort]
+    /// oracle = "high"
+    /// explore = "low"
+    /// ```
+    #[serde(default)]
+    pub effort: std::collections::HashMap<String, String>,
     /// Per-subagent enable/disable toggles.
     /// Keys are agent names, values are booleans.
     /// Omitted agents default to enabled (`true`).

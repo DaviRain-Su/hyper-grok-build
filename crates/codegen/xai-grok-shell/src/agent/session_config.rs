@@ -96,8 +96,8 @@ pub(crate) fn build_session_config_options(
         };
         // Locked BYOK platform models carry their setup hint so clients
         // rendering these options can show why the row is gated.
-        let description =
-            parse_platform_lock_meta(model.meta.as_ref()).map(|lock| format!("🔒 {}", lock.setup_hint));
+        let description = parse_platform_lock_meta(model.meta.as_ref())
+            .map(|lock| format!("🔒 {}", lock.setup_hint));
         options.push(SessionConfigOption {
             id: model.model_id.0.to_string(),
             category: "model".to_string(),

@@ -1071,3 +1071,5 @@ readiness.suggest.readme: "プロジェクトの背景として README を追加
 readiness.evidence.clean: "クリーン"
 slash.readiness.desc: "リポジトリがエージェントの自律実行に適しているか確認"
 readiness.suggest.git_dirty_few: "未コミットの変更 — コミットしてエージェントにチェックポイントを提供"
+agents.detail.effort_pinned: "  強度: %{level} (固定 — [subagents.effort])"
+agents.detail.effort_definition: "  強度: %{level} (エージェント定義より)"

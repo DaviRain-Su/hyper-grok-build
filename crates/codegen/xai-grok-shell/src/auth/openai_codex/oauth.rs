@@ -171,9 +171,8 @@ async fn read_token_response(
         anyhow::bail!("OpenAI Codex token {operation} failed (HTTP {status}): {body}");
     }
     let json: TokenResponse = response.json().await?;
-    codex_token_from_response(json).map_err(|e| {
-        anyhow::anyhow!("OpenAI Codex token {operation} response invalid: {e}")
-    })
+    codex_token_from_response(json)
+        .map_err(|e| anyhow::anyhow!("OpenAI Codex token {operation} response invalid: {e}"))
 }
 
 /// Exchange an authorization code for tokens (`grant_type=authorization_code`).
@@ -444,9 +443,8 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn jwt_with_claim(claim_json: &str) -> String {
-        let payload = URL_SAFE_NO_PAD.encode(
-            format!(r#"{{"{JWT_CLAIM_PATH}": {claim_json}, "sub": "user-1"}}"#).as_bytes(),
-        );
+        let payload = URL_SAFE_NO_PAD
+            .encode(format!(r#"{{"{JWT_CLAIM_PATH}": {claim_json}, "sub": "user-1"}}"#).as_bytes());
         format!("header.{payload}.sig")
     }
 
@@ -497,7 +495,10 @@ mod tests {
         assert_eq!(parsed.host_str(), Some("auth.openai.com"));
         assert_eq!(parsed.path(), "/oauth/authorize");
         let params: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
-        assert_eq!(params.get("response_type").map(|v| v.as_ref()), Some("code"));
+        assert_eq!(
+            params.get("response_type").map(|v| v.as_ref()),
+            Some("code")
+        );
         assert_eq!(
             params.get("client_id").map(|v| v.as_ref()),
             Some(OPENAI_CODEX_CLIENT_ID)
@@ -569,7 +570,6 @@ mod tests {
             device_auth_poll_interval(Some(&serde_json::json!(0))),
             std::time::Duration::from_secs(1)
         );
-
     }
 
     #[test]

@@ -122,6 +122,20 @@ pub(crate) async fn run_shell_child(
         .parent_session_info
         .as_ref()
         .map(|i| std::path::Path::new(&i.cwd));
+    let config_effort_pin = ctx
+        .subagent_effort_overrides
+        .get(&request.subagent_type)
+        .and_then(|raw| {
+            raw.parse()
+                .map_err(|err| {
+                    tracing::warn!(
+                        value = %raw,
+                        error = %err,
+                        "[subagents.effort] pin has an invalid value, ignoring"
+                    );
+                })
+                .ok()
+        });
     let mut effective_runtime = xai_grok_subagent_resolution::resolve_runtime_config(
         &request.subagent_type,
         &request.runtime_overrides,
@@ -129,6 +143,7 @@ pub(crate) async fn run_shell_child(
         &ctx.subagent_personas,
         cwd,
         &definition,
+        config_effort_pin,
     );
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {

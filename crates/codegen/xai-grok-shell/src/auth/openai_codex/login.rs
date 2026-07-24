@@ -17,8 +17,8 @@ use axum::{
 use tokio::net::TcpListener;
 
 use super::oauth::{
-    self, BROWSER_CALLBACK_PATH, BROWSER_CALLBACK_PORT, BROWSER_REDIRECT_URI,
-    DEVICE_CODE_TIMEOUT, DEVICE_VERIFICATION_URI, DeviceAuthInfo, DevicePollTick,
+    self, BROWSER_CALLBACK_PATH, BROWSER_CALLBACK_PORT, BROWSER_REDIRECT_URI, DEVICE_CODE_TIMEOUT,
+    DEVICE_VERIFICATION_URI, DeviceAuthInfo, DevicePollTick,
 };
 use crate::auth::flow::AuthChannels;
 use crate::auth::model::GrokAuth;
@@ -122,11 +122,10 @@ fn parse_authorization_input(input: &str) -> Option<Callback> {
         });
     }
     if value.contains("code=") {
-        let params: std::collections::HashMap<String, String> = url::form_urlencoded::parse(
-            value.as_bytes(),
-        )
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(value.as_bytes())
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
         return params.get("code").cloned().map(|code| Callback {
             code,
             state: params.get("state").cloned(),
@@ -224,7 +223,11 @@ async fn wait_for_authorization_code(
             .fallback(|| async {
                 (
                     StatusCode::NOT_FOUND,
-                    Html(callback_page("Not found", "Callback route not found.", false)),
+                    Html(callback_page(
+                        "Not found",
+                        "Callback route not found.",
+                        false,
+                    )),
                 )
             })
             .with_state(tx.clone());
@@ -333,7 +336,9 @@ async fn browser_login(host: &str, channels: Option<AuthChannels>) -> anyhow::Re
         eprintln!();
     }
     if code_rx.is_none() && std::io::stdin().is_terminal() {
-        eprintln!("Complete login in your browser, or paste the authorization code / redirect URL here:");
+        eprintln!(
+            "Complete login in your browser, or paste the authorization code / redirect URL here:"
+        );
     }
     // Always hand off to the browser: in TUI mode the client UI shows the
     // URL as a fallback; in CLI mode the URL was printed above.
@@ -360,9 +365,10 @@ async fn browser_login(host: &str, channels: Option<AuthChannels>) -> anyhow::Re
     )
     .await?;
 
-    let token = oauth::exchange_authorization_code(host, &code, &pkce.verifier, BROWSER_REDIRECT_URI)
-        .await
-        .context("OpenAI Codex token exchange failed")?;
+    let token =
+        oauth::exchange_authorization_code(host, &code, &pkce.verifier, BROWSER_REDIRECT_URI)
+            .await
+            .context("OpenAI Codex token exchange failed")?;
     oauth::credentials_from_token(token, None)
 }
 
@@ -416,7 +422,10 @@ struct DeviceCodeSuccess {
 }
 
 /// Poll the device token endpoint until approval (Pi `pollOAuthDeviceCodeFlow`).
-async fn poll_device_auth(host: &str, device: &DeviceAuthInfo) -> anyhow::Result<DeviceCodeSuccess> {
+async fn poll_device_auth(
+    host: &str,
+    device: &DeviceAuthInfo,
+) -> anyhow::Result<DeviceCodeSuccess> {
     let deadline = tokio::time::Instant::now() + DEVICE_CODE_TIMEOUT;
     let mut interval = if device.interval.is_zero() {
         oauth::default_poll_interval()
@@ -434,7 +443,7 @@ async fn poll_device_auth(host: &str, device: &DeviceAuthInfo) -> anyhow::Result
                 return Ok(DeviceCodeSuccess {
                     authorization_code,
                     code_verifier,
-                })
+                });
             }
             DevicePollTick::Pending => {}
             DevicePollTick::SlowDown => {
@@ -585,9 +594,7 @@ async fn refresh_openai_codex_auth(force: bool) -> Option<GrokAuth> {
         return None;
     }
 
-    if let Some(reason) =
-        sticky_permanent_failure(PlatformRefreshFamily::OpenAiCodex, &refresh)
-    {
+    if let Some(reason) = sticky_permanent_failure(PlatformRefreshFamily::OpenAiCodex, &refresh) {
         tracing::warn!(
             %reason,
             "auth: Codex refresh short-circuited by sticky permanent failure \
@@ -945,10 +952,9 @@ mod tests {
 
     #[test]
     fn parse_authorization_input_accepts_full_url() {
-        let cb = parse_authorization_input(
-            "http://localhost:1455/auth/callback?code=abc123&state=xyz",
-        )
-        .unwrap();
+        let cb =
+            parse_authorization_input("http://localhost:1455/auth/callback?code=abc123&state=xyz")
+                .unwrap();
         assert_eq!(cb.code, "abc123");
         assert_eq!(cb.state.as_deref(), Some("xyz"));
     }

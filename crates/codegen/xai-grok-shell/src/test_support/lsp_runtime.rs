@@ -90,6 +90,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_chat_state: None,
         available_models: indexmap::IndexMap::new(),
         subagent_model_overrides: HashMap::new(),
+        subagent_effort_overrides: HashMap::new(),
         subagent_toggle: toggle,
         disable_web_search: false,
         todo_gate: false,

@@ -46,9 +46,7 @@ where
     T: Send,
 {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle)
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-        {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(f)
         }
         Ok(_) => std::thread::scope(|s| match s.spawn(f).join() {
@@ -68,10 +66,7 @@ pub(crate) fn load_platforms_config() -> PlatformsConfig {
 }
 
 /// Platforms with usable credentials, registry order (subscription first).
-fn enabled_platforms(
-    has_kimi_oauth: bool,
-    platforms: &PlatformsConfig,
-) -> Vec<PlatformId> {
+fn enabled_platforms(has_kimi_oauth: bool, platforms: &PlatformsConfig) -> Vec<PlatformId> {
     PlatformId::ALL
         .into_iter()
         .filter(|p| {
@@ -130,10 +125,7 @@ fn fetch_enabled_platform_models_inner(
                 );
                 successes += 1;
                 for entry in entries {
-                    let key = entry
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| entry.model.clone());
+                    let key = entry.id.clone().unwrap_or_else(|| entry.model.clone());
                     map.insert(key, ModelEntry::from_config_entry(&entry));
                 }
             }
@@ -270,11 +262,7 @@ pub(crate) fn platform_wire_model_to_entry(
         });
     ModelEntryConfig {
         id: Some(platform.managed_model_key(&wire.id)),
-        name: Some(
-            wire.display_name
-                .clone()
-                .unwrap_or_else(|| wire.id.clone()),
-        ),
+        name: Some(wire.display_name.clone().unwrap_or_else(|| wire.id.clone())),
         model: wire.id,
         base_url: base_url.to_owned(),
         description: None,
@@ -443,7 +431,10 @@ mod tests {
             wire,
             "https://api.moonshot.cn/v1",
         );
-        assert_eq!(entry.id.as_deref(), Some("moonshot-cn/kimi-k2-turbo-preview"));
+        assert_eq!(
+            entry.id.as_deref(),
+            Some("moonshot-cn/kimi-k2-turbo-preview")
+        );
         assert!(entry.supported_in_api);
         assert!(entry.env_key.is_some());
         assert!(entry.api_key.is_none());

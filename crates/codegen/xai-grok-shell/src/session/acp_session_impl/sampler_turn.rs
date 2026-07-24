@@ -1060,8 +1060,7 @@ impl SessionActor {
                     );
                 }
             }
-        } else if (matches!(error.kind, SamplingErrorKind::Auth)
-            || error.status_code == Some(401))
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && is_kimi_code
         {
             // Do not fall through to xAI AuthManager recovery (wrong credential).

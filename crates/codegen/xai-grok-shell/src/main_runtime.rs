@@ -80,9 +80,7 @@ mod tests {
         let handle = runtime.handle().clone();
 
         let (base_url, server) = runtime.block_on(async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let app = axum::Router::new()
                 .route(

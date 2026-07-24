@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use xai_grok_tools::implementations::grok_build::task::types::SubagentRuntimeOverrides;
-use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
+use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, SubagentReasoningEffort};
 
 use crate::config::{SubagentPersona, SubagentRole};
 use crate::types::{DefinitionRuntimeDefaults, EffectiveRuntimeConfig};
@@ -73,6 +73,7 @@ pub fn resolve_effective_overrides(
         personas,
         cwd,
         role_name,
+        None,
         DefinitionRuntimeDefaults::default(),
     )
 }
@@ -87,6 +88,10 @@ pub fn resolve_subagent_spec(
     personas: &HashMap<String, SubagentPersona>,
     cwd: Option<&Path>,
     role_name: Option<String>,
+    // User `[subagents.effort]` pin for this agent type. Sits between the
+    // persona layer and the agent-definition default, mirroring how the
+    // `[subagents.models]` pin ranks below role/persona model overrides.
+    config_effort_pin: Option<SubagentReasoningEffort>,
     definition_defaults: DefinitionRuntimeDefaults,
 ) -> EffectiveRuntimeConfig {
     // ── Model resolution ─────────────────────────────────────────
@@ -120,6 +125,7 @@ pub fn resolve_subagent_spec(
         model_from_override_or_role.or_else(|| resolved_persona.and_then(|p| p.model.clone()));
     let reasoning_effort = reasoning_from_override_or_role
         .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort))
+        .or(config_effort_pin)
         .or(definition_defaults.reasoning_effort);
 
     // ── Persona instructions loading ─────────────────────────────
@@ -463,8 +469,15 @@ mod tests {
             isolation: Some(SubagentIsolationMode::Worktree),
         };
 
-        let result =
-            resolve_subagent_spec(&overrides, None, &empty_personas(), None, None, defaults);
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            None,
+            defaults,
+        );
 
         assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::High));
         assert_eq!(
@@ -489,8 +502,15 @@ mod tests {
             isolation: Some(SubagentIsolationMode::Worktree),
         };
 
-        let result =
-            resolve_subagent_spec(&overrides, None, &empty_personas(), None, None, defaults);
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            None,
+            defaults,
+        );
 
         assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::Low));
         assert_eq!(
@@ -498,6 +518,69 @@ mod tests {
             Some(SubagentCapabilityMode::ReadOnly)
         );
         assert_eq!(result.isolation, SubagentIsolationMode::None);
+    }
+
+    // ── [subagents.effort] config pin precedence ─────────────────
+
+    #[test]
+    fn config_effort_pin_applies_below_persona_and_above_definition_default() {
+        let overrides = make_overrides(None, None, None, None, None);
+        let defaults = DefinitionRuntimeDefaults {
+            reasoning_effort: Some(SubagentReasoningEffort::Medium),
+            ..DefinitionRuntimeDefaults::default()
+        };
+        // No role/persona layer: the pin wins over the definition default.
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            Some(SubagentReasoningEffort::Ultra),
+            defaults,
+        );
+        assert_eq!(
+            result.reasoning_effort,
+            Some(SubagentReasoningEffort::Ultra)
+        );
+    }
+
+    #[test]
+    fn config_effort_pin_loses_to_persona_and_explicit_override() {
+        let mut personas = HashMap::new();
+        personas.insert(
+            "deep".to_string(),
+            SubagentPersona {
+                reasoning_effort: Some(SubagentReasoningEffort::Low),
+                instructions: Some("test".into()),
+                ..Default::default()
+            },
+        );
+        // Persona effort beats the config pin.
+        let overrides = make_overrides(None, Some("deep"), None, None, None);
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &personas,
+            None,
+            None,
+            Some(SubagentReasoningEffort::Ultra),
+            DefinitionRuntimeDefaults::default(),
+        );
+        assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::Low));
+
+        // Explicit per-spawn override beats the pin too.
+        let overrides = make_overrides(None, None, None, None, Some("high"));
+        let result = resolve_subagent_spec(
+            &overrides,
+            None,
+            &empty_personas(),
+            None,
+            None,
+            Some(SubagentReasoningEffort::Ultra),
+            DefinitionRuntimeDefaults::default(),
+        );
+        assert_eq!(result.reasoning_effort, Some(SubagentReasoningEffort::High));
     }
 
     // ── Isolation precedence ─────────────────────────────────────

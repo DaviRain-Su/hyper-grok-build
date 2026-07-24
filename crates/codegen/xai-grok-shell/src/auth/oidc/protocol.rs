@@ -1201,9 +1201,7 @@ mod tests {
         let hits_for_handler = hits.clone();
         let body_polled = std::sync::Arc::new(AtomicBool::new(false));
         let body_polled_for_handler = body_polled.clone();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().route(
             "/token",

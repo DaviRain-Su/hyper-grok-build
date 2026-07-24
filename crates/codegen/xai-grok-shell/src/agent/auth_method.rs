@@ -330,7 +330,10 @@ impl AuthMethodKind {
 
     /// Requires user interaction (browser, OIDC redirect, or external auth command).
     pub fn needs_interactive_login(self) -> bool {
-        matches!(self, Self::GrokCom | Self::Oidc | Self::KimiCode | Self::OpenAiCodex)
+        matches!(
+            self,
+            Self::GrokCom | Self::Oidc | Self::KimiCode | Self::OpenAiCodex
+        )
     }
 
     pub fn auth_error_message(self) -> &'static str {

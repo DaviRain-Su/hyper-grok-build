@@ -383,12 +383,19 @@ impl MvpAgent {
             None => (None, None),
         };
         let project_trusted = crate::agent::folder_trust::project_scope_allowed(&parent_cwd);
-        let (base_roles, base_personas, subagent_model_overrides, subagent_toggle) = {
+        let (
+            base_roles,
+            base_personas,
+            subagent_model_overrides,
+            subagent_effort_overrides,
+            subagent_toggle,
+        ) = {
             let cfg = self.cfg.borrow();
             (
                 cfg.subagent_roles.clone(),
                 cfg.subagent_personas.clone(),
                 cfg.subagent_model_overrides.clone(),
+                cfg.subagent_effort_overrides.clone(),
                 cfg.subagent_toggle.clone(),
             )
         };
@@ -458,6 +465,7 @@ impl MvpAgent {
             parent_max_turns,
             available_models,
             subagent_model_overrides,
+            subagent_effort_overrides,
             subagent_toggle,
             subagent_roles,
             subagent_personas,

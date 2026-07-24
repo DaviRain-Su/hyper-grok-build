@@ -286,6 +286,9 @@ pub struct AgentsModalState {
     /// `[subagents.models]` pins from the effective config, loaded with the
     /// agent list and reloaded after every successful edit.
     pub model_pins: HashMap<String, String>,
+    /// `[subagents.effort]` pins from the effective config (display only —
+    /// edit them in config.toml).
+    pub effort_pins: HashMap<String, String>,
     /// Current `model` values of persona definitions, keyed by persona name
     /// and read from each persona's source file (display + picker preselect).
     persona_models: HashMap<String, String>,
@@ -342,6 +345,7 @@ impl AgentsModalState {
         let personas = merge_persona_lists(bundle, cwd);
         let default_agent = resolve_default_agent_name(cwd, model_agent_type);
         let model_pins = load_agent_model_pins();
+        let effort_pins = load_agent_effort_pins();
         let persona_models = load_persona_models(&personas);
         let mut available_models = available_models;
         available_models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -362,6 +366,7 @@ impl AgentsModalState {
             model_edit_target: None,
             model_picker_selected: 0,
             model_pins,
+            effort_pins,
             persona_models,
             available_models,
             message: None,
@@ -381,6 +386,7 @@ impl AgentsModalState {
         let toggle = load_agent_toggle();
         self.agents = build_agent_list(&self.cwd, &toggle);
         self.model_pins = load_agent_model_pins();
+        self.effort_pins = load_agent_effort_pins();
         if self.selected >= self.agents.len() {
             self.selected = self.agents.len().saturating_sub(1);
         }
@@ -859,10 +865,22 @@ pub fn load_agent_model_pins() -> HashMap<String, String> {
     };
     parse_model_pins(&root)
 }
+/// Load the `[subagents.effort]` pin map from the effective config.
+pub fn load_agent_effort_pins() -> HashMap<String, String> {
+    let root = match xai_grok_shell::config::load_effective_config() {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+    parse_subagent_string_table(&root, "effort")
+}
 /// Extract the `[subagents.models]` string map from a resolved config value.
 fn parse_model_pins(root: &toml::Value) -> HashMap<String, String> {
+    parse_subagent_string_table(root, "models")
+}
+/// Extract a `[subagents.<table>]` string map from a resolved config value.
+fn parse_subagent_string_table(root: &toml::Value, table: &str) -> HashMap<String, String> {
     root.get("subagents")
-        .and_then(|s| s.get("models"))
+        .and_then(|s| s.get(table))
         .and_then(|m| m.as_table())
         .map(|table| {
             table
@@ -1014,7 +1032,11 @@ fn current_target_model(state: &AgentsModalState) -> Option<&str> {
 ///
 /// `pin` is the agent's `[subagents.models]` override, if any — it wins over
 /// the agent definition's `model` at spawn time and is labeled as such.
-pub fn format_agent_detail(entry: &AgentListEntry, pin: Option<&str>) -> Vec<String> {
+pub fn format_agent_detail(
+    entry: &AgentListEntry,
+    pin: Option<&str>,
+    effort_pin: Option<&str>,
+) -> Vec<String> {
     let def = &entry.definition;
     let mut lines = Vec::new();
     match pin {
@@ -1027,6 +1049,19 @@ pub fn format_agent_detail(entry: &AgentListEntry, pin: Option<&str>) -> Vec<Str
                 lines.push(format!("  Model: {id} (from agent definition)"));
             }
         },
+    }
+    match effort_pin {
+        Some(level) => {
+            lines.push(rust_i18n::t!("agents.detail.effort_pinned", level = level).into_owned())
+        }
+        None => {
+            if let Some(effort) = def.effort {
+                let level: &str = effort.into();
+                lines.push(
+                    rust_i18n::t!("agents.detail.effort_definition", level = level).into_owned(),
+                );
+            }
+        }
     }
     let mode_label = match def.prompt_mode {
         xai_grok_agent::config::PromptMode::Extend => "extend",
@@ -1755,8 +1790,11 @@ fn render_agents_tab(
             }
         }
         if entry.expanded {
-            let details =
-                format_agent_detail(entry, state.model_pins.get(&entry.name).map(String::as_str));
+            let details = format_agent_detail(
+                entry,
+                state.model_pins.get(&entry.name).map(String::as_str),
+                state.effort_pins.get(&entry.name).map(String::as_str),
+            );
             for line in details {
                 rows.push(FlatRow::Detail(line));
             }
@@ -1927,6 +1965,20 @@ fn render_agents_tab(
                         }
                         buf.set_string(x, row_y, &pin_label, pin_style);
                         x += pin_label.width() as u16;
+                    }
+                }
+                if let Some(level) = state.effort_pins.get(&entry.name) {
+                    let effort_label =
+                        format!(" · {}: {level}", rust_i18n::t!("persona.field.effort"));
+                    let effort_remaining =
+                        (content_area.x + content_area.width).saturating_sub(x) as usize;
+                    if effort_remaining >= effort_label.width() {
+                        let mut effort_style = Style::default().fg(theme.gray_dim);
+                        if let Some(bg_color) = bg {
+                            effort_style = effort_style.bg(bg_color);
+                        }
+                        buf.set_string(x, row_y, &effort_label, effort_style);
+                        x += effort_label.width() as u16;
                     }
                 }
                 let (badge_text, mut badge_style) = scope_badge(entry.scope, theme);
@@ -3617,6 +3669,7 @@ mod tests {
                 model_edit_target: None,
                 model_picker_selected: 0,
                 model_pins: HashMap::new(),
+                effort_pins: HashMap::new(),
                 persona_models: HashMap::new(),
                 available_models: Vec::new(),
                 message: None,
@@ -3664,6 +3717,7 @@ mod tests {
             model_edit_target: None,
             model_picker_selected: 0,
             model_pins: HashMap::new(),
+            effort_pins: HashMap::new(),
             persona_models: HashMap::new(),
             available_models: Vec::new(),
             message: None,

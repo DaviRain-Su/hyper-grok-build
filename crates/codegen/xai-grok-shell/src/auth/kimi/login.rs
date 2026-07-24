@@ -51,9 +51,7 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
                     crate::auth::platform_refresh_sticky::PlatformRefreshFamily::KimiCode,
                 );
                 eprintln!("✓ Signed in to Kimi For Coding");
-                eprintln!(
-                    "  Models:"
-                );
+                eprintln!("  Models:");
                 eprintln!("    kimi-code/k3");
                 eprintln!("    kimi-code/k2p7                     # Kimi K2.7 Code");
                 eprintln!("    kimi-code/kimi-for-coding-highspeed # Kimi K2.7 Hyper Speed");
@@ -174,9 +172,7 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
 
     // Permanent failure (revoked RT / invalid_grant): do not re-hit the IdP
     // every turn. Cleared on successful refresh under a new RT or logout.
-    if let Some(reason) =
-        sticky_permanent_failure(PlatformRefreshFamily::KimiCode, &refresh)
-    {
+    if let Some(reason) = sticky_permanent_failure(PlatformRefreshFamily::KimiCode, &refresh) {
         tracing::warn!(
             %reason,
             "auth: Kimi refresh short-circuited by sticky permanent failure \
@@ -210,11 +206,8 @@ async fn refresh_kimi_code_auth(force: bool) -> Option<GrokAuth> {
     } else {
         tracing::warn!("auth: Kimi refresh lock lost before IdP; re-acquiring");
         drop(file_lock);
-        match crate::auth::manager::lock::try_lock_auth_file_async(
-            &path,
-            KIMI_REFRESH_LOCK_TIMEOUT,
-        )
-        .await
+        match crate::auth::manager::lock::try_lock_auth_file_async(&path, KIMI_REFRESH_LOCK_TIMEOUT)
+            .await
         {
             Some(relock) => {
                 if let Some(adopted) = try_adopt_sibling_kimi_token(home, &refresh, force) {

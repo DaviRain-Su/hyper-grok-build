@@ -266,8 +266,8 @@ async fn refresh_token_with_timeout(
 ) -> Result<GrokAuth, RefreshError> {
     let url = oauth_url(host, "/api/oauth/token");
     let mut last_error = String::from("no attempt made");
-    let total_deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(REFRESH_TOTAL_BUDGET_SECS);
+    let total_deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(REFRESH_TOTAL_BUDGET_SECS);
     for attempt in 0..MAX_REFRESH_RETRIES {
         if tokio::time::Instant::now() >= total_deadline {
             return Err(RefreshError::Exhausted(format!(
@@ -460,9 +460,10 @@ mod poll_error_mapping_tests {
                         tokio::time::sleep(header_delay).await;
                         axum::response::Response::builder()
                             .status(axum::http::StatusCode::OK)
-                            .body(axum::body::Body::from_stream(
-                                futures::stream::pending::<Result<String, std::io::Error>>(),
-                            ))
+                            .body(axum::body::Body::from_stream(futures::stream::pending::<
+                                Result<String, std::io::Error>,
+                            >(
+                            )))
                             .unwrap()
                     }
                 }
@@ -566,10 +567,8 @@ mod poll_error_mapping_tests {
     #[tokio::test]
     async fn refresh_headers_and_body_share_one_attempt_deadline() {
         let request_timeout = std::time::Duration::from_secs(1);
-        let (host, hits, server) = spawn_delayed_headers_stalled_body_server(
-            std::time::Duration::from_millis(700),
-        )
-        .await;
+        let (host, hits, server) =
+            spawn_delayed_headers_stalled_body_server(std::time::Duration::from_millis(700)).await;
 
         // A split send/body budget would take about 1.7s here. The outer
         // guard leaves scheduling slack while proving the refresh returns on

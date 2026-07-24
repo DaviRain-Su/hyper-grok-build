@@ -639,6 +639,8 @@ mod tests {
         "readiness.suggest.lockfile",
         "readiness.suggest.readme",
         "readiness.evidence.clean",
+        "agents.detail.effort_pinned",
+        "agents.detail.effort_definition",
         "warn.import_failed",
         "warn.no_claude_settings",
         "warn.no_items_selected",
