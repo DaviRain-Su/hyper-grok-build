@@ -55,5 +55,5 @@ Automate, script, and integrate Grok Build with other systems.
 | 20 | [Background Tasks and Monitoring](20-background-tasks.md) | `background: true`, `/loop`, `monitor`, and `Ctrl+B` to demote |
 | 21 | [Terminal Support and Troubleshooting](21-terminal-support.md) | tmux, SSH, truecolor, clipboard, and OSC 52 |
 | 22 | [Permissions and Safety Controls](22-permissions-and-safety.md) | `dontAsk` mode, auto-approved tools, the safe-bash list, and restrictive PreToolUse hooks (such as git/gh-only) |
-| 23 | [Agent Dashboard](23-dashboard.md) | Central overview of local sessions and forks |
+| 23 | [Agent Dashboard](23-dashboard.md) | Terminal agent control plus the local Rust web observability dashboard |
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export |

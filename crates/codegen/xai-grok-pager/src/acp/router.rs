@@ -153,20 +153,26 @@ mod tests {
     #[test]
     fn legacy_codex_ids_migrate_to_native_catalog() {
         assert_eq!(migrate_model_id("codex:gpt-5.4"), "openai-codex/gpt-5.4");
-        assert_eq!(migrate_model_id("codex:gpt-5.6-sol"), "openai-codex/gpt-5.6-sol");
+        assert_eq!(
+            migrate_model_id("codex:gpt-5.6-sol"),
+            "openai-codex/gpt-5.6-sol"
+        );
         // Non-legacy ids pass through untouched.
-        assert_eq!(migrate_model_id("openai-codex/gpt-5.4"), "openai-codex/gpt-5.4");
+        assert_eq!(
+            migrate_model_id("openai-codex/gpt-5.4"),
+            "openai-codex/gpt-5.4"
+        );
         assert_eq!(migrate_model_id("grok-4.5"), "grok-4.5");
         assert_eq!(migrate_model_id("codex:"), "codex:");
     }
 
     #[test]
     fn is_codex_model_matches_only_legacy_prefix() {
-        assert!(is_codex_model(&acp::ModelId::new(std::sync::Arc::<str>::from(
-            "codex:gpt-5.4"
-        ))));
-        assert!(!is_codex_model(&acp::ModelId::new(std::sync::Arc::<str>::from(
-            "openai-codex/gpt-5.4"
-        ))));
+        assert!(is_codex_model(&acp::ModelId::new(
+            std::sync::Arc::<str>::from("codex:gpt-5.4")
+        )));
+        assert!(!is_codex_model(&acp::ModelId::new(
+            std::sync::Arc::<str>::from("openai-codex/gpt-5.4")
+        )));
     }
 }

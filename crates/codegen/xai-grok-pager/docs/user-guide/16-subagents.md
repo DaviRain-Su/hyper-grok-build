@@ -68,11 +68,30 @@ Project- or user-defined agents can add new types or shadow these built-ins by n
 
 ### Consulting the Oracle
 
-The oracle pattern pairs a fast working model with a stronger analysis model: the main agent keeps working on its own model, and when it hits a problem that needs deeper reasoning it spawns the `oracle` subagent, reads its recommendation, and continues. The oracle is read-only at the toolset level, so it can inspect the repo but never edits it.
+The oracle pattern pairs a **working model** with a **stronger analysis model**: the main agent keeps working on its own model, and when it hits a problem that needs deeper reasoning it spawns the `oracle` subagent, reads its recommendation, and continues. The oracle is read-only at the toolset level, so it can inspect the repo but never edits it.
 
-Pin the oracle to your strongest configured model with `/agents` → select `oracle` → `m` (or `[subagents.models] oracle = "..."` in `config.toml`). Without a pin it inherits the session model, which defeats the purpose.
+**Pin a stronger model or the pattern does nothing useful.** Without a pin, Oracle **inherits the session model**. If the main session is already on that model (for example Grok), Oracle is the same model with a fancier prompt — not Amp-style deep think.
+
+Pin Oracle with `/agents` → select `oracle` → `m`, or in `config.toml`:
+
+```toml
+[subagents.models]
+oracle = "openai/gpt-5.6"   # example; use any stronger slug you have credentials for
+```
+
+Typical setup: cheap/fast model on the main session, frontier model on `oracle` only.
+
+**When the main agent should consult Oracle** (it decides via `spawn_subagent`; Hyper does not auto-run Oracle every turn like some cloud products):
+
+- Same test or error still failing after repeated edit attempts
+- Unclear root cause, architecture trade-off, or high-risk change
+- You ask it to rethink, review the approach, or get a second opinion
+
+If the working model keeps thrashing instead of calling Oracle, **say so in the chat** — there is no `/oracle` slash. For example: “用 oracle 看为什么测试还红”, “ask oracle why this still fails”, or “spawn oracle on the root cause”. Pin a stronger model first so the consult is worth the cost.
 
 The built-in Oracle is bounded by default: 12 model/tool-use rounds, 40 tool calls, and 180 seconds total wall-clock time. Thirty seconds are reserved for finalization. Near a limit, Grok Build tells Oracle to stop investigating and return its best structured recommendation; if it ignores the warning, the hard tool/time limit cancels it. The Oracle response contract includes findings, evidence, alternatives, risks, a verification handoff, confidence, and a final recommendation.
+
+Design notes (pin warnings, chat-trigger obedience): repository `docs/design-oracle.md`.
 
 Custom or shadowing agent definitions can use the same YAML frontmatter fields:
 

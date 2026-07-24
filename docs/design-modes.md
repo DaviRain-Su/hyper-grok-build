@@ -2,12 +2,29 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **设计文档**（尚未实现） |
-| 日期 | 2026-07-21 |
-| 动机 | 子代理默认继承主模型；缺 Amp 式 low–ultra 搭配与可配置降级 |
+| 状态 | **缓停 / 非当前主线**（设计保留作参考，不排期实现） |
+| 初稿 | 2026-07-21 |
+| 决策修订 | 2026-07-23 |
+| 动机（原） | 子代理默认继承主模型；缺 Amp 式 low–ultra 搭配与可配置降级 |
 | 对标 | [Amp Modes & Models](https://ampcode.com/modes)、omp modelRoles |
-| 竞品背景 | [competitive-analysis.md](./competitive-analysis.md) §7.1 #1 Effort / Role 路由 |
+| 竞品背景 | [competitive-analysis.md](./competitive-analysis.md) |
 | 受众 | 个人 power user；多 provider / BYOK |
+| 相关主线 | Oracle 触发与强模型钉定 → [design-oracle.md](./design-oracle.md) |
+
+---
+
+## 0. 决策修订（2026-07-23）
+
+**结论：不做 Amp 四档 Modes 作为当前产品线。** 现有 `/model`、`/effort`、`[subagents.models]`、persona/role、spawn `model` 已覆盖「可配置」；Amp low–ultra 本质是 **意见鲜明的默认搭配表**，不是更强的自定义能力。对追求 BYOK / 多 provider / 细粒度钉模型的 Hyper 用户，整包抄四档 ROI 低，还会和 permission mode / plan mode 撞名。
+
+| 项 | 决定 |
+|----|------|
+| Amp 式 `low \| medium \| high \| ultra` | **不做**（或永久缓；本文以下章节仅作归档） |
+| 现有配置表面 | **保持**；用文档 / 示例 preset 教人钉 explore、oracle 等 |
+| 真正缺口 | **Oracle 何时被叫、用什么更强模型** — 见 [design-oracle.md](./design-oracle.md) |
+| 若将来再做「一键搭配」 | 优先 **薄 preset 包**（写入现有 `[subagents.models]`），不要新解析层 |
+
+下文 §1 起仍是原设计全文，**不再作为实现 checklist**。
 
 ---
 
@@ -440,20 +457,14 @@ effort = "medium"
 | 配置表面膨胀 | deep merge + 内置默认，用户最少只设 `modes.default` |
 | 双模型成本 | oracle 默认不跑真旁路直到 P3 |
 
-### 已拍板
+### 已拍板（历史；已被 §0 修订覆盖）
 
-| 项 | 决定 |
-|----|------|
-| 档位名 | Amp 式 low / medium / high / ultra |
-| 产品名词 | **agent mode（档位）**，与 permission/plan mode 消歧 |
-| 默认 | 代码内置，非强制项目 config 文件 |
-| 缺模型 | fallback → inherit，fail-soft |
-| 自定义 | TOML 覆盖槽位；P2+ preset 包 |
-| 入口 | `/mode` slash + `--mode` CLI + `GROK_MODE` env |
-| 优先级链 | §4.1（spawn > role > persona > pin > agent-def > **mode 槽** > inherit） |
-| effort 语义 | 复用现有 `ReasoningEffort` serde；语义档位映射模型菜单 |
-| 实现顺序 | **先本文档，后 coding（P1 起）** |
-| 主模型 | P1 不因切 mode 自动改写用户主模型 |
+| 项 | 原决定 | 2026-07-23 |
+|----|--------|------------|
+| 档位名 | Amp 式 low / medium / high / ultra | **缓停，不实现** |
+| 产品名词 | **agent mode（档位）** | 不再引入 |
+| 实现顺序 | 先文档后 coding（P1 起） | **取消排期**；Oracle 见 [design-oracle.md](./design-oracle.md) |
+| 缺模型 / 自定义 / 优先级链等 | 见上文章节 | 仅作归档参考 |
 
 ---
 

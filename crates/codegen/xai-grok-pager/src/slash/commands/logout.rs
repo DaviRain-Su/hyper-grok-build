@@ -122,9 +122,9 @@ fn split_first(s: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
     use crate::settings::PagerLocalSnapshot;
-    use crate::acp::model_state::ModelState;
 
     static EMPTY_BUNDLE: BundleState = BundleState {
         has_cache: false,

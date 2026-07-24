@@ -247,7 +247,10 @@ mod tests {
         assert!(hidden_model_ids_at(&path).is_empty());
         set_hidden_model_ids_at(
             &path,
-            &["deepseek/deepseek-v4-flash".to_string(), "gpt-5".to_string()],
+            &[
+                "deepseek/deepseek-v4-flash".to_string(),
+                "gpt-5".to_string(),
+            ],
         )
         .unwrap();
         assert_eq!(
@@ -255,7 +258,10 @@ mod tests {
             ["deepseek/deepseek-v4-flash", "gpt-5"]
         );
         let body = fs::read_to_string(&path).unwrap();
-        assert!(body.contains("default = \"grok-4.5\""), "[models] sibling kept");
+        assert!(
+            body.contains("default = \"grok-4.5\""),
+            "[models] sibling kept"
+        );
         assert!(body.contains("compact_mode"), "[ui] table kept");
 
         // Empty clears the key but leaves the file parseable and siblings intact.

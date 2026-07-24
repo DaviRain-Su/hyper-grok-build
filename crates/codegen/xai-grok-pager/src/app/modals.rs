@@ -55,7 +55,10 @@ pub(crate) fn model_picker_view_items(
         })
         .collect();
     for id in hidden_ids {
-        if out.iter().any(|i| i.action_id.as_deref() == Some(id.as_str())) {
+        if out
+            .iter()
+            .any(|i| i.action_id.as_deref() == Some(id.as_str()))
+        {
             continue;
         }
         out.push(ArgItem {
@@ -679,8 +682,7 @@ impl AgentView {
                         } else {
                             hidden_ids.push(id);
                         }
-                        if let Err(e) = crate::config_toml_edit::set_hidden_model_ids(hidden_ids)
-                        {
+                        if let Err(e) = crate::config_toml_edit::set_hidden_model_ids(hidden_ids) {
                             tracing::warn!(error = %e, "failed to persist hidden_models");
                         }
                         let q = state.query().to_string();
@@ -1044,32 +1046,32 @@ impl AgentView {
                                                 state: state.clone(),
                                             })
                                         };
-                                    let is_model = matches!(trimmed.as_str(), "model" | "m");
-                                    let hidden_ids = if is_model {
-                                        crate::config_toml_edit::hidden_model_ids()
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    let view_items = if is_model {
-                                        model_picker_view_items(&items, &hidden_ids, false)
-                                    } else {
-                                        items.clone()
-                                    };
-                                    self.active_modal = Some(ActiveModal::ArgPicker {
-                                        command: trimmed,
-                                        args_query: String::new(),
-                                        items: view_items,
-                                        original_items: items,
-                                        show_all: false,
-                                        hidden_ids,
-                                        // Type-to-find: open in input mode (vim: Esc→nav, i→input).
-                                        state: crate::views::picker::PickerState::input_active(
-                                        ),
-                                        previous_palette: prev,
-                                        window:
-                                            crate::views::modal_window::ModalWindowState::new(),
-                                    });
-                                    return InputOutcome::Changed;
+                                        let is_model = matches!(trimmed.as_str(), "model" | "m");
+                                        let hidden_ids = if is_model {
+                                            crate::config_toml_edit::hidden_model_ids()
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        let view_items = if is_model {
+                                            model_picker_view_items(&items, &hidden_ids, false)
+                                        } else {
+                                            items.clone()
+                                        };
+                                        self.active_modal = Some(ActiveModal::ArgPicker {
+                                            command: trimmed,
+                                            args_query: String::new(),
+                                            items: view_items,
+                                            original_items: items,
+                                            show_all: false,
+                                            hidden_ids,
+                                            // Type-to-find: open in input mode (vim: Esc→nav, i→input).
+                                            state: crate::views::picker::PickerState::input_active(
+                                            ),
+                                            previous_palette: prev,
+                                            window:
+                                                crate::views::modal_window::ModalWindowState::new(),
+                                        });
+                                        return InputOutcome::Changed;
                                     }
                                 }
                                 self.active_modal = None;
@@ -3357,18 +3359,21 @@ mod model_picker_view_tests {
         ];
         let hidden = vec!["openai/gpt-5".to_string()];
         let view = model_picker_view_items(&items, &hidden, false);
-        let ids: Vec<_> = view.iter().map(|i| i.action_id.as_deref().unwrap()).collect();
+        let ids: Vec<_> = view
+            .iter()
+            .map(|i| i.action_id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, ["grok-4.5"]);
     }
 
     #[test]
     fn all_view_marks_hidden_and_synthesizes_missing_rows() {
-        let items = vec![row("grok-4.5", false), row("deepseek/deepseek-v4-flash", true)];
-        // One hidden id still in the catalog projection, one already gone.
-        let hidden = vec![
-            "grok-4.5".to_string(),
-            "ollama/gpt-oss:120b".to_string(),
+        let items = vec![
+            row("grok-4.5", false),
+            row("deepseek/deepseek-v4-flash", true),
         ];
+        // One hidden id still in the catalog projection, one already gone.
+        let hidden = vec!["grok-4.5".to_string(), "ollama/gpt-oss:120b".to_string()];
         let view = model_picker_view_items(&items, &hidden, true);
         let grok = view
             .iter()
@@ -3396,7 +3401,10 @@ mod model_picker_view_tests {
 
     #[test]
     fn filter_narrows_view_by_query() {
-        let items = vec![row("grok-4.5", false), row("deepseek/deepseek-v4-flash", true)];
+        let items = vec![
+            row("grok-4.5", false),
+            row("deepseek/deepseek-v4-flash", true),
+        ];
         let view = apply_model_picker_filter(&items, &[], true, "deepseek");
         assert_eq!(view.len(), 1);
         assert!(view[0].locked);

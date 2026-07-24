@@ -909,10 +909,7 @@ fn set_agent_model_pin_at(
             models[name] = toml_edit::value(id);
         }
         None => {
-            if let Some(models) = subagents
-                .get_mut("models")
-                .and_then(|m| m.as_table_mut())
-            {
+            if let Some(models) = subagents.get_mut("models").and_then(|m| m.as_table_mut()) {
                 models.remove(name);
                 // Drop the table once it holds no pins so hand-edited
                 // configs don't accumulate an empty `[subagents.models]`.
@@ -1568,7 +1565,9 @@ fn render_model_picker_block(
     };
     let prefix = match state.model_edit_target.as_ref() {
         Some(ModelEditTarget::Agent(name)) => format!("{name} model: "),
-        Some(ModelEditTarget::Persona { name, .. } | ModelEditTarget::BundledPersona { name, .. }) => {
+        Some(
+            ModelEditTarget::Persona { name, .. } | ModelEditTarget::BundledPersona { name, .. },
+        ) => {
             format!("persona {name} model: ")
         }
         None => "model: ".to_string(),
@@ -1756,10 +1755,8 @@ fn render_agents_tab(
             }
         }
         if entry.expanded {
-            let details = format_agent_detail(
-                entry,
-                state.model_pins.get(&entry.name).map(String::as_str),
-            );
+            let details =
+                format_agent_detail(entry, state.model_pins.get(&entry.name).map(String::as_str));
             for line in details {
                 rows.push(FlatRow::Detail(line));
             }
@@ -2678,7 +2675,10 @@ fn resolve_pin_edit(raw: &str, available_models: &[ModelChoice]) -> PinEdit {
     if available_models.is_empty() {
         return PinEdit::Set(raw.to_string());
     }
-    match available_models.iter().find(|c| c.id.eq_ignore_ascii_case(raw)) {
+    match available_models
+        .iter()
+        .find(|c| c.id.eq_ignore_ascii_case(raw))
+    {
         Some(c) => PinEdit::Set(c.id.clone()),
         None => PinEdit::Invalid(format!(
             "Unknown model: {raw} — use a catalog id (see /model); editor kept open"
@@ -4230,10 +4230,7 @@ ignored = 42
 
         set_agent_model_pin_at(&path, "explore", Some("kimi-code/kimi-for-coding")).unwrap();
         set_agent_model_pin_at(&path, "plan", Some("grok-4")).unwrap();
-        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
-            .unwrap()
-            .parse()
-            .unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(
             doc["subagents"]["models"]["explore"].as_str(),
             Some("kimi-code/kimi-for-coding")
@@ -4246,10 +4243,7 @@ ignored = 42
         );
 
         set_agent_model_pin_at(&path, "explore", None).unwrap();
-        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
-            .unwrap()
-            .parse()
-            .unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let models = doc["subagents"]["models"]
             .as_table()
             .expect("models table remains while plan is pinned");
@@ -4258,10 +4252,7 @@ ignored = 42
 
         // Clearing the last pin drops the now-empty `models` table.
         set_agent_model_pin_at(&path, "plan", None).unwrap();
-        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
-            .unwrap()
-            .parse()
-            .unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let subagents = doc["subagents"].as_table().expect("subagents table");
         assert!(subagents.get("models").is_none());
     }
@@ -4270,10 +4261,7 @@ ignored = 42
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("config.toml");
         set_agent_model_pin_at(&path, "explore", Some("grok-4")).unwrap();
-        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
-            .unwrap()
-            .parse()
-            .unwrap();
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(
             doc["subagents"]["models"]["explore"].as_str(),
             Some("grok-4")
@@ -4338,7 +4326,10 @@ ignored = 42
     }
     #[test]
     fn filtered_model_matches_display_name() {
-        let models = vec![choice("openai/gpt-5.4", "GPT-5.4"), choice("xai/grok-4", "Grok 4")];
+        let models = vec![
+            choice("openai/gpt-5.4", "GPT-5.4"),
+            choice("xai/grok-4", "Grok 4"),
+        ];
         let hits = filtered_model_matches("gpt", &models);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "openai/gpt-5.4");

@@ -320,6 +320,36 @@ The query supports the same prefixes as before (they are only honoured
 
 ---
 
+## Local web observability
+
+The terminal dashboard above remains the default for bare `grok dashboard` / `hyper dashboard`.
+For a read-only browser view over persisted session telemetry, add `--web`:
+
+```bash
+hyper dashboard --web
+hyper dashboard --web --bind 127.0.0.1:9191 --no-open
+```
+
+The web dashboard is implemented entirely in Rust with Axum and Leptos SSR. It reads existing
+files below `$GROK_HOME` (normally `~/.grok`) and does not alter session state:
+
+- Overview and searchable session list
+- Session summary, context use, tools, errors, and compactions
+- Event timeline and an SSE stream for newly appended events
+- Recent conversation view
+- Event/tool-duration charts
+- Active-process memory traces and storage usage
+- Filterable unified logs
+
+The server rejects non-loopback bind addresses because prompts, working-directory paths, and tool
+metadata are private machine data. Its JSON endpoints live under `/api`; the raw live stream for a
+session is `/api/sessions/<id>/events`.
+
+`[dashboard].enabled` and `GROK_AGENT_DASHBOARD` continue to control the terminal dashboard. The
+web observability command is independent and always read-only.
+
+---
+
 ## Persistence
 
 Per-user dashboard preferences live under `[dashboard]` in

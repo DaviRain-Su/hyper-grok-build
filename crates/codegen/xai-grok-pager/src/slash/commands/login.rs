@@ -26,7 +26,10 @@ impl SlashCommand for LoginCommand {
         let arg = args.trim().to_ascii_lowercase();
         if matches!(arg.as_str(), "kimi" | "kimi-code") {
             CommandResult::Action(Action::LoginKimi)
-        } else if matches!(arg.as_str(), "openai" | "openai-codex" | "codex" | "chatgpt") {
+        } else if matches!(
+            arg.as_str(),
+            "openai" | "openai-codex" | "codex" | "chatgpt"
+        ) {
             CommandResult::Action(Action::LoginOpenAiCodex)
         } else if arg.is_empty() {
             CommandResult::Action(Action::Login)
