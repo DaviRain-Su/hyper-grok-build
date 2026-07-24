@@ -36,6 +36,8 @@
 //! reads `watch.borrow()` directly — never a stale value from a lossy queue. The
 //! media layer forces the watch to 0.0 on every output-task exit and on teardown.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -43,12 +45,43 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 use super::protocol::{
-    build_delegation_context_append, build_session_close, build_session_context_append,
-    chunk_live_context,
+    LiveClientMessage, LiveContextChannel, build_delegation_context_append, build_session_close,
+    build_session_context_append, chunk_live_context,
 };
 use super::transport::CodexLiveTransport;
 use super::types::{CallbackSink, LiveCommand, LiveConfig, LiveEvent, LivePhase, SharedLiveAuth};
 use crate::audio;
+
+/// The transport operations [`apply_command`] / [`send_chunked`] need. This is
+/// a session-internal seam so the command-application error-propagation logic
+/// can be unit-tested with a fake sink (no network). `CodexLiveTransport`
+/// implements it; `send` returns `Err` when the sideband is closed and does
+/// NOT invoke callbacks, so the caller must surface the error itself.
+trait LiveTransportSink {
+    /// Serialize and send one control message onto the sideband. Returns
+    /// `Err` if the transport is not connected or the sideband is gone.
+    fn send<'a>(
+        &'a mut self,
+        message: &'a LiveClientMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Enable or disable the native audio source (echo gate / mute).
+    /// Infallible / best-effort.
+    fn set_muted(&mut self, muted: bool);
+}
+
+impl LiveTransportSink for CodexLiveTransport {
+    fn send<'a>(
+        &'a mut self,
+        message: &'a LiveClientMessage,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(CodexLiveTransport::send(self, message))
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        CodexLiveTransport::set_muted(self, muted);
+    }
+}
 
 /// Default mic capture sample rate for a live session (16 kHz mono, matching
 /// the WebRTC peer's input rate).
@@ -103,10 +136,16 @@ fn microphone_level(samples: &[f32]) -> f64 {
 ///    connection cancels the connect and cleans up safely.
 /// 3. Forwards mic PCM (converted to f32) to the peer, applying the OMP
 ///    barge-in echo gate (suppress mic while output is active and the user
-///    isn't loud enough to interrupt) and explicit mute commands.
+///    isn't loud enough to interrupt) and explicit mute commands. When the
+///    mic PCM source closes, the PCM arm is permanently parked so the session
+///    continues listen-only without hot-looping or starving command handling.
 /// 4. Translates [`LiveCommand`]s into sideband control messages, chunking
-///    context appends into ≤500-byte frames.
-/// 5. Shuts down idempotently on `Shutdown` or a fatal transport error.
+///    context appends into ≤500-byte frames. A control-message send failure
+///    (e.g. sideband closed) becomes the session's once-only fatal error and
+///    drives Error → Closing → Closed — `CodexLiveTransport::send` does not
+///    invoke callbacks on send errors, so the session surfaces it itself.
+///    Mute commands are infallible (atomic flag + best-effort peer hint).
+/// 5. Shuts down idempotently on `Shutdown` or a fatal transport/command error.
 pub async fn run_live_session(
     config: LiveConfig,
     auth: SharedLiveAuth,
@@ -253,9 +292,15 @@ pub async fn run_live_session(
 
     phase(LivePhase::Connected);
 
-    // Apply buffered commands that arrived during connection.
+    // Apply buffered commands that arrived during connection. A send failure
+    // (e.g. sideband already closed) becomes the session's once-only fatal and
+    // drives Error → Closing → Closed — the model must not be left waiting.
+    let mut buffered_fatal: Option<LiveEvent> = None;
     for cmd in buffered_commands {
-        apply_command(&cmd, &mut transport, &user_muted).await;
+        if let Err(e) = apply_command(&cmd, &mut transport, &user_muted).await {
+            buffered_fatal = Some(LiveEvent::Error { message: e });
+            break;
+        }
     }
 
     // The session loop drives both mic-PCM forward (barge-in gated / muted) and
@@ -268,8 +313,32 @@ pub async fn run_live_session(
     // no lossy queue. Output level is forced to 0.0 on teardown below.
     let mut capture = Some(capture);
     let mut fatal_rx = fatal_rx;
-    let mut fatal_event: Option<LiveEvent> = None;
+    // Seed with a buffered-command fatal (if a command that arrived during
+    // connection failed to send) so the loop immediately tears down.
+    let mut fatal_event: Option<LiveEvent> = buffered_fatal;
+    // Whether the mic PCM source has closed. Once `pcm_rx.recv()` returns
+    // `None` (the capture sender dropped), a closed mpsc receiver is
+    // immediately ready forever and would hot-loop this biased `select!`,
+    // starving `cmd_rx` (Shutdown/CompleteDelegation) and preventing
+    // teardown. We permanently disable the PCM arm via `pending()` so the
+    // session continues listen-only and command handling stays responsive.
+    let mut pcm_closed = false;
+    // A command send failure (e.g. sideband closed) becomes the session's
+    // once-only fatal error and drives Error → Closing → Closed. Mute
+    // commands remain infallible/best-effort.
+    let mut command_fatal: Option<LiveEvent> = None;
     loop {
+        // If a buffered/connected command send failed, surface it as the
+        // session's once-only fatal and tear down — never leave the model
+        // waiting while the session reports Connected. `fatal_event` may be
+        // pre-seeded by a buffered-command failure (above), so check it first.
+        if let Some(ev) = command_fatal.take() {
+            fatal_event = Some(ev);
+            break;
+        }
+        if fatal_event.is_some() {
+            break;
+        }
         tokio::select! {
             biased;
             // Fatal (terminal) event from the transport/media — exactly one.
@@ -281,7 +350,9 @@ pub async fn run_live_session(
                 }
             }
             // Forward mic PCM to the peer with the OMP barge-in echo gate.
-            bytes = pcm_rx.recv() => match bytes {
+            // Once the PCM source closes, this arm is parked on `pending()`
+            // forever so it cannot hot-loop or starve command handling.
+            bytes = pcm_recv(&mut pcm_rx, &mut pcm_closed) => match bytes {
                 Some(bytes) => {
                     if user_muted.load(Ordering::Acquire) {
                         continue;
@@ -308,13 +379,23 @@ pub async fn run_live_session(
                 }
                 None => {
                     // Mic stream ended (capture stopped). Not fatal; the session
-                    // can continue without mic input (e.g. listen-only).
+                    // can continue without mic input (e.g. listen-only). The PCM
+                    // arm is now permanently parked via `pcm_closed` so this
+                    // arm never hot-loops.
                 }
             },
             cmd = cmd_rx.recv() => match cmd {
                 Some(LiveCommand::Shutdown) | None => break,
                 Some(other) => {
-                    apply_command(&other, &mut transport, &user_muted).await;
+                    if let Err(e) = apply_command(&other, &mut transport, &user_muted).await {
+                        // A control message (e.g. CompleteDelegation) failed to
+                        // reach Codex. `CodexLiveTransport::send` does NOT
+                        // invoke callbacks on send errors, so we must surface
+                        // it ourselves as the once-only fatal and tear down —
+                        // otherwise the model is left waiting while the session
+                        // reports Connected.
+                        command_fatal = Some(LiveEvent::Error { message: e });
+                    }
                 }
             },
         }
@@ -356,22 +437,51 @@ async fn deliver_terminal(event_tx: &mpsc::Sender<LiveEvent>, event: LiveEvent) 
     let _ = tokio::time::timeout(TERMINAL_EVENT_TIMEOUT, event_tx.send(event)).await;
 }
 
+/// Poll the mic PCM receiver, permanently parking on `pending()` once the
+/// source has closed. A closed mpsc receiver is immediately ready forever
+/// (returning `None` each poll), which would hot-loop a biased `select!` and
+/// starve command handling. Once `pcm_closed` is set, this returns
+/// `Pending` forever so the session continues listen-only while `cmd_rx`
+/// stays responsive.
+///
+/// Returns `None` exactly once (the first time the source closes); subsequent
+/// calls never resolve.
+async fn pcm_recv(pcm_rx: &mut mpsc::Receiver<Vec<u8>>, pcm_closed: &mut bool) -> Option<Vec<u8>> {
+    if *pcm_closed {
+        // Park forever: the closed receiver must not be re-polled.
+        std::future::pending::<()>().await;
+        return None;
+    }
+    let result = pcm_rx.recv().await;
+    if result.is_none() {
+        *pcm_closed = true;
+    }
+    result
+}
+
 /// Apply a single [`LiveCommand`] to the transport. Used both for buffered
 /// commands (arrived during connection) and live commands (post-connect).
+///
+/// Returns `Err(message)` when a control message fails to reach Codex (e.g.
+/// the sideband is closed). The caller turns this into the session's once-only
+/// fatal error. Mute commands are infallible (they only flip an atomic flag
+/// and a best-effort peer hint) and always return `Ok`.
 async fn apply_command(
     cmd: &LiveCommand,
-    transport: &mut CodexLiveTransport,
+    transport: &mut impl LiveTransportSink,
     user_muted: &Arc<AtomicBool>,
-) {
+) -> Result<(), String> {
     match cmd {
         LiveCommand::ToggleMute => {
             let next = !user_muted.load(Ordering::Acquire);
             user_muted.store(next, Ordering::Release);
             transport.set_muted(next);
+            Ok(())
         }
         LiveCommand::SetMuted(muted) => {
             user_muted.store(*muted, Ordering::Release);
             transport.set_muted(*muted);
+            Ok(())
         }
         LiveCommand::AppendDelegationContext {
             delegation_id,
@@ -384,7 +494,7 @@ async fn apply_command(
                 Some(delegation_id.clone()),
                 Some(*channel),
             )
-            .await;
+            .await
         }
         LiveCommand::CompleteDelegation {
             delegation_id,
@@ -401,36 +511,38 @@ async fn apply_command(
                 Some(delegation_id.clone()),
                 None,
             )
-            .await;
+            .await
         }
         LiveCommand::AppendSessionContext { text, channel } => {
-            send_chunked(transport, &chunk_live_context(text), None, Some(*channel)).await;
+            send_chunked(transport, &chunk_live_context(text), None, Some(*channel)).await
         }
         LiveCommand::Shutdown => {
             // Handled by the caller's loop break; unreachable here.
+            Ok(())
         }
     }
 }
 
 /// Send chunked context appends to the transport. Each chunk becomes one
-/// `delegation.context.append` or `session.context.append` message. Errors are
-/// surfaced as `LiveEvent::Error` by the transport's callbacks; here we only
-/// log at debug (a failed send during shutdown is expected).
+/// `delegation.context.append` or `session.context.append` message. Returns
+/// `Err` on the first chunk that fails to send; later chunks are NOT attempted
+/// (a partial delegation append after a sideband close is not recoverable).
+/// `CodexLiveTransport::send` does NOT invoke callbacks on send errors, so the
+/// caller must surface the error as the session's once-only fatal itself.
 async fn send_chunked(
-    transport: &CodexLiveTransport,
+    transport: &mut impl LiveTransportSink,
     chunks: &[String],
     delegation_id: Option<String>,
-    channel: Option<super::protocol::LiveContextChannel>,
-) {
+    channel: Option<LiveContextChannel>,
+) -> Result<(), String> {
     for chunk in chunks {
         let message = match &delegation_id {
             Some(id) => build_delegation_context_append(id, chunk, channel),
             None => build_session_context_append(chunk, channel),
         };
-        if transport.send(&message).await.is_err() {
-            break;
-        }
+        transport.send(&message).await?;
     }
+    Ok(())
 }
 
 /// Convert PCM16 little-endian bytes to mono f32 samples in `[-1.0, 1.0]`.
@@ -605,6 +717,241 @@ mod tests {
         assert!(
             elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(4),
             "deliver_terminal returned in {elapsed:?} — expected ~2s timeout"
+        );
+    }
+
+    // --- Fix 1: closed PCM source must not hot-loop or starve commands -----
+
+    /// `pcm_recv` returns `None` exactly once when the source closes, then
+    /// permanently parks on `pending()` so the biased `select!` arm cannot
+    /// hot-loop.
+    #[tokio::test]
+    async fn pcm_recv_returns_none_once_then_parks_forever() {
+        let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<u8>>(4);
+        let mut pcm_closed = false;
+        // Send one frame, then close the sender.
+        pcm_tx.send(vec![0x00, 0x01]).await.unwrap();
+        assert_eq!(
+            pcm_recv(&mut pcm_rx, &mut pcm_closed).await,
+            Some(vec![0x00, 0x01])
+        );
+        assert!(!pcm_closed);
+        drop(pcm_tx);
+        // The close yields None once and sets the flag.
+        assert_eq!(pcm_recv(&mut pcm_rx, &mut pcm_closed).await, None);
+        assert!(pcm_closed);
+        // A subsequent call must never resolve (parked forever). Race it
+        // against a timeout to prove it doesn't return immediately (which
+        // would be the hot-loop bug).
+        let parked = tokio::time::timeout(
+            Duration::from_millis(100),
+            pcm_recv(&mut pcm_rx, &mut pcm_closed),
+        )
+        .await;
+        assert!(
+            parked.is_err(),
+            "pcm_recv resolved after close — hot-loop bug"
+        );
+    }
+
+    /// A closed PCM source must not starve a later command. This simulates the
+    /// session's biased `select!` loop: the PCM arm is parked after the source
+    /// closes, so `cmd_rx.recv()` stays responsive and a `Shutdown` (or any
+    /// command) is delivered promptly — no hot spin consuming CPU.
+    #[tokio::test]
+    async fn closed_pcm_source_does_not_starve_command() {
+        let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<u8>>(4);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<LiveCommand>(4);
+        let mut pcm_closed = false;
+
+        // Close the PCM source first.
+        drop(pcm_tx);
+        // Drain the close notification so the arm parks.
+        assert_eq!(pcm_recv(&mut pcm_rx, &mut pcm_closed).await, None);
+        assert!(pcm_closed);
+
+        // Now post a command and run one iteration of the biased select. The
+        // PCM arm is parked, so the command arm must win immediately.
+        cmd_tx.send(LiveCommand::SetMuted(true)).await.unwrap();
+        let start = std::time::Instant::now();
+        let select_loop = async {
+            tokio::select! {
+                biased;
+                // PCM arm — parked via the helper.
+                bytes = pcm_recv(&mut pcm_rx, &mut pcm_closed) => {
+                    Err::<(), String>(format!("PCM arm fired with {bytes:?} — should be parked"))
+                }
+                cmd = cmd_rx.recv() => {
+                    assert!(matches!(cmd, Some(LiveCommand::SetMuted(true))));
+                    Ok(())
+                }
+            }
+        };
+        let outcome = tokio::time::timeout(Duration::from_millis(500), select_loop).await;
+        assert!(outcome.is_ok(), "select hung — PCM arm starved the command");
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "command delivery took {:?} — PCM hot-loop starving cmd_rx",
+            start.elapsed()
+        );
+    }
+
+    // --- Fix 2: command send failure must propagate as the fatal error -----
+
+    /// A fake transport sink that records sends and can be programmed to fail
+    /// after N successful sends, with configurable mute behavior. Used to
+    /// unit-test `apply_command` / `send_chunked` error propagation without a
+    /// network.
+    struct FakeSink {
+        /// `Some(n)` = fail on the (0-indexed) n-th send; `None` = never fail.
+        fail_on: Option<usize>,
+        sends: usize,
+        muted: Option<bool>,
+        sent_messages: Vec<String>,
+    }
+
+    impl FakeSink {
+        fn new() -> Self {
+            Self {
+                fail_on: None,
+                sends: 0,
+                muted: None,
+                sent_messages: Vec::new(),
+            }
+        }
+        fn fail_on(mut self, n: usize) -> Self {
+            self.fail_on = Some(n);
+            self
+        }
+    }
+
+    impl LiveTransportSink for FakeSink {
+        fn send<'a>(
+            &'a mut self,
+            message: &'a LiveClientMessage,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                let idx = self.sends;
+                self.sends += 1;
+                self.sent_messages
+                    .push(serde_json::to_string(message).unwrap_or_default());
+                if matches!(self.fail_on, Some(n) if n == idx) {
+                    Err("sideband is closed".to_owned())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn set_muted(&mut self, muted: bool) {
+            self.muted = Some(muted);
+        }
+    }
+
+    /// A `CompleteDelegation` whose chunk send fails must propagate `Err` —
+    /// the caller turns it into the once-only fatal. The session must not
+    /// leave the model waiting while reporting Connected.
+    #[tokio::test]
+    async fn apply_command_complete_delegation_propagates_send_error() {
+        let mut sink = FakeSink::new().fail_on(0);
+        let user_muted = Arc::new(AtomicBool::new(false));
+        // "final result text" chunks into a single chunk for this short text.
+        let result = apply_command(
+            &LiveCommand::CompleteDelegation {
+                delegation_id: "del-1".into(),
+                text: "done".into(),
+            },
+            &mut sink,
+            &user_muted,
+        )
+        .await;
+        assert!(result.is_err(), "send error was swallowed");
+        assert!(
+            result.unwrap_err().contains("sideband is closed"),
+            "unexpected error message"
+        );
+        // Exactly one send was attempted (the failing chunk).
+        assert_eq!(sink.sends, 1);
+    }
+
+    /// Mute commands are infallible: they never call `send`, so a failing sink
+    /// does not affect them and they return `Ok`.
+    #[tokio::test]
+    async fn apply_command_mute_is_infallible() {
+        let mut sink = FakeSink::new().fail_on(0);
+        let user_muted = Arc::new(AtomicBool::new(false));
+        apply_command(&LiveCommand::ToggleMute, &mut sink, &user_muted)
+            .await
+            .unwrap();
+        assert!(user_muted.load(Ordering::Acquire), "mute flag not toggled");
+        assert_eq!(sink.muted, Some(true), "peer mute hint not set");
+        assert_eq!(sink.sends, 0, "mute command issued a send");
+
+        apply_command(&LiveCommand::SetMuted(false), &mut sink, &user_muted)
+            .await
+            .unwrap();
+        assert!(!user_muted.load(Ordering::Acquire));
+        assert_eq!(sink.muted, Some(false));
+        assert_eq!(sink.sends, 0);
+    }
+
+    /// `send_chunked` must stop at the first failing chunk and propagate the
+    /// error; later chunks must NOT be attempted (a partial append after a
+    /// sideband close is not recoverable).
+    #[tokio::test]
+    async fn send_chunked_stops_at_first_failing_chunk() {
+        // Build enough text to produce multiple chunks. chunk_live_context
+        // splits into ≤500-byte chunks, so a long string yields several.
+        let big = "x".repeat(1200);
+        let chunks = chunk_live_context(&big);
+        assert!(chunks.len() >= 2, "test text must produce multiple chunks");
+
+        let mut sink = FakeSink::new().fail_on(1); // fail on the second chunk
+        let result = send_chunked(
+            &mut sink,
+            &chunks,
+            Some("del-2".into()),
+            Some(super::super::protocol::LiveContextChannel::Commentary),
+        )
+        .await;
+        assert!(result.is_err());
+        // Two sends were attempted (chunk 0 ok, chunk 1 failed) — chunk 2+ not
+        // attempted.
+        assert_eq!(sink.sends, 2, "later chunks were attempted after a failure");
+    }
+
+    /// A successful `send_chunked` sends every chunk and returns `Ok`.
+    #[tokio::test]
+    async fn send_chunked_sends_all_chunks_on_success() {
+        let big = "y".repeat(1100);
+        let chunks = chunk_live_context(&big);
+        assert!(chunks.len() >= 2);
+        let mut sink = FakeSink::new();
+        let result = send_chunked(&mut sink, &chunks, None, None).await;
+        assert!(result.is_ok());
+        assert_eq!(sink.sends, chunks.len());
+    }
+
+    /// A delegation-context append that succeeds must produce
+    /// `delegation.context.append` messages carrying the delegation id.
+    #[tokio::test]
+    async fn apply_command_append_delegation_context_sends_with_id() {
+        let mut sink = FakeSink::new();
+        let user_muted = Arc::new(AtomicBool::new(false));
+        apply_command(
+            &LiveCommand::AppendDelegationContext {
+                delegation_id: "del-3".into(),
+                text: "ctx".into(),
+                channel: super::super::protocol::LiveContextChannel::Speakable,
+            },
+            &mut sink,
+            &user_muted,
+        )
+        .await
+        .unwrap();
+        assert!(sink.sends >= 1);
+        assert!(
+            sink.sent_messages.iter().all(|m| m.contains("del-3")),
+            "delegation id not carried in all chunk messages"
         );
     }
 }
