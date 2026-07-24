@@ -61,6 +61,70 @@ grok logout --openai
 
 ---
 
+## Experimental Live voice
+
+`/live` starts a long-running, full-duplex voice conversation with the Codex
+Live model. It is separate from `/voice`, which remains push-to-dictate speech
+to text.
+
+```text
+/live
+```
+
+Live mode:
+
+- records the microphone and plays the assistant's spoken response at the same
+  time;
+- shows realtime user and assistant transcripts;
+- supports barge-in, so speaking over the assistant interrupts naturally;
+- delegates coding or tool work to the **currently bound Hyper agent session**,
+  then feeds progress and the final result back into the voice conversation;
+- leaves the current prompt draft and cursor intact.
+
+Press **Space** to mute or unmute the microphone. Press **Esc** or **Ctrl+C** to
+stop Live mode. You can also click the mute/unmute and stop controls in the Live
+footer. Permission prompts, questions, and other modals keep keyboard
+priority while they are open. Starting `/live` stops `/voice` dictation, and
+starting `/voice` stops `/live`, so only one mode owns the microphone.
+
+> **Experimental:** this feature uses the undocumented internal Codex Live
+> protocol and the `gpt-live-1-codex` model. OpenAI can change or disable it
+> without notice. It is not the public OpenAI Realtime API.
+
+Live always requires the ChatGPT/Codex OAuth login described above, but the
+coding agent may use any configured provider or model. If credentials are
+missing, run `grok login --openai` and retry.
+
+Availability defaults to on in normal Hyper builds. Administrators can disable
+it with either of these layered settings:
+
+```toml
+# ~/.grok/config.toml or managed requirements.toml
+[features]
+codex_live = false
+```
+
+```bash
+GROK_CODEX_LIVE=0 hyper
+```
+
+For development and test endpoints, `GROK_OPENAI_CODEX_BASE_URL` overrides the
+Codex signaling base and `GROK_CODEX_LIVE_SIDEBAND_BASE` overrides the sideband
+base. Normal users should not set either variable.
+
+### Audio requirements
+
+- **Linux:** Hyper tries PipeWire first, then PulseAudio and ALSA tools.
+- **macOS:** microphone and speaker access belong to the terminal application
+  running Hyper; grant access in System Settings if prompted.
+- **Windows:** Hyper uses WASAPI through the native audio backend.
+
+If Live cannot open an audio device, end the session with Esc, check the system
+input/output device and permissions, then retry. Hardware-backed Live sessions
+cannot be exercised in headless environments.
+
+---
+
 ## Use a Codex model
 
 ```bash

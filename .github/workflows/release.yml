@@ -15,6 +15,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # audiopus_sys builds bundled Opus from an older CMake project. New CMake
+  # releases reject that project's historical policy floor unless this is set.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   build:
@@ -65,6 +68,9 @@ jobs:
 
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup show
+
+      - name: Check CMake for bundled Opus
+        run: cmake --version
 
       - name: Add build target
         run: rustup target add ${{ matrix.target }}

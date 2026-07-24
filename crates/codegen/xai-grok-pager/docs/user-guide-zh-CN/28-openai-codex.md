@@ -51,6 +51,62 @@ grok logout --openai
 
 ---
 
+## 实验性 Live 语音
+
+`/live` 会启动与 Codex Live 模型的长时间全双工语音对话。它不同于
+`/voice`：后者仍然只是把语音听写成提示文本。
+
+```text
+/live
+```
+
+Live 模式可以：
+
+- 同时录制麦克风并播放助手的语音回复；
+- 显示实时的用户与助手转录；
+- 支持插话，用户在助手说话时开口即可自然打断；
+- 把需要编辑代码或调用工具的任务委派给**当前绑定的 Hyper Agent 会话**，
+  再把执行进度和最终结果送回语音对话；
+- 保留当前提示草稿和光标位置。
+
+按 **Space** 静音或取消静音；按 **Esc** 或 **Ctrl+C** 结束 Live。也可以点击
+Live 底栏中的静音/取消静音与停止控件。权限确认、提问等模态窗口打开时仍优先
+处理键盘输入。启动 `/live` 会停止 `/voice`，反之亦然，确保两种模式不会争用麦克风。
+
+> **实验性功能：** 此功能使用未公开的 Codex Live 内部协议和
+> `gpt-live-1-codex` 模型，并不是公开的 OpenAI Realtime API。OpenAI 可能
+> 随时更改或关闭该协议。
+
+Live 始终需要上文所述的 ChatGPT/Codex OAuth 登录，但编码 Agent 可继续
+使用任意已配置的供应商或模型。若缺少凭据，请先运行
+`grok login --openai`。
+
+普通 Hyper 构建默认开启此功能。管理员可通过分层配置或环境变量关闭：
+
+```toml
+# ~/.grok/config.toml 或托管的 requirements.toml
+[features]
+codex_live = false
+```
+
+```bash
+GROK_CODEX_LIVE=0 hyper
+```
+
+开发/测试环境可用 `GROK_OPENAI_CODEX_BASE_URL` 覆盖信令地址，用
+`GROK_CODEX_LIVE_SIDEBAND_BASE` 覆盖 sideband 地址；普通用户不应设置它们。
+
+### 音频要求
+
+- **Linux：** Hyper 依次尝试 PipeWire、PulseAudio 和 ALSA 工具。
+- **macOS：** 麦克风和扬声器权限属于运行 Hyper 的终端应用；系统提示时请授权。
+- **Windows：** Hyper 通过原生音频后端使用 WASAPI。
+
+若 Live 无法打开音频设备，请按 Esc 结束，检查系统输入/输出设备和权限后重试。
+无头环境无法完成依赖真实硬件的 Live 验收。
+
+---
+
 ## 使用 Codex 模型
 
 ```bash

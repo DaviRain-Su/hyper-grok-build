@@ -117,7 +117,7 @@ Hyper 保留了本代码树中的多供应商注册表(见 pager
 | xAI / Grok | `hyper login`(OIDC)或 `XAI_API_KEY` | 第一方模型 |
 | Kimi Code | 设备 OAuth / 订阅 | `kimi-code/*` 目录 |
 | Moonshot CN / AI | API key | 开放平台 |
-| ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning 级别,含 max/ultra |
+| ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning，并支持实验性全双工 `/live` 语音 |
 | OpenAI / Anthropic / DeepSeek 风格 | API keys | BYOK 目录 |
 | Z.AI Coding Plan | 平台 key | 国际版方案 |
 | Ollama Cloud | API key | 实时模型清单同步 |
@@ -143,6 +143,8 @@ OpenAI Codex 等)。
   cargo install dotslash
   # 或者:brew install dotslash
   ```
+- **CMake 3.5+** —— 构建实验性 `/live` 语音使用的内置静态 Opus；工作区已固定
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`
 
 ```sh
 cargo run -p xai-grok-pager-bin              # 构建并启动 TUI(二进制名:hyper)

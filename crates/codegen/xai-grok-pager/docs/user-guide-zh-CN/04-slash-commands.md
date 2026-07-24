@@ -147,6 +147,14 @@
 
 在另一种渲染模式下重新打开当前会话。`/minimal`（全屏时提供）切到实验性回滚区原生模式；`/fullscreen`（minimal 时提供；别名 `/full`）切回标准 alt-screen TUI。两者仅在本会话对同一对话重新启动 pager —— 不改 `config.toml`，重启动横幅会提醒如何切回。`--minimal` / `--fullscreen` CLI 标志同样仅会话范围。要让普通 `grok` 默认以某模式打开，用 `/settings` → **Default screen mode** 或设置 `[ui] screen_mode`。
 
+### `/voice`
+
+切换提示编辑器的麦克风听写。它仍然只做语音转文字，不会播放语音回复。
+
+### `/live`
+
+启动或停止**实验性** Codex 全双工语音对话。按 Space 静音，按 Esc 或 Ctrl+C 结束，也可以点击 Live 底栏中的静音/停止控件。Live 助手可以把编码工作委派给当前 Agent 并朗读结果。无论当前编码模型是什么，它都要求先运行 `grok login --openai`。`/live` 与 `/voice` 互斥。详见 [OpenAI Codex — 实验性 Live 语音](28-openai-codex.md#实验性-live-语音)。
+
 ### `/plan`
 
 进入计划模式。

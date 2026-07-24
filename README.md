@@ -119,7 +119,7 @@ Hyper keeps the multi-provider registry from this tree (see the pager
 | xAI / Grok | `hyper login` (OIDC) or `XAI_API_KEY` | First-party models |
 | Kimi Code | device OAuth / subscription | `kimi-code/*` catalog |
 | Moonshot CN / AI | API key | open platform |
-| ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning efforts incl. max/ultra |
+| ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning plus experimental full-duplex `/live` voice |
 | OpenAI / Anthropic / DeepSeek-style | API keys | BYOK catalog |
 | Z.AI Coding Plan | platform key | international plan |
 | Ollama Cloud | API key | live roster sync |
@@ -146,6 +146,8 @@ Requirements:
   cargo install dotslash
   # or: brew install dotslash
   ```
+- **CMake 3.5+** — builds the bundled static Opus library used by experimental
+  `/live` voice (the workspace pins `CMAKE_POLICY_VERSION_MINIMUM=3.5`)
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch TUI (binary: hyper)

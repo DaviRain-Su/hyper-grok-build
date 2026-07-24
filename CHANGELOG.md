@@ -2,6 +2,16 @@
 
 All notable changes to **Hyper** (`hyper` binary) are documented here.
 
+## [Unreleased]
+
+### Added
+- Add experimental `/live` full-duplex voice sessions powered by ChatGPT Codex OAuth and `gpt-live-1-codex`, with realtime transcripts, mute and barge-in controls, native WebRTC/Opus audio, and spoken model responses.
+- Let the Live assistant delegate coding work to the currently bound Hyper agent, relay tool-boundary progress, and return the agent's final result to the voice conversation.
+
+### Notes
+- `/live` uses an undocumented internal Codex Live protocol and may stop working when the backend changes. It is independent of the active coding provider but requires `grok login --openai`.
+- Existing `/voice` dictation is unchanged. `/voice` and `/live` are mutually exclusive so they never compete for the microphone.
+
 ## [0.2.110] — 2026-07-23
 
 ### Added

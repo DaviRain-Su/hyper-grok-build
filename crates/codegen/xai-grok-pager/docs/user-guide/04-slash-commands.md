@@ -147,6 +147,14 @@ Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on)
 
 Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to the standard alt-screen TUI. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
 
+### `/voice`
+
+Toggle microphone dictation into the prompt composer. This remains speech-to-text only; it does not play spoken responses.
+
+### `/live`
+
+Start or stop an **experimental** full-duplex Codex voice conversation. Press Space to mute and Esc or Ctrl+C to stop, or click the mute/stop controls in the Live footer. The Live assistant can delegate coding work to the current agent and speak the result. It requires `grok login --openai`, regardless of the current coding model. `/live` and `/voice` are mutually exclusive. See [OpenAI Codex — Experimental Live voice](28-openai-codex.md#experimental-live-voice).
+
 ### `/plan`
 
 Enter plan mode.
