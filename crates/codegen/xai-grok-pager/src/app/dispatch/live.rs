@@ -5,15 +5,13 @@
 //! idempotently on session/view switch, close/exit/quit, ACP disconnect, and
 //! teardown.
 
-#![cfg(feature = "codex-live")]
-
-use crate::app::actions::Effect;
+use crate::app::actions::{Action, Effect};
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::live::state::{DraftSnapshot, LiveState};
 
-/// Stop `/voice` dictation if it's active (mutual exclusion — starting Live
-/// stops Voice).
+/// Stop `/voice` dictation if it's active or pending (mutual exclusion —
+/// starting Live stops Voice, including asynchronous/pending starts).
 fn stop_voice_for_live(app: &mut AppView) {
     if app.voice_listening() || app.voice_state.pending_cold_start() {
         app.voice_reset();
@@ -23,8 +21,10 @@ fn stop_voice_for_live(app: &mut AppView) {
 
 /// Start the Codex Live session. The start primitive reached by the toggle
 /// (`/live`). Binds to the active agent + session, preserving the composer
-/// draft. If the active AgentView has no bound ACP session, uses the existing
-/// `CreateSession` effect then continues pending Live start.
+/// draft+cursor. If the active AgentView has no bound ACP session, emits the
+/// existing `CreateSession` effect and defers to `PendingUnbound`; the event
+/// loop resumes the start exactly once when the matching AgentId/SessionId is
+/// established. Failure/cancel restores the draft and idles.
 pub(super) fn dispatch_live_toggle(app: &mut AppView) -> Vec<Effect> {
     // Gate: silent no-op when the Live gate is off.
     if !app.live_mode_enabled {
@@ -33,20 +33,19 @@ pub(super) fn dispatch_live_toggle(app: &mut AppView) -> Vec<Effect> {
 
     // If Live is active or pending, stop it (toggle off).
     if app.live_in_flight() {
-        dispatch_live_stop(app);
-        return vec![];
+        return dispatch_live_stop(app);
     }
 
-    // Mutual exclusion: stop `/voice` if active.
+    // Mutual exclusion: stop `/voice` if active or pending.
     stop_voice_for_live(app);
 
-    // Resolve the active agent + session.
+    // Resolve the active agent.
     let agent_id = match app.active_view {
         ActiveView::Agent(id) => id,
         _ => return vec![], // Not on an agent screen — silent no-op.
     };
 
-    // Snapshot the draft before starting (preserved across the session).
+    // Snapshot the draft+cursor before starting (preserved across the session).
     let draft = snapshot_draft(app, agent_id);
 
     // Check if the agent has a bound session.
@@ -57,19 +56,23 @@ pub(super) fn dispatch_live_toggle(app: &mut AppView) -> Vec<Effect> {
         .map(|s| s.0.as_ref().to_string());
 
     if let Some(session_id) = session_id {
-        // Session is bound — start Live now.
-        start_live_session(app, agent_id, session_id, draft);
+        // Session is bound — start Live now (ColdStart → event loop spawns).
+        start_live_cold_start(app, agent_id, session_id, draft);
+        vec![]
     } else {
-        // No bound session — defer to PendingUnbound. The event loop will
-        // create a session via CreateSession then continue the pending start.
-        app.live_runtime.state = LiveState::PendingUnbound { agent_id };
+        // No bound session — dispatch NewSession (which emits CreateSession
+        // via the normal action path, respecting auth + folder-trust gates)
+        // and defer to PendingUnbound. The event loop's `resume_pending_live`
+        // detects the newly-established session and transitions to ColdStart
+        // exactly once.
+        app.live_runtime.state = LiveState::PendingUnbound { agent_id, draft };
+        crate::app::dispatch::dispatch(Action::NewSession, app)
     }
-
-    vec![]
 }
 
-/// Start the Live session (pipeline spawn + state transition).
-fn start_live_session(
+/// Transition to `ColdStart` — the event loop picks this up and spawns the
+/// pipeline.
+fn start_live_cold_start(
     app: &mut AppView,
     agent_id: AgentId,
     session_id: String,
@@ -78,17 +81,69 @@ fn start_live_session(
     let generation = app.live_runtime.next_generation();
     app.live_runtime.state = LiveState::ColdStart {
         agent_id,
-        session_id: session_id.clone(),
+        session_id,
         generation,
-        draft: draft.clone(),
+        draft,
     };
-    // The event loop picks up the ColdStart and spawns the pipeline.
 }
 
-/// Stop the Codex Live session unconditionally. Idempotent.
+/// Resume a `PendingUnbound` start when the matching AgentId now has a bound
+/// session. Called from the event loop after ACP session establishment.
+/// Returns true if a start was resumed.
+pub fn resume_pending_live(app: &mut AppView) -> bool {
+    let (agent_id, draft) = match &app.live_runtime.state {
+        LiveState::PendingUnbound { agent_id, draft } => (*agent_id, draft.clone()),
+        _ => return false,
+    };
+
+    // Check if the agent now has a bound session.
+    let session_id = app
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.session.session_id.as_ref())
+        .map(|s| s.0.as_ref().to_string());
+
+    if let Some(session_id) = session_id {
+        start_live_cold_start(app, agent_id, session_id, draft);
+        true
+    } else {
+        false
+    }
+}
+
+/// Cancel a `PendingUnbound` start (e.g. the user navigated away, the session
+/// creation failed, or the user pressed Esc). Restores the draft and idles.
+pub fn cancel_pending_live(app: &mut AppView) {
+    if let LiveState::PendingUnbound { agent_id, draft } = &app.live_runtime.state {
+        let agent_id = *agent_id;
+        let draft = draft.clone();
+        crate::live::handle::restore_draft(app, agent_id, &draft);
+    }
+    app.live_reset();
+}
+
+/// Stop the Codex Live session unconditionally. Idempotent. Restores the
+/// draft+cursor, terminalizes the broker, and tears down the pipeline.
 pub(super) fn dispatch_live_stop(app: &mut AppView) -> Vec<Effect> {
     if !app.live_in_flight() {
         return vec![];
+    }
+
+    // Terminalize all broker delegations (cancel_all) and send CompleteDelegation
+    // for any that haven't completed.
+    let cancel_decision = app
+        .live_runtime
+        .broker
+        .observe_cancel_all(&app.live_runtime.delegations);
+    let cmds = crate::live::broker::decision_to_commands(&cancel_decision);
+    for cmd in cmds {
+        app.live_send_cmd(cmd);
+    }
+    // Mark all delegations terminal in the registry.
+    let delegation_ids: Vec<(u64, String)> = app.live_runtime.delegations.keys().cloned().collect();
+    for (generation, delegation_id) in delegation_ids {
+        app.live_runtime
+            .mark_delegation_terminal(generation, &delegation_id);
     }
 
     // Restore the draft before teardown (so the editor/cursor comes back).
@@ -111,10 +166,23 @@ pub(super) fn dispatch_live_set_muted(app: &mut AppView, muted: bool) -> Vec<Eff
     vec![]
 }
 
+/// Toggle the Live mute state (Space key in the visualizer).
+pub(super) fn dispatch_live_toggle_mute(app: &mut AppView) -> Vec<Effect> {
+    if !app.live_active() {
+        return vec![];
+    }
+    app.live_toggle_mute();
+    vec![]
+}
+
 /// Handle a `LiveEvent::Delegation` — submit literal plain text through the
-/// prompt pipeline to the bound AgentSession, preserve the draft, obtain the
-/// prompt_id, and register `(generation, delegation_id) ->
+/// prompt pipeline to the bound AgentSession, preserve the draft, capture the
+/// actual prompt_id, and register `(generation, delegation_id) ->
 /// (AgentId, SessionId, prompt_id, lifecycle)`.
+///
+/// **Bound-session path**: validates the bound agent/session/generation before
+/// dispatch. Never uses generic whatever-is-active routing. Does not use
+/// empty-string fallbacks for prompt_id.
 pub(super) fn dispatch_live_delegation_submit(
     app: &mut AppView,
     agent_id: AgentId,
@@ -123,32 +191,49 @@ pub(super) fn dispatch_live_delegation_submit(
     generation: u64,
     draft: DraftSnapshot,
 ) -> Vec<Effect> {
+    // Validate the bound agent still exists and has the expected session.
+    let session_id = match app
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.session.session_id.as_ref())
+        .map(|s| s.0.as_ref().to_string())
+    {
+        Some(sid) => sid,
+        None => {
+            // Agent or session gone — cancel the delegation.
+            app.live_runtime
+                .mark_delegation_terminal(generation, &delegation_id);
+            return vec![];
+        }
+    };
+
     // Restore the draft first (the SendPrompt path clears the textarea, but
     // we want the draft preserved throughout).
     crate::live::handle::restore_draft(app, agent_id, &draft);
 
     // Submit the text as a prompt to the bound agent session. This goes
     // through the normal SendPrompt action → dispatch → effect pipeline.
-    // We dispatch SendPrompt directly so the prompt_id is assigned by the
-    // prompt dispatcher. After the dispatch, we register the delegation.
-    let effects =
-        crate::app::dispatch::dispatch(crate::app::actions::Action::SendPrompt(text.clone()), app);
+    let effects = crate::app::dispatch::dispatch(Action::SendPrompt(text), app);
 
-    // Obtain the prompt_id from the agent's current_prompt_id (set by the
-    // dispatch). If unavailable, use a fallback.
-    let prompt_id = app
+    // Capture the actual prompt_id from the agent's current_prompt_id (set
+    // by the dispatch). If the prompt wasn't accepted (no prompt_id), mark
+    // the delegation terminal and bail — no empty-string fallback.
+    let prompt_id = match app
         .agents
         .get(&agent_id)
         .and_then(|a| a.session.current_prompt_id.clone())
-        .unwrap_or_default();
+    {
+        Some(pid) if !pid.is_empty() => pid,
+        _ => {
+            // Prompt was not accepted — mark terminal and bail.
+            app.live_runtime
+                .mark_delegation_terminal(generation, &delegation_id);
+            crate::live::handle::restore_draft(app, agent_id, &draft);
+            return effects;
+        }
+    };
 
-    let session_id = app
-        .agents
-        .get(&agent_id)
-        .and_then(|a| a.session.session_id.as_ref())
-        .map(|s| s.0.as_ref().to_string())
-        .unwrap_or_default();
-
+    // Register the delegation with the exact correlation.
     app.live_runtime.register_delegation(
         generation,
         delegation_id,
@@ -179,6 +264,13 @@ fn snapshot_draft(app: &AppView, agent_id: AgentId) -> DraftSnapshot {
 /// `enforce_voice_session_bound`).
 pub fn enforce_live_session_bound(app: &mut AppView) {
     if !app.live_active() {
+        // Also check PendingUnbound — if the user navigated away from the
+        // pending agent, cancel the pending start.
+        if let LiveState::PendingUnbound { agent_id, .. } = &app.live_runtime.state
+            && !matches!(app.active_view, ActiveView::Agent(active) if active == *agent_id)
+        {
+            cancel_pending_live(app);
+        }
         return;
     }
     let (agent_id, session_id) = match &app.live_runtime.state {
@@ -195,6 +287,7 @@ pub fn enforce_live_session_bound(app: &mut AppView) {
 }
 
 /// Stop Live on quit/exit/close/ACP-disconnect/teardown. Idempotent.
+/// Terminalizes broker state and restores the draft.
 pub fn stop_live_on_teardown(app: &mut AppView) {
     if app.live_in_flight() {
         dispatch_live_stop(app);

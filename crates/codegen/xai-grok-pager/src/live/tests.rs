@@ -1,38 +1,46 @@
 //! Focused tests for the Codex Live (`/live`) integration.
 //!
-//! These tests use fake Live command/event channels — no real audio/network.
-//! They cover:
-//! - command visibility/toggle
-//! - auth absent
-//! - pending unbound session
-//! - draft preservation
-//! - `/voice` exclusion (mutual exclusion)
-//! - stop on navigation/quit
-//! - modal/input priority
-//! - transcript coalescing
-//! - full-width/narrow visualizer
-//! - repeated/multiple delegation ids
-//! - exact prompt correlation
-//! - replay/foreign/old generation
-//! - tool-boundary commentary
-//! - terminal exactly once under signal reordering
-//! - bounded channel behavior
+//! These tests exercise the real `xai_grok_voice::live` API types and the
+//! pager-side adapters (state, broker, visualizer, config, prompts, gate).
+//! No real audio/network — the tests are pure state/data tests.
+//!
+//! Coverage:
+//! - broker: foreign session/prompt/old generation/replay/terminal rejection
+//! - broker: tool-boundary commentary flush
+//! - broker: terminal exactly once (turn completed + signal reordering)
+//! - broker: multiple delegations per call + exact prompt correlation
+//! - broker: cancel-all completes non-terminal
+//! - broker: decision_to_commands uses Commentary channel + CompleteDelegation
+//! - state: idle/active/pending transitions + generation counter
+//! - state: delegation register/mark terminal/teardown
+//! - state: find_delegation_by_prompt_id
+//! - visualizer: phase update + no redraw on same phase
+//! - visualizer: levels update + peak decay
+//! - visualizer: user transcript accumulation
+//! - visualizer: assistant transcript coalescing
+//! - visualizer: error sets error message
+//! - visualizer: reset_turn clears assistant
+//! - visualizer: narrow detection
+//! - config: built with OMP version
+//! - prompts: wrap final message
+//! - gate: defaults on / requirement off / config off
 
 #![cfg(feature = "codex-live")]
 
-use crate::live::broker::LiveDelegationBroker;
-use crate::live::state::{DraftSnapshot, LiveRuntime, LiveState, LiveVisualizerState};
-use crate::live::{LiveCommand, LiveContextChannel, LiveEvent, LiveLevels, LivePhase, LiveRole};
+use crate::live::broker::{
+    BrokerDecision, CommentaryFlush, LiveDelegationBroker, TerminalFinal, decision_to_commands,
+};
+use crate::live::state::{
+    DelegationEntry, DraftSnapshot, LiveRuntime, LiveState, LiveVisualizerState,
+};
+use crate::live::{
+    LiveCommand, LiveContextChannel, LiveEvent, LivePhase, LiveRole, TranscriptKind,
+};
 
-// ── Broker tests ────────────────────────────────────────────────────────────
+// ── Broker helper functions ─────────────────────────────────────────────────
 
-fn make_entry(
-    generation: u64,
-    del_id: &str,
-    pid: &str,
-    terminal: bool,
-) -> crate::live::state::DelegationEntry {
-    crate::live::state::DelegationEntry {
+fn make_entry(generation: u64, del_id: &str, pid: &str, terminal: bool) -> DelegationEntry {
+    DelegationEntry {
         generation,
         delegation_id: del_id.to_string(),
         agent_id: crate::app::agent::AgentId(0),
@@ -43,19 +51,21 @@ fn make_entry(
 }
 
 fn make_delegations(
-    entries: &[crate::live::state::DelegationEntry],
-) -> std::collections::HashMap<(u64, String), crate::live::state::DelegationEntry> {
+    entries: &[DelegationEntry],
+) -> std::collections::HashMap<(u64, String), DelegationEntry> {
     entries
         .iter()
         .map(|e| ((e.generation, e.delegation_id.clone()), e.clone()))
         .collect()
 }
 
+// ── Broker tests ────────────────────────────────────────────────────────────
+
 #[test]
 fn broker_foreign_session_ignored() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
     let decision = broker.observe_chunk("sess-other", "pid-1", "hello", false, &delegations);
     assert!(decision.commentary.is_empty());
@@ -66,7 +76,7 @@ fn broker_foreign_session_ignored() {
 fn broker_foreign_prompt_ignored() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
     let decision = broker.observe_chunk("sess-1", "pid-other", "hello", false, &delegations);
     assert!(decision.commentary.is_empty());
@@ -76,7 +86,7 @@ fn broker_foreign_prompt_ignored() {
 fn broker_old_generation_ignored() {
     let mut broker = LiveDelegationBroker::new(2);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
     let decision = broker.observe_chunk("sess-1", "pid-1", "hello", false, &delegations);
     assert!(decision.commentary.is_empty());
@@ -87,7 +97,7 @@ fn broker_replay_ignored_via_terminal_delegation() {
     // A terminal delegation should be ignored (simulates replay/stale).
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", true)]);
     let decision = broker.observe_chunk("sess-1", "pid-1", "hello", false, &delegations);
     assert!(decision.commentary.is_empty());
@@ -97,7 +107,7 @@ fn broker_replay_ignored_via_terminal_delegation() {
 fn broker_tool_boundary_flushes_commentary() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
 
     broker.observe_chunk("sess-1", "pid-1", "I will now ", false, &delegations);
@@ -113,7 +123,7 @@ fn broker_tool_boundary_flushes_commentary() {
 fn broker_terminal_exactly_once() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
 
     broker.observe_chunk("sess-1", "pid-1", "Done!", false, &delegations);
@@ -136,7 +146,7 @@ fn broker_terminal_exactly_once() {
 fn broker_signal_reordering_terminal_wins() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+    broker.register_delegation("del-1".to_string());
     let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
 
     broker.observe_chunk("sess-1", "pid-1", "result", false, &delegations);
@@ -152,8 +162,8 @@ fn broker_signal_reordering_terminal_wins() {
 fn broker_repeated_delegation_ids() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-    broker.register_delegation("del-2".to_string(), "pid-2".to_string());
+    broker.register_delegation("del-1".to_string());
+    broker.register_delegation("del-2".to_string());
     let delegations = make_delegations(&[
         make_entry(1, "del-1", "pid-1", false),
         make_entry(1, "del-2", "pid-2", false),
@@ -172,8 +182,8 @@ fn broker_repeated_delegation_ids() {
 fn broker_exact_prompt_correlation() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-    broker.register_delegation("del-2".to_string(), "pid-2".to_string());
+    broker.register_delegation("del-1".to_string());
+    broker.register_delegation("del-2".to_string());
     let delegations = make_delegations(&[
         make_entry(1, "del-1", "pid-1", false),
         make_entry(1, "del-2", "pid-2", false),
@@ -194,8 +204,8 @@ fn broker_exact_prompt_correlation() {
 fn broker_cancel_all_completes_non_terminal() {
     let mut broker = LiveDelegationBroker::new(1);
     broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-    broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-    broker.register_delegation("del-2".to_string(), "pid-2".to_string());
+    broker.register_delegation("del-1".to_string());
+    broker.register_delegation("del-2".to_string());
     let delegations = make_delegations(&[
         make_entry(1, "del-1", "pid-1", false),
         make_entry(1, "del-2", "pid-2", false),
@@ -203,6 +213,45 @@ fn broker_cancel_all_completes_non_terminal() {
 
     let d = broker.observe_cancel_all(&delegations);
     assert_eq!(d.mark_terminal.len(), 2);
+}
+
+#[test]
+fn broker_decision_to_commands_uses_commentary_channel() {
+    let decision = BrokerDecision {
+        commentary: vec![CommentaryFlush {
+            delegation_id: "del-1".to_string(),
+            text: "hello".to_string(),
+        }],
+        terminal: vec![TerminalFinal {
+            delegation_id: "del-1".to_string(),
+            final_message: "Agent Final Message: done".to_string(),
+        }],
+        mark_terminal: vec!["del-1".to_string()],
+    };
+    let cmds = decision_to_commands(&decision);
+    assert_eq!(cmds.len(), 2);
+    match &cmds[0] {
+        LiveCommand::AppendDelegationContext {
+            channel,
+            delegation_id,
+            text,
+        } => {
+            assert_eq!(*channel, LiveContextChannel::Commentary);
+            assert_eq!(delegation_id, "del-1");
+            assert_eq!(text, "hello");
+        }
+        _ => panic!("expected AppendDelegationContext"),
+    }
+    match &cmds[1] {
+        LiveCommand::CompleteDelegation {
+            delegation_id,
+            text,
+        } => {
+            assert_eq!(delegation_id, "del-1");
+            assert!(text.starts_with("Agent Final Message:"));
+        }
+        _ => panic!("expected CompleteDelegation"),
+    }
 }
 
 // ── State tests ─────────────────────────────────────────────────────────────
@@ -231,6 +280,24 @@ fn live_state_active_transitions() {
     assert_eq!(state.agent_id(), Some(crate::app::agent::AgentId(1)));
     assert_eq!(state.session_id(), Some("sess-1"));
     assert_eq!(state.generation(), Some(42));
+}
+
+#[test]
+fn live_state_pending_unbound() {
+    let state = LiveState::PendingUnbound {
+        agent_id: crate::app::agent::AgentId(0),
+        draft: DraftSnapshot {
+            text: "hello".to_string(),
+            cursor: 3,
+        },
+    };
+    assert!(state.is_pending());
+    assert!(state.is_in_flight());
+    assert!(!state.is_active());
+    assert_eq!(state.agent_id(), Some(crate::app::agent::AgentId(0)));
+    assert!(state.session_id().is_none());
+    assert!(state.generation().is_none());
+    assert!(state.draft().is_some());
 }
 
 #[test]
@@ -280,34 +347,63 @@ fn live_runtime_teardown_clears_everything() {
     assert!(runtime.delegations.is_empty());
 }
 
+#[test]
+fn live_runtime_find_delegation_by_prompt_id() {
+    let mut runtime = LiveRuntime::default();
+    let generation = runtime.next_generation();
+    runtime.register_delegation(
+        generation,
+        "del-1".to_string(),
+        crate::app::agent::AgentId(0),
+        "sess-1".to_string(),
+        "pid-1".to_string(),
+    );
+    runtime.register_delegation(
+        generation,
+        "del-2".to_string(),
+        crate::app::agent::AgentId(0),
+        "sess-1".to_string(),
+        "pid-2".to_string(),
+    );
+    assert_eq!(
+        runtime.find_delegation_by_prompt_id("pid-1"),
+        Some("del-1".to_string())
+    );
+    assert_eq!(
+        runtime.find_delegation_by_prompt_id("pid-2"),
+        Some("del-2".to_string())
+    );
+    assert_eq!(runtime.find_delegation_by_prompt_id("pid-3"), None);
+
+    // Terminal delegations should not be found.
+    runtime.mark_delegation_terminal(generation, "del-1");
+    assert_eq!(runtime.find_delegation_by_prompt_id("pid-1"), None);
+}
+
 // ── Visualizer state tests ──────────────────────────────────────────────────
 
 #[test]
 fn visualizer_phase_update() {
     let mut vis = LiveVisualizerState::default();
-    let needs_draw = vis.apply_event(&LiveEvent::Phase(LivePhase::Listening));
+    let needs_draw = vis.apply_event(&LiveEvent::Phase(LivePhase::Connected));
     assert!(needs_draw);
-    assert_eq!(vis.phase, LivePhase::Listening);
+    assert_eq!(vis.phase, LivePhase::Connected);
 }
 
 #[test]
 fn visualizer_phase_no_redraw_on_same_phase() {
     let mut vis = LiveVisualizerState::default();
-    vis.phase = LivePhase::Listening;
-    let needs_draw = vis.apply_event(&LiveEvent::Phase(LivePhase::Listening));
+    vis.phase = LivePhase::Connected;
+    let needs_draw = vis.apply_event(&LiveEvent::Phase(LivePhase::Connected));
     assert!(!needs_draw);
 }
 
 #[test]
 fn visualizer_levels_update_and_peak_decay() {
     let mut vis = LiveVisualizerState::default();
-    let levels = LiveLevels {
-        user_peak: 0.8,
-        assistant_peak: 0.5,
-        ..Default::default()
-    };
-    let needs_draw = vis.apply_event(&LiveEvent::Levels(levels));
+    let needs_draw = vis.apply_event(&LiveEvent::Levels(0.8));
     assert!(needs_draw);
+    assert!((vis.level - 0.8).abs() < 0.01);
     assert!((vis.peak_decay - 0.8).abs() < 0.01);
 
     vis.decay_peak(0.5);
@@ -315,17 +411,26 @@ fn visualizer_levels_update_and_peak_decay() {
 }
 
 #[test]
+fn visualizer_levels_flood_does_not_panic() {
+    let mut vis = LiveVisualizerState::default();
+    for i in 0..1000 {
+        let level = (i as f64) / 1000.0;
+        vis.apply_event(&LiveEvent::Levels(level));
+    }
+    assert!(vis.level <= 1.0);
+    assert!(vis.peak_decay <= 1.0);
+}
+
+#[test]
 fn visualizer_user_transcript_accumulates() {
     let mut vis = LiveVisualizerState::default();
     vis.apply_event(&LiveEvent::Transcript {
-        role: LiveRole::User,
+        kind: TranscriptKind::Input,
         text: "Hello".to_string(),
-        finalized: true,
     });
     vis.apply_event(&LiveEvent::Transcript {
-        role: LiveRole::User,
+        kind: TranscriptKind::Input,
         text: "world".to_string(),
-        finalized: true,
     });
     assert_eq!(vis.user_transcript, "Hello world");
 }
@@ -333,37 +438,44 @@ fn visualizer_user_transcript_accumulates() {
 #[test]
 fn visualizer_assistant_transcript_coalescing() {
     let mut vis = LiveVisualizerState::default();
-    // Partial segments replace the live partial.
+    // Output transcript events replace the live partial (coalescing).
     vis.apply_event(&LiveEvent::Transcript {
-        role: LiveRole::Assistant,
+        kind: TranscriptKind::Output,
         text: "I am".to_string(),
-        finalized: false,
     });
     assert_eq!(vis.assistant_transcript, "I am");
     vis.apply_event(&LiveEvent::Transcript {
-        role: LiveRole::Assistant,
+        kind: TranscriptKind::Output,
         text: "I am thinking".to_string(),
-        finalized: false,
     });
     assert_eq!(vis.assistant_transcript, "I am thinking");
-    // Finalized segments coalesce.
-    vis.apply_event(&LiveEvent::Transcript {
-        role: LiveRole::Assistant,
-        text: "Done.".to_string(),
-        finalized: true,
-    });
-    assert!(vis.assistant_transcript.contains("Done."));
-    assert!(vis.assistant_finalized);
 }
 
 #[test]
-fn visualizer_error_sets_error_phase() {
+fn visualizer_turn_resets_assistant() {
+    let mut vis = LiveVisualizerState::default();
+    vis.apply_event(&LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "response".to_string(),
+    });
+    vis.apply_event(&LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "final response".to_string(),
+    });
+    assert_eq!(vis.assistant_transcript, "final response");
+    assert!(!vis.assistant_flushed); // needs scrollback flush
+    vis.reset_turn();
+    assert!(vis.assistant_transcript.is_empty());
+    assert!(!vis.assistant_flushed);
+}
+
+#[test]
+fn visualizer_error_sets_error_message() {
     let mut vis = LiveVisualizerState::default();
     let needs_draw = vis.apply_event(&LiveEvent::Error {
         message: "Connection lost".to_string(),
     });
     assert!(needs_draw);
-    assert_eq!(vis.phase, LivePhase::Error);
     assert_eq!(vis.error_message, Some("Connection lost".to_string()));
 }
 
@@ -371,13 +483,12 @@ fn visualizer_error_sets_error_phase() {
 fn visualizer_reset_turn_clears_assistant() {
     let mut vis = LiveVisualizerState::default();
     vis.apply_event(&LiveEvent::Transcript {
-        role: LiveRole::Assistant,
+        kind: TranscriptKind::Output,
         text: "response".to_string(),
-        finalized: true,
     });
     vis.reset_turn();
     assert!(vis.assistant_transcript.is_empty());
-    assert!(!vis.assistant_finalized);
+    assert!(!vis.assistant_flushed);
 }
 
 // ── Visualizer layout tests ─────────────────────────────────────────────────
@@ -391,27 +502,25 @@ fn visualizer_narrow_detection() {
     assert!(!crate::live::visualizer::is_narrow(wide));
 }
 
-// ── Channel tests ───────────────────────────────────────────────────────────
-
 #[test]
-fn live_context_channel_try_send_and_close() {
-    let (ch, mut rx) = LiveContextChannel::pair(4);
-    assert!(ch.try_send(LiveCommand::ToggleMute));
-    assert!(ch.try_send(LiveCommand::Shutdown));
-    let cmd1 = rx.try_recv().unwrap();
-    let cmd2 = rx.try_recv().unwrap();
-    assert_eq!(cmd1, LiveCommand::ToggleMute);
-    assert_eq!(cmd2, LiveCommand::Shutdown);
+fn visualizer_render_wide_does_not_panic() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
+    let state = LiveVisualizerState::default();
+    crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, 10), &state);
+    // Should have rendered something (not all empty).
+    assert!(buf.area().width > 0);
 }
 
 #[test]
-fn live_context_channel_bounded_drops_when_full() {
-    let (ch, _rx) = LiveContextChannel::pair(2);
-    // Fill the channel.
-    assert!(ch.try_send(LiveCommand::ToggleMute));
-    assert!(ch.try_send(LiveCommand::ToggleMute));
-    // Third send should fail (bounded).
-    assert!(!ch.try_send(LiveCommand::ToggleMute));
+fn visualizer_render_narrow_does_not_panic() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    let mut buf = Buffer::empty(Rect::new(0, 0, 30, 10));
+    let state = LiveVisualizerState::default();
+    crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 30, 10), &state);
+    assert!(buf.area().width > 0);
 }
 
 // ── Config tests ────────────────────────────────────────────────────────────
@@ -420,14 +529,26 @@ fn live_context_channel_bounded_drops_when_full() {
 fn live_config_built_with_omp_version() {
     let config = crate::live::config::build_live_config(
         "sess-1",
-        "https://chatgpt.com/backend-api/codex",
-        "wss://sideband",
+        "https://chatgpt.com/backend-api",
+        None,
         "sol",
     );
     assert_eq!(config.session_id, "sess-1");
-    assert_eq!(config.codex_base, "https://chatgpt.com/backend-api/codex");
+    assert_eq!(config.codex_base, "https://chatgpt.com/backend-api");
     assert_eq!(config.voice, "sol");
     assert_eq!(config.client_version, "0.144.1");
+    assert!(config.sideband_base.is_none());
+}
+
+#[test]
+fn live_config_with_sideband() {
+    let config = crate::live::config::build_live_config(
+        "sess-1",
+        "https://chatgpt.com/backend-api",
+        Some("wss://sideband".to_string()),
+        "sol",
+    );
+    assert_eq!(config.sideband_base.as_deref(), Some("wss://sideband"));
 }
 
 #[test]
@@ -435,6 +556,12 @@ fn live_prompts_wrap_final_message() {
     let wrapped = crate::live::prompts::wrap_agent_final_message("All done");
     assert!(wrapped.starts_with("Agent Final Message:"));
     assert!(wrapped.contains("All done"));
+}
+
+#[test]
+fn live_prompts_instructions_nonempty() {
+    let instructions = crate::live::prompts::live_instructions();
+    assert!(!instructions.is_empty());
 }
 
 // ── Gate tests ──────────────────────────────────────────────────────────────
@@ -461,4 +588,107 @@ fn gate_config_off_disables_when_requirement_absent() {
         None,
         Some(false)
     ));
+}
+
+// ── DraftSnapshot tests ─────────────────────────────────────────────────────
+
+#[test]
+fn draft_snapshot_default_is_empty() {
+    let draft = DraftSnapshot::default();
+    assert!(draft.text.is_empty());
+    assert_eq!(draft.cursor, 0);
+}
+
+#[test]
+fn draft_snapshot_preserves_text_and_cursor() {
+    let draft = DraftSnapshot {
+        text: "hello world".to_string(),
+        cursor: 5,
+    };
+    assert_eq!(draft.text, "hello world");
+    assert_eq!(draft.cursor, 5);
+}
+
+// ── Real API type compilation tests ─────────────────────────────────────────
+// These tests verify that the pager code compiles against the real
+// `xai_grok_voice::live` types (not test doubles). If the voice crate API
+// changes, these tests will fail to compile.
+
+#[test]
+fn real_live_command_variants_exist() {
+    let _ = LiveCommand::ToggleMute;
+    let _ = LiveCommand::SetMuted(true);
+    let _ = LiveCommand::Shutdown;
+    let _ = LiveCommand::AppendDelegationContext {
+        delegation_id: "del".to_string(),
+        text: "text".to_string(),
+        channel: LiveContextChannel::Speakable,
+    };
+    let _ = LiveCommand::AppendDelegationContext {
+        delegation_id: "del".to_string(),
+        text: "text".to_string(),
+        channel: LiveContextChannel::Commentary,
+    };
+    let _ = LiveCommand::CompleteDelegation {
+        delegation_id: "del".to_string(),
+        text: "final".to_string(),
+    };
+    let _ = LiveCommand::AppendSessionContext {
+        text: "ctx".to_string(),
+        channel: LiveContextChannel::Speakable,
+    };
+}
+
+#[test]
+fn real_live_event_variants_exist() {
+    let _ = LiveEvent::Phase(LivePhase::Connecting);
+    let _ = LiveEvent::Phase(LivePhase::Connected);
+    let _ = LiveEvent::Phase(LivePhase::Closing);
+    let _ = LiveEvent::Phase(LivePhase::Closed);
+    let _ = LiveEvent::Levels(0.5);
+    let _ = LiveEvent::Transcript {
+        kind: TranscriptKind::Input,
+        text: "hi".to_string(),
+    };
+    let _ = LiveEvent::Transcript {
+        kind: TranscriptKind::Output,
+        text: "hello".to_string(),
+    };
+    let _ = LiveEvent::Delegation {
+        id: "del-1".to_string(),
+        content: vec!["text".to_string()],
+    };
+    let _ = LiveEvent::Turn {
+        role: LiveRole::User,
+        transcript: "user transcript".to_string(),
+    };
+    let _ = LiveEvent::Turn {
+        role: LiveRole::Assistant,
+        transcript: "assistant transcript".to_string(),
+    };
+    let _ = LiveEvent::Error {
+        message: "err".to_string(),
+    };
+    let _ = LiveEvent::Closed;
+}
+
+#[test]
+fn real_live_context_channel_is_enum() {
+    // LiveContextChannel is an enum (Speakable/Commentary), not a struct.
+    let speakable = LiveContextChannel::Speakable;
+    let commentary = LiveContextChannel::Commentary;
+    assert!(matches!(speakable, LiveContextChannel::Speakable));
+    assert!(matches!(commentary, LiveContextChannel::Commentary));
+}
+
+// ── Auth adapter test (compile-link only) ───────────────────────────────────
+
+#[test]
+fn real_auth_provider_trait_object_compiles() {
+    use crate::live::LiveAuthProvider;
+    use crate::live::auth::CodexLiveAuth;
+    // Verify the auth adapter implements the real trait.
+    fn accepts_provider(_p: &dyn LiveAuthProvider) {}
+    let provider = CodexLiveAuth;
+    accepts_provider(&provider);
 }

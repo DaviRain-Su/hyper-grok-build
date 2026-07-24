@@ -51,6 +51,10 @@ pub struct AppRenderParams<'a> {
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
+    /// Codex Live visualizer state — when present, the prompt container is
+    /// replaced by the fixed-height Live visualizer.
+    #[cfg(feature = "codex-live")]
+    pub live_visualizer: Option<&'a crate::live::state::LiveVisualizerState>,
 }
 impl AgentView {
     pub(crate) fn update_scrollback_selection_state(
@@ -710,6 +714,8 @@ impl AgentView {
             voice_listening,
             voice_interim,
             esc_owned_before_agent,
+            #[cfg(feature = "codex-live")]
+            live_visualizer,
         } = app_params;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
@@ -2738,39 +2744,87 @@ impl AgentView {
                 buttons.clear();
             }
         } else {
-            let collapsed = !prompt_focused && appearance.prompt.collapse_unfocused;
-            let saved_scroll = if collapsed {
-                let s = self.prompt.scroll();
-                let ovr = self.prompt.textarea.scroll_override();
-                self.prompt.textarea.set_scroll_override(Some(0));
-                Some((s, ovr))
+            // Codex Live visualizer: when Live is active, replace the prompt
+            // editor with the fixed-height visualizer. This takes priority
+            // over the normal prompt but is lower than all modals/overlays
+            // (permission, question, rewind, jump, cancel-turn) above.
+            #[cfg(feature = "codex-live")]
+            if let Some(live_state) = live_visualizer {
+                crate::live::visualizer::render(buf, layout.prompt, live_state);
             } else {
-                None
-            };
-            let voice_overlay = if voice_available && (voice_listening || voice_interim.is_some()) {
-                Some(crate::views::prompt_widget::VoicePromptOverlay {
-                    listening: voice_listening,
-                    interim: voice_interim,
-                    color: theme.accent_running,
-                })
-            } else {
-                None
-            };
-            let prompt_result_inner = self.prompt.draw(
-                buf,
-                layout.prompt,
-                Some(layout.scrollback),
-                &prompt_style,
-                Some(&info),
-                voice_overlay,
-            );
-            if let Some((s, ovr)) = saved_scroll {
-                self.prompt.textarea.set_scroll_override(ovr);
-                self.prompt.set_scroll(s);
+                let collapsed = !prompt_focused && appearance.prompt.collapse_unfocused;
+                let saved_scroll = if collapsed {
+                    let s = self.prompt.scroll();
+                    let ovr = self.prompt.textarea.scroll_override();
+                    self.prompt.textarea.set_scroll_override(Some(0));
+                    Some((s, ovr))
+                } else {
+                    None
+                };
+                let voice_overlay =
+                    if voice_available && (voice_listening || voice_interim.is_some()) {
+                        Some(crate::views::prompt_widget::VoicePromptOverlay {
+                            listening: voice_listening,
+                            interim: voice_interim,
+                            color: theme.accent_running,
+                        })
+                    } else {
+                        None
+                    };
+                let prompt_result_inner = self.prompt.draw(
+                    buf,
+                    layout.prompt,
+                    Some(layout.scrollback),
+                    &prompt_style,
+                    Some(&info),
+                    voice_overlay,
+                );
+                if let Some((s, ovr)) = saved_scroll {
+                    self.prompt.textarea.set_scroll_override(ovr);
+                    self.prompt.set_scroll(s);
+                }
+                prompt_cursor_pos = prompt_result_inner.cursor_pos;
+                if let Some(escapes) = prompt_result_inner.post_flush_escapes {
+                    prompt_post_flush = Some(escapes.into());
+                }
             }
-            prompt_cursor_pos = prompt_result_inner.cursor_pos;
-            if let Some(escapes) = prompt_result_inner.post_flush_escapes {
-                prompt_post_flush = Some(escapes.into());
+            #[cfg(not(feature = "codex-live"))]
+            {
+                let collapsed = !prompt_focused && appearance.prompt.collapse_unfocused;
+                let saved_scroll = if collapsed {
+                    let s = self.prompt.scroll();
+                    let ovr = self.prompt.textarea.scroll_override();
+                    self.prompt.textarea.set_scroll_override(Some(0));
+                    Some((s, ovr))
+                } else {
+                    None
+                };
+                let voice_overlay =
+                    if voice_available && (voice_listening || voice_interim.is_some()) {
+                        Some(crate::views::prompt_widget::VoicePromptOverlay {
+                            listening: voice_listening,
+                            interim: voice_interim,
+                            color: theme.accent_running,
+                        })
+                    } else {
+                        None
+                    };
+                let prompt_result_inner = self.prompt.draw(
+                    buf,
+                    layout.prompt,
+                    Some(layout.scrollback),
+                    &prompt_style,
+                    Some(&info),
+                    voice_overlay,
+                );
+                if let Some((s, ovr)) = saved_scroll {
+                    self.prompt.textarea.set_scroll_override(ovr);
+                    self.prompt.set_scroll(s);
+                }
+                prompt_cursor_pos = prompt_result_inner.cursor_pos;
+                if let Some(escapes) = prompt_result_inner.post_flush_escapes {
+                    prompt_post_flush = Some(escapes.into());
+                }
             }
         }
         if self.prompt.file_search_visible() {

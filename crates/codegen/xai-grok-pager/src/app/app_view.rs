@@ -1883,6 +1883,30 @@ impl AppView {
         self.live_runtime.state.is_active()
     }
     #[cfg(feature = "codex-live")]
+    /// Returns the Live visualizer state for the active agent, if Live is
+    /// active and bound to the currently-visible agent. Used by the render
+    /// path to replace the prompt editor with the visualizer.
+    pub fn live_visualizer_state_for_active(
+        &self,
+    ) -> Option<&crate::live::state::LiveVisualizerState> {
+        if !self.live_active() {
+            return None;
+        }
+        // Only show the visualizer on the agent that Live is bound to.
+        let (agent_id, _session_id) = match &self.live_runtime.state {
+            crate::live::state::LiveState::Active {
+                agent_id,
+                session_id,
+                ..
+            } => (*agent_id, session_id.as_str()),
+            _ => return None,
+        };
+        match self.active_view {
+            ActiveView::Agent(active) if active == agent_id => Some(&self.live_runtime.visualizer),
+            _ => None,
+        }
+    }
+    #[cfg(feature = "codex-live")]
     /// Whether a Live start is pending.
     pub fn live_pending(&self) -> bool {
         self.live_runtime.state.is_pending()
@@ -2712,6 +2736,47 @@ impl AppView {
                 }
                 if let Some(outcome) = self.voice_esc_outcome(key_event) {
                     return outcome;
+                }
+                // Codex Live keyboard: Space toggles mute, Esc/Ctrl+C stops.
+                // This is placed AFTER voice_esc_outcome and modal handling
+                // (import_claude_modal, permission modals) so those take
+                // precedence. The agent's own modal/permission/AskUserQuestion
+                // handling inside `handle_input` also takes precedence because
+                // those modal checks run before key dispatch in the agent's
+                // input handler — BUT we need to check Live BEFORE the agent's
+                // input handler would consume Space/Esc for the prompt editor.
+                // So we intercept here, but only when Live is active and bound
+                // to this agent (no modal/permission/AskUserQuestion pending).
+                #[cfg(feature = "codex-live")]
+                if self.live_active()
+                    && let Event::Key(key) = ev
+                    && key.kind == KeyEventKind::Press
+                {
+                    // Only intercept when the bound agent is the active one
+                    // and no agent-level modal/permission/AskUserQuestion
+                    // is pending. We check the agent's modal state to
+                    // respect higher-priority modal handling.
+                    let agent_modal_active = self.agents.get(&id).is_some_and(|a| {
+                        a.active_modal.is_some()
+                            || a.permission_queue.front().is_some()
+                            || a.question_view.is_some()
+                            || a.cancel_turn_view.is_some()
+                            || a.rewind_state.is_some()
+                            || a.jump_state.is_some()
+                    });
+                    if !agent_modal_active {
+                        if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
+                            return InputOutcome::Action(Action::LiveToggleMute);
+                        }
+                        if (key.code == KeyCode::Esc && key.modifiers.is_empty())
+                            || (key.code == KeyCode::Char('c')
+                                && key
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL))
+                        {
+                            return InputOutcome::Action(Action::LiveStop);
+                        }
+                    }
                 }
                 if self.screen_mode.is_minimal()
                     && let Event::Key(key) = ev
@@ -4248,6 +4313,14 @@ impl AppView {
                 &self.hidden_announcement_ids,
             );
         let agent_mouse_pos = self.last_mouse_pos;
+        // Compute the Live visualizer state for the active agent BEFORE the
+        // destructuring borrow below, so the closure can use it without
+        // re-borrowing `self`.
+        #[cfg(feature = "codex-live")]
+        let live_visualizer_state: Option<crate::live::state::LiveVisualizerState> =
+            self.live_visualizer_state_for_active().cloned();
+        #[cfg(not(feature = "codex-live"))]
+        let _live_visualizer_state: Option<()> = None;
         let Self {
             active_view,
             agents,
@@ -4637,6 +4710,8 @@ impl AppView {
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
                                     esc_owned_before_agent,
+                                    #[cfg(feature = "codex-live")]
+                                    live_visualizer: live_visualizer_state.as_ref(),
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {

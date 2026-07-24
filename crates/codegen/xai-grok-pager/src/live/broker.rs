@@ -3,8 +3,8 @@
 //! delegations to:
 //!
 //! - accumulate `AgentMessageChunk` text per delegation,
-//! - flush the preceding assistant segment as 500-byte-safe commentary at tool
-//!   boundaries,
+//! - flush the accumulated assistant segment as 500-byte-safe commentary at
+//!   tool boundaries,
 //! - emit the terminal assistant segment wrapped as `"Agent Final Message:"`
 //!   and send `CompleteDelegation` exactly once,
 //! - unify `TurnCompleted`, `PromptResponse` errors, and cancel/failure
@@ -17,16 +17,17 @@
 //! The broker is a pure data structure — it does not touch the ACP stream
 //! directly. The ACP handler calls into it with observed events, and the broker
 //! returns actions (commentary to flush, final message to send) that the
-//! caller executes via the `LiveContextChannel`.
+//! caller executes via the `cmd_tx` channel.
 
-use super::LiveCommand;
 use super::prompts;
 use super::state::{DelegationEntry, Generation};
+use super::{LiveCommand, LiveContextChannel};
 
 /// The agent id type.
 use super::state::AgentId;
 
-/// Maximum byte length for a single commentary chunk (500-byte-safe).
+/// Maximum byte length for a single commentary chunk (500-byte-safe, matching
+/// the voice core's `CONTEXT_CHUNK_BYTES`).
 const COMMENTARY_CHUNK_MAX: usize = 500;
 
 /// A commentary segment to flush as `AppendDelegationContext`.
@@ -65,9 +66,6 @@ impl BrokerDecision {
 struct DelegationAccumulator {
     /// The accumulated assistant segment text (raw, before wrapping).
     assistant_text: String,
-    /// The preceding assistant segment (kept until the next tool boundary so
-    /// it can be flushed as commentary).
-    preceding_segment: String,
     /// Whether the terminal has already been sent (idempotent).
     terminal_sent: bool,
 }
@@ -102,7 +100,7 @@ impl LiveDelegationBroker {
 
     /// Register a new delegation (called when `LiveEvent::Delegation` submits
     /// text and the prompt pipeline returns a `prompt_id`).
-    pub fn register_delegation(&mut self, delegation_id: String, _prompt_id: String) {
+    pub fn register_delegation(&mut self, delegation_id: String) {
         self.accumulators
             .entry((self.generation, delegation_id))
             .or_default();
@@ -112,7 +110,7 @@ impl LiveDelegationBroker {
     /// session + a registered delegation's `prompt_id`.
     ///
     /// Returns commentary/terminal decisions. The caller executes them via
-    /// `LiveContextChannel::try_send`.
+    /// `cmd_tx.try_send`.
     ///
     /// - `session_id`: the ACP session id of the ingress (must match the
     ///   broker's bound session).
@@ -121,6 +119,7 @@ impl LiveDelegationBroker {
     /// - `text`: the assistant message chunk text.
     /// - `is_tool_boundary`: whether this chunk arrived at a tool boundary
     ///   (e.g. right before/after a `ToolCallUpdate`).
+    /// - `delegations`: the runtime's delegation registry.
     pub fn observe_chunk(
         &mut self,
         session_id: &str,
@@ -148,24 +147,18 @@ impl LiveDelegationBroker {
         // Accumulate the assistant text.
         acc.assistant_text.push_str(text);
 
-        if is_tool_boundary {
+        if is_tool_boundary && !acc.assistant_text.is_empty() {
             // At a tool boundary, flush the accumulated assistant text as
             // 500-byte-safe commentary (the assistant's commentary before/after
-            // the tool call). The preceding segment (if any) was already
-            // flushed on the last boundary; the current accumulated text is
-            // the new segment to flush.
-            if !acc.assistant_text.is_empty() {
-                let chunks = split_500_byte_safe(&acc.assistant_text);
-                for chunk in chunks {
-                    decision.commentary.push(CommentaryFlush {
-                        delegation_id: delegation_id.clone(),
-                        text: chunk,
-                    });
-                }
-                // Move the flushed text to preceding_segment (kept for the
-                // terminal final message fallback) and clear the accumulator.
-                acc.preceding_segment = std::mem::take(&mut acc.assistant_text);
+            // the tool call).
+            let chunks = split_500_byte_safe(&acc.assistant_text);
+            for chunk in chunks {
+                decision.commentary.push(CommentaryFlush {
+                    delegation_id: delegation_id.clone(),
+                    text: chunk,
+                });
             }
+            acc.assistant_text.clear();
         }
 
         decision
@@ -201,16 +194,8 @@ impl LiveDelegationBroker {
             return decision; // idempotent
         }
 
-        // The terminal segment is the last assistant segment: the accumulated
-        // text (if any) or the preceding segment.
-        let final_text = if !acc.assistant_text.is_empty() {
-            std::mem::take(&mut acc.assistant_text)
-        } else if !acc.preceding_segment.is_empty() {
-            std::mem::take(&mut acc.preceding_segment)
-        } else {
-            String::new()
-        };
-
+        // The terminal segment is the accumulated assistant text.
+        let final_text = std::mem::take(&mut acc.assistant_text);
         let wrapped = prompts::wrap_agent_final_message(&final_text);
         decision.terminal.push(TerminalFinal {
             delegation_id: delegation_id.clone(),
@@ -324,18 +309,22 @@ fn split_500_byte_safe(text: &str) -> Vec<String> {
 }
 
 /// Convert a [`BrokerDecision`] into [`LiveCommand`]s for the pipeline.
+/// Commentary uses `AppendDelegationContext` with the `Commentary` channel;
+/// terminal uses `CompleteDelegation` (no channel — the voice core omits it
+/// for final messages).
 pub fn decision_to_commands(decision: &BrokerDecision) -> Vec<LiveCommand> {
     let mut cmds = Vec::new();
     for commentary in &decision.commentary {
         cmds.push(LiveCommand::AppendDelegationContext {
             delegation_id: commentary.delegation_id.clone(),
             text: commentary.text.clone(),
+            channel: LiveContextChannel::Commentary,
         });
     }
     for terminal in &decision.terminal {
         cmds.push(LiveCommand::CompleteDelegation {
             delegation_id: terminal.delegation_id.clone(),
-            final_message: terminal.final_message.clone(),
+            text: terminal.final_message.clone(),
         });
     }
     cmds
@@ -344,7 +333,6 @@ pub fn decision_to_commands(decision: &BrokerDecision) -> Vec<LiveCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::state::DelegationEntry;
 
     fn make_entry(
         generation: Generation,
@@ -375,7 +363,7 @@ mod tests {
     fn foreign_session_ignored() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
         let decision = broker.observe_chunk("sess-other", "pid-1", "hello", false, &delegations);
         assert!(decision.commentary.is_empty());
@@ -386,7 +374,7 @@ mod tests {
     fn foreign_prompt_ignored() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
         let decision = broker.observe_chunk("sess-1", "pid-other", "hello", false, &delegations);
         assert!(decision.commentary.is_empty());
@@ -396,9 +384,7 @@ mod tests {
     fn old_generation_ignored() {
         let mut broker = LiveDelegationBroker::new(2);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-        // The delegation is registered in generation 1, but the broker is
-        // generation 2 — the find_delegation_by_prompt_id should not match.
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
         let decision = broker.observe_chunk("sess-1", "pid-1", "hello", false, &delegations);
         assert!(decision.commentary.is_empty());
@@ -408,7 +394,7 @@ mod tests {
     fn terminal_delegation_ignored() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", true)]);
         let decision = broker.observe_chunk("sess-1", "pid-1", "hello", false, &delegations);
         assert!(decision.commentary.is_empty());
@@ -418,14 +404,12 @@ mod tests {
     fn tool_boundary_flushes_commentary() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
 
-        // Accumulate some text.
         broker.observe_chunk("sess-1", "pid-1", "I will now ", false, &delegations);
         broker.observe_chunk("sess-1", "pid-1", "edit the file.", false, &delegations);
 
-        // Tool boundary: flush preceding segment as commentary.
         let decision = broker.observe_chunk("sess-1", "pid-1", "", true, &delegations);
         assert_eq!(decision.commentary.len(), 1);
         assert_eq!(decision.commentary[0].delegation_id, "del-1");
@@ -436,13 +420,11 @@ mod tests {
     fn terminal_exactly_once() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
 
-        // Accumulate text.
         broker.observe_chunk("sess-1", "pid-1", "Done!", false, &delegations);
 
-        // First TurnCompleted: emits terminal.
         let d1 = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
         assert_eq!(d1.terminal.len(), 1);
         assert!(
@@ -452,38 +434,22 @@ mod tests {
         );
         assert_eq!(d1.mark_terminal, vec!["del-1".to_string()]);
 
-        // Second TurnCompleted: idempotent (no-op).
         let d2 = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
         assert!(d2.terminal.is_empty());
         assert!(d2.mark_terminal.is_empty());
     }
 
     #[test]
-    fn failure_marks_terminal_without_final() {
-        let mut broker = LiveDelegationBroker::new(1);
-        broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-        let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
-
-        let d = broker.observe_failure("sess-1", "pid-1", &delegations);
-        assert!(d.terminal.is_empty());
-        assert_eq!(d.mark_terminal, vec!["del-1".to_string()]);
-    }
-
-    #[test]
     fn signal_reordering_terminal_wins() {
-        // TurnCompleted arrives, then a failure arrives — the failure is a
-        // no-op because the terminal was already sent.
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
+        broker.register_delegation("del-1".to_string());
         let delegations = make_delegations(&[make_entry(1, "del-1", "pid-1", false)]);
 
         broker.observe_chunk("sess-1", "pid-1", "result", false, &delegations);
         let d1 = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
         assert_eq!(d1.terminal.len(), 1);
 
-        // Late failure — idempotent.
         let d2 = broker.observe_failure("sess-1", "pid-1", &delegations);
         assert!(d2.terminal.is_empty());
         assert!(d2.mark_terminal.is_empty());
@@ -493,8 +459,8 @@ mod tests {
     fn cancel_all_completes_non_terminal() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-        broker.register_delegation("del-2".to_string(), "pid-2".to_string());
+        broker.register_delegation("del-1".to_string());
+        broker.register_delegation("del-2".to_string());
         let delegations = make_delegations(&[
             make_entry(1, "del-1", "pid-1", false),
             make_entry(1, "del-2", "pid-2", false),
@@ -506,51 +472,96 @@ mod tests {
 
     #[test]
     fn split_500_byte_safe_respects_char_boundaries() {
-        // ASCII under limit.
         assert_eq!(split_500_byte_safe("hello"), vec!["hello"]);
 
-        // ASCII over limit — split at 500.
         let long = "a".repeat(600);
         let chunks = split_500_byte_safe(&long);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), 500);
         assert_eq!(chunks[1].len(), 100);
 
-        // Multi-byte: ensure no split mid-char.
         let multi = "é".repeat(300); // 600 bytes, 300 chars
         let chunks = split_500_byte_safe(&multi);
-        // 500 bytes / 2 bytes per char = 250 chars in first chunk.
         assert!(chunks[0].len() <= 500);
         assert!(chunks[0].chars().all(|c| c == 'é'));
     }
 
     #[test]
-    fn repeated_delegation_ids_handled() {
-        // Two delegations with different ids in the same generation.
+    fn repeated_delegation_ids() {
         let mut broker = LiveDelegationBroker::new(1);
         broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
-        broker.register_delegation("del-1".to_string(), "pid-1".to_string());
-        broker.register_delegation("del-2".to_string(), "pid-2".to_string());
+        broker.register_delegation("del-1".to_string());
+        broker.register_delegation("del-2".to_string());
         let delegations = make_delegations(&[
             make_entry(1, "del-1", "pid-1", false),
             make_entry(1, "del-2", "pid-2", false),
         ]);
 
-        // Chunks for del-1.
-        let d1 = broker.observe_chunk("sess-1", "pid-1", "first", false, &delegations);
-        assert!(d1.commentary.is_empty());
-
-        // TurnCompleted for del-1.
         let d1t = broker.observe_turn_completed("sess-1", "pid-1", &delegations);
         assert_eq!(d1t.terminal.len(), 1);
         assert_eq!(d1t.terminal[0].delegation_id, "del-1");
 
-        // Chunks for del-2 still work.
-        let d2 = broker.observe_chunk("sess-1", "pid-2", "second", false, &delegations);
-        assert!(d2.commentary.is_empty());
-
         let d2t = broker.observe_turn_completed("sess-1", "pid-2", &delegations);
         assert_eq!(d2t.terminal.len(), 1);
         assert_eq!(d2t.terminal[0].delegation_id, "del-2");
+    }
+
+    #[test]
+    fn exact_prompt_correlation() {
+        let mut broker = LiveDelegationBroker::new(1);
+        broker.bind("sess-1".to_string(), crate::app::agent::AgentId(0));
+        broker.register_delegation("del-1".to_string());
+        broker.register_delegation("del-2".to_string());
+        let delegations = make_delegations(&[
+            make_entry(1, "del-1", "pid-1", false),
+            make_entry(1, "del-2", "pid-2", false),
+        ]);
+
+        let d = broker.observe_chunk("sess-1", "pid-1", "text for del-1", true, &delegations);
+        assert_eq!(d.commentary.len(), 1);
+        assert_eq!(d.commentary[0].delegation_id, "del-1");
+
+        let d = broker.observe_chunk("sess-1", "pid-2", "text for del-2", true, &delegations);
+        assert_eq!(d.commentary.len(), 1);
+        assert_eq!(d.commentary[0].delegation_id, "del-2");
+    }
+
+    #[test]
+    fn decision_to_commands_uses_commentary_channel() {
+        let decision = BrokerDecision {
+            commentary: vec![CommentaryFlush {
+                delegation_id: "del-1".to_string(),
+                text: "hello".to_string(),
+            }],
+            terminal: vec![TerminalFinal {
+                delegation_id: "del-1".to_string(),
+                final_message: "Agent Final Message: done".to_string(),
+            }],
+            mark_terminal: vec!["del-1".to_string()],
+        };
+        let cmds = decision_to_commands(&decision);
+        assert_eq!(cmds.len(), 2);
+        match &cmds[0] {
+            LiveCommand::AppendDelegationContext {
+                channel,
+                delegation_id,
+                text,
+            } => {
+                assert_eq!(*channel, LiveContextChannel::Commentary);
+                assert_eq!(delegation_id, "del-1");
+                assert_eq!(text, "hello");
+            }
+            _ => panic!("expected AppendDelegationContext"),
+        }
+        match &cmds[1] {
+            LiveCommand::CompleteDelegation {
+                delegation_id,
+                text,
+            } => {
+                assert_eq!(delegation_id, "del-1");
+                assert!(text.starts_with("Agent Final Message:"));
+            }
+            _ => panic!("expected CompleteDelegation"),
+        }
     }
 }

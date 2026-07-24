@@ -13,8 +13,6 @@
 //! (`GROK_CODEX_LIVE` / requirements / config). Independent of the xAI
 //! `/voice` subscription tier.
 
-#![cfg(feature = "codex-live")]
-
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 

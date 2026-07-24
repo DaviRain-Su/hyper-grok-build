@@ -3,10 +3,10 @@
 //!
 //! Layout (5 rows):
 //! 1. Top border
-//! 2. Waveform row 1 (user channel)
-//! 3. Waveform row 2 (assistant channel)
-//! 4. User transcript (accumulated finalized user segments)
-//! 5. Phase footer (connecting / listening / working / speaking / muted / error)
+//! 2. Waveform row 1 (output level)
+//! 3. Waveform row 2 (peak decay)
+//! 4. User transcript (accumulated finalized input segments)
+//! 5. Phase footer (connecting / connected / closing / closed + error)
 //!
 //! Narrow fallback: when the terminal width is too small for the full
 //! visualizer, a compact 3-row layout is used (phase + waveform + transcript).
@@ -17,11 +17,11 @@
 //! - Mouse hit areas: click on the waveform toggles mute, click on the footer
 //!   stops.
 
-use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use super::LivePhase;
 use super::state::LiveVisualizerState;
@@ -38,8 +38,9 @@ pub fn is_narrow(area: Rect) -> bool {
     area.width < NARROW_WIDTH_THRESHOLD
 }
 
-/// Render the Live visualizer into the given area (replaces the editor).
-pub fn render(f: &mut Frame, area: Rect, state: &LiveVisualizerState) {
+/// Render the Live visualizer into the given buffer area (replaces the editor).
+/// Called from the agent view's `draw` method when Live is active.
+pub fn render(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState) {
     let narrow = is_narrow(area);
     let height = if narrow {
         VISUALIZER_NARROW_HEIGHT
@@ -52,30 +53,31 @@ pub fn render(f: &mut Frame, area: Rect, state: &LiveVisualizerState) {
     };
 
     let theme = crate::theme::Theme::current();
+    let title = rust_i18n::t!("live.visualizer.title");
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(theme.accent_user))
         .title(Span::styled(
-            " Live ",
+            title.to_string(),
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ));
 
     if narrow {
-        render_narrow(f, area, state, block);
+        render_narrow(buf, area, state, block);
     } else {
-        render_full(f, area, state, block);
+        render_full(buf, area, state, block);
     }
 }
 
-fn render_full(f: &mut Frame, area: Rect, state: &LiveVisualizerState, block: Block) {
+fn render_full(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block: Block) {
     let chunks = ratatui::layout::Layout::vertical([
         // Row 1: top border (the block provides it, so this is 0-height filler).
         ratatui::layout::Constraint::Length(0),
-        // Row 2: waveform row 1 (user).
+        // Row 2: waveform row 1 (output level).
         ratatui::layout::Constraint::Length(1),
-        // Row 3: waveform row 2 (assistant).
+        // Row 3: waveform row 2 (peak decay).
         ratatui::layout::Constraint::Length(1),
         // Row 4: user transcript.
         ratatui::layout::Constraint::Length(1),
@@ -84,22 +86,17 @@ fn render_full(f: &mut Frame, area: Rect, state: &LiveVisualizerState, block: Bl
     ])
     .split(block.inner(area));
 
-    // The block itself renders the top border.
-    f.render_widget(block, area);
+    block.render(area, buf);
 
     let theme = crate::theme::Theme::current();
 
-    // Waveform row 1 (user).
-    let user_bar = render_waveform(state.levels.user_peak, state.peak_decay, theme.accent_user);
-    f.render_widget(Paragraph::new(user_bar), chunks[1]);
+    // Waveform row 1 (output level).
+    let level_bar = render_waveform(state.level, theme.accent_user);
+    Paragraph::new(level_bar).render(chunks[1], buf);
 
-    // Waveform row 2 (assistant).
-    let assistant_bar = render_waveform(
-        state.levels.assistant_peak,
-        state.peak_decay,
-        theme.accent_assistant,
-    );
-    f.render_widget(Paragraph::new(assistant_bar), chunks[2]);
+    // Waveform row 2 (peak decay).
+    let decay_bar = render_waveform(state.peak_decay, theme.accent_assistant);
+    Paragraph::new(decay_bar).render(chunks[2], buf);
 
     // User transcript.
     let transcript = if state.user_transcript.is_empty() {
@@ -110,14 +107,14 @@ fn render_full(f: &mut Frame, area: Rect, state: &LiveVisualizerState, block: Bl
             Style::default().fg(theme.text_primary),
         ))
     };
-    f.render_widget(Paragraph::new(transcript), chunks[3]);
+    Paragraph::new(transcript).render(chunks[3], buf);
 
     // Phase footer.
     let phase_line = render_phase_footer(state.phase, &state.error_message, theme.accent_user);
-    f.render_widget(Paragraph::new(phase_line), chunks[4]);
+    Paragraph::new(phase_line).render(chunks[4], buf);
 }
 
-fn render_narrow(f: &mut Frame, area: Rect, state: &LiveVisualizerState, block: Block) {
+fn render_narrow(buf: &mut Buffer, area: Rect, state: &LiveVisualizerState, block: Block) {
     let chunks = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Length(0),
         // Phase + waveform combined.
@@ -129,18 +126,18 @@ fn render_narrow(f: &mut Frame, area: Rect, state: &LiveVisualizerState, block: 
     ])
     .split(block.inner(area));
 
-    f.render_widget(block, area);
+    block.render(area, buf);
 
     let theme = crate::theme::Theme::current();
 
     // Phase footer.
     let phase_line = render_phase_footer(state.phase, &state.error_message, theme.accent_user);
-    f.render_widget(Paragraph::new(phase_line), chunks[1]);
+    Paragraph::new(phase_line).render(chunks[1], buf);
 
-    // Combined waveform.
-    let peak = state.levels.user_peak.max(state.levels.assistant_peak);
-    let bar = render_waveform(peak, state.peak_decay, theme.accent_user);
-    f.render_widget(Paragraph::new(bar), chunks[2]);
+    // Combined waveform (max of level and peak decay).
+    let peak = state.level.max(state.peak_decay);
+    let bar = render_waveform(peak, theme.accent_user);
+    Paragraph::new(bar).render(chunks[2], buf);
 
     // Transcript.
     let transcript = if state.user_transcript.is_empty() {
@@ -151,14 +148,14 @@ fn render_narrow(f: &mut Frame, area: Rect, state: &LiveVisualizerState, block: 
             Style::default().fg(theme.text_primary),
         ))
     };
-    f.render_widget(Paragraph::new(transcript), chunks[3]);
+    Paragraph::new(transcript).render(chunks[3], buf);
 }
 
 /// Render a single waveform row as a bar of `█` characters proportional to
-/// the peak level.
-fn render_waveform(peak: f32, decay: f32, color: Color) -> Line<'static> {
-    let effective = peak.max(decay);
-    let width = ((effective * 40.0).round() as usize).min(40);
+/// the level.
+fn render_waveform(level: f64, color: Color) -> Line<'static> {
+    let level = level.clamp(0.0, 1.0);
+    let width = ((level * 40.0).round() as usize).min(40);
     let bar: String = "█".repeat(width);
     let padding: String = " ".repeat(40usize.saturating_sub(width));
     Line::from(vec![
@@ -169,29 +166,50 @@ fn render_waveform(peak: f32, decay: f32, color: Color) -> Line<'static> {
 
 /// Render the phase footer line.
 fn render_phase_footer(phase: LivePhase, error: &Option<String>, color: Color) -> Line<'static> {
-    let (label, style) = match phase {
-        LivePhase::Connecting => ("Connecting", Style::default().fg(color)),
-        LivePhase::Listening => ("Listening", Style::default().fg(Color::Green)),
-        LivePhase::Working => ("Working", Style::default().fg(Color::Yellow)),
-        LivePhase::Speaking => ("Speaking", Style::default().fg(Color::Cyan)),
-        LivePhase::Muted => ("Muted", Style::default().fg(Color::DarkGray)),
-        LivePhase::Error => ("Error", Style::default().fg(Color::Red)),
+    let key = format!("live.phase.{}", phase_as_key(phase));
+    let label = rust_i18n::t!(&key);
+    let (phase_style, phase_str) = match phase {
+        LivePhase::Connected => (Style::default().fg(Color::Green), label.to_string()),
+        LivePhase::Closing | LivePhase::Closed => {
+            (Style::default().fg(Color::DarkGray), label.to_string())
+        }
+        LivePhase::Connecting => (Style::default().fg(color), label.to_string()),
     };
+
+    let mute_hint = rust_i18n::t!("live.hint.mute");
+    let stop_hint = rust_i18n::t!("live.hint.stop");
+
     let mut spans = vec![
-        Span::styled(format!(" {label} "), style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" {phase_str} "),
+            phase_style.add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
-        Span::styled("Space: mute  Esc: stop", Style::default().fg(color)),
+        Span::styled(
+            format!("{mute_hint}  {stop_hint}"),
+            Style::default().fg(color),
+        ),
     ];
-    if let Some(msg) = error
-        && phase == LivePhase::Error
-    {
+
+    if let Some(msg) = error {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             truncate(msg, 40),
             Style::default().fg(Color::Red),
         ));
     }
+
     Line::from(spans)
+}
+
+/// Map a `LivePhase` to a locale key suffix.
+fn phase_as_key(phase: LivePhase) -> &'static str {
+    match phase {
+        LivePhase::Connecting => "connecting",
+        LivePhase::Connected => "connected",
+        LivePhase::Closing => "closing",
+        LivePhase::Closed => "closed",
+    }
 }
 
 /// Truncate a string to `max` chars, appending `…` if truncated.

@@ -32,7 +32,7 @@ use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_j
 #[cfg(feature = "codex-live")]
 use super::live::{
     dispatch_live_delegation_submit, dispatch_live_set_muted, dispatch_live_stop,
-    dispatch_live_toggle,
+    dispatch_live_toggle, dispatch_live_toggle_mute,
 };
 use super::modes::{
     dispatch_cycle_mode, dispatch_enter_plan_mode, dispatch_show_plan, dispatch_toggle_yolo,
@@ -383,6 +383,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::LiveToggle => dispatch_live_toggle(app),
         #[cfg(feature = "codex-live")]
         Action::LiveStop => dispatch_live_stop(app),
+        #[cfg(feature = "codex-live")]
+        Action::LiveToggleMute => dispatch_live_toggle_mute(app),
         #[cfg(feature = "codex-live")]
         Action::LiveSetMuted(muted) => dispatch_live_set_muted(app, muted),
         #[cfg(feature = "codex-live")]

@@ -313,10 +313,7 @@ community-build = []
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support"]
 # Codex Live (`/live`): real-time bidirectional voice sessions against the
-# Codex sideband. The pager integrates against the `xai_grok_voice::live` API
-# when the voice crate's `live` feature is stable; until then, the pager's
-# `codex-live` feature compiles local test doubles (see `src/live/`) so the
-# integration can be developed and tested without the real audio/network stack.
-# When the voice API is ready, uncomment the forwarding below:
-# codex-live = ["xai-grok-voice/live"]
-codex-live = []
+# Codex sideband. Forwards `xai-grok-voice/live` so production code directly
+# uses the real `xai_grok_voice::live` types and `run_live_session`. Test
+# doubles are kept only under `#[cfg(test)]` where needed.
+codex-live = ["xai-grok-voice/live"]

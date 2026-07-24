@@ -192,6 +192,9 @@ pub enum Action {
     /// quit, ACP disconnect). Idempotent.
     #[cfg(feature = "codex-live")]
     LiveStop,
+    /// Toggle the Live mute state (Space key in the visualizer).
+    #[cfg(feature = "codex-live")]
+    LiveToggleMute,
     /// Set the Live mute state explicitly (`true` = muted, `false` = unmuted).
     /// Space toggles; this is the explicit variant.
     #[cfg(feature = "codex-live")]

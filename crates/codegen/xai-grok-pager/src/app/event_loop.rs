@@ -1519,7 +1519,7 @@ pub(crate) async fn run(
     #[cfg(feature = "codex-live")]
     let mut live_rx: Option<tokio::sync::mpsc::Receiver<crate::live::LiveEvent>> = None;
     #[cfg(not(feature = "codex-live"))]
-    let mut live_rx: Option<std::convert::Infallible> = None;
+    let _live_rx: Option<std::convert::Infallible> = None;
 
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
@@ -1901,6 +1901,13 @@ pub(crate) async fn run(
         #[cfg(feature = "codex-live")]
         dispatch::enforce_live_session_bound(&mut app);
 
+        // Codex Live: resume a PendingUnbound start if the session is now
+        // established (after CreateSession completed).
+        #[cfg(feature = "codex-live")]
+        if dispatch::resume_pending_live(&mut app) {
+            presenter.request_presentation(&mut app, terminal, false);
+        }
+
         // Codex Live: lazy pipeline spawn on ColdStart (like voice).
         #[cfg(feature = "codex-live")]
         {
@@ -1922,9 +1929,12 @@ pub(crate) async fn run(
                     cmd_rx,
                     event_tx,
                 ));
-                app.live_runtime.cmd_channel =
-                    Some(crate::live::LiveContextChannel::from_sender(cmd_tx));
+                app.live_runtime.cmd_tx = Some(cmd_tx);
                 live_rx = Some(event_rx);
+                // Bind the delegation broker to this session+agent+generation.
+                app.live_runtime.broker =
+                    crate::live::broker::LiveDelegationBroker::new(generation);
+                app.live_runtime.broker.bind(session_id.clone(), agent_id);
                 app.live_runtime.state = crate::live::state::LiveState::Active {
                     agent_id,
                     session_id,

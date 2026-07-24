@@ -6,7 +6,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{LiveCommand, LiveContextChannel, LiveEvent, LiveLevels, LivePhase, LiveRole};
+use super::LiveCommand;
+use super::LiveEvent;
+use super::LivePhase;
+use super::TranscriptKind;
 
 /// Process-global Live gate for view code without an `AppView`.
 pub(crate) static LIVE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -52,7 +55,7 @@ pub struct DraftSnapshot {
 pub struct DelegationEntry {
     /// The generation this delegation was submitted in.
     pub generation: Generation,
-    /// The delegation id (from `LiveDelegation`).
+    /// The delegation id (from `LiveEvent::Delegation`).
     pub delegation_id: String,
     /// The AgentId of the bound session at submission time.
     pub agent_id: AgentId,
@@ -77,8 +80,11 @@ pub enum LiveState {
     Idle,
     /// A start was requested but the bound session is not yet established
     /// (no ACP session id); the start is deferred until `CreateSession`
-    /// completes.
-    PendingUnbound { agent_id: AgentId },
+    /// completes. The draft+cursor are preserved here.
+    PendingUnbound {
+        agent_id: AgentId,
+        draft: DraftSnapshot,
+    },
     /// The Live pipeline is spawning; the session is bound.
     ColdStart {
         agent_id: AgentId,
@@ -124,7 +130,7 @@ impl LiveState {
             Self::Active { agent_id, .. }
             | Self::ColdStart { agent_id, .. }
             | Self::Stopping { agent_id, .. }
-            | Self::PendingUnbound { agent_id } => Some(*agent_id),
+            | Self::PendingUnbound { agent_id, .. } => Some(*agent_id),
             Self::Idle => None,
         }
     }
@@ -154,31 +160,49 @@ impl LiveState {
         match self {
             Self::Active { draft, .. }
             | Self::ColdStart { draft, .. }
-            | Self::Stopping { draft, .. } => Some(draft),
-            Self::PendingUnbound { .. } | Self::Idle => None,
+            | Self::Stopping { draft, .. }
+            | Self::PendingUnbound { draft, .. } => Some(draft),
+            Self::Idle => None,
         }
     }
 }
 
 /// The live visualizer display state (updated from `LiveEvent`s).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LiveVisualizerState {
     /// The current phase (footer).
     pub phase: LivePhase,
-    /// The latest audio levels (waveform).
-    pub levels: LiveLevels,
-    /// The user transcript (accumulated finalized user segments).
+    /// The latest audio output level (waveform), `[0.0, 1.0]`.
+    pub level: f64,
+    /// The user transcript (accumulated finalized input transcript segments).
     pub user_transcript: String,
-    /// The assistant live transcript (streaming, shown in scrollback).
+    /// The assistant live transcript (streaming output transcript, shown in
+    /// scrollback with a distinct Live label).
     pub assistant_transcript: String,
-    /// Whether the assistant transcript has been finalized this turn.
-    pub assistant_finalized: bool,
-    /// Peak decay animation: the last peak value and its timestamp (ms).
-    pub peak_decay: f32,
+    /// Peak decay animation: the last peak value.
+    pub peak_decay: f64,
     /// Whether the visualizer should render in narrow fallback mode.
     pub narrow: bool,
     /// The last error message (shown in the error phase).
     pub error_message: Option<String>,
+    /// Whether the assistant transcript has been flushed to scrollback this
+    /// turn (prevents duplicate scrollback blocks).
+    pub assistant_flushed: bool,
+}
+
+impl Default for LiveVisualizerState {
+    fn default() -> Self {
+        Self {
+            phase: LivePhase::Connecting,
+            level: 0.0,
+            user_transcript: String::new(),
+            assistant_transcript: String::new(),
+            peak_decay: 0.0,
+            narrow: false,
+            error_message: None,
+            assistant_flushed: false,
+        }
+    }
 }
 
 impl LiveVisualizerState {
@@ -193,69 +217,61 @@ impl LiveVisualizerState {
                 }
                 false
             }
-            LiveEvent::Levels(levels) => {
-                self.levels = levels.clone();
-                // Peak decay: track the max of user/assistant peaks.
-                let peak = levels.user_peak.max(levels.assistant_peak);
-                if peak > self.peak_decay {
-                    self.peak_decay = peak;
+            LiveEvent::Levels(level) => {
+                self.level = *level;
+                if *level > self.peak_decay {
+                    self.peak_decay = *level;
                 }
                 true
             }
-            LiveEvent::Transcript {
-                role,
-                text,
-                finalized,
-            } => {
+            LiveEvent::Transcript { kind, text } => match kind {
+                TranscriptKind::Input => {
+                    if !self.user_transcript.is_empty() {
+                        self.user_transcript.push(' ');
+                    }
+                    self.user_transcript.push_str(text);
+                    true
+                }
+                TranscriptKind::Output => {
+                    // Coalesce: replace the live partial (the voice core sends
+                    // the accumulated output transcript on each delta).
+                    self.assistant_transcript = text.clone();
+                    true
+                }
+            },
+            LiveEvent::Turn { role, transcript } => {
+                // Turn done: finalize the transcript for the role.
                 match role {
-                    LiveRole::User => {
-                        if *finalized {
-                            if !self.user_transcript.is_empty() {
-                                self.user_transcript.push(' ');
-                            }
-                            self.user_transcript.push_str(text);
-                        }
+                    super::LiveRole::User => {
+                        self.user_transcript = transcript.clone();
                     }
-                    LiveRole::Assistant => {
-                        if *finalized {
-                            // Coalesce: append a space + the finalized segment.
-                            if !self.assistant_transcript.is_empty() {
-                                self.assistant_transcript.push(' ');
-                            }
-                            self.assistant_transcript.push_str(text);
-                            self.assistant_finalized = true;
-                        } else {
-                            // Live partial: replace the last partial (coalesce
-                            // role-local transcript: a new partial supersedes
-                            // the previous partial, keeping finalized segments).
-                            self.assistant_transcript = text.clone();
-                        }
+                    super::LiveRole::Assistant => {
+                        self.assistant_transcript = transcript.clone();
+                        self.assistant_flushed = false; // needs scrollback flush
                     }
                 }
                 true
             }
-            LiveEvent::Delegation(_) => {
+            LiveEvent::Delegation { .. } => {
                 // Delegations are handled by the broker/event loop, not the
-                // visualizer. No redraw needed here.
+                // visualizer.
                 false
             }
             LiveEvent::Error { message } => {
-                self.phase = LivePhase::Error;
                 self.error_message = Some(message.clone());
                 true
             }
             LiveEvent::Closed => {
-                // The event loop resets the visualizer on close; nothing to
-                // do here.
+                // The event loop resets the visualizer on close.
                 false
             }
         }
     }
 
     /// Decay the peak (called on animation tick).
-    pub fn decay_peak(&mut self, decay_factor: f32) {
+    pub fn decay_peak(&mut self, decay_factor: f64) {
         self.peak_decay *= decay_factor;
-        if self.peak_decay < 0.01 {
+        if self.peak_decay < 0.001 {
             self.peak_decay = 0.0;
         }
     }
@@ -263,7 +279,7 @@ impl LiveVisualizerState {
     /// Reset for a new turn (assistant transcript cleared).
     pub fn reset_turn(&mut self) {
         self.assistant_transcript.clear();
-        self.assistant_finalized = false;
+        self.assistant_flushed = false;
     }
 }
 
@@ -275,13 +291,15 @@ pub struct LiveRuntime {
     /// The visualizer display state.
     pub visualizer: LiveVisualizerState,
     /// The context channel (commands into the pipeline), if the pipeline is up.
-    pub cmd_channel: Option<LiveContextChannel>,
+    pub cmd_tx: Option<tokio::sync::mpsc::Sender<LiveCommand>>,
     /// Registered delegations: `(generation, delegation_id) -> entry`.
     pub delegations: std::collections::HashMap<(Generation, String), DelegationEntry>,
     /// Monotonic generation counter.
     pub generation_counter: Generation,
     /// The muted state (toggled by Space).
     pub muted: bool,
+    /// The delegation broker (wired into ACP ingress).
+    pub broker: crate::live::broker::LiveDelegationBroker,
 }
 
 impl LiveRuntime {
@@ -338,19 +356,33 @@ impl LiveRuntime {
 
     /// Send a best-effort command into the pipeline (no-op if it isn't up).
     pub fn send_cmd(&self, cmd: LiveCommand) {
-        if let Some(ch) = &self.cmd_channel {
-            ch.try_send(cmd);
+        if let Some(tx) = &self.cmd_tx {
+            let _ = tx.try_send(cmd);
         }
     }
 
-    /// Hard teardown: drop the channel, reset state, forget delegations.
+    /// Hard teardown: drop the channel, reset state, forget delegations,
+    /// terminalize broker. Idempotent.
     pub fn teardown(&mut self) {
         self.send_cmd(LiveCommand::Shutdown);
-        self.cmd_channel = None;
+        self.cmd_tx = None;
         self.state = LiveState::Idle;
         self.visualizer = LiveVisualizerState::default();
         self.delegations.clear();
         self.muted = false;
+        self.broker.clear();
         LIVE_ACTIVE.store(false, Ordering::Release);
+    }
+
+    /// Find the delegation for a given prompt_id in the current generation
+    /// (non-terminal only). Used by the broker to correlate ACP ingress.
+    pub fn find_delegation_by_prompt_id(&self, prompt_id: &str) -> Option<String> {
+        let current_gen = self.generation_counter;
+        for ((generation, _), entry) in &self.delegations {
+            if *generation == current_gen && entry.prompt_id == prompt_id && !entry.terminal {
+                return Some(entry.delegation_id.clone());
+            }
+        }
+        None
     }
 }

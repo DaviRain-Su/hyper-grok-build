@@ -256,6 +256,37 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     let mut plan_mode_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
 
+                    // Codex Live broker: extract text from the update BEFORE the
+                    // if-else chain and `handle_update` move it. The actual broker
+                    // call is deferred to after the `agent` borrow ends (the broker
+                    // borrows `app.live_runtime`, which the borrow checker can't
+                    // prove is disjoint from the `agent` borrow from `app.agents`).
+                    #[cfg(feature = "codex-live")]
+                    let live_bridge_text: Option<String> = {
+                        let pid_str = meta.prompt_id.as_deref().unwrap_or("");
+                        if !meta.is_replay && !pid_str.is_empty() {
+                            match &notif.request.update {
+                                acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                                    if let acp::ContentBlock::Text(ref tc) = chunk.content {
+                                        Some(tc.text.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                acp::SessionUpdate::ToolCall(_)
+                                | acp::SessionUpdate::ToolCallUpdate(_) => {
+                                    // Tool boundary — empty string signals a flush.
+                                    Some(String::new())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    #[cfg(not(feature = "codex-live"))]
+                    let _live_bridge_text: Option<String> = None;
+
                     // Extract Plan updates before passing to tracker (tracker skips them).
                     let mutated = if dedup_drop {
                         tracing::debug!(
@@ -514,6 +545,56 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     }
                     if workflows_modal_refresh {
                         queue_open_workflows_modal_refresh(app, id);
+                    }
+
+                    // Codex Live broker: deferred chunk/tool-boundary feed.
+                    // The text was extracted before `handle_update` moved the
+                    // update; now that the `agent` borrow has ended, we can
+                    // safely call the broker (which borrows `app.live_runtime`).
+                    #[cfg(feature = "codex-live")]
+                    if let Some(text) = live_bridge_text {
+                        let sid_str = notif.request.session_id.0.as_ref();
+                        let pid_str = meta.prompt_id.as_deref().unwrap_or("");
+                        if crate::live::acp_bridge::should_observe(app, sid_str, pid_str) {
+                            let is_tool_boundary = text.is_empty();
+                            crate::live::acp_bridge::on_agent_message_chunk(
+                                app,
+                                sid_str,
+                                pid_str,
+                                &text,
+                                is_tool_boundary,
+                            );
+                        }
+                    }
+
+                    // Codex Live broker: check for turn completion / prompt error.
+                    // If the agent's turn just finished (state is Idle and a
+                    // prompt_id was set), notify the broker. This catches the
+                    // TurnCompleted/PromptResponse/cancel paths in one place.
+                    #[cfg(feature = "codex-live")]
+                    if !meta.is_replay {
+                        let sid_str = notif.request.session_id.0.as_ref();
+                        if let Some(agent) = app.agents.get(&id) {
+                            // Turn completed: agent is Idle and had a prompt_id.
+                            if !agent.session.state.is_busy()
+                                && agent.session.current_prompt_id.is_none()
+                            {
+                                // Check all registered delegations for this session —
+                                // any whose prompt_id matches the just-finished turn
+                                // should be completed. We check by looking at the
+                                // delegations map for entries whose session_id matches.
+                                let delegations: Vec<(u64, String, String)> = app
+                                    .live_runtime
+                                    .delegations
+                                    .iter()
+                                    .filter(|((_, _), e)| e.session_id == sid_str && !e.terminal)
+                                    .map(|((g, d), e)| (*g, d.clone(), e.prompt_id.clone()))
+                                    .collect();
+                                for (_, _, pid) in &delegations {
+                                    crate::live::acp_bridge::on_turn_completed(app, sid_str, pid);
+                                }
+                            }
+                        }
                     }
 
                     // Mutation always happens; redraw only when the matched
