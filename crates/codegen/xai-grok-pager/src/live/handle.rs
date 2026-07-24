@@ -7,6 +7,25 @@ use crate::app::actions::Action;
 use crate::app::agent::AgentId;
 use crate::app::app_view::AppView;
 
+const LIVE_STOPPED_UNEXPECTEDLY: &str = "Live stopped unexpectedly. Try again.";
+
+/// Build the one-line terminal toast for a Live channel close.
+///
+/// Fatal transport/media errors arrive before `Closed`; preserve their exact
+/// cause instead of replacing it with the generic channel-closed message.
+/// Whitespace is collapsed so a server error cannot break the one-line toast.
+pub(crate) fn live_stop_message(error: Option<&str>) -> String {
+    let Some(error) = error else {
+        return LIVE_STOPPED_UNEXPECTEDLY.to_owned();
+    };
+    let error = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if error.is_empty() {
+        LIVE_STOPPED_UNEXPECTEDLY.to_owned()
+    } else {
+        format!("Live stopped: {error}")
+    }
+}
+
 /// Apply a Live event to app state. Returns whether the frame should redraw
 /// and any actions the event loop should dispatch (e.g. a delegation prompt
 /// submission).
@@ -49,15 +68,39 @@ pub fn handle_live_event(app: &mut AppView, event: LiveEvent) -> (bool, Vec<Acti
         LiveEvent::Delegation { id, content } => {
             needs_draw = handle_delegation(app, id, content, &mut actions);
         }
-        LiveEvent::Error { .. } => {
+        LiveEvent::Error { message } => {
             if app.live_runtime.visualizer.apply_event(&event) {
                 needs_draw = true;
             }
+            // Keep the actionable transport/media reason visible and persist
+            // it in the unified diagnostic log. Transport-generated HTTP error
+            // bodies are redacted before they become Live events; unknown wire
+            // payloads are never logged wholesale.
+            let session_id = app.live_runtime.state.session_id().map(str::to_owned);
+            let log_error = xai_grok_voice::live::transport::redact_live_error_for_log(message);
+            tracing::warn!(
+                target: "codex_live",
+                error = %log_error,
+                "Codex Live session failed"
+            );
+            crate::unified_log::error(
+                "codex.live.session_failed",
+                session_id.as_deref(),
+                Some(serde_json::json!({ "error": log_error })),
+            );
+            app.show_toast(&live_stop_message(Some(message)));
         }
         LiveEvent::Closed => {
-            // Preserve any partial spoken response as a finalized transcript;
-            // the event loop performs channel/state teardown afterward.
+            // Preserve any partial spoken response as a finalized transcript.
+            // Terminally reset here (rather than waiting for `recv() == None`)
+            // while the preceding Error is still available for the final toast.
+            let was_active = app.live_active();
+            let terminal_error = app.live_runtime.visualizer.error_message.clone();
             finish_live_assistant_transcript(app);
+            if was_active {
+                app.live_reset();
+                app.show_toast(&live_stop_message(terminal_error.as_deref()));
+            }
             needs_draw = true;
         }
     }

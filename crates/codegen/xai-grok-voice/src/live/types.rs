@@ -44,9 +44,10 @@ pub type SharedLiveAuth = Arc<dyn LiveAuthProvider>;
 /// Live session configuration.
 #[derive(Debug, Clone)]
 pub struct LiveConfig {
-    /// Codex backend base URL (e.g. `https://chatgpt.com/backend-api`). The
-    /// signaling path `/realtime/calls?intent=quicksilver&architecture=avas`
-    /// is appended to this.
+    /// Codex backend base URL (e.g.
+    /// `https://chatgpt.com/backend-api/codex`). The signaling path
+    /// `/realtime/calls?intent=quicksilver&architecture=avas` is appended to
+    /// this.
     pub codex_base: String,
     /// Sideband base URL. When unset, the sideband wss URL is derived from the
     /// server-assigned call id as `wss://api.openai.com/v1/live/<callId>`.

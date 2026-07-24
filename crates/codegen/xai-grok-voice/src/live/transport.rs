@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, client_async};
 
 use super::attestation::generate_codex_attestation;
@@ -42,7 +43,9 @@ use super::protocol::{
 };
 use super::types::{LiveAuth, LiveConfig, SharedLiveAuth};
 
-/// Signaling request URL suffix (appended to `codex_base`). Exact OMP value.
+/// Signaling request suffix appended to Hyper's Codex platform base, which
+/// already ends in `/codex`. The combined URL exactly matches OMP's
+/// `{CODEX_BASE_URL}/codex/realtime/calls?...` wire endpoint.
 const SIGNALING_PATH: &str = "/realtime/calls?intent=quicksilver&architecture=avas";
 /// Max bytes of an error response body surfaced in a signaling error.
 const MAX_ERROR_BODY_LENGTH: usize = 2_048;
@@ -60,6 +63,29 @@ const HEADER_THREAD_ID: &str = "thread-id";
 const HEADER_ACCOUNT_ID: &str = "chatgpt-account-id";
 const HEADER_ATTESTATION: &str = "x-oai-attestation";
 const ORIGINATOR_VALUE: &str = "Codex Desktop";
+
+/// Build the exact OMP signaling URL from the Codex platform base.
+fn live_signaling_url(codex_base: &str) -> String {
+    format!("{}{SIGNALING_PATH}", codex_base.trim_end_matches('/'))
+}
+
+/// Preserve the WebSocket close code/reason in the user-facing terminal error,
+/// matching OMP's `sideband closed (<code>): <reason>` diagnostic.
+fn sideband_close_message(frame: Option<&CloseFrame>) -> String {
+    let Some(frame) = frame else {
+        return "Codex live sideband closed without a close frame".to_owned();
+    };
+    let reason = frame
+        .reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if reason.is_empty() {
+        format!("Codex live sideband closed ({})", frame.code)
+    } else {
+        format!("Codex live sideband closed ({}): {reason}", frame.code)
+    }
+}
 
 /// Decide whether a parsed data-channel (`oai-events`) server event should be
 /// forwarded to the callbacks, given the current sideband-open state.
@@ -312,10 +338,7 @@ impl CodexLiveTransport {
                 message: "No Codex credential is available for a live call.".to_owned(),
             })?;
 
-        let signaling_url = format!(
-            "{}{SIGNALING_PATH}",
-            self.config.codex_base.trim_end_matches('/')
-        );
+        let signaling_url = live_signaling_url(&self.config.codex_base);
         let body = serde_json::json!({
             "sdp": offer,
             "session": build_live_session_payload(&self.config.instructions, &self.config.voice),
@@ -554,24 +577,52 @@ impl CodexLiveTransport {
                         // never logged wholesale (secrets safety).
                     }
                     Some(Ok(Message::Binary(_))) => {
-                        // Sideband is text-only; ignore binary frames.
-                    }
-                    Some(Ok(_)) => continue,
-                    Some(Err(_)) | None => {
-                        // Sideband closed (EOF/error). Clear the open gate so
-                        // the data-channel fallback resumes accepting events
-                        // — but the session will terminally fail on an
-                        // unexpected close (below) and a deliberate close
-                        // ignores state (closed_flag set by `close_inner`).
+                        // OMP treats a binary sideband frame as a protocol
+                        // failure. Do the same instead of silently hiding it.
                         sideband_open_for_reader.store(false, Ordering::Release);
-                        // Propagate sideband EOF/error as an Error event
-                        // exactly once — but only if this wasn't a deliberate
-                        // shutdown (OMP: #reportFailure checks state).
                         if !closed_flag.load(Ordering::Acquire)
                             && !failure_reported.swap(true, Ordering::AcqRel)
                         {
                             callbacks.on_event(LiveServerEvent::Error {
-                                message: "Codex live sideband closed unexpectedly".to_owned(),
+                                message: "Codex live sideband returned an unexpected binary frame."
+                                    .to_owned(),
+                            });
+                        }
+                        break;
+                    }
+                    Some(Ok(Message::Close(frame))) => {
+                        sideband_open_for_reader.store(false, Ordering::Release);
+                        if !closed_flag.load(Ordering::Acquire)
+                            && !failure_reported.swap(true, Ordering::AcqRel)
+                        {
+                            callbacks.on_event(LiveServerEvent::Error {
+                                message: sideband_close_message(frame.as_ref()),
+                            });
+                        }
+                        break;
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                    Some(Err(error)) => {
+                        sideband_open_for_reader.store(false, Ordering::Release);
+                        if !closed_flag.load(Ordering::Acquire)
+                            && !failure_reported.swap(true, Ordering::AcqRel)
+                        {
+                            callbacks.on_event(LiveServerEvent::Error {
+                                message: format!("Codex live sideband failed: {error}"),
+                            });
+                        }
+                        break;
+                    }
+                    None => {
+                        // EOF without a Close frame. Clear the open gate so
+                        // data-channel fallback resumes while the fatal event
+                        // is delivered and the session tears down.
+                        sideband_open_for_reader.store(false, Ordering::Release);
+                        if !closed_flag.load(Ordering::Acquire)
+                            && !failure_reported.swap(true, Ordering::AcqRel)
+                        {
+                            callbacks.on_event(LiveServerEvent::Error {
+                                message: sideband_close_message(None),
                             });
                         }
                         break;
@@ -1138,6 +1189,21 @@ fn bounded_error_body(body: &str, status: u16) -> String {
     format!("{truncated}…")
 }
 
+/// Redact, normalize, and bound a terminal Live error before it is written to
+/// a persistent diagnostic log. UI toasts may show the original local error,
+/// but disk logs must never retain bearer tokens, cookies, session ids, proxy
+/// credentials, or an unbounded server-provided message.
+pub fn redact_live_error_for_log(message: &str) -> String {
+    let redacted = redact_secrets(message);
+    let normalized = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX_ERROR_BODY_LENGTH {
+        return normalized;
+    }
+    let mut bounded: String = normalized.chars().take(MAX_ERROR_BODY_LENGTH).collect();
+    bounded.push('…');
+    bounded
+}
+
 /// Redact secret-bearing substrings from a response body. Replaces:
 /// - `Bearer <token>` → `Bearer [REDACTED]`
 /// - `token=<value>` / `access_token=<value>` → `token=[REDACTED]`
@@ -1332,6 +1398,26 @@ fn match_secret_key(s: &str, pos: usize, keys: &[&str]) -> Option<(usize, usize,
 mod tests {
     use super::super::protocol::{LiveInputTextContent, LiveRole, TranscriptKind};
     use super::*;
+
+    #[test]
+    fn sideband_close_message_preserves_code_and_reason() {
+        let frame = CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "  account policy\nchanged  ".into(),
+        };
+        assert_eq!(
+            sideband_close_message(Some(&frame)),
+            "Codex live sideband closed (1008): account policy changed"
+        );
+    }
+
+    #[test]
+    fn sideband_close_message_handles_missing_frame() {
+        assert_eq!(
+            sideband_close_message(None),
+            "Codex live sideband closed without a close frame"
+        );
+    }
 
     // --- OMP `#handleServerEvent` data-channel routing gate -----------------
     //
@@ -1533,11 +1619,10 @@ mod tests {
     }
 
     #[test]
-    fn signaling_url_appends_exact_suffix() {
-        let url = format!("https://chatgpt.com/backend-api{SIGNALING_PATH}");
+    fn signaling_url_appends_exact_suffix_to_codex_base() {
         assert_eq!(
-            url,
-            "https://chatgpt.com/backend-api/realtime/calls?intent=quicksilver&architecture=avas"
+            live_signaling_url("https://chatgpt.com/backend-api/codex/"),
+            "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
         );
     }
 
@@ -1593,7 +1678,10 @@ mod tests {
 
     #[test]
     fn url_host_extracts_from_codex_base() {
-        assert_eq!(url_host("https://chatgpt.com/backend-api"), "chatgpt.com");
+        assert_eq!(
+            url_host("https://chatgpt.com/backend-api/codex"),
+            "chatgpt.com"
+        );
         assert_eq!(
             url_host("https://api.staging.openai.com/v1/live"),
             "api.staging.openai.com"
@@ -1762,6 +1850,19 @@ mod tests {
         let body = "Internal server error: database connection refused";
         let redacted = redact_secrets(body);
         assert_eq!(redacted, body);
+    }
+
+    #[test]
+    fn persistent_live_error_is_redacted_normalized_and_bounded() {
+        let message = format!(
+            "Bearer sk-live-secret\n{}",
+            "x".repeat(MAX_ERROR_BODY_LENGTH * 2)
+        );
+        let out = redact_live_error_for_log(&message);
+        assert!(!out.contains("sk-live-secret"));
+        assert!(!out.contains('\n'));
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), MAX_ERROR_BODY_LENGTH + 1);
     }
 
     #[test]

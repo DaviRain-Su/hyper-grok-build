@@ -509,6 +509,28 @@ fn visualizer_error_sets_error_message() {
 }
 
 #[test]
+fn live_stop_message_preserves_terminal_cause_on_one_line() {
+    assert_eq!(
+        crate::live::handle::live_stop_message(Some(
+            "Codex live sideband closed (1008):\n account policy changed"
+        )),
+        "Live stopped: Codex live sideband closed (1008): account policy changed"
+    );
+}
+
+#[test]
+fn live_stop_message_uses_generic_fallback_without_cause() {
+    assert_eq!(
+        crate::live::handle::live_stop_message(None),
+        "Live stopped unexpectedly. Try again."
+    );
+    assert_eq!(
+        crate::live::handle::live_stop_message(Some(" \n\t")),
+        "Live stopped unexpectedly. Try again."
+    );
+}
+
+#[test]
 fn visualizer_reset_turn_clears_assistant() {
     let mut vis = LiveVisualizerState::default();
     vis.apply_event(&LiveEvent::Transcript {
@@ -571,22 +593,31 @@ fn visualizer_render_narrow_does_not_panic() {
 fn live_config_built_with_omp_version() {
     let config = crate::live::config::build_live_config(
         "sess-1",
-        "https://chatgpt.com/backend-api",
+        "https://chatgpt.com/backend-api/codex",
         None,
         "sol",
     );
     assert_eq!(config.session_id, "sess-1");
-    assert_eq!(config.codex_base, "https://chatgpt.com/backend-api");
+    assert_eq!(config.codex_base, "https://chatgpt.com/backend-api/codex");
     assert_eq!(config.voice, "sol");
     assert_eq!(config.client_version, "0.144.1");
     assert!(config.sideband_base.is_none());
 }
 
 #[test]
+fn live_default_codex_base_matches_platform_catalog() {
+    let config = crate::live::config::build_live_config_default("sess-1");
+    assert_eq!(
+        config.codex_base,
+        xai_grok_models::PlatformId::OpenAiCodex.base_url()
+    );
+}
+
+#[test]
 fn live_config_with_sideband() {
     let config = crate::live::config::build_live_config(
         "sess-1",
-        "https://chatgpt.com/backend-api",
+        "https://chatgpt.com/backend-api/codex",
         Some("wss://sideband".to_string()),
         "sol",
     );

@@ -93,7 +93,9 @@ starting `/voice` stops `/live`, so only one mode owns the microphone.
 
 Live always requires the ChatGPT/Codex OAuth login described above, but the
 coding agent may use any configured provider or model. If credentials are
-missing, run `grok login --openai` and retry.
+missing, run `grok login --openai` and retry. If Live reports `You have reached
+your usage limit.`, that message comes from the OpenAI account's Live/Codex
+quota or entitlement; xAI/SuperGrok usage does not apply to `/live`.
 
 Availability defaults to on in normal Hyper builds. Administrators can disable
 it with either of these layered settings:
@@ -109,8 +111,10 @@ GROK_CODEX_LIVE=0 hyper
 ```
 
 For development and test endpoints, `GROK_OPENAI_CODEX_BASE_URL` overrides the
-Codex signaling base and `GROK_CODEX_LIVE_SIDEBAND_BASE` overrides the sideband
-base. Normal users should not set either variable.
+Codex platform base (the production value is
+`https://chatgpt.com/backend-api/codex`); Live appends `/realtime/calls` to it.
+`GROK_CODEX_LIVE_SIDEBAND_BASE` overrides the sideband base. Normal users
+should not set either variable.
 
 ### Audio requirements
 

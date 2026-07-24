@@ -79,7 +79,9 @@ Live 底栏中的静音/取消静音与停止控件。权限确认、提问等�
 
 Live 始终需要上文所述的 ChatGPT/Codex OAuth 登录，但编码 Agent 可继续
 使用任意已配置的供应商或模型。若缺少凭据，请先运行
-`grok login --openai`。
+`grok login --openai`。若 Live 显示 `You have reached your usage limit.`，
+该消息来自 OpenAI 账号的 Live/Codex 额度或功能权限；xAI/SuperGrok
+用量不适用于 `/live`。
 
 普通 Hyper 构建默认开启此功能。管理员可通过分层配置或环境变量关闭：
 
@@ -93,8 +95,10 @@ codex_live = false
 GROK_CODEX_LIVE=0 hyper
 ```
 
-开发/测试环境可用 `GROK_OPENAI_CODEX_BASE_URL` 覆盖信令地址，用
-`GROK_CODEX_LIVE_SIDEBAND_BASE` 覆盖 sideband 地址；普通用户不应设置它们。
+开发/测试环境可用 `GROK_OPENAI_CODEX_BASE_URL` 覆盖 Codex 平台基址
+（生产值为 `https://chatgpt.com/backend-api/codex`，Live 会在其后追加
+`/realtime/calls`），用 `GROK_CODEX_LIVE_SIDEBAND_BASE` 覆盖 sideband
+地址；普通用户不应设置它们。
 
 ### 音频要求
 

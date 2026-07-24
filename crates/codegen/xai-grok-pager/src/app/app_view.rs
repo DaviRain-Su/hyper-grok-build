@@ -6343,6 +6343,39 @@ pub(crate) mod tests {
         assert!(matches!(esc, InputOutcome::Changed));
         assert!(app.live_active(), "Esc must stay owned by plan approval");
     }
+    #[cfg(feature = "codex-live")]
+    #[test]
+    fn live_closed_preserves_terminal_error_in_toast() {
+        let mut app = test_app_with_agent();
+        let agent_id = super::super::agent::AgentId(0);
+        app.live_runtime.state = crate::live::state::LiveState::Active {
+            agent_id,
+            session_id: "test-session".to_string(),
+            generation: 1,
+            draft: crate::live::state::DraftSnapshot::default(),
+        };
+
+        let error = crate::live::LiveEvent::Error {
+            message: "Codex live sideband closed (1008): policy changed".to_owned(),
+        };
+        let (error_draw, error_actions) = crate::live::handle::handle_live_event(&mut app, error);
+        assert!(error_draw);
+        assert!(error_actions.is_empty());
+
+        let (closed_draw, closed_actions) =
+            crate::live::handle::handle_live_event(&mut app, crate::live::LiveEvent::Closed);
+        assert!(closed_draw);
+        assert!(closed_actions.is_empty());
+        assert!(!app.live_active());
+        let toast = app.agents[&agent_id]
+            .toast
+            .as_ref()
+            .map(|(message, _)| message.as_str());
+        assert_eq!(
+            toast,
+            Some("Live stopped: Codex live sideband closed (1008): policy changed")
+        );
+    }
     #[test]
     fn needs_animation_gates_prompt_history_tick_delivery() {
         let mut app = test_app_with_agent();

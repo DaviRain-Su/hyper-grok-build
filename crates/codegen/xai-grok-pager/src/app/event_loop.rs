@@ -2958,9 +2958,16 @@ pub(crate) async fn run(
                         None => {
                             live_rx = None;
                             let was_active = app.live_active();
+                            // `Error` normally precedes `Closed`, but retain its
+                            // cause here too in case terminal `Closed` delivery
+                            // timed out and the channel ended directly.
+                            let terminal_error =
+                                app.live_runtime.visualizer.error_message.clone();
                             app.live_reset();
                             if was_active {
-                                app.show_toast("Live stopped unexpectedly. Try again.");
+                                app.show_toast(&crate::live::handle::live_stop_message(
+                                    terminal_error.as_deref(),
+                                ));
                             }
                             presenter.request(false);
                         }

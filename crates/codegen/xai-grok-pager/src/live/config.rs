@@ -1,6 +1,8 @@
 //! Live session configuration builder: assembles a [`LiveConfig`] from the
 //! active session id, platform Codex base, OMP client version, and voice.
 
+use xai_grok_models::PlatformId;
+
 use super::LiveConfig;
 use crate::live::prompts;
 
@@ -9,10 +11,6 @@ pub const OMP_CLIENT_VERSION: &str = "0.144.1";
 
 /// The default voice persona for Codex Live.
 pub const LIVE_VOICE: &str = "sol";
-
-/// The default sideband base URL for Codex Live (WebRTC signaling).
-/// Can be overridden via `GROK_CODEX_LIVE_SIDEBAND_BASE`.
-pub const SIDEBAND_BASE_DEFAULT: &str = "https://chatgpt.com/backend-api";
 
 /// Resolve the sideband base URL (env override or default). Returns `None` to
 /// let the voice core derive the sideband wss URL from the server-assigned
@@ -25,12 +23,13 @@ pub fn resolve_sideband_base() -> Option<String> {
 }
 
 /// Resolve the platform Codex base URL (env override or default).
-/// The voice core appends `/realtime/calls?intent=quicksilver&architecture=avas`.
+///
+/// Reuse the catalog resolver so Live and normal Codex inference share the
+/// exact `https://chatgpt.com/backend-api/codex` default and the same
+/// `GROK_OPENAI_CODEX_BASE_URL` override. The voice core appends
+/// `/realtime/calls?intent=quicksilver&architecture=avas` to this base.
 pub fn resolve_codex_base() -> String {
-    match std::env::var("GROK_OPENAI_CODEX_BASE_URL") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => "https://chatgpt.com/backend-api".to_string(),
-    }
+    PlatformId::OpenAiCodex.base_url()
 }
 
 /// Build a [`LiveConfig`] for the active session.
