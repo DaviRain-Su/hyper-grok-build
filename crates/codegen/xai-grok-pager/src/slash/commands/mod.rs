@@ -47,6 +47,7 @@ pub mod plugin;
 pub mod privacy;
 pub mod providers;
 pub mod queue;
+pub mod readiness;
 pub mod recap;
 pub mod release_notes;
 pub mod remember;
@@ -138,6 +139,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
+        Arc::new(readiness::ReadinessCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(imagine::ImagineCommand),
@@ -326,10 +328,12 @@ mod tests {
             "providers",
             "queue",
             "quit",
+            "readiness",
             "recap",
             "release-notes",
             "remember",
             "rename",
+            "repo-check",
             "resume",
             "rewind",
             "scroll-debug",

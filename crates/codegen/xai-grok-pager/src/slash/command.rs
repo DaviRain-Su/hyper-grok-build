@@ -47,6 +47,9 @@ pub enum CommandResult {
     HandledNoOp,
     /// Build or act on TUI doctor state from live app/session inputs.
     Doctor(DoctorRequest),
+    /// Run the repo-readiness probe set against the active session's
+    /// workspace and push the report to the scrollback.
+    Readiness,
     /// Command failed with an error message.
     Error(String),
     /// Command produced a user-visible message.

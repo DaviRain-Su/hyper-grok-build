@@ -1518,6 +1518,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             }
             vec![]
         }
+        CommandResult::Readiness => {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.dispatch.set_text("");
+                d.set_error_toast("Open a session to run /readiness.");
+            }
+            vec![]
+        }
         CommandResult::QueueCommand(_)
         | CommandResult::InjectSkill { .. }
         | CommandResult::PassThrough(_) => {

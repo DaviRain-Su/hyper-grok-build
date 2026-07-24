@@ -90,6 +90,20 @@ fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
     }
 }
 
+pub(super) fn dispatch_readiness(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let report = crate::readiness::assess(&agent.session.cwd);
+    agent
+        .scrollback
+        .push_block(RenderBlock::system(crate::readiness::render(&report)));
+    vec![]
+}
+
 pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
@@ -653,6 +667,12 @@ pub(super) fn dispatch_send_prompt_inner(
                     agent.prompt.set_text("");
                 }
                 return dispatch_doctor(request, app);
+            }
+            CommandResult::Readiness => {
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                return dispatch_readiness(app);
             }
             CommandResult::Action(Action::ExitSession) => {
                 if consume_input {
