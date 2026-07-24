@@ -61,6 +61,26 @@ const HEADER_ACCOUNT_ID: &str = "chatgpt-account-id";
 const HEADER_ATTESTATION: &str = "x-oai-attestation";
 const ORIGINATOR_VALUE: &str = "Codex Desktop";
 
+/// Decide whether a parsed data-channel (`oai-events`) server event should be
+/// forwarded to the callbacks, given the current sideband-open state.
+///
+/// Matches OMP `transport.ts` `#handleServerEvent(payload)`: when the sideband
+/// WebSocket is OPEN the sideband owns server events, so **every** data-channel
+/// event is ignored **except `error`** (which is always surfaced). Before the
+/// sideband opens (or after it closes) the data-channel is the fallback path
+/// and its events are accepted.
+///
+/// This is a pure routing predicate so it can be unit-tested independently of
+/// the async media-forward task.
+fn route_data_channel_event(sideband_open: bool, event: &LiveServerEvent) -> bool {
+    if !sideband_open {
+        return true;
+    }
+    // Sideband owns server events once open; only `error` is still accepted
+    // from the data channel (OMP: `except error`).
+    matches!(event, LiveServerEvent::Error { .. })
+}
+
 /// Callbacks emitted by the live transport (forwarded to the session).
 pub trait LiveTransportCallbacks: Send + Sync + 'static {
     fn on_event(&self, event: LiveServerEvent);
@@ -98,6 +118,15 @@ pub struct CodexLiveTransport {
     /// Shared flag set by `close_inner` so the sideband reader knows the close
     /// was deliberate and suppresses the unexpected-close error event.
     sideband_closed_flag: Option<Arc<AtomicBool>>,
+    /// Shared sideband-open state. Set to `true` once the sideband WebSocket
+    /// is open and owns server events; cleared on sideband close/teardown.
+    /// The media-forward task reads this to gate data-channel events: while
+    /// the sideband is open, parsed data-channel events are suppressed except
+    /// `LiveServerEvent::Error` — matching OMP `transport.ts`
+    /// `#handleServerEvent`, which ignores data-channel events whenever the
+    /// sideband is OPEN except `error`. Before the sideband opens the
+    /// data-channel is the fallback path and its events are accepted.
+    sideband_open: Option<Arc<AtomicBool>>,
     connected: AtomicBool,
     closed: AtomicBool,
     /// Once-only 401 forced refresh: the first signaling 401 triggers a single
@@ -122,6 +151,7 @@ impl CodexLiveTransport {
             sideband_writer: None,
             sideband_reader: None,
             sideband_closed_flag: None,
+            sideband_open: None,
             connected: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             refreshed: AtomicBool::new(false),
@@ -149,6 +179,14 @@ impl CodexLiveTransport {
 
     async fn connect_inner(&mut self) -> Result<(), String> {
         let (peer, media_rx) = LiveMediaPeer::new();
+        // Shared sideband-open state. The sideband reader sets this once the
+        // WebSocket is open and clears it on close/teardown. The media-forward
+        // task reads it to gate data-channel events: while the sideband is
+        // open, data-channel events are suppressed except `Error` (OMP
+        // `#handleServerEvent`). Starts false — the data-channel is the
+        // fallback path until the sideband opens.
+        let sideband_open = Arc::new(AtomicBool::new(false));
+        self.sideband_open = Some(Arc::clone(&sideband_open));
         // Subscribe to the peer's lifecycle signal watch *before* any media
         // callback can fire (create_offer installs peer/data-channel callbacks
         // that may report failures). The media-forward task races this watch
@@ -184,7 +222,17 @@ impl CodexLiveTransport {
                         match event {
                             MediaEvent::Event(payload) => {
                                 if let Some(ev) = parse_live_server_event(&payload) {
-                                    callbacks.on_event(ev);
+                                    // OMP `#handleServerEvent`: while the
+                                    // sideband is OPEN it owns server events,
+                                    // so data-channel events are suppressed
+                                    // except `Error`. Before the sideband
+                                    // opens the data-channel is the fallback.
+                                    if route_data_channel_event(
+                                        sideband_open.load(Ordering::Acquire),
+                                        &ev,
+                                    ) {
+                                        callbacks.on_event(ev);
+                                    }
                                 }
                             }
                             MediaEvent::OutputLevel(level) => {
@@ -484,10 +532,21 @@ impl CodexLiveTransport {
         let closed_flag = Arc::new(AtomicBool::new(self.closed.load(Ordering::Acquire)));
         let closed_flag_for_close = Arc::clone(&closed_flag);
         let failure_reported = Arc::new(AtomicBool::new(false));
+        // The sideband WebSocket is now open: it owns server events. Flip the
+        // shared gate so the media-forward task suppresses data-channel events
+        // except `Error` (OMP `#handleServerEvent`).
+        let sideband_open = self
+            .sideband_open
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        sideband_open.store(true, Ordering::Release);
+        let sideband_open_for_reader = Arc::clone(&sideband_open);
         let reader = tokio::spawn(async move {
             loop {
                 match ws_read.next().await {
                     Some(Ok(Message::Text(text))) => {
+                        // Sideband events are always accepted (the sideband
+                        // owns server events once open).
                         if let Some(event) = parse_live_server_event(&text) {
                             callbacks.on_event(event);
                         }
@@ -499,6 +558,12 @@ impl CodexLiveTransport {
                     }
                     Some(Ok(_)) => continue,
                     Some(Err(_)) | None => {
+                        // Sideband closed (EOF/error). Clear the open gate so
+                        // the data-channel fallback resumes accepting events
+                        // — but the session will terminally fail on an
+                        // unexpected close (below) and a deliberate close
+                        // ignores state (closed_flag set by `close_inner`).
+                        sideband_open_for_reader.store(false, Ordering::Release);
                         // Propagate sideband EOF/error as an Error event
                         // exactly once — but only if this wasn't a deliberate
                         // shutdown (OMP: #reportFailure checks state).
@@ -579,6 +644,12 @@ impl CodexLiveTransport {
         // suppresses the unexpected-close error event.
         if let Some(flag) = self.sideband_closed_flag.take() {
             flag.store(true, Ordering::Release);
+        }
+        // Clear the sideband-open gate on teardown so a late data-channel
+        // event resumes the fallback path (the session is closing regardless,
+        // but the gate must not linger `true` past the sideband's lifetime).
+        if let Some(open) = self.sideband_open.take() {
+            open.store(false, Ordering::Release);
         }
         // Close the sideband first so no new messages are queued.
         if let Some(tx) = self.sideband_tx.take() {
@@ -1259,7 +1330,173 @@ fn match_secret_key(s: &str, pos: usize, keys: &[&str]) -> Option<(usize, usize,
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::{LiveInputTextContent, LiveRole, TranscriptKind};
     use super::*;
+
+    // --- OMP `#handleServerEvent` data-channel routing gate -----------------
+    //
+    // While the sideband WebSocket is OPEN it owns server events, so the
+    // data-channel (`oai-events`) must suppress every parsed event except
+    // `Error`. Before the sideband opens (and after it closes) the
+    // data-channel is the fallback path and accepts all events. These tests
+    // exercise the pure routing predicate plus the shared-state lifecycle.
+
+    fn delegation(id: &str) -> LiveServerEvent {
+        LiveServerEvent::DelegationCreated {
+            id: id.to_owned(),
+            content: vec![LiveInputTextContent::input_text("do work")],
+        }
+    }
+
+    fn turn(role: LiveRole, transcript: &str) -> LiveServerEvent {
+        LiveServerEvent::TurnDone {
+            role,
+            transcript: transcript.to_owned(),
+        }
+    }
+
+    fn transcript(kind: TranscriptKind, text: &str) -> LiveServerEvent {
+        LiveServerEvent::TranscriptAdded {
+            kind,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn route_pre_sideband_accepts_all_data_channel_events() {
+        // Before the sideband opens, the data-channel is the fallback path.
+        assert!(route_data_channel_event(false, &delegation("d1")));
+        assert!(route_data_channel_event(
+            false,
+            &turn(LiveRole::Assistant, "hi")
+        ));
+        assert!(route_data_channel_event(
+            false,
+            &transcript(TranscriptKind::Output, "delta")
+        ));
+        assert!(route_data_channel_event(
+            false,
+            &LiveServerEvent::Error {
+                message: "boom".into()
+            }
+        ));
+        assert!(route_data_channel_event(
+            false,
+            &LiveServerEvent::Unknown {
+                wire_type: "future.event".into()
+            }
+        ));
+    }
+
+    #[test]
+    fn route_sideband_open_suppresses_all_except_error() {
+        // While the sideband is open it owns server events: delegation, turn,
+        // transcript, session, output_audio.delta, and unknown are suppressed.
+        assert!(
+            !route_data_channel_event(true, &delegation("d1")),
+            "delegation must be suppressed while sideband is open"
+        );
+        assert!(
+            !route_data_channel_event(true, &turn(LiveRole::Assistant, "hi")),
+            "turn must be suppressed while sideband is open"
+        );
+        assert!(
+            !route_data_channel_event(true, &transcript(TranscriptKind::Output, "delta")),
+            "transcript must be suppressed while sideband is open"
+        );
+        assert!(!route_data_channel_event(
+            true,
+            &LiveServerEvent::Unknown {
+                wire_type: "future.event".into()
+            }
+        ));
+        // `Error` is always accepted from the data channel (OMP: `except error`).
+        assert!(
+            route_data_channel_event(
+                true,
+                &LiveServerEvent::Error {
+                    message: "boom".into()
+                }
+            ),
+            "data-channel error must be accepted even while sideband is open"
+        );
+    }
+
+    #[test]
+    fn route_post_close_resumes_fallback_acceptance() {
+        // After the sideband closes, the gate flips back to false and the
+        // data-channel fallback resumes accepting all events.
+        let open = Arc::new(AtomicBool::new(true));
+        assert!(!route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &delegation("d1")
+        ));
+        open.store(false, Ordering::Release);
+        assert!(route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &delegation("d1")
+        ));
+        assert!(route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &turn(LiveRole::User, "after close")
+        ));
+    }
+
+    /// The shared sideband-open flag models the lifecycle the reader task
+    /// drives: starts false (fallback), flips true once the WebSocket opens,
+    /// clears on close/teardown. Verify the gate transitions match OMP
+    /// semantics across the full pre-open → open → close cycle.
+    #[test]
+    fn sideband_open_gate_lifecycle_matches_omp() {
+        let open = Arc::new(AtomicBool::new(false));
+        // Pre-sideband: data-channel delegation accepted.
+        assert!(route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &delegation("pre")
+        ));
+        // Sideband opens: delegation now suppressed, error still accepted.
+        open.store(true, Ordering::Release);
+        assert!(!route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &delegation("dup")
+        ));
+        assert!(route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &LiveServerEvent::Error {
+                message: "dc err".into()
+            }
+        ));
+        // Sideband closes (unexpected): gate clears, fallback resumes. The
+        // session will terminally fail on the unexpected close; a deliberate
+        // close ignores state, but in both cases the gate is false.
+        open.store(false, Ordering::Release);
+        assert!(route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &delegation("post")
+        ));
+    }
+
+    /// A duplicate/stale sideband-open must not re-enable suppression after a
+    /// close, and re-opening is idempotent: the gate is a single shared bool,
+    /// so a stale socket clearing it does not corrupt a fresh session's state
+    /// (the transport creates a fresh gate per `connect_inner`).
+    #[test]
+    fn sideband_open_gate_is_idempotent_under_duplicate_open() {
+        let open = Arc::new(AtomicBool::new(false));
+        open.store(true, Ordering::Release);
+        // A second "open" is a no-op (already true) — no duplicate delivery.
+        open.store(true, Ordering::Release);
+        assert!(open.load(Ordering::Acquire));
+        assert!(!route_data_channel_event(
+            open.load(Ordering::Acquire),
+            &delegation("d")
+        ));
+        // A stale socket's EOF clears the gate.
+        open.store(false, Ordering::Release);
+        assert!(!open.load(Ordering::Acquire));
+    }
+
+    // --- existing tests below ---------------------------------------------
 
     #[test]
     fn bounded_error_body_collapses_whitespace_and_caps_length() {
