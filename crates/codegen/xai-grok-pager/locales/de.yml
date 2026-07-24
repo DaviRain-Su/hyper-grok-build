@@ -1072,3 +1072,4 @@ readiness.suggest.lockfile: "committe ein Lockfile für reproduzierbare Installa
 readiness.suggest.readme: "füge ein README für Projektkontext hinzu"
 readiness.evidence.clean: "sauber"
 slash.readiness.desc: "Prüft, ob das Repo für Agenten-Autonomie bereit ist"
+readiness.suggest.git_dirty_few: "uncommittete Änderungen — committe, damit der Agent Checkpoints hat"

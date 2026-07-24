@@ -1070,3 +1070,4 @@ readiness.suggest.lockfile: "再現可能なインストールのためロック
 readiness.suggest.readme: "プロジェクトの背景として README を追加"
 readiness.evidence.clean: "クリーン"
 slash.readiness.desc: "リポジトリがエージェントの自律実行に適しているか確認"
+readiness.suggest.git_dirty_few: "未コミットの変更 — コミットしてエージェントにチェックポイントを提供"

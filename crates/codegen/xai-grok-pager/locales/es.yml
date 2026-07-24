@@ -1070,3 +1070,4 @@ readiness.suggest.lockfile: "confirma un archivo de bloqueo para instalaciones r
 readiness.suggest.readme: "añade un README para contexto del proyecto"
 readiness.evidence.clean: "limpio"
 slash.readiness.desc: "Comprueba si el repositorio está listo para la autonomía del agente"
+readiness.suggest.git_dirty_few: "cambios sin confirmar — confirma para que el agente tenga puntos de control"

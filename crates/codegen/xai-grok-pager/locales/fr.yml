@@ -1070,3 +1070,4 @@ readiness.suggest.lockfile: "commitez un fichier de verrouillage pour des instal
 readiness.suggest.readme: "ajoutez un README pour le contexte du projet"
 readiness.evidence.clean: "propre"
 slash.readiness.desc: "Vérifie si le dépôt est prêt pour l'autonomie de l'agent"
+readiness.suggest.git_dirty_few: "changements non commités — commitez pour que l'agent ait des points de contrôle"

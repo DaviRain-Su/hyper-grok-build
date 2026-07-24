@@ -634,6 +634,7 @@ mod tests {
         "readiness.suggest.lint",
         "readiness.suggest.git_repo",
         "readiness.suggest.git_dirty",
+        "readiness.suggest.git_dirty_few",
         "readiness.suggest.git_unknown",
         "readiness.suggest.lockfile",
         "readiness.suggest.readme",

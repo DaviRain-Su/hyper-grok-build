@@ -495,7 +495,7 @@ Hyper 可占据的位置（power user）：
 | A3 | 会话/费用/子代理成本**可透视** | 竞品空白 / 自研 | pager dashboard | P1 | idea | |
 | A4 | 钉定模型失败时有**可观测 fallback** | omp multi-key | models / auth / config | P1 | idea | |
 | A5 | 流中违规可 **abort→注入→同点重试**，规则不常驻 context | omp stream rules | sampler 流式层 | P2 | idea | 非 PreToolUse 替代 |
-| A6 | 一键知道仓库**适不适合自治** | Droid Readiness | `/readiness` 或 doctor 扩展 | P2 | **done** | `/readiness` 已落地：8 探针（AGENTS.md/build/tests/CI/lint/git/lockfile/README）+ 结论分级 + 10 语言 |
+| A6 | 一键知道仓库**适不适合自治** | Droid Readiness | `/readiness` 或 doctor 扩展 | P2 | **done** | `/readiness` 已落地：8 探针 + 结论分级 + 10 语言。**v1 为静态信号近似**（不跑 build/test；Droid 原版是执行式验证，可作后续 `--verify` 增强） |
 | A7 | 可选第二模型逐步挑刺（默认关） | omp Advisor | 旁路 subagent | P2 | idea | 与 A1 区分：逐步 vs 按需 |
 | A8 | 结构改动走 AST，不只文本 diff | omp ast | skill → 可选 tool | P2 | idea | 先插件 |
 | A9 | 真调试器，不是只 print | omp DAP | tools + adapter | P2 | idea | 工作量大 |
