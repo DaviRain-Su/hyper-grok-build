@@ -1607,6 +1607,77 @@ async fn ext_method_routes_auth_cleared_and_refreshes_resident_sessions() {
         })
         .await;
 }
+/// Fresh managed catalog sync must push UpdateMcpServers with the injected
+/// managed connector. The `search_tool` rebuild is a SEPARATE broadcast
+/// (`refresh_mcp_search_index_in_sessions`), so it is not asserted here.
+#[tokio::test(flavor = "current_thread")]
+async fn sync_fresh_managed_mcp_pushes_update() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let agent = build_agent_with_auth(crate::auth::GrokAuth {
+                key: "eligible".into(),
+                auth_mode: crate::auth::AuthMode::WebLogin,
+                ..crate::auth::GrokAuth::test_default()
+            });
+            let sid = acp::SessionId::new("sess-managed-sync");
+            let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+            agent.sessions.borrow_mut().insert(sid, handle);
+            let managed = vec![crate::session::managed_mcp::ManagedMcpConfig {
+                name: "Linear".into(),
+                endpoint: "https://mcp.example.com/linear".into(),
+                headers: std::collections::HashMap::from([(
+                    "Authorization".into(),
+                    "Bearer tok".into(),
+                )]),
+                token_expires_at: None,
+                scope: None,
+                scope_id: None,
+                scope_name: None,
+            }];
+            agent.sync_fresh_managed_mcp_to_sessions(&managed);
+            let first = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
+                .await
+                .expect("UpdateMcpServers should be sent")
+                .expect("channel should stay open");
+            let SessionCommand::UpdateMcpServers { mcp_servers, .. } = first else {
+                panic!("expected UpdateMcpServers as the first synced command");
+            };
+            let managed_name = crate::session::managed_mcp::to_managed_name("Linear");
+            let linear = mcp_servers
+                .iter()
+                .find_map(|s| match s {
+                    acp::McpServer::Http(http) if http.name == managed_name => Some(http),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!("merged catalog must contain managed HTTP server {managed_name}")
+                });
+            assert!(
+                linear
+                    .headers
+                    .iter()
+                    .any(|h| h.name == "Authorization" && h.value == "Bearer tok"),
+                "managed server must carry the injected Authorization header"
+            );
+        })
+        .await;
+}
+/// The gateway-catalog refresh broadcast pushes `RefreshMcpSearchIndex` to every
+/// live session (independent of the legacy managed-connector sync).
+#[tokio::test(flavor = "current_thread")]
+async fn refresh_mcp_search_index_broadcasts_to_sessions() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("sess-search-index");
+    let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, None);
+    agent.sessions.borrow_mut().insert(sid, handle);
+    agent.refresh_mcp_search_index_in_sessions();
+    let cmd = tokio::time::timeout(std::time::Duration::from_secs(1), cmd_rx.recv())
+        .await
+        .expect("RefreshMcpSearchIndex should be sent")
+        .expect("channel should stay open");
+    assert!(matches!(cmd, SessionCommand::RefreshMcpSearchIndex));
+}
 /// Build a minimal MvpAgent suitable for testing extension methods.
 fn build_minimal_agent_for_tests() -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;

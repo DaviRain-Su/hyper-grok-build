@@ -105,6 +105,37 @@ pub fn merge_managed_mcp_servers(
     .collect()
 }
 
+/// Merge the managed catalog into ONE live session's MCP set and push the
+/// result via [`crate::session::SessionCommand::UpdateMcpServers`]; returns
+/// `true` if the command was enqueued (session still alive).
+///
+/// Shared core for every "re-merge managed configs into a live session" path
+/// (`mcp/list cache=false`, config hot-reload, post-grant reload) so the merge
+/// inputs and the dropped-oneshot-response contract can't drift between them.
+pub(crate) fn merge_and_send_managed_mcp_update(
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    cwd: &std::path::Path,
+    initial_client_mcp_servers: Vec<acp::McpServer>,
+    managed: &[ManagedMcpConfig],
+    plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
+    compat: &xai_grok_tools::types::compat::CompatConfig,
+) -> bool {
+    let merged = merge_managed_mcp_servers(
+        initial_client_mcp_servers,
+        cwd,
+        managed,
+        plugin_registry,
+        compat,
+    );
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(crate::session::SessionCommand::UpdateMcpServers {
+            mcp_servers: merged,
+            respond_to: tx,
+        })
+        .is_ok()
+}
+
 pub fn merge_managed_mcp_servers_with_policy(
     client_mcp_servers: Vec<acp::McpServer>,
     cwd: &std::path::Path,

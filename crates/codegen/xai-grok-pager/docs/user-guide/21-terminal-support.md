@@ -124,15 +124,16 @@ terminal-native `Shift+Insert`, or hold `Shift` while middle-clicking when the
 terminal uses that gesture to bypass mouse reporting.
 
 When Grok cannot identify the outer terminal over SSH, it predicts that OSC 52
-will be sent but marks the route as not verified. The copy message shows the
-actual result and backup file. Run `/doctor` for other copy options.
+will be sent but marks the route as not verified. The copy toast then names the
+backup file so you can retrieve the text. Run `/doctor` for other copy options.
 
 #### Apple Terminal over SSH
 
-Apple Terminal does not support OSC 52, so a remote copy cannot directly reach
-the local clipboard. Grok also saves each copy to the backup file named in the
-copy message (`~/.grok/last-copy.txt` by default; override with
-`GROK_COPY_FILE`). You can also use `/copy <file>` or `/minimal`.
+Apple Terminal does not support OSC 52, so a remote copy cannot reach the local
+clipboard. Each copy is still saved to a backup file (`~/.grok/last-copy.txt` by
+default; override with `GROK_COPY_FILE`); the toast names that path when delivery
+is unverified or the clipboard is unreachable. You can also use `/copy <file>` or
+`/minimal`.
 
 For direct clipboard forwarding, run the SSH command from the local computer
 through `grok wrap`, for example `grok wrap ssh user@host`. The same command can

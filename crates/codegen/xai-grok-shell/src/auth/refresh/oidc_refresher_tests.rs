@@ -301,26 +301,29 @@ async fn oidc_refresher_e2e_near_expiry_idp_rejects_refresh() {
     };
     mgr.hot_swap(near_expiry);
 
-    // auth() dispatches to refresh_chain -> OidcRefresher -> invalid_grant.
-    // Because the token is still within real expires_at (3 min from now),
-    // the grace path returns the cached token as a fallback.
+    // Permanent invalid_grant discards AT+RT (no grace re-serve of pre-refresh
+    // snapshot). Grace remains for *transient* refresh failures only.
     mgr.set_refresher(std::sync::Arc::new(OidcRefresher::new(mgr.clone())));
-    let refreshed = mgr.auth().await;
+    let err = mgr.auth().await.unwrap_err();
     assert!(
-        refreshed.is_ok(),
-        "grace path should return the cached token while within real expires_at"
+        matches!(
+            err,
+            crate::auth::AuthError::Refresh(crate::auth::RefreshTokenError::Permanent(_))
+        ),
+        "permanent invalid_grant must not grace-serve the pre-refresh AT, got: {err:?}",
     );
-    assert_eq!(refreshed.unwrap().key, "about-to-expire-token");
+    assert!(
+        mgr.current_or_expired().is_none(),
+        "permanent invalid_grant must clear credentials",
+    );
 
     server.abort();
 }
 
-/// On `invalid_client` (client_id rotated, soft-deleted, or disabled), the
-/// credential is retained and a permanent-failure verdict cached. Verdict + TTL
-/// stop the retry loop; the bearer drops only on explicit logout, so a
-/// transient client-rotation blip self-heals without a fleet re-login.
+/// On `invalid_client` (client_id rotated, soft-deleted, or disabled) with a
+/// hard-expired AT, permanent failure retains AT+RT (only invalid_grant discards).
 #[tokio::test]
-async fn oidc_refresher_e2e_invalid_client_caches_verdict_and_retains_credentials() {
+async fn oidc_refresher_e2e_invalid_client_retains_credentials() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let base_for_discovery = base_url.clone();
@@ -371,34 +374,25 @@ async fn oidc_refresher_e2e_invalid_client_caches_verdict_and_retains_credential
     mgr.hot_swap(expired);
 
     mgr.set_refresher(std::sync::Arc::new(OidcRefresher::new(mgr.clone())));
-    let refreshed = mgr.auth().await.ok();
+    let err = mgr.auth().await.unwrap_err();
     assert!(
-        refreshed.is_none(),
-        "refresh should fail when client is unknown"
+        matches!(
+            err,
+            crate::auth::AuthError::Refresh(crate::auth::RefreshTokenError::Permanent(_))
+        ),
+        "refresh should fail permanently when client is unknown, got: {err:?}",
     );
-
-    // Credential retained (not cleared) — the bearer may be fine; the client
-    // credential isn't.
+    assert_eq!(
+        mgr.current_or_expired()
+            .and_then(|a| a.refresh_token)
+            .as_deref(),
+        Some("rt-valid"),
+        "invalid_client must retain RT for TTL-gated retry after client rotation",
+    );
     assert!(
-        mgr.expired_auth().is_some(),
-        "credentials must be retained after invalid_client",
+        mgr.read_disk_auth().is_some() || mgr.current_or_expired().is_some(),
+        "invalid_client must not clear credentials",
     );
-    // The verdict is cached, scoped to the retained credential, and carries
-    // the non-sticky `ClientRejected` reason (so it ages out, not stuck-forever).
-    match mgr.permanent_failure() {
-        Some(crate::auth::AuthError::Refresh(crate::auth::RefreshTokenError::Permanent(e))) => {
-            assert_eq!(
-                e.reason,
-                crate::auth::RefreshTokenFailedReason::ClientRejected,
-                "invalid_client must map to ClientRejected",
-            );
-            assert!(
-                !e.reason.is_sticky(),
-                "ClientRejected must age out past the TTL, not stick forever",
-            );
-        }
-        other => panic!("invalid_client must cache a permanent-failure verdict, got {other:?}"),
-    }
 
     server.abort();
 }
@@ -990,22 +984,18 @@ async fn refresher_disk_retry_invalid_client_with_different_client_id_preserves_
         other => panic!("expected PermanentFailure, got: {other:?}"),
     }
 
-    // Credential retained; the cached verdict (scoped to it) stops the storm.
+    // Disk-retry already tried the sibling RT and got invalid_client —
+    // permanent is recorded, but ClientRejected retains credentials.
     assert!(
-        mgr.current_or_expired().is_some(),
-        "credential must be retained on permanent failure"
-    );
-    assert!(
-        mgr.permanent_failure().is_some(),
-        "verdict must be cached to stop the retry storm"
+        mgr.current_or_expired().is_some() || mgr.read_disk_auth().is_some(),
+        "invalid_client permanent must retain credentials (only invalid_grant discards)"
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 2, "no recursion");
 
     server.abort();
 }
 
-/// Both RTs revoked: retry is strictly one-shot (no third call);
-/// refresh_chain's disk-RT-differs guard preserves disk creds.
+/// Both RTs revoked: retry is strictly one-shot (no third call).
 #[tokio::test]
 async fn refresher_disk_retry_is_one_shot() {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1060,7 +1050,8 @@ async fn refresher_disk_retry_is_one_shot() {
         "exactly two IdP calls — disk-token retry must NOT recurse"
     );
 
-    // Disk auth must still be present (the refresher never clears).
+    // This test calls the refresher directly (not refresh_chain); disk is
+    // unchanged here — refresh_chain is responsible for permanent clear.
     assert!(
         mgr.read_disk_auth().is_some(),
         "refresher must not touch disk; clearing is refresh_chain's responsibility"

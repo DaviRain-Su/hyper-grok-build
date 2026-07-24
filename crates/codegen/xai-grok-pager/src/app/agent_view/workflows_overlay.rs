@@ -464,6 +464,7 @@ mod workflows_overlay_key_tests {
                 model: None,
                 state: "done".to_owned(),
                 tokens_used: 0,
+                duration_ms: 0,
             },
             crate::views::workflows::WorkflowAgentRowView {
                 agent_id: "child-running".to_owned(),
@@ -472,6 +473,7 @@ mod workflows_overlay_key_tests {
                 model: None,
                 state: "running".to_owned(),
                 tokens_used: 0,
+                duration_ms: 0,
             },
         ];
         agent
@@ -511,7 +513,7 @@ mod workflows_overlay_key_tests {
     }
 
     #[test]
-    fn only_explicitly_paused_background_runs_are_resumable() {
+    fn paused_budget_limited_and_failed_runs_are_resumable_others_fail_closed() {
         let mut agent = workflows_agent(&["wf_run"]);
         let reg = ActionRegistry::defaults();
         agent.workflow_runs[0].status = "user_paused".to_string();
@@ -540,8 +542,24 @@ mod workflows_overlay_key_tests {
         agent.show_workflows = true;
         agent.workflow_runs[0].status = "failed".to_string();
         let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
+        assert!(
+            matches!(
+                out,
+                InputOutcome::Action(Action::SendSlashCommandPreservingDraft(ref command))
+                    if command == "/workflow resume deep-research"
+            ),
+            "failed runs resume via journal replay"
+        );
+        assert!(
+            !agent.show_workflows,
+            "failed r dispatches a resume and closes the overlay"
+        );
+
+        agent.show_workflows = true;
+        agent.workflow_runs[0].status = "complete".to_string();
+        let out = agent.handle_input(&key(KeyCode::Char('r')), &reg);
         assert!(matches!(out, InputOutcome::Changed));
-        assert!(agent.show_workflows, "failed runs must not be resumed");
+        assert!(agent.show_workflows, "completed runs must not be resumed");
 
         agent.workflow_runs[0].status = "user_paused".to_string();
         agent.workflow_runs[0].management_available = false;

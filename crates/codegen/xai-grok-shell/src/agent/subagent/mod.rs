@@ -1410,6 +1410,21 @@ fn durable_resume_source_for(
         model_id: meta.effective_model_id,
     })
 }
+/// Resolve the MCP pool a child subagent should import from its parent.
+///
+/// Inheritance applies to **every** agent source (built-in, user, project,
+/// and plugin). Plugin agents are not excluded: the parent already connected
+/// these servers for the session. Agent-owned `mcpServers` (spawned by the
+/// child itself) are handled separately and remain blocked for plugins.
+///
+/// Returns `None` when there is no parent pool or `inheritance` is
+/// [`McpInheritance::None`] (avoids an empty import call downstream).
+fn resolve_inherited_mcp_pool(
+    parent_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
+    inheritance: &xai_grok_agent::config::McpInheritance,
+) -> Option<crate::session::mcp_servers::SharedMcpPool> {
+    parent_pool.and_then(|pool| filter_pool_by_inheritance(pool, inheritance))
+}
 /// Apply `McpInheritance` filtering to a parent MCP pool snapshot.
 ///
 /// Returns `None` for `McpInheritance::None` (no pool at all — avoids
@@ -1445,6 +1460,14 @@ fn filter_pool_by_inheritance(
             Some(pool)
         }
     }
+}
+/// Whether a subagent may declare its own agent-owned `mcpServers`.
+///
+/// Plugin agents cannot: untrusted packages must not spawn MCP processes or
+/// open network MCP endpoints. Parent-pool inheritance is independent and
+/// always available subject to [`McpInheritance`].
+fn agent_owned_mcp_servers_allowed(is_plugin_agent: bool) -> bool {
+    !is_plugin_agent
 }
 /// Resolve a subagent type name to its `AgentDefinition`, with the parent
 /// session's CLI tool/permission overrides already applied (so the spawn path

@@ -1108,6 +1108,11 @@ pub struct AgentView {
     pub hit_cwd: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
+    /// Still-running watcher cue on the turn-status row (click opens the
+    /// tasks pane, same as `Ctrl+G`).
+    pub hit_watching_cue: HitArea,
+    /// One-time Ctrl+G toast already fired for a watching-cue click.
+    pub(crate) watching_cue_toast_shown: bool,
     /// `[hide]` button on the announcement banner (click == `/announcements hide`).
     pub hit_announcement_hide: HitArea,
     /// `[label]` CTA button on the promo banner row (click opens its link).

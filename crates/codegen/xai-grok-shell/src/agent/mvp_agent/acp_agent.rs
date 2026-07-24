@@ -3197,6 +3197,9 @@ impl acp::Agent for MvpAgent {
                     crate::session::commands::PromptCompletionKind::MaxTurnsReached {
                         ..
                     } => Some("max_turns_reached".to_string()),
+                    crate::session::commands::PromptCompletionKind::StationarityEnded => {
+                        Some("action_stationarity".to_string())
+                    }
                     _ => None,
                 };
                 Ok(

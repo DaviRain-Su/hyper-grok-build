@@ -58,6 +58,16 @@ fn turn_result_cancelled() {
     );
 }
 #[test]
+fn turn_result_stationarity_ended_is_completed() {
+    let result: Result<TurnOutcome, acp::Error> = Ok(TurnOutcome::StationarityEnded {
+        snapshot: Box::new(None),
+    });
+    assert_eq!(
+        turn_result_to_hook_outcome(&result),
+        TurnHookOutcome::Completed
+    );
+}
+#[test]
 fn turn_result_error() {
     let result: Result<TurnOutcome, acp::Error> = Err(acp::Error::internal_error());
     assert_eq!(turn_result_to_hook_outcome(&result), TurnHookOutcome::Error);

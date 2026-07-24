@@ -319,9 +319,11 @@ async fn auth_backend_contract_transient_failures_escalate_to_non_sticky_permane
     auth_manager.hot_swap(expired_oidc(&base_url));
 
     // One refresher instance: it owns the consecutive-failure counter.
+    // Budget is above try_recover_unauthorized's per-recovery attempts so a
+    // single 401 recovery cannot alone escalate; exhaust the full budget here.
     let refresher = OidcRefresher::new(auth_manager.clone());
     let mut outcomes = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..5 {
         outcomes.push(refresher.refresh(RefreshReason::ServerRejected).await);
     }
 
@@ -330,7 +332,12 @@ async fn auth_backend_contract_transient_failures_escalate_to_non_sticky_permane
         "first blip is transient, not a lockout: {:?}",
         outcomes[0],
     );
-    match &outcomes[2] {
+    assert!(
+        matches!(outcomes[3], RefreshOutcome::TransientFailure { .. }),
+        "4th blip still under escalation budget: {:?}",
+        outcomes[3],
+    );
+    match &outcomes[4] {
         RefreshOutcome::PermanentFailure { error, .. } => {
             assert_eq!(
                 error.reason,

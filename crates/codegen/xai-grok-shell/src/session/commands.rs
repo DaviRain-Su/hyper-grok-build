@@ -24,6 +24,9 @@ pub struct CancellationContext {
 #[derive(Debug, Clone)]
 pub enum PromptCompletionKind {
     Completed,
+    /// Silent EndTurn after stationarity/true-noop thrash. Distinct from
+    /// Completed so goal continuation is not re-queued under an active goal.
+    StationarityEnded,
     Cancelled {
         category: Option<xai_file_utils::events::types::CancellationCategory>,
         context: Option<CancellationContext>,

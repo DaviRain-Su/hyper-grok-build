@@ -218,11 +218,11 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     // Ctrl+T "force-show" pin; effective visibility (auto-hide) is computed per
     // agent by `todo_panel_height`.
     let force_todos = minimal_api::minimal_show_todos(app);
-    // Snapshot appearance-derived inputs before borrowing `agents` mutably.
-    let style = super::live::prompt_style(&app.appearance);
     // Committed appearance (timestamps off) so the measured tail height matches
     // exactly what `draw_tail` renders.
     let commit_app = super::commit::committed_appearance(&app.appearance);
+    // Theme + prompt style: built after the agent is known so bash/feedback/
+    // remember chrome matches `draw_live` (same `prompt_style` inputs).
     // Minimal is flush-left (W-38): prompt-replacing modals span the live
     // region's full width (no outer horizontal padding), so measure their
     // height at that same width — it must match `live::draw_live`'s
@@ -242,6 +242,16 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
         return needed.max(base).min(ceiling);
     };
     let id = *id;
+    // Snapshot mode/multiline before the mut agent borrow so `prompt_style` can
+    // still read `app.appearance` (same inputs as `draw_live`).
+    let (input_mode, multiline) = app
+        .agents
+        .get(&id)
+        .map(|a| (a.prompt_input_mode, a.multiline_mode))
+        .unwrap_or_default();
+    let theme = xai_grok_pager::theme::Theme::current();
+    let style = super::live::prompt_style(&app.appearance, input_mode, &theme, multiline);
+
     let Some(agent) = app.agents.get_mut(&id) else {
         return base;
     };

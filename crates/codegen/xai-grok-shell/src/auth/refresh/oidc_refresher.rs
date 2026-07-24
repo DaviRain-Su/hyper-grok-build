@@ -13,8 +13,9 @@ use crate::auth::manager::AuthManager;
 /// Escalate to `PermanentFailure` after this many consecutive transient
 /// failures (then `PERMANENT_FAILURE_TTL` allows recovery). OIDC tolerates more
 /// blips than `ExternalBinaryRefresher` (1) since network refreshes flake more
-/// than a local binary.
-const MAX_CONSECUTIVE_TRANSIENT_FAILURES: u32 = 3;
+/// than a local binary. Kept above `try_recover_unauthorized`'s per-recovery
+/// attempt budget so one 401 recovery cannot alone escalate.
+const MAX_CONSECUTIVE_TRANSIENT_FAILURES: u32 = 5;
 
 /// Consecutive transient-failure budget, scoped to the credential it accrued
 /// against. Held under one lock so the credential check, reset, and increment

@@ -1251,6 +1251,128 @@ async fn test_copy_session_data_transforms_xai_updates() {
         _ => panic!("Expected xAI update"),
     }
 }
+fn fork_user_chunk(session_id: &str, text: &str, prompt_index: usize) -> SessionUpdate {
+    let chunk = acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
+        )
+        .meta(serde_json::json!({ "promptIndex": prompt_index }).as_object().cloned());
+    SessionUpdate::Acp(
+        Box::new(
+            acp::SessionNotification::new(
+                acp::SessionId::new(session_id),
+                acp::SessionUpdate::UserMessageChunk(chunk),
+            ),
+        ),
+    )
+}
+fn fork_agent_chunk(session_id: &str, text: &str) -> SessionUpdate {
+    SessionUpdate::Acp(
+        Box::new(
+            acp::SessionNotification::new(
+                acp::SessionId::new(session_id),
+                acp::SessionUpdate::AgentMessageChunk(
+                    acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
+                    ),
+                ),
+            ),
+        ),
+    )
+}
+fn fork_rewind_marker(session_id: &str, target_prompt_index: usize) -> SessionUpdate {
+    use crate::extensions::notification::{
+        SessionNotification as XaiSessionNotification,
+        SessionUpdate as XaiSessionUpdateType,
+    };
+    SessionUpdate::Xai(
+        Box::new(XaiSessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdateType::RewindMarker {
+                target_prompt_index,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            meta: None,
+        }),
+    )
+}
+fn chat_user(text: &str, prompt_index: usize) -> ConversationItem {
+    let mut item = ConversationItem::user(text);
+    item.set_prompt_index(prompt_index);
+    item
+}
+/// Fork truncation targets the live branch — dead-branch runs from a
+/// prior rewind overlap its stamps (indices are branch-local) — and keeps
+/// prompt N inclusive in both the updates and chat (model-context) files.
+#[tokio::test]
+async fn copy_session_data_fork_truncates_live_branch_inclusive() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let sid = "src-rewound";
+    let source_info = Info {
+        id: acp::SessionId::new(sid),
+        cwd: "/src".to_string(),
+    };
+    adapter.init_session(&source_info, default_model_id()).await.unwrap();
+    for update in [
+        fork_user_chunk(sid, "P0", 0),
+        fork_agent_chunk(sid, "A0"),
+        fork_user_chunk(sid, "P1-dead", 1),
+        fork_agent_chunk(sid, "A1-dead"),
+        fork_rewind_marker(sid, 1),
+        fork_user_chunk(sid, "P1b", 1),
+        fork_agent_chunk(sid, "A1b"),
+        fork_user_chunk(sid, "P2", 2),
+    ] {
+        adapter.append_update(&source_info, &update).await.unwrap();
+    }
+    for item in [
+        chat_user("P0", 0),
+        ConversationItem::assistant("A0"),
+        chat_user("P1b", 1),
+        ConversationItem::assistant("A1b"),
+        chat_user("P2", 2),
+    ] {
+        adapter.append_chat_message(&source_info, &item).await.unwrap();
+    }
+    let fork_at = |target: usize, fork_id: &str| {
+        let target_info = Info {
+            id: acp::SessionId::new(fork_id),
+            cwd: "/src".to_string(),
+        };
+        let options = CopySessionOptions {
+            target_prompt_index: Some(target),
+            ..Default::default()
+        };
+        (target_info, options)
+    };
+    let (target_info, options) = fork_at(1, "fork-at-1");
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, options)
+        .await
+        .unwrap();
+    assert_eq!(result.updates_copied, 4);
+    assert_eq!(result.chat_messages_copied, 4);
+    let loaded = adapter.load_session(&target_info).await.unwrap();
+    let last = loaded.updates.last().unwrap();
+    assert!(
+            matches!(
+                last,
+                SessionUpdate::Acp(n) if matches!(
+                    &n.update,
+                    acp::SessionUpdate::AgentMessageChunk(c)
+                        if matches!(&c.content, acp::ContentBlock::Text(t) if t.text == "A1b")
+                )
+            ),
+            "fork must end at the live branch's A1b, got {last:?}"
+        );
+    let (target_info, options) = fork_at(0, "fork-at-0");
+    let result = adapter
+        .copy_session_data(&source_info, &target_info, options)
+        .await
+        .unwrap();
+    assert_eq!(result.updates_copied, 2, "P0 + A0");
+    assert_eq!(result.chat_messages_copied, 2, "P0 + A0 in model context");
+}
 #[tokio::test]
 async fn test_copy_session_data_source_not_found() {
     let temp_dir = TempDir::new().unwrap();

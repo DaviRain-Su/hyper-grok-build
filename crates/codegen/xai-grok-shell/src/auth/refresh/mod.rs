@@ -94,8 +94,9 @@ pub(crate) enum RefreshOutcome {
     Success(Box<GrokAuth>),
     /// Terminal failure (e.g. invalid_grant), or a transient escalated to
     /// `Other` after repeated blips. Caller records a verdict scoped to the
-    /// rejected credential and retains it (`RefreshTokenRejected` is sticky,
-    /// the rest age out past the TTL).
+    /// rejected credential. `refresh_chain` discards AT+RT only for
+    /// `RefreshTokenRejected` (sticky until login); `ClientRejected` / `Other`
+    /// retain credentials and age out past the TTL.
     PermanentFailure {
         error: crate::auth::error::RefreshTokenFailedError,
         /// Key of the credential the refresher actually sent to the IdP, so

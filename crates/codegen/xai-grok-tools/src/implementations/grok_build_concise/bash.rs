@@ -265,8 +265,9 @@ mod tests {
         // to_prompt_format() is a passthrough — it must NOT add another header.
         let mut bash = make_bash(0, "hello world\n");
         // Pre-bake DEFAULT (what BashTool::run() does)
-        bash.output_for_prompt =
-            crate::implementations::grok_build::bash::format_default_prompt(&bash);
+        bash.output_for_prompt = crate::implementations::grok_build::bash::format_default_prompt(
+            &bash, /* append_noop_reminder */ true,
+        );
         assert!(bash.output_for_prompt.starts_with("exit: 0"));
 
         // Concise post-processing (what BashConciseTool::run() does)

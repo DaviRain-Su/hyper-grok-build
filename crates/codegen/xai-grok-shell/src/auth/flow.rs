@@ -701,9 +701,8 @@ pub(crate) async fn try_ensure_session_noninteractive(
     let grok_home = grok_home::grok_home();
     let auth_manager = Arc::new(AuthManager::new(&grok_home, grok_com_config.clone()));
 
-    // A refresh failure leaves the session on disk (credentials are retained;
-    // the verdict gates re-attempts). Return it so consumers self-recover on
-    // 401, rather than disabling the relay for the leader's lifetime.
+    // Transient refresh failure: credentials remain (usable on 401 recovery).
+    // Permanent failure already discarded them.
     if let Some(expired) = expired_refreshable_session(&auth_manager) {
         return Some(expired);
     }

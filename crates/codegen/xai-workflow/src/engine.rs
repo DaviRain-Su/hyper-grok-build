@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::host::{AgentOpts, HostError, WorkflowHostRequest};
-use crate::journal::{Journal, JournalError, request_hash};
+use crate::journal::{HOST_ERROR_KEY, Journal, JournalError, request_hash};
 use crate::run::{PauseKind, WorkflowOutcome};
 use crate::{MAX_HOST_CALLS, MAX_PARALLEL};
 
@@ -302,7 +302,6 @@ fn host_call<T>(
     Ok(value)
 }
 
-const HOST_ERROR_KEY: &str = "__xai_workflow_host_error";
 const HOST_TERMINAL_KEY: &str = "__xai_workflow_parallel_terminal";
 const TERMINAL_BUDGET: &str = "budget_exceeded";
 const TERMINAL_CANCELLED: &str = "cancelled";

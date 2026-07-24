@@ -174,7 +174,7 @@ pub static USER_GUIDE: &[Doc] = &[
     guide!(
         "22-permissions-and-safety.md",
         "Permissions and Safety",
-        "Tool approval, sandbox, security"
+        "Modes, authorization order, allow/ask/deny rules, matching, and hooks"
     ),
 ];
 

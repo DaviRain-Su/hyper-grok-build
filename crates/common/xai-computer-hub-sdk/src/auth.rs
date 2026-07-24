@@ -159,6 +159,15 @@ pub struct PrincipalKey {
     fingerprint: String,
 }
 
+impl PrincipalKey {
+    /// Stable non-secret fingerprint (e.g. OIDC issuer+client); never tokens.
+    pub fn opaque(fingerprint: impl Into<String>) -> Self {
+        Self {
+            fingerprint: fingerprint.into(),
+        }
+    }
+}
+
 impl fmt::Debug for PrincipalKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrincipalKey").finish_non_exhaustive()

@@ -140,6 +140,8 @@ Grok asks where to save the skill:
 - **Project** (`<repo_root>/.grok/skills/<name>/`) -- available only in this repository and shareable with teammates through version control. Grok recommends this scope inside a git repository.
 - **User** (`~/.grok/skills/<name>/`) -- available across all your projects.
 
+To distribute a skill to a whole team or organization, package it in a plugin and publish it through a marketplace. See [Create your own marketplace](09-plugins.md#create-your-own-marketplace) and [Distribute across an organization](09-plugins.md#distribute-across-an-organization).
+
 The new skill appears in the slash menu within a few seconds, because Grok reloads skills when files change on disk.
 
 ---

@@ -1,69 +1,93 @@
-# Agent Mode (ACP) and IDE Integration
+# Agent mode (ACP) and IDE integration
 
-Agent mode runs Grok as an ACP (Agent Client Protocol) server for integration with IDEs, editors, and custom tooling. Unlike single-prompt mode (`grok -p`, which prints one response and exits), agent mode keeps a persistent process running and communicates through structured JSON-RPC messages.
+Agent mode runs Grok as a long-lived server that clients talk to over [ACP](https://agentclientprotocol.com) (JSON-RPC). Use it from IDEs, SDKs, eval harnesses, and custom apps. For a one-shot prompt that prints and exits, use `grok -p` instead ([headless mode](14-headless-mode.md)).
+
+---
+
+## Automation and SDKs
+
+For scripts, CI, evals, and agent servers, start with always-approve so tools run without interactive permission prompts. Deny rules and hooks still apply.
+
+```bash
+# stdio (local process / many SDKs)
+grok agent --always-approve stdio
+
+# WebSocket server
+grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+```
+
+You can also set always-approve per session on `session/new`:
+
+```json
+{
+  "cwd": "/path/to/project",
+  "mcpServers": [],
+  "_meta": { "yoloMode": true }
+}
+```
+
+Interactive TUI users typically leave the default ask mode (or use auto). See [Permissions and safety](22-permissions-and-safety.md).
 
 ---
 
 ## What is ACP?
 
-The [Agent Client Protocol (ACP)](https://agentclientprotocol.com) is a standard for AI agent communication. It defines how clients (IDEs, editors, custom apps) interact with AI agents through a structured JSON-RPC protocol. ACP provides:
+The [Agent Client Protocol (ACP)](https://agentclientprotocol.com) defines how clients talk to coding agents over JSON-RPC. With Grok it covers:
 
-- **Session management** -- create, load, and resume conversations
-- **Prompt submission** -- send user messages and receive streamed responses
-- **Tool visibility** -- see what tools the agent is using in real time
-- **Thought streams** -- observe the agent's reasoning process
-- **Permission handling** -- approve or deny tool executions interactively
+- Sessions (create, load, resume)
+- Prompts and streamed replies
+- Tool call updates
+- Reasoning / thought streams
+- Permission prompts when the session is not always-approve
 
 ---
 
 ## stdio transport
 
-stdio is the primary integration mode. The agent exchanges JSON-RPC messages over stdin and stdout:
+stdio is the common local integration path. The agent speaks JSON-RPC on stdin and stdout:
 
 ```bash
-grok agent stdio
+grok agent --always-approve stdio
 ```
 
-Clients that use this mode include:
-
-- IDE extensions (for example, Zed, Neovim, and Emacs)
-- Custom automation tools
-- ACP client libraries
+Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs.
 
 ### Options
 
-These options belong to the `grok agent` command and apply to every mode. Pass them before the mode name, for example `grok agent --model grok-build stdio`. The `stdio` subcommand itself takes no options.
+Agent options apply to every transport (`stdio`, `serve`, `headless`, `leader`). They go after `agent` and before the mode name. Mode-specific flags go after the mode (for example `serve --bind`).
 
-| Flag                       | Description                                                       |
-| -------------------------- | ---------------------------------------------------------------- |
-| `-m, --model <MODEL>`      | Set the model ID (for example, `grok-build`).                    |
-| `--always-approve`         | Auto-approve every tool execution. (Alias: `--yolo`.)            |
-| `--reauth`                 | Run authentication before starting the agent.                    |
-| `--agent-profile <PATH>`   | Load an agent profile from a file.                               |
+```bash
+grok agent --always-approve --model grok-build stdio
+grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `-m, --model <MODEL>` | Model ID (for example `grok-build`). |
+| `--always-approve` | Run without interactive tool-permission prompts. Alias: `--yolo`. |
+| `--reauth` | Authenticate before the agent starts. |
+| `--agent-profile <PATH>` | Load an agent profile from a file. |
+| `--leader` / `--no-leader` | Connect to a shared leader process, or force a local agent. |
 
 ---
 
 ## Server mode
 
-Run the agent as a WebSocket server for remote clients:
-
 ```bash
-grok agent serve --bind 127.0.0.1:2419 --secret <token>
+grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 ```
 
-Clients connect over WebSocket and authenticate with the secret token. If you omit `--secret`, the agent generates a token and prints it at startup; you can also supply one through the `GROK_AGENT_SECRET` environment variable. The agent persists across reconnections, so a client can disconnect and later resume in-flight work.
+Clients connect over WebSocket and authenticate with the secret token. If you omit `--secret`, the agent prints a generated token at startup, or set `GROK_AGENT_SECRET`. The process keeps state across client reconnects. Permissions match other entry points; see [Permissions and safety](22-permissions-and-safety.md).
 
 ---
 
 ## WebSocket relay
 
-To reach the agent over the internet instead of the local network, run a WebSocket relay server and have the agent connect to it:
+To reach the agent over the internet, connect the agent to a relay and point browsers at the same relay:
 
 ```bash
-grok agent headless --grok-ws-url wss://your-relay.example.com/ws
+grok agent --always-approve headless --grok-ws-url wss://your-relay.example.com/ws
 ```
-
-The agent connects out to your relay, and your web clients connect to the same relay. This is useful for building web UIs where browsers cannot spawn local processes.
 
 ---
 
@@ -75,7 +99,7 @@ Communication follows the JSON-RPC 2.0 format. A typical session lifecycle:
 2. **Create session** -- client sends `session/new` with working directory
 3. **Send prompts** -- client sends `session/prompt` with user messages
 4. **Receive updates** -- agent sends `session/update` notifications with streamed content
-5. **Handle permissions** -- agent may request tool execution approval
+5. **Handle permissions** -- agent may request tool execution approval (or allow or deny based on permission mode)
 
 ### Architecture
 
@@ -149,13 +173,23 @@ The agent sends push notifications to clients for real-time updates:
 
 ## Session `_meta` options
 
-The `session/new` request accepts these optional `_meta` fields:
+Optional fields on `session/new`:
 
-| Field                  | Description                                    |
-| ---------------------- | ---------------------------------------------- |
-| `rules`                | Extra rules appended to the system prompt.     |
-| `systemPromptOverride` | A replacement system prompt.                   |
-| `agentProfile`         | An agent profile, as a name or a JSON object.  |
+| Field | Description |
+| ----- | ----------- |
+| `rules` | Extra rules appended to the system prompt. |
+| `systemPromptOverride` | Replacement system prompt. |
+| `agentProfile` | Agent profile name or JSON object. |
+| `yoloMode` | When `true`, always-approve for this session. |
+| `autoMode` | When `true`, auto permission mode for this session. Superseded when always-approve is already on. |
+
+```json
+{
+  "cwd": "/path/to/project",
+  "mcpServers": [],
+  "_meta": { "yoloMode": true }
+}
+```
 
 ---
 
@@ -199,10 +233,9 @@ class GrokACPChat {
   constructor(private cwd = ".") {}
 
   async init() {
-    this.proc = spawn("grok", ["agent", "stdio"]);
+    this.proc = spawn("grok", ["agent", "--always-approve", "stdio"]);
     this.rl = readline.createInterface({ input: this.proc.stdout! });
 
-    // Initialize
     await this.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: {
@@ -211,10 +244,10 @@ class GrokACPChat {
       },
     });
 
-    // Create session
     const { sessionId } = await this.request("session/new", {
       cwd: this.cwd,
       mcpServers: [],
+      _meta: { yoloMode: true },
     });
     this.sessionId = sessionId;
     return this;

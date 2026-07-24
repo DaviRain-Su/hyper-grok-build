@@ -6,7 +6,7 @@ Grok connects to custom model endpoints for alternative providers, self-hosted m
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-build`. Default models require no configuration. Authenticate with `grok login` or an API key, then start a session.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-4.5`. Default models require no configuration. Authenticate with `grok login` or an API key, then start a session.
 
 List all available models:
 
@@ -48,7 +48,7 @@ Set a persistent default in `~/.grok/config.toml`:
 
 ```toml
 [models]
-default = "grok-build"
+default = "grok-4.5"
 ```
 
 ---
@@ -343,13 +343,13 @@ The `web_search` tool uses a separate model. Configure it with:
 
 ```toml
 [models]
-web_search = "grok-4.20-multi-agent"
+web_search = "grok-4.5"
 ```
 
 Or via environment variable:
 
 ```bash
-export GROK_WEB_SEARCH_MODEL="grok-4.20-multi-agent"
+export GROK_WEB_SEARCH_MODEL="grok-4.5"
 ```
 
 If you point web search at a custom model, you also need a `[model.*]` entry so Grok can reach it. Server-side ("backend") web search runs only when the model sets `supports_backend_search = true` (and the build enables backend search); it does not depend on `api_backend`:

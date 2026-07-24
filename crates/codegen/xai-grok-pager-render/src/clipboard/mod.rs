@@ -297,11 +297,10 @@ fn clipboard_write_with_route(text: &str, route: &ClipboardRoute) -> ClipboardWr
 /// Result of a clipboard write with toast info for the caller to display.
 #[derive(Debug)]
 pub struct CopyResult {
-    /// Full user-facing toast message (used when no backup file exists).
+    /// Full user-facing toast message.
     pub message: &'static str,
-    /// Leading phrase of `message` without the trailing guidance sentence.
-    /// [`CopyDelivery::toast_message`] appends the dynamic backup-file path
-    /// to this compact lead instead of the full message.
+    /// Compact lead of `message` (no trailing guidance). Used when the toast
+    /// names a backup path so lead + path fits a narrow terminal.
     pub message_lead: &'static str,
     /// Toast duration in ticks (30fps: 30 = ~1s, 120 = ~4s).
     pub ticks: u8,
@@ -371,10 +370,7 @@ impl ClipboardFeedback {
         }
     }
 
-    /// Leading phrase of [`Self::message`] (no trailing period). When a
-    /// backup file exists, the toast is just this lead plus the path — the
-    /// guidance tail is dropped because the file already is the recovery
-    /// path and the full sentence overflows narrow terminals.
+    /// Compact lead of [`Self::message`] (no trailing guidance sentence).
     fn message_lead(self) -> &'static str {
         match self {
             Self::Copied => "Copied!",
@@ -473,20 +469,21 @@ impl CopyDelivery {
         !matches!(self, Self::Failed { .. })
     }
 
-    /// User-facing toast line for this delivery. Every clipboard success with
-    /// a backup file names its path. The guidance tail is dropped in that
-    /// case — the file already is the recovery path, and lead + path + tail
-    /// overflows narrow terminals (the toast renderer would truncate it).
+    /// User-facing toast line for this delivery.
+    ///
+    /// Confirmed clipboard writes use the static message only (the backup
+    /// file is still written). Unverified OSC 52 and file-only fallbacks
+    /// name the backup path for recovery.
     pub fn toast_message(&self) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
         match self {
-            Self::Clipboard { result, file } => match file {
-                Some(path) => Cow::Owned(format!(
+            Self::Clipboard { result, file } => match (result.delivery, file) {
+                (ClipboardDelivery::Unverified, Some(path)) => Cow::Owned(format!(
                     "{} — saved to {}",
                     result.message_lead,
                     display_copy_path(path)
                 )),
-                None => Cow::Borrowed(result.message),
+                _ => Cow::Borrowed(result.message),
             },
             Self::File { path } => Cow::Owned(format!(
                 "Clipboard unreachable — wrote {}",
@@ -2275,23 +2272,22 @@ mod tests {
     // -- CopyDelivery toast composition ---------------------------------------
 
     #[test]
-    fn toast_message_always_names_backup_file() {
+    fn toast_message_names_backup_only_for_unverified_or_file_fallback() {
         let path = std::path::PathBuf::from("/tmp/grok-1/last-copy.txt");
 
-        // Plain success with a backup: names the path.
-        let plain = CopyDelivery::Clipboard {
+        let confirmed = CopyDelivery::Clipboard {
             result: ClipboardFeedback::Copied.to_result(),
             file: Some(path.clone()),
         };
-        assert_eq!(
-            plain.toast_message(),
-            "Copied! — saved to /tmp/grok-1/last-copy.txt"
-        );
-        assert_eq!(plain.toast_ticks(), 30);
+        assert_eq!(confirmed.toast_message(), "Copied!");
+        assert_eq!(confirmed.toast_ticks(), 30);
 
-        // Unverified OSC 52 with a backup: compact lead + path, guidance tail
-        // dropped (the file is the recovery path; the full sentence overflows
-        // narrow terminals).
+        let confirmed_osc = CopyDelivery::Clipboard {
+            result: ClipboardFeedback::CopiedOscRemote.to_result(),
+            file: Some(path.clone()),
+        };
+        assert_eq!(confirmed_osc.toast_message(), "Copied via OSC 52.");
+
         let unverified = CopyDelivery::Clipboard {
             result: ClipboardFeedback::UnverifiedOscRemote.to_result(),
             file: Some(path.clone()),
@@ -2302,17 +2298,15 @@ mod tests {
         );
         assert_eq!(unverified.toast_ticks(), 120);
 
-        // No backup file (write failed): falls back to the static message.
-        let no_file = CopyDelivery::Clipboard {
+        let unverified_no_file = CopyDelivery::Clipboard {
             result: ClipboardFeedback::UnverifiedOscRemote.to_result(),
             file: None,
         };
         assert_eq!(
-            no_file.toast_message(),
+            unverified_no_file.toast_message(),
             ClipboardFeedback::UnverifiedOscRemote.message()
         );
 
-        // File-only delivery keeps the "unreachable" wording.
         let file_only = CopyDelivery::File { path };
         assert_eq!(
             file_only.toast_message(),
@@ -2320,7 +2314,6 @@ mod tests {
         );
         assert_eq!(file_only.toast_ticks(), 120);
 
-        // Failed delivery surfaces the clipboard failure message.
         let failed = CopyDelivery::Failed {
             clipboard: ClipboardFeedback::Failed.to_result(),
             file_error: std::io::Error::other("nope"),
@@ -2329,8 +2322,7 @@ mod tests {
         assert_eq!(failed.toast_ticks(), 120);
     }
 
-    /// An UNVERIFIED clipboard delivery still counts as a clipboard delivery
-    /// (not a file fallback): the toast hedges but the backup path is named.
+    /// Unverified OSC still composes as clipboard delivery (not file fallback).
     #[test]
     fn unverified_clipboard_delivery_composes_as_clipboard() {
         let path = std::path::PathBuf::from("/tmp/grok-1/last-copy.txt");

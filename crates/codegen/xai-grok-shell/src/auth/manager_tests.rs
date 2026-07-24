@@ -729,25 +729,6 @@ fn record_permanent_failure(
     auth_manager.record_permanent_failure(key, reason.into());
 }
 
-/// Permanent-failure refresher that reports a specific `tried_key` (the
-/// credential it claims to have sent to the IdP), letting tests assert the
-/// verdict is keyed on the actually-tried credential.
-struct TriedKeyFailRefresher {
-    tried_key: String,
-    call_count: Arc<AtomicU32>,
-}
-
-#[async_trait::async_trait]
-impl TokenRefresher for TriedKeyFailRefresher {
-    async fn refresh(&self, _reason: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-        crate::auth::refresh::RefreshOutcome::permanent(
-            crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
-            Some(self.tried_key.clone()),
-        )
-    }
-}
-
 /// With `inner == None` but a dead refresh-token on disk, the refresher still
 /// exchanges that disk RT. The verdict must be keyed on the
 /// credential actually tried (the disk RT), so repeated reactive refreshes
@@ -791,10 +772,10 @@ async fn storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token() {
 }
 
 /// Record/check consistency: in-mem and disk are DIFFERENT stale credentials.
-/// The refresher resolves & sends the DISK refresh token, so the verdict must be
-/// keyed on THAT — proven by swapping the in-mem bearer afterward and confirming
-/// the verdict still caps the storm (a verdict mis-keyed to the in-mem bearer
-/// would read absent after the swap and re-hit the IdP). The `tried_key == None`
+/// The refresher reports `tried_key = disk`; with a retain-path permanent
+/// (`ClientRejected`) credentials stay, so the verdict stays scoped to disk.
+/// Swapping the in-mem bearer must not re-open the IdP (a verdict mis-keyed to
+/// the in-mem bearer would read absent after the swap). The `tried_key == None`
 /// fallback (external-binary flow → `attempted_verdict_key`) is covered by
 /// `storm_cap_engages_with_empty_inner_and_dead_disk_refresh_token`.
 #[tokio::test]
@@ -813,7 +794,7 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
         ..GrokAuth::test_default()
     });
     // disk: a DIFFERENT stale credential K_disk (expired, with RT) — what the
-    // refresher resolves first.
+    // refresher claims to have tried.
     let disk = GrokAuth {
         key: "disk-stale".into(),
         auth_mode: AuthMode::Oidc,
@@ -826,7 +807,23 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
     let calls = Arc::new(AtomicU32::new(0));
-    mgr.set_refresher(Arc::new(TriedKeyFailRefresher {
+    struct TriedKeyClientRejected {
+        tried_key: String,
+        call_count: Arc<AtomicU32>,
+    }
+    #[async_trait::async_trait]
+    impl TokenRefresher for TriedKeyClientRejected {
+        async fn refresh(&self, _reason: RefreshReason) -> crate::auth::refresh::RefreshOutcome {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            // ClientRejected retains credentials (unlike RefreshTokenRejected),
+            // so the disk-scoped verdict remains the storm cap after mem swap.
+            crate::auth::refresh::RefreshOutcome::permanent(
+                crate::auth::error::RefreshTokenFailedReason::ClientRejected,
+                Some(self.tried_key.clone()),
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(TriedKeyClientRejected {
         tried_key: "disk-stale".into(),
         call_count: calls.clone(),
     }));
@@ -838,6 +835,10 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
         calls.load(Ordering::SeqCst),
         1,
         "first call hits the IdP once"
+    );
+    assert!(
+        mgr.read_disk_auth().is_some(),
+        "ClientRejected must retain the disk credential the verdict is keyed on",
     );
 
     // Swap the in-mem bearer to yet another stale key: a verdict mis-keyed to
@@ -1197,8 +1198,8 @@ async fn proactive_refresh_backs_off_on_permanent_failure() {
          failure is recorded, got {after_failure} calls"
     );
     assert!(
-        mgr.permanent_failure().is_some(),
-        "permanent failure must be cached after invalid_grant",
+        mgr.current_or_expired().is_none(),
+        "permanent refresh failure must clear credentials",
     );
     // The proactive (background) loop must never emit the manual_auth KPI:
     // a background failure is not a user-facing forced re-login.
@@ -1322,10 +1323,10 @@ async fn reactive_401_recovery_produces_fresh_token_end_to_end() {
 // refresh_chain permanent-failure short-circuit via recovery is tested
 // in recovery::tests::refresh_authority_short_circuits_on_cached_permanent_failure.
 
-/// Different disk RT with expired AT: PermanentFailure is recorded
-/// (not demoted to transient), stopping the retry loop.
+/// Different disk RT with expired AT: demote to transient so a sibling's
+/// still-usable RT is not wiped by permanent clear.
 #[tokio::test]
-async fn refresh_chain_records_permanent_failure_when_disk_rt_differs_but_at_expired() {
+async fn refresh_chain_demotes_when_disk_rt_differs_even_if_at_expired() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let scope = cfg.auth_scope();
@@ -1355,7 +1356,7 @@ async fn refresh_chain_records_permanent_failure_when_disk_rt_differs_but_at_exp
         ..GrokAuth::test_default()
     };
     let mut store = AuthStore::new();
-    store.insert(scope, sibling);
+    store.insert(scope, sibling.clone());
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
     struct FailingRefresher;
@@ -1374,28 +1375,254 @@ async fn refresh_chain_records_permanent_failure_when_disk_rt_differs_but_at_exp
     mgr.set_refresher(Arc::new(FailingRefresher));
 
     let err = mgr.auth().await.unwrap_err();
-    // An expired disk AT means the sibling is dead too — the failure is
-    // permanent (not demoted to transient). Credentials are retained; the
-    // scoped verdict is cached and stops the retry storm.
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "disk RT mismatch must demote even when sibling AT is expired, got: {err:?}",
+    );
+    assert_eq!(
+        mgr.read_disk_auth().and_then(|a| a.refresh_token),
+        Some("rt-new".into()),
+        "sibling RT on disk must not be wiped when AT is only expired",
+    );
+    assert!(
+        mgr.permanent_failure().is_none(),
+        "demotion must not record a sticky permanent verdict",
+    );
+}
+
+/// Disk-first invalid_grant must not wipe an untried in-memory successor RT
+/// (mem-ahead-of-disk after a failed persist of a successful rotation).
+#[tokio::test]
+async fn permanent_rtr_clears_only_the_tried_side_when_rts_diverge() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    // Mem: successor RT after a successful refresh whose disk write failed.
+    mgr.hot_swap(GrokAuth {
+        key: "mem-successor".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-new".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    });
+    // Disk: revoked predecessor RT (disk-first resolve will try this).
+    let disk = GrokAuth {
+        key: "disk-predecessor".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    let mut store = AuthStore::new();
+    store.insert(scope, disk);
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    let calls = Arc::new(AtomicU32::new(0));
+    struct TriedDiskRtr(Arc<AtomicU32>);
+    #[async_trait::async_trait]
+    impl TokenRefresher for TriedDiskRtr {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::auth::refresh::RefreshOutcome::permanent(
+                crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+                Some("disk-predecessor".into()),
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(TriedDiskRtr(calls.clone())));
+
+    let err = mgr
+        .refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, AuthError::Refresh(RefreshTokenError::Permanent(_))),
-        "must surface a permanent failure when disk AT is expired, got: {err:?}",
+        "must surface permanent for the tried disk RT, got: {err:?}",
     );
     assert!(
-        mgr.permanent_failure().is_some(),
-        "verdict must be cached (scoped to the retained credential)",
+        mgr.read_disk_auth().is_none(),
+        "rejected disk predecessor must be cleared",
     );
-    // No-clear invariant: a refresh failure must NOT delete auth.json (a future
-    // regression that re-adds disk-clear-on-invalid_grant would fail here).
+    assert_eq!(
+        mgr.current_or_expired().and_then(|a| a.refresh_token),
+        Some("rt-new".into()),
+        "untried in-memory successor RT must not be wiped",
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// Retain-path permanent (ClientRejected) still graces a soft-expired wire-valid AT.
+#[tokio::test]
+async fn client_rejected_graces_soft_expired_access_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+
+    // Inside the early-invalidation buffer but still hard-valid.
+    mgr.hot_swap(GrokAuth {
+        key: "buffered-at".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt".into()),
+        expires_at: Some(Utc::now() + Duration::seconds(30)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    });
+
+    struct AlwaysClientRejected;
+    #[async_trait::async_trait]
+    impl TokenRefresher for AlwaysClientRejected {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            crate::auth::refresh::RefreshOutcome::permanent(
+                crate::auth::error::RefreshTokenFailedReason::ClientRejected,
+                Some("buffered-at".into()),
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(AlwaysClientRejected));
+
+    let auth = mgr
+        .auth()
+        .await
+        .expect("retain-path permanent must grace wire-valid AT");
+    assert_eq!(auth.key, "buffered-at");
+    assert!(
+        mgr.current_or_expired().is_some(),
+        "ClientRejected must retain credentials",
+    );
+}
+
+/// Escalated permanent `Other` retains AT+RT (only RefreshTokenRejected discards).
+#[tokio::test]
+async fn permanent_other_retains_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+
+    let session = GrokAuth {
+        key: "live-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-still-valid".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    mgr.hot_swap(session.clone());
+    // Persist so disk clear would be observable.
+    let mut store = AuthStore::new();
+    store.insert(GrokComConfig::default().auth_scope(), session);
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    struct OtherPermanent;
+    #[async_trait::async_trait]
+    impl crate::auth::refresh::TokenRefresher for OtherPermanent {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            crate::auth::refresh::RefreshOutcome::permanent(
+                crate::auth::error::RefreshTokenFailedReason::Other,
+                Some("live-key".into()),
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(OtherPermanent));
+
+    let err = mgr.auth().await.unwrap_err();
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Permanent(_))),
+        "escalated Other must still surface permanent, got: {err:?}",
+    );
     assert!(
         mgr.read_disk_auth().is_some(),
-        "invalid_grant must not delete auth.json (no auto-clear)",
+        "Other must not clear disk credentials",
     );
-    // Second attempt short-circuits on the cached verdict — no extra IdP call.
-    assert!(matches!(
-        mgr.auth().await.unwrap_err(),
-        AuthError::Refresh(RefreshTokenError::Permanent(_))
-    ));
+    assert_eq!(
+        mgr.current_or_expired().and_then(|a| a.refresh_token),
+        Some("rt-still-valid".into()),
+        "Other must retain in-memory RT",
+    );
+}
+
+/// Sticky permanent must not block a different credential key (sibling RT).
+#[tokio::test]
+async fn sticky_permanent_allows_refresh_when_attempted_key_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    mgr.hot_swap(GrokAuth {
+        key: "dead-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-dead".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    record_permanent_failure(
+        &mgr,
+        crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+    );
+    assert!(mgr.permanent_failure().is_some());
+
+    // Sibling writes a different key + RT (AT hard-expired, RT may still work).
+    let sibling = GrokAuth {
+        key: "sibling-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-sibling".into()),
+        expires_at: Some(Utc::now() - Duration::minutes(30)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    let mut store = AuthStore::new();
+    store.insert(scope, sibling.clone());
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+    // Load sibling into memory without clearing sticky via wire-valid hot_swap.
+    mgr.with_inner_write(|inner| *inner = Some(sibling));
+
+    assert!(
+        mgr.permanent_failure().is_none(),
+        "sticky verdict must not apply to a different credential key",
+    );
+
+    let calls = Arc::new(AtomicU32::new(0));
+    struct CountingOk(Arc<AtomicU32>);
+    #[async_trait::async_trait]
+    impl crate::auth::refresh::TokenRefresher for CountingOk {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::auth::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
+                key: "fresh-from-sibling-rt".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("rt-sibling".into()),
+                expires_at: Some(Utc::now() + Duration::hours(1)),
+                ..GrokAuth::test_default()
+            }))
+        }
+    }
+    mgr.set_refresher(Arc::new(CountingOk(calls.clone())));
+
+    let auth = mgr
+        .auth()
+        .await
+        .expect("sibling key must reach refresh_chain");
+    assert_eq!(auth.key, "fresh-from-sibling-rt");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 /// Different disk RT with valid AT: adopt the sibling's token directly.
@@ -1514,10 +1741,15 @@ async fn permanent_failure_reads_absent_after_clear_so_auth_reports_not_logged_i
         crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
     );
     mgr.clear_in_memory();
+    // clear_in_memory drops the credential but keeps a sticky permanent
+    // verdict so a just-revoked RT is not re-tried until login.
     let err = mgr.auth().await.unwrap_err();
     assert!(
-        matches!(err, AuthError::NotLoggedIn),
-        "auth() after hot_swap_clear() must report NotLoggedIn, got: {err:?}",
+        matches!(
+            err,
+            AuthError::Refresh(RefreshTokenError::Permanent(_)) | AuthError::NotLoggedIn
+        ),
+        "auth() after clear_in_memory must not re-hit a dead RT, got: {err:?}",
     );
 }
 
@@ -2629,9 +2861,10 @@ async fn update_recovers_from_whitespace_only_auth_json() {
 
 // -- sibling_has_different_refresh_token ----------------------------------
 
-/// Expired disk AT with different RT is not a live sibling.
+/// Expired disk AT with different RT is still treated as a sibling RT
+/// (may still be refreshable; must not be wiped by permanent clear).
 #[tokio::test]
-async fn sibling_different_rt_with_expired_at_is_not_treated_as_live() {
+async fn sibling_different_rt_with_expired_at_is_still_sibling() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = GrokComConfig::default();
     let mgr = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
@@ -2659,8 +2892,8 @@ async fn sibling_different_rt_with_expired_at_is_not_treated_as_live() {
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
     assert!(
-        !mgr.sibling_has_different_refresh_token(),
-        "expired disk token must not be treated as a live sibling"
+        mgr.sibling_has_different_refresh_token(),
+        "different disk RT must demote even when the sibling AT is expired"
     );
 }
 

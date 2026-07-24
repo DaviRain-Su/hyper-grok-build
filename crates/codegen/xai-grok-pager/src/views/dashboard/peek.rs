@@ -870,12 +870,9 @@ pub fn render_peek_panel(
         image_preview: false,
         ..PromptStyle::default()
     };
-    // Stream the interim transcript into the reply box (and hide the caret)
-    // while dictating, so voice on the dashboard is visible even with a row's
-    // peek panel open — it stands in for the dispatch box's voice overlay.
+    // Interim STT into the reply box so voice stays visible with a peek open.
     let voice_overlay = (voice_listening || voice_interim.is_some()).then_some(
         crate::views::prompt_widget::VoicePromptOverlay {
-            listening: voice_listening,
             interim: voice_interim,
             color: theme.accent_running,
         },

@@ -129,7 +129,7 @@ impl SessionActor {
                 if status == WorkflowRunStatus::Active {
                     return format!("Run '{name}' is already running.");
                 }
-                if !status.is_paused() {
+                if !status.is_resumable() {
                     return format!(
                         "Run '{name}' cannot be resumed (status: {}). Start a new run instead.",
                         status.as_str()
@@ -305,7 +305,7 @@ fn narrow_run_matches(mut all: Vec<RunMatch>, selector: &str, op: &str) -> Vec<R
             .iter()
             .filter(|(_, status, ..)| match op {
                 "pause" => *status == WorkflowRunStatus::Active,
-                "resume" => status.is_paused(),
+                "resume" => status.is_resumable(),
                 "stop" => !status.is_terminal(),
                 _ => true,
             })
@@ -354,6 +354,17 @@ mod run_match_tests {
         let all = vec![
             run("wf_1", "a", WorkflowRunStatus::Complete),
             run("wf_2", "b", WorkflowRunStatus::UserPaused),
+        ];
+        let picked = narrow_run_matches(all, "", "resume");
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].2, "b");
+    }
+
+    #[test]
+    fn failed_run_is_applicable_for_resume_narrowing() {
+        let all = vec![
+            run("wf_1", "a", WorkflowRunStatus::Complete),
+            run("wf_2", "b", WorkflowRunStatus::Failed),
         ];
         let picked = narrow_run_matches(all, "", "resume");
         assert_eq!(picked.len(), 1);

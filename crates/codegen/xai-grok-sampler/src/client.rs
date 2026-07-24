@@ -1058,6 +1058,9 @@ impl SamplingClient {
     /// POST with default headers. A live resolver is evaluated exactly once;
     /// the returned prefix is carried to 401 attribution so logging never
     /// performs another potentially blocking credential lookup.
+    /// When a bearer_resolver is wired it is the sole auth source: a missing
+    /// live bearer strips default Authorization / x-api-key so a hard-expired
+    /// seed key cannot ride on the wire.
     fn post(&self, url: impl reqwest::IntoUrl) -> (reqwest::RequestBuilder, Option<String>) {
         let mut headers = self.default_headers.clone();
         if let Some(resolver) = &self.bearer_resolver {
@@ -1120,6 +1123,24 @@ impl SamplingClient {
         // Authorization and x-api-key values are ASCII, so this byte boundary
         // is also a UTF-8 character boundary.
         bearer[..crate::attribution::SENT_BEARER_PREFIX_LEN.min(bearer.len())].to_string()
+    }
+
+    /// Bearer prefix for 401 attribution. When a resolver is wired it is
+    /// authoritative (including `None` ⇒ nothing was sent). Without a resolver,
+    /// fall back to construction-time default headers.
+    ///
+    /// Prefer the prefix returned by [`Self::post`] for request-path
+    /// attribution so the live credential is resolved only once.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn current_sent_bearer_prefix(&self) -> Option<String> {
+        if self.bearer_resolver.is_some() {
+            return self
+                .bearer_resolver
+                .as_ref()
+                .and_then(|r| r.current_bearer())
+                .map(|s| Self::truncate_bearer_prefix(&s));
+        }
+        self.extract_sent_bearer()
     }
 
     /// Extract the construction-time bearer, truncated to prefix length.
@@ -3231,6 +3252,64 @@ mod tests {
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
             Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+        );
+    }
+
+    /// When a bearer_resolver is wired but returns `None`, attribution must
+    /// report no sent bearer (not the construction-time default header seed).
+    #[test]
+    fn bearer_resolver_none_attribution_ignores_default_headers() {
+        #[derive(Debug)]
+        struct EmptyResolver;
+        impl crate::config::BearerResolver for EmptyResolver {
+            fn current_bearer(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let cfg = SamplerConfig {
+            api_key: Some("stale-seed-token".to_string()),
+            api_backend: ApiBackend::Responses,
+            bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert_eq!(
+            client.current_sent_bearer_prefix(),
+            None,
+            "resolver None must not attribute a stripped default seed"
+        );
+    }
+
+    /// When a bearer_resolver is wired but returns `None` (hard-expired
+    /// session with no live AT), default Authorization / x-api-key must be
+    /// stripped so a stale seed key cannot ride the wire.
+    #[test]
+    fn bearer_resolver_none_strips_default_authorization() {
+        #[derive(Debug)]
+        struct EmptyResolver;
+        impl crate::config::BearerResolver for EmptyResolver {
+            fn current_bearer(&self) -> Option<String> {
+                None
+            }
+        }
+
+        let cfg = SamplerConfig {
+            api_key: Some("stale-token".to_string()),
+            api_backend: ApiBackend::Responses,
+            bearer_resolver: Some(std::sync::Arc::new(EmptyResolver)),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let (builder, sent_bearer_prefix) = client.post("https://example.test/v1/responses");
+        let request = builder.body("").build().expect("request should build");
+        assert!(
+            request.headers().get(AUTHORIZATION).is_none(),
+            "stale default Authorization must not be sent when resolver is empty"
+        );
+        assert!(
+            sent_bearer_prefix.is_none(),
+            "resolver None must not attribute a stripped default seed"
         );
     }
 

@@ -4,13 +4,20 @@ use super::session::lifecycle::dispatch_new_session;
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView, VoiceState, VoiceTarget};
 
-/// Tear down voice when a prompt box is **submitted** (Enter / send): release
-/// the mic and forget the session entirely (no trailing final) so a late
-/// in-flight final can't refill the box the user just sent, and a queued
-/// cold-start can't open the mic afterwards. Used by the agent prompt and every
-/// dashboard submit path (dispatch / peek reply / new-agent / slash).
-pub(super) fn voice_stop_on_submit(app: &mut AppView) {
+/// Promote live interim into the bound prompt, then hard-reset (no trailing
+/// final). Returns the fragment for callers that captured text earlier.
+pub(super) fn voice_stop_on_submit(app: &mut AppView) -> Option<String> {
+    let interim = crate::voice::commit_interim_into_prompt(app);
     app.voice_reset();
+    interim
+}
+
+/// Merge interim into a payload captured before [`voice_stop_on_submit`].
+pub(super) fn merge_prompt_with_voice_interim(existing: String, interim: Option<String>) -> String {
+    match interim {
+        Some(interim) => crate::voice::combine_prompt_with_voice_text(&existing, &interim),
+        None => existing,
+    }
 }
 
 /// The prompt box dictation should target for the current surface: a top-level

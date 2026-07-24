@@ -6,6 +6,8 @@ use sha2::Digest as _;
 pub const MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_JOURNAL_ENTRIES: usize = crate::MAX_HOST_CALLS as usize;
 
+pub(crate) const HOST_ERROR_KEY: &str = "__xai_workflow_host_error";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JournalEntry {
     pub seq: u64,
@@ -46,6 +48,7 @@ pub struct Journal {
     entries: Vec<JournalEntry>,
     path: Option<PathBuf>,
     bytes: u64,
+    last_line_start: Option<u64>,
 }
 
 impl Journal {
@@ -54,6 +57,7 @@ impl Journal {
             entries: Vec::new(),
             path,
             bytes: 0,
+            last_line_start: None,
         }
     }
 
@@ -73,6 +77,7 @@ impl Journal {
         let mut offset = 0usize;
         let mut line_number = 0usize;
         let mut bytes = content.len() as u64;
+        let mut last_line_start = None;
         while offset < content.len() {
             line_number += 1;
             let Some(relative_newline) = content[offset..].iter().position(|byte| *byte == b'\n')
@@ -93,6 +98,7 @@ impl Journal {
                         }
                         validate_sequence(&entries, &entry)?;
                         entries.push(entry);
+                        last_line_start = Some(offset as u64);
                         terminate_line(&path)?;
                         bytes = bytes.saturating_add(1);
                     }
@@ -110,6 +116,7 @@ impl Journal {
             };
             let end = offset + relative_newline;
             let line = &content[offset..end];
+            let line_start = offset as u64;
             offset = end + 1;
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
@@ -128,11 +135,13 @@ impl Journal {
             }
             validate_sequence(&entries, &entry)?;
             entries.push(entry);
+            last_line_start = Some(line_start);
         }
         Ok(Self {
             entries,
             path: Some(path),
             bytes,
+            last_line_start,
         })
     }
 
@@ -209,9 +218,37 @@ impl Journal {
         if let Some(path) = &self.path {
             append_line(path, &line)?;
         }
+        self.last_line_start = Some(self.bytes);
         self.bytes = self.bytes.saturating_add(line.len() as u64);
         self.entries.push(entry);
         Ok(())
+    }
+
+    pub fn prune_trailing_host_error(
+        &mut self,
+        failure_detail: &str,
+    ) -> Result<bool, JournalError> {
+        let Some(last) = self.entries.last() else {
+            return Ok(false);
+        };
+        let Some(message) = last.result.get(HOST_ERROR_KEY).and_then(|v| v.as_str()) else {
+            return Ok(false);
+        };
+        if message.is_empty() || !failure_detail.contains(message) {
+            return Ok(false);
+        }
+        let Some(new_len) = self.last_line_start else {
+            return Err(JournalError::Io(std::io::Error::other(
+                "journal cannot locate the trailing entry's byte offset",
+            )));
+        };
+        if let Some(path) = &self.path {
+            truncate_tail(path, new_len)?;
+        }
+        self.entries.pop();
+        self.bytes = new_len;
+        self.last_line_start = None;
+        Ok(true)
     }
 }
 
@@ -487,6 +524,151 @@ mod tests {
             Err(JournalError::Io(_))
         ));
         assert!(journal.is_empty());
+    }
+
+    #[test]
+    fn prune_removes_trailing_host_error_sentinel_and_truncates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .record(
+                0,
+                "spawn_agent",
+                "aaaa".into(),
+                serde_json::json!({"ok": true}),
+            )
+            .unwrap();
+        journal
+            .record(
+                1,
+                "write_scratch_file",
+                "bbbb".into(),
+                serde_json::json!({ HOST_ERROR_KEY: "scratch byte quota exceeded" }),
+            )
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before.lines().count(), 2);
+
+        let mut loaded = Journal::load(path.clone()).unwrap();
+        assert!(
+            loaded
+                .prune_trailing_host_error("Runtime error: scratch byte quota exceeded")
+                .unwrap()
+        );
+        assert_eq!(loaded.len(), 1);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after.lines().count(), 1);
+        assert!(!after.contains(HOST_ERROR_KEY));
+        assert!(before.starts_with(&after), "prune must only truncate");
+
+        loaded
+            .record(
+                1,
+                "write_scratch_file",
+                "bbbb".into(),
+                serde_json::json!("ok"),
+            )
+            .unwrap();
+        let reloaded = Journal::load(path).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(
+            reloaded.replay(1, "write_scratch_file", "bbbb").unwrap(),
+            Some(serde_json::json!("ok"))
+        );
+    }
+
+    #[test]
+    fn prune_after_in_memory_record_truncates_and_allows_reappend() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .record(
+                0,
+                "read_scratch_file",
+                "cccc".into(),
+                serde_json::json!({ HOST_ERROR_KEY: "boom" }),
+            )
+            .unwrap();
+        assert!(journal.prune_trailing_host_error("boom").unwrap());
+        assert!(journal.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        journal
+            .record(
+                0,
+                "read_scratch_file",
+                "cccc".into(),
+                serde_json::json!("live"),
+            )
+            .unwrap();
+        assert_eq!(Journal::load(path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_last_entry_is_a_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .record(
+                0,
+                "spawn_agent",
+                "aaaa".into(),
+                serde_json::json!({ HOST_ERROR_KEY: "caught mid-journal error" }),
+            )
+            .unwrap();
+        journal
+            .record(
+                1,
+                "spawn_agent",
+                "bbbb".into(),
+                serde_json::json!({"ok": true}),
+            )
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !journal
+                .prune_trailing_host_error("caught mid-journal error")
+                .unwrap()
+        );
+        assert_eq!(journal.len(), 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_trailing_sentinel_was_caught_and_run_died_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::new(Some(path.clone()));
+        journal
+            .record(
+                0,
+                "read_scratch_file",
+                "aaaa".into(),
+                serde_json::json!({ HOST_ERROR_KEY: "scratch file not found: data.txt" }),
+            )
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !journal
+                .prune_trailing_host_error("Runtime error: array index out of bounds (line 9)")
+                .unwrap(),
+            "a caught trailing sentinel must keep replaying when the run failed elsewhere"
+        );
+        assert_eq!(journal.len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn prune_is_a_noop_on_empty_journal() {
+        let mut journal = Journal::new(None);
+        assert!(!journal.prune_trailing_host_error("boom").unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Journal::load(dir.path().join("missing.jsonl")).unwrap();
+        assert!(!loaded.prune_trailing_host_error("boom").unwrap());
     }
 
     #[test]

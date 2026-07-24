@@ -2626,6 +2626,76 @@ fn filter_inheritance_except_all_servers_gives_empty() {
     let result = result.expect("Except should return Some");
     assert_eq!(result.server_names().count(), 0);
 }
+#[test]
+fn resolve_inherited_pool_all_passes_parent_pool() {
+    let pool = make_pool(&["github", "atlassian"]);
+    let result = super::resolve_inherited_mcp_pool(
+            Some(pool),
+            &xai_grok_agent::config::McpInheritance::All,
+        )
+        .expect("All should return Some");
+    assert_eq!(pool_names(&result), vec!["atlassian", "github"]);
+}
+#[test]
+fn resolve_inherited_pool_none_returns_none() {
+    let pool = make_pool(&["github", "atlassian"]);
+    let result = super::resolve_inherited_mcp_pool(
+        Some(pool),
+        &xai_grok_agent::config::McpInheritance::None,
+    );
+    assert!(result.is_none());
+}
+#[test]
+fn resolve_inherited_pool_named_filters() {
+    let pool = make_pool(&["github", "atlassian", "slack"]);
+    let result = super::resolve_inherited_mcp_pool(
+            Some(pool),
+            &xai_grok_agent::config::McpInheritance::Named(vec!["atlassian".into()]),
+        )
+        .expect("Named should return Some");
+    assert_eq!(pool_names(&result), vec!["atlassian"]);
+}
+#[test]
+fn resolve_inherited_pool_missing_parent_returns_none() {
+    let result = super::resolve_inherited_mcp_pool(
+        None,
+        &xai_grok_agent::config::McpInheritance::All,
+    );
+    assert!(result.is_none());
+}
+/// Plugin agents must still inherit the parent pool under default
+/// `mcpInheritance: all`. The product rule is: plugins cannot *declare*
+/// mcpServers, but they do inherit already-connected parent servers.
+#[test]
+fn plugin_agents_inherit_parent_mcp_pool_by_default() {
+    assert!(
+            !super::agent_owned_mcp_servers_allowed(true),
+            "plugin agents must not declare agent-owned mcpServers"
+        );
+    assert!(
+            super::agent_owned_mcp_servers_allowed(false),
+            "non-plugin agents may declare agent-owned mcpServers"
+        );
+    let pool = make_pool(&["atlassian", "github"]);
+    let inherited = super::resolve_inherited_mcp_pool(
+            Some(pool),
+            &xai_grok_agent::config::McpInheritance::All,
+        )
+        .expect("plugin children inherit parent pool with mcpInheritance=all");
+    assert_eq!(pool_names(&inherited), vec!["atlassian", "github"]);
+}
+#[test]
+fn plugin_agents_can_opt_out_via_mcp_inheritance_none() {
+    let pool = make_pool(&["atlassian"]);
+    let inherited = super::resolve_inherited_mcp_pool(
+        Some(pool),
+        &xai_grok_agent::config::McpInheritance::None,
+    );
+    assert!(
+            inherited.is_none(),
+            "mcpInheritance: none must drop the parent pool for every source"
+        );
+}
 fn make_test_skill(
     name: &str,
     plugin: Option<&str>,

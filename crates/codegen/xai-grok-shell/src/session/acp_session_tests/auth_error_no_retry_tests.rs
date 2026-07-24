@@ -338,7 +338,7 @@ async fn pre_flight_refreshes_hard_expired_session_token() {
 }
 
 /// Hard-expired + failed refresh: do not fall through to JWT/config.toml;
-/// leave credentials unchanged so 401 recovery remains the safety net.
+/// strip the chat-state seed so default headers cannot carry a dead AT.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough() {
@@ -389,8 +389,8 @@ async fn pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough() {
                     .await
                     .api_key
                     .as_deref(),
-                Some("initial-test-key"),
-                "failed hard-expired pre-flight must not invent a JWT/config bearer"
+                None,
+                "hard-expired pre-flight failure must strip the chat-state seed"
             );
             assert!(
                 !am.has_usable_token(),
@@ -451,6 +451,71 @@ async fn pre_flight_refresh_skips_open_platform_endpoint() {
                     .as_deref(),
                 Some("ollama-platform-key"),
                 "stamped platform key must not be overwritten by the session token"
+            );
+        })
+        .await;
+}
+
+/// Soft-expired (early-invalidation buffer) + transient fail: retain the seed
+/// so a still-accepted wire AT can continue until 401 recovery.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn pre_flight_soft_expired_transient_fail_retains_seed() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> = Arc::new({
+                struct AlwaysFail(Arc<std::sync::atomic::AtomicU32>);
+                #[async_trait::async_trait]
+                impl crate::auth::refresh::TokenRefresher for AlwaysFail {
+                    async fn refresh(
+                        &self,
+                        _: crate::auth::refresh::RefreshReason,
+                    ) -> crate::auth::refresh::RefreshOutcome {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                        crate::auth::refresh::RefreshOutcome::transient("refresh failed")
+                    }
+                }
+                AlwaysFail(call_count.clone())
+            });
+            let dir = tempfile::tempdir().expect("tempdir");
+            let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+            // Inside the early-invalidation buffer but still hard-valid.
+            am.hot_swap(GrokAuth {
+                key: "buffered-test-key".into(),
+                auth_mode: AuthMode::Oidc,
+                refresh_token: Some("rt".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
+                ..GrokAuth::test_default()
+            });
+            am.set_refresher(refresher);
+            let (actor, _rx) = make_actor_with_auth_and_credentials(
+                Some(am.clone()),
+                xai_chat_state::AuthType::SessionToken,
+                "buffered-test-key".to_string(),
+            )
+            .await;
+
+            actor.refresh_token_if_expired().await;
+
+            assert!(
+                call_count.load(Ordering::SeqCst) >= 1,
+                "soft-expired pre-flight must still attempt refresh"
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_credentials()
+                    .await
+                    .api_key
+                    .as_deref(),
+                Some("buffered-test-key"),
+                "buffer-window soft-expired + transient fail must retain seed"
+            );
+            assert!(
+                am.has_usable_token(),
+                "token inside hard-expiry buffer remains usable"
             );
         })
         .await;

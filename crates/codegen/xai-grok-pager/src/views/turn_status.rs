@@ -74,20 +74,22 @@ pub struct TurnStatusOutput {
     pub cancel_button: Option<Rect>,
     /// Hit area for the background-demote button, if rendered.
     pub bg_button: Option<Rect>,
+    /// Hit area for the still-running watcher cue (click opens the tasks
+    /// pane). `None` on keyboard-only hosts.
+    pub watching_cue: Option<Rect>,
 }
 
-/// Mouse-clickable affordances on the turn-status row — the `[stop]` cancel and
-/// `[↓]` send-to-background buttons — with their current hover state. Passing
-/// `Some(_)` to [`render_turn_status`] renders the buttons; passing `None`
-/// marks a keyboard-only host (minimal mode has no mouse capture) and suppresses
-/// both — that host cancels the turn via `Ctrl+C` and sends to background via
-/// `Ctrl+B` instead.
+/// Hover state for the turn-status row's mouse affordances (`[stop]`, `[↓]`,
+/// the still-running watcher cue). `Some(_)` renders them; `None` marks a
+/// keyboard-only host (minimal mode — no mouse capture) and suppresses all.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MouseButtons {
     /// Whether the mouse is over the `[stop]` cancel button.
     pub cancel_hovered: bool,
     /// Whether the mouse is over the `[↓]` send-to-background button.
     pub bg_hovered: bool,
+    /// Whether the mouse is over the still-running watcher cue.
+    pub watching_hovered: bool,
 }
 
 /// Counts of idle-surviving "watcher" work — background jobs that can wake
@@ -191,49 +193,64 @@ pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
     )
 }
 
+/// Inputs to [`render_turn_status`] — one frame's worth of turn state.
+#[derive(Debug)]
+pub struct TurnStatusArgs<'a> {
+    pub state: &'a AgentState,
+    pub activity: &'a Option<TurnActivity>,
+    pub turn_elapsed: Option<Duration>,
+    pub activity_started_at: Option<Instant>,
+    pub tick: u64,
+    pub drain_blocked: bool,
+    /// Mouse affordances + hover state; `None` for keyboard-only hosts.
+    pub buttons: Option<MouseButtons>,
+    pub has_running_execute: bool,
+    /// Context-window tokens used, shown as `⇣Nk`.
+    pub total_tokens: Option<u64>,
+    pub mcp_init_progress: Option<&'a McpInitProgress>,
+    pub is_bash_turn: bool,
+    pub is_pending_user_input: bool,
+    pub goal_verifying: bool,
+    pub watchers: Watchers,
+    /// Parked on a sendable wait (`AgentView::renders_parked`): suppress the
+    /// running-turn chrome and render only the still-running cue.
+    pub parked: bool,
+    /// Transparent right-side background so the row blends with the
+    /// terminal's own background (minimal mode).
+    pub flat_background: bool,
+    pub held_queue: usize,
+    pub held_queue_top_sendable: bool,
+}
+
 /// Render the turn status line into the given area.
 ///
 /// The caller is responsible for only allocating a 1-row area when
 /// `should_show()` returns true (and 0 rows when false).
-///
-/// # Parameters
-/// - `buttons`: `Some(MouseButtons { .. })` to render the mouse-clickable
-///   `[stop]` / `[↓]` buttons with their hover state; `None` for a keyboard-only
-///   host (minimal mode — no mouse capture), which suppresses both buttons.
-/// - `total_tokens`: Total tokens used (context window usage), shown as `⇣Nk`.
-/// - `parked`: the turn is parked on a sendable wait and renders the stopped
-///   look (`AgentView::renders_parked`). The running-turn chrome is suppressed;
-///   only the "… still running" cue renders (the parked turn is by definition
-///   waiting on background work, so the cue explains the idle-looking chrome).
-/// - `flat_background`: when `true`, right-side timer/buttons use a transparent
-///   (`Color::Reset`) background instead of `theme.bg_base`, so the row blends
-///   with the terminal's own background (minimal mode).
-///
-/// # Returns
-/// A [`TurnStatusOutput`] containing the cancel button hit area (if rendered).
-#[allow(clippy::too_many_arguments)]
 pub fn render_turn_status(
     buf: &mut Buffer,
     area: Rect,
-    state: &AgentState,
-    activity: &Option<TurnActivity>,
-    turn_elapsed: Option<Duration>,
-    activity_started_at: Option<Instant>,
-    tick: u64,
-    drain_blocked: bool,
-    buttons: Option<MouseButtons>,
-    has_running_execute: bool,
-    total_tokens: Option<u64>,
-    mcp_init_progress: Option<&McpInitProgress>,
-    is_bash_turn: bool,
-    is_pending_user_input: bool,
-    goal_verifying: bool,
-    watchers: Watchers,
-    parked: bool,
-    flat_background: bool,
-    held_queue: usize,
-    held_queue_top_sendable: bool,
+    args: TurnStatusArgs<'_>,
 ) -> TurnStatusOutput {
+    let TurnStatusArgs {
+        state,
+        activity,
+        turn_elapsed,
+        activity_started_at,
+        tick,
+        drain_blocked,
+        buttons,
+        has_running_execute,
+        total_tokens,
+        mcp_init_progress,
+        is_bash_turn,
+        is_pending_user_input,
+        goal_verifying,
+        watchers,
+        parked,
+        flat_background,
+        held_queue,
+        held_queue_top_sendable,
+    } = args;
     // Resolve the mouse affordances: a keyboard-only host (`None`) suppresses
     // both buttons and reports no hover.
     let show_buttons = buttons.is_some();
@@ -289,15 +306,22 @@ pub fn render_turn_status(
         // turn spinner (see MONITOR_PULSE_DIVISOR).
         let frames = crate::glyphs::monitor_icon_frames();
         let frame_idx = (tick / MONITOR_PULSE_DIVISOR) as usize % frames.len();
+        let icon = format!("{} ", frames[frame_idx]);
+        let label_fg = if buttons.is_some_and(|b| b.watching_hovered) {
+            theme.text_primary
+        } else {
+            theme.gray
+        };
+        let cue_width = (icon.width() + cue.width()).min(area.width as usize) as u16;
         let spans = vec![
-            Span::styled(
-                format!("{} ", frames[frame_idx]),
-                Style::default().fg(theme.accent_system),
-            ),
-            Span::styled(cue, Style::default().fg(theme.gray)),
+            Span::styled(icon, Style::default().fg(theme.accent_system)),
+            Span::styled(cue, Style::default().fg(label_fg)),
         ];
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-        return TurnStatusOutput::default();
+        return TurnStatusOutput {
+            watching_cue: show_buttons.then(|| Rect::new(area.x, area.y, cue_width, 1)),
+            ..TurnStatusOutput::default()
+        };
     }
 
     // Parked with no watchers left: render nothing. The stopped look must
@@ -603,6 +627,7 @@ pub fn render_turn_status(
     TurnStatusOutput {
         cancel_button: cancel_button_rect,
         bg_button: bg_button_rect,
+        watching_cue: None,
     }
 }
 
@@ -1123,33 +1148,49 @@ mod tests {
             .join("\n")
     }
 
+    /// Baseline render args: idle agent on a mouse host with the given watchers.
+    fn idle_args<'a>(watchers: Watchers) -> TurnStatusArgs<'a> {
+        TurnStatusArgs {
+            state: &AgentState::Idle,
+            activity: &None,
+            turn_elapsed: None,
+            activity_started_at: None,
+            tick: 0,
+            drain_blocked: false,
+            buttons: Some(MouseButtons::default()),
+            has_running_execute: false,
+            total_tokens: None,
+            mcp_init_progress: None,
+            is_bash_turn: false,
+            is_pending_user_input: false,
+            goal_verifying: false,
+            watchers,
+            parked: false,
+            flat_background: false,
+            held_queue: 0,
+            held_queue_top_sendable: false,
+        }
+    }
+
+    /// Render `args` into a `width`×1 row.
+    fn render_row(args: TurnStatusArgs<'_>, width: u16) -> (TurnStatusOutput, Buffer) {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        let output = render_turn_status(&mut buf, area, args);
+        (output, buf)
+    }
+
+    /// Render `args` into a `width`×1 row, returning the visible text.
+    fn render_row_text(args: TurnStatusArgs<'_>, width: u16) -> String {
+        let (_, buf) = render_row(args, width);
+        buffer_text(&buf, buf.area)
+    }
+
     /// Invoke `render_turn_status` for an idle agent with the given MCP seed.
     fn render_idle_with_mcp(progress: &McpInitProgress) -> String {
-        let area = Rect::new(0, 0, 60, 1);
-        let mut buf = Buffer::empty(area);
-        render_turn_status(
-            &mut buf,
-            area,
-            &AgentState::Idle,
-            &None,
-            None,
-            None,
-            0,
-            false,
-            Some(MouseButtons::default()),
-            false,
-            None,
-            Some(progress),
-            false,
-            false,
-            false,
-            Watchers::default(),
-            false,
-            false,
-            0,
-            false,
-        );
-        buffer_text(&buf, area)
+        let mut args = idle_args(Watchers::default());
+        args.mcp_init_progress = Some(progress);
+        render_row_text(args, 60)
     }
 
     /// Invoke `render_turn_status` for an idle agent with the given watcher
@@ -1160,61 +1201,21 @@ mod tests {
 
     /// [`render_idle_with_watchers_at_tick`] with an explicit row width.
     fn render_idle_with_watchers_in_width(watchers: Watchers, tick: u64, width: u16) -> String {
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        render_turn_status(
-            &mut buf,
-            area,
-            &AgentState::Idle,
-            &None,
-            None,
-            None,
-            tick,
-            false,
-            Some(MouseButtons::default()),
-            false,
-            None,
-            None,
-            false,
-            false,
-            false,
-            watchers,
-            false,
-            false,
-            0,
-            false,
-        );
-        buffer_text(&buf, area)
+        let mut args = idle_args(watchers);
+        args.tick = tick;
+        render_row_text(args, width)
     }
 
     /// Invoke `render_turn_status` for a PARKED running turn (the stopped
     /// look) with the given watcher counts.
     fn render_parked_with_watchers(watchers: Watchers) -> String {
-        let area = Rect::new(0, 0, 72, 1);
-        let mut buf = Buffer::empty(area);
-        render_turn_status(
-            &mut buf,
-            area,
-            &AgentState::TurnRunning,
-            &Some(TurnActivity::Waiting(WaitingReason::TasksComplete)),
-            Some(Duration::from_secs(5)),
-            None,
-            0,
-            false,
-            Some(MouseButtons::default()),
-            false,
-            None,
-            None,
-            false,
-            false,
-            false,
-            watchers,
-            true,
-            false,
-            0,
-            false,
-        );
-        buffer_text(&buf, area)
+        let activity = Some(TurnActivity::Waiting(WaitingReason::TasksComplete));
+        let mut args = idle_args(watchers);
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.turn_elapsed = Some(Duration::from_secs(5));
+        args.parked = true;
+        render_row_text(args, 72)
     }
 
     /// Invoke `render_turn_status` for an idle agent with the given watcher
@@ -1266,6 +1267,38 @@ mod tests {
             text.trim().is_empty(),
             "idle with no monitors must render nothing, got: {text:?}"
         );
+    }
+
+    /// Mouse hosts get a hit rect hugging exactly the rendered cue text, and
+    /// hover brightens the label; keyboard-only hosts get neither.
+    #[test]
+    fn watching_cue_is_clickable_on_mouse_hosts_only() {
+        let theme = Theme::current();
+        let watchers = Watchers {
+            monitors: 1,
+            ..Watchers::default()
+        };
+        // First label cell (after the 2-col icon).
+        let label_fg = |buf: &Buffer| buf.cell((2, 0)).map(|c| c.fg);
+
+        let (output, buf) = render_row(idle_args(watchers), 60);
+        let rect = output.watching_cue.expect("mouse host must get a hit rect");
+        let rendered_width = buffer_text(&buf, buf.area).trim_end().width() as u16;
+        assert_eq!(rect, Rect::new(0, 0, rendered_width, 1));
+        assert_eq!(label_fg(&buf), Some(theme.gray));
+
+        let mut args = idle_args(watchers);
+        args.buttons = Some(MouseButtons {
+            watching_hovered: true,
+            ..MouseButtons::default()
+        });
+        let (_, buf) = render_row(args, 60);
+        assert_eq!(label_fg(&buf), Some(theme.text_primary));
+
+        let mut args = idle_args(watchers);
+        args.buttons = None;
+        let (output, _) = render_row(args, 60);
+        assert!(output.watching_cue.is_none());
     }
 
     #[test]
@@ -1439,31 +1472,14 @@ mod tests {
 
     #[test]
     fn queued_hint_renders_after_phase_timer() {
-        let area = Rect::new(0, 0, 80, 1);
-        let mut buf = Buffer::empty(area);
-        render_turn_status(
-            &mut buf,
-            area,
-            &AgentState::TurnRunning,
-            &Some(TurnActivity::Waiting(WaitingReason::Subagent)),
-            None,
-            Some(Instant::now() - Duration::from_secs(359)),
-            0,
-            false,
-            Some(MouseButtons::default()),
-            false,
-            None,
-            None,
-            false,
-            false,
-            false,
-            Watchers::default(),
-            false,
-            false,
-            1,
-            true,
-        );
-        let text = buffer_text(&buf, area);
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Subagent));
+        let mut args = idle_args(Watchers::default());
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.activity_started_at = Some(Instant::now() - Duration::from_secs(359));
+        args.held_queue = 1;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 80);
         assert!(
             text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"

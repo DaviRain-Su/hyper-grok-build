@@ -63,6 +63,11 @@ pub(crate) enum TurnOutcome {
     },
     /// The `--max-turns` limit was reached after a tool-execution cycle.
     MaxTurnsReached { limit: usize },
+    /// Silent EndTurn after stationarity/true-noop thrash. Distinct from
+    /// Completed so recovery/goal/stop-hook cannot re-open the sampling loop.
+    StationarityEnded {
+        snapshot: Box<Option<TurnDeltaSnapshot>>,
+    },
 }
 
 #[derive(Debug)]

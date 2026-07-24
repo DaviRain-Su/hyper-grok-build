@@ -2,6 +2,7 @@
 //! `x.ai/interject` effect, and prompt-history recording. Split out of
 //! `dispatch.rs` verbatim (pure code motion).
 
+use super::voice::voice_stop_on_submit;
 use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
@@ -23,6 +24,8 @@ pub(super) fn dispatch_interject(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    // Hard-reset only — `text` may not be from the composer.
+    let _ = voice_stop_on_submit(app);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -90,6 +93,8 @@ pub(super) fn dispatch_send_prompt_now(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    // Hard-reset only — `text` may be a queue row, not the composer.
+    let _ = voice_stop_on_submit(app);
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };

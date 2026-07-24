@@ -15,7 +15,7 @@ use super::session::load::dispatch_load_session;
 use super::session::load::focus_if_session_already_open;
 use super::session::modal::dispatch_sessions_confirm_close;
 use super::turn::dispatch_cancel_turn;
-use super::voice::voice_stop_on_submit;
+use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, Effect};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
@@ -667,9 +667,7 @@ fn open_dashboard_worktree_dialog(
 /// Mirrors `dispatch_dashboard_dispatch`'s new-session arm with `attach=true`,
 /// minus the prompt enqueue.
 pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView) -> Vec<Effect> {
-    // Creating/switching consumes the dispatch surface — stop voice and drop the
-    // target so a late final can't refill the box after the view switch.
-    voice_stop_on_submit(app);
+    let _ = voice_stop_on_submit(app);
     // Worktree mode armed + git repo: open the label dialog (which spawns the
     // agent in a fresh worktree on confirm) instead of a plain session. The
     // button opens the detail view, so confirm attaches (`attach = true`).
@@ -1101,10 +1099,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     text: String,
     attach: bool,
 ) -> Vec<Effect> {
-    // Enter is a submit attempt — stop voice and drop the target up front (as the
-    // agent path does), so even a rejected send (empty / over-cap) can't leave a
-    // hot mic or let a late final refill the box.
-    voice_stop_on_submit(app);
+    let text = merge_prompt_with_voice_interim(text, voice_stop_on_submit(app));
     // Paste-then-immediate-send: a Cmd+V image probe is still off-thread. Stash
     // this send and re-issue it once the probe completes so the image is never
     // dropped from the dispatched prompt's content blocks.
@@ -1284,8 +1279,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     use crate::slash::command::{CommandExecCtx, CommandResult};
     use crate::slash::parse_invocation;
 
-    // Enter is a submit attempt — stop voice and drop the target up front.
-    voice_stop_on_submit(app);
+    let text = merge_prompt_with_voice_interim(text, voice_stop_on_submit(app));
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() || !trimmed.starts_with('/') {
         return vec![];
@@ -1694,9 +1688,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
 ) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
 
-    // Enter is a submit attempt — stop voice and drop the target up front so a
-    // rejected reply can't leave a hot mic or let a late final refill the box.
-    voice_stop_on_submit(app);
+    let text = merge_prompt_with_voice_interim(text, voice_stop_on_submit(app));
 
     // Paste-then-immediate-send: a Cmd+V image probe is still off-thread. Stash
     // this reply and re-issue it once the probe completes so the image is never

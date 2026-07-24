@@ -71,6 +71,12 @@ const AUTO_UPDATE_FLUSH_GRACE: Duration = Duration::from_secs(10);
 /// the bounded-grace semantics of the `RelaunchForUpdate` drain.
 const MAX_AUTO_UPDATE_BUSY_DEFERRALS: u32 = 24;
 
+/// Bounded wait for the leader flock when it is held but no socket is bound yet
+/// (a spawner mid-handoff, an old-flow client holding the flock across its ~10s
+/// spawn window, or a same-version sibling briefly holding it). Exceeds that
+/// old-flow window so a legitimately-spawning peer wins the race.
+const LEADER_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Run the auto-update checker loop.
 ///
 /// Periodically calls `check_fn` to check for, download, and install updates.
@@ -906,17 +912,16 @@ fn spawn_leader_relay(
 /// serve clients over IPC only. See [`spawn_leader_relay`] for when the relay
 /// connection is opened (eager by default, demand-gated with `relay_on_demand`).
 ///
-/// Startup sequence:
-/// 1. Lock acquisition check — bail if another leader is already running.
+/// Startup sequence (lock-then-socket):
+/// 1. Acquire the leader flock FIRST — bail if another process holds it.
 /// 2. Socket cleanup, channel + readiness-watch creation.
 /// 3. IPC server started (`tokio::spawn`) — socket bound HERE, before auth.
 /// 4. Wait for socket to appear (fast: < 100 ms).
-/// 5. Lock handoff with spawner (if launched via connect_or_spawn).
-/// 6. Auth + model prefetch (slow path, but socket already available to clients).
+/// 5. Auth + model prefetch (slow path, but socket already available to clients).
 ///    - Auth resolves non-interactively; `None` (BYOK / no session) is not an
 ///      error — the relay is gated off and login is deferred to ACP.
-/// 7. `ready_tx.send(true)` — unblocks ACP forwarding in the IPC server.
-/// 8. LocalSet: agent, IPC↔agent bridges, WS↔agent bridges, relay, config watcher.
+/// 6. `ready_tx.send(true)` — unblocks ACP forwarding in the IPC server.
+/// 7. LocalSet: agent, IPC↔agent bridges, WS↔agent bridges, relay, config watcher.
 ///
 /// # Arguments
 ///
@@ -934,7 +939,7 @@ pub async fn run_leader(
 ) -> anyhow::Result<()> {
     use crate::agent::relay::RelayConfig;
     use crate::leader::{
-        LeaderLock, LeaderServerControlState, LeaderServerMetadata, ShutdownReason,
+        LeaderLock, LeaderServerControlState, LeaderServerMetadata, LockError, ShutdownReason,
         compute_ws_url_suffix, run_leader_server,
     };
     use tokio::sync::watch;
@@ -964,41 +969,62 @@ pub async fn run_leader(
     let mut lock = LeaderLock::new(ws_url);
     let socket_path = lock.socket_path().clone();
 
-    // Early bail-out: lock held + socket exists → another leader is running.
+    // ── Phase 1: Acquire the leader flock FIRST (lock-then-socket) ────────────
     //
-    // Three cases:
-    // - Lock free              → we ARE the leader; hold lock through setup.
-    // - Lock held + socket     → another leader running → bail out immediately.
-    // - Lock held + no socket  → spawner (connect_or_spawn) holds lock and is
-    //                            waiting for our socket → proceed normally.
-    let lock_already_held = match lock.try_acquire() {
+    // SINGLE-LEADER INVARIANT: only the flock holder may create/remove the socket
+    // and it holds the flock for its whole lifetime, so a racing leader can never
+    // clobber a live socket.
+    match lock.try_acquire() {
         Ok(true) => {
             lock.write_pid()?;
-            debug!("Lock acquired immediately, proceeding as leader");
-            true
+            debug!("Acquired leader lock, proceeding as leader");
         }
         Ok(false) => {
+            // Fast path: a fully-running leader (flock held AND socket bound) →
+            // exit so the client adopts it.
             if crate::leader::listener_is_ready(&socket_path) {
                 info!(
-                    "Another leader is already running (lock held, socket exists at {}). Exiting.",
+                    "Another process holds the leader lock with a bound socket ({}). \
+                     Exiting so the client adopts it.",
                     socket_path.display()
                 );
                 return Err(anyhow::anyhow!(
-                    "Another leader is already running at {}",
+                    "Another leader already holds the lock at {}",
                     socket_path.display()
                 ));
             }
-            debug!("Lock held by spawner (no socket yet), proceeding with socket-then-lock flow");
-            false
-        }
-        Err(e) => return Err(anyhow::anyhow!("Failed to check leader lock: {}", e)),
-    };
 
-    // ── Phase 1: Clean up stale socket ────────────────────────────────────────
+            // Held but no socket yet: a spawner is mid-handoff, or an old-flow
+            // client holds the flock across its spawn window. Wait (re-opening the
+            // path each poll to tolerate the old client's Drop unlinking the inode)
+            // before conceding.
+            match lock.acquire_reopen_timeout(LEADER_ACQUIRE_TIMEOUT).await {
+                Ok(()) => {
+                    lock.write_pid()?;
+                    debug!("Acquired leader lock after bounded wait, proceeding as leader");
+                }
+                Err(LockError::Timeout(_)) => {
+                    info!(
+                        "Timed out waiting for the leader lock ({}). Exiting so the \
+                         client adopts whoever won it.",
+                        socket_path.display()
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Timed out acquiring leader lock at {}",
+                        socket_path.display()
+                    ));
+                }
+                Err(e) => return Err(anyhow::anyhow!("Failed to acquire leader lock: {}", e)),
+            }
+        }
+        Err(e) => return Err(anyhow::anyhow!("Failed to acquire leader lock: {}", e)),
+    }
+
+    // ── Phase 2: Clean up stale socket (we hold the flock, so this is safe) ────
     lock.cleanup_socket()?;
     info!("Leader server starting");
 
-    // ── Phase 2: Create all channels + readiness watch ────────────────────────
+    // ── Phase 3: Create all channels + readiness watch ────────────────────────
     //
     // All channels are created here so the IPC server can start receiving
     // client connections immediately, before auth/prefetch begin.
@@ -1058,7 +1084,7 @@ pub async fn run_leader(
     // Cloned before control_state moves into the IPC server; auth wired below.
     let workspace_control = control_state.workspace.clone();
 
-    // ── Phase 3: Bind socket and start IPC server (BEFORE auth/prefetch) ──────
+    // ── Phase 4: Bind socket and start IPC server (BEFORE auth/prefetch) ──────
     //
     // Starting the server here means connect_or_spawn sees the socket in < 100 ms
     // regardless of how long auth + model prefetch take. The `ready_rx` gate inside
@@ -1092,7 +1118,7 @@ pub async fn run_leader(
         }
     });
 
-    // ── Phase 4: Wait for socket to appear (fast: < 100 ms now) ──────────────
+    // ── Phase 5: Wait for socket to appear (fast: < 100 ms now) ──────────────
     let socket_ready_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     while !crate::leader::listener_is_ready(&socket_path) {
         if tokio::time::Instant::now() >= socket_ready_deadline {
@@ -1105,42 +1131,8 @@ pub async fn run_leader(
     }
     debug!("IPC socket created");
 
-    // ── Phase 5: Lock handoff ─────────────────────────────────────────────────
-    //
-    // (a) lock_already_held=true: We acquired the lock at startup. Keep it.
-    // (b) lock_already_held=false: spawner holds lock, waiting for our socket.
-    //     Now that socket is up, the spawner will see it, connect, and release
-    //     the lock. We acquire it here (30 s timeout).
-    let _lock = if lock_already_held {
-        info!("Leader lock already held from startup, PID already written");
-        lock
-    } else {
-        const LEADER_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-        // spawn_blocking so we don't stall the async runtime while waiting.
-        let lock_result = tokio::task::spawn_blocking(move || {
-            lock.try_acquire_timeout(LEADER_LOCK_TIMEOUT)?;
-            lock.write_pid()?;
-            Ok::<_, anyhow::Error>(lock)
-        })
-        .await;
-
-        match lock_result {
-            Ok(Ok(lock)) => {
-                info!("Leader lock acquired, PID written");
-                lock
-            }
-            Ok(Err(e)) => {
-                warn!(error = ?e, "Failed to acquire leader lock");
-                cancel.cancel();
-                return Err(anyhow::anyhow!("Failed to acquire leader lock: {}", e));
-            }
-            Err(e) => {
-                warn!(error = ?e, "Lock task panicked");
-                cancel.cancel();
-                return Err(anyhow::anyhow!("Lock task failed: {}", e));
-            }
-        }
-    };
+    // Keep `lock` alive so its `Drop` removes the lock + socket on exit.
+    let _lock = lock;
 
     // ── Phase 6: Auth + model prefetch ───────────────────────────────────────
     //

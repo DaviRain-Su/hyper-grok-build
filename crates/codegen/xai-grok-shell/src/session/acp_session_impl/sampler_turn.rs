@@ -454,7 +454,7 @@ impl SessionActor {
         }
         impl xai_grok_sampler::BearerResolver for AuthManagerBearerResolver {
             fn current_bearer(&self) -> Option<String> {
-                self.0.current_or_expired().map(|a| a.key)
+                self.0.current_wire_valid().map(|a| a.key)
             }
         }
         let cfg = self
@@ -1413,6 +1413,11 @@ impl SessionActor {
                     }
                     Err(e) => {
                         let hard_expired = !am.has_usable_token();
+                        if hard_expired && creds.api_key.is_some() {
+                            let mut cleared = creds;
+                            cleared.api_key = None;
+                            self.chat_state_handle.update_credentials(cleared);
+                        }
                         tracing::warn!(
                             error = %e,
                             hard_expired,

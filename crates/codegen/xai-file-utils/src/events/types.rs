@@ -609,7 +609,6 @@ pub enum CancellationCategory {
     PermissionRejected,
     PermissionCancelled,
     MidTurnAbort,
-    ActionStationarity,
 }
 
 // Note: `From<&permission::Decision> for PermissionDecision` crosses the
@@ -628,7 +627,6 @@ mod tests {
             CancellationCategory::PermissionRejected,
             CancellationCategory::PermissionCancelled,
             CancellationCategory::MidTurnAbort,
-            CancellationCategory::ActionStationarity,
         ] {
             let value = serde_json::to_value(variant).unwrap();
             let decoded: CancellationCategory = serde_json::from_value(value).unwrap();
@@ -650,10 +648,6 @@ mod tests {
                 "\"permission_cancelled\"",
             ),
             (CancellationCategory::MidTurnAbort, "\"mid_turn_abort\""),
-            (
-                CancellationCategory::ActionStationarity,
-                "\"action_stationarity\"",
-            ),
         ] {
             let json = serde_json::to_string(&variant).unwrap();
             assert_eq!(json, expected, "{variant:?} must serialize to {expected}");

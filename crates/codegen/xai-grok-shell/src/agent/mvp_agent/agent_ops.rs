@@ -272,6 +272,81 @@ impl MvpAgent {
             }
         });
     }
+    /// Push a fresh legacy managed-MCP catalog into live sessions' per-session
+    /// `McpServers` (called after `mcp/list` with `cache=false`).
+    ///
+    /// The per-session `merge_managed_mcp_servers` re-reads disk, so the whole
+    /// broadcast is deferred off the `mcp/list` response-latency path via
+    /// `spawn_local`. This ONLY re-merges/pushes connectors; rebuilding the
+    /// agent-level gateway catalog's `search_tool` index is a separate,
+    /// independently-gated broadcast (see `refresh_mcp_search_index_in_sessions`),
+    /// because the two run in mutually-exclusive modes (legacy fetch only when
+    /// gateway tools are OFF, gateway fetch only when ON).
+    /// Caller must confirm the managed fetch succeeded (cache `Ready`) first: a
+    /// failed fetch returns an empty vec and syncing it tears down live servers.
+    pub(crate) fn sync_fresh_managed_mcp_to_sessions(
+        &self,
+        managed: &[crate::session::managed_mcp::ManagedMcpConfig],
+    ) {
+        let sessions: Vec<_> = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|handle| (
+                handle.cmd_tx.clone(),
+                handle.info.cwd.clone(),
+                handle.initial_client_mcp_servers.clone(),
+            ))
+            .collect();
+        if sessions.is_empty() {
+            return;
+        }
+        let compat = self.cfg.borrow().compat_resolved;
+        let plugin_snapshot = self.plugin_registry_handle.snapshot();
+        let managed = managed.to_vec();
+        tokio::task::spawn_local(async move {
+            let mut updated = 0u32;
+            for (cmd_tx, cwd, initial_client_mcp_servers) in sessions {
+                let cwd = std::path::PathBuf::from(cwd);
+                if crate::session::managed_mcp::merge_and_send_managed_mcp_update(
+                    &cmd_tx,
+                    &cwd,
+                    initial_client_mcp_servers,
+                    &managed,
+                    plugin_snapshot.as_deref(),
+                    &compat,
+                ) {
+                    updated += 1;
+                }
+            }
+            if updated > 0 {
+                tracing::info!(
+                    updated,
+                    managed_count = managed.len(),
+                    "synced fresh managed MCP catalog into live sessions"
+                );
+            }
+        });
+    }
+    /// Rebuild `search_tool` in every live session after a fresh gateway tool
+    /// catalog committed.
+    ///
+    /// Gateway tools live in the agent-level catalog (not per-session
+    /// `McpServers`), so a fresh gateway catalog needs a session-side
+    /// `search_tool` rebuild even though the legacy managed cache stays
+    /// `NotFetched` in gateway mode. Callers gate on a successful refetch and
+    /// skip on failure to keep the last-good index.
+    pub(crate) fn refresh_mcp_search_index_in_sessions(&self) {
+        let session_txs: Vec<_> = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|handle| handle.cmd_tx.clone())
+            .collect();
+        for tx in session_txs {
+            let _ = tx.send(SessionCommand::RefreshMcpSearchIndex);
+        }
+    }
     /// Resolve the launch dir's project-scope trust verdict ONCE and return it
     /// with its path.
     ///

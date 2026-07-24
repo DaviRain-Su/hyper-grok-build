@@ -184,6 +184,23 @@ mod init_metrics_tests {
             "grok_workspace_rpc_errors_total",
             &[("method", "unknown"), ("error_kind", "hub_error")]
         ));
+        for stage in [
+            "startup_recovery",
+            "tool_catalog",
+            "hub_ws_connect",
+            "connect_hub",
+            "time_to_ready",
+        ] {
+            for outcome in ["ok", "error"] {
+                assert!(
+                    has(
+                        "grok_workspace_startup_stage_duration_seconds",
+                        &[("stage", stage), ("outcome", outcome)]
+                    ),
+                    "missing baseline stage={stage} outcome={outcome}"
+                );
+            }
+        }
         assert!(has(
             "grok_workspace_drain_started_total",
             &[("reason", "sigterm")]

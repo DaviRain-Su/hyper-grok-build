@@ -2044,6 +2044,7 @@ impl AgentView {
                 ));
                 self.hit_cancel_button.rect = None;
                 self.hit_bg_button.rect = None;
+                self.hit_watching_cue.rect = None;
             } else {
                 let has_running_execute = !self.is_subagent_view
                     && self
@@ -2062,36 +2063,42 @@ impl AgentView {
                 let turn_output = turn_status::render_turn_status(
                     buf,
                     turn_area,
-                    &self.session.state,
-                    &activity,
-                    self.turn_elapsed(),
-                    self.activity_started_at,
-                    tick,
-                    drain_blocked,
-                    Some(turn_status::MouseButtons {
-                        cancel_hovered: self.hit_cancel_button.hovered,
-                        bg_hovered: self.hit_bg_button.hovered,
-                    }),
-                    has_running_execute,
-                    self.context_state.as_ref().map(|c| c.used),
-                    self.mcp_init_progress.as_ref(),
-                    self.bash_turn,
-                    is_pending_user_input,
-                    goal_verifying,
-                    watchers,
-                    parked,
-                    false,
-                    held_queue,
-                    held_queue_top_sendable,
+                    turn_status::TurnStatusArgs {
+                        state: &self.session.state,
+                        activity: &activity,
+                        turn_elapsed: self.turn_elapsed(),
+                        activity_started_at: self.activity_started_at,
+                        tick,
+                        drain_blocked,
+                        buttons: Some(turn_status::MouseButtons {
+                            cancel_hovered: self.hit_cancel_button.hovered,
+                            bg_hovered: self.hit_bg_button.hovered,
+                            watching_hovered: self.hit_watching_cue.hovered,
+                        }),
+                        has_running_execute,
+                        total_tokens: self.context_state.as_ref().map(|c| c.used),
+                        mcp_init_progress: self.mcp_init_progress.as_ref(),
+                        is_bash_turn: self.bash_turn,
+                        is_pending_user_input,
+                        goal_verifying,
+                        watchers,
+                        parked,
+                        flat_background: false,
+                        held_queue,
+                        held_queue_top_sendable,
+                    },
                 );
                 self.hit_cancel_button
                     .set_unless_dropdown(turn_output.cancel_button, dropdown_open);
                 self.hit_bg_button
                     .set_unless_dropdown(turn_output.bg_button, dropdown_open);
+                self.hit_watching_cue
+                    .set_unless_dropdown(turn_output.watching_cue, dropdown_open);
             }
         } else {
             self.hit_cancel_button.clear();
             self.hit_bg_button.clear();
+            self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
         }
         let privacy_banner_owns_slot = privacy_banner && layout.banner.height >= 2;
@@ -2793,7 +2800,6 @@ impl AgentView {
                 let voice_overlay =
                     if voice_available && (voice_listening || voice_interim.is_some()) {
                         Some(crate::views::prompt_widget::VoicePromptOverlay {
-                            listening: voice_listening,
                             interim: voice_interim,
                             color: theme.accent_running,
                         })
@@ -2831,7 +2837,6 @@ impl AgentView {
                 let voice_overlay =
                     if voice_available && (voice_listening || voice_interim.is_some()) {
                         Some(crate::views::prompt_widget::VoicePromptOverlay {
-                            listening: voice_listening,
                             interim: voice_interim,
                             color: theme.accent_running,
                         })
@@ -4322,8 +4327,23 @@ impl AgentView {
             let mut view = self.workflows_view.clone();
             view.normalize(&runs);
             let tick = self.tasks.tick_count() as usize;
+            let live: crate::views::workflows::WorkflowAgentLiveMap = self
+                .subagent_sessions
+                .iter()
+                .filter(|(_, info)| info.workflow_run_id.is_some() && info.is_running())
+                .map(|(id, info)| {
+                    (
+                        id.clone(),
+                        crate::views::workflows::WorkflowAgentLiveStatus {
+                            activity: info.activity_label.clone(),
+                            tokens_used: info.tokens_used,
+                            elapsed_ms: Some(info.display_elapsed().as_millis() as u64),
+                        },
+                    )
+                })
+                .collect();
             let popup =
-                crate::views::workflows::render_workflows(buf, area, &runs, &mut view, tick);
+                crate::views::workflows::render_workflows(buf, area, &runs, &mut view, tick, &live);
             self.workflows_view = view;
             if let Some(popup) = popup {
                 self.frame_occluder_rects.push(popup);

@@ -18,6 +18,11 @@ pub enum DeployError {
     /// can render the retry hint.
     RateLimited,
     ArchiveTooLarge,
+    /// Project was taken down by moderation and cannot be published until
+    /// an operator reinstates it.
+    TakenDown,
+    /// Another deployment is already in progress for this app.
+    DeploymentInProgress,
     Internal,
     Unauthenticated,
     InvalidArgument,
@@ -28,7 +33,7 @@ pub enum DeployError {
 }
 impl DeployError {
     /// Every kind, for exhaustive iteration in tests.
-    pub const ALL: [DeployError; 18] = [
+    pub const ALL: [DeployError; 20] = [
         Self::UrlConflict,
         Self::UrlModeration,
         Self::IdempotencyConflict,
@@ -40,6 +45,8 @@ impl DeployError {
         Self::ProjectLimitExceeded,
         Self::RateLimited,
         Self::ArchiveTooLarge,
+        Self::TakenDown,
+        Self::DeploymentInProgress,
         Self::Internal,
         Self::Unauthenticated,
         Self::InvalidArgument,
@@ -62,6 +69,8 @@ impl DeployError {
             Self::ProjectLimitExceeded => "deploy_project_limit_exceeded",
             Self::RateLimited => "deploy_rate_limited",
             Self::ArchiveTooLarge => "deploy_archive_too_large",
+            Self::TakenDown => "deploy_taken_down",
+            Self::DeploymentInProgress => "deploy_deployment_in_progress",
             Self::Internal => "deploy_internal",
             Self::Unauthenticated => "deploy_unauthenticated",
             Self::InvalidArgument => "deploy_invalid_argument",
@@ -86,6 +95,8 @@ impl DeployError {
             "deploy_project_limit_exceeded" => Self::ProjectLimitExceeded,
             "deploy_rate_limited" => Self::RateLimited,
             "deploy_archive_too_large" => Self::ArchiveTooLarge,
+            "deploy_taken_down" => Self::TakenDown,
+            "deploy_deployment_in_progress" => Self::DeploymentInProgress,
             "deploy_internal" => Self::Internal,
             "deploy_unauthenticated" => Self::Unauthenticated,
             "deploy_invalid_argument" => Self::InvalidArgument,

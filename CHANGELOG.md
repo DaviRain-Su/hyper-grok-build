@@ -19,11 +19,12 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 - **Documentation** — Complete Codex Live user guide in English and Simplified Chinese (`/live` slash command, audio requirements, environment variables).
 
 ### Changed
-- Sync the community build with the upstream `0.2.111` monorepo line.
+- Sync the community build with the upstream `0.2.111` monorepo line (`SOURCE_REV` `9b8d35b`), including auth fail-closed refresh, voice interim commit-on-submit, workflow scratch quotas / resumable failed runs, leader process hardening, plugin subagent MCP inheritance, and the refreshed permissions / plugins / marketplaces docs.
 
 ### Notes
 - `/live` uses an undocumented internal Codex Live protocol and may stop working when the backend changes. It is independent of the active coding provider but requires `grok login --openai`.
 - Existing `/voice` dictation is unchanged. `/voice` and `/live` are mutually exclusive so they never compete for the microphone.
+- Wire version remains lockstep with upstream crate versions (`0.2.111`).
 
 ### Install
 

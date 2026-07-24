@@ -131,11 +131,44 @@ impl AuthProvider for OidcAuthProvider {
                 Utc::now() + chrono::Duration::from_std(REFRESH_MARGIN).unwrap() >= exp
             })
         };
-        if expired && let Err(e) = self.try_refresh() {
-            tracing::warn!(error = %e, "OIDC refresh failed, using stale token");
+        if !expired {
+            crate::metrics::oidc_refresh_observe(
+                crate::metrics::OidcRefreshOutcome::SkippedNotExpired,
+                None,
+            );
+        } else {
+            use crate::metrics::{OidcRefreshOutcome, oidc_refresh_observe};
+            let started = std::time::Instant::now();
+            match self.try_refresh() {
+                Ok(()) => {
+                    let secs = started.elapsed().as_secs_f64();
+                    oidc_refresh_observe(OidcRefreshOutcome::Ok, Some(secs));
+                    tracing::info!(duration_secs = secs, outcome = "ok", "OIDC token refreshed");
+                }
+                Err(e) => {
+                    let secs = started.elapsed().as_secs_f64();
+                    oidc_refresh_observe(OidcRefreshOutcome::FailedUsedStale, Some(secs));
+                    tracing::warn!(
+                        error = %e,
+                        duration_secs = secs,
+                        outcome = "failed_used_stale",
+                        "OIDC refresh failed, using stale token"
+                    );
+                }
+            }
         }
         let s = self.state.lock();
         AuthCredential::bearer(&s.access_token)
+    }
+
+    /// Stable issuer/client/user pool key; does not call [`Self::current`].
+    fn principal_key(&self) -> crate::auth::PrincipalKey {
+        let mut fingerprint = format!("oidc:{}:{}", self.issuer, self.client_id);
+        if let Some(uid) = self.user_id.as_deref() {
+            fingerprint.push(':');
+            fingerprint.push_str(uid);
+        }
+        crate::auth::PrincipalKey::opaque(fingerprint)
     }
 
     /// Surface the principal fields parsed from the auth source. `None` only
@@ -219,8 +252,6 @@ impl OidcAuthProvider {
             .expires_in
             .map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
 
-        tracing::info!(expires_at = ?expires_at, "OIDC token refreshed");
-
         if let Some(ref cb) = self.on_refresh {
             cb(&RefreshEvent {
                 access_token: tokens.access_token.clone(),
@@ -245,6 +276,8 @@ mod tests {
 
     #[test]
     fn current_returns_token_when_not_expired() {
+        #[cfg(feature = "metrics")]
+        let _guard = crate::metrics::lock_oidc_metrics_test();
         let provider = OidcAuthProviderBuilder::new(
             "access-tok",
             "refresh-tok",
@@ -265,6 +298,8 @@ mod tests {
 
     #[test]
     fn current_returns_token_when_no_expiry() {
+        #[cfg(feature = "metrics")]
+        let _guard = crate::metrics::lock_oidc_metrics_test();
         let provider = OidcAuthProviderBuilder::new(
             "no-expiry-tok",
             "refresh-tok",
@@ -282,6 +317,8 @@ mod tests {
 
     #[test]
     fn current_returns_stale_token_when_refresh_fails() {
+        #[cfg(feature = "metrics")]
+        let _guard = crate::metrics::lock_oidc_metrics_test();
         // Expired token, but issuer is unreachable — should return stale
         let provider = OidcAuthProviderBuilder::new(
             "stale-tok",
@@ -297,6 +334,162 @@ mod tests {
             AuthCredential::Bearer { token } => assert_eq!(token, "stale-tok"),
             _ => panic!("expected Bearer"),
         }
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn current_records_skipped_and_failed_refresh_outcomes() {
+        let _guard = crate::metrics::lock_oidc_metrics_test();
+        use crate::metrics::OidcRefreshOutcome;
+        let skipped_before =
+            crate::metrics::oidc_refresh_count(OidcRefreshOutcome::SkippedNotExpired);
+        let failed_before = crate::metrics::oidc_refresh_count(OidcRefreshOutcome::FailedUsedStale);
+        let duration_before = crate::metrics::oidc_refresh_duration_sample_count();
+
+        let fresh = OidcAuthProviderBuilder::new(
+            "access-tok",
+            "refresh-tok",
+            "https://auth.example.com",
+            "client1",
+        )
+        .expires_at(Utc::now() + chrono::Duration::hours(1))
+        .build();
+        let _ = fresh.current();
+        assert_eq!(
+            crate::metrics::oidc_refresh_count(OidcRefreshOutcome::SkippedNotExpired),
+            skipped_before + 1
+        );
+        assert_eq!(
+            crate::metrics::oidc_refresh_duration_sample_count(),
+            duration_before,
+            "skipped path must not observe refresh duration"
+        );
+
+        let stale = OidcAuthProviderBuilder::new(
+            "stale-tok",
+            "refresh-tok",
+            "https://localhost:1",
+            "client1",
+        )
+        .expires_at(Utc::now() - chrono::Duration::hours(1))
+        .build();
+        let _ = stale.current();
+        assert_eq!(
+            crate::metrics::oidc_refresh_count(OidcRefreshOutcome::FailedUsedStale),
+            failed_before + 1
+        );
+        assert_eq!(
+            crate::metrics::oidc_refresh_duration_sample_count(),
+            duration_before + 1,
+            "failed refresh must observe exactly one duration sample"
+        );
+        assert_eq!(
+            crate::metrics::oidc_refresh_count(OidcRefreshOutcome::SkippedNotExpired),
+            skipped_before + 1,
+            "failed refresh must not also count as skipped"
+        );
+    }
+
+    #[test]
+    fn principal_key_is_stable_and_does_not_call_current() {
+        #[cfg(feature = "metrics")]
+        let _guard = crate::metrics::lock_oidc_metrics_test();
+        #[cfg(feature = "metrics")]
+        let skipped_before = crate::metrics::oidc_refresh_count(
+            crate::metrics::OidcRefreshOutcome::SkippedNotExpired,
+        );
+
+        let provider = OidcAuthProviderBuilder::new(
+            "access-tok",
+            "refresh-tok",
+            "https://auth.example.com",
+            "client1",
+        )
+        .user_id("user-9")
+        .expires_at(Utc::now() + chrono::Duration::hours(1))
+        .build();
+
+        let k1 = provider.principal_key();
+        let k2 = provider.principal_key();
+        assert_eq!(k1, k2);
+
+        #[cfg(feature = "metrics")]
+        assert_eq!(
+            crate::metrics::oidc_refresh_count(
+                crate::metrics::OidcRefreshOutcome::SkippedNotExpired
+            ),
+            skipped_before,
+            "principal_key must not call current()"
+        );
+
+        let token_key = AuthCredential::bearer("access-tok").principal_key();
+        assert_ne!(k1, token_key);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_records_ok_refresh_outcome_against_mock_idp() {
+        use crate::metrics::OidcRefreshOutcome;
+        use axum::Router;
+        use axum::routing::{get, post};
+
+        let _guard = crate::metrics::lock_oidc_metrics_test();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let token_endpoint = format!("{base}/token");
+        let app = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let token_endpoint = token_endpoint.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "token_endpoint": token_endpoint
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                post(|| async {
+                    axum::Json(serde_json::json!({
+                        "access_token": "fresh-access",
+                        "refresh_token": "fresh-refresh",
+                        "expires_in": 3600
+                    }))
+                }),
+            );
+        let _server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        let ok_before = crate::metrics::oidc_refresh_count(OidcRefreshOutcome::Ok);
+        let duration_before = crate::metrics::oidc_refresh_duration_sample_count();
+
+        let provider = OidcAuthProviderBuilder::new("stale-access", "refresh-tok", base, "client1")
+            .expires_at(Utc::now() - chrono::Duration::hours(1))
+            .build();
+
+        // try_refresh uses block_in_place; needs multi-thread runtime.
+        let cred = tokio::task::spawn_blocking(move || provider.current())
+            .await
+            .expect("join");
+        match cred {
+            AuthCredential::Bearer { token } => assert_eq!(token, "fresh-access"),
+            _ => panic!("expected Bearer"),
+        }
+        assert_eq!(
+            crate::metrics::oidc_refresh_count(OidcRefreshOutcome::Ok),
+            ok_before + 1
+        );
+        assert_eq!(
+            crate::metrics::oidc_refresh_duration_sample_count(),
+            duration_before + 1
+        );
     }
 
     #[test]

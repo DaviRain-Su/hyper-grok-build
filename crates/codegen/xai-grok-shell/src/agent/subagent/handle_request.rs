@@ -886,7 +886,7 @@ pub(crate) async fn run_shell_child(
             }
         }
     }
-    let agent_mcp_servers: Vec<_> = if is_plugin_agent {
+    let agent_mcp_servers: Vec<_> = if !agent_owned_mcp_servers_allowed(is_plugin_agent) {
         if !definition.mcp_servers.is_empty() {
             tracing::warn!(
                 agent = %definition.name,
@@ -946,19 +946,8 @@ pub(crate) async fn run_shell_child(
                 })
                 .collect()
     };
-    let parent_mcp_pool = if is_plugin_agent {
-        if ctx.parent_mcp_pool.is_some() {
-            tracing::debug!(
-                agent = %definition.name,
-                "skipping MCP pool inheritance for plugin agent"
-            );
-        }
-        None
-    } else {
-        ctx.parent_mcp_pool
-            .take()
-            .and_then(|pool| filter_pool_by_inheritance(pool, &definition.mcp_inheritance))
-    };
+    let parent_mcp_pool =
+        resolve_inherited_mcp_pool(ctx.parent_mcp_pool.take(), &definition.mcp_inheritance);
     let mcp_inherited_count = parent_mcp_pool
         .as_ref()
         .map(|p| p.len() as u32)

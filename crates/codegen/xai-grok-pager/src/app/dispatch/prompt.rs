@@ -12,7 +12,7 @@ use super::queue::{
 use super::router::dispatch;
 use super::session::fork::open_project_question;
 use super::session::lifecycle::skip_picker_and_create_session;
-use super::voice::voice_stop_on_submit;
+use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, DoctorFixTarget, Effect};
 use crate::app::agent::{AgentId, AgentState};
 use crate::app::agent_view::AgentView;
@@ -459,9 +459,13 @@ pub(super) fn dispatch_send_prompt_inner(
     // the common funnel so every submit path is covered, before any early-return
     // guard below.
     app.pending_action = None;
-    // Releases the mic and drops the recording target so a late in-flight final
-    // can't refill the prompt the user just sent.
-    voice_stop_on_submit(app);
+    // Promote interim + hard-reset; merge only when consuming the composer.
+    let interim = voice_stop_on_submit(app);
+    let text = if consume_input {
+        merge_prompt_with_voice_interim(text, interim)
+    } else {
+        text
+    };
 
     if app.reconnect_pending {
         app.show_toast("Reconnecting, please wait...");

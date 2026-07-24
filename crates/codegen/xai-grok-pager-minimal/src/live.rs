@@ -63,8 +63,15 @@ fn paintable_btw_area(frame_area: Rect, area: Rect) -> Option<Rect> {
 ///
 /// Shared with [`super::overlay::sync_viewport`] so viewport sizing measures the
 /// prompt's height exactly as the live region will draw it.
+///
+/// `input_mode` wires special composer modes (bash `! `, feedback `~ `,
+/// remember `# `) the same way the full TUI does — without this, `!` on an
+/// empty prompt would flip mode invisibly (key consumed, default `❯` remains).
 pub(super) fn prompt_style(
     appearance: &xai_grok_pager::appearance::AppearanceConfig,
+    input_mode: xai_grok_pager::app::agent_view::PromptInputMode,
+    theme: &Theme,
+    multiline: bool,
 ) -> PromptStyle {
     PromptStyle {
         focused: true,
@@ -75,10 +82,12 @@ pub(super) fn prompt_style(
         chrome_pad_left: live_left_inset(appearance),
         chrome_pad_right: 0,
         bg_override: Some(Color::Reset),
-        accent_color_override: None,
+        accent_color_override: input_mode.accent_color(theme),
         border_color_override: None,
-        prefix_override: None,
-        placeholder_override: None,
+        prefix_override: input_mode.prefix_override(theme),
+        placeholder_override: input_mode
+            .placeholder_override(multiline)
+            .map(std::borrow::Cow::Borrowed),
         show_accent_line: false,
         show_borders: false,
         title: None,
@@ -115,7 +124,11 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
     let theme = Theme::current();
     let commit_app = super::commit::committed_appearance(appearance);
     let compact = appearance.prompt.compact;
-    let style = prompt_style(appearance);
+    let (input_mode, multiline) = agent_id
+        .and_then(|id| agents.get(&id))
+        .map(|a| (a.prompt_input_mode, a.multiline_mode))
+        .unwrap_or_default();
+    let style = prompt_style(appearance, input_mode, &theme, multiline);
     let row_inset = live_left_inset(appearance);
     let layout_cfg = &appearance.scrollback.layout;
     let term_h = terminal.last_known_area().height;
@@ -550,24 +563,26 @@ fn render_minimal_status(
     turn_status::render_turn_status(
         buf,
         area,
-        &agent.session.state,
-        activity,
-        agent.turn_elapsed(),
-        agent.activity_started_at,
-        agent.scrollback.animation_tick(),
-        drain_blocked,
-        None,
-        false,
-        agent.context_state.as_ref().map(|c| c.used),
-        minimal_api::mcp_init_progress(agent),
-        agent.bash_turn,
-        is_pending_user_input,
-        goal_verifying,
-        watchers,
-        parked,
-        true,
-        minimal_api::held_queue_count(agent),
-        minimal_api::held_queue_top_sendable(agent),
+        turn_status::TurnStatusArgs {
+            state: &agent.session.state,
+            activity,
+            turn_elapsed: agent.turn_elapsed(),
+            activity_started_at: agent.activity_started_at,
+            tick: agent.scrollback.animation_tick(),
+            drain_blocked,
+            buttons: None,
+            has_running_execute: false,
+            total_tokens: agent.context_state.as_ref().map(|c| c.used),
+            mcp_init_progress: minimal_api::mcp_init_progress(agent),
+            is_bash_turn: agent.bash_turn,
+            is_pending_user_input,
+            goal_verifying,
+            watchers,
+            parked,
+            flat_background: true,
+            held_queue: minimal_api::held_queue_count(agent),
+            held_queue_top_sendable: minimal_api::held_queue_top_sendable(agent),
+        },
     );
 }
 /// Idle status: `minimal · [/fullscreen to go back ·] /help` (+ auto-set note).
@@ -615,41 +630,45 @@ fn render_prompt_info(
     let base = theme.primary().bg(Color::Reset);
     let sep = theme.dim().bg(Color::Reset);
     let mut segs: Vec<(String, Style)> = Vec::new();
-    if let Some(model) = agent.session.models.current_model_name() {
-        let label = match agent.session.models.reasoning_effort {
-            Some(eff) => format!("{model} ({eff})"),
-            None => model,
-        };
-        segs.push((label, base));
-    }
-    let effective_plan =
-        minimal_api::plan_mode_pending(agent).unwrap_or(minimal_api::plan_mode_active(agent));
-    let mode_flag: Option<(&str, Color)> = if effective_plan {
-        Some(("plan", theme.accent_plan))
-    } else if agent.session.is_yolo() {
-        Some(("always-approve", theme.warning))
-    } else if agent.session.is_auto() {
-        Some(("auto", theme.accent_system))
+    if let Some(label) = agent.prompt_input_mode.prompt_info_override() {
+        segs.push((label.to_string(), base));
     } else {
-        None
-    };
-    if let Some((label, color)) = mode_flag {
-        segs.push((label.to_string(), base.fg(color)));
-    }
-    let used = agent.context_state.as_ref().map(|c| c.used);
-    let total = agent
-        .context_state
-        .as_ref()
-        .and_then(|c| (c.total > 0).then_some(c.total))
-        .or_else(|| agent.session.models.get_context_window());
-    if let (Some(used), Some(total)) = (used, total)
-        && total > 0
-    {
-        let pct = xai_token_estimation::usage_percentage(used, total);
-        segs.push((
-            format!("{} / {} ({:.0}%)", fmt_tokens(used), fmt_tokens(total), pct),
-            base,
-        ));
+        if let Some(model) = agent.session.models.current_model_name() {
+            let label = match agent.session.models.reasoning_effort {
+                Some(eff) => format!("{model} ({eff})"),
+                None => model,
+            };
+            segs.push((label, base));
+        }
+        let effective_plan =
+            minimal_api::plan_mode_pending(agent).unwrap_or(minimal_api::plan_mode_active(agent));
+        let mode_flag: Option<(&str, Color)> = if effective_plan {
+            Some(("plan", theme.accent_plan))
+        } else if agent.session.is_yolo() {
+            Some(("always-approve", theme.warning))
+        } else if agent.session.is_auto() {
+            Some(("auto", theme.accent_system))
+        } else {
+            None
+        };
+        if let Some((label, color)) = mode_flag {
+            segs.push((label.to_string(), base.fg(color)));
+        }
+        let used = agent.context_state.as_ref().map(|c| c.used);
+        let total = agent
+            .context_state
+            .as_ref()
+            .and_then(|c| (c.total > 0).then_some(c.total))
+            .or_else(|| agent.session.models.get_context_window());
+        if let (Some(used), Some(total)) = (used, total)
+            && total > 0
+        {
+            let pct = xai_token_estimation::usage_percentage(used, total);
+            segs.push((
+                format!("{} / {} ({:.0}%)", fmt_tokens(used), fmt_tokens(total), pct),
+                base,
+            ));
+        }
     }
     if queued > 0 {
         segs.push((format!("{queued} queued"), base));
@@ -890,6 +909,28 @@ mod tests {
         assert!(!text.contains("/help"), "not the idle hint: {text:?}");
     }
     #[test]
+    fn prompt_style_bash_mode_shows_bang_prefix() {
+        use xai_grok_pager::app::agent_view::PromptInputMode;
+        use xai_grok_pager::appearance::AppearanceConfig;
+        let appearance = AppearanceConfig::default();
+        let theme = Theme::current();
+        let normal = prompt_style(&appearance, PromptInputMode::Normal, &theme, false);
+        assert!(normal.prefix_override.is_none());
+        assert!(normal.accent_color_override.is_none());
+        assert!(normal.placeholder_override.is_none());
+        let bash = prompt_style(&appearance, PromptInputMode::Bash, &theme, false);
+        assert_eq!(
+            bash.prefix_override,
+            Some(("! ", theme.command)),
+            "bash mode must paint the yellow `! ` prefix (full-TUI parity)"
+        );
+        assert_eq!(bash.accent_color_override, Some(theme.command));
+        assert!(
+            bash.placeholder_override.is_none(),
+            "bash keeps the default placeholder"
+        );
+    }
+    #[test]
     fn prompt_info_renders_model_context_and_queued() {
         let mut a = agent();
         a.context_state = Some(xai_grok_shell::session::ContextInfo {
@@ -911,6 +952,37 @@ mod tests {
         assert!(
             text.trim_end().ends_with("ctrl+o transcript"),
             "trailing transcript hint: {text:?}"
+        );
+    }
+    #[test]
+    fn prompt_info_bash_mode_shows_run_shell_command() {
+        use xai_grok_pager::app::agent_view::PromptInputMode;
+        let mut a = agent();
+        a.prompt_input_mode = PromptInputMode::Bash;
+        a.context_state = Some(xai_grok_shell::session::ContextInfo {
+            used: 276_000,
+            total: 2_000_000,
+            ..Default::default()
+        });
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        render_prompt_info(&mut buf, area, &a, 2, "ctrl+o transcript", &theme);
+        let text: String = (0..area.width)
+            .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(
+            text.contains("Run shell command"),
+            "bash mode info label: {text:?}"
+        );
+        assert!(
+            !text.contains("276K"),
+            "context usage hidden under bash mode: {text:?}"
+        );
+        assert!(text.contains("2 queued"), "queued still shown: {text:?}");
+        assert!(
+            text.trim_end().ends_with("ctrl+o transcript"),
+            "transcript hint still trails: {text:?}"
         );
     }
     /// Where Ctrl+O is the interject chord (Apple Terminal) the caller passes

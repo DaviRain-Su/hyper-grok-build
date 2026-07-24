@@ -59,6 +59,10 @@ impl WorkflowRunStatus {
         )
     }
 
+    pub fn is_resumable(self) -> bool {
+        self.is_paused() || self == Self::Failed
+    }
+
     fn from_pause(kind: PauseKind) -> Self {
         match kind {
             PauseKind::User => Self::UserPaused,
@@ -263,7 +267,7 @@ impl WorkflowTracker {
         new_agent_budget: Option<u64>,
     ) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
-        if !run.state.status.is_paused() {
+        if !run.state.status.is_resumable() {
             return None;
         }
         let candidate_budget = match new_agent_budget {
@@ -414,6 +418,19 @@ impl WorkflowTracker {
             run.state.agents.remove(pos);
         }
         label
+    }
+
+    /// Point a roster row at a fresh child session id. Contract retries
+    /// spawn a new child session per attempt; the row must follow so live
+    /// progress lookups and transcript clicks resolve to the current child.
+    pub fn rebind_agent_id(&mut self, run_id: &str, agent_id: &str, new_agent_id: &str) {
+        let Some(run) = self.run_mut(run_id) else {
+            return;
+        };
+        if let Some(row) = run.state.agents.iter_mut().find(|a| a.agent_id == agent_id) {
+            row.agent_id = new_agent_id.to_string();
+            run.state.advance_revision();
+        }
     }
 
     pub fn agent_finished(
@@ -794,6 +811,34 @@ mod tests {
     }
 
     #[test]
+    fn rebind_agent_id_points_row_at_retry_child_and_bumps_revision() {
+        let (mut t, id) = tracker_with_run();
+        t.agent_started(
+            &id,
+            WorkflowAgentRow {
+                agent_id: "child-attempt-1".into(),
+                label: "worker".into(),
+                phase: None,
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+        );
+        let before = t.get(&id).unwrap().revision;
+        t.rebind_agent_id(&id, "child-attempt-1", "child-attempt-2");
+        let run = t.get(&id).unwrap();
+        assert_eq!(run.agents.len(), 1);
+        assert_eq!(run.agents[0].agent_id, "child-attempt-2");
+        assert_eq!(run.agents[0].label, "worker");
+        assert_eq!(run.agents[0].state, "running");
+        assert!(run.revision > before);
+
+        t.agent_finished(&id, "child-attempt-2", "done", 42, 1_000);
+        assert_eq!(t.get(&id).unwrap().agents[0].state, "done");
+    }
+
+    #[test]
     fn snapshot_restore_marks_active_non_resumable_interrupted() {
         let (t, _) = tracker_with_run();
         let restored = WorkflowTracker::from_snapshot(t.snapshot());
@@ -825,11 +870,64 @@ mod tests {
     }
 
     #[test]
-    fn resume_rejects_nonpaused_states() {
+    fn resume_rejects_nonresumable_states() {
         let (mut t, id) = tracker_with_run();
         t.interrupt(&id, "lost executor").unwrap();
         assert!(t.resume_run(&id, None).is_none());
         assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Interrupted);
+
+        let (mut t, id) = tracker_with_run();
+        t.apply_outcome(&id, &WorkflowOutcome::Cancelled);
+        assert!(t.resume_run(&id, None).is_none());
+        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Cancelled);
+
+        let (mut t, id) = tracker_with_run();
+        t.apply_outcome(
+            &id,
+            &WorkflowOutcome::Completed {
+                result: serde_json::json!("done"),
+            },
+        );
+        assert!(t.resume_run(&id, None).is_none());
+        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Complete);
+    }
+
+    #[test]
+    fn failed_run_resumes_to_active_bumps_epoch_and_cancels_ghost_agents() {
+        let (mut t, id) = tracker_with_run();
+        t.agent_started(
+            &id,
+            WorkflowAgentRow {
+                agent_id: "child".into(),
+                label: "worker".into(),
+                phase: None,
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+        );
+        t.apply_outcome(
+            &id,
+            &WorkflowOutcome::Failed {
+                error: "scratch byte quota exceeded".into(),
+            },
+        );
+        let failed = t.get(&id).unwrap();
+        assert_eq!(failed.status, WorkflowRunStatus::Failed);
+        assert!(failed.status.is_resumable());
+        assert!(failed.status.is_terminal());
+        assert!(!failed.status.is_paused());
+        assert_eq!(t.execution_epoch(&id), Some(0));
+
+        let resumed = t.resume_run(&id, None).unwrap();
+        assert_eq!(resumed.status, WorkflowRunStatus::Active);
+        assert!(resumed.pause_message.is_none());
+        assert_eq!(
+            resumed.agents[0].state, "cancelled",
+            "ghost running agent rows must be cancelled on resume"
+        );
+        assert_eq!(t.execution_epoch(&id), Some(1));
     }
 
     #[test]

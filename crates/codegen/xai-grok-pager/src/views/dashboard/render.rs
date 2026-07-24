@@ -2999,13 +2999,10 @@ fn render_dispatch(
     let prefix = "\u{276F} ";
     let prefix_w = UnicodeWidthStr::width(prefix) as u16;
 
-    // Voice overlay: stream the interim transcript into the box and hide the
-    // caret while listening. When active we render through `PromptWidget::draw`
-    // (below) even on an empty buffer, so the manual empty-state branch is
-    // skipped in that case.
+    // When voice is active, draw through PromptWidget even on an empty buffer
+    // so the manual empty-state branch is skipped.
     let voice_overlay = (state.voice_listening || state.voice_interim.is_some()).then_some(
         crate::views::prompt_widget::VoicePromptOverlay {
-            listening: state.voice_listening,
             interim: state.voice_interim.as_deref(),
             color: theme.accent_running,
         },

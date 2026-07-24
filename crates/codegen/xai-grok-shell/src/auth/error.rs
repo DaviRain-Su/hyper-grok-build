@@ -141,4 +141,10 @@ impl AuthError {
     pub(crate) fn permanent(reason: RefreshTokenFailedReason) -> Self {
         AuthError::Refresh(RefreshTokenError::Permanent(reason.into()))
     }
+
+    /// Retryable refresh failure (network, 5xx, sleep/dark-wake defer, etc.).
+    /// Permanent failures, NotLoggedIn, and policy rejects are not transient.
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(self, AuthError::Refresh(RefreshTokenError::Transient(_)))
+    }
 }

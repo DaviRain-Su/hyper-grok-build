@@ -294,22 +294,17 @@ pub struct PromptInfo<'a> {
     pub usage_warning_critical: bool,
 }
 
-/// Live voice-capture overlay state for the prompt.
+/// Live voice-capture overlay for the prompt.
 ///
-/// When voice capture is active the interim STT transcript streams
-/// directly into the prompt body (in [`color`](Self::color)) so the user
-/// sees their words land in the input box instead of a status-bar indicator.
-/// The prompt prefix stays the normal `❯` chevron; the recording state is
-/// signalled by a pulsating record indicator rendered above the prompt box.
+/// Interim STT paints as muted italic ghost text (not in the textarea).
+/// Finalized STT is real prompt content and stays editable while the mic is open.
+/// Overlay presence (even with no interim) marks voice active for callers that
+/// skip empty-state placeholders while capturing.
 #[derive(Debug, Clone, Copy)]
 pub struct VoicePromptOverlay<'a> {
-    /// Whether the mic is currently capturing (suppresses the caret while the
-    /// interim transcript stands in for it).
-    pub listening: bool,
-    /// Latest interim transcript to stream into the prompt body, if any.
+    /// Latest interim transcript, if any.
     pub interim: Option<&'a str>,
-    /// Accent color used for both the mic prefix and the streamed text so
-    /// voice input is visually distinct from typed text.
+    /// Theme accent associated with this overlay.
     pub color: ratatui::style::Color,
 }
 
@@ -3095,8 +3090,8 @@ impl PromptWidget {
             (snap.active, snap.inline_ghost.is_some())
         };
 
-        // Voice interim transcript rendered in muted text_secondary so
-        // in-progress words are visually distinct from finalized text.
+        // Interim STT: muted italic overlay (not in the textarea). Finalized
+        // text remains the real, editable draft.
         let voice_interim_shown = if let Some(v) = voice
             && let Some(interim) = v.interim.filter(|t| !t.trim().is_empty())
             && ta_area.width > 0
@@ -3104,7 +3099,10 @@ impl PromptWidget {
         {
             let interim_fg = crate::render::color::blend_color(bg, theme.text_secondary, 0.7)
                 .unwrap_or(theme.gray);
-            let interim_style = Style::default().fg(interim_fg).bg(bg);
+            let interim_style = Style::default()
+                .fg(interim_fg)
+                .bg(bg)
+                .add_modifier(Modifier::ITALIC);
             if self.textarea.text().is_empty() {
                 let lines =
                     wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
@@ -3112,11 +3110,11 @@ impl PromptWidget {
                     buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
                 }
             } else {
-                // Append interim as ghost-text suffix after finalized text.
-                let cursor = self.textarea.text().len();
+                // Ghost suffix after the finalized draft (not at the caret).
+                let end = self.textarea.text().len();
                 if let Some((start_x, row_y)) =
                     self.textarea
-                        .screen_position_of(cursor, ta_area, self.textarea_state)
+                        .screen_position_of(end, ta_area, self.textarea_state)
                 {
                     let display = format!(" {interim}");
                     let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
@@ -3212,44 +3210,41 @@ impl PromptWidget {
             crate::render::color::blend_area(buf, dim_area, Some((bg, 0.66)), None);
         }
 
-        // Hide the cursor while voice capture is active — the streamed
-        // transcript stands in for the caret, so a blinking cursor over it
-        // is noise.
-        let voice_listening = voice.is_some_and(|v| v.listening);
-        let cursor_pos = if style.focused && !voice_listening {
+        // Finalized draft stays editable during voice; hide the caret only when
+        // the box is empty and interim is standing in for it.
+        let hide_caret_for_empty_interim = self.textarea.text().is_empty()
+            && voice.is_some_and(|v| v.interim.is_some_and(|t| !t.trim().is_empty()));
+        let cursor_pos = if style.focused && !hide_caret_for_empty_interim {
             self.textarea
                 .cursor_pos_with_state(ta_area, self.textarea_state)
         } else {
             None
         };
 
-        // Shell command ghost text: render suggestion suffix after cursor.
-        if let Some(ghost) = self.suggestions.ghost_text()
-            && self.textarea.cursor() == self.textarea.text().len()
-            && !slash_active
-            && !slash_has_inline_ghost
-            && let Some((cx, cy)) = cursor_pos
-        {
-            let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
-            if avail > 0 {
-                let truncated = crate::render::line_utils::truncate_str(ghost, avail);
-                buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
+        // Ghost suffixes (shell completion / predicted prompt). Voice interim
+        // owns the end-of-text cells when shown, so skip both ghosts then.
+        if !voice_interim_shown {
+            if let Some(ghost) = self.suggestions.ghost_text()
+                && self.textarea.cursor() == self.textarea.text().len()
+                && !slash_active
+                && !slash_has_inline_ghost
+                && let Some((cx, cy)) = cursor_pos
+            {
+                let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
+                if avail > 0 {
+                    let truncated = crate::render::line_utils::truncate_str(ghost, avail);
+                    buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
+                }
             }
-        }
 
-        // Predicted-next-prompt ghost (tab autocomplete): render the remainder
-        // of the suggestion after the cursor. `prompt_suggestion_ghost()`
-        // owns all gating (per-frame active flag, no competing completion UI,
-        // cursor at end-of-text); voice interim already occupies the row when
-        // shown, so it wins.
-        if !voice_interim_shown
-            && let Some(ghost) = self.prompt_suggestion_ghost()
-            && let Some((cx, cy)) = cursor_pos
-        {
-            let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
-            if avail > 0 {
-                let truncated = crate::render::line_utils::truncate_str(ghost, avail);
-                buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
+            if let Some(ghost) = self.prompt_suggestion_ghost()
+                && let Some((cx, cy)) = cursor_pos
+            {
+                let avail = (ta_area.x + ta_area.width).saturating_sub(cx) as usize;
+                if avail > 0 {
+                    let truncated = crate::render::line_utils::truncate_str(ghost, avail);
+                    buf.set_string(cx, cy, &truncated, theme.ghost_text_style().bg(bg));
+                }
             }
         }
 

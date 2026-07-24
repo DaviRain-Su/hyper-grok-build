@@ -1002,6 +1002,20 @@ pub struct TurnCompleted {
     pub error_category: Option<String>,
 }
 
+/// Model issued a shell tool call whose command is `true` (keepalive thrash signal).
+#[derive(Serialize)]
+pub struct ShellTrueNoop {
+    pub tool_name: String,
+}
+
+/// Harness hard-stopped a turn after identical tool thrash (silent EndTurn).
+#[derive(Serialize)]
+pub struct ActionStationarityStop {
+    pub true_noop: bool,
+    pub run_len: u32,
+    pub tool_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tool Calls
 // ---------------------------------------------------------------------------
@@ -1700,6 +1714,8 @@ telemetry_event!(
     "turn_completed",
     external = crate::external::schema::map_turn_completed
 );
+telemetry_event!(ShellTrueNoop, "shell_true_noop");
+telemetry_event!(ActionStationarityStop, "action_stationarity_stop");
 telemetry_event!(
     ToolCallCompleted,
     "tool_call_completed",

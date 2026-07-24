@@ -43,7 +43,7 @@ impl HttpAuth for ShellAuthCredentialProvider {
     fn apply(&self, builder: RequestBuilder, base_url: &str) -> RequestBuilder {
         let mut creds = self.static_credentials.clone();
         if creds.deployment_key.is_none()
-            && let Some(auth) = self.auth_manager.current_or_expired()
+            && let Some(auth) = self.auth_manager.current_wire_valid()
         {
             creds.user_token = Some(auth.key);
         }
@@ -60,12 +60,12 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
                 ..Default::default()
             };
         }
-        let auth = self.auth_manager.current_or_expired();
-        let user_id = auth.as_ref().map(|a| a.user_id.clone());
-        let team_id = auth.as_ref().and_then(|a| a.team_id.clone());
-        let organization_id = auth.as_ref().and_then(|a| a.organization_id.clone());
-        let api_key_id = api_key_id_for(auth.as_ref());
-        let token = auth.map(|a| a.key);
+        let identity = self.auth_manager.current_or_expired();
+        let user_id = identity.as_ref().map(|a| a.user_id.clone());
+        let team_id = identity.as_ref().and_then(|a| a.team_id.clone());
+        let organization_id = identity.as_ref().and_then(|a| a.organization_id.clone());
+        let api_key_id = api_key_id_for(identity.as_ref());
+        let token = self.auth_manager.current_wire_valid().map(|a| a.key);
         CredentialSnapshot {
             token,
             user_id,

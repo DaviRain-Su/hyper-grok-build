@@ -410,7 +410,7 @@ pub(super) async fn run_session(
                     if let Some(notification) = replay_buffer.flush() {
                         session.emit_buffered(notification).await;
                     }
-                    let (turn_succeeded, infra_pause_message) =
+                    let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                         SessionActor::post_turn_goal_degradation_plan(&result);
                     session.handle_completion(prompt_id, result).await;
                     // Drain any monitor events that were routed to the mid-turn buffer
@@ -421,7 +421,9 @@ pub(super) async fn run_session(
                     }
                     // Goal continuation (success) or back-off (non-success).
                     // Owns the streak-tracking and reminder-injection path.
-                    session.handle_turn_end(turn_succeeded).await;
+                    session
+                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
+                        .await;
                     // Interjections that raced past the turn's final drain
                     // (arrived during turn-end bookkeeping) have no turn left
                     // to merge into — convert them to front-of-queue prompt

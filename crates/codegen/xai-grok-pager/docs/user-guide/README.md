@@ -29,7 +29,7 @@ Customize and extend Grok Build.
 | 6 | [Theming and Appearance](06-theming.md) | Themes, the `/theme` command, `pager.toml`, and color-support detection |
 | 7 | [MCP Servers](07-mcp-servers.md) | External tool integrations through the Model Context Protocol |
 | 8 | [Skills](08-skills.md) | Reusable prompt packages in the SKILL.md format |
-| 9 | [Plugins](09-plugins.md) | Bundle and share skills, commands, agents, hooks, and MCP servers; install from marketplace sources |
+| 9 | [Plugins](09-plugins.md) | Bundle and share skills, commands, agents, hooks, and MCP servers; install from, author, and govern marketplaces (organization controls) |
 | 10 | [Hooks](10-hooks.md) | Lifecycle scripts and HTTP callbacks for pre- and post-tool-use events |
 | 11 | [Custom Models](11-custom-models.md) | Bring-your-own-key, Ollama, and OpenAI-compatible endpoints |
 | 25 | [Moonshot Providers](25-moonshot-providers.md) | Built-in Moonshot / Kimi open-platform API keys (`moonshot-cn`, `moonshot-ai`) |
@@ -54,6 +54,6 @@ Automate, script, and integrate Grok Build with other systems.
 | 19 | [Plan Mode](19-plan-mode.md) | Structured planning, plan-file edits, and approval before coding |
 | 20 | [Background Tasks and Monitoring](20-background-tasks.md) | `background: true`, `/loop`, `monitor`, and `Ctrl+B` to demote |
 | 21 | [Terminal Support and Troubleshooting](21-terminal-support.md) | tmux, SSH, truecolor, clipboard, and OSC 52 |
-| 22 | [Permissions and Safety Controls](22-permissions-and-safety.md) | `dontAsk` mode, auto-approved tools, the safe-bash list, and restrictive PreToolUse hooks (such as git/gh-only) |
+| 22 | [Permissions and Safety](22-permissions-and-safety.md) | Modes (always-approve, auto, ask), rules, matching, hooks, and examples |
 | 23 | [Agent Dashboard](23-dashboard.md) | Terminal agent control plus the local Rust web observability dashboard |
 | 24 | [Monitoring Usage (External OpenTelemetry)](24-monitoring-usage.md) | Customer OTEL export |

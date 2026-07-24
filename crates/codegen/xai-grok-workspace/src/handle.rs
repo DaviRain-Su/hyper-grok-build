@@ -55,6 +55,56 @@ static PRODUCER_SPAWNED_AFTER_DRAIN_TOTAL: std::sync::LazyLock<IntCounter> =
         )
         .unwrap()
     });
+/// Startup stages until hub connected. Labels: stage + outcome (ok/error).
+static STARTUP_STAGE_DURATION_SECONDS: std::sync::LazyLock<HistogramVec> =
+    std::sync::LazyLock::new(|| {
+        register_histogram_vec!(
+            "grok_workspace_startup_stage_duration_seconds",
+            "Workspace-server startup stage wall time by stage and outcome \
+             (ok/error; fat-tail failures are recorded, not only success): \
+             startup_recovery, tool_catalog, hub_ws_connect \
+             (open_socket+hello through on_connect), connect_hub (catalog+ws), \
+             time_to_ready (connect_local_workspace start to hub connect attempt end).",
+            &["stage", "outcome"],
+            vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0,
+                60.0,
+            ]
+        )
+        .unwrap()
+    });
+const STARTUP_STAGE_STARTUP_RECOVERY: &str = "startup_recovery";
+const STARTUP_STAGE_TOOL_CATALOG: &str = "tool_catalog";
+const STARTUP_STAGE_HUB_WS_CONNECT: &str = "hub_ws_connect";
+const STARTUP_STAGE_CONNECT_HUB: &str = "connect_hub";
+const STARTUP_STAGE_TIME_TO_READY: &str = "time_to_ready";
+const STARTUP_OUTCOME_OK: &str = "ok";
+const STARTUP_OUTCOME_ERROR: &str = "error";
+fn observe_startup_stage(stage: &str, outcome: &str, secs: f64) {
+    STARTUP_STAGE_DURATION_SECONDS
+        .with_label_values(&[stage, outcome])
+        .observe(secs);
+}
+/// tool_catalog always; connect_hub error only when catalog fails. Testable.
+fn observe_connect_hub_catalog_result(
+    catalog_ok: bool,
+    tool_catalog_secs: f64,
+    connect_hub_secs: f64,
+) {
+    let outcome = if catalog_ok {
+        STARTUP_OUTCOME_OK
+    } else {
+        STARTUP_OUTCOME_ERROR
+    };
+    observe_startup_stage(STARTUP_STAGE_TOOL_CATALOG, outcome, tool_catalog_secs);
+    if !catalog_ok {
+        observe_startup_stage(
+            STARTUP_STAGE_CONNECT_HUB,
+            STARTUP_OUTCOME_ERROR,
+            connect_hub_secs,
+        );
+    }
+}
 /// `session.bind` resolutions advertising zero model-facing tools, by reason.
 /// At most one reason is counted per zero-tool bind.
 static WORKSPACE_BIND_ZERO_TOOLS_TOTAL: std::sync::LazyLock<IntCounterVec> =
@@ -289,6 +339,17 @@ pub(crate) fn init_metrics() {
     ENV_CAPTURE_PANIC_TOTAL.inc_by(0);
     std::sync::LazyLock::force(&DRAIN_DURATION);
     std::sync::LazyLock::force(&WORKSPACE_BIND_ADVERTISED_TOOLS);
+    for stage in [
+        STARTUP_STAGE_STARTUP_RECOVERY,
+        STARTUP_STAGE_TOOL_CATALOG,
+        STARTUP_STAGE_HUB_WS_CONNECT,
+        STARTUP_STAGE_CONNECT_HUB,
+        STARTUP_STAGE_TIME_TO_READY,
+    ] {
+        for outcome in [STARTUP_OUTCOME_OK, STARTUP_OUTCOME_ERROR] {
+            let _ = STARTUP_STAGE_DURATION_SECONDS.with_label_values(&[stage, outcome]);
+        }
+    }
     for reason in [
         "workspace_shutdown",
         "session_lookup_failed",
@@ -3178,6 +3239,7 @@ impl WorkspaceHandle {
     pub async fn connect_hub(&self) -> WorkspaceResult<()> {
         use crate::hub::{HubHandle, apply_tools_changed, hub_result};
         tracing::info!("WorkspaceHandle::connect_hub — starting");
+        let connect_hub_started = std::time::Instant::now();
         let hub_config = match &self.shared.hub_config {
             Some(c) => {
                 let mut cfg = c.clone();
@@ -3194,7 +3256,8 @@ impl WorkspaceHandle {
             return Ok(());
         }
         tracing::info!(url = %hub_config.url, "WorkspaceHandle::connect_hub — connecting to hub");
-        let (template_handlers, rpc_tool_id) = {
+        let catalog_started = std::time::Instant::now();
+        let catalog_result = (|| -> WorkspaceResult<_> {
             let session_env = Arc::new(std::collections::HashMap::new());
             let mcp_snapshot = self.shared.mcp_tools_snapshot.load_full();
             let hub_snapshot = self.shared.hub_tools_snapshot.load_full();
@@ -3226,23 +3289,56 @@ impl WorkspaceHandle {
                 tools = ?tool_names,
                 "Registering server tool catalog on hub"
             );
-            (handlers, rpc_tool_id)
+            Ok((handlers, rpc_tool_id))
+        })();
+        let tool_catalog_secs = catalog_started.elapsed().as_secs_f64();
+        let (template_handlers, rpc_tool_id) = match catalog_result {
+            Ok(v) => {
+                observe_connect_hub_catalog_result(true, tool_catalog_secs, 0.0);
+                v
+            }
+            Err(e) => {
+                observe_connect_hub_catalog_result(
+                    false,
+                    tool_catalog_secs,
+                    connect_hub_started.elapsed().as_secs_f64(),
+                );
+                return Err(e);
+            }
         };
         let catalog: Arc<Vec<Arc<dyn xai_computer_hub_sdk::ToolServerHandler>>> =
             Arc::new(template_handlers.clone());
         let resolver = self.session_bind_resolver(catalog, rpc_tool_id);
-        let mut handle = hub_result(
-            HubHandle::connect(
-                &hub_config,
-                self.shared.status_config.ws_ping,
-                self.shared.status_config.ws_reconnect_backoff.clone(),
-                template_handlers,
-                self.shared.server_metadata.clone(),
-                Some(resolver),
-            )
-            .await,
-        )?;
-        tracing::info!("WorkspaceHandle::connect_hub — connected, starting server + listeners");
+        let hub_ws_started = std::time::Instant::now();
+        let connect_result = HubHandle::connect(
+            &hub_config,
+            self.shared.status_config.ws_ping,
+            self.shared.status_config.ws_reconnect_backoff.clone(),
+            template_handlers,
+            self.shared.server_metadata.clone(),
+            Some(resolver),
+        )
+        .await;
+        let hub_ws_connect_secs = hub_ws_started.elapsed().as_secs_f64();
+        let connect_hub_secs = connect_hub_started.elapsed().as_secs_f64();
+        let connect_outcome = if connect_result.is_ok() {
+            STARTUP_OUTCOME_OK
+        } else {
+            STARTUP_OUTCOME_ERROR
+        };
+        observe_startup_stage(
+            STARTUP_STAGE_HUB_WS_CONNECT,
+            connect_outcome,
+            hub_ws_connect_secs,
+        );
+        observe_startup_stage(STARTUP_STAGE_CONNECT_HUB, connect_outcome, connect_hub_secs);
+        let mut handle = hub_result(connect_result)?;
+        tracing::info!(
+            tool_catalog_secs,
+            hub_ws_connect_secs,
+            connect_hub_secs,
+            "WorkspaceHandle::connect_hub — connected, starting server + listeners"
+        );
         let (activity_notify_handle, activity_notify_rx) =
             xai_grok_tools::notification::types::ToolNotificationHandle::channel();
         let activity_feed_task = tokio::spawn(run_activity_feed(
@@ -3788,6 +3884,7 @@ pub async fn connect_local_workspace(
     confine_fs_to_workspace_root: bool,
 ) -> WorkspaceResult<WorkspaceHandle> {
     use crate::session::tool_config::WorkspaceSessionContextFactory;
+    let time_to_ready_started = std::time::Instant::now();
     let identity: crate::upload::environment::WorkspaceIdentity =
         auth.identity().map(Into::into).unwrap_or_default();
     let workspace_home = resolve_workspace_home();
@@ -3855,11 +3952,20 @@ pub async fn connect_local_workspace(
         trace_source,
         xai_file_utils::queue::UploadRetryPolicy::default(),
     ));
-    if data_collection_disabled {
-        crate::recovery::purge_spilled_items(&workspace_home);
-    } else {
-        let report = crate::recovery::run_startup_recovery(&workspace_home, &upload_queue).await;
-        tracing::info!(?report, "workspace startup restart-recovery scan complete");
+    {
+        let recovery_started = std::time::Instant::now();
+        if data_collection_disabled {
+            crate::recovery::purge_spilled_items(&workspace_home);
+        } else {
+            let report =
+                crate::recovery::run_startup_recovery(&workspace_home, &upload_queue).await;
+            tracing::info!(?report, "workspace startup restart-recovery scan complete");
+        }
+        observe_startup_stage(
+            STARTUP_STAGE_STARTUP_RECOVERY,
+            STARTUP_OUTCOME_OK,
+            recovery_started.elapsed().as_secs_f64(),
+        );
     }
     upload_queue.cleanup_orphans(xai_file_utils::queue::DEFAULT_MAX_AGE);
     crate::upload::spawn_queue_stats_sampler(
@@ -3888,7 +3994,17 @@ pub async fn connect_local_workspace(
         identity,
     )
     .map_err(|e| WorkspaceError::HubError(format!("failed to create workspace: {e}")))?;
-    ws_handle.connect_hub().await?;
+    let connect_result = ws_handle.connect_hub().await;
+    observe_startup_stage(
+        STARTUP_STAGE_TIME_TO_READY,
+        if connect_result.is_ok() {
+            STARTUP_OUTCOME_OK
+        } else {
+            STARTUP_OUTCOME_ERROR
+        },
+        time_to_ready_started.elapsed().as_secs_f64(),
+    );
+    connect_result?;
     Ok(ws_handle)
 }
 /// Resolve `$GROK_WORKSPACE_HOME` — the workspace-owned on-disk state root.
@@ -7675,12 +7791,233 @@ pub(crate) mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].id, "hub:remote_exec");
     }
+    #[test]
+    fn startup_stage_observe_records_independent_samples() {
+        let recovery_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_STARTUP_RECOVERY,
+                super::STARTUP_OUTCOME_OK,
+            ])
+            .get_sample_count();
+        let catalog_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+            .get_sample_count();
+        let hub_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_HUB_WS_CONNECT,
+                super::STARTUP_OUTCOME_OK,
+            ])
+            .get_sample_count();
+        let hub_err_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_HUB_WS_CONNECT,
+                super::STARTUP_OUTCOME_ERROR,
+            ])
+            .get_sample_count();
+        super::observe_startup_stage(
+            super::STARTUP_STAGE_STARTUP_RECOVERY,
+            super::STARTUP_OUTCOME_OK,
+            0.42,
+        );
+        super::observe_startup_stage(
+            super::STARTUP_STAGE_HUB_WS_CONNECT,
+            super::STARTUP_OUTCOME_ERROR,
+            12.5,
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_STARTUP_RECOVERY,
+                    super::STARTUP_OUTCOME_OK
+                ])
+                .get_sample_count(),
+            recovery_before + 1
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_HUB_WS_CONNECT,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            hub_err_before + 1
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_HUB_WS_CONNECT,
+                    super::STARTUP_OUTCOME_OK
+                ])
+                .get_sample_count(),
+            hub_ok_before,
+            "error sample must not advance ok hub_ws_connect"
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+                .get_sample_count(),
+            catalog_before,
+            "observing recovery/hub must not sample tool_catalog"
+        );
+    }
     #[tokio::test]
     async fn connect_hub_noop_when_no_config() {
+        let catalog_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+            .get_sample_count();
+        let catalog_err_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_TOOL_CATALOG,
+                super::STARTUP_OUTCOME_ERROR,
+            ])
+            .get_sample_count();
+        let connect_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[super::STARTUP_STAGE_CONNECT_HUB, super::STARTUP_OUTCOME_OK])
+            .get_sample_count();
+        let connect_err_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_CONNECT_HUB,
+                super::STARTUP_OUTCOME_ERROR,
+            ])
+            .get_sample_count();
+        let hub_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_HUB_WS_CONNECT,
+                super::STARTUP_OUTCOME_OK,
+            ])
+            .get_sample_count();
         let handle = make_handle();
         let result = handle.connect_hub().await;
         assert!(result.is_ok());
         assert!(handle.shared().hub_server().is_none());
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+                .get_sample_count(),
+            catalog_ok_before,
+            "no-hub-config noop must not sample tool_catalog"
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_TOOL_CATALOG,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            catalog_err_before
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[super::STARTUP_STAGE_CONNECT_HUB, super::STARTUP_OUTCOME_OK])
+                .get_sample_count(),
+            connect_ok_before
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_CONNECT_HUB,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            connect_err_before
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_HUB_WS_CONNECT,
+                    super::STARTUP_OUTCOME_OK
+                ])
+                .get_sample_count(),
+            hub_ok_before
+        );
+    }
+    #[test]
+    fn observe_connect_hub_catalog_result_records_error_pair() {
+        let catalog_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+            .get_sample_count();
+        let catalog_err_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_TOOL_CATALOG,
+                super::STARTUP_OUTCOME_ERROR,
+            ])
+            .get_sample_count();
+        let connect_err_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_CONNECT_HUB,
+                super::STARTUP_OUTCOME_ERROR,
+            ])
+            .get_sample_count();
+        let connect_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[super::STARTUP_STAGE_CONNECT_HUB, super::STARTUP_OUTCOME_OK])
+            .get_sample_count();
+        let hub_before = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[
+                super::STARTUP_STAGE_HUB_WS_CONNECT,
+                super::STARTUP_OUTCOME_ERROR,
+            ])
+            .get_sample_count();
+        super::observe_connect_hub_catalog_result(false, 0.03, 0.11);
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_TOOL_CATALOG,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            catalog_err_before + 1
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_CONNECT_HUB,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            connect_err_before + 1
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+                .get_sample_count(),
+            catalog_ok_before
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[super::STARTUP_STAGE_CONNECT_HUB, super::STARTUP_OUTCOME_OK])
+                .get_sample_count(),
+            connect_ok_before
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_HUB_WS_CONNECT,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            hub_before,
+            "catalog failure must not sample hub_ws_connect"
+        );
+        let catalog_ok_mid = super::STARTUP_STAGE_DURATION_SECONDS
+            .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+            .get_sample_count();
+        super::observe_connect_hub_catalog_result(true, 0.02, 0.0);
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
+                .get_sample_count(),
+            catalog_ok_mid + 1
+        );
+        assert_eq!(
+            super::STARTUP_STAGE_DURATION_SECONDS
+                .with_label_values(&[
+                    super::STARTUP_STAGE_CONNECT_HUB,
+                    super::STARTUP_OUTCOME_ERROR
+                ])
+                .get_sample_count(),
+            connect_err_before + 1,
+            "catalog ok must not sample connect_hub error"
+        );
     }
     #[test]
     fn workspace_shared_auth_provider_uses_workspace_config() {

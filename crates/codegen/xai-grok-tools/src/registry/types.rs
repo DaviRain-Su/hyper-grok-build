@@ -983,7 +983,7 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::Cwd(cwd.clone()));
         resources.insert(crate::types::resources::SessionFolder(ctx.session_folder));
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
-        if let Some(owner_session_id) = ctx.owner_session_id {
+        if let Some(owner_session_id) = ctx.owner_session_id.clone() {
             resources.insert(crate::types::resources::OwnerSessionId(owner_session_id));
         }
         if let Some(subagent) = ctx.subagent {
@@ -1022,9 +1022,15 @@ impl ToolRegistryBuilder {
         if let Some(lsp) = ctx.lsp {
             resources.insert(lsp);
         }
-        if ctx.image_gen_config.has_credentials() {
+        let mut image_gen_config = ctx.image_gen_config;
+        let mut video_gen_config = ctx.video_gen_config;
+        if let Some(session_id) = &ctx.owner_session_id {
+            image_gen_config.stamp_session_id_header(session_id);
+            video_gen_config.stamp_session_id_header(session_id);
+        }
+        if image_gen_config.has_credentials() {
             match crate::implementations::grok_build::image_gen::ImageGenClient::new(
-                &ctx.image_gen_config,
+                &image_gen_config,
                 ctx.api_key_provider.clone(),
             ) {
                 Ok(client) => {
@@ -1036,9 +1042,9 @@ impl ToolRegistryBuilder {
                 }
             }
         }
-        if ctx.video_gen_config.is_enabled() {
+        if video_gen_config.is_enabled() {
             match crate::implementations::grok_build::video_gen::VideoGenClient::new(
-                &ctx.video_gen_config,
+                &video_gen_config,
                 ctx.api_key_provider.clone(),
             ) {
                 Ok(client) => {

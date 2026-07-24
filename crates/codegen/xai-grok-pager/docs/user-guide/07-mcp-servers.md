@@ -18,6 +18,8 @@ See the [MCP specification](https://modelcontextprotocol.io) for protocol detail
 
 MCP servers are configured in `~/.grok/config.toml` under `[mcp_servers.<name>]` sections.
 
+To distribute MCP servers to a team, or to restrict which servers users may run, see [Distribute across an organization](09-plugins.md#distribute-across-an-organization) in the Plugins guide.
+
 ### stdio Transport (Local Process)
 
 Grok spawns a local process and communicates over stdin/stdout:
@@ -307,6 +309,18 @@ A partial list of MCP servers you can configure with the `url` or `command` form
 | Puppeteer | stdio | `@modelcontextprotocol/server-puppeteer` |
 
 See the [MCP Server Registry](https://github.com/modelcontextprotocol/servers) for the full list of community servers and the [MCP specification](https://modelcontextprotocol.io) for protocol details.
+
+---
+
+## Subagents and MCP
+
+Subagents inherit the parent session’s connected MCP servers by default, including plugin-sourced agents. Use agent frontmatter `mcpInheritance` to restrict that set (`all`, `none`, `named`, or `except`). Details are in [Subagents — MCP inheritance](16-subagents.md#mcp-inheritance).
+
+If a child lists `search_tool` / `use_tool` but returns an empty catalog, check that:
+
+1. The parent session actually connected the server (see Extensions / `grok inspect`)
+2. The agent’s `mcpInheritance` is not `none` or a filter that excludes the server
+3. Plugin agents cannot declare their own `mcpServers` in frontmatter — they only see parent-connected servers
 
 ---
 

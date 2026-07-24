@@ -76,7 +76,7 @@ pub use server::{
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -87,6 +87,9 @@ const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLIENT_LEADER_VERSION: &str = xai_grok_version::VERSION;
 /// Max wait for an evicted leader to exit before force-killing (relaunch drain ~5s).
 const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long the SAME live grok flock-holder may stay unconnectable before
+/// `connect_or_spawn` treats it as a "zombie leader" and evicts it.
+const ZOMBIE_EVICT_DEADLINE: Duration = Duration::from_secs(30);
 /// Whether `leader_version` is a strictly-older parseable semver than `baseline`.
 /// Unparseable versions (e.g. dev `"unknown"`) return `false` — leave them alone.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
@@ -1158,7 +1161,7 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
 }
 /// Evict a below-floor leader that holds the socket but NOT the flock (the caller
 /// MUST hold the flock, so this teardown is serialized against other clients).
-/// Signals it to vacate, waits for the pid to exit, then force-kills if it
+/// Signals it to vacate, waits for the pid to exit, then re-sends SIGTERM if it
 /// overran the grace window, so the caller can reclaim the socket and respawn.
 async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
     let pid = lock.read_pid();
@@ -1171,14 +1174,14 @@ async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
         if !crate::util::is_process_alive(pid) {
             "exited"
         } else if let Err(e) = crate::util::kill_process_by_pid(pid) {
-            warn!(error = %e, pid, "Failed to force-kill stale leader");
+            warn!(error = %e, pid, "Failed to re-signal (SIGTERM) stale leader");
             "timed_out"
         } else {
             wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
             if crate::util::is_process_alive(pid) {
                 "timed_out"
             } else {
-                "force_killed"
+                "resignaled_sigterm"
             }
         }
     } else {
@@ -1193,6 +1196,209 @@ async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
             "leader_version": leader_version,
             "client_version": CLIENT_LEADER_VERSION,
             "waited_ms": wait_start.elapsed().as_millis() as u64,
+        })),
+    );
+}
+/// PID-keyed timer state: the holder PID being timed and when we first saw it
+/// live-but-unconnectable.
+type ZombieTimer = Option<(u32, Instant)>;
+/// Decision produced by [`zombie_evict_decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZombieAction {
+    /// Not a zombie candidate this round; timer cleared.
+    Clear,
+    /// A live grok holder is still unconnectable; timer (re)armed, keep waiting.
+    Wait,
+    /// The SAME holder PID has been unconnectable for the full deadline — evict.
+    Evict { pid: u32, waited: Duration },
+}
+/// Pure decision for the zombie-eviction net. The timer is keyed to the PID so a
+/// timer accrued against an old zombie can never evict a freshly-spawned leader.
+fn zombie_evict_decision(
+    holder: Option<u32>,
+    now: Instant,
+    deadline: Duration,
+    timer: &mut ZombieTimer,
+) -> ZombieAction {
+    let Some(pid) = holder else {
+        *timer = None;
+        return ZombieAction::Clear;
+    };
+    match *timer {
+        Some((tracked_pid, since)) if tracked_pid == pid => {
+            let waited = now.saturating_duration_since(since);
+            if waited >= deadline {
+                *timer = None;
+                ZombieAction::Evict { pid, waited }
+            } else {
+                ZombieAction::Wait
+            }
+        }
+        _ => {
+            *timer = Some((pid, now));
+            ZombieAction::Wait
+        }
+    }
+}
+/// The live *grok* PID that ACTUALLY holds the flock on the lock file, if any.
+/// `None` for a dead / non-grok PID, OR when the file PID can't be confirmed to be
+/// the real flock holder — so the auto-kill zombie net never SIGKILLs a process
+/// that does not hold the flock (a stale-but-live PID left in `leader.lock`, or a
+/// brief spawner that held the flock without rewriting the file). Uses the
+/// stricter (name-matching) grok check since this drives the auto-kill path.
+///
+/// Linux confirms the holder via `/proc/locks`. macOS/BSD have no `/proc/locks`,
+/// so the holder is unconfirmable and this returns `None` (eviction skipped),
+/// accepting that a genuine zombie there is not auto-killed.
+fn live_grok_lock_holder(lock: &LeaderLock) -> Option<u32> {
+    let file_pid = lock.read_pid()?;
+    let pid = evictable_holder(file_pid, confirmed_flock_holder(lock.lock_path()))?;
+    (crate::util::is_process_alive(pid) && crate::util::is_grok_process_strict(pid)).then_some(pid)
+}
+/// Safety gate: a file PID is evictable only when the confirmed flock `holder` is
+/// known AND equals it. An unknown holder or a mismatch (file PID ≠ real holder)
+/// is NOT evictable. Pure so the "do not evict" invariant is unit-testable.
+fn evictable_holder(file_pid: u32, holder: Option<u32>) -> Option<u32> {
+    match holder {
+        Some(h) if h == file_pid => Some(file_pid),
+        _ => None,
+    }
+}
+/// PID that actually holds the exclusive flock on the lock file, or `None` when it
+/// can't be determined. Linux reads `/proc/locks`; other platforms lack that
+/// interface, so the holder is unknowable there and we return `None` (callers must
+/// not auto-kill a PID they can't confirm holds the flock).
+fn confirmed_flock_holder(lock_path: &Path) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        flock_holder_pid(lock_path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = lock_path;
+        None
+    }
+}
+/// The flock-holder PID for `lock_path` per `/proc/locks`: stat the path for its
+/// device:inode, then find the matching `FLOCK`/`WRITE` (fs2's exclusive lock)
+/// entry. Linux-only.
+#[cfg(target_os = "linux")]
+fn flock_holder_pid(lock_path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(lock_path).ok()?;
+    let proc_locks = std::fs::read_to_string("/proc/locks").ok()?;
+    let (major, minor) = glibc_dev_major_minor(meta.dev());
+    parse_flock_holder(&proc_locks, major, minor, meta.ino())
+}
+/// Decode a glibc 64-bit `dev_t` into (major, minor) — the same bit layout glibc's
+/// `gnu_dev_major`/`gnu_dev_minor` use, matching the numbers the kernel prints in
+/// `/proc/locks`. (libc 0.2 dropped `major`/`minor` for the gnu target.) Pure, so
+/// it (and the parser below) compile+test on all hosts even though only Linux
+/// consumes them.
+#[cfg(any(target_os = "linux", test))]
+fn glibc_dev_major_minor(dev: u64) -> (u64, u64) {
+    let major = ((dev & 0x0000_0000_000f_ff00) >> 8) | ((dev & 0xffff_f000_0000_0000) >> 32);
+    let minor = (dev & 0x0000_0000_0000_00ff) | ((dev & 0x0000_0fff_fff0_0000) >> 12);
+    (major, minor)
+}
+/// Parse `/proc/locks` for the PID holding an exclusive `flock` on the file
+/// identified by `major:minor:inode`. Skips blocked waiters (lines whose second
+/// field is `->`, which does not hold the lock and shifts the field layout).
+/// Returns `None` if no matching `FLOCK`/`WRITE` holder is present. Pure (parses a
+/// string) so it is unit-testable without real kernel locks.
+#[cfg(any(target_os = "linux", test))]
+fn parse_flock_holder(proc_locks: &str, major: u64, minor: u64, inode: u64) -> Option<u32> {
+    for line in proc_locks.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.get(1) == Some(&"->") {
+            continue;
+        }
+        if f.len() < 6 || f[1] != "FLOCK" || f[3] != "WRITE" {
+            continue;
+        }
+        let mut dev_inode = f[5].split(':');
+        let (Some(maj), Some(min), Some(ino)) =
+            (dev_inode.next(), dev_inode.next(), dev_inode.next())
+        else {
+            continue;
+        };
+        let (Ok(maj), Ok(min), Ok(ino)) = (
+            u64::from_str_radix(maj, 16),
+            u64::from_str_radix(min, 16),
+            ino.parse::<u64>(),
+        ) else {
+            continue;
+        };
+        if maj == major && min == minor && ino == inode {
+            return f[4].parse::<u32>().ok();
+        }
+    }
+    None
+}
+/// Max zombie-eviction attempts against the SAME PID before `connect_or_spawn`
+/// surfaces an error instead of looping forever.
+const MAX_ZOMBIE_EVICT_ATTEMPTS: u32 = 3;
+/// Max times `connect_or_spawn` will self-spawn a leader that fails to become
+/// connectable before surfacing an error. Bounds a persistent spawn/bind failure
+/// (bad socket-dir perms, exec fault in `run_leader`) that would otherwise
+/// re-fork every `SPAWN_WAIT_TIMEOUT` forever; still allows the intended
+/// single-retry after a transient same-version sibling race.
+const MAX_SELF_SPAWN_ATTEMPTS: u32 = 3;
+/// Records an eviction attempt against `pid`; returns `false` once the per-PID
+/// budget is exhausted. Attempts reset when the target PID changes.
+fn register_evict_attempt(state: &mut Option<(u32, u32)>, pid: u32, max_attempts: u32) -> bool {
+    let count = match *state {
+        Some((tracked, n)) if tracked == pid => n + 1,
+        _ => 1,
+    };
+    *state = Some((pid, count));
+    count <= max_attempts
+}
+/// A connect-level failure: never became connectable (`Timeout`) or the socket
+/// file exists but refuses connections (`Connect`, e.g. ECONNREFUSED against a
+/// stale socket / dead IPC task). Both drive the zombie net. Registration- and
+/// protocol-level errors mean the socket ANSWERED and must surface instead.
+fn is_connect_level_failure(error: &ConnectionError) -> bool {
+    matches!(
+        error,
+        ConnectionError::Timeout | ConnectionError::Client(ClientError::Connect(_, _))
+    )
+}
+/// Evict a suspected zombie leader (holds the flock but is not connectable).
+/// SIGTERM, wait, then escalate to SIGKILL if it overran the grace window.
+async fn evict_zombie_leader(pid: u32, sock_path: &Path, waited: Duration) {
+    use crate::util::KillSignal;
+    warn!(
+        pid,
+        socket = %sock_path.display(),
+        "Suspected zombie leader (holds lock, not connectable past deadline); evicting"
+    );
+    if let Err(e) = crate::util::kill_process_with_signal(pid, KillSignal::Term) {
+        warn!(error = %e, pid, "Failed to SIGTERM suspected zombie leader");
+    }
+    wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
+    let outcome = if !crate::util::is_process_alive(pid) {
+        "exited"
+    } else if let Err(e) = crate::util::kill_process_with_signal(pid, KillSignal::Kill) {
+        warn!(error = %e, pid, "Failed to SIGKILL suspected zombie leader");
+        "sigkill_failed"
+    } else {
+        wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
+        if crate::util::is_process_alive(pid) {
+            "survived_sigkill"
+        } else {
+            "sigkilled"
+        }
+    };
+    xai_grok_telemetry::unified_log::warn(
+        "leader.zombie.evicted",
+        None,
+        Some(serde_json::json!({
+            "zombie_pid": pid,
+            "socket_path": sock_path.display().to_string(),
+            "outcome": outcome,
+            "client_version": CLIENT_LEADER_VERSION,
+            "waited_ms": waited.as_millis() as u64,
         })),
     );
 }
@@ -1255,6 +1461,9 @@ pub async fn connect_or_spawn(
             }
         }
     }
+    let mut zombie_timer: ZombieTimer = None;
+    let mut evict_attempts: Option<(u32, u32)> = None;
+    let mut self_spawn_attempts: u32 = 0;
     loop {
         match lock.try_acquire() {
             Ok(true) => {
@@ -1291,15 +1500,35 @@ pub async fn connect_or_spawn(
                     replacing_stale = true;
                 }
                 info!("Acquired lock, spawning leader subprocess");
-                if let Err(e) = lock.cleanup_socket() {
-                    warn!(error = %e, "Failed to clean up stale socket");
+                if let Err(e) = lock.release() {
+                    warn!(error = %e, "Failed to release lock before spawning leader");
                 }
                 spawn_leader_subprocess(env_urls)?;
-                wait_for_listener_ready(&sock_path).await?;
-                if let Err(e) = lock.release() {
-                    warn!(error = %e, "Failed to release lock");
-                }
-                let conn = connect_to_leader(&sock_path, client_type, mode, capabilities).await?;
+                let conn = match wait_for_socket_connectable(
+                    &sock_path,
+                    client_type,
+                    mode,
+                    capabilities.clone(),
+                )
+                .await
+                {
+                    Ok(conn) => conn,
+                    Err(ConnectionError::Timeout) => {
+                        self_spawn_attempts += 1;
+                        if self_spawn_attempts >= MAX_SELF_SPAWN_ATTEMPTS {
+                            return Err(ConnectionError::SpawnFailed(format!(
+                                "spawned leader did not become connectable after \
+                                 {MAX_SELF_SPAWN_ATTEMPTS} attempts"
+                            )));
+                        }
+                        debug!(
+                            attempt = self_spawn_attempts,
+                            "Spawned leader not connectable yet, retrying"
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 info!(elapsed_ms, "Spawned and connected to leader");
                 if replacing_stale {
@@ -1316,7 +1545,7 @@ pub async fn connect_or_spawn(
                 return Ok(conn);
             }
             Ok(false) => {
-                debug!("Lock held by another process, waiting for socket");
+                debug!("Lock held by another process, probing socket connectability");
             }
             Err(e) => {
                 return Err(e.into());
@@ -1325,6 +1554,7 @@ pub async fn connect_or_spawn(
         match wait_for_socket_connectable(&sock_path, client_type, mode, capabilities.clone()).await
         {
             Ok(conn) => {
+                zombie_timer = None;
                 if !should_evict_conn(&conn) {
                     info!(
                         elapsed_ms = start.elapsed().as_millis() as u64,
@@ -1338,9 +1568,37 @@ pub async fn connect_or_spawn(
                 tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
                 continue;
             }
-            Err(ConnectionError::Timeout) => {
-                debug!("Timeout waiting for socket, retrying lock acquisition");
-                continue;
+            Err(e) if is_connect_level_failure(&e) => {
+                let holder = live_grok_lock_holder(&lock);
+                match zombie_evict_decision(
+                    holder,
+                    Instant::now(),
+                    ZOMBIE_EVICT_DEADLINE,
+                    &mut zombie_timer,
+                ) {
+                    ZombieAction::Evict { pid, waited } => {
+                        if !register_evict_attempt(
+                            &mut evict_attempts,
+                            pid,
+                            MAX_ZOMBIE_EVICT_ATTEMPTS,
+                        ) {
+                            return Err(ConnectionError::SpawnFailed(format!(
+                                "zombie leader pid {pid} could not be evicted after \
+                                 {MAX_ZOMBIE_EVICT_ATTEMPTS} attempts"
+                            )));
+                        }
+                        evict_zombie_leader(pid, &sock_path, waited).await;
+                        continue;
+                    }
+                    ZombieAction::Wait => {
+                        debug!("Flock-holder not connectable yet, waiting");
+                        continue;
+                    }
+                    ZombieAction::Clear => {
+                        debug!("Timeout waiting for socket, retrying lock acquisition");
+                        continue;
+                    }
+                }
             }
             Err(e) => return Err(e),
         }
@@ -1469,19 +1727,6 @@ async fn connect_to_leader(
         LeaderClient::connect(sock_path.to_path_buf(), client_type, mode, capabilities).await?;
     Ok(LeaderConnection { client })
 }
-/// Poll until the IPC listener at `sock_path` is reachable. A full
-/// connect would deadlock (see inline comment at the call site).
-async fn wait_for_listener_ready(sock_path: &Path) -> Result<(), ConnectionError> {
-    let deadline = tokio::time::Instant::now() + SPAWN_WAIT_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        if crate::leader::transport::listener_is_ready(sock_path) {
-            debug!("Leader listener is ready");
-            return Ok(());
-        }
-        tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
-    }
-    Err(ConnectionError::Timeout)
-}
 /// Wait for socket to appear and successfully connect.
 ///
 /// Polls the socket path until it becomes connectable or timeout is reached.
@@ -1519,6 +1764,163 @@ mod tests {
     };
     use std::fs;
     use tempfile::TempDir;
+    const TEST_DEADLINE: Duration = Duration::from_secs(30);
+    /// No live grok holder → `Clear`, and any pending timer is reset.
+    #[test]
+    fn zombie_decision_clears_when_no_holder() {
+        let mut timer: ZombieTimer = Some((100, Instant::now()));
+        assert_eq!(
+            zombie_evict_decision(None, Instant::now(), TEST_DEADLINE, &mut timer),
+            ZombieAction::Clear
+        );
+        assert_eq!(timer, None, "timer must be cleared when there is no holder");
+    }
+    /// First sighting of a holder arms the timer and waits (never evicts).
+    #[test]
+    fn zombie_decision_arms_timer_on_first_sighting() {
+        let mut timer: ZombieTimer = None;
+        let t0 = Instant::now();
+        assert_eq!(
+            zombie_evict_decision(Some(100), t0, TEST_DEADLINE, &mut timer),
+            ZombieAction::Wait
+        );
+        assert_eq!(timer, Some((100, t0)));
+    }
+    /// The SAME holder is evicted only after staying unconnectable for the deadline.
+    #[test]
+    fn zombie_decision_evicts_same_pid_after_deadline() {
+        let mut timer: ZombieTimer = None;
+        let t0 = Instant::now();
+        assert_eq!(
+            zombie_evict_decision(Some(100), t0, TEST_DEADLINE, &mut timer),
+            ZombieAction::Wait
+        );
+        let t_mid = t0 + Duration::from_secs(29);
+        assert_eq!(
+            zombie_evict_decision(Some(100), t_mid, TEST_DEADLINE, &mut timer),
+            ZombieAction::Wait
+        );
+        let t_end = t0 + Duration::from_secs(30);
+        assert_eq!(
+            zombie_evict_decision(Some(100), t_end, TEST_DEADLINE, &mut timer),
+            ZombieAction::Evict {
+                pid: 100,
+                waited: Duration::from_secs(30),
+            }
+        );
+        assert_eq!(timer, None);
+    }
+    /// A holder PID change re-keys the timer, so time accrued against an old zombie
+    /// can never evict a fresh leader.
+    #[test]
+    fn zombie_decision_resets_timer_when_pid_changes() {
+        let mut timer: ZombieTimer = None;
+        let t0 = Instant::now();
+        assert_eq!(
+            zombie_evict_decision(Some(100), t0, TEST_DEADLINE, &mut timer),
+            ZombieAction::Wait
+        );
+        let t1 = t0 + Duration::from_secs(40);
+        assert_eq!(
+            zombie_evict_decision(Some(200), t1, TEST_DEADLINE, &mut timer),
+            ZombieAction::Wait
+        );
+        assert_eq!(timer, Some((200, t1)), "timer must re-key to the new PID");
+        let t2 = t1 + Duration::from_secs(1);
+        assert_eq!(
+            zombie_evict_decision(None, t2, TEST_DEADLINE, &mut timer),
+            ZombieAction::Clear
+        );
+        assert_eq!(timer, None);
+    }
+    /// Eviction safety gate: a file PID is evictable only when the confirmed flock
+    /// holder is known AND equals it. Unknown holder or a mismatch → do not evict.
+    #[test]
+    fn evictable_holder_requires_confirmed_matching_holder() {
+        assert_eq!(evictable_holder(100, Some(100)), Some(100));
+        assert_eq!(evictable_holder(100, Some(200)), None);
+        assert_eq!(evictable_holder(100, None), None);
+    }
+    /// glibc `dev_t` decode matches the logical major:minor the kernel prints.
+    /// makedev(253, 1) == 0xfd01 → (253, 1).
+    #[test]
+    fn glibc_dev_major_minor_decodes_makedev() {
+        assert_eq!(glibc_dev_major_minor(0xfd01), (253, 1));
+        assert_eq!(glibc_dev_major_minor(0), (0, 0));
+    }
+    /// `/proc/locks` parsing: match an exclusive FLOCK holder by device:inode and
+    /// return its PID; skip waiters, POSIX locks, and non-matching dev/inode.
+    #[test]
+    fn parse_flock_holder_matches_dev_inode_and_pid() {
+        let sample = "\
+1: POSIX  ADVISORY  WRITE 111 fd:01:2000 0 EOF
+2: FLOCK  ADVISORY  WRITE 592 fd:01:1000 0 EOF
+3: FLOCK  ADVISORY  WRITE 700 fd:01:3000 0 EOF
+";
+        assert_eq!(parse_flock_holder(sample, 253, 1, 1000), Some(592));
+        assert_eq!(parse_flock_holder(sample, 253, 1, 9999), None);
+        assert_eq!(parse_flock_holder(sample, 8, 1, 1000), None);
+    }
+    /// Blocked waiters (`->`) do not hold the lock and shift the field layout, so
+    /// they must be skipped even when their dev:inode matches.
+    #[test]
+    fn parse_flock_holder_skips_waiters() {
+        let sample = "\
+1: FLOCK  ADVISORY  WRITE 592 fd:01:1000 0 EOF
+1: -> FLOCK ADVISORY WRITE 800 fd:01:1000 0 EOF
+";
+        assert_eq!(parse_flock_holder(sample, 253, 1, 1000), Some(592));
+    }
+    /// A stale-but-live PID in the lock file (file PID ≠ real flock holder) is
+    /// classified "do not evict" end-to-end through the parse + gate helpers.
+    #[test]
+    fn stale_file_pid_not_matching_holder_is_not_evictable() {
+        let sample = "1: FLOCK  ADVISORY  WRITE 592 fd:01:1000 0 EOF\n";
+        let holder = parse_flock_holder(sample, 253, 1, 1000);
+        assert_eq!(holder, Some(592));
+        assert_eq!(evictable_holder(12345, holder), None);
+    }
+    /// Connect-level failures (timeout / connection-refused) drive the zombie
+    /// net; registration/protocol errors (socket answered) surface instead.
+    #[test]
+    fn connect_level_failure_classification() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_connect_level_failure(&ConnectionError::Timeout));
+        assert!(is_connect_level_failure(&ConnectionError::Client(
+            ClientError::Connect(3, Error::from(ErrorKind::ConnectionRefused))
+        )));
+        assert!(!is_connect_level_failure(&ConnectionError::Client(
+            ClientError::Registration("rejected".into())
+        )));
+        assert!(!is_connect_level_failure(&ConnectionError::Client(
+            ClientError::ConnectionClosed
+        )));
+    }
+    /// Per-PID eviction budget: allows `max` attempts, then denies; a PID change
+    /// resets the counter so a fresh zombie gets its own budget.
+    #[test]
+    fn register_evict_attempt_bounds_per_pid() {
+        let mut state: Option<(u32, u32)> = None;
+        assert!(register_evict_attempt(&mut state, 100, 3));
+        assert!(register_evict_attempt(&mut state, 100, 3));
+        assert!(register_evict_attempt(&mut state, 100, 3));
+        assert!(!register_evict_attempt(&mut state, 100, 3));
+        assert!(register_evict_attempt(&mut state, 200, 3));
+        assert_eq!(state, Some((200, 1)));
+    }
+    /// `live_grok_lock_holder` returns `None` for a missing or dead PID, so the
+    /// zombie net never times/kills a recycled or unrelated PID.
+    #[test]
+    fn live_grok_lock_holder_none_for_missing_or_dead_pid() {
+        let temp = TempDir::new().unwrap();
+        let lock = LeaderLock::from_paths(
+            temp.path().join("leader.lock"),
+            temp.path().join("leader.sock"),
+        );
+        assert_eq!(live_grok_lock_holder(&lock), None);
+        fs::write(lock.lock_path(), "4000000000").unwrap();
+        assert_eq!(live_grok_lock_holder(&lock), None);
+    }
     #[test]
     fn reachable_leader_pids_skips_stale_locks() {
         let reachable = LeaderDescriptor {

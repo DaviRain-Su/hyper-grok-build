@@ -126,7 +126,7 @@ impl WorkflowManager {
                     .lock()
                     .get(run_id)
                     .ok_or_else(|| LaunchError::UnknownRun(run_id.clone()))?;
-                if !existing.status.is_paused() {
+                if !existing.status.is_resumable() {
                     return Err(LaunchError::NotResumable(
                         existing.status.as_str().to_string(),
                     ));
@@ -150,7 +150,7 @@ impl WorkflowManager {
                 execution_script = self.store.script_for(run_id).ok_or_else(|| {
                     LaunchError::Store("immutable workflow script is missing".into())
                 })?;
-                let journal = match existing
+                let mut journal = match existing
                     .journal_path
                     .as_ref()
                     .and_then(|p| self.session_dir.as_ref().map(|d| (d, p)))
@@ -167,6 +167,11 @@ impl WorkflowManager {
                     }
                     None => Journal::new(None),
                 };
+                if existing.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
+                    journal
+                        .prune_trailing_host_error(existing.pause_message.as_deref().unwrap_or(""))
+                        .map_err(|e| LaunchError::Journal(e.to_string()))?;
+                }
                 let state = {
                     let mut tracker = self.tracker.lock();
                     tracker.reconcile_agents_used(run_id, journal.agent_reservation_count());
@@ -963,7 +968,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_cancelled_and_completed_runs_are_not_resumable() {
+    async fn failed_run_resumes_and_reexecutes_failed_host_call_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      let content = read_scratch_file(\"data.txt\");\n\
+                      complete(content);";
+        let (run_id, outcome_rx) = manager
+            .launch(resolve_inline(script.into()).unwrap(), spec())
+            .unwrap();
+        match outcome_rx.await.unwrap() {
+            WorkflowOutcome::Failed { error } => {
+                assert!(error.contains("scratch"), "{error}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            manager.tracker.lock().get(&run_id).unwrap().status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Failed
+        );
+        let journal_path = dir
+            .path()
+            .join("workflows")
+            .join(&run_id)
+            .join("journal.jsonl");
+        assert!(
+            std::fs::read_to_string(&journal_path)
+                .unwrap()
+                .contains("__xai_workflow_host_error"),
+            "the uncaught host error must be journaled as a trailing sentinel"
+        );
+
+        let scratch = dir.path().join("workflows").join(&run_id).join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("data.txt"), "hello").unwrap();
+
+        let (_same_id, outcome_rx) = manager
+            .launch(
+                resolve_inline(script.into()).unwrap(),
+                LaunchSpec {
+                    resume_run_id: Some(run_id.clone()),
+                    ..spec()
+                },
+            )
+            .unwrap();
+        match outcome_rx.await.unwrap() {
+            WorkflowOutcome::Completed { result } => {
+                assert_eq!(
+                    result,
+                    serde_json::json!("hello"),
+                    "the failed host call must go live instead of replaying the sentinel"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert_eq!(
+            manager.tracker.lock().get(&run_id).unwrap().status,
+            crate::session::workflow::tracker::WorkflowRunStatus::Complete
+        );
+        assert!(
+            !std::fs::read_to_string(&journal_path)
+                .unwrap()
+                .contains("__xai_workflow_host_error"),
+            "the trailing sentinel must be pruned and replaced by the live result"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_cancelled_and_interrupted_runs_are_not_resumable() {
         use xai_grok_tools::implementations::grok_build::task::types::{
             SubagentEvent, SubagentResult,
         };
@@ -992,7 +1064,6 @@ mod tests {
         let state = manager.tracker.lock().get(&run_id).unwrap();
         for status in [
             crate::session::workflow::tracker::WorkflowRunStatus::Complete,
-            crate::session::workflow::tracker::WorkflowRunStatus::Failed,
             crate::session::workflow::tracker::WorkflowRunStatus::Cancelled,
             crate::session::workflow::tracker::WorkflowRunStatus::Interrupted,
         ] {

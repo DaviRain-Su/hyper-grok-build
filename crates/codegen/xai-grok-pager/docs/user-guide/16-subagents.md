@@ -230,6 +230,40 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 
 The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
 
+### MCP inheritance
+
+Subagents inherit the parent session’s **already-connected** MCP servers by default. That includes local stdio/HTTP servers and plugin-sourced agents (for example `my-plugin:reviewer`). The child discovers and calls those tools with `search_tool` / `use_tool` the same way the parent does.
+
+Control inheritance with agent frontmatter `mcpInheritance`:
+
+| Value | Effect |
+| ----- | ------ |
+| `all` (default if omitted) | Inherit every parent-connected MCP server |
+| `none` | Inherit no parent MCP servers |
+| `named: [server, …]` | Inherit only the listed server names |
+| `except: [server, …]` | Inherit all parent servers except the listed names |
+
+Example:
+
+```yaml
+---
+name: research-only
+description: Read MCP tools but not internal connectors
+tools: search_tool, use_tool, Read
+mcpInheritance:
+  except:
+    - internal-tools
+---
+```
+
+**Plugin agents** inherit parent MCP the same way. For security they still cannot:
+
+- Declare their own `mcpServers` in agent frontmatter (ignored with a warning)
+- Declare hooks in agent frontmatter
+- Set `permissionMode: bypassPermissions`
+
+Plugin-bundled MCP servers (plugin `.mcp.json`) still attach to the **parent/session** after the plugin is trusted — they are not a child-only frontmatter declaration. See [Plugins](09-plugins.md) and [MCP Servers](07-mcp-servers.md).
+
 ---
 
 ## Isolation: Worktree Mode

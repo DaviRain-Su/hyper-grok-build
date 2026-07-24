@@ -449,6 +449,14 @@ fn format_workflow_completion_reminder(
                 );
             }
         }
+        if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
+            let _ = writeln!(
+                buf,
+                "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" — \
+                 completed agents replay from the journal and the failed step re-executes.",
+                run.run_id
+            );
+        }
         let report_path = session_dir
             .join("workflows")
             .join(&run.run_id)
@@ -850,7 +858,15 @@ mod workflow_reminder_tests {
         let run = failed_run(detail);
         let session_dir = tempfile::tempdir().unwrap();
         let reminder = format_workflow_completion_reminder(&[run], session_dir.path(), false, None);
-        let rendered_detail = reminder.split_once("  Detail: ").unwrap().1.trim_end();
+        let rendered_detail = reminder
+            .split_once("  Detail: ")
+            .unwrap()
+            .1
+            .lines()
+            .next()
+            .unwrap()
+            .trim_end();
+        assert!(reminder.contains("resume_from_run_id: \"wf_1\""));
         assert!(rendered_detail.starts_with("first second "));
         assert!(rendered_detail.ends_with('…'));
         assert!(rendered_detail.len() <= WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);

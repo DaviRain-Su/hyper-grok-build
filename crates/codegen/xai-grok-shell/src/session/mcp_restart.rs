@@ -133,7 +133,7 @@ pub const HTTP_RECOVERY_BACKOFF: [Duration; 7] = [
 /// `Disabled` vs `NotConfigured` both come from
 /// [`RestartActions::is_stdio_server_configured`] returning `false`;
 /// the split is temporal (schedule time vs inside the backoff loop) so
-/// on-call can tell "flipped off mid-restart" from "stale event".
+/// operators can tell "flipped off mid-restart" from "stale event".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     /// Server is in the dispatcher's `shutting_down` set
@@ -666,7 +666,7 @@ fn record_skipped(server: &str, reason: SkipReason) {
 }
 
 // ── in-place HTTP recovery metrics (kept separate from auto_restart.* so
-//    on-call can distinguish stdio respawn from HTTP transport reset) ──
+//    operators can distinguish stdio respawn from HTTP transport reset) ──
 
 fn record_http_recovery_attempted(server: &str) {
     tracing::info!(target: "metrics.mcp.http_recovery.attempted", server = %server);

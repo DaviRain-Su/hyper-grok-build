@@ -1041,6 +1041,12 @@ pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
     }
     items.truncate(last_complete_end);
 }
+fn conversation_truncate_after_prompt(
+    conversation: &[ConversationItem],
+    target_prompt_index: usize,
+) -> usize {
+    conversation_truncate_for_prompt(conversation, target_prompt_index + 1)
+}
 impl JsonlStorageAdapter {
     /// Fully synchronous version of `copy_session_data` for use inside
     /// `spawn_blocking`. Identical logic but uses `std::fs::write` instead
@@ -1061,8 +1067,12 @@ impl JsonlStorageAdapter {
         let mut updates_to_copy: Vec<super::SessionUpdate> =
             self.read_updates_jsonl(self.updates_file(source_info))?;
         if let Some(target_idx) = options.target_prompt_index {
-            chat_to_copy.truncate(conversation_truncate_for_prompt(&chat_to_copy, target_idx));
+            updates_to_copy = super::filter_rewind_updates(updates_to_copy);
             updates_to_copy.truncate(updates_truncate_for_prompt(&updates_to_copy, target_idx));
+            chat_to_copy.truncate(conversation_truncate_after_prompt(
+                &chat_to_copy,
+                target_idx,
+            ));
         }
         if options.fork_filter {
             fork_filter_chat(&mut chat_to_copy);
