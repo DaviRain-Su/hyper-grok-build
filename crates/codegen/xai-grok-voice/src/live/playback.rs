@@ -754,7 +754,15 @@ fn forward_pcm16<W: Write + Send>(
             buf.extend_from_slice(&v.to_le_bytes());
         }
         if out.write_all(&buf).and_then(|()| out.flush()).is_err() {
-            break; // player closed stdin / died → stop
+            // Player died (broken pipe / closed stdin). Stop the queue so the
+            // media writer surfaces `Live speaker playback failed` instead of
+            // silently shedding PCM into a black hole.
+            tracing::warn!(
+                device,
+                "live speaker player closed stdin; stopping playback queue"
+            );
+            queue.stop();
+            break;
         }
     }
     let _ = out.flush();
@@ -955,12 +963,20 @@ fn fill_cpal_output<T>(
 // macOS: short-lived self-exec helper
 // ---------------------------------------------------------------------------
 
+/// How long the parent waits for the `__speaker-play` helper to open the
+/// default output device and print `READY` (or `ERR`) on stderr.
+#[cfg(target_os = "macos")]
+const SPEAKER_HELPER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(target_os = "macos")]
 fn start_macos_helper(
     sample_rate: u32,
     queue: Arc<PlaybackQueue>,
     stopped: Arc<AtomicBool>,
 ) -> Result<(JoinHandle<()>, Teardown), VoiceError> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+
     let exe = std::env::current_exe()
         .map_err(|e| VoiceError::Config(format!("current_exe for speaker helper: {e}")))?;
     let rate = sample_rate.to_string();
@@ -979,19 +995,84 @@ fn start_macos_helper(
         .stdin
         .take()
         .ok_or_else(|| VoiceError::Config("speaker helper produced no stdin".into()))?;
-    if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || {
-            let mut buf = String::new();
-            use std::io::Read;
-            let mut stderr = stderr;
-            if stderr.read_to_string(&mut buf).is_ok() {
-                let msg = buf.trim();
-                if !msg.is_empty() {
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VoiceError::Config("speaker helper produced no stderr".into()))?;
+
+    // Block until the helper opens the device (READY) or reports failure (ERR).
+    // Without this handshake a failed cpal open left the parent writing PCM
+    // into a black-hole pipe and Live looked "connected" with no speaker.
+    let (status_tx, status_rx) = mpsc::channel::<Result<String, String>>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = status_tx.send(Err(
+                        "speaker helper exited before opening the output device".into(),
+                    ));
+                    break;
+                }
+                Ok(_) => {
+                    let msg = line.trim();
+                    if msg.is_empty() {
+                        continue;
+                    }
+                    if let Some(payload) = msg.strip_prefix("READY") {
+                        let _ = status_tx.send(Ok(payload.trim().to_string()));
+                        // Drain remaining stderr for diagnostics.
+                        let mut rest = String::new();
+                        if reader.read_to_string(&mut rest).is_ok() {
+                            let rest = rest.trim();
+                            if !rest.is_empty() {
+                                tracing::debug!(stderr = rest, "live speaker helper stderr");
+                            }
+                        }
+                        break;
+                    }
+                    if let Some(payload) = msg.strip_prefix("ERR ") {
+                        let _ = status_tx.send(Err(payload.to_string()));
+                        break;
+                    }
+                    if msg.starts_with("ERR") {
+                        let _ = status_tx.send(Err(msg.to_string()));
+                        break;
+                    }
                     tracing::debug!(stderr = msg, "live speaker helper stderr");
                 }
+                Err(e) => {
+                    let _ = status_tx.send(Err(format!("speaker helper stderr: {e}")));
+                    break;
+                }
             }
-        });
+        }
+    });
+
+    match status_rx.recv_timeout(SPEAKER_HELPER_READY_TIMEOUT) {
+        Ok(Ok(info)) => {
+            if !info.is_empty() {
+                tracing::info!(info = %info, "live speaker helper ready");
+            }
+        }
+        Ok(Err(msg)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(VoiceError::Config(format!(
+                "live speaker helper failed: {msg}"
+            )));
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(VoiceError::Config(
+                "live speaker helper timed out opening the output device".into(),
+            ));
+        }
     }
+
     let thread = thread::spawn(move || forward_pcm16(stdin, queue, stopped, "speaker-helper"));
     Ok((thread, Teardown::Child(Some(child))))
 }
@@ -1103,88 +1184,124 @@ fn parse_speaker_args(args: &[String]) -> Result<u32, String> {
     Ok(rate)
 }
 
-/// Open the default cpal output device at `rate` Hz and play PCM16 mono LE
-/// read from stdin until EOF. Uses a persisted remainder so partial chunks
-/// carry across callbacks (no discarded tails).
+/// Open the default cpal output device and play PCM16 mono LE (at `source_rate`
+/// Hz) read from stdin until EOF.
+///
+/// **Important (macOS):** do **not** force mono/`i16`/`source_rate` on the
+/// device stream. Many Mac defaults are stereo + `f32` (and often 44.1 kHz).
+/// Forcing an unsupported config makes `build_output_stream` fail; the parent
+/// then silently sheds PCM and Live appears "connected" with no speaker
+/// output. Match the Windows backend: open the device's default config,
+/// resample mono input to the device rate, and upmix to the device channel
+/// count / sample format.
 #[cfg(all(target_os = "macos", feature = "audio"))]
-fn run_cpal_playback(rate: u32) -> Result<(), VoiceError> {
+fn run_cpal_playback(source_rate: u32) -> Result<(), VoiceError> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use cpal::{SampleRate, StreamConfig};
-    use std::sync::Mutex;
+    use cpal::{SampleFormat, SampleRate, StreamConfig};
     use std::sync::mpsc as sync_mpsc;
 
     let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| VoiceError::Config("no default output audio device".into()))?;
-    let config = StreamConfig {
-        channels: 1,
-        sample_rate: SampleRate(rate),
+    let supported = device
+        .default_output_config()
+        .map_err(|e| VoiceError::Config(format!("default output config: {e}")))?;
+    let stream_rate = supported.sample_rate().0;
+    let channels = supported.channels();
+    let sample_format = supported.sample_format();
+    let stream_config = StreamConfig {
+        channels,
+        sample_rate: SampleRate(stream_rate),
         buffer_size: cpal::BufferSize::Default,
     };
-    let (tx, rx) = sync_mpsc::sync_channel::<Vec<i16>>(64);
+
+    // Parent feeds PCM16 mono at `source_rate`; convert to f32 for the shared
+    // resampler path, then to the device format in the callback.
+    let (tx, rx) = sync_mpsc::sync_channel::<Vec<f32>>(64);
     let stopped = Arc::new(AtomicBool::new(false));
-    let stop_cb = Arc::clone(&stopped);
-    // Persisted remainder so a partial PCM chunk carries to the next callback.
-    let remainder: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
-    let rem_cb = Arc::clone(&remainder);
-    let stream = device
-        .build_output_stream(
-            &config,
-            move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                use std::sync::mpsc::TryRecvError;
-                out.fill(0);
-                if stop_cb.load(Ordering::Acquire) {
-                    return;
-                }
-                let mut rem = match rem_cb.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                let mut written = 0usize;
-                // Drain leftover first.
-                while written < out.len() && !rem.is_empty() {
-                    let take = rem.len().min(out.len() - written);
-                    out[written..written + take].copy_from_slice(&rem[..take]);
-                    written += take;
-                    rem.drain(..take);
-                }
-                // Then pull new chunks.
-                while written < out.len() {
-                    match rx.try_recv() {
-                        Ok(chunk) => {
-                            let take = chunk.len().min(out.len() - written);
-                            out[written..written + take].copy_from_slice(&chunk[..take]);
-                            written += take;
-                            if take < chunk.len() {
-                                rem.extend_from_slice(&chunk[take..]);
-                            }
-                        }
-                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                    }
-                }
-            },
-            |err| tracing::warn!(error = %err, "speaker helper stream error"),
-            None,
-        )
-        .map_err(|e| VoiceError::Config(format!("build output stream: {e}")))?;
+    // `std::sync::Mutex` (not parking_lot) so the helper compiles with
+    // `audio` alone; the live feature is what actually spawns this child.
+    let resampler: Arc<Mutex<ResamplerState>> =
+        Arc::new(Mutex::new(ResamplerState::new(source_rate, stream_rate)));
+
+    let stream = match sample_format {
+        SampleFormat::F32 => build_macos_helper_stream::<f32>(
+            &device,
+            &stream_config,
+            Arc::clone(&stopped),
+            Arc::clone(&resampler),
+            rx,
+            channels,
+        )?,
+        SampleFormat::I16 => build_macos_helper_stream::<i16>(
+            &device,
+            &stream_config,
+            Arc::clone(&stopped),
+            Arc::clone(&resampler),
+            rx,
+            channels,
+        )?,
+        SampleFormat::U16 => build_macos_helper_stream::<u16>(
+            &device,
+            &stream_config,
+            Arc::clone(&stopped),
+            Arc::clone(&resampler),
+            rx,
+            channels,
+        )?,
+        other => {
+            return Err(VoiceError::Config(format!(
+                "unsupported speaker sample format: {other:?}"
+            )));
+        }
+    };
     stream
         .play()
         .map_err(|e| VoiceError::Config(format!("play output stream: {e}")))?;
 
-    // Read PCM16 LE from stdin, forward to the cpal callback.
+    // Signal readiness on stderr so a parent that drains it can log a real open
+    // (stdout is nulled by the parent spawn).
+    let _ = writeln!(
+        std::io::stderr(),
+        "READY rate={stream_rate} channels={channels} format={sample_format:?} source_rate={source_rate}"
+    );
+
+    // Read PCM16 LE mono from stdin, convert to f32, forward to the callback.
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
     let mut raw = vec![0u8; 4096];
+    // Odd trailing byte across reads (stdin can split a sample).
+    let mut pending_lo: Option<u8> = None;
     loop {
         use std::io::Read;
         match handle.read(&mut raw) {
             Ok(0) => break, // parent closed stdin → done
             Ok(n) => {
-                let samples: Vec<i16> = raw[..n]
-                    .chunks_exact(2)
-                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                let _ = tx.send(samples); // blocking, but the callback drains it
+                let mut samples = Vec::with_capacity(n / 2 + 1);
+                let mut i = 0usize;
+                if let Some(lo) = pending_lo.take() {
+                    if n == 0 {
+                        pending_lo = Some(lo);
+                    } else {
+                        samples.push(i16::from_le_bytes([lo, raw[0]]) as f32 / i16::MAX as f32);
+                        i = 1;
+                    }
+                }
+                while i + 1 < n {
+                    let s = i16::from_le_bytes([raw[i], raw[i + 1]]);
+                    samples.push(s as f32 / i16::MAX as f32);
+                    i += 2;
+                }
+                if i < n {
+                    pending_lo = Some(raw[i]);
+                }
+                if !samples.is_empty() {
+                    // Blocking send: the callback drains. If the callback is
+                    // dead, disconnect breaks the loop.
+                    if tx.send(samples).is_err() {
+                        break;
+                    }
+                }
             }
             Err(_) => break,
         }
@@ -1192,6 +1309,74 @@ fn run_cpal_playback(rate: u32) -> Result<(), VoiceError> {
     stopped.store(true, Ordering::Release);
     drop(stream);
     Ok(())
+}
+
+/// Build a cpal output stream for the macOS `__speaker-play` helper child.
+/// Source is mono f32 chunks on a sync channel; resamples + upmixes to the
+/// device config (same policy as the Windows in-process backend).
+#[cfg(all(target_os = "macos", feature = "audio"))]
+fn build_macos_helper_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    stopped: Arc<AtomicBool>,
+    resampler: Arc<Mutex<ResamplerState>>,
+    rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    channels: u16,
+) -> Result<cpal::Stream, VoiceError>
+where
+    T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
+{
+    use cpal::traits::DeviceTrait;
+    use std::sync::mpsc::TryRecvError;
+
+    let stream = device
+        .build_output_stream(
+            config,
+            move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
+                out.fill(T::from_sample(0.0));
+                if stopped.load(Ordering::Acquire) {
+                    return;
+                }
+                let ch = channels.max(1) as usize;
+                let total_frames = out.len() / ch;
+                if total_frames == 0 {
+                    return;
+                }
+
+                // Pull all pending input into one mono batch for this callback.
+                let mut input: Vec<f32> = Vec::new();
+                loop {
+                    match rx.try_recv() {
+                        Ok(chunk) => input.extend_from_slice(&chunk),
+                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                let mut mono = vec![0.0f32; total_frames];
+                let written = {
+                    let Ok(mut rs) = resampler.lock() else {
+                        return;
+                    };
+                    // Even with empty input, drain leftover resampled frames.
+                    rs.fill(&input, &mut mono)
+                };
+                if written == 0 {
+                    return;
+                }
+
+                for frame_idx in 0..written.min(total_frames) {
+                    let clamped = mono[frame_idx].clamp(-1.0, 1.0);
+                    let base = frame_idx * ch;
+                    for c in 0..ch {
+                        out[base + c] = T::from_sample(clamped);
+                    }
+                }
+            },
+            |err| tracing::warn!(error = %err, "speaker helper stream error"),
+            None,
+        )
+        .map_err(|e| VoiceError::Config(format!("build output stream: {e}")))?;
+    Ok(stream)
 }
 
 #[cfg(not(all(target_os = "macos", feature = "audio")))]
