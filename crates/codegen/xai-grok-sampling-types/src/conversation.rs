@@ -638,8 +638,31 @@ pub struct ConversationRequest {
     /// tests of Kimi shaping keep working without a dialect flag.
     /// Production sets this from [`SamplerConfig::kimi_dialect`].
     pub kimi_dialect: Option<bool>,
-    /// Sticky routing key for prompt-cache reuse; overrides `x_grok_conv_id` for routing.
+    /// Sticky routing key for prompt-cache reuse (OpenAI Responses + Chat
+    /// Completions `prompt_cache_key`). Prefer session id; clamped to 64 chars
+    /// on the wire.
     pub prompt_cache_key: Option<String>,
+    /// OpenAI Responses only: `"24h"` / `"long"` or `"in_memory"` / `"short"`.
+    /// Never sent on Codex dialect (rejected by ChatGPT backend). Not used for
+    /// Anthropic Messages — Hyper does not extend Claude-style `cache_control`.
+    pub prompt_cache_retention: Option<String>,
+}
+
+/// OpenAI caps prompt-cache keys at 64 characters (Pi `clampOpenAIPromptCacheKey`).
+pub fn clamp_prompt_cache_key(key: &str) -> String {
+    const PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
+    key.chars().take(PROMPT_CACHE_KEY_MAX_CHARS).collect()
+}
+
+/// Parse OpenAI Responses `prompt_cache_retention` from config / env strings.
+pub fn parse_prompt_cache_retention(raw: &str) -> Option<rs::PromptCacheRetention> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "24h" | "long" | "24" | "hours24" => Some(rs::PromptCacheRetention::Hours24),
+        "in_memory" | "in-memory" | "short" | "5m" | "default" => {
+            Some(rs::PromptCacheRetention::InMemory)
+        }
+        _ => None,
+    }
 }
 
 impl ConversationRequest {
@@ -2281,6 +2304,22 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 },
             });
 
+        let prompt_cache_key = req
+            .prompt_cache_key
+            .as_deref()
+            .map(clamp_prompt_cache_key)
+            .or_else(|| {
+                req.x_grok_session_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(clamp_prompt_cache_key)
+            })
+            .or_else(|| {
+                req.x_grok_conv_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(clamp_prompt_cache_key)
+            });
         let mut chat = ChatCompletionRequest {
             model: req.model.clone(),
             messages,
@@ -2290,6 +2329,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             frequency_penalty: None,
             presence_penalty: None,
             user: None,
+            prompt_cache_key,
             tools,
             tool_choice,
             search_parameters: None,
@@ -2453,8 +2493,26 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             parallel_tool_calls: None,
             previous_response_id: None,
             prompt: None,
-            prompt_cache_key: req.prompt_cache_key.clone(),
-            prompt_cache_retention: None,
+            prompt_cache_key: req
+                .prompt_cache_key
+                .as_deref()
+                .map(clamp_prompt_cache_key)
+                .or_else(|| {
+                    req.x_grok_session_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(clamp_prompt_cache_key)
+                })
+                .or_else(|| {
+                    req.x_grok_conv_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(clamp_prompt_cache_key)
+                }),
+            prompt_cache_retention: req
+                .prompt_cache_retention
+                .as_deref()
+                .and_then(parse_prompt_cache_retention),
             reasoning: Some(rs::Reasoning {
                 effort: req.reasoning_effort.map(|e| e.to_responses_api()),
                 summary: Some(rs::ReasoningSummary::Concise),
@@ -4038,6 +4096,45 @@ mod tests {
         // Forward-compat: an unknown wire string decodes to `Unknown`.
         let unknown: PriorTurnInterrupt = serde_json::from_str("\"some_future_cause\"").unwrap();
         assert_eq!(unknown, PriorTurnInterrupt::Unknown);
+    }
+
+    #[test]
+    fn clamp_prompt_cache_key_caps_at_64_chars() {
+        let long = "a".repeat(80);
+        assert_eq!(clamp_prompt_cache_key(&long).chars().count(), 64);
+        assert_eq!(clamp_prompt_cache_key("short"), "short");
+    }
+
+    #[test]
+    fn parse_prompt_cache_retention_openai_aliases() {
+        assert_eq!(
+            parse_prompt_cache_retention("24h"),
+            Some(rs::PromptCacheRetention::Hours24)
+        );
+        assert_eq!(
+            parse_prompt_cache_retention("long"),
+            Some(rs::PromptCacheRetention::Hours24)
+        );
+        assert_eq!(
+            parse_prompt_cache_retention("in_memory"),
+            Some(rs::PromptCacheRetention::InMemory)
+        );
+        assert_eq!(
+            parse_prompt_cache_retention("short"),
+            Some(rs::PromptCacheRetention::InMemory)
+        );
+        assert_eq!(parse_prompt_cache_retention("nope"), None);
+    }
+
+    #[test]
+    fn chat_and_responses_carry_prompt_cache_key() {
+        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")]);
+        req.prompt_cache_key = Some("sess-1".into());
+        req.x_grok_session_id = Some("ignored-when-key-set".into());
+        let chat: ChatCompletionRequest = req.clone().into();
+        assert_eq!(chat.prompt_cache_key.as_deref(), Some("sess-1"));
+        let responses: rs::CreateResponse = (&req).into();
+        assert_eq!(responses.prompt_cache_key.as_deref(), Some("sess-1"));
     }
 
     #[test]

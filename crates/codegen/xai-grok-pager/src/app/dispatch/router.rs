@@ -142,6 +142,55 @@ pub(super) fn dispatch_copy_auth_url(
         generation: app.auth_clipboard_feedback_generation,
     }]
 }
+
+/// Cycle the session model among `[models].enabled_models` (or all usable models).
+fn dispatch_cycle_scoped_model(app: &mut AppView, reverse: bool) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let patterns = crate::scoped_models::enabled_patterns();
+    let list = crate::scoped_models::cycle_candidates(&agent.session.models, &patterns);
+    if list.is_empty() {
+        agent.show_toast(
+            "No models to cycle — configure credentials or /scoped-models",
+        );
+        return vec![];
+    }
+    let current = agent.session.models.current.clone();
+    let Some(model_id) = crate::scoped_models::adjacent_in_cycle(&list, current.as_ref(), reverse)
+    else {
+        let name = list
+            .first()
+            .and_then(|id| agent.session.models.available.get(id))
+            .map(|i| i.name.as_str())
+            .unwrap_or("current");
+        agent.show_toast(&format!("Only one scoped model: {name}"));
+        return vec![];
+    };
+    let label = agent
+        .session
+        .models
+        .available
+        .get(&model_id)
+        .map(|i| i.name.clone())
+        .unwrap_or_else(|| model_id.0.to_string());
+    agent.show_toast(&format!("Model → {label}"));
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.session.deferred_model_switch = Some((model_id, None));
+        return vec![];
+    };
+    agent.session.model_switch_pending = true;
+    vec![Effect::SwitchModel {
+        agent_id: id,
+        session_id,
+        model_id,
+        effort: None,
+        prev_model_id: None,
+    }]
+}
 /// Dispatch an action: mutate state, return effects to execute.
 ///
 /// The returned `Vec<Effect>` may be empty (pure state mutation) or contain
@@ -909,7 +958,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 enabled,
             }]
         }
-        Action::NextModel => vec![],
+        Action::NextModel => dispatch_cycle_scoped_model(app, false),
+        Action::PrevModel => dispatch_cycle_scoped_model(app, true),
         Action::SwitchModel { model_id, effort } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];

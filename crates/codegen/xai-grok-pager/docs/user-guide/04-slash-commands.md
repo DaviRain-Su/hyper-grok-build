@@ -106,6 +106,19 @@ A normal switch keeps the portable transcript (user messages, visible assistant 
 
 You do not need to compact before every switch. Before the next model call, Grok Build checks the transcript against the target model's context window and can auto-compact when required. When the existing context is already about 85% of the target window, the TUI adds a capacity warning; run `/compact <what to preserve>` first only when you want to guide the summary yourself.
 
+### `/scoped-models`
+
+Manage the **scoped shortlist** used by **Alt+]** / **Alt+[** model cycling (Pi-style). Soft list only — full picker stays `/model` and Ctrl+M. Persists to `[models].enabled_models`. Aliases: `/scoped`, `/enabled-models`.
+
+```
+/scoped-models
+/scoped-models add grok-*
+/scoped-models set grok-4.5 openrouter/anthropic/*
+/scoped-models clear
+```
+
+See [Models, Providers, Scoped Selection](29-models-providers-and-scoped-selection.md).
+
 ### `/effort <level>`
 
 Set reasoning effort on the **current** model without reselecting it. Levels are `low`, `medium`, `high`, and `xhigh`, and it only applies when the active model supports reasoning effort.

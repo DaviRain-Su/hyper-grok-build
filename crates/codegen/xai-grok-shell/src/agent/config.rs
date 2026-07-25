@@ -1078,6 +1078,17 @@ pub struct ModelsConfig {
     /// is rejected at startup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
+    /// Soft shortlist for fast model cycling (Pi-style **scoped models**).
+    /// Glob patterns match catalog key or model slug. Empty/None = cycle all
+    /// currently usable models. Does **not** hide or block other models in
+    /// `/model` / Ctrl+M — use `allowed_models` / `hidden_models` for that.
+    ///
+    /// Alias `enabledModels` accepts Pi's camelCase settings key.
+    #[serde(
+        alias = "enabledModels",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled_models: Option<Vec<String>>,
     /// Force `hidden = true` on these model IDs (still usable via `-m`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden_models: Option<Vec<String>>,
@@ -1980,6 +1991,7 @@ impl Config {
     pub fn validate_model_filters(&self) -> Result<(), String> {
         for (field, list) in [
             ("allowed_models", &self.models.allowed_models),
+            ("enabled_models", &self.models.enabled_models),
             ("disabled_models", &self.models.disabled_models),
             ("hidden_models", &self.models.hidden_models),
         ] {

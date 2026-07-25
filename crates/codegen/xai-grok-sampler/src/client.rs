@@ -421,13 +421,36 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
     usage.total_tokens = total;
 }
 
+/// Stamp OpenAI Responses `prompt_cache_key` from session / conv id when unset.
+///
+/// Used for both public OpenAI-compatible Responses and Codex (Pi clamps to 64).
+fn stamp_responses_prompt_cache_key(request: &mut CreateResponseWrapper) {
+    if request.inner.prompt_cache_key.is_some() {
+        return;
+    }
+    let key = request
+        .x_grok_session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            request
+                .x_grok_conv_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+        });
+    if let Some(key) = key {
+        request.inner.prompt_cache_key =
+            Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
+    }
+}
+
 /// Apply the ChatGPT Codex backend dialect to a Responses API request.
 ///
 /// Mirrors official Pi `openai-codex-responses.ts` request building:
 /// - the system prompt travels in the top-level `instructions` field, not as
 ///   `input` items (Pi: `convertResponsesMessages` with
 ///   `includeSystemPrompt: false` + `instructions: context.systemPrompt`);
-/// - `prompt_cache_key` pins the session for server-side cache affinity;
+/// - `prompt_cache_key` is stamped via [`stamp_responses_prompt_cache_key`];
 /// - `text.verbosity` defaults to `low` (Pi default) unless a text format
 ///   (e.g. structured output) is already set.
 fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
@@ -452,17 +475,7 @@ fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
         // Pi: `instructions: context.systemPrompt || "You are a helpful assistant."`
         request.inner.instructions = Some("You are a helpful assistant.".to_string());
     }
-    if request.inner.prompt_cache_key.is_none()
-        && let Some(session_id) = request
-            .x_grok_session_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-    {
-        // Pi `clampOpenAIPromptCacheKey`: the backend caps cache keys at 64 chars.
-        const PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
-        let clamped: String = session_id.chars().take(PROMPT_CACHE_KEY_MAX_CHARS).collect();
-        request.inner.prompt_cache_key = Some(clamped);
-    }
+    stamp_responses_prompt_cache_key(request);
     if request.inner.text.is_none() {
         // Pi: `text: { verbosity: "low" }`. Format defaults to text when omitted;
         // typed Text serializes as `{ "type": "text" }` which the backend accepts.
@@ -1249,6 +1262,25 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
+        // OpenAI Chat Completions: sticky prompt_cache_key for automatic
+        // prefix-cache affinity when the provider supports it.
+        if request.prompt_cache_key.is_none() {
+            let key = request
+                .x_grok_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    request
+                        .x_grok_conv_id
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                });
+            if let Some(key) = key {
+                request.prompt_cache_key =
+                    Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
+            }
+        }
+
         Ok(request)
     }
 
@@ -1553,6 +1585,11 @@ impl SamplingClient {
         if !includes.contains(&rs::IncludeEnum::ReasoningEncryptedContent) {
             includes.push(rs::IncludeEnum::ReasoningEncryptedContent);
         }
+
+        // OpenAI-compatible Responses: always pin prompt_cache_key for
+        // session-affinity routing (automatic prefix cache). Codex dialect
+        // does additional instruction reshaping below.
+        stamp_responses_prompt_cache_key(request);
 
         if self.defaults.responses_codex_dialect {
             apply_codex_dialect(request);
@@ -2567,6 +2604,7 @@ mod tests {
             frequency_penalty: None,
             presence_penalty: None,
             user: None,
+            prompt_cache_key: None,
             tools: None,
             tool_choice: None,
             search_parameters: None,
@@ -2666,6 +2704,7 @@ mod tests {
         ]);
         let responses_request: rs::CreateResponse = (&request).into();
         let mut wrapper = CreateResponseWrapper::new(responses_request);
+        wrapper.x_grok_session_id = Some("sess-openai".to_string());
 
         client.apply_response_defaults(&mut wrapper).unwrap();
         let body = serde_json::to_value(&wrapper.inner).unwrap();
@@ -2673,7 +2712,25 @@ mod tests {
         assert!(body.get("instructions").is_none());
         let input = body["input"].as_array().expect("input items");
         assert!(input.iter().any(|item| item["role"] == "system"));
-        assert!(body.get("prompt_cache_key").is_none());
+        // Non-Codex OpenAI Responses still stamps prompt_cache_key for affinity.
+        assert_eq!(body["prompt_cache_key"], "sess-openai");
+    }
+
+    #[test]
+    fn responses_prompt_cache_key_from_conversation_request() {
+        use xai_grok_sampling_types::ConversationRequest;
+
+        let mut req = ConversationRequest::from_items(vec![
+            xai_grok_sampling_types::ConversationItem::user("hi"),
+        ]);
+        req.prompt_cache_key = Some("explicit-key".into());
+        req.prompt_cache_retention = Some("24h".into());
+        let body: rs::CreateResponse = (&req).into();
+        assert_eq!(body.prompt_cache_key.as_deref(), Some("explicit-key"));
+        assert_eq!(
+            body.prompt_cache_retention,
+            Some(rs::PromptCacheRetention::Hours24)
+        );
     }
 
     #[test]

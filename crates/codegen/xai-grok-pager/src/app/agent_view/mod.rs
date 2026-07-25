@@ -2108,6 +2108,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::FocusPrompt => Action::FocusPrompt,
         ActionId::FocusScrollback => Action::FocusScrollback,
         ActionId::NextModel => Action::NextModel,
+        ActionId::PrevModel => Action::PrevModel,
         ActionId::CycleMode => Action::CycleMode,
         ActionId::CancelTurn
         | ActionId::Quit

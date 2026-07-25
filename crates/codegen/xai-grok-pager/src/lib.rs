@@ -9,6 +9,7 @@ pub mod client_identity;
 pub mod codex;
 pub mod completions_cmd;
 mod config_toml_edit;
+mod scoped_models;
 pub mod diagnostics;
 pub mod diff;
 pub mod docs;

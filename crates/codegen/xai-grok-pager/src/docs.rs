@@ -124,7 +124,12 @@ pub static USER_GUIDE: &[Doc] = &[
     guide!(
         "29-models-providers-and-scoped-selection.md",
         "Models, Providers, Scoped Selection",
-        "Catalog vs Pi, provider gaps, scoped-models shortlist roadmap"
+        "OpenAI-compat stance, catalog, /scoped-models shortlist and Alt+] cycle"
+    ),
+    guide!(
+        "30-openai-prompt-caching.md",
+        "OpenAI Prompt Caching",
+        "prompt_cache_key, retention, usage hit rate (OpenAI only — not Anthropic)"
     ),
     guide!(
         "12-project-rules.md",

@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "0.2.111"
+version = "0.2.112"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -44,6 +44,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true, features = ["serde"] }
+globset = { workspace = true }
 
 # ANSI parsing (tracing pane)
 ansi-to-tui = { workspace = true }

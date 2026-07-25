@@ -4,6 +4,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.112] — 2026-07-25
+
+### Added
+- **Scoped models (Pi-style shortlist)** — `[models].enabled_models` globs (also reads Pi camelCase `enabledModels`), `/scoped-models` (`add` / `remove` / `set` / `clear`), and **Alt+]** / **Alt+[** to cycle only the shortlist. Empty shortlist cycles all usable models; invalid globs are rejected and never silently expand to “all models”. Full picker remains `/model` · Ctrl+M.
+- **OpenAI prompt-cache affinity** — Every turn stamps `prompt_cache_key` (session id, ≤64 chars) on **Responses** and **Chat Completions** so OpenAI-compatible prefix caches stick to the session. Optional `GROK_PROMPT_CACHE_RETENTION=24h` (or `long`) for Responses extended retention; Codex still strips retention (backend rejects it). **No** Anthropic Messages multi-breakpoint `cache_control` expansion.
+- **`/usage` cache hit rate** — Session usage shows a hit-rate line when providers report cached input tokens.
+- **Docs** — User guide §29 models/providers/scoped selection (EN/zh), §30 OpenAI prompt caching (EN/zh), slash-command notes for `/scoped-models`.
+
 ### Fixed
 - **macOS `/live` speaker silence** — The `__speaker-play` helper no longer forces mono/`i16`/48 kHz on CoreAudio. It opens the device default config (often stereo + `f32` + 44.1 kHz), resamples and upmixes the WebRTC mono stream, waits for a `READY`/`ERR` handshake before feeding PCM, and stops the playback queue if the player dies so failures surface instead of silent no-sound.
 - **macOS `/live` crackle / stutter (撕拉)** — Match Linux’s continuous-stream model inside the helper: PCM goes into a continuous sample ring (not discrete `mpsc` chunks), callbacks use the same fill path as Windows (pull only what the buffer needs, hold last sample on underrun), prefer a 48 kHz device config when available, enlarge the playback queue to ~1s, and stop flushing every pipe write (which fragmented audio and starved CoreAudio).
@@ -11,6 +19,18 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ### Changed
 - **Hyper auth is multi-provider first** — On community builds, first launch no longer auto-starts Grok OAuth. The welcome screen waits for you to choose: press `l` for the default login, or after entry use `/login openai`, `/login kimi`, `/providers <platform> <key>`, or `/model`. Consumer SuperGrok access gates no longer lock the whole TUI. When Grok free usage is exhausted, the modal also offers **Switch model or use API key** and **Dismiss** instead of only upgrade links.
+
+### Notes
+- Provider stance: prefer OpenAI-compatible APIs (Chat Completions / Responses) plus existing Messages paths; no first-class native Google / Bedrock / Azure clients.
+- Wire version remains lockstep with Hyper crate versions (`0.2.112`).
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.112
+```
 
 ## [0.2.111] — 2026-07-25
 

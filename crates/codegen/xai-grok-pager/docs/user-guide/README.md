@@ -32,7 +32,8 @@ Customize and extend Grok Build.
 | 9 | [Plugins](09-plugins.md) | Bundle and share skills, commands, agents, hooks, and MCP servers; install from, author, and govern marketplaces (organization controls) |
 | 10 | [Hooks](10-hooks.md) | Lifecycle scripts and HTTP callbacks for pre- and post-tool-use events |
 | 11 | [Custom Models](11-custom-models.md) | Bring-your-own-key, Ollama, and OpenAI-compatible endpoints |
-| 29 | [Models, Providers, Scoped Selection](29-models-providers-and-scoped-selection.md) | Catalog vs Pi, provider gaps, scoped-models (enabled shortlist) roadmap |
+| 29 | [Models, Providers, Scoped Selection](29-models-providers-and-scoped-selection.md) | OpenAI-compat stance, catalog, `/scoped-models` + Alt+] cycle |
+| 30 | [OpenAI Prompt Caching](30-openai-prompt-caching.md) | `prompt_cache_key`, retention, `/usage` hit rate (OpenAI only) |
 | 25 | [Moonshot Providers](25-moonshot-providers.md) | Built-in Moonshot / Kimi open-platform API keys (`moonshot-cn`, `moonshot-ai`) |
 | 26 | [Kimi Code Subscription](26-kimi-code.md) | Device OAuth login for Kimi Code (`grok login --kimi`) |
 | 27 | [OpenAI & Anthropic](27-openai-anthropic.md) | Built-in OpenAI Responses and Anthropic Messages platforms |

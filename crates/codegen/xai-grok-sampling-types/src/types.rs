@@ -120,6 +120,10 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// OpenAI Chat Completions sticky key for automatic prompt-cache affinity
+    /// (replaces relying on the deprecated `user` field for cache bucketing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +180,7 @@ impl ChatCompletionRequest {
             frequency_penalty: None,
             presence_penalty: None,
             user: None,
+            prompt_cache_key: None,
             tools: None,
             tool_choice: None,
             search_parameters: None,
@@ -203,6 +208,7 @@ impl ChatCompletionRequest {
             frequency_penalty: None,
             presence_penalty: None,
             user: None,
+            prompt_cache_key: None,
             tools: None,
             tool_choice: None,
             search_parameters: None,

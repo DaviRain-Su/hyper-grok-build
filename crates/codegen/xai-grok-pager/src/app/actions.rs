@@ -426,8 +426,10 @@ pub enum Action {
         tool_name: String,
         enabled: bool,
     },
-    /// Cycle to next model.
+    /// Cycle to the next model in the scoped shortlist (`enabled_models`).
     NextModel,
+    /// Cycle to the previous model in the scoped shortlist.
+    PrevModel,
     /// Switch active model.
     SwitchModel {
         model_id: acp::ModelId,

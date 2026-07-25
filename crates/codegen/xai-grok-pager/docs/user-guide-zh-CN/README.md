@@ -32,7 +32,8 @@
 | 9 | [插件](09-plugins.md) | 打包并共享 skills、命令、agents、hooks 与 MCP 服务器；从市场源安装 |
 | 10 | [Hooks](10-hooks.md) | 生命周期脚本与 HTTP 回调，用于工具调用前/后事件 |
 | 11 | [自定义模型](11-custom-models.md) | 自带密钥、Ollama 与 OpenAI 兼容端点 |
-| 29 | [模型、平台与 Scoped 选择](29-models-providers-and-scoped-selection.md) | 目录与 Pi 对比、平台缺口、scoped models 短名单路线图 |
+| 29 | [模型、平台与 Scoped 选择](29-models-providers-and-scoped-selection.md) | OpenAI 兼容立场、目录、`/scoped-models` 与 Alt+] 循环 |
+| 30 | [OpenAI 提示缓存](30-openai-prompt-caching.md) | `prompt_cache_key`、retention、`/usage` 命中率（仅 OpenAI） |
 | 25 | [Moonshot 提供方](25-moonshot-providers.md) | 内置 Moonshot / Kimi 开放平台 API 密钥（`moonshot-cn`、`moonshot-ai`） |
 | 26 | [Kimi Code 订阅](26-kimi-code.md) | Kimi Code 的设备 OAuth 登录（`grok login --kimi`） |
 | 27 | [OpenAI 与 Anthropic](27-openai-anthropic.md) | 内置 OpenAI Responses 与 Anthropic Messages 平台 |

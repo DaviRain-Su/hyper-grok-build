@@ -46,18 +46,7 @@ pub(crate) fn hidden_model_ids() -> Vec<String> {
 
 /// Path-injectable core of [`hidden_model_ids`].
 fn hidden_model_ids_at(path: &Path) -> Vec<String> {
-    let Some(doc) = read_config_document_for_edit(path) else {
-        return Vec::new();
-    };
-    doc.get("models")
-        .and_then(|m| m.get("hidden_models"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
+    models_string_array_at(path, "hidden_models")
 }
 
 /// Write the full `[models].hidden_models` array back to `~/.grok/config.toml`
@@ -70,6 +59,93 @@ pub(crate) fn set_hidden_model_ids(ids: &[String]) -> std::io::Result<()> {
 
 /// Path-injectable core of [`set_hidden_model_ids`].
 fn set_hidden_model_ids_at(path: &Path, ids: &[String]) -> std::io::Result<()> {
+    set_models_string_array_at(path, "hidden_models", ids)
+}
+
+/// Read `[models].enabled_models` (Pi scoped shortlist; absent → empty).
+///
+/// Also accepts Pi camelCase `enabledModels` so shell serde aliases and pager
+/// cycle shortlists stay aligned. Snake_case wins if both keys are present.
+pub(crate) fn enabled_model_ids() -> Vec<String> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    enabled_model_ids_at(&path)
+}
+
+/// Path-injectable core of [`enabled_model_ids`].
+fn enabled_model_ids_at(path: &Path) -> Vec<String> {
+    let Some(doc) = read_config_document_for_edit(path) else {
+        return Vec::new();
+    };
+    let Some(models) = doc.get("models") else {
+        return Vec::new();
+    };
+    // Prefer canonical snake_case; fall back to Pi camelCase.
+    for key in ["enabled_models", "enabledModels"] {
+        if let Some(ids) = models.get(key).and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        }) {
+            return ids;
+        }
+    }
+    Vec::new()
+}
+
+/// Write the full `[models].enabled_models` array (empty removes the key).
+///
+/// Always writes snake_case and removes a leftover `enabledModels` key so the
+/// file cannot hold two serde-equivalent fields after a `/scoped-models` edit.
+pub(crate) fn set_enabled_model_ids(ids: &[String]) -> std::io::Result<()> {
+    let path = xai_grok_tools::util::grok_home::grok_home().join("config.toml");
+    set_enabled_model_ids_at(&path, ids)
+}
+
+/// Path-injectable core of [`set_enabled_model_ids`].
+fn set_enabled_model_ids_at(path: &Path, ids: &[String]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let Some(mut doc) = read_config_document_for_edit(path) else {
+        return Ok(());
+    };
+    if let Some(models) = doc.get_mut("models").and_then(|m| m.as_table_mut()) {
+        models.remove("enabledModels");
+        if ids.is_empty() {
+            models.remove("enabled_models");
+        } else {
+            let mut arr = toml_edit::Array::default();
+            for id in ids {
+                arr.push(id.as_str());
+            }
+            models["enabled_models"] = toml_edit::value(arr);
+        }
+    } else if !ids.is_empty() {
+        let mut arr = toml_edit::Array::default();
+        for id in ids {
+            arr.push(id.as_str());
+        }
+        doc["models"]["enabled_models"] = toml_edit::value(arr);
+    }
+    std::fs::write(path, doc.to_string())
+}
+
+fn models_string_array_at(path: &Path, key: &str) -> Vec<String> {
+    let Some(doc) = read_config_document_for_edit(path) else {
+        return Vec::new();
+    };
+    doc.get("models")
+        .and_then(|m| m.get(key))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_models_string_array_at(path: &Path, key: &str, ids: &[String]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -78,14 +154,14 @@ fn set_hidden_model_ids_at(path: &Path, ids: &[String]) -> std::io::Result<()> {
     };
     if ids.is_empty() {
         if let Some(models) = doc.get_mut("models").and_then(|m| m.as_table_mut()) {
-            models.remove("hidden_models");
+            models.remove(key);
         }
     } else {
         let mut arr = toml_edit::Array::default();
         for id in ids {
             arr.push(id.as_str());
         }
-        doc["models"]["hidden_models"] = toml_edit::value(arr);
+        doc["models"][key] = toml_edit::value(arr);
     }
     std::fs::write(path, doc.to_string())
 }
@@ -278,5 +354,66 @@ mod tests {
         let path = dir.path().join("nested/config.toml");
         set_hidden_model_ids_at(&path, &["grok-4.5".to_string()]).unwrap();
         assert_eq!(hidden_model_ids_at(&path), ["grok-4.5"]);
+    }
+
+    #[test]
+    fn enabled_models_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[models]\ndefault = \"grok-4.5\"\n").unwrap();
+        set_enabled_model_ids_at(
+            &path,
+            &["grok-*".to_string(), "openai/gpt-5".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            enabled_model_ids_at(&path),
+            ["grok-*", "openai/gpt-5"]
+        );
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("default = \"grok-4.5\""));
+        set_enabled_model_ids_at(&path, &[]).unwrap();
+        assert!(enabled_model_ids_at(&path).is_empty());
+        assert!(!fs::read_to_string(&path).unwrap().contains("enabled_models"));
+    }
+
+    #[test]
+    fn enabled_models_reads_pi_camel_case_alias() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[models]\nenabledModels = [\"grok-*\", \"openai/*\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            enabled_model_ids_at(&path),
+            ["grok-*", "openai/*"],
+            "pager cycle must honor Pi camelCase enabledModels"
+        );
+    }
+
+    #[test]
+    fn enabled_models_snake_case_wins_over_camel() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[models]\nenabled_models = [\"a\"]\nenabledModels = [\"b\"]\n",
+        )
+        .unwrap();
+        assert_eq!(enabled_model_ids_at(&path), ["a"]);
+    }
+
+    #[test]
+    fn set_enabled_models_migrates_away_from_camel_case() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[models]\nenabledModels = [\"old\"]\n").unwrap();
+        set_enabled_model_ids_at(&path, &["new-*".to_string()]).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("enabled_models"));
+        assert!(!body.contains("enabledModels"), "must not leave dual keys");
+        assert_eq!(enabled_model_ids_at(&path), ["new-*"]);
     }
 }

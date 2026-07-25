@@ -2117,7 +2117,33 @@ impl SessionActor {
                 })),
             );
             let mut request = request;
-            request.x_grok_session_id = Some(self.session_info.id.to_string());
+            let session_id = self.session_info.id.to_string();
+            request.x_grok_session_id = Some(session_id.clone());
+            // OpenAI-compatible prompt cache affinity (Responses + Chat Completions).
+            // Always pin to the session so successive turns hit the same KV prefix
+            // bucket. Codex dialect also sets this; harmless if already present.
+            request.prompt_cache_key = Some(xai_grok_sampling_types::clamp_prompt_cache_key(
+                &session_id,
+            ));
+            // Optional extended retention for OpenAI Responses only
+            // (`24h` / `long`). Codex strips this field; Anthropic Messages
+            // does not use it (no Claude cache_control expansion).
+            if request.prompt_cache_retention.is_none()
+                && let Ok(raw) = std::env::var("GROK_PROMPT_CACHE_RETENTION")
+            {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    if xai_grok_sampling_types::parse_prompt_cache_retention(trimmed).is_some() {
+                        request.prompt_cache_retention = Some(trimmed.to_string());
+                    } else {
+                        tracing::warn!(
+                            value = %trimmed,
+                            "GROK_PROMPT_CACHE_RETENTION is not a known value \
+                             (use 24h|long or in_memory|short); ignoring"
+                        );
+                    }
+                }
+            }
             request.x_grok_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
             request.x_grok_agent_id = Some(xai_grok_telemetry::id::agent_id());

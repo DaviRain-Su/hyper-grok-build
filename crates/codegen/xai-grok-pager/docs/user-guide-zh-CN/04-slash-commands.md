@@ -106,6 +106,19 @@
 
 不必每次切换前都 compact。下一次模型调用前，Grok Build 会对照目标模型上下文窗口检查 transcript，必要时自动 compact。当现有上下文已约占目标窗口 85% 时，TUI 会给出容量警告；仅当你想自己引导摘要时，才先运行 `/compact <要保留的内容>`。
 
+### `/scoped-models`
+
+管理 **Alt+]** / **Alt+[** 模型循环用的 **scoped 短名单**（Pi 风格）。仅软列表 — 全量选择器仍是 `/model` 与 Ctrl+M。写入 `[models].enabled_models`。别名：`/scoped`、`/enabled-models`。
+
+```
+/scoped-models
+/scoped-models add grok-*
+/scoped-models set grok-4.5 openrouter/anthropic/*
+/scoped-models clear
+```
+
+详见 [模型、平台与 Scoped 选择](29-models-providers-and-scoped-selection.md)。
+
 ### `/effort <level>`
 
 在 **当前** 模型上设置推理 effort，无需重新选择。级别为 `low`、`medium`、`high`、`xhigh`；仅当活动模型支持 reasoning effort 时生效。

@@ -71,6 +71,7 @@ pub enum ActionId {
 
     // Agent
     NextModel,
+    PrevModel,
     CancelTurn,
     ToggleYolo,
     ToggleMultiline,

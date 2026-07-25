@@ -43,6 +43,7 @@ pub mod loop_cmd;
 pub mod mcps;
 pub mod model;
 pub mod multiline;
+pub mod scoped_models;
 pub mod new;
 pub mod personas;
 pub mod plan;
@@ -115,6 +116,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         Arc::new(model::ModelCommand),
+        Arc::new(scoped_models::ScopedModelsCommand),
         Arc::new(effort::EffortCommand),
         Arc::new(always_approve::AlwaysApproveCommand),
         Arc::new(auto::AutoCommand),
