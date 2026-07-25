@@ -1,18 +1,52 @@
 # Authentication
 
-Grok supports several authentication methods, including interactive browser login, enterprise single sign-on (SSO), and headless CI/CD runners.
+Hyper (and Grok Build) supports **multiple independent auth methods**. You are not required to use only SpaceXAI / grok.com: you can mix subscriptions and API keys, and switch models without re-binding everything to one vendor.
+
+| Method | How | Typical use |
+|--------|-----|-------------|
+| SpaceXAI / Grok OAuth | `hyper login` or `l` on welcome | Grok-hosted models |
+| xAI API key | `export XAI_API_KEY=…` | CI / no browser |
+| OpenAI Codex (ChatGPT) | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro coding |
+| Kimi Code | `hyper login --kimi` / `/login kimi` | Kimi subscription |
+| BYOK platforms | `/providers <platform> <key>` or env keys | OpenAI, Anthropic, OpenRouter, Ollama, … |
+| Customer OIDC / SSO | config / env | Enterprise |
+
+Credentials live under `~/.grok/auth.json` in **separate scopes** so logging out of xAI does not wipe Codex or Kimi unless you ask.
 
 ---
 
-## Browser Login (Default)
+## First launch (Hyper community builds)
 
-On first launch, Grok opens your browser to authenticate with grok.com:
+**Hyper does not auto-open the Grok browser login.** You land on the welcome splash:
 
-```bash
-grok
+1. Press **`l`** when you want the default interactive login (usually grok.com).
+2. Or enter a session after any credential is already configured, then use slash commands:
+
+```text
+/login openai          # ChatGPT Codex OAuth
+/login kimi            # Kimi Code OAuth
+/providers openrouter <key>
+/providers anthropic <key>
+/model openrouter/...
 ```
 
-Grok stores credentials in `~/.grok/auth.json` and reuses them across sessions. Grok refreshes access tokens automatically in the background. When a token can't be refreshed, Grok prompts you to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
+If Grok **free usage** is exhausted, the upsell is not paywall-only: you can **switch model / use an API key** or **dismiss** and keep working with another provider. Consumer SuperGrok access gates do not lock the entire TUI on Hyper.
+
+Official `grok` builds may still auto-start SpaceXAI login; Hyper (`community-build`) prefers multi-provider choice.
+
+---
+
+## Browser Login (SpaceXAI / Grok)
+
+On first launch of an official Grok build, or when you press `l` / run login without flags, the CLI opens your browser to authenticate with SpaceXAI:
+
+```bash
+hyper
+# or
+hyper login
+```
+
+Credentials are stored in `~/.grok/auth.json` and reused across sessions. Access tokens refresh in the background. When a token can't be refreshed, you are prompted to sign in again. Credentials without a server-provided expiry fall back to a 30-day lifetime.
 
 ### Credential storage
 

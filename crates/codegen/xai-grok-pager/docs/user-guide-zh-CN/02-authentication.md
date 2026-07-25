@@ -1,18 +1,52 @@
 # 认证
 
-Grok 支持多种认证方式，包括交互式浏览器登录、企业单点登录（SSO），以及无头 CI/CD 运行环境。
+Hyper（以及 Grok Build）支持**多种互不绑定的认证方式**。不必只用 SpaceXAI / grok.com：可以混合订阅与 API Key，并随时换模型。
+
+| 方式 | 怎么做 | 常见用途 |
+|------|--------|----------|
+| SpaceXAI / Grok OAuth | `hyper login` 或欢迎页按 `l` | Grok 托管模型 |
+| xAI API Key | `export XAI_API_KEY=…` | CI / 无浏览器 |
+| OpenAI Codex（ChatGPT） | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro 编程 |
+| Kimi Code | `hyper login --kimi` / `/login kimi` | Kimi 订阅 |
+| BYOK 平台 | `/providers <platform> <key>` 或环境变量 | OpenAI、Anthropic、OpenRouter、Ollama 等 |
+| 企业 OIDC / SSO | 配置 / 环境变量 | 企业部署 |
+
+凭据按**不同 scope** 写在 `~/.grok/auth.json`，退出 xAI 不会自动清掉 Codex / Kimi（除非你显式清除）。
 
 ---
 
-## 浏览器登录（默认）
+## 首次启动（Hyper 社区构建）
 
-首次启动时，Grok 会打开浏览器，通过 grok.com 认证：
+**Hyper 不会一打开就强制跳 Grok 浏览器登录。** 你会先到欢迎页：
 
-```bash
-grok
+1. 需要默认交互登录时按 **`l`**（通常是 grok.com）。
+2. 也可在已有凭据时直接进会话，再用斜杠命令：
+
+```text
+/login openai          # ChatGPT Codex OAuth
+/login kimi            # Kimi Code OAuth
+/providers openrouter <key>
+/providers anthropic <key>
+/model openrouter/...
 ```
 
-凭据保存在 `~/.grok/auth.json`，跨会话复用。访问令牌会在后台自动刷新。无法刷新时，会提示重新登录。若服务器未提供过期时间，凭据默认按 30 天生命周期处理。
+若 **Grok 免费额度用尽**，弹窗不只逼升级：可选 **切换模型 / 使用 API Key** 或 **Dismiss**，用其他厂商继续工作。Hyper 不会用个人 SuperGrok 订阅 gate 锁死整个 TUI。
+
+官方 `grok` 构建仍可能自动走 SpaceXAI 登录；Hyper（`community-build`）优先多平台自选。
+
+---
+
+## 浏览器登录（SpaceXAI / Grok）
+
+官方 Grok 构建首次启动，或按 `l` / 无参数 `login` 时，会打开浏览器完成 SpaceXAI 认证：
+
+```bash
+hyper
+# 或
+hyper login
+```
+
+凭据保存在 `~/.grok/auth.json`，跨会话复用。访问令牌会在后台自动刷新。无法刷新时会提示重新登录。若服务器未提供过期时间，凭据默认按 30 天生命周期处理。
 
 ### 凭据存储
 

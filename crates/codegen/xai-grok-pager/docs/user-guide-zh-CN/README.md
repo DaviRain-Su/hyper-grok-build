@@ -13,7 +13,7 @@
 | # | 文档 | 说明 |
 |---|----------|-------------|
 | 1 | [快速入门](01-getting-started.md) | 安装、首次启动、身份验证、基本交互与核心概念 |
-| 2 | [身份验证](02-authentication.md) | 浏览器登录、API 密钥、OIDC/SSO、外部认证提供方与设备码流程 |
+| 2 | [身份验证](02-authentication.md) | 多平台登录（Grok / Codex / Kimi / BYOK）、额度用尽出路、OIDC/SSO |
 | 3 | [键盘快捷键](03-keyboard-shortcuts.md) | TUI 中全部按键绑定与鼠标操作参考 |
 | 4 | [斜杠命令](04-slash-commands.md) | 全部 `/` 命令，包括目标、深度研究与工作流运行管理 |
 | 5 | [配置](05-configuration.md) | `config.toml`、`pager.toml`、环境变量与文件位置 |
@@ -32,6 +32,7 @@
 | 9 | [插件](09-plugins.md) | 打包并共享 skills、命令、agents、hooks 与 MCP 服务器；从市场源安装 |
 | 10 | [Hooks](10-hooks.md) | 生命周期脚本与 HTTP 回调，用于工具调用前/后事件 |
 | 11 | [自定义模型](11-custom-models.md) | 自带密钥、Ollama 与 OpenAI 兼容端点 |
+| 29 | [模型、平台与 Scoped 选择](29-models-providers-and-scoped-selection.md) | 目录与 Pi 对比、平台缺口、scoped models 短名单路线图 |
 | 25 | [Moonshot 提供方](25-moonshot-providers.md) | 内置 Moonshot / Kimi 开放平台 API 密钥（`moonshot-cn`、`moonshot-ai`） |
 | 26 | [Kimi Code 订阅](26-kimi-code.md) | Kimi Code 的设备 OAuth 登录（`grok login --kimi`） |
 | 27 | [OpenAI 与 Anthropic](27-openai-anthropic.md) | 内置 OpenAI Responses 与 Anthropic Messages 平台 |

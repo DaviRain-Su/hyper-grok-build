@@ -54,7 +54,7 @@ pub static USER_GUIDE: &[Doc] = &[
     guide!(
         "02-authentication.md",
         "Authentication",
-        "Browser login, API keys, OIDC, external auth providers"
+        "Multi-provider login (Grok, Codex, Kimi, BYOK), free-usage escape, OIDC"
     ),
     guide!(
         "03-keyboard-shortcuts.md",
@@ -120,6 +120,11 @@ pub static USER_GUIDE: &[Doc] = &[
         "28-openai-codex.md",
         "OpenAI Codex (ChatGPT)",
         "ChatGPT subscription login (grok login --openai) and Codex models"
+    ),
+    guide!(
+        "29-models-providers-and-scoped-selection.md",
+        "Models, Providers, Scoped Selection",
+        "Catalog vs Pi, provider gaps, scoped-models shortlist roadmap"
     ),
     guide!(
         "12-project-rules.md",

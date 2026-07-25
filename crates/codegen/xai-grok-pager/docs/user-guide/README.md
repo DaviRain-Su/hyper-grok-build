@@ -13,7 +13,7 @@ Start here. These guides cover what you need on your first day.
 | # | Document | Description |
 |---|----------|-------------|
 | 1 | [Getting Started](01-getting-started.md) | Installation, first launch, authentication, basic interaction, and key concepts |
-| 2 | [Authentication](02-authentication.md) | Browser login, API keys, OIDC/SSO, external auth providers, and device-code flow |
+| 2 | [Authentication](02-authentication.md) | Multi-provider login (Grok, Codex, Kimi, BYOK), free-usage escape, OIDC/SSO |
 | 3 | [Keyboard Shortcuts](03-keyboard-shortcuts.md) | Reference for every key binding and mouse action in the TUI |
 | 4 | [Slash Commands](04-slash-commands.md) | Every `/` command, including goals, deep research, and workflow run management |
 | 5 | [Configuration](05-configuration.md) | `config.toml`, `pager.toml`, environment variables, and file locations |
@@ -32,6 +32,7 @@ Customize and extend Grok Build.
 | 9 | [Plugins](09-plugins.md) | Bundle and share skills, commands, agents, hooks, and MCP servers; install from, author, and govern marketplaces (organization controls) |
 | 10 | [Hooks](10-hooks.md) | Lifecycle scripts and HTTP callbacks for pre- and post-tool-use events |
 | 11 | [Custom Models](11-custom-models.md) | Bring-your-own-key, Ollama, and OpenAI-compatible endpoints |
+| 29 | [Models, Providers, Scoped Selection](29-models-providers-and-scoped-selection.md) | Catalog vs Pi, provider gaps, scoped-models (enabled shortlist) roadmap |
 | 25 | [Moonshot Providers](25-moonshot-providers.md) | Built-in Moonshot / Kimi open-platform API keys (`moonshot-cn`, `moonshot-ai`) |
 | 26 | [Kimi Code Subscription](26-kimi-code.md) | Device OAuth login for Kimi Code (`grok login --kimi`) |
 | 27 | [OpenAI & Anthropic](27-openai-anthropic.md) | Built-in OpenAI Responses and Anthropic Messages platforms |

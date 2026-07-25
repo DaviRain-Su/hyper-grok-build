@@ -2,17 +2,23 @@
 
 Grok connects to custom model endpoints for alternative providers, self-hosted models, and overriding built-in settings. This guide explains how to select models, configure endpoints, and integrate third-party providers.
 
+For the **built-in multi-platform catalog**, provider gaps vs Pi, and Pi-style **scoped models** (shortlist + cycle), see [Models, Providers, and Scoped Selection](29-models-providers-and-scoped-selection.md).
+
 ---
 
 ## Default Models
 
-By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-4.5`. Default models require no configuration. Authenticate with `grok login` or an API key, then start a session.
+By default, Grok uses models hosted by SpaceXAI, and new sessions start with `grok-4.5`. Default models require no configuration. Authenticate with `hyper login` / an API key / another provider, then start a session.
 
 List all available models:
 
 ```bash
+hyper models
+# or
 grok models
 ```
+
+Many third-party rows only appear after you set a platform key (`/providers …`) or env var, or complete `/login openai` / `/login kimi`.
 
 ---
 
