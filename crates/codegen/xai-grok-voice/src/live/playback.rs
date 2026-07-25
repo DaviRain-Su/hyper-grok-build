@@ -968,13 +968,39 @@ fn fill_cpal_output<T>(
 #[cfg(target_os = "macos")]
 const SPEAKER_HELPER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Parse one stderr line from the `__speaker-play` helper.
+///
+/// - `READY …` → `Some(Ok(payload))`
+/// - `ERR …` → `Some(Err(message))`
+/// - blank / diagnostic noise → `None` (keep reading)
+///
+/// Platform-agnostic so Linux CI can unit-test the handshake contract without
+/// cross-compiling CoreAudio.
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_speaker_helper_status_line(line: &str) -> Option<Result<String, String>> {
+    let msg = line.trim();
+    if msg.is_empty() {
+        return None;
+    }
+    if let Some(payload) = msg.strip_prefix("READY") {
+        return Some(Ok(payload.trim().to_string()));
+    }
+    if let Some(payload) = msg.strip_prefix("ERR ") {
+        return Some(Err(payload.to_string()));
+    }
+    if msg.starts_with("ERR") {
+        return Some(Err(msg.to_string()));
+    }
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn start_macos_helper(
     sample_rate: u32,
     queue: Arc<PlaybackQueue>,
     stopped: Arc<AtomicBool>,
 ) -> Result<(JoinHandle<()>, Teardown), VoiceError> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     use std::sync::mpsc;
 
     let exe = std::env::current_exe()
@@ -1016,14 +1042,10 @@ fn start_macos_helper(
                     ));
                     break;
                 }
-                Ok(_) => {
-                    let msg = line.trim();
-                    if msg.is_empty() {
-                        continue;
-                    }
-                    if let Some(payload) = msg.strip_prefix("READY") {
-                        let _ = status_tx.send(Ok(payload.trim().to_string()));
-                        // Drain remaining stderr for diagnostics.
+                Ok(_) => match parse_speaker_helper_status_line(&line) {
+                    Some(status) => {
+                        let _ = status_tx.send(status);
+                        // Drain remaining stderr for diagnostics (non-fatal).
                         let mut rest = String::new();
                         if reader.read_to_string(&mut rest).is_ok() {
                             let rest = rest.trim();
@@ -1033,16 +1055,13 @@ fn start_macos_helper(
                         }
                         break;
                     }
-                    if let Some(payload) = msg.strip_prefix("ERR ") {
-                        let _ = status_tx.send(Err(payload.to_string()));
-                        break;
+                    None => {
+                        let msg = line.trim();
+                        if !msg.is_empty() {
+                            tracing::debug!(stderr = msg, "live speaker helper stderr");
+                        }
                     }
-                    if msg.starts_with("ERR") {
-                        let _ = status_tx.send(Err(msg.to_string()));
-                        break;
-                    }
-                    tracing::debug!(stderr = msg, "live speaker helper stderr");
-                }
+                },
                 Err(e) => {
                     let _ = status_tx.send(Err(format!("speaker helper stderr: {e}")));
                     break;
@@ -1393,6 +1412,82 @@ pub(crate) fn run_speaker_play_child(_args: Vec<String>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Speaker helper status handshake (macOS parent contract) ---
+
+    #[test]
+    fn speaker_helper_status_parses_ready_with_payload() {
+        let status = parse_speaker_helper_status_line(
+            "READY rate=48000 channels=2 format=F32 source_rate=48000\n",
+        );
+        assert_eq!(
+            status,
+            Some(Ok(
+                "rate=48000 channels=2 format=F32 source_rate=48000".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn speaker_helper_status_parses_ready_bare() {
+        assert_eq!(parse_speaker_helper_status_line("READY"), Some(Ok(String::new())));
+        assert_eq!(
+            parse_speaker_helper_status_line("READY\n"),
+            Some(Ok(String::new()))
+        );
+    }
+
+    #[test]
+    fn speaker_helper_status_parses_err_variants() {
+        assert_eq!(
+            parse_speaker_helper_status_line("ERR no default output audio device"),
+            Some(Err("no default output audio device".into()))
+        );
+        assert_eq!(
+            parse_speaker_helper_status_line("ERR"),
+            Some(Err("ERR".into()))
+        );
+    }
+
+    #[test]
+    fn speaker_helper_status_ignores_blank_and_noise() {
+        assert_eq!(parse_speaker_helper_status_line(""), None);
+        assert_eq!(parse_speaker_helper_status_line("   \n"), None);
+        assert_eq!(
+            parse_speaker_helper_status_line("tracing noise before ready"),
+            None
+        );
+    }
+
+    /// When the player pipe dies, `forward_pcm16` must stop the queue so
+    /// subsequent `PlaybackWriter::write` returns Err (surfaces to the UI)
+    /// instead of silently shedding PCM.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn forward_pcm16_stops_queue_when_writer_fails() {
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "player died",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let queue = Arc::new(PlaybackQueue::new());
+        let stopped = Arc::new(AtomicBool::new(false));
+        queue.push(&[0.1, 0.2, 0.3]).expect("push before stop");
+        // Seed so wait_samples returns immediately with data.
+        forward_pcm16(FailWriter, Arc::clone(&queue), Arc::clone(&stopped), "test");
+        assert!(
+            queue.push(&[0.5]).is_err(),
+            "queue must reject writes after the player pipe fails"
+        );
+    }
 
     // --- PlaybackQueue tests ---
 
