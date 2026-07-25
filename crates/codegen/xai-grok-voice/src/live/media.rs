@@ -812,6 +812,9 @@ async fn receive_output_audio(
                 // Packet-loss concealment: synthesize up to 4 missing frames
                 // (decode_float with an empty payload + `false`), then decode
                 // the arrived packet with `true` (FEC) to recover its content.
+                // Must `continue` after this path — falling through would
+                // decode the same payload a second time without FEC and
+                // corrupt decoder state / double-play frames.
                 for _ in 1..gap.min(5) {
                     if let Ok(samples) =
                         decoder.decode_float(&[], &mut decoded[..OUTPUT_FRAME_SAMPLES], false)
@@ -822,12 +825,25 @@ async fn receive_output_audio(
                         level.observe(&decoded[..samples], &core);
                     }
                 }
-                if let Ok(samples) = decoder.decode_float(&packet.payload, &mut decoded, true) {
-                    if !write_output(&playback_tx, &decoded[..samples], &core) {
+                match decoder.decode_float(&packet.payload, &mut decoded, true) {
+                    Ok(samples) => {
+                        if !write_output(&playback_tx, &decoded[..samples], &core) {
+                            return;
+                        }
+                        level.observe(&decoded[..samples], &core);
+                        expected_sequence = Some(sequence.wrapping_add(1));
+                    }
+                    Err(e) => {
+                        if let Some(core) = core.upgrade() {
+                            core.report_failure(format!(
+                                "Failed to decode live speaker audio: {e}"
+                            ));
+                            core.report_level(0.0);
+                        }
                         return;
                     }
-                    level.observe(&decoded[..samples], &core);
                 }
+                continue;
             }
         }
         expected_sequence = Some(sequence.wrapping_add(1));
