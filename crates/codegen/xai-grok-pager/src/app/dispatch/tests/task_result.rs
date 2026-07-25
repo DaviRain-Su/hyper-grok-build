@@ -2258,6 +2258,7 @@ fn verify_check_failure_promotes_pending_gate() {
 /// must never promote a deferred gate: only the deferral's own
 /// generation-scoped check or timeout may (a superseded or unrelated check
 /// failing is not evidence about the current verification).
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn check_subscription_complete_failure_leaves_pending_gate_untouched() {
     let mut app = test_app();

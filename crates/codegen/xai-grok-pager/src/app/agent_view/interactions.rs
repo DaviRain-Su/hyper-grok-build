@@ -1129,6 +1129,42 @@ impl AgentView {
                 kind,
                 crate::views::question_view::LocalQuestionKind::DoctorFix { .. }
             );
+            // Hyper community free-usage escapes need `&mut self` (clear sticky
+            // block + toast). Detect before the pure `translate_local_submit`.
+            if !skipped
+                && let crate::views::question_view::LocalQuestionKind::FreeUsageUpsell { source } =
+                    &kind
+                && let Some(crate::views::question_view::QuestionSelection::Single(Some(idx))) =
+                    qv.selections.first()
+                && let Some(action_id) = qv
+                    .questions
+                    .first()
+                    .and_then(|q| q.options.get(*idx))
+                    .and_then(|o| o.id.as_deref())
+            {
+                use super::dispatch::{UPSELL_ACTION_DISMISS, UPSELL_ACTION_SWITCH_MODEL};
+                if action_id == UPSELL_ACTION_SWITCH_MODEL || action_id == UPSELL_ACTION_DISMISS {
+                    xai_grok_telemetry::session_ctx::log_event(
+                        xai_grok_telemetry::events::SuperGrokUpsellClicked {
+                            source: *source,
+                            auth_method: None,
+                        },
+                    );
+                    self.session.free_usage_blocked = false;
+                    if action_id == UPSELL_ACTION_SWITCH_MODEL {
+                        self.show_toast(
+                            "Grok free limit cleared. Run /model to switch, or /login openai · /login kimi · /providers <platform> <key>",
+                        );
+                    } else {
+                        self.show_toast(
+                            "Paywall dismissed. Use /model or another login when you are ready.",
+                        );
+                    }
+                    self.prompt.restore(qv.stashed_prompt);
+                    self.cleanup_question_state();
+                    return InputOutcome::Changed;
+                }
+            }
             let outcome = if skipped && is_doctor_fix {
                 let crate::views::question_view::LocalQuestionKind::DoctorFix { target, .. } = kind
                 else {

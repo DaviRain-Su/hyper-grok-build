@@ -1007,7 +1007,28 @@ fn free_usage_upsell_shows_two_options_with_exact_labels() {
         )
     ));
     let q = &qv.questions[0];
-    assert_eq!(q.question, "You hit your free usage limit.");
+    if cfg!(feature = "community-build") {
+        assert!(
+            q.question.contains("Grok free usage limit")
+                || q.question.contains("another model"),
+            "community heading should mention multi-provider escape, got: {}",
+            q.question
+        );
+        assert!(
+            q.options.len() >= 4,
+            "community free-usage modal must include switch/dismiss options"
+        );
+        assert_eq!(
+            q.options[2].id.as_deref(),
+            Some(crate::app::dispatch::UPSELL_ACTION_SWITCH_MODEL)
+        );
+        assert_eq!(
+            q.options[3].id.as_deref(),
+            Some(crate::app::dispatch::UPSELL_ACTION_DISMISS)
+        );
+    } else {
+        assert_eq!(q.question, "You hit your free usage limit.");
+    }
     let expected = [
         (
             "Upgrade to SuperGrok",
@@ -1020,7 +1041,7 @@ fn free_usage_upsell_shows_two_options_with_exact_labels() {
             Some(UPSELL_URL_UPGRADE),
         ),
     ];
-    assert_eq!(q.options.len(), expected.len());
+    assert!(q.options.len() >= expected.len());
     for (opt, (label, desc, id)) in q.options.iter().zip(expected) {
         assert_eq!(opt.label, label);
         assert_eq!(opt.description, desc);

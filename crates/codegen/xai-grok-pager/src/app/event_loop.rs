@@ -983,6 +983,17 @@ pub(crate) async fn run(
                 ),
             };
             vec![]
+        } else if cfg!(feature = "community-build") {
+            // Hyper: do **not** auto-launch Grok OAuth on first open. Land on
+            // the login splash so the user can pick `/login`, `/login openai`,
+            // `/login kimi`, API keys, or config.toml BYOK when they choose —
+            // instead of being pushed straight into a grok.com browser flow.
+            app.auth_state = super::app_view::AuthState::Pending { error: None };
+            tracing::info!(
+                method_id = ?app.login_method_id,
+                "community-build: deferred login until user chooses a method"
+            );
+            vec![]
         } else {
             dispatch::dispatch(Action::Login, &mut app)
         }

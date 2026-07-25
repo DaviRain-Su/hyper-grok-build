@@ -39,7 +39,10 @@ mod transcript;
 mod turn;
 mod voice;
 
-pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
+pub(crate) use billing::{
+    UPSELL_ACTION_DISMISS, UPSELL_ACTION_SWITCH_MODEL, UPSELL_URL_PAYG, UPSELL_URL_UPGRADE,
+    is_credit_limit_error,
+};
 #[cfg(feature = "codex-live")]
 pub(crate) use live::stop_live_on_teardown;
 #[cfg(feature = "codex-live")]

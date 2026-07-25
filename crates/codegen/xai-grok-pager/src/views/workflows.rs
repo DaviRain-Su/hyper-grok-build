@@ -1267,8 +1267,8 @@ mod tests {
             .into_iter()
             .map(|shortcut| shortcut.label)
             .collect::<Vec<_>>();
-        assert!(labels.contains(&"r resume"));
-        assert!(!labels.contains(&"x stop"));
+        assert!(labels.iter().any(|l| l.as_ref() == "r resume"));
+        assert!(!labels.iter().any(|l| l.as_ref() == "x stop"));
     }
 
     #[test]

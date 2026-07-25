@@ -698,8 +698,20 @@ pub fn render_welcome(
             let label = params.login_label.unwrap_or("grok.com");
             let login_text = rust_i18n::t!("welcome.login_with", label = label).to_string();
             let quit_text = rust_i18n::t!("welcome.quit").to_string();
+            // Community builds: make multi-provider entry obvious (not just Grok).
+            let community_hint = if cfg!(feature = "community-build") {
+                Some((
+                    "Press l to log in, or after login: /login openai · /login kimi · /providers <platform> <key> · /model",
+                    theme.gray_bright,
+                ))
+            } else {
+                None
+            };
+            let msg = error
+                .as_deref()
+                .map(|e| (e, theme.accent_error))
+                .or(community_hint);
             let menu = [("l", login_text.as_str()), ("q", quit_text.as_str())];
-            let msg = error.as_deref().map(|e| (e, theme.accent_error));
             let info = PromptInfo {
                 model_name: params.model_name,
                 flags: params.flags,

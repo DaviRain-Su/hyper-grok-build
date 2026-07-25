@@ -143,6 +143,24 @@ impl AppView {
             self.gate = Some(gate);
             return vec![];
         }
+        // Hyper community builds support multi-provider auth (API keys, Codex,
+        // Kimi, …). A SuperGrok *consumer* paywall must not lock the whole TUI
+        // — users should keep working by switching model / credentials. Team /
+        // enterprise gates still apply.
+        if cfg!(feature = "community-build")
+            && self.team_name.is_none()
+            && !self.is_api_key_auth
+        {
+            crate::unified_log::info(
+                "subscription.gate.ignored_community_build",
+                None,
+                Some(serde_json::json!({
+                    "message": gate.message,
+                    "url": gate.url,
+                })),
+            );
+            return vec![];
+        }
         if self.is_consumer_session() {
             return self.defer_gate_for_verification(gate);
         }
@@ -368,6 +386,9 @@ mod tests {
         );
     }
 
+    // Community builds soft-ignore SuperGrok consumer gates (multi-provider).
+    // Upstream gate semantics are still tested without that feature.
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn impose_gate_defers_for_consumer_session() {
         let mut app = test_app();
@@ -416,6 +437,7 @@ mod tests {
         assert_eq!(gated.gate.as_ref().unwrap().message, "New copy");
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn impose_gate_bumps_generation_each_time() {
         let mut app = test_app();
@@ -447,6 +469,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn lift_gate_counts_pending_deferral_as_blocked() {
         let mut app = test_app();
@@ -463,6 +486,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn promote_deferred_gate_is_generation_scoped() {
         let mut app = test_app();

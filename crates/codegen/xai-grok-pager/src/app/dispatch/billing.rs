@@ -35,6 +35,11 @@ pub(crate) const UPSELL_URL_UPGRADE: &str = "https://grok.com/supergrok?referrer
 /// URL for managing pay-as-you-go / on-demand spending / purchasing credits.
 pub(crate) const UPSELL_URL_PAYG: &str = "https://grok.com?_s=usage";
 
+/// Internal free-usage modal action: clear the sticky block and open `/model`.
+pub(crate) const UPSELL_ACTION_SWITCH_MODEL: &str = "hyper:switch-model";
+/// Internal free-usage modal action: dismiss the paywall without upgrading.
+pub(crate) const UPSELL_ACTION_DISMISS: &str = "hyper:dismiss-paywall";
+
 /// Billing mode for credit-limit upsell copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CreditLimitUpsellMode {
@@ -272,7 +277,11 @@ fn open_supergrok_upsell(
 
     let (heading, source, modal_id_prefix) = match reason {
         UpsellReason::FreeUsageLimit => (
-            "You hit your free usage limit.",
+            if cfg!(feature = "community-build") {
+                "Grok free usage limit reached. Upgrade, or keep coding with another model / API key."
+            } else {
+                "You hit your free usage limit."
+            },
             SuperGrokUpsell::FreeUsagePaywall,
             "free-usage-upsell",
         ),
@@ -288,7 +297,7 @@ fn open_supergrok_upsell(
         auth_method,
     });
 
-    let options = vec![
+    let mut options = vec![
         QuestionOption {
             label: "Upgrade to SuperGrok".into(),
             description: "For everyday coding and productivity tasks".into(),
@@ -304,6 +313,22 @@ fn open_supergrok_upsell(
             id: Some(UPSELL_URL_UPGRADE.into()),
         },
     ];
+    // Hyper community: never trap users on a paywall-only path. Let them
+    // switch model / BYOK / other logins instead of only "pay SuperGrok".
+    if cfg!(feature = "community-build") && matches!(reason, UpsellReason::FreeUsageLimit) {
+        options.push(QuestionOption {
+            label: "Switch model or use API key".into(),
+            description: "Open /model — use openai-codex/*, kimi, or any BYOK platform".into(),
+            preview: None,
+            id: Some(UPSELL_ACTION_SWITCH_MODEL.into()),
+        });
+        options.push(QuestionOption {
+            label: "Dismiss for now".into(),
+            description: "Clear the block; change model/login when ready".into(),
+            preview: None,
+            id: Some(UPSELL_ACTION_DISMISS.into()),
+        });
+    }
     let question = Question {
         question: heading.into(),
         options,

@@ -1723,7 +1723,7 @@ fn translate_local_submit(
             InputOutcome::Action(Action::OpenUrl(url.to_string()))
         }
         LocalQuestionKind::FreeUsageUpsell { source } => {
-            let url = qv
+            let action_id = qv
                 .questions
                 .first()
                 .and_then(|q| q.options.get(*idx))
@@ -1735,7 +1735,15 @@ fn translate_local_submit(
                     auth_method: None,
                 },
             );
-            InputOutcome::Action(Action::OpenUrl(url.to_string()))
+            // Community multi-provider escapes are handled in
+            // `submit_question_answers` (needs `&mut self`). URL paths stay here.
+            if action_id == super::dispatch::UPSELL_ACTION_SWITCH_MODEL
+                || action_id == super::dispatch::UPSELL_ACTION_DISMISS
+            {
+                // Placeholder — real work is done before this free function runs.
+                return InputOutcome::Changed;
+            }
+            InputOutcome::Action(Action::OpenUrl(action_id.to_string()))
         }
         LocalQuestionKind::AgentTypeMismatch { model_id, effort } => {
             let start_new = *idx == 0;
