@@ -6,6 +6,7 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ### Fixed
 - **macOS `/live` speaker silence** — The `__speaker-play` helper no longer forces mono/`i16`/48 kHz on CoreAudio. It opens the device default config (often stereo + `f32` + 44.1 kHz), resamples and upmixes the WebRTC mono stream, waits for a `READY`/`ERR` handshake before feeding PCM, and stops the playback queue if the player dies so failures surface instead of silent no-sound.
+- **macOS `/live` crackle / stutter (撕拉)** — Match Linux’s continuous-stream model inside the helper: PCM goes into a continuous sample ring (not discrete `mpsc` chunks), callbacks use the same fill path as Windows (pull only what the buffer needs, hold last sample on underrun), prefer a 48 kHz device config when available, enlarge the playback queue to ~1s, and stop flushing every pipe write (which fragmented audio and starved CoreAudio).
 - **Live Opus PLC double-decode** — After packet-loss concealment/FEC recovery, the decoder no longer immediately re-decodes the same payload without FEC (which corrupted state and could double-play or mute frames).
 
 ## [0.2.111] — 2026-07-25

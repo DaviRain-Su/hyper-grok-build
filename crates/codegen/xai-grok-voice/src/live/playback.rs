@@ -43,11 +43,11 @@ use std::time::Duration;
 
 use crate::error::VoiceError;
 
-/// Bounded capacity of the playback sample queue, in samples. Sized for ~0.5s
-/// of 48 kHz mono — enough to absorb decoder jitter without ever blocking the
-/// real-time RTP read loop, and small enough that a stalled player sheds
-/// quickly rather than accumulating seconds of latency.
-const PLAYBACK_QUEUE_SAMPLES: usize = 24_000;
+/// Bounded capacity of the playback sample queue, in samples. Sized for ~1s
+/// of 48 kHz mono — enough to absorb WebRTC jitter + subprocess scheduling
+/// without underruns (which sound like crackle/stutter on macOS), while still
+/// shedding if the player stalls so latency cannot grow unbounded.
+const PLAYBACK_QUEUE_SAMPLES: usize = 48_000;
 
 /// Poll interval for the subprocess reader threads. The reader uses
 /// `wait_timeout` on the condvar so it never blocks forever — it wakes, checks
@@ -230,6 +230,9 @@ struct ResamplerState {
     resampler: LinearResampler,
     /// Excess resampled output from the previous callback, carried to the next.
     leftover: Vec<f32>,
+    /// Last mono sample actually written to the device — held across underruns
+    /// so brief gaps do not hard-zero the DAC (which clicks / 撕拉).
+    last_out: f32,
 }
 
 #[allow(dead_code)]
@@ -238,6 +241,7 @@ impl ResamplerState {
         Self {
             resampler: LinearResampler::new(source_rate, target_rate),
             leftover: Vec::new(),
+            last_out: 0.0,
         }
     }
 
@@ -261,10 +265,16 @@ impl ResamplerState {
         }
 
         if written >= out.len() {
+            if written > 0 {
+                self.last_out = out[written - 1];
+            }
             return written; // leftover alone filled the buffer
         }
 
         if input.is_empty() {
+            if written > 0 {
+                self.last_out = out[written - 1];
+            }
             return written; // nothing new to resample
         }
 
@@ -281,6 +291,9 @@ impl ResamplerState {
             out[written..written + remaining].copy_from_slice(&resampled[..remaining]);
             written += remaining;
             self.leftover.extend_from_slice(&resampled[remaining..]);
+        }
+        if written > 0 {
+            self.last_out = out[written - 1];
         }
         written
     }
@@ -753,7 +766,10 @@ fn forward_pcm16<W: Write + Send>(
             let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
             buf.extend_from_slice(&v.to_le_bytes());
         }
-        if out.write_all(&buf).and_then(|()| out.flush()).is_err() {
+        // Do **not** flush every chunk: flush forces tiny pipe packets which
+        // starve the child audio callback and produce crackle/stutter on macOS.
+        // The OS pipe buffer coalesces; we only flush once on exit.
+        if out.write_all(&buf).is_err() {
             // Player died (broken pipe / closed stdin). Stop the queue so the
             // media writer surfaces `Live speaker playback failed` instead of
             // silently shedding PCM into a black hole.
@@ -881,11 +897,15 @@ where
         .build_output_stream(
             config,
             move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
+                if stopped.load(Ordering::Acquire) {
+                    out.fill(T::from_sample(0.0));
+                    return;
+                }
+                let mut rs = resampler.lock();
                 fill_cpal_output(
                     out,
                     &queue,
-                    &resampler,
-                    &stopped,
+                    &mut rs,
                     source_rate,
                     stream_rate,
                     channels,
@@ -903,58 +923,56 @@ where
 /// leftover state is persisted across callbacks so interpolation spans chunk
 /// boundaries AND excess resampled output carries to the next callback (no
 /// output tails lost — finding 5).
-#[cfg(target_os = "windows")]
-#[allow(clippy::too_many_arguments)]
+///
+/// Shared by Windows (in-process) and macOS (`__speaker-play` helper). Pulls
+/// only the samples needed for this buffer (not "everything available") so
+/// the queue stays pre-buffered and callbacks rarely underrun — underruns
+/// sound like crackle / 撕拉 stutter.
+#[cfg(any(target_os = "windows", all(target_os = "macos", feature = "audio")))]
 fn fill_cpal_output<T>(
     out: &mut [T],
     queue: &PlaybackQueue,
-    resampler: &Arc<parking_lot::Mutex<ResamplerState>>,
-    stopped: &Arc<AtomicBool>,
+    resampler: &mut ResamplerState,
     source_rate: u32,
     stream_rate: u32,
     channels: u16,
 ) where
     T: cpal::Sample + cpal::FromSample<f32>,
 {
-    out.fill(T::from_sample(0.0));
-    if stopped.load(Ordering::Acquire) {
-        return;
-    }
     let ch = channels.max(1) as usize;
     let total_frames = out.len() / ch;
+    if total_frames == 0 {
+        return;
+    }
 
-    // Drain all available source samples from the queue.
-    let ratio = f64::from(source_rate) / f64::from(stream_rate);
+    // Pull only what this callback needs for a full buffer (plus a couple
+    // samples for the linear interpolator). Leaving surplus in the queue is
+    // intentional: it is the underrun margin.
+    let ratio = f64::from(source_rate) / f64::from(stream_rate.max(1));
     let needed = (total_frames as f64 * ratio).ceil() as usize + 2;
     let input = queue.try_drain(needed.max(1));
 
-    if input.is_empty() && {
-        // No new data — but there may be leftover resampled output from the
-        // previous callback. Check by attempting a fill with empty input.
-        let mut rs = resampler.lock();
-        let mut mono = vec![0.0f32; total_frames];
-        let written = rs.fill(&[], &mut mono);
-        written == 0
-    } {
-        return; // truly nothing to output
-    }
-
-    // Resample (with leftover carry) into a mono buffer, then upmix.
     let mut mono = vec![0.0f32; total_frames];
-    let written = {
-        let mut rs = resampler.lock();
-        rs.fill(&input, &mut mono)
-    };
+    let written = resampler.fill(&input, &mut mono);
 
-    // Upmix mono → channels and write to the output buffer.
-    for frame_idx in 0..written {
-        if frame_idx >= total_frames {
-            break;
-        }
-        let clamped = mono[frame_idx].clamp(-1.0, 1.0);
+    // Upmix mono → channels. If the resampler could not fill the whole
+    // buffer (true underrun), hold the last sample instead of hard zeros —
+    // hard zeros produce the classic crackle/pop the user hears as 撕拉.
+    let hold = if written > 0 {
+        mono[written - 1].clamp(-1.0, 1.0)
+    } else {
+        resampler.last_out.clamp(-1.0, 1.0)
+    };
+    for frame_idx in 0..total_frames {
+        let sample = if frame_idx < written {
+            mono[frame_idx].clamp(-1.0, 1.0)
+        } else {
+            hold
+        };
         let base = frame_idx * ch;
+        let v = T::from_sample(sample);
         for c in 0..ch {
-            out[base + c] = T::from_sample(clamped);
+            out[base + c] = v;
         }
     }
 }
@@ -1206,40 +1224,32 @@ fn parse_speaker_args(args: &[String]) -> Result<u32, String> {
 /// Open the default cpal output device and play PCM16 mono LE (at `source_rate`
 /// Hz) read from stdin until EOF.
 ///
-/// **Important (macOS):** do **not** force mono/`i16`/`source_rate` on the
-/// device stream. Many Mac defaults are stereo + `f32` (and often 44.1 kHz).
-/// Forcing an unsupported config makes `build_output_stream` fail; the parent
-/// then silently sheds PCM and Live appears "connected" with no speaker
-/// output. Match the Windows backend: open the device's default config,
-/// resample mono input to the device rate, and upmix to the device channel
-/// count / sample format.
+/// # Why Linux is smooth and Mac used to crackle
+/// Linux feeds a **system player** (`pw-play` / `pacat` / `aplay`) a continuous
+/// PCM16 stream; the player maintains its own ring buffer and never drops to
+/// hard zeros mid-utterance. The old Mac path pushed **discrete Vec chunks**
+/// over an `mpsc` and zero-filled every cpal callback that arrived slightly
+/// early — that is exactly the "撕拉 / 不连贯" the user hears.
+///
+/// This implementation mirrors Linux's continuous model *inside* the helper:
+/// stdin → continuous [`PlaybackQueue`] of f32 → same `fill_cpal_output` as
+/// Windows (pull only what the current buffer needs, hold last sample on
+/// underrun). Prefer a **48 kHz** device config when CoreAudio offers it so we
+/// avoid 48k→44.1k resampling artifacts.
 #[cfg(all(target_os = "macos", feature = "audio"))]
 fn run_cpal_playback(source_rate: u32) -> Result<(), VoiceError> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{SampleFormat, SampleRate, StreamConfig};
-    use std::sync::mpsc as sync_mpsc;
 
     let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| VoiceError::Config("no default output audio device".into()))?;
-    let supported = device
-        .default_output_config()
-        .map_err(|e| VoiceError::Config(format!("default output config: {e}")))?;
-    let stream_rate = supported.sample_rate().0;
-    let channels = supported.channels();
-    let sample_format = supported.sample_format();
-    let stream_config = StreamConfig {
-        channels,
-        sample_rate: SampleRate(stream_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
+    let (stream_rate, channels, sample_format, stream_config) =
+        pick_macos_output_config(&device, source_rate)?;
 
-    // Parent feeds PCM16 mono at `source_rate`; convert to f32 for the shared
-    // resampler path, then to the device format in the callback.
-    let (tx, rx) = sync_mpsc::sync_channel::<Vec<f32>>(64);
+    // Continuous sample queue — same shape as the parent→Linux player path.
+    let queue = Arc::new(PlaybackQueue::new());
     let stopped = Arc::new(AtomicBool::new(false));
-    // `std::sync::Mutex` (not parking_lot) so the helper compiles with
-    // `audio` alone; the live feature is what actually spawns this child.
     let resampler: Arc<Mutex<ResamplerState>> =
         Arc::new(Mutex::new(ResamplerState::new(source_rate, stream_rate)));
 
@@ -1247,25 +1257,31 @@ fn run_cpal_playback(source_rate: u32) -> Result<(), VoiceError> {
         SampleFormat::F32 => build_macos_helper_stream::<f32>(
             &device,
             &stream_config,
-            Arc::clone(&stopped),
+            Arc::clone(&queue),
             Arc::clone(&resampler),
-            rx,
+            Arc::clone(&stopped),
+            source_rate,
+            stream_rate,
             channels,
         )?,
         SampleFormat::I16 => build_macos_helper_stream::<i16>(
             &device,
             &stream_config,
-            Arc::clone(&stopped),
+            Arc::clone(&queue),
             Arc::clone(&resampler),
-            rx,
+            Arc::clone(&stopped),
+            source_rate,
+            stream_rate,
             channels,
         )?,
         SampleFormat::U16 => build_macos_helper_stream::<u16>(
             &device,
             &stream_config,
-            Arc::clone(&stopped),
+            Arc::clone(&queue),
             Arc::clone(&resampler),
-            rx,
+            Arc::clone(&stopped),
+            source_rate,
+            stream_rate,
             channels,
         )?,
         other => {
@@ -1278,32 +1294,31 @@ fn run_cpal_playback(source_rate: u32) -> Result<(), VoiceError> {
         .play()
         .map_err(|e| VoiceError::Config(format!("play output stream: {e}")))?;
 
-    // Signal readiness on stderr so a parent that drains it can log a real open
-    // (stdout is nulled by the parent spawn).
+    // READY before parent starts feeding PCM (handshake contract).
     let _ = writeln!(
         std::io::stderr(),
         "READY rate={stream_rate} channels={channels} format={sample_format:?} source_rate={source_rate}"
     );
 
-    // Read PCM16 LE mono from stdin, convert to f32, forward to the callback.
+    // Read PCM16 LE mono from stdin → continuous f32 queue (Linux-like).
+    // Larger read size reduces syscall/chunk fragmentation across the pipe.
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
-    let mut raw = vec![0u8; 4096];
-    // Odd trailing byte across reads (stdin can split a sample).
+    let mut raw = vec![0u8; 16_384];
     let mut pending_lo: Option<u8> = None;
     loop {
         use std::io::Read;
         match handle.read(&mut raw) {
-            Ok(0) => break, // parent closed stdin → done
+            Ok(0) => break,
             Ok(n) => {
                 let mut samples = Vec::with_capacity(n / 2 + 1);
                 let mut i = 0usize;
                 if let Some(lo) = pending_lo.take() {
-                    if n == 0 {
-                        pending_lo = Some(lo);
-                    } else {
+                    if n > 0 {
                         samples.push(i16::from_le_bytes([lo, raw[0]]) as f32 / i16::MAX as f32);
                         i = 1;
+                    } else {
+                        pending_lo = Some(lo);
                     }
                 }
                 while i + 1 < n {
@@ -1314,82 +1329,105 @@ fn run_cpal_playback(source_rate: u32) -> Result<(), VoiceError> {
                 if i < n {
                     pending_lo = Some(raw[i]);
                 }
-                if !samples.is_empty() {
-                    // Blocking send: the callback drains. If the callback is
-                    // dead, disconnect breaks the loop.
-                    if tx.send(samples).is_err() {
-                        break;
-                    }
+                if !samples.is_empty() && queue.push(&samples).is_err() {
+                    break; // queue stopped (parent/teardown)
                 }
             }
             Err(_) => break,
         }
     }
     stopped.store(true, Ordering::Release);
+    queue.stop();
     drop(stream);
     Ok(())
 }
 
-/// Build a cpal output stream for the macOS `__speaker-play` helper child.
-/// Source is mono f32 chunks on a sync channel; resamples + upmixes to the
-/// device config (same policy as the Windows in-process backend).
+/// Prefer a 48 kHz config (matches WebRTC Opus output / Linux's fixed rate)
+/// so we avoid linear 48k→44.1k resampling. Falls back to the device default.
 #[cfg(all(target_os = "macos", feature = "audio"))]
+fn pick_macos_output_config(
+    device: &cpal::Device,
+    prefer_rate: u32,
+) -> Result<(u32, u16, cpal::SampleFormat, cpal::StreamConfig), VoiceError> {
+    use cpal::traits::DeviceTrait;
+    use cpal::{SampleRate, StreamConfig};
+
+    let default = device
+        .default_output_config()
+        .map_err(|e| VoiceError::Config(format!("default output config: {e}")))?;
+
+    // Walk supported ranges looking for prefer_rate (typically 48_000).
+    if let Ok(ranges) = device.supported_output_configs() {
+        for range in ranges {
+            let min = range.min_sample_rate().0;
+            let max = range.max_sample_rate().0;
+            if min <= prefer_rate && prefer_rate <= max && range.channels() >= 1 {
+                let supported = range.with_sample_rate(SampleRate(prefer_rate));
+                let sample_format = supported.sample_format();
+                let channels = supported.channels();
+                let stream_config = StreamConfig {
+                    channels,
+                    sample_rate: SampleRate(prefer_rate),
+                    // Slightly larger buffer reduces CoreAudio callback
+                    // frequency and underrun risk vs the absolute minimum.
+                    buffer_size: cpal::BufferSize::Default,
+                };
+                return Ok((prefer_rate, channels, sample_format, stream_config));
+            }
+        }
+    }
+
+    let stream_rate = default.sample_rate().0;
+    let channels = default.channels();
+    let sample_format = default.sample_format();
+    let stream_config = StreamConfig {
+        channels,
+        sample_rate: SampleRate(stream_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    Ok((stream_rate, channels, sample_format, stream_config))
+}
+
+/// Build a cpal output stream for the macOS `__speaker-play` helper.
+/// Uses the same continuous-queue + `fill_cpal_output` path as Windows so
+/// callbacks pull a steady stream instead of zero-padding discrete chunks.
+#[cfg(all(target_os = "macos", feature = "audio"))]
+#[allow(clippy::too_many_arguments)]
 fn build_macos_helper_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    stopped: Arc<AtomicBool>,
+    queue: Arc<PlaybackQueue>,
     resampler: Arc<Mutex<ResamplerState>>,
-    rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    stopped: Arc<AtomicBool>,
+    source_rate: u32,
+    stream_rate: u32,
     channels: u16,
 ) -> Result<cpal::Stream, VoiceError>
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
 {
     use cpal::traits::DeviceTrait;
-    use std::sync::mpsc::TryRecvError;
 
     let stream = device
         .build_output_stream(
             config,
             move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
-                out.fill(T::from_sample(0.0));
                 if stopped.load(Ordering::Acquire) {
+                    out.fill(T::from_sample(0.0));
                     return;
                 }
-                let ch = channels.max(1) as usize;
-                let total_frames = out.len() / ch;
-                if total_frames == 0 {
+                let Ok(mut rs) = resampler.lock() else {
+                    out.fill(T::from_sample(0.0));
                     return;
-                }
-
-                // Pull all pending input into one mono batch for this callback.
-                let mut input: Vec<f32> = Vec::new();
-                loop {
-                    match rx.try_recv() {
-                        Ok(chunk) => input.extend_from_slice(&chunk),
-                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                    }
-                }
-
-                let mut mono = vec![0.0f32; total_frames];
-                let written = {
-                    let Ok(mut rs) = resampler.lock() else {
-                        return;
-                    };
-                    // Even with empty input, drain leftover resampled frames.
-                    rs.fill(&input, &mut mono)
                 };
-                if written == 0 {
-                    return;
-                }
-
-                for frame_idx in 0..written.min(total_frames) {
-                    let clamped = mono[frame_idx].clamp(-1.0, 1.0);
-                    let base = frame_idx * ch;
-                    for c in 0..ch {
-                        out[base + c] = T::from_sample(clamped);
-                    }
-                }
+                fill_cpal_output(
+                    out,
+                    &queue,
+                    &mut rs,
+                    source_rate,
+                    stream_rate,
+                    channels,
+                );
             },
             |err| tracing::warn!(error = %err, "speaker helper stream error"),
             None,
@@ -1504,13 +1542,14 @@ mod tests {
     #[test]
     fn queue_sheds_oldest_when_over_bound() {
         let q = Arc::new(PlaybackQueue::new());
-        // Push 24k samples (at the bound), then 1k more → oldest 1k shed.
-        let chunk = vec![0.5f32; 12_000];
-        q.push(&chunk).unwrap(); // 12k
-        q.push(&chunk).unwrap(); // 24k (at bound)
-        q.push(&[1.0; 1_000]).unwrap(); // 25k → shed 1k oldest → 24k
+        // Fill to the bound with 0.5, then push 1k of 1.0 → oldest 1k shed.
+        let half = PLAYBACK_QUEUE_SAMPLES / 2;
+        let chunk = vec![0.5f32; half];
+        q.push(&chunk).unwrap();
+        q.push(&chunk).unwrap(); // at bound
         assert_eq!(q.len(), PLAYBACK_QUEUE_SAMPLES);
-        // The oldest samples should be gone; the newest (1.0) should be present.
+        q.push(&[1.0; 1_000]).unwrap(); // shed 1k oldest
+        assert_eq!(q.len(), PLAYBACK_QUEUE_SAMPLES);
         let out = q.try_drain(PLAYBACK_QUEUE_SAMPLES);
         assert_eq!(out.len(), PLAYBACK_QUEUE_SAMPLES);
         // The last 1000 samples should be 1.0 (the newest chunk).
