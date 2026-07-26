@@ -7,16 +7,18 @@
 //! for the sideband, with auth resolved through the async-object-safe
 //! [`super::LiveAuthProvider`].
 //!
-//! Wire behavior preserved exactly: the `gpt-live-1-codex` model, the
-//! `{codex_base}/realtime/calls?intent=quicksilver&architecture=avas` signaling
-//! URL, the `OpenAI-Alpha: quicksilver=v2` header, the
-//! `User-Agent: Codex Desktop/{version}` header, the `x-session-id` UUID, the
+//! Application wire behavior preserved exactly: the `gpt-live-1-codex` model,
+//! the `{codex_base}/realtime/calls?intent=quicksilver&architecture=avas`
+//! signaling URL, the `OpenAI-Alpha: quicksilver=v2` header, the `User-Agent:
+//! Codex Desktop/{version}` header, the `x-session-id` UUID, the
 //! `originator`/`version`/`session-id`/`thread-id` headers, the optional
 //! `chatgpt-account-id` and `x-oai-attestation`, the strict `rtc_*` Location
 //! parsing, the `wss://api.openai.com/v1/live/<callId>` sideband URL, the exact
 //! serde signaling body, the initial sideband retry/backoff/timeouts, the
 //! once-only 401 forced refresh via the auth provider, and idempotent shutdown.
-//! Unknown payloads are never logged wholesale.
+//! Hyper additionally sends transport-level WebSocket Ping frames during quiet
+//! periods so intermediaries do not reap a healthy sideband. Unknown payloads
+//! are never logged wholesale.
 //!
 //! MIT attribution preserved in `THIRD-PARTY-NOTICES`.
 
@@ -53,6 +55,10 @@ const MAX_ERROR_BODY_LENGTH: usize = 2_048;
 const SIDEBAND_CONNECT_ATTEMPTS: u32 = 5;
 /// Per-attempt sideband connect timeout (OMP: 15 s).
 const SIDEBAND_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Keep the control WebSocket active through proxies/load balancers that reap
+/// otherwise-silent connections after roughly 60–100 seconds. WebRTC media is
+/// a separate transport and does not keep the sideband WebSocket alive.
+const SIDEBAND_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 /// Signaling connect timeout.
 const SIGNALING_TIMEOUT: Duration = Duration::from_secs(20);
 /// OpenAI header names (OMP `OPENAI_HEADERS`).
@@ -85,6 +91,36 @@ fn sideband_close_message(frame: Option<&CloseFrame>) -> String {
     } else {
         format!("Codex live sideband closed ({}): {reason}", frame.code)
     }
+}
+
+/// Drain application control messages and emit protocol-level keepalive pings
+/// while the application is idle. The Ping frame carries no conversation data;
+/// it only keeps the sideband path alive through idle-reaping intermediaries.
+async fn run_sideband_writer<S>(
+    mut ws_write: S,
+    mut sideband_rx: mpsc::Receiver<String>,
+    keepalive_interval: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    let first_keepalive = tokio::time::Instant::now() + keepalive_interval;
+    let mut keepalive = tokio::time::interval_at(first_keepalive, keepalive_interval);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let message = tokio::select! {
+            biased;
+            message = sideband_rx.recv() => match message {
+                Some(message) => Message::Text(message.into()),
+                None => break,
+            },
+            _ = keepalive.tick() => Message::Ping(Vec::new().into()),
+        };
+        if ws_write.send(message).await.is_err() {
+            break;
+        }
+    }
+    let _ = ws_write.send(Message::Close(None)).await;
 }
 
 /// Decide whether a parsed data-channel (`oai-events`) server event should be
@@ -542,9 +578,9 @@ impl CodexLiveTransport {
                 .await
                 .map_err(|_| "Codex live sideband connection timed out".to_string())??;
 
-        let (mut ws_write, mut ws_read) = ws_stream.split();
+        let (ws_write, mut ws_read) = ws_stream.split();
 
-        let (sideband_tx, mut sideband_rx) = mpsc::channel::<String>(64);
+        let (sideband_tx, sideband_rx) = mpsc::channel::<String>(64);
         self.sideband_tx = Some(sideband_tx);
 
         let callbacks = Arc::clone(&self.callbacks);
@@ -631,14 +667,11 @@ impl CodexLiveTransport {
             }
         });
 
-        let writer = tokio::spawn(async move {
-            while let Some(msg) = sideband_rx.recv().await {
-                if ws_write.send(Message::Text(msg.into())).await.is_err() {
-                    break;
-                }
-            }
-            let _ = ws_write.send(Message::Close(None)).await;
-        });
+        let writer = tokio::spawn(run_sideband_writer(
+            ws_write,
+            sideband_rx,
+            SIDEBAND_KEEPALIVE_INTERVAL,
+        ));
 
         self.sideband_reader = Some(reader);
         self.sideband_writer = Some(writer);
@@ -1398,6 +1431,89 @@ fn match_secret_key(s: &str, pos: usize, keys: &[&str]) -> Option<(usize, usize,
 mod tests {
     use super::super::protocol::{LiveInputTextContent, LiveRole, TranscriptKind};
     use super::*;
+
+    struct RecordingMessageSink {
+        tx: mpsc::UnboundedSender<Message>,
+    }
+
+    impl futures_util::Sink<Message> for RecordingMessageSink {
+        type Error = ();
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.get_mut().tx.send(message).map_err(|_| ())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn sideband_writer_sends_keepalive_ping_while_application_is_idle() {
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let (application_tx, application_rx) = mpsc::channel(1);
+        let writer = tokio::spawn(run_sideband_writer(
+            RecordingMessageSink { tx: observed_tx },
+            application_rx,
+            Duration::from_millis(10),
+        ));
+
+        let message = tokio::time::timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("idle writer should send a keepalive")
+            .expect("recording sink should stay open");
+        assert!(
+            matches!(&message, Message::Ping(payload) if payload.is_empty()),
+            "idle sideband must emit an empty protocol Ping, got {message:?}"
+        );
+
+        drop(application_tx);
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should stop after its application channel closes")
+            .expect("writer task should not panic");
+    }
+
+    #[tokio::test]
+    async fn sideband_writer_still_forwards_application_text() {
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let (application_tx, application_rx) = mpsc::channel(1);
+        let writer = tokio::spawn(run_sideband_writer(
+            RecordingMessageSink { tx: observed_tx },
+            application_rx,
+            Duration::from_secs(60),
+        ));
+
+        application_tx.send("control".to_owned()).await.unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("application message should be forwarded")
+            .expect("recording sink should stay open");
+        assert!(matches!(message, Message::Text(text) if text == "control"));
+
+        drop(application_tx);
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer should stop after its application channel closes")
+            .expect("writer task should not panic");
+    }
 
     #[test]
     fn sideband_close_message_preserves_code_and_reason() {

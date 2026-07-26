@@ -4,6 +4,33 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.113] — 2026-07-27
+
+### Added
+- **Nexus relay gateway** — `/nexus <api_key> [base_url]` and `/providers nexus …` persist a BYOK bearer plus an optional self-hosted gateway root, discover both OpenAI Chat Completions and Anthropic Messages catalogs, and route each discovered model through the matching protocol endpoint.
+- **Anthropic Claude subscription login** — `/claude` and `/login claude` add Claude Pro/Max OAuth with PKCE, scoped credential storage, rotating refresh-token persistence, per-request bearer resolution, and built-in Claude subscription models.
+
+### Fixed
+- **`/live` idle disconnects** — The Codex Live sideband now sends protocol-level keepalive pings while no control messages are flowing, preventing proxies and load balancers from reaping otherwise healthy voice sessions after a few quiet minutes.
+- **Subagent model-pin activation** — Saving a model pin in `/agents` now performs an acknowledged shell reload before releasing the modal, so fresh subagent spawns use the new model immediately even after a long-running session; resumed agents still retain their original model.
+- **Claude OAuth safety** — Require an exact OAuth `state` match before callback success or token exchange, use Anthropic’s registered callback for the bundled client, reject unsupported loopback redirects, and serialize rotating refresh tokens across processes.
+- **Provider and policy regressions** — Preserve Nexus custom gateway URLs end-to-end, trusted managed-config signature controls, fail-closed settings-only startup prefetch, tolerant MCP parsing, and Unix file-descriptor limit raising.
+- **Pager registry coverage** — Reserve the new provider/scoped-model commands and aliases, complete translations across all supported locales, and refresh deterministic usage snapshots.
+
+### Changed
+- **Upstream sync** — Sync the community build with upstream `main` at `SOURCE_REV` `d02693a856a54f1030695b36b91d276e96b30b23`.
+
+### Notes
+- Wire version remains lockstep with Hyper crate versions (`0.2.113`).
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.113
+```
+
 ## [0.2.112] — 2026-07-25
 
 ### Added
