@@ -651,6 +651,9 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         platform: String,
         #[serde(default)]
         api_key: String,
+        /// Self-hosted gateway root for BYOK platforms (Nexus). Optional.
+        #[serde(default)]
+        base_url: Option<String>,
     }
 
     let req: SetPlatformApiKeyRequest = parse_params(args)?;
@@ -672,8 +675,13 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     }
 
     let home = xai_grok_config::grok_home();
-    crate::auth::store_platform_api_key(&home, platform_id.as_str(), &req.api_key)
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    crate::auth::store_platform_api_key(
+        &home,
+        platform_id.as_str(),
+        &req.api_key,
+        req.base_url.as_deref(),
+    )
+    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     // Re-stamp catalog + live-fetch so models unlock immediately.
     agent.models_manager.restamp_platform_credentials();

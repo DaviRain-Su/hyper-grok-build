@@ -383,12 +383,6 @@ pub enum Action {
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),
-    /// Refresh the shell's live `[subagents.models]` map after the agents
-    /// modal commits a model pin. The originating modal remains blocked until
-    /// completion, even if the active view changes before dispatch.
-    ReloadSubagentModels {
-        agent_id: AgentId,
-    },
     /// Trigger OAuth for an MCP server from the modal.
     McpAuthTrigger {
         server_name: String,
@@ -608,10 +602,12 @@ pub enum Action {
     SetDefaultModel(acp::ModelId),
     /// Persist a third-party platform API key from `/providers` (stored in
     /// `~/.grok/auth.json` under `platform/<id>`, then restamps the catalog).
-    /// Empty `api_key` clears the stored key.
+    /// Empty `api_key` clears the stored key. `base_url` carries the optional
+    /// self-hosted gateway root for BYOK platforms (Nexus).
     SetPlatformApiKey {
         platform: String,
         api_key: String,
+        base_url: Option<String>,
     },
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves
@@ -694,6 +690,8 @@ pub enum Action {
     LoginKimi,
     /// Interactive OpenAI Codex (ChatGPT) subscription login (`/login openai`).
     LoginOpenAiCodex,
+    /// Interactive Anthropic Claude (Pro/Max) subscription login (`/login claude`).
+    LoginAnthropicClaude,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -1605,10 +1603,12 @@ pub enum Effect {
     },
     /// Persist a BYOK platform API key via `x.ai/internal/set_platform_api_key`
     /// and restamp the catalog. Empty `api_key` clears the stored key.
-    SetPlatformApiKey { platform: String, api_key: String },
-    /// Reload live subagent model pins from the just-committed config file and
-    /// wait for the shell acknowledgement before releasing modal input.
-    ReloadSubagentModels { agent_id: AgentId },
+    /// `base_url` carries the optional self-hosted gateway root (Nexus).
+    SetPlatformApiKey {
+        platform: String,
+        api_key: String,
+        base_url: Option<String>,
+    },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -2462,11 +2462,6 @@ pub enum TaskResult {
         /// Env var *names* still set after clear (values never included).
         env_still_active: Vec<String>,
         error: Option<String>,
-    },
-    /// Live subagent model-pin reload completed.
-    SubagentModelsReloaded {
-        agent_id: AgentId,
-        result: Result<(), String>,
     },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as

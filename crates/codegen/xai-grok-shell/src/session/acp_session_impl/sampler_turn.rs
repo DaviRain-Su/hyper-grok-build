@@ -511,6 +511,11 @@ impl SessionActor {
                 std::sync::Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver)
                     as xai_grok_sampler::SharedBearerResolver
             });
+        let claude_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
+            (oauth_platform == Some(xai_grok_models::PlatformId::AnthropicClaude)).then(|| {
+                std::sync::Arc::new(crate::auth::anthropic_claude::AnthropicClaudeBearerResolver)
+                    as xai_grok_sampler::SharedBearerResolver
+            });
         let responses_codex_dialect =
             oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
         let kimi_dialect = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
@@ -566,6 +571,10 @@ impl SessionActor {
             // Kimi access tokens are likewise resolved only when the request
             // is built, avoiding an eager refresh followed by a second lookup.
             (None, Some(kimi))
+        } else if let Some(claude) = claude_bearer_resolver {
+            // Anthropic Claude subscription bearer + `anthropic-beta` header are
+            // resolved per request (token TTL ~ short); never send xAI auth.
+            (None, Some(claude))
         } else if oauth_origin {
             // Both OAuth providers may share one user proxy. Without catalog
             // identity, fail closed rather than send Kimi, Codex, or xAI auth
@@ -1028,6 +1037,8 @@ impl SessionActor {
         let is_openai_codex =
             failed_oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
         let is_kimi_code = failed_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode);
+        let is_anthropic_claude =
+            failed_oauth_platform == Some(xai_grok_models::PlatformId::AnthropicClaude);
         let ambiguous_oauth_origin = failed_oauth_platform.is_none()
             && (xai_grok_models::PlatformId::KimiCode.base_url_matches(&failed_base_url)
                 || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&failed_base_url));
@@ -1088,6 +1099,37 @@ impl SessionActor {
                     );
                     xai_grok_telemetry::unified_log::warn(
                         "auth recovery: sampler 401, kimi-code re-mint failed",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                }
+            }
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && is_anthropic_claude
+        {
+            // Mirror the Kimi/Codex path: force a Claude token refresh rather
+            // than falling through to xAI AuthManager (wrong credential).
+            match crate::auth::anthropic_claude::force_refresh_anthropic_claude_auth().await {
+                Some(_) => {
+                    tracing::info!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, anthropic-claude re-mint, retrying"
+                    );
+                    xai_grok_telemetry::unified_log::info(
+                        "auth recovery: sampler 401, anthropic-claude re-mint, retrying",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                    self.prepare_sampler_for_turn().await;
+                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, anthropic-claude re-mint failed"
+                    );
+                    xai_grok_telemetry::unified_log::warn(
+                        "auth recovery: sampler 401, anthropic-claude re-mint failed",
                         Some(self.session_info.id.0.as_ref()),
                         None,
                     );

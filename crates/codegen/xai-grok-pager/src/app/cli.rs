@@ -29,11 +29,30 @@ pub enum Command {
         /// Clear only the OpenAI Codex (ChatGPT) subscription credential.
         #[arg(long = "openai", conflicts_with_all = ["kimi", "all"])]
         openai: bool,
-        /// Clear xAI session **and** Kimi Code + OpenAI Codex OAuth scopes.
+        /// Clear only the Anthropic Claude (Pro/Max) subscription credential.
+        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["kimi", "openai", "all"])]
+        claude: bool,
+        /// Clear xAI session **and** Kimi / Codex / Claude OAuth scopes.
         /// Does not remove BYOK platform API keys or env vars (use
         /// `/logout provider <id>` / unset env for those).
-        #[arg(long = "all", conflicts_with_all = ["kimi", "openai"])]
+        #[arg(long = "all", conflicts_with_all = ["kimi", "openai", "claude"])]
         all: bool,
+    },
+    /// Configure the Nexus relay key without signing in (writes ~/.grok/auth.json)
+    ///
+    /// Nexus is a self-hosted OpenAI/Anthropic-compatible relay. This works
+    /// before any xAI login, so you can set up `nexus/*` models up front.
+    /// Run with no arguments to print setup guidance and current status.
+    Nexus {
+        /// API key to save. Omit to print setup guidance / current status.
+        #[arg(value_name = "API_KEY")]
+        key: Option<String>,
+        /// Optional self-hosted gateway root (default https://nexuscore.now).
+        #[arg(value_name = "BASE_URL")]
+        base_url: Option<String>,
+        /// Remove the stored Nexus key.
+        #[arg(long, conflicts_with_all = ["key", "base_url"])]
+        clear: bool,
     },
     /// Sign in to Grok
     Login {
@@ -64,6 +83,13 @@ pub enum Command {
         /// `openai-codex/*` models. Independent of xAI login.
         #[arg(long = "openai", alias = "chatgpt", conflicts_with_all = ["oauth", "kimi"])]
         openai: bool,
+        /// Sign in with an Anthropic Claude (Pro/Max) subscription.
+        ///
+        /// Browser OAuth (PKCE + loopback callback, manual paste supported).
+        /// Stores credentials under the `oauth/anthropic-claude` scope and
+        /// unlocks `anthropic-claude/*` models. Independent of xAI login.
+        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["oauth", "kimi", "openai"])]
+        claude: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -1409,6 +1435,7 @@ mod tests {
             Some(Command::Logout {
                 kimi: false,
                 openai: false,
+                claude: false,
                 all: false,
             })
         ));
@@ -1418,6 +1445,7 @@ mod tests {
             Some(Command::Logout {
                 kimi: true,
                 openai: false,
+                claude: false,
                 all: false,
             })
         ));
@@ -1427,6 +1455,7 @@ mod tests {
             Some(Command::Logout {
                 kimi: false,
                 openai: false,
+                claude: false,
                 all: true,
             })
         ));
@@ -1448,6 +1477,7 @@ mod tests {
             Some(Command::Logout {
                 kimi: false,
                 openai: true,
+                claude: false,
                 all: false,
             })
         ));

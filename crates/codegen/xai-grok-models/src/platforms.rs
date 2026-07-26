@@ -71,6 +71,10 @@ const OPENAI_CODEX_BASE_URL_DEFAULT: &str = "https://chatgpt.com/backend-api/cod
 const OPENAI_CODEX_OAUTH_HOST_DEFAULT: &str = "https://auth.openai.com";
 const OPENAI_BASE_URL_DEFAULT: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL_DEFAULT: &str = "https://api.anthropic.com/v1";
+/// Nexus gateway root (Claude-Code-style base). OpenAI clients use `{root}/openai`,
+/// Anthropic/Responses clients use `{root}/v1`. Override with `GROK_NEXUS_BASE_URL`.
+/// The `/providers nexus <key> [base_url]` login can also persist a per-account root.
+pub const NEXUS_BASE_URL_DEFAULT: &str = "https://nexuscore.now";
 /// Required Anthropic Messages API version header (also sent for Kimi Code).
 pub const ANTHROPIC_VERSION_HEADER_VALUE: &str = "2023-06-01";
 
@@ -95,6 +99,42 @@ pub fn normalize_kimi_code_base_url(url: &str) -> String {
         return format!("{trimmed}/v1");
     }
     trimmed.to_string()
+}
+
+/// Normalize a user-supplied Nexus base into the bare gateway root `R`.
+///
+/// Accepts any client-facing shape (`https://nexuscore.now`,
+/// `…/openai`, `…/openai/v1`, `…/v1`, trailing slash) and strips the
+/// client-view suffix so per-backend bases can be re-derived. Empty → default.
+pub fn nexus_normalize_root(raw: &str) -> String {
+    let mut t = raw.trim().trim_end_matches('/');
+    // Strip the longest client-view suffix first (`/openai/v1` before `/openai`).
+    for suffix in ["/openai/v1", "/openai", "/v1"] {
+        if let Some(base) = t.strip_suffix(suffix) {
+            t = base.trim_end_matches('/');
+            break;
+        }
+    }
+    if t.is_empty() {
+        NEXUS_BASE_URL_DEFAULT.to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Nexus OpenAI chat/completions base: `{R}/openai/v1` → `…/chat/completions`.
+pub fn nexus_chat_base(root: &str) -> String {
+    format!("{}/openai/v1", root.trim_end_matches('/'))
+}
+
+/// Nexus Claude Messages base: `{R}/v1` → sampler joins `{base}/messages`.
+pub fn nexus_messages_base(root: &str) -> String {
+    format!("{}/v1", root.trim_end_matches('/'))
+}
+
+/// Nexus Responses base: `{R}/v1` → `…/responses`.
+pub fn nexus_responses_base(root: &str) -> String {
+    format!("{}/v1", root.trim_end_matches('/'))
 }
 
 /// Convert Claude Code / Anthropic SDK base URLs into Grok's base shape.
@@ -164,11 +204,19 @@ pub enum PlatformId {
     /// China Z.AI / BigModel Coding Plan (`open.bigmodel.cn` coding/paas).
     ZaiCodingCn,
     Ollama,
+    /// Nexus gateway (OpenAI/Anthropic-compatible BYOK; Bearer API key).
+    /// Root `https://nexuscore.now`; chat/completions, Claude Messages and
+    /// Responses all speak Bearer. No X/xAI membership gate (ApiKey auth).
+    Nexus,
+    /// Anthropic Claude subscription (Pro/Max) via browser OAuth. Bearer token
+    /// + `anthropic-beta: oauth-2025-04-20` against Anthropic Messages. Distinct
+    /// from `Anthropic` (which is x-api-key BYOK).
+    AnthropicClaude,
 }
 
 impl PlatformId {
     /// All platforms; subscription first.
-    pub const ALL: [PlatformId; 21] = [
+    pub const ALL: [PlatformId; 23] = [
         Self::KimiCode,
         Self::OpenAiCodex,
         Self::MoonshotCn,
@@ -190,6 +238,8 @@ impl PlatformId {
         Self::ZaiCoding,
         Self::ZaiCodingCn,
         Self::Ollama,
+        Self::Nexus,
+        Self::AnthropicClaude,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -215,6 +265,8 @@ impl PlatformId {
             Self::ZaiCoding => "zai-coding",
             Self::ZaiCodingCn => "zai-coding-cn",
             Self::Ollama => "ollama",
+            Self::Nexus => "nexus",
+            Self::AnthropicClaude => "anthropic-claude",
         }
     }
 
@@ -241,6 +293,8 @@ impl PlatformId {
             "zai-coding" | "zai-code-plan" => Some(Self::ZaiCoding),
             "zai-coding-cn" => Some(Self::ZaiCodingCn),
             "ollama" => Some(Self::Ollama),
+            "nexus" => Some(Self::Nexus),
+            "anthropic-claude" | "claude" | "claude-code" => Some(Self::AnthropicClaude),
             _ => None,
         }
     }
@@ -268,6 +322,8 @@ impl PlatformId {
             Self::ZaiCoding => "Z.AI Coding Plan",
             Self::ZaiCodingCn => "Z.AI Coding Plan (CN)",
             Self::Ollama => "Ollama Cloud",
+            Self::Nexus => "Nexus",
+            Self::AnthropicClaude => "Anthropic Claude (Pro/Max)",
         }
     }
 
@@ -298,6 +354,13 @@ impl PlatformId {
             Self::ZaiCoding => "https://api.z.ai/api/coding/paas/v4",
             Self::ZaiCodingCn => "https://open.bigmodel.cn/api/coding/paas/v4",
             Self::Ollama => "https://ollama.com/v1",
+            // Nexus gateway root. Per-backend bases are derived at model-fetch
+            // time (`nexus_chat_base` / `nexus_messages_base`); this raw root is
+            // what `GROK_NEXUS_BASE_URL` overrides and login persists.
+            Self::Nexus => NEXUS_BASE_URL_DEFAULT,
+            // Claude subscription inference uses Anthropic Messages; the sampler
+            // joins `{base}/messages`, so the base ends in `/v1`.
+            Self::AnthropicClaude => ANTHROPIC_BASE_URL_DEFAULT,
         }
     }
 
@@ -364,7 +427,10 @@ impl PlatformId {
 
     /// True for the OAuth-bearer subscription channel.
     pub fn uses_oauth(self) -> bool {
-        matches!(self, Self::KimiCode | Self::OpenAiCodex)
+        matches!(
+            self,
+            Self::KimiCode | Self::OpenAiCodex | Self::AnthropicClaude
+        )
     }
 
     /// Anthropic Messages uses `x-api-key` rather than Bearer.
@@ -388,7 +454,7 @@ impl PlatformId {
     /// SECURITY: the *values* behind these names must never be logged.
     pub fn api_key_env_names(self) -> &'static [&'static str] {
         match self {
-            Self::KimiCode | Self::OpenAiCodex => &[],
+            Self::KimiCode | Self::OpenAiCodex | Self::AnthropicClaude => &[],
             Self::MoonshotCn => &[
                 MOONSHOT_CN_API_KEY_ENV,
                 MOONSHOT_API_KEY_ENV,
@@ -422,6 +488,7 @@ impl PlatformId {
             Self::ZaiCoding => &["GROK_ZAI_CODING_API_KEY", "ZAI_API_KEY"],
             Self::ZaiCodingCn => &["GROK_ZAI_CODING_CN_API_KEY", "ZAI_API_KEY"],
             Self::Ollama => &["GROK_OLLAMA_API_KEY", "OLLAMA_API_KEY"],
+            Self::Nexus => &["GROK_NEXUS_API_KEY", "NEXUS_API_KEY"],
         }
     }
 
@@ -440,6 +507,7 @@ impl PlatformId {
         if self.uses_oauth() {
             let login_target = match self {
                 Self::OpenAiCodex => "/login openai",
+                Self::AnthropicClaude => "/login claude",
                 _ => "/login kimi",
             };
             return format!(
@@ -472,7 +540,11 @@ impl PlatformId {
     pub fn live_models_list_enabled(self) -> bool {
         matches!(
             self,
-            Self::KimiCode | Self::MoonshotCn | Self::MoonshotAi | Self::Ollama
+            Self::KimiCode
+                | Self::MoonshotCn
+                | Self::MoonshotAi
+                | Self::Ollama
+                | Self::Nexus
         )
     }
 
@@ -702,9 +774,63 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
                 out.push(m);
             }
         }
+        // Anthropic Claude (Pro/Max subscription OAuth) — hand-maintained.
+        for m in anthropic_claude_offline_fallbacks() {
+            if let Some(idx) = existing.get(&m.catalog_key()) {
+                out[*idx] = m;
+            } else {
+                existing.insert(m.catalog_key(), out.len());
+                out.push(m);
+            }
+        }
         out
     });
     &MODELS
+}
+
+/// Anthropic Claude subscription models (`api.anthropic.com/v1/messages` via
+/// OAuth bearer + `anthropic-beta: oauth-2025-04-20`).
+///
+/// These are picker seeds only — the user can `/model anthropic-claude/<id>`
+/// with any Claude model id their subscription grants. Adjust the ids/context
+/// windows here as Anthropic ships new models.
+fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
+    macro_rules! claude {
+        ($id:literal, $name:literal, $desc:literal, $ctx:expr) => {
+            BuiltinPlatformModel {
+                platform: PlatformId::AnthropicClaude,
+                model: $id.into(),
+                name: $name.into(),
+                description: $desc.into(),
+                context_window: $ctx,
+                supports_reasoning_effort: true,
+                supported_in_api: false,
+                max_completion_tokens: MAX_TOK_32K,
+                api_backend: PlatformApiBackend::Messages,
+                base_url_override: None,
+            }
+        };
+    }
+    vec![
+        claude!(
+            "claude-opus-4-8",
+            "Claude Opus 4.8 (subscription)",
+            "Frontier Claude model for complex coding (Claude Pro/Max)",
+            CTX_256K
+        ),
+        claude!(
+            "claude-sonnet-4-6",
+            "Claude Sonnet 4.6 (subscription)",
+            "Balanced Claude model for everyday coding (Claude Pro/Max)",
+            CTX_1M
+        ),
+        claude!(
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5 (subscription)",
+            "Fast, affordable Claude model (Claude Pro/Max)",
+            CTX_256K
+        ),
+    ]
 }
 
 /// OpenAI Codex subscription models (`chatgpt.com/backend-api/codex`).
@@ -1077,8 +1203,18 @@ pub enum ModelCapability {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct WireModel {
     pub id: String,
-    #[serde(default)]
+    /// Nexus `/models` names this `context_window` (OpenAI) / `context_window`
+    /// (Anthropic); accept both spellings so Nexus context is not lost.
+    #[serde(default, alias = "context_window")]
     pub context_length: u64,
+    /// Nexus reports max output via `max_completion_tokens` (OpenAI list) or
+    /// `max_output_tokens` (Anthropic list). None for platforms that omit it.
+    #[serde(
+        default,
+        alias = "max_completion_tokens",
+        alias = "max_output_tokens"
+    )]
+    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub supports_reasoning: bool,
     #[serde(default)]
@@ -1233,6 +1369,63 @@ mod tests {
         assert!(PlatformId::Ollama.live_models_list_enabled());
         assert!(PlatformId::KimiCode.live_models_list_enabled());
         assert!(!PlatformId::DeepSeek.live_models_list_enabled());
+    }
+
+    #[test]
+    fn nexus_is_bearer_byok_with_live_discovery() {
+        assert_eq!(PlatformId::parse("nexus"), Some(PlatformId::Nexus));
+        assert_eq!(PlatformId::Nexus.as_str(), "nexus");
+        assert_eq!(PlatformId::Nexus.display_name(), "Nexus");
+        assert!(!PlatformId::Nexus.uses_oauth());
+        // Bearer even for the Messages backend (Nexus is not Anthropic-native).
+        assert!(!PlatformId::Nexus.uses_x_api_key());
+        assert!(PlatformId::Nexus.live_models_list_enabled());
+        assert_eq!(PlatformId::Nexus.base_url(), NEXUS_BASE_URL_DEFAULT);
+        assert_eq!(
+            PlatformId::Nexus.api_key_env_names(),
+            &["GROK_NEXUS_API_KEY", "NEXUS_API_KEY"]
+        );
+    }
+
+    #[test]
+    fn nexus_root_normalizes_client_view_suffixes() {
+        for raw in [
+            "https://nexuscore.now",
+            "https://nexuscore.now/",
+            "https://nexuscore.now/openai",
+            "https://nexuscore.now/openai/",
+            "https://nexuscore.now/openai/v1",
+            "https://nexuscore.now/v1",
+        ] {
+            assert_eq!(nexus_normalize_root(raw), "https://nexuscore.now", "{raw}");
+        }
+        // Empty falls back to the compiled default.
+        assert_eq!(nexus_normalize_root("   "), NEXUS_BASE_URL_DEFAULT);
+        // A self-hosted root with a path prefix is preserved (minus client view).
+        assert_eq!(
+            nexus_normalize_root("https://gw.example.com/nexus/openai/v1"),
+            "https://gw.example.com/nexus"
+        );
+    }
+
+    #[test]
+    fn nexus_per_backend_bases_match_gateway() {
+        let r = "https://nexuscore.now";
+        assert_eq!(nexus_chat_base(r), "https://nexuscore.now/openai/v1");
+        assert_eq!(nexus_messages_base(r), "https://nexuscore.now/v1");
+        assert_eq!(nexus_responses_base(r), "https://nexuscore.now/v1");
+    }
+
+    #[test]
+    fn wire_model_accepts_context_window_alias() {
+        let wire: WireModel = serde_json::from_value(serde_json::json!({
+            "id": "claude-opus-4-8",
+            "context_window": 1_048_576,
+            "max_output_tokens": 128_000
+        }))
+        .expect("nexus wire model parses");
+        assert_eq!(wire.context_length, 1_048_576);
+        assert_eq!(wire.max_output_tokens, Some(128_000));
     }
 
     #[test]
@@ -1410,6 +1603,7 @@ mod tests {
             WireModel {
                 id: "kimi-k3".into(),
                 context_length: 1_048_576,
+                max_output_tokens: None,
                 supports_reasoning: true,
                 supports_image_in: true,
                 supports_video_in: true,
@@ -1420,6 +1614,7 @@ mod tests {
             WireModel {
                 id: "moonshot-v1-8k".into(),
                 context_length: 8_192,
+                max_output_tokens: None,
                 supports_reasoning: false,
                 supports_image_in: false,
                 supports_video_in: false,
@@ -1430,6 +1625,7 @@ mod tests {
             WireModel {
                 id: "kimi-k2-turbo-preview".into(),
                 context_length: 262_144,
+                max_output_tokens: None,
                 supports_reasoning: true,
                 supports_image_in: true,
                 supports_video_in: true,
@@ -1448,6 +1644,7 @@ mod tests {
         let models = vec![WireModel {
             id: "k3".into(),
             context_length: 1_048_576,
+            max_output_tokens: None,
             supports_reasoning: true,
             supports_image_in: true,
             supports_video_in: true,

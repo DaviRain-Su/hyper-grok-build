@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 
 use super::model::{
-    API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, KIMI_CODE_OAUTH_SCOPE, OPENAI_CODEX_OAUTH_SCOPE,
-    lookup_auth, platform_api_key_scope,
+    ANTHROPIC_CLAUDE_OAUTH_SCOPE, API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth,
+    KIMI_CODE_OAUTH_SCOPE, OPENAI_CODEX_OAUTH_SCOPE, lookup_auth, platform_api_key_scope,
 };
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
@@ -591,6 +591,36 @@ pub fn clear_openai_codex_auth(grok_home: &Path) -> std::io::Result<()> {
     })
 }
 
+/// Read the Anthropic Claude (Pro/Max) OAuth credential, if present and scoped.
+pub fn read_anthropic_claude_auth(grok_home: &Path) -> Option<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(ANTHROPIC_CLAUDE_OAUTH_SCOPE)?.clone();
+    (auth.auth_mode == AuthMode::AnthropicClaude).then_some(auth)
+}
+
+/// Persist an Anthropic Claude OAuth credential under
+/// [`ANTHROPIC_CLAUDE_OAUTH_SCOPE`]. Merges with existing scopes so xAI / Kimi /
+/// Codex sessions are preserved; serialized through `auth.json.lock`.
+pub fn store_anthropic_claude_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        let mut stored = auth.clone();
+        stored.auth_mode = AuthMode::AnthropicClaude;
+        map.insert(ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_owned(), stored);
+        write_auth_json(&path, &map)
+    })
+}
+
+/// Remove the Anthropic Claude OAuth scope from auth.json.
+pub fn clear_anthropic_claude_auth(grok_home: &Path) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        clear_scope_from_auth_json(&path, ANTHROPIC_CLAUDE_OAUTH_SCOPE)
+    })
+}
+
 fn ensure_live_auth_file_lock(
     file_lock: &AuthFileLock,
     auth_json_path: &Path,
@@ -696,10 +726,27 @@ pub fn read_platform_api_key(grok_home: &Path, platform: &str) -> Option<String>
     }
 }
 
+/// Read a self-hosted BYOK platform's per-account gateway root (Nexus).
+///
+/// Returns the bare root persisted by `/providers <platform> <key> [base_url]`,
+/// or `None` when the login used the env/compiled default.
+pub fn read_platform_base_url(grok_home: &Path, platform: &str) -> Option<String> {
+    let path = resolve_auth_json_path(grok_home);
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(&platform_api_key_scope(platform))?;
+    let base = auth.platform_base_url.as_deref()?.trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_owned())
+    }
+}
+
 /// Persist a third-party platform API key under `platform/<id>`.
 ///
 /// Empty/`clear` removes the scope. Merges with existing scopes so xAI / Kimi
-/// OAuth sessions are preserved.
+/// OAuth sessions are preserved. `base_url` (Nexus self-hosted gateway root)
+/// is stored alongside the key; `None` leaves it unset (env/compiled default).
 ///
 /// Serializes through `auth.json.lock` (same as Kimi/Codex) so a concurrent
 /// whole-map RMW cannot drop sibling scopes.
@@ -707,11 +754,16 @@ pub fn store_platform_api_key(
     grok_home: &Path,
     platform: &str,
     api_key: &str,
+    base_url: Option<&str>,
 ) -> std::io::Result<()> {
     let trimmed = api_key.trim();
     if trimmed.is_empty() {
         return clear_platform_api_key(grok_home, platform);
     }
+    let base = base_url
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_owned);
     let path = resolve_auth_json_path(grok_home);
     with_auth_json_scope_lock(&path, || {
         let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
@@ -720,6 +772,7 @@ pub fn store_platform_api_key(
             GrokAuth {
                 key: trimmed.to_owned(),
                 auth_mode: AuthMode::ApiKey,
+                platform_base_url: base.clone(),
                 ..Default::default()
             },
         );
@@ -924,7 +977,7 @@ mod platform_api_key_tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         assert!(read_platform_api_key(home, "zai").is_none());
-        store_platform_api_key(home, "zai", " sk-zai-test ").unwrap();
+        store_platform_api_key(home, "zai", " sk-zai-test ", None).unwrap();
         assert_eq!(
             read_platform_api_key(home, "zai").as_deref(),
             Some("sk-zai-test")
@@ -936,9 +989,30 @@ mod platform_api_key_tests {
             read_platform_api_key(home, "zai").as_deref(),
             Some("sk-zai-test")
         );
-        store_platform_api_key(home, "zai", "").unwrap();
+        store_platform_api_key(home, "zai", "", None).unwrap();
         assert!(read_platform_api_key(home, "zai").is_none());
         assert_eq!(read_api_key(home).as_deref(), Some("xai-key"));
+    }
+
+    #[test]
+    #[serial]
+    fn platform_base_url_roundtrips_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert!(read_platform_base_url(home, "nexus").is_none());
+        // Whitespace-only base_url is treated as unset.
+        store_platform_api_key(home, "nexus", "sk-nexus", Some("   ")).unwrap();
+        assert!(read_platform_base_url(home, "nexus").is_none());
+        // A real root persists and trims.
+        store_platform_api_key(home, "nexus", "sk-nexus", Some(" https://gw.example ")).unwrap();
+        assert_eq!(
+            read_platform_base_url(home, "nexus").as_deref(),
+            Some("https://gw.example")
+        );
+        // Clearing the key clears the whole scope (base included).
+        store_platform_api_key(home, "nexus", "", None).unwrap();
+        assert!(read_platform_base_url(home, "nexus").is_none());
+        assert!(read_platform_api_key(home, "nexus").is_none());
     }
 }
 

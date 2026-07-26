@@ -15,11 +15,11 @@ impl SlashCommand for LoginCommand {
     }
 
     fn description(&self) -> &str {
-        "Log in or re-authenticate (optional: kimi | openai)"
+        "Log in or re-authenticate (optional: kimi | openai | claude)"
     }
 
     fn usage(&self) -> &str {
-        "/login [kimi|openai]"
+        "/login [kimi|openai|claude]"
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -31,12 +31,70 @@ impl SlashCommand for LoginCommand {
             "openai" | "openai-codex" | "codex" | "chatgpt"
         ) {
             CommandResult::Action(Action::LoginOpenAiCodex)
+        } else if matches!(arg.as_str(), "claude" | "anthropic" | "anthropic-claude") {
+            CommandResult::Action(Action::LoginAnthropicClaude)
+        } else if matches!(arg.as_str(), "nexus" | "providers" | "provider") {
+            // Nexus is BYOK (API key), not OAuth — redirect instead of erroring.
+            CommandResult::Error(
+                "Nexus 用 API key,不走 OAuth —— 请用 `/nexus <key>`(TUI 内)或 \
+                 `hyper nexus <key>`(命令行,登录前即可用)。空敲 `/nexus` 查看引导。"
+                    .into(),
+            )
         } else if arg.is_empty() {
             CommandResult::Action(Action::Login)
         } else {
             CommandResult::Error(format!(
-                "Unknown login target '{arg}'. Try `/login`, `/login kimi` or `/login openai`."
+                "Unknown login target '{arg}'. Try `/login`, `/login kimi`, `/login openai` or `/login claude` \
+                 (for Nexus use `/nexus`)."
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acp::model_state::ModelState;
+
+    static EMPTY_BUNDLE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {
+        has_cache: false,
+        version: String::new(),
+        personas: Vec::new(),
+        roles: Vec::new(),
+        agents: Vec::new(),
+        skills: Vec::new(),
+        persona_details: Vec::new(),
+        role_details: Vec::new(),
+    };
+
+    fn dummy_exec_ctx(models: &ModelState) -> CommandExecCtx<'_> {
+        CommandExecCtx {
+            models,
+            session_id: None,
+            bundle_state: &EMPTY_BUNDLE,
+            screen_mode: crate::app::ScreenMode::Inline,
+            billing_surface_visible: true,
+            pager_state: crate::settings::PagerLocalSnapshot::default(),
+        }
+    }
+
+    #[test]
+    fn login_nexus_redirects_to_nexus_command() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match LoginCommand.run(&mut ctx, "nexus") {
+            CommandResult::Error(msg) => assert!(msg.contains("/nexus"), "msg: {msg}"),
+            other => panic!("expected redirect Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_claude_still_logs_in() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        assert!(matches!(
+            LoginCommand.run(&mut ctx, "claude"),
+            CommandResult::Action(Action::LoginAnthropicClaude)
+        ));
     }
 }

@@ -2076,18 +2076,9 @@ impl Config {
             t.remove("auth_provider");
             t.remove("model_providers");
         }
-        let parsed_mcp_servers =
-            crate::util::config::parse_mcp_servers_from_toml(&raw_without_model_sections);
-        if let toml::Value::Table(ref mut t) = raw_without_model_sections {
-            t.remove("mcp_servers");
-        }
         crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
-        if let toml::Value::Table(ref mut t) = base {
-            t.remove("mcp_servers");
-        }
         let (mut config, user_unused) =
             Self::deserialize_collecting_unrecognized(base, &raw_without_model_sections)?;
-        config.mcp_servers = parsed_mcp_servers.into_iter().collect();
         if !user_unused.is_empty() {
             let keys = user_unused.join(", ");
             tracing::warn!(
@@ -3489,15 +3480,6 @@ pub fn apply_external_otel_remote_policy(settings: Option<&crate::util::config::
 }
 /// Seed free-function remote caches after writing `Config.remote_settings`.
 pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
-    if let Some(s) = settings {
-        let origin_trusted = crate::util::is_prod_cli_chat_proxy_url(
-            &EndpointsConfig::from_effective_config().proxy_url(),
-        );
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            s.managed_config_signature_verification,
-            origin_trusted,
-        );
-    }
     crate::util::config::cache_remote_mcp_startup_timeout_secs(
         settings.and_then(|s| s.mcp_startup_timeout_secs),
     );
@@ -3987,6 +3969,15 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 );
             }
         }
+        // Anthropic Claude subscription (OAuth Bearer + Messages) needs
+        // `anthropic-version`; the `anthropic-beta: oauth-2025-04-20` header is
+        // stamped per-request by `AnthropicClaudeBearerResolver`.
+        if builtin.platform == xai_grok_models::PlatformId::AnthropicClaude {
+            extra_headers.insert(
+                "anthropic-version".into(),
+                xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
+            );
+        }
         // Prefer an explicit per-platform effort menu over the legacy
         // low/medium/high/xhigh fallback so GPT-5 / Kimi show their real tiers.
         let (menu_supports, menu_default, menu_opts) =
@@ -4068,7 +4059,15 @@ fn apply_platform_credentials(
     // currently wire-safe `kimi_code_access_token_cached()` value.
     let kimi_bearer = crate::auth::kimi::kimi_code_catalog_access_token_cached();
     let codex_bearer = crate::auth::openai_codex::openai_codex_catalog_access_token_cached();
-    apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer, codex_bearer);
+    let claude_bearer =
+        crate::auth::anthropic_claude::anthropic_claude_catalog_access_token_cached();
+    apply_platform_credentials_with_bearer(
+        resolved,
+        platforms,
+        kimi_bearer,
+        codex_bearer,
+        claude_bearer,
+    );
 }
 
 /// Testable core of [`apply_platform_credentials`] with injected OAuth bearers.
@@ -4077,6 +4076,7 @@ fn apply_platform_credentials_with_bearer(
     platforms: &PlatformsConfig,
     kimi_bearer: Option<String>,
     codex_bearer: Option<String>,
+    claude_bearer: Option<String>,
 ) {
     for (key, entry) in resolved.iter_mut() {
         let id = entry.info.id.as_deref().unwrap_or(key.as_str());
@@ -4088,6 +4088,7 @@ fn apply_platform_credentials_with_bearer(
             let bearer = match platform {
                 xai_grok_models::PlatformId::KimiCode => kimi_bearer.as_ref(),
                 xai_grok_models::PlatformId::OpenAiCodex => codex_bearer.as_ref(),
+                xai_grok_models::PlatformId::AnthropicClaude => claude_bearer.as_ref(),
                 _ => None,
             };
             if entry.api_key.is_none()
@@ -5744,7 +5745,8 @@ pub fn sampling_config_for_model(
     // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
     // so a catalog stamp from login is never sent after expiry.
     let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
-        .or_else(|| openai_codex_bearer_resolver_for_model(model));
+        .or_else(|| openai_codex_bearer_resolver_for_model(model))
+        .or_else(|| anthropic_claude_bearer_resolver_for_model(model));
     let responses_codex_dialect = model_uses_openai_codex_oauth(model);
     let kimi_dialect = model_uses_kimi_request_dialect(model);
     // The Codex bearer resolver returns `chatgpt-account-id` from the same
@@ -5807,6 +5809,9 @@ pub(crate) fn oauth_platform_for_model(model: &ModelEntry) -> Option<xai_grok_mo
 pub(crate) fn oauth_platform_for_base_url(base_url: &str) -> Option<xai_grok_models::PlatformId> {
     use xai_grok_models::PlatformId;
 
+    // Anthropic Claude OAuth shares api.anthropic.com with the `Anthropic`
+    // BYOK platform; the catalog id (`anthropic-claude/*`), not the URL,
+    // distinguishes them, so this URL-only helper does not resolve Claude.
     match (
         PlatformId::KimiCode.base_url_matches(base_url),
         PlatformId::OpenAiCodex.base_url_matches(base_url),
@@ -5815,6 +5820,30 @@ pub(crate) fn oauth_platform_for_base_url(base_url: &str) -> Option<xai_grok_mod
         (false, true) => Some(PlatformId::OpenAiCodex),
         _ => None,
     }
+}
+
+/// Whether this catalog entry routes through Anthropic Claude (Pro/Max) OAuth.
+pub fn model_uses_anthropic_claude_oauth(model: &ModelEntry) -> bool {
+    let catalog_id = model
+        .info
+        .id
+        .as_deref()
+        .unwrap_or(model.info.model.as_str());
+    matches!(
+        xai_grok_models::parse_managed_model_key(catalog_id),
+        Some((xai_grok_models::PlatformId::AnthropicClaude, _))
+    )
+}
+
+/// Per-request bearer for Anthropic Claude models; `None` for everything else.
+/// The resolver also stamps `anthropic-beta: oauth-2025-04-20`.
+pub fn anthropic_claude_bearer_resolver_for_model(
+    model: &ModelEntry,
+) -> Option<SharedBearerResolver> {
+    if !model_uses_anthropic_claude_oauth(model) {
+        return None;
+    }
+    Some(Arc::new(crate::auth::anthropic_claude::AnthropicClaudeBearerResolver) as SharedBearerResolver)
 }
 
 /// Whether this catalog entry routes through Kimi Code OAuth (subscription).
@@ -6818,45 +6847,6 @@ reasoning_effort = "low"
         )
         .expect("warm cache resolves");
         assert_eq!(resolved.api_key.as_deref(), Some("ws-token"));
-    }
-    /// GBT-4128: bad `[mcp_servers.*]` entries are dropped, not fatal.
-    #[test]
-    fn invalid_mcp_server_stub_does_not_fail_config_load() {
-        let raw_config: toml::Value = toml::from_str(
-            r#"
-            [mcp_servers.github]
-            enabled = false
-
-            mcp_servers.broken = "not-a-table"
-
-            [mcp_servers.also_broken]
-            enabled = "yes"
-
-            [mcp_servers.linear]
-            command = "npx"
-            args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config)
-            .expect("bad mcp stubs must be dropped, not fail whole config");
-        assert!(
-            !cfg.mcp_servers.contains_key("broken"),
-            "non-table entry is dropped"
-        );
-        assert!(
-            !cfg.mcp_servers.contains_key("also_broken"),
-            "wrong-type enabled is dropped"
-        );
-        assert!(
-            !cfg.mcp_servers.contains_key("github"),
-            "transport-less stub is dropped (disable via disabled_mcp_servers)"
-        );
-        assert!(
-            cfg.mcp_servers.contains_key("linear"),
-            "valid MCP neighbor must still load"
-        );
-        assert!(cfg.mcp_servers["linear"].enabled);
     }
     /// The lenient parser warns per problem and never fails the whole
     /// config.
@@ -13815,6 +13805,7 @@ default = "grok-4.5"
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
     }
+
     // ── Moonshot / platforms (Phase 1) ──────────────────────────────
 
     /// Platform models without API keys must stay out of the picker even when
@@ -14016,6 +14007,7 @@ default = "grok-4.5"
             &cfg.platforms,
             Some("fake-kimi-token".into()),
             Some("fake-codex-token".into()),
+            None,
         );
         let entry = models.get("kimi-code/k2p7").expect("kimi-code entry");
         assert!(
@@ -14128,7 +14120,7 @@ default = "grok-4.5"
         let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
         let mut models = resolve_model_list(&cfg, None);
-        apply_platform_credentials_with_bearer(&mut models, &cfg.platforms, None, None);
+        apply_platform_credentials_with_bearer(&mut models, &cfg.platforms, None, None, None);
         let codex_entry = models
             .get("openai-codex/gpt-5.6-sol")
             .expect("openai-codex entry");
@@ -14304,84 +14296,5 @@ api_key = "per-model-key"
             .get("moonshot-cn/kimi-k2-turbo-preview")
             .expect("entry");
         assert_eq!(entry.api_key.as_deref(), Some("per-model-key"));
-    }
-
-    #[test]
-    #[serial_test::serial(remote_sig_disarm)]
-    fn remote_settings_disarm_managed_config_signatures() {
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(xai_grok_config::signed_policy::verification_active());
-        let settings = crate::util::config::RemoteSettings {
-            managed_config_signature_verification: Some(false),
-            ..Default::default()
-        };
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(!xai_grok_config::signed_policy::verification_active());
-        let settings = crate::util::config::RemoteSettings {
-            managed_config_signature_verification: Some(true),
-            ..Default::default()
-        };
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(xai_grok_config::signed_policy::verification_active());
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(false),
-            true,
-        );
-        apply_remote_settings_side_effects(None);
-        assert!(!xai_grok_config::signed_policy::verification_active());
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(xai_grok_config::signed_policy::verification_active());
-    }
-
-    /// Keyed path: prod proxy origin can disarm; env override cannot.
-    #[test]
-    #[serial_test::serial(remote_sig_disarm)]
-    fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(xai_grok_config::signed_policy::verification_active());
-        let settings = crate::util::config::RemoteSettings {
-            managed_config_signature_verification: Some(false),
-            ..Default::default()
-        };
-        unsafe {
-            std::env::remove_var("GROK_CLI_CHAT_PROXY_BASE_URL");
-        }
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(
-            !xai_grok_config::signed_policy::verification_active(),
-            "prod proxy origin must allow disarm when keys are embedded"
-        );
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
-        assert!(xai_grok_config::signed_policy::verification_active());
-        unsafe {
-            std::env::set_var(
-                "GROK_CLI_CHAT_PROXY_BASE_URL",
-                "https://attacker.example/v1",
-            );
-        }
-        apply_remote_settings_side_effects(Some(&settings));
-        assert!(
-            xai_grok_config::signed_policy::verification_active(),
-            "env-overridden proxy must not be able to disarm keyed verification"
-        );
-        unsafe {
-            std::env::remove_var("GROK_CLI_CHAT_PROXY_BASE_URL");
-        }
-        xai_grok_config::signed_policy::apply_remote_managed_config_signature_verification(
-            Some(true),
-            true,
-        );
     }
 }

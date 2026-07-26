@@ -1619,6 +1619,9 @@ fn has_any_platform_credentials() -> bool {
     if crate::auth::openai_codex::openai_codex_catalog_access_token_cached().is_some() {
         return true;
     }
+    if crate::auth::anthropic_claude::anthropic_claude_catalog_access_token_cached().is_some() {
+        return true;
+    }
     let platforms = crate::agent::platform_models_fetch::load_platforms_config();
     xai_grok_models::PlatformId::ALL.iter().any(|p| {
         !p.uses_oauth() && crate::agent::config::resolve_platform_api_key(*p, &platforms).is_some()
@@ -1639,31 +1642,19 @@ fn resolve_prefetch_env(grok_com_config: Option<GrokComConfig>) -> Option<Prefet
 /// credentials from disk.
 pub fn start_early_prefetch_with_auth(auth: Option<GrokAuth>) -> Option<EarlyPrefetchHandle> {
     let env = resolve_prefetch_env_with_auth(auth)?;
-    Some(spawn_prefetch_thread(env, true))
+    Some(spawn_prefetch_thread(env))
 }
 
 /// Start model + settings prefetch on a background thread.
 ///
 /// Convenience wrapper that reads cached auth from disk. Prefer
 /// `start_early_prefetch_with_auth` when you have pre-resolved credentials.
-/// Also runs a best-effort managed-config sync when the cache is stale.
 pub fn start_early_prefetch(grok_com_config: Option<GrokComConfig>) -> Option<EarlyPrefetchHandle> {
     let env = resolve_prefetch_env(grok_com_config)?;
-    Some(spawn_prefetch_thread(env, true))
+    Some(spawn_prefetch_thread(env))
 }
 
-/// Prefetch models + remote settings only — **no** managed-config sync.
-///
-/// Used before the managed-policy gate so a kill-switch can apply on cold start
-/// without healing a tampered on-disk policy before the fail-closed gate runs.
-pub fn start_early_prefetch_settings_only(
-    grok_com_config: Option<GrokComConfig>,
-) -> Option<EarlyPrefetchHandle> {
-    let env = resolve_prefetch_env(grok_com_config)?;
-    Some(spawn_prefetch_thread(env, false))
-}
-
-fn spawn_prefetch_thread(env: PrefetchEnv, sync_managed: bool) -> EarlyPrefetchHandle {
+fn spawn_prefetch_thread(env: PrefetchEnv) -> EarlyPrefetchHandle {
     std::thread::spawn(move || {
         let mut timer = crate::instrumentation_timer!("startup.early_prefetch");
         let proxy_endpoint = env.endpoints.proxy_url();
@@ -1673,9 +1664,7 @@ fn spawn_prefetch_thread(env: PrefetchEnv, sync_managed: bool) -> EarlyPrefetchH
             env.auth.as_ref(),
             env.model_fetch_auth,
         );
-        if sync_managed
-            && (env.endpoints.deployment_key.is_some()
-                || crate::managed_config::has_active_team_auth())
+        if (env.endpoints.deployment_key.is_some() || crate::managed_config::has_active_team_auth())
             && crate::config::is_managed_config_stale_for(
                 &crate::managed_config::current_serving_identity(),
             )

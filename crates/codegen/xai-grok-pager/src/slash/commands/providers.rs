@@ -107,8 +107,8 @@ impl SlashCommand for ProvidersCommand {
             ));
         }
 
-        let api_key = rest.trim();
-        if api_key.is_empty() {
+        let rest = rest.trim();
+        if rest.is_empty() {
             return CommandResult::Error(format!(
                 "Paste an API key after the platform name:\n  /providers {} <api_key>\n\
                  Or clear a stored key with:\n  /providers clear {}\n  /providers {} clear",
@@ -118,6 +118,17 @@ impl SlashCommand for ProvidersCommand {
             ));
         }
 
+        // Nexus is self-hosted: accept an optional gateway base_url after the
+        // key (`/providers nexus <api_key> [base_url]`). Other platforms use the
+        // whole remainder as the key.
+        let (api_key, base_url) = if platform == PlatformId::Nexus {
+            let (key, base) = split_first_token(rest);
+            let base = base.trim();
+            (key, (!base.is_empty()).then(|| base.to_owned()))
+        } else {
+            (rest, None)
+        };
+
         if is_clear_verb(api_key) || is_clear_verb(split_first_token(api_key).0) {
             return clear_platform(platform.as_str());
         }
@@ -125,6 +136,7 @@ impl SlashCommand for ProvidersCommand {
         CommandResult::Action(Action::SetPlatformApiKey {
             platform: platform.as_str().to_owned(),
             api_key: api_key.to_owned(),
+            base_url,
         })
     }
 }
@@ -145,6 +157,7 @@ fn clear_platform(platform_tok: &str) -> CommandResult {
     CommandResult::Action(Action::SetPlatformApiKey {
         platform: platform.as_str().to_owned(),
         api_key: String::new(),
+        base_url: None,
     })
 }
 
@@ -209,6 +222,10 @@ fn compact_hint(platform: PlatformId) -> String {
     if platform.uses_oauth() {
         let (login, _) = oauth_login_logout_hint(platform);
         return format!("{login} (OAuth)");
+    }
+    // Nexus is self-hosted → the gateway root is an optional trailing arg.
+    if platform == PlatformId::Nexus {
+        return format!("/providers {} <api_key> [base_url]", platform.as_str());
     }
     format!("/providers {} <api_key>", platform.as_str())
 }
@@ -445,9 +462,47 @@ mod tests {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
         match ProvidersCommand.run(&mut ctx, "zai sk-test-key") {
-            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform,
+                api_key,
+                base_url,
+            }) => {
                 assert_eq!(platform, "zai");
                 assert_eq!(api_key, "sk-test-key");
+                // Non-Nexus platforms never carry a base_url.
+                assert_eq!(base_url, None);
+            }
+            other => panic!("expected SetPlatformApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_nexus_parses_optional_base_url() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        // With a base_url token.
+        match ProvidersCommand.run(&mut ctx, "nexus sk-nexus https://nexuscore.now") {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform,
+                api_key,
+                base_url,
+            }) => {
+                assert_eq!(platform, "nexus");
+                assert_eq!(api_key, "sk-nexus");
+                assert_eq!(base_url.as_deref(), Some("https://nexuscore.now"));
+            }
+            other => panic!("expected SetPlatformApiKey, got {other:?}"),
+        }
+        // Without a base_url token → None (env/compiled default is used).
+        match ProvidersCommand.run(&mut ctx, "nexus sk-nexus") {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform,
+                api_key,
+                base_url,
+            }) => {
+                assert_eq!(platform, "nexus");
+                assert_eq!(api_key, "sk-nexus");
+                assert_eq!(base_url, None);
             }
             other => panic!("expected SetPlatformApiKey, got {other:?}"),
         }
@@ -458,7 +513,7 @@ mod tests {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
         match ProvidersCommand.run(&mut ctx, "zai clear") {
-            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key, .. }) => {
                 assert_eq!(platform, "zai");
                 assert!(api_key.is_empty());
             }
@@ -472,7 +527,7 @@ mod tests {
         let mut ctx = dummy_exec_ctx(&models);
         for cmd in ["clear zai-coding", "logout zai-coding", "remove zai-coding"] {
             match ProvidersCommand.run(&mut ctx, cmd) {
-                CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+                CommandResult::Action(Action::SetPlatformApiKey { platform, api_key, .. }) => {
                     assert_eq!(platform, "zai-coding", "cmd={cmd}");
                     assert!(api_key.is_empty(), "cmd={cmd}");
                 }

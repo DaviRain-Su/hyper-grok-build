@@ -260,6 +260,8 @@ fn build_unpinned(
     methods.push(kimi_code_auth_method());
     // Same for the OpenAI Codex (ChatGPT) subscription OAuth login.
     methods.push(openai_codex_auth_method());
+    // Same for the Anthropic Claude (Pro/Max) subscription OAuth login.
+    methods.push(anthropic_claude_auth_method());
 
     BuiltAuthMethods {
         methods,
@@ -300,6 +302,8 @@ pub enum AuthMethodKind {
     KimiCode,
     /// OpenAI Codex subscription ChatGPT OAuth (third-party; not xAI session).
     OpenAiCodex,
+    /// Anthropic Claude subscription OAuth (third-party; not xAI session).
+    AnthropicClaude,
     Unknown,
 }
 
@@ -312,6 +316,7 @@ impl AuthMethodKind {
             OIDC_METHOD_ID => Self::Oidc,
             KIMI_CODE_METHOD_ID => Self::KimiCode,
             OPENAI_CODEX_METHOD_ID => Self::OpenAiCodex,
+            ANTHROPIC_CLAUDE_METHOD_ID => Self::AnthropicClaude,
             _ => Self::Unknown,
         }
     }
@@ -332,7 +337,11 @@ impl AuthMethodKind {
     pub fn needs_interactive_login(self) -> bool {
         matches!(
             self,
-            Self::GrokCom | Self::Oidc | Self::KimiCode | Self::OpenAiCodex
+            Self::GrokCom
+                | Self::Oidc
+                | Self::KimiCode
+                | Self::OpenAiCodex
+                | Self::AnthropicClaude
         )
     }
 
@@ -521,6 +530,21 @@ pub fn openai_codex_auth_method() -> acp::AuthMethod {
         )
         .description(Some(
             "Sign in with a ChatGPT Plus/Pro subscription (browser or device code)".to_string(),
+        )),
+    )
+}
+
+/// ACP method id for the Anthropic Claude (Pro/Max) subscription OAuth login.
+pub const ANTHROPIC_CLAUDE_METHOD_ID: &str = "anthropic-claude";
+
+pub fn anthropic_claude_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(ANTHROPIC_CLAUDE_METHOD_ID),
+            "Anthropic Claude".to_string(),
+        )
+        .description(Some(
+            "Sign in with a Claude Pro/Max subscription (browser OAuth)".to_string(),
         )),
     )
 }

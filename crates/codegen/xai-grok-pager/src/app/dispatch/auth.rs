@@ -227,6 +227,7 @@ pub(super) fn dispatch_set_platform_api_key(
     app: &mut AppView,
     platform: String,
     api_key: String,
+    base_url: Option<String>,
 ) -> Vec<Effect> {
     let label = xai_grok_models::PlatformId::parse(&platform)
         .map(|p| p.display_name().to_string())
@@ -236,7 +237,11 @@ pub(super) fn dispatch_set_platform_api_key(
     } else {
         app.show_toast(&format!("Saving API key for {label}…"));
     }
-    vec![Effect::SetPlatformApiKey { platform, api_key }]
+    vec![Effect::SetPlatformApiKey {
+        platform,
+        api_key,
+        base_url,
+    }]
 }
 
 /// `/login kimi` — Kimi Code subscription device OAuth.
@@ -269,6 +274,22 @@ pub(super) fn dispatch_login_openai_codex(app: &mut AppView) -> Vec<Effect> {
         app.login_label = Some(m.name().to_string());
     } else {
         app.login_label = Some("OpenAI Codex".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login claude` — Anthropic Claude (Pro/Max) subscription browser OAuth.
+pub(super) fn dispatch_login_anthropic_claude(app: &mut AppView) -> Vec<Effect> {
+    let method_id =
+        acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::ANTHROPIC_CLAUDE_METHOD_ID);
+    if let Some(m) = app.auth_methods.iter().find(|m| {
+        m.id().0.as_ref() == xai_grok_shell::agent::auth_method::ANTHROPIC_CLAUDE_METHOD_ID
+    }) {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("Anthropic Claude".to_string());
     }
     app.login_method_id = Some(method_id.clone());
     app.auth_start_mode = AuthMode::Pending;
