@@ -1,8 +1,8 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
-    dispatch_cancel_login, dispatch_login, dispatch_login_kimi, dispatch_login_openai_codex,
-    dispatch_logout, dispatch_set_platform_api_key, dispatch_submit_auth_code,
-    dispatch_switch_account,
+    dispatch_cancel_login, dispatch_login, dispatch_login_anthropic_claude, dispatch_login_kimi,
+    dispatch_login_openai_codex, dispatch_logout, dispatch_set_platform_api_key,
+    dispatch_submit_auth_code, dispatch_switch_account,
 };
 use super::billing::dispatch_open_supergrok_url;
 use super::ctx::{
@@ -154,9 +154,7 @@ fn dispatch_cycle_scoped_model(app: &mut AppView, reverse: bool) -> Vec<Effect> 
     let patterns = crate::scoped_models::enabled_patterns();
     let list = crate::scoped_models::cycle_candidates(&agent.session.models, &patterns);
     if list.is_empty() {
-        agent.show_toast(
-            "No models to cycle — configure credentials or /scoped-models",
-        );
+        agent.show_toast("No models to cycle — configure credentials or /scoped-models");
         return vec![];
     }
     let current = agent.session.models.current.clone();
@@ -1113,9 +1111,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetAutoDarkTheme(v) => set_auto_dark_theme(app, v),
         Action::SetAutoLightTheme(v) => set_auto_light_theme(app, v),
         Action::SetDefaultModel(v) => set_default_model(app, v),
-        Action::SetPlatformApiKey { platform, api_key } => {
-            dispatch_set_platform_api_key(app, platform, api_key)
-        }
+        Action::SetPlatformApiKey {
+            platform,
+            api_key,
+            base_url,
+        } => dispatch_set_platform_api_key(app, platform, api_key, base_url),
         Action::ClearDefaultModel => clear_default_model(app),
         Action::SetForkSecondaryModel(v) => set_fork_secondary_model(app, v),
         Action::ClearForkSecondaryModel => clear_fork_secondary_model(app),
@@ -1192,6 +1192,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::Login => dispatch_login(app),
         Action::LoginKimi => dispatch_login_kimi(app),
         Action::LoginOpenAiCodex => dispatch_login_openai_codex(app),
+        Action::LoginAnthropicClaude => dispatch_login_anthropic_claude(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {

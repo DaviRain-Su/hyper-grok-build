@@ -1464,12 +1464,7 @@ async fn run_agent_command(
 ///
 /// Default soft limits (256 macOS, commonly 1024 Linux) are easily exceeded:
 /// each session thread's runtime costs ~3 fds, and a wide parallel subagent
-/// wave adds spawn-burst transients — a 1024 limit fails with EMFILE under a
-/// ~100-session wave. Targets 65536 on Linux (hard limits typically >= 1M)
-/// and 8192 on macOS (`kern.maxfilesperproc` is often ~10k). No known
-/// in-tree `select(2)` users (Rust std/tokio use epoll/kqueue); residual
-/// third-party `FD_SETSIZE` risk is accepted — the prior 8192 cap already
-/// exceeded FD_SETSIZE.
+/// wave adds spawn-burst transients. Targets 65536 on Linux and 8192 on macOS.
 ///
 /// Best-effort: never blocks startup (containers/cgroups may pin limits).
 #[cfg(unix)]
@@ -2021,6 +2016,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 device_auth,
                 kimi,
                 openai,
+                claude,
                 devbox,
             } => {
                 init_tracing_simple("cli");
@@ -2035,6 +2031,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     };
                     xai_grok_shell::auth::openai_codex::run_openai_codex_login(None, method)
                         .await?;
+                } else if claude {
+                    xai_grok_shell::auth::anthropic_claude::run_anthropic_claude_login(None)
+                        .await?;
                 } else {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
                         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
@@ -2046,7 +2045,12 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout { kimi, openai, all } => {
+            Command::Logout {
+                kimi,
+                openai,
+                claude,
+                all,
+            } => {
                 init_tracing_simple("cli");
                 if all {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
@@ -2058,12 +2062,58 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     xai_grok_shell::auth::run_cli_logout_kimi()?;
                 } else if openai {
                     xai_grok_shell::auth::run_cli_logout_openai_codex()?;
+                } else if claude {
+                    xai_grok_shell::auth::run_cli_logout_anthropic_claude()?;
                 } else {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
                         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                     let config = AgentConfig::new_from_toml_cfg(&config)
                         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                     xai_grok_shell::auth::run_cli_logout(&config)?;
+                }
+                xai_grok_shell::instrumentation::finalize_and_exit(0);
+            }
+            Command::Nexus {
+                key,
+                base_url,
+                clear,
+            } => {
+                init_tracing_simple("cli");
+                let home = xai_grok_config::grok_home();
+                if clear {
+                    xai_grok_shell::auth::clear_platform_api_key(&home, "nexus")
+                        .map_err(|e| anyhow::anyhow!("Failed to clear Nexus key: {e}"))?;
+                    println!("✓ Nexus key removed from ~/.grok/auth.json");
+                } else if let Some(key) = key {
+                    xai_grok_shell::auth::store_platform_api_key(
+                        &home,
+                        "nexus",
+                        &key,
+                        base_url.as_deref(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to save Nexus key: {e}"))?;
+                    println!("✓ Nexus key saved to ~/.grok/auth.json");
+                    if let Some(base) = base_url.as_deref() {
+                        println!("  gateway root: {base}");
+                    }
+                    println!("  models appear as nexus/* after launch.");
+                } else {
+                    // No key, no --clear → print onboarding guide + current status.
+                    println!(
+                        "{}",
+                        xai_grok_pager::slash::commands::nexus::nexus_setup_guide()
+                    );
+                    match xai_grok_shell::auth::read_platform_api_key(&home, "nexus") {
+                        Some(_) => {
+                            let root = xai_grok_shell::auth::read_platform_base_url(&home, "nexus")
+                                .unwrap_or_else(|| {
+                                    xai_grok_pager::slash::commands::nexus::nexus_default_root()
+                                        .to_string()
+                                });
+                            println!("\n当前状态: 已配置 (网关: {root})");
+                        }
+                        None => println!("\n当前状态: 未配置"),
+                    }
                 }
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }

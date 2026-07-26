@@ -16,11 +16,13 @@ pub use platforms::{
     KIMI_DEFAULT_MAX_TOKENS, KimiRequestProfile,
     MOONSHOT_AI_API_KEY_ENV, MOONSHOT_AI_BASE_URL_ENV, MOONSHOT_API_KEY_ALIAS_ENV,
     MOONSHOT_API_KEY_ENV, MOONSHOT_CN_API_KEY_ENV, MOONSHOT_CN_BASE_URL_ENV, ModelCapability,
+    NEXUS_BASE_URL_DEFAULT,
     OPENAI_API_KEY_ALIAS_ENV, OPENAI_API_KEY_ENV, OPENAI_BASE_URL_ENV, PLATFORM_CATALOG_JSON,
     PlatformApiBackend, PlatformId, WireModel, WireModelsResponse, WireThinkEfforts,
     derive_capabilities, filter_allowed_models, kimi_allow_empty_thinking_signature,
     kimi_force_adaptive_thinking, kimi_request_profile, kimi_sampling_is_fixed,
-    moonshot_builtin_models, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
+    moonshot_builtin_models, nexus_chat_base, nexus_messages_base, nexus_normalize_root,
+    nexus_responses_base, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
     parse_managed_model_key, platform_builtin_models,
 };
 

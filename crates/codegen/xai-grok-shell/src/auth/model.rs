@@ -19,6 +19,9 @@ pub const KIMI_CODE_OAUTH_SCOPE: &str = "oauth/kimi-code";
 /// auth.json scope key for the OpenAI Codex (ChatGPT) subscription OAuth session.
 pub const OPENAI_CODEX_OAUTH_SCOPE: &str = "oauth/openai-codex";
 
+/// auth.json scope key for the Anthropic Claude (Pro/Max) subscription OAuth session.
+pub const ANTHROPIC_CLAUDE_OAUTH_SCOPE: &str = "oauth/anthropic-claude";
+
 /// Prefix for third-party platform API keys stored via `/providers` (e.g.
 /// `platform/zai`, `platform/openai`). One scope per platform id.
 pub const PLATFORM_API_KEY_SCOPE_PREFIX: &str = "platform/";
@@ -58,6 +61,10 @@ pub enum AuthMode {
     /// OpenAI Codex subscription (ChatGPT OAuth). Stored under
     /// [`crate::auth::openai_codex::OPENAI_CODEX_OAUTH_SCOPE`]; not an xAI session.
     OpenAiCodex,
+    /// Anthropic Claude subscription (Pro/Max OAuth). Stored under
+    /// [`ANTHROPIC_CLAUDE_OAUTH_SCOPE`]; not an xAI session. Inference uses a
+    /// Bearer token + `anthropic-beta: oauth-2025-04-20` against Anthropic Messages.
+    AnthropicClaude,
 }
 
 /// Wire value of `principal_type` for team OAuth principals (capitalized by
@@ -131,6 +138,12 @@ pub struct GrokAuth {
     /// every ChatGPT backend request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+
+    /// Per-account gateway base URL for BYOK platforms whose endpoint is
+    /// self-hosted (Nexus). Set by `/providers <platform> <key> [base_url]`.
+    /// The bare gateway root; per-backend bases are derived at request time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_base_url: Option<String>,
 }
 
 impl std::fmt::Debug for GrokAuth {
@@ -173,9 +186,11 @@ impl GrokAuth {
                 .oidc_issuer
                 .as_deref()
                 .is_some_and(is_xai_oauth2_issuer),
-            AuthMode::ApiKey | AuthMode::WebLogin | AuthMode::KimiCode | AuthMode::OpenAiCodex => {
-                false
-            }
+            AuthMode::ApiKey
+            | AuthMode::WebLogin
+            | AuthMode::KimiCode
+            | AuthMode::OpenAiCodex
+            | AuthMode::AnthropicClaude => false,
         }
     }
 
@@ -194,9 +209,13 @@ impl GrokAuth {
         match self.auth_mode {
             AuthMode::WebLogin | AuthMode::Oidc => true,
             AuthMode::External => self.is_xai_auth(),
-            // Kimi Code is a third-party session for its own models only; it
-            // must not unlock xAI `supported_in_api: false` catalog entries.
-            AuthMode::ApiKey | AuthMode::KimiCode | AuthMode::OpenAiCodex => false,
+            // Kimi Code / Codex / Claude are third-party sessions for their own
+            // models only; they must not unlock xAI `supported_in_api: false`
+            // catalog entries.
+            AuthMode::ApiKey
+            | AuthMode::KimiCode
+            | AuthMode::OpenAiCodex
+            | AuthMode::AnthropicClaude => false,
         }
     }
 
@@ -266,6 +285,7 @@ impl Default for GrokAuth {
             oidc_issuer: None,
             oidc_client_id: None,
             account_id: None,
+            platform_base_url: None,
         }
     }
 }
@@ -420,6 +440,7 @@ mod tests {
             oidc_issuer: None,
             oidc_client_id: None,
             account_id: None,
+            platform_base_url: None,
         }
     }
 

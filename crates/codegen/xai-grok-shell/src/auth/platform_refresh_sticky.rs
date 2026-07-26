@@ -21,6 +21,7 @@ const STICKY_TTL: Duration = Duration::from_secs(300);
 pub(crate) enum PlatformRefreshFamily {
     KimiCode,
     OpenAiCodex,
+    AnthropicClaude,
 }
 
 #[derive(Debug, Clone)]

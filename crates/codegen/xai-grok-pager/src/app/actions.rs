@@ -608,10 +608,12 @@ pub enum Action {
     SetDefaultModel(acp::ModelId),
     /// Persist a third-party platform API key from `/providers` (stored in
     /// `~/.grok/auth.json` under `platform/<id>`, then restamps the catalog).
-    /// Empty `api_key` clears the stored key.
+    /// Empty `api_key` clears the stored key. `base_url` carries the optional
+    /// self-hosted gateway root for BYOK platforms (Nexus).
     SetPlatformApiKey {
         platform: String,
         api_key: String,
+        base_url: Option<String>,
     },
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves
@@ -694,6 +696,8 @@ pub enum Action {
     LoginKimi,
     /// Interactive OpenAI Codex (ChatGPT) subscription login (`/login openai`).
     LoginOpenAiCodex,
+    /// Interactive Anthropic Claude (Pro/Max) subscription login (`/login claude`).
+    LoginAnthropicClaude,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -1605,7 +1609,12 @@ pub enum Effect {
     },
     /// Persist a BYOK platform API key via `x.ai/internal/set_platform_api_key`
     /// and restamp the catalog. Empty `api_key` clears the stored key.
-    SetPlatformApiKey { platform: String, api_key: String },
+    /// `base_url` carries the optional self-hosted gateway root (Nexus).
+    SetPlatformApiKey {
+        platform: String,
+        api_key: String,
+        base_url: Option<String>,
+    },
     /// Reload live subagent model pins from the just-committed config file and
     /// wait for the shell acknowledgement before releasing modal input.
     ReloadSubagentModels { agent_id: AgentId },

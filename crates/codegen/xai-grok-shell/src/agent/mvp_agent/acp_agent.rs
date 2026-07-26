@@ -550,10 +550,14 @@ impl acp::Agent for MvpAgent {
         );
         if let Some(preferred) = self.cfg.borrow().grok_com_config.preferred_method {
             let kind = auth_method::AuthMethodKind::from_id(&arguments.method_id);
-            // Kimi Code is an independent third-party channel and is always
-            // allowed alongside preferred xAI methods.
-            let allowed = matches!(kind, auth_method::AuthMethodKind::KimiCode)
-                || match preferred {
+            // Kimi Code / Codex / Claude are independent third-party channels
+            // and are always allowed alongside preferred xAI methods.
+            let allowed = matches!(
+                kind,
+                auth_method::AuthMethodKind::KimiCode
+                    | auth_method::AuthMethodKind::OpenAiCodex
+                    | auth_method::AuthMethodKind::AnthropicClaude
+            ) || match preferred {
                     crate::auth::PreferredAuthMethod::ApiKey => kind.is_api_key(),
                     crate::auth::PreferredAuthMethod::Oidc => kind.is_session_based(),
                 };
@@ -878,6 +882,72 @@ impl acp::Agent for MvpAgent {
                 emit_login_span(true, "openai-codex", None, None);
                 log_event(xai_grok_telemetry::events::Login {
                     auth_method: "openai-codex".to_string(),
+                    user_id: None,
+                });
+                let _ = auth;
+                Ok(Default::default())
+            }
+            auth_method::ANTHROPIC_CLAUDE_METHOD_ID => {
+                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
+                let client_seq = auth_meta.request_seq;
+                let mut cancelled = false;
+                // Interactive (TUI): push the auth URL + accept a pasted code.
+                // Headless: no channels — the loopback/browser path is driven
+                // by the CLI login binary, not this ACP method.
+                let auth_result = if !auth_meta.headless {
+                    let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+                    let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+                    let (cancel, _guard) = self.interactive_auth.begin(
+                        Some(crate::auth::single_flight::AttemptChannels::new(
+                            code_tx, url_rx,
+                        )),
+                        client_seq,
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::anthropic_claude::run_anthropic_claude_login(
+                            Some(crate::auth::AuthChannels {
+                                url_tx: Some(url_tx),
+                                code_rx,
+                            }),
+                        ) => r,
+                    }
+                } else {
+                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::anthropic_claude::run_anthropic_claude_login(None) => r,
+                    }
+                };
+                let auth = auth_result.map_err(|e| {
+                    emit_login_span(
+                        false,
+                        "anthropic-claude",
+                        None,
+                        Some(if cancelled {
+                            "login_cancelled"
+                        } else {
+                            "login_flow_failed"
+                        }),
+                    );
+                    let mut err = acp::Error::auth_required();
+                    err.message = e.to_string();
+                    err
+                })?;
+                // Re-stamp anthropic-claude/* catalog entries with the new bearer.
+                self.models_manager.restamp_platform_credentials();
+                // Do not replace the primary xAI AuthManager session.
+                emit_login_span(true, "anthropic-claude", None, None);
+                log_event(xai_grok_telemetry::events::Login {
+                    auth_method: "anthropic-claude".to_string(),
                     user_id: None,
                 });
                 let _ = auth;

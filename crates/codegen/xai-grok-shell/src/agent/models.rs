@@ -1458,8 +1458,9 @@ pub(crate) fn prefetch_models_and_settings_blocking(
     let settings = match auth {
         Some(auth) if remote_fetch_enabled => {
             let _timer = crate::instrumentation_timer!("startup.early_settings_fetch");
+            let proxy_url = endpoints.proxy_url();
             crate::remote::fetch_settings_blocking(
-                &endpoints.proxy_url(),
+                &proxy_url,
                 auth,
                 endpoints.alpha_test_key.as_deref(),
             )
@@ -1617,6 +1618,9 @@ fn has_any_platform_credentials() -> bool {
     // currently disabled, and refreshing its access token here can otherwise
     // block startup merely because a persisted login exists.
     if crate::auth::openai_codex::openai_codex_catalog_access_token_cached().is_some() {
+        return true;
+    }
+    if crate::auth::anthropic_claude::anthropic_claude_catalog_access_token_cached().is_some() {
         return true;
     }
     let platforms = crate::agent::platform_models_fetch::load_platforms_config();

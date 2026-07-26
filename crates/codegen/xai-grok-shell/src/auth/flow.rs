@@ -1057,6 +1057,9 @@ pub fn run_cli_logout_all(config: &crate::agent::config::Config) -> anyhow::Resu
     if let Err(e) = run_cli_logout_openai_codex() {
         errors.push(format!("OpenAI Codex: {e}"));
     }
+    if let Err(e) = run_cli_logout_anthropic_claude() {
+        errors.push(format!("Anthropic Claude: {e}"));
+    }
     eprintln!(
         "Note: BYOK platform API keys (if any) were not removed. \
          Use `/logout provider <platform>` or `/providers clear` in the TUI."
@@ -1126,6 +1129,24 @@ pub fn run_cli_logout_openai_codex() -> anyhow::Result<()> {
         eprintln!("Logged out of OpenAI Codex (xAI session unchanged).");
     } else {
         eprintln!("No OpenAI Codex session to log out of.");
+    }
+    Ok(())
+}
+
+/// `hyper logout --claude`: clear only the Anthropic Claude OAuth scope.
+pub fn run_cli_logout_anthropic_claude() -> anyhow::Result<()> {
+    let auth_path = crate::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    let had = crate::auth::read_anthropic_claude_auth(home).is_some();
+    crate::auth::clear_anthropic_claude_auth(home)
+        .map_err(|e| anyhow::anyhow!("Failed to clear Anthropic Claude auth: {e}"))?;
+    crate::auth::platform_refresh_sticky::clear_sticky_family(
+        crate::auth::platform_refresh_sticky::PlatformRefreshFamily::AnthropicClaude,
+    );
+    if had {
+        eprintln!("Logged out of Anthropic Claude (xAI session unchanged).");
+    } else {
+        eprintln!("No Anthropic Claude session to log out of.");
     }
     Ok(())
 }
@@ -1668,6 +1689,7 @@ mod tests {
             oidc_issuer: None,
             oidc_client_id: None,
             account_id: None,
+            platform_base_url: None,
         }
     }
 

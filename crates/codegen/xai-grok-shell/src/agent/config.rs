@@ -1084,10 +1084,7 @@ pub struct ModelsConfig {
     /// `/model` / Ctrl+M — use `allowed_models` / `hidden_models` for that.
     ///
     /// Alias `enabledModels` accepts Pi's camelCase settings key.
-    #[serde(
-        alias = "enabledModels",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(alias = "enabledModels", skip_serializing_if = "Option::is_none")]
     pub enabled_models: Option<Vec<String>>,
     /// Force `hidden = true` on these model IDs (still usable via `-m`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3987,6 +3984,15 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
                 );
             }
         }
+        // Anthropic Claude subscription (OAuth Bearer + Messages) needs
+        // `anthropic-version`; the `anthropic-beta: oauth-2025-04-20` header is
+        // stamped per-request by `AnthropicClaudeBearerResolver`.
+        if builtin.platform == xai_grok_models::PlatformId::AnthropicClaude {
+            extra_headers.insert(
+                "anthropic-version".into(),
+                xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
+            );
+        }
         // Prefer an explicit per-platform effort menu over the legacy
         // low/medium/high/xhigh fallback so GPT-5 / Kimi show their real tiers.
         let (menu_supports, menu_default, menu_opts) =
@@ -4068,7 +4074,15 @@ fn apply_platform_credentials(
     // currently wire-safe `kimi_code_access_token_cached()` value.
     let kimi_bearer = crate::auth::kimi::kimi_code_catalog_access_token_cached();
     let codex_bearer = crate::auth::openai_codex::openai_codex_catalog_access_token_cached();
-    apply_platform_credentials_with_bearer(resolved, platforms, kimi_bearer, codex_bearer);
+    let claude_bearer =
+        crate::auth::anthropic_claude::anthropic_claude_catalog_access_token_cached();
+    apply_platform_credentials_with_bearer(
+        resolved,
+        platforms,
+        kimi_bearer,
+        codex_bearer,
+        claude_bearer,
+    );
 }
 
 /// Testable core of [`apply_platform_credentials`] with injected OAuth bearers.
@@ -4077,6 +4091,7 @@ fn apply_platform_credentials_with_bearer(
     platforms: &PlatformsConfig,
     kimi_bearer: Option<String>,
     codex_bearer: Option<String>,
+    claude_bearer: Option<String>,
 ) {
     for (key, entry) in resolved.iter_mut() {
         let id = entry.info.id.as_deref().unwrap_or(key.as_str());
@@ -4088,6 +4103,7 @@ fn apply_platform_credentials_with_bearer(
             let bearer = match platform {
                 xai_grok_models::PlatformId::KimiCode => kimi_bearer.as_ref(),
                 xai_grok_models::PlatformId::OpenAiCodex => codex_bearer.as_ref(),
+                xai_grok_models::PlatformId::AnthropicClaude => claude_bearer.as_ref(),
                 _ => None,
             };
             if entry.api_key.is_none()
@@ -5744,7 +5760,8 @@ pub fn sampling_config_for_model(
     // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
     // so a catalog stamp from login is never sent after expiry.
     let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
-        .or_else(|| openai_codex_bearer_resolver_for_model(model));
+        .or_else(|| openai_codex_bearer_resolver_for_model(model))
+        .or_else(|| anthropic_claude_bearer_resolver_for_model(model));
     let responses_codex_dialect = model_uses_openai_codex_oauth(model);
     let kimi_dialect = model_uses_kimi_request_dialect(model);
     // The Codex bearer resolver returns `chatgpt-account-id` from the same
@@ -5807,6 +5824,9 @@ pub(crate) fn oauth_platform_for_model(model: &ModelEntry) -> Option<xai_grok_mo
 pub(crate) fn oauth_platform_for_base_url(base_url: &str) -> Option<xai_grok_models::PlatformId> {
     use xai_grok_models::PlatformId;
 
+    // Anthropic Claude OAuth shares api.anthropic.com with the `Anthropic`
+    // BYOK platform; the catalog id (`anthropic-claude/*`), not the URL,
+    // distinguishes them, so this URL-only helper does not resolve Claude.
     match (
         PlatformId::KimiCode.base_url_matches(base_url),
         PlatformId::OpenAiCodex.base_url_matches(base_url),
@@ -5815,6 +5835,33 @@ pub(crate) fn oauth_platform_for_base_url(base_url: &str) -> Option<xai_grok_mod
         (false, true) => Some(PlatformId::OpenAiCodex),
         _ => None,
     }
+}
+
+/// Whether this catalog entry routes through Anthropic Claude (Pro/Max) OAuth.
+pub fn model_uses_anthropic_claude_oauth(model: &ModelEntry) -> bool {
+    let catalog_id = model
+        .info
+        .id
+        .as_deref()
+        .unwrap_or(model.info.model.as_str());
+    matches!(
+        xai_grok_models::parse_managed_model_key(catalog_id),
+        Some((xai_grok_models::PlatformId::AnthropicClaude, _))
+    )
+}
+
+/// Per-request bearer for Anthropic Claude models; `None` for everything else.
+/// The resolver also stamps `anthropic-beta: oauth-2025-04-20`.
+pub fn anthropic_claude_bearer_resolver_for_model(
+    model: &ModelEntry,
+) -> Option<SharedBearerResolver> {
+    if !model_uses_anthropic_claude_oauth(model) {
+        return None;
+    }
+    Some(
+        Arc::new(crate::auth::anthropic_claude::AnthropicClaudeBearerResolver)
+            as SharedBearerResolver,
+    )
 }
 
 /// Whether this catalog entry routes through Kimi Code OAuth (subscription).
@@ -6858,6 +6905,31 @@ reasoning_effort = "low"
         );
         assert!(cfg.mcp_servers["linear"].enabled);
     }
+
+    #[test]
+    fn malformed_mcp_entries_do_not_invalidate_valid_neighbors() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [mcp_servers.good]
+            command = "node"
+            args = ["server.js"]
+
+            [mcp_servers.bad]
+            enabled = true
+            args = ["missing-transport"]
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config)
+            .expect("malformed MCP entry must not fail the whole config");
+        assert!(cfg.mcp_servers.contains_key("good"));
+        assert!(
+            !cfg.mcp_servers.contains_key("bad"),
+            "only the malformed MCP entry should be dropped"
+        );
+    }
+
     /// The lenient parser warns per problem and never fails the whole
     /// config.
     #[test]
@@ -13815,6 +13887,7 @@ default = "grok-4.5"
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
     }
+
     // ── Moonshot / platforms (Phase 1) ──────────────────────────────
 
     /// Platform models without API keys must stay out of the picker even when
@@ -14016,6 +14089,7 @@ default = "grok-4.5"
             &cfg.platforms,
             Some("fake-kimi-token".into()),
             Some("fake-codex-token".into()),
+            None,
         );
         let entry = models.get("kimi-code/k2p7").expect("kimi-code entry");
         assert!(
@@ -14128,7 +14202,7 @@ default = "grok-4.5"
         let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
         let mut models = resolve_model_list(&cfg, None);
-        apply_platform_credentials_with_bearer(&mut models, &cfg.platforms, None, None);
+        apply_platform_credentials_with_bearer(&mut models, &cfg.platforms, None, None, None);
         let codex_entry = models
             .get("openai-codex/gpt-5.6-sol")
             .expect("openai-codex entry");

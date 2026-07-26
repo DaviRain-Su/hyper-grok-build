@@ -489,6 +489,7 @@ mod tests {
             oidc_issuer: None,
             oidc_client_id: None,
             account_id: None,
+            platform_base_url: None,
         }
     }
     fn test_auth_manager() -> Arc<crate::auth::AuthManager> {

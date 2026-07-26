@@ -9,6 +9,7 @@ pub mod auto;
 pub mod btw;
 pub mod cd;
 pub mod changes;
+pub mod claude;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
@@ -43,6 +44,7 @@ pub mod loop_cmd;
 pub mod mcps;
 pub mod model;
 pub mod multiline;
+pub mod nexus;
 pub mod scoped_models;
 pub mod new;
 pub mod personas;
@@ -87,6 +89,9 @@ pub(crate) fn oauth_login_logout_hint(
 ) -> (&'static str, &'static str) {
     match platform {
         xai_grok_models::PlatformId::OpenAiCodex => ("/login openai", "grok logout --openai"),
+        xai_grok_models::PlatformId::AnthropicClaude => {
+            ("/login claude", "grok logout --claude")
+        }
         _ => ("/login kimi", "grok logout --kimi"),
     }
 }
@@ -161,6 +166,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(jump::JumpCommand),
         Arc::new(login::LoginCommand),
         Arc::new(logout::LogoutCommand),
+        Arc::new(claude::ClaudeCommand),
+        Arc::new(nexus::NexusCommand),
         Arc::new(providers::ProvidersCommand),
         Arc::new(import_claude::ImportClaudeCommand),
         Arc::new(usage::UsageCommand),
@@ -273,12 +280,14 @@ mod tests {
             "agents-dashboard",
             "always-approve",
             "announcements",
+            "anthropic",
             "auto",
             "btw",
             "cd",
             "changelog",
             "changes",
             "chat",
+            "claude",
             "clear",
             "cloud",
             "compact",
@@ -326,6 +335,7 @@ mod tests {
             "ml",
             "model",
             "multiline",
+            "nexus",
             "new",
             "onboarding",
             "personas",
@@ -348,11 +358,15 @@ mod tests {
             "resume",
             "review",
             "rewind",
+            "scoped",
+            "scoped-models",
+            "scope-models",
             "scroll-debug",
             "session-info",
             "sessions",
             "settings",
             "share",
+            "enabled-models",
             "show-plan",
             "skills",
             "summarize",
