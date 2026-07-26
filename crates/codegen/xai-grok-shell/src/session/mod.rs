@@ -355,6 +355,8 @@ pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod summary;
 pub(crate) mod telemetry;
+#[cfg(feature = "test-support")]
+pub mod testkit;
 pub mod tool_index;
 pub(crate) mod turn_completion;
 pub mod unified_list;

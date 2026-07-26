@@ -3639,3 +3639,26 @@ fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
             "gate must still allow the kill-switched folder after the config read"
         );
 }
+/// Writeback requires grok.com auth: remote may advertise it, but a non-xai
+/// credential is downgraded to `Local`.
+#[test]
+#[serial_test::serial]
+fn from_remote_gated_requires_xai_auth_for_writeback() {
+    let _env = crate::env::EnvVarGuard::remove("GROK_STORAGE_MODE");
+    let writeback = crate::util::config::RemoteSettings {
+        writeback_enabled: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(
+        StorageMode::from_remote_gated(Some(&writeback), true),
+        StorageMode::Writeback
+    );
+    assert_eq!(
+        StorageMode::from_remote_gated(Some(&writeback), false),
+        StorageMode::Local,
+    );
+    assert_eq!(
+        StorageMode::from_remote_gated(None, true),
+        StorageMode::Local
+    );
+}

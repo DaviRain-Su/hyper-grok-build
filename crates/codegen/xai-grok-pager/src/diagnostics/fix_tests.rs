@@ -73,6 +73,7 @@ fn terminal() -> TerminalContext {
         vte_version: None,
         tmux_extended_keys: None,
         term_program_version: None,
+        env_term_version: None,
     }
 }
 

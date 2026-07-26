@@ -379,6 +379,7 @@ pub(super) fn multiplexer(kind: MultiplexerKind) -> &'static str {
         MultiplexerKind::Screen => "screen",
         MultiplexerKind::Zellij => "zellij",
         MultiplexerKind::Cmux => "cmux",
+        MultiplexerKind::Herdr => "herdr",
         MultiplexerKind::Undetected => "undetected",
     }
 }

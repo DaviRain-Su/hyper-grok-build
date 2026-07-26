@@ -6,6 +6,21 @@ use std::process::Command;
 
 use crate::sandbox::TestSandbox;
 
+/// Parse env var `key` into `T`, falling back to `default` when it is unset or
+/// present-but-unparseable (warning in the latter case).
+pub fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
+    let Ok(raw) = std::env::var(key) else {
+        return default;
+    };
+    match raw.parse() {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("[test-support] ignoring unparseable {key}={raw:?}; using default");
+            default
+        }
+    }
+}
+
 /// RAII guard for a single environment variable in `#[serial]` tests: snapshots
 /// the prior value on construction, applies the change, then restores the prior
 /// value (or unsets it) on drop — even if an assertion panics. Restoring rather
@@ -110,7 +125,9 @@ pub fn grok_binary() -> PathBuf {
     if let Ok(path) = std::env::var("GROK_BINARY") {
         let p = PathBuf::from(path);
         assert!(p.exists(), "GROK_BINARY does not exist: {}", p.display());
-        return p;
+        // Bazel's GROK_BINARY is runfiles-relative; the harness spawns the child
+        // with a different cwd, so absolutize against the (runfiles-root) cwd now.
+        return std::path::absolute(&p).unwrap_or(p);
     }
 
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_hyper") {

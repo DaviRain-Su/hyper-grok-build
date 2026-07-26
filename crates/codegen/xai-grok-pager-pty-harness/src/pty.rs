@@ -574,6 +574,7 @@ const HOST_TERMINAL_ENV_VARS: &[&str] = &[
     "CMUX_SOCKET_PATH",
     "CMUX_PANEL_ID",
     "CMUX_BUNDLE_ID",
+    "HERDR_ENV",
     // Embedded editor markers (embedded_editor_from_env).
     "NVIM",
     "NVIM_LISTEN_ADDRESS",

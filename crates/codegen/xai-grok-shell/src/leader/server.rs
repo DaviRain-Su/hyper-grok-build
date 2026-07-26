@@ -849,7 +849,7 @@ fn make_leader_starting_error(json: &serde_json::Value) -> Option<String> {
         "error": {
             "code": -32002,
             "message": "leader_starting",
-            "data": "Leader is still initializing (auth/prefetch in progress). Retry shortly."
+            "data": "Leader is still initializing (auth in progress). Retry shortly."
         }
     });
     Some(response.to_string())
@@ -1480,7 +1480,8 @@ fn make_version_mismatch_notification(
 ///   JSON-RPC error so the client can retry rather than hang.
 /// - ACP notifications (no `id`) are dropped with a trace log.
 ///
-/// Once `ready_rx` is signaled `true` (auth + prefetch complete), all subsequent
+/// Once `ready_rx` is signaled `true` (socket bound + bounded auth complete; the
+/// model catalog and remote settings stream in afterward), all subsequent
 /// ACP traffic is forwarded to the agent as normal.
 ///
 /// # Arguments
@@ -2567,14 +2568,16 @@ pub struct ServerHandle {
     pub client_count: Arc<AtomicUsize>,
     /// Atomic flag: `true` while the agent has pending (in-flight) requests
     pub agent_busy: Arc<AtomicBool>,
-    /// Signal the IPC server that the leader is fully ready (auth + prefetch complete).
+    /// Signal the IPC server that the leader is fully ready (socket bound + bounded auth;
+    /// catalog/settings refresh runs in the background).
     ///
     /// Send `true` once the leader has finished initializing. Until then, ACP requests
     /// receive a `leader_starting` error and ACP notifications are dropped.
     ///
     /// `spawn_leader_server` sends `true` immediately so that callers that do not need
     /// staged startup (e.g. tests, in-process use) get a fully-ready server out of the box.
-    /// Production leader startup (`run_leader`) holds this back until auth + prefetch succeed.
+    /// Production leader startup (`run_leader`) holds this back until bounded auth completes
+    /// (catalog/settings are no longer prefetched; they refresh in the background).
     pub ready_tx: watch::Sender<bool>,
     /// Set the shutdown reason before cancelling so clients receive the correct `ShuttingDown`
     /// reason. The default value is [`ShutdownReason::Manual`]; send

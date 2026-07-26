@@ -864,10 +864,11 @@ fn stable_mapping_tables_are_complete() {
             MultiplexerKind::Screen,
             MultiplexerKind::Zellij,
             MultiplexerKind::Cmux,
+            MultiplexerKind::Herdr,
             MultiplexerKind::Undetected,
         ]
         .map(multiplexer),
-        ["tmux", "screen", "zellij", "cmux", "undetected"]
+        ["tmux", "screen", "zellij", "cmux", "herdr", "undetected"]
     );
     assert_eq!(
         [

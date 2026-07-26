@@ -213,7 +213,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         startup_auth_metadata(&auth_methods);
 
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
-        eager_auth_or_login_fallback(
+        bounded_eager_auth(
             &tx,
             &auth_methods,
             default_auth_method_id.as_ref(),
@@ -326,7 +326,7 @@ pub async fn connect_via_leader(
         startup_auth_metadata(&auth_methods);
 
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
-        eager_auth_or_login_fallback(
+        bounded_eager_auth(
             &tx,
             &auth_methods,
             default_auth_method_id.as_ref(),
@@ -719,6 +719,49 @@ async fn eager_auth_or_login_fallback(
             let (label, method_id, mode) = find_interactive_login_method(auth_methods);
             (true, label, method_id, mode, None)
         }
+    }
+}
+
+/// [`eager_auth_or_login_fallback`] bounded by `STARTUP_AUTH_REFRESH_TIMEOUT`,
+/// so a hung agent cannot gate the first draw. On timeout the inputs pass
+/// through unchanged and the agent finishes authentication in the background.
+async fn bounded_eager_auth(
+    tx: &AcpAgentTx,
+    auth_methods: &[acp::AuthMethod],
+    default_auth_method_id: Option<&acp::AuthMethodId>,
+    needs_login: bool,
+    login_label: Option<String>,
+    login_method_id: Option<acp::AuthMethodId>,
+    auth_start_mode: AuthStartMode,
+) -> (
+    bool,
+    Option<String>,
+    Option<acp::AuthMethodId>,
+    AuthStartMode,
+    Option<serde_json::Value>,
+) {
+    match tokio::time::timeout(
+        xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+        eager_auth_or_login_fallback(
+            tx,
+            auth_methods,
+            default_auth_method_id,
+            needs_login,
+            login_label.clone(),
+            login_method_id.clone(),
+            auth_start_mode,
+        ),
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(_) => (
+            needs_login,
+            login_label,
+            login_method_id,
+            auth_start_mode,
+            None,
+        ),
     }
 }
 

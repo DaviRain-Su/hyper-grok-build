@@ -72,6 +72,20 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         return false;
     };
 
+    // Reseed this process's remote-campaign cache. In leader mode no in-process
+    // agent seeds the TUI process, and the bounded startup prefetch can miss —
+    // without this reseed a remote campaign stays invisible to
+    // `resolve_dismissable_campaigns`, so a `/model` pick never records its
+    // dismissal and the leader re-nudges every new session. Idempotent in
+    // embedded mode, where the in-process agent seeds the same cache.
+    if let Some(campaigns) = update.campaigns.clone() {
+        let rs = xai_grok_shell::util::config::RemoteSettings {
+            campaigns,
+            ..Default::default()
+        };
+        xai_grok_shell::util::config::set_remote_campaigns_from_settings(Some(&rs));
+    }
+
     if let Some(v) = update.auto_permission_mode_enabled {
         // Keep the pager's auto-permission-mode gate live with the remote settings
         // remote tier (the leader caches it agent-side; the pager process needs
@@ -537,6 +551,11 @@ pub(super) struct PagerSettingsUpdate {
     // remote_settings also emits gen-ordered `x.ai/announcements/update`
     // (emit_announcements_if_changed), and a gen-less apply on this path could
     // clobber a newer push. Single ingest path: handle_announcements_update.
+    /// Remote campaigns snapshot. `Some` whenever the shell has settings
+    /// (empty = campaigns withdrawn); `None`/omitted (settings-less push,
+    /// older shell) must leave this process's campaign cache untouched.
+    #[serde(default)]
+    campaigns: Option<Vec<xai_grok_shell::util::config::CampaignOverride>>,
     #[serde(default)]
     gate_message: Option<String>,
     #[serde(default)]

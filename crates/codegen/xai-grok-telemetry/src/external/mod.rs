@@ -72,7 +72,7 @@ impl IdentityAttrs {
 /// reach init).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExternalOtelRemotePolicy {
-    /// Fleet kill switch: flush, then drop subsequent emissions in-process.
+    /// Remote-policy force-disable: flush, then drop subsequent emissions in-process.
     pub force_disable: bool,
     /// Force the content gates off regardless of local env/config.
     pub lock_content_gates: bool,
@@ -219,17 +219,55 @@ fn active_handle() -> Option<Arc<ExternalTelemetry>> {
     handle().filter(|ext| ext.active.load(Ordering::Relaxed))
 }
 
+/// Fail-closed OTEL gate. Defaults open; the leader closes it before init and
+/// re-opens it when settings arrive (or immediately for a pure env-API-key
+/// leader, which has no remote policy to fetch).
+///
+/// On the leader, opening is the synchronizing event: `OtelGate::apply_and_open`
+/// applies the remote force-disable (`active = false`) and then opens here, so
+/// an emitter whose `Acquire` read observes the `Release` open also observes
+/// `active = false`; the emit-path `active` load can therefore stay `Relaxed`.
+/// Closing is fail-safe and stays `Relaxed`. The follower path force-disables
+/// without re-opening and relies on eventual visibility, acceptable because the
+/// policy is tighten-only.
+static SETTINGS_RESOLVED: AtomicBool = AtomicBool::new(true);
+
+/// Close the gate (leader preinit + account switch).
+pub fn suppress_external_otel_until_settings() {
+    SETTINGS_RESOLVED.store(false, Ordering::Relaxed);
+}
+
+/// Open the gate. `Release` publishes the force-disable applied just before it.
+pub fn mark_external_otel_settings_resolved() {
+    if !SETTINGS_RESOLVED.swap(true, Ordering::Release) {
+        tracing::debug!("external otel: settings resolved, emission gate opened");
+    }
+}
+
+/// Read the gate. `Acquire` pairs with the `Release` open.
+#[inline]
+pub fn is_settings_gate_open() -> bool {
+    SETTINGS_RESOLVED.load(Ordering::Acquire)
+}
+
 /// Cheap check used by the fan-out hook and the split-sink call sites:
-/// registry present AND the runtime emission gate set. A stale `true` read
-/// only costs a wasted mapping, never an export ([`emit`] re-checks).
+/// registry present AND the runtime emission gate set AND the settings gate
+/// open. A stale `true` read only costs a wasted mapping, never an export
+/// ([`emit`] re-checks).
 pub fn is_active() -> bool {
-    matches!(EXTERNAL.get(), Some(Some(ext)) if ext.active.load(Ordering::Relaxed))
+    is_settings_gate_open()
+        && matches!(EXTERNAL.get(), Some(Some(ext)) if ext.active.load(Ordering::Relaxed))
 }
 
 /// Map and emit one typed telemetry event. No-op unless the stream is active
 /// and the event has an `external = …` mapping. Synchronous and cheap (the
 /// batch processor queues; nothing blocks on I/O).
 pub fn emit<T: crate::events::TelemetryEvent>(data: &T) {
+    // Fail-closed: suppress until the leader confirms the remote policy; open by
+    // default for everyone else.
+    if !is_settings_gate_open() {
+        return;
+    }
     let Some(ext) = active_handle() else {
         return;
     };
@@ -267,8 +305,8 @@ pub(crate) fn set_identity_on(ext: &ExternalTelemetry, attrs: IdentityAttrs) {
 }
 
 /// Apply remote policy when `RemoteSettings` arrive (post-auth, alongside
-/// [`set_identity`]). **TIGHTEN-ONLY**: may clear `active` (fleet kill switch
-/// — flushes, then drops subsequent emissions) and may force content gates
+/// [`set_identity`]). **TIGHTEN-ONLY**: may clear `active` (remote-policy
+/// force-disable, flushes then drops subsequent emissions) and may force content gates
 /// off; it can never enable a stream that env/config left off, and never
 /// loosens gates mid-run.
 pub fn apply_remote_policy(policy: ExternalOtelRemotePolicy) {

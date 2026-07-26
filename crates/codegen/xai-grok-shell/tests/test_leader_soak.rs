@@ -32,6 +32,7 @@ use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, LeaderClient, LeaderServerControlState, LeaderServerMetadata,
     run_leader_server,
 };
+use xai_grok_test_support::resources::ResourceSnapshot;
 
 const SIMPLEX_BUF: usize = 8 * 1024 * 1024;
 
@@ -40,41 +41,6 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
-}
-
-/// Resident set size of THIS process (leader server + agent are in-process).
-/// Copied from `xai-codebase-graph/tests/memory_integration.rs`.
-fn rss_bytes() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(val) = line.strip_prefix("VmRSS:") {
-                let kb: usize = val.trim().trim_end_matches(" kB").trim().parse().ok()?;
-                return Some(kb * 1024);
-            }
-        }
-        None
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        let output = Command::new("ps")
-            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-            .output()
-            .ok()?;
-        let kb: usize = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .ok()?;
-        Some(kb * 1024)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        None
-    }
 }
 
 /// `leader.response.send_failed` entries written by THIS process.
@@ -281,7 +247,7 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             )
             .await;
 
-            let rss_baseline = rss_bytes();
+            let rss_before = ResourceSnapshot::capture();
             let soak_deadline = tokio::time::Instant::now() + Duration::from_secs(soak_secs);
             let workdir_str = workdir.path().to_string_lossy().to_string();
             let mut cycles: u64 = 0;
@@ -379,8 +345,12 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             );
 
             // ── RSS bound ─────────────────────────────────────────────────
-            if let (Some(before), Some(after)) = (rss_baseline, rss_bytes()) {
-                let growth_mb = after.saturating_sub(before) as f64 / (1024.0 * 1024.0);
+            let rss_after = ResourceSnapshot::capture();
+            let growth = rss_after.growth_from(&rss_before);
+            if let (Some(before), Some(after), Some(growth_bytes)) =
+                (rss_before.rss, rss_after.rss, growth.rss)
+            {
+                let growth_mb = growth_bytes as f64 / (1024.0 * 1024.0);
                 eprintln!(
                     "[soak] rss: {:.1} MB -> {:.1} MB (growth {growth_mb:.1} MB)",
                     before as f64 / (1024.0 * 1024.0),

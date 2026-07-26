@@ -119,15 +119,15 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
     crate::util::config::sync_campaign_fields(&mut cfg);
 
     // env var > remote settings > Local. Skip remote settings for Generic (grok -p, subagents).
+    let has_xai_auth = auth_manager.current().is_some_and(|a| a.is_xai_auth());
     if cfg.storage_mode == StorageMode::Local
         && cfg.mode != crate::agent::config::AgentMode::Generic
     {
-        cfg.storage_mode = StorageMode::resolve(None, cfg.remote_settings.as_ref());
+        cfg.storage_mode =
+            StorageMode::from_remote_gated(cfg.remote_settings.as_ref(), has_xai_auth);
     }
-    // Writeback talks to the code backend; requires grok.com auth.
-    if cfg.storage_mode == StorageMode::Writeback
-        && !auth_manager.current().is_some_and(|a| a.is_xai_auth())
-    {
+    // A CLI/env-set Writeback still requires grok.com auth.
+    if cfg.storage_mode == StorageMode::Writeback && !has_xai_auth {
         tracing::info!("Writeback is disabled: requires auth with grok.com");
         cfg.storage_mode = StorageMode::Local;
     }
@@ -165,9 +165,9 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
 
         crate::extensions::marketplace::purge_default_skills_installs(&grok_home);
 
-        // Auto-register is gated (default off; env/remote settings enables). Kept out
-        // of built-in extraction so the gate can read the resolved
-        // remote_settings, which resolve_config has populated by now.
+        // At boot remote_settings may still be None (fetches are backgrounded),
+        // so only an env opt-in fires here; the gate is re-evaluated once
+        // settings arrive (see `MvpAgent::reapply_official_marketplace`).
         if cfg.resolve_official_marketplace_auto_register().value {
             crate::extensions::marketplace::ensure_official_marketplace_source(&grok_home);
         }

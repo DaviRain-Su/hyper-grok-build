@@ -416,6 +416,34 @@ fn mux_tmux_nested_inside_cmux_wins() {
     assert_eq!(detect_multiplexer_from_env(&env), MultiplexerKind::Tmux);
 }
 
+#[test]
+fn mux_herdr_from_herdr_env() {
+    let env = env_from(&[("HERDR_ENV", "1")]);
+    assert_eq!(detect_multiplexer_from_env(&env), MultiplexerKind::Herdr);
+}
+
+#[test]
+fn mux_tmux_nested_inside_herdr_wins() {
+    // tmux started inside a herdr pane, or a stale TMUX frozen into the pane by
+    // herdr's daemon — indistinguishable from the env, and tmux wins either way.
+    let env = env_from(&[
+        ("TMUX", "/tmp/tmux-501/default,12345,0"),
+        ("HERDR_ENV", "1"),
+    ]);
+    assert_eq!(detect_multiplexer_from_env(&env), MultiplexerKind::Tmux);
+}
+
+#[test]
+fn mux_herdr_nested_inside_cmux_wins() {
+    // herdr in a cmux panel inherits the CMUX_* markers; the inner layer wins.
+    let env = env_from(&[
+        ("CMUX_SOCKET_PATH", "/tmp/cmux.sock"),
+        ("CMUX_PANEL_ID", "1"),
+        ("HERDR_ENV", "1"),
+    ]);
+    assert_eq!(detect_multiplexer_from_env(&env), MultiplexerKind::Herdr);
+}
+
 // -- ambiguous marker precedence ------------------------------------------
 
 #[test]
@@ -1122,6 +1150,21 @@ fn mux_zellij_not_from_version_only() {
     );
 }
 
+#[test]
+fn zellij_version_is_never_the_terminal_version() {
+    // The multiplexer's version must never be attributed to the emulator.
+    let env = env_from(&[
+        ("TERM", "alacritty"),
+        ("ZELLIJ", "0"),
+        ("ZELLIJ_SESSION_NAME", "main"),
+        ("ZELLIJ_VERSION", "0.43.1"),
+    ]);
+    let ctx = build_terminal_context_from_env(&env);
+    assert_eq!(ctx.brand, TerminalName::Alacritty);
+    assert_eq!(ctx.multiplexer, MultiplexerKind::Zellij);
+    assert_eq!(ctx.term_version(), (String::new(), TermVersionSource::None));
+}
+
 // -- Byobu inference edge cases -------------------------------------------
 
 #[test]
@@ -1689,6 +1732,28 @@ fn shift_enter_available_unknown_with_multiplexer() {
         tmux_version: Some("tmux 3.4".to_owned()),
         ..Default::default()
     };
+    assert!(!ctx.shift_enter_unavailable());
+}
+
+#[test]
+fn herdr_over_ssh_pane_does_not_skip_kitty_keyboard() {
+    // A real herdr pane reached over SSH: no TERM_PROGRAM, so the brand stays
+    // Unknown. HERDR_ENV is what keeps this out of the unknown-no-multiplexer
+    // skip, which would otherwise drop Shift+Enter (herdr speaks KKP).
+    let env = env_from(&[
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "3"),
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("SSH_CONNECTION", "10.0.0.1 52000 10.0.0.2 22"),
+    ]);
+    let ctx = build_terminal_context_from_env(&env);
+    assert!(ctx.is_ssh);
+    assert_eq!(ctx.brand, TerminalName::Unknown);
+    // shift_enter_unavailable() reads env_brand, not brand.
+    assert_eq!(ctx.env_brand, TerminalName::Unknown);
+    assert_eq!(ctx.multiplexer, MultiplexerKind::Herdr);
+    assert_eq!(ctx.kitty_skip_reason(), None);
     assert!(!ctx.shift_enter_unavailable());
 }
 

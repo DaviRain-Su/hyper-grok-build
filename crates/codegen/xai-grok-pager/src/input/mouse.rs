@@ -277,12 +277,15 @@ impl ScrollConfigOverrides {
 }
 
 /// Multiplexers that re-encode mouse into their own SGR stream (tmux with
-/// `mouse on`, screen, zellij all re-emit per pane). Cmux is a Ghostty-backed
-/// passthrough and keeps the outer brand's stream.
+/// `mouse on`, screen, zellij, herdr all re-emit per pane). Cmux is a
+/// Ghostty-backed passthrough and keeps the outer brand's stream.
 fn multiplexer_reencodes_mouse(multiplexer: MultiplexerKind) -> bool {
     matches!(
         multiplexer,
-        MultiplexerKind::Tmux | MultiplexerKind::Screen | MultiplexerKind::Zellij
+        MultiplexerKind::Tmux
+            | MultiplexerKind::Screen
+            | MultiplexerKind::Zellij
+            | MultiplexerKind::Herdr
     )
 }
 
@@ -311,8 +314,8 @@ impl ScrollConfig {
     }
 
     /// Derive scroll normalization defaults from detected terminal metadata.
-    /// tmux/screen/zellij re-encode mouse into their own SGR stream, so the
-    /// outer brand's events-per-tick/pacing calibration describes the wrong
+    /// tmux/screen/zellij/herdr re-encode mouse into their own SGR stream, so
+    /// the outer brand's events-per-tick/pacing calibration describes the wrong
     /// producer — trusting an outer ept=3 profile under tmux under-counts 3x
     /// per notch when the multiplexer re-chunks to one event. Under those
     /// multiplexers the brand table is replaced by a conservative ept=1

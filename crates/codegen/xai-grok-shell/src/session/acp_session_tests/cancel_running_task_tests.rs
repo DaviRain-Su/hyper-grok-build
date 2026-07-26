@@ -12,8 +12,27 @@ impl AsyncTerminalRunner for DummyTerminal {
         Err(TerminalError::Other("dummy terminal".into()))
     }
 }
-#[tokio::test(flavor = "current_thread")]
-async fn persist_ack_waits_for_disk_flush_before_success() {
+#[test]
+fn persist_ack_waits_for_disk_flush_before_success() {
+    // This fixture constructs the full SessionActor, whose debug-build future
+    // exceeds the test harness's default 2 MiB thread stack. Production
+    // session actors also run on an explicit 8 MiB stack (see spawn.rs).
+    std::thread::Builder::new()
+        .name("test-persist-ack".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build persistence test runtime");
+            runtime.block_on(persist_ack_waits_for_disk_flush_before_success_inner());
+        })
+        .expect("spawn persistence test thread")
+        .join()
+        .expect("persistence test thread panicked");
+}
+
+async fn persist_ack_waits_for_disk_flush_before_success_inner() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {

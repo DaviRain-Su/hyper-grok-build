@@ -865,9 +865,9 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
 /// but cannot write it to disk must surface `Transient` AND still swap the
 /// in-memory bearer to the fresh token (the "always update in-memory even if the
 /// disk write failed" invariant — without it a disk hiccup strands the session).
-/// The write is failed deterministically (root-safe) by planting a *directory*
-/// at the atomic-write temp path so `open_secure_file` hits `EISDIR`; the
-/// auth.json read (file absent) and the file lock still succeed.
+/// The write is failed deterministically (root-safe) via the path-scoped
+/// `WRITE_FAULT_PATH` injection in `storage.rs`; the auth.json read (file
+/// absent) and the file lock still succeed.
 #[tokio::test]
 async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -882,14 +882,20 @@ async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
         ..GrokAuth::test_default()
     });
 
-    // `write_auth_json_atomic` writes `auth.json.<pid>.tmp` then renames; a
-    // directory there makes the temp-file open fail with EISDIR (enforced even
-    // for root), so the persist fails while the read/lock paths are unaffected.
-    std::fs::create_dir(
-        dir.path()
-            .join(format!("auth.json.{}.tmp", std::process::id())),
-    )
-    .unwrap();
+    // Fail every atomic write to THIS tempdir's auth.json (path-scoped, so
+    // parallel tests are unaffected). Cleared on drop.
+    struct FaultGuard;
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            *crate::auth::storage::WRITE_FAULT_PATH
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+    let _fault = FaultGuard;
+    *crate::auth::storage::WRITE_FAULT_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(dir.path().join("auth.json"));
 
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: Arc::new(AtomicU32::new(0)),

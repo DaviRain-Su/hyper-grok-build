@@ -26,12 +26,13 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// Timeout for receiving registration response from server.
 /// This prevents indefinite hangs if the server doesn't respond.
 const REGISTRATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Timeout for waiting for `LeaderReady` after a `Registered { ready: false }` response.
+/// Timeout for waiting for `LeaderReady` after a `Registered { ready: false }`.
 ///
-/// Auth + model prefetch can take significant time (network calls, potential browser
-/// OAuth flow). 5 minutes is generous enough to cover all practical scenarios; if the
-/// leader fails it will close the connection first anyway.
-const LEADER_READY_TIMEOUT: Duration = Duration::from_secs(300);
+/// The leader signals readiness right after its bounded sign-in
+/// (`STARTUP_AUTH_TIMEOUT`); model/settings prefetch runs off the readiness path
+/// and the leader never opens a browser OAuth flow. This therefore only needs to
+/// cover that bounded auth plus margin, matching the client connect ceiling.
+const LEADER_READY_TIMEOUT: Duration = crate::http::MIN_CLIENT_CONNECT_TIMEOUT;
 
 /// Reason the client disconnected from the leader server.
 ///

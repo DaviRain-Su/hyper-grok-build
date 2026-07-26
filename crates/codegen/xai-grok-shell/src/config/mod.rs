@@ -854,6 +854,19 @@ impl StorageMode {
         }
         Self::Local
     }
+    /// Resolve from remote settings, enforcing the rule that `Writeback`
+    /// requires grok.com auth (it syncs to grok-code-backend). This is the
+    /// single home for that gate, used at boot ([`crate::agent::init`]) and by
+    /// the post-readiness self-heal (`MvpAgent::reapply_storage_mode`).
+    pub fn from_remote_gated(
+        remote: Option<&crate::util::config::RemoteSettings>,
+        has_xai_auth: bool,
+    ) -> Self {
+        match Self::resolve(None, remote) {
+            Self::Writeback if !has_xai_auth => Self::Local,
+            mode => mode,
+        }
+    }
     /// Returns true if this mode syncs to the backend.
     pub fn is_writeback(&self) -> bool {
         matches!(self, Self::Writeback)

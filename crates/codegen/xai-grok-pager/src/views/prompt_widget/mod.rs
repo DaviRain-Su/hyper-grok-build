@@ -1827,6 +1827,8 @@ impl PromptWidget {
                     terminal.multiplexer = %evt.terminal.multiplexer,
                     terminal.is_ssh = evt.terminal.is_ssh,
                     terminal.term_var = %evt.terminal.term_var,
+                    terminal.term_version = %evt.terminal.term_version,
+                    terminal.term_version_source = %evt.terminal.term_version_source,
                     key.code = %evt.key_code,
                     key.modifiers = %evt.key_modifiers,
                     key.kind = %evt.key_kind,

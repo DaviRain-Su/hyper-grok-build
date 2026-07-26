@@ -1147,7 +1147,7 @@ fn ghostty_duplicate_reports_do_not_feed_accel_banding() {
 
 #[test]
 fn multiplexed_sessions_use_conservative_profile_regardless_of_brand() {
-    // tmux/screen/zellij re-encode mouse into their own SGR stream, so
+    // tmux/screen/zellij/herdr re-encode mouse into their own SGR stream, so
     // the outer brand's ept/pacing calibration is wrong under them: the
     // conservative ept=1 shape applies no matter the brand. Cmux is a
     // passthrough and Undetected means no multiplexer — both keep the
@@ -1172,6 +1172,7 @@ fn multiplexed_sessions_use_conservative_profile_regardless_of_brand() {
         MultiplexerKind::Tmux,
         MultiplexerKind::Screen,
         MultiplexerKind::Zellij,
+        MultiplexerKind::Herdr,
     ] {
         for brand in brands {
             let cfg = ScrollConfig::from_terminal_context(brand, mux, Default::default());

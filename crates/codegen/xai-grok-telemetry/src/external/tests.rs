@@ -960,6 +960,44 @@ async fn remote_gate_lock_forces_gates_off_and_never_on() {
     );
 }
 
+/// All tests that mutate `SETTINGS_RESOLVED` must hold this lock.
+static GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn settings_gate_suppresses_until_resolved() {
+    let _serial = GATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    struct RestoreGate;
+    impl Drop for RestoreGate {
+        fn drop(&mut self) {
+            super::mark_external_otel_settings_resolved();
+        }
+    }
+    let _restore = RestoreGate;
+
+    // Baseline: default open.
+    super::mark_external_otel_settings_resolved();
+    assert!(super::is_settings_gate_open(), "gate defaults open");
+
+    // Leader closes it at the start of its auth/network phase.
+    super::suppress_external_otel_until_settings();
+    assert!(
+        !super::is_settings_gate_open(),
+        "gate must be closed until settings resolve"
+    );
+    assert!(
+        !super::is_active(),
+        "is_active must be false while the settings gate is closed"
+    );
+
+    // Settings response arrives (policy evaluated) → reopen.
+    super::mark_external_otel_settings_resolved();
+    assert!(
+        super::is_settings_gate_open(),
+        "gate must reopen after settings are resolved"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Metric increment derivation
 // ─────────────────────────────────────────────────────────────────────────────

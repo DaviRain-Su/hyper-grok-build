@@ -56,6 +56,8 @@ pub struct Capture {
     chunks: std::sync::Mutex<Vec<String>>,
     notification_count: AtomicU32,
     reconnected_count: AtomicU32,
+    models_update_count: AtomicU32,
+    settings_update_count: AtomicU32,
 }
 
 struct LeaderAcpClient {
@@ -96,10 +98,23 @@ impl acp::Client for LeaderAcpClient {
     }
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
-        if &*args.method == "x.ai/leader_reconnected" {
-            self.capture
-                .reconnected_count
-                .fetch_add(1, Ordering::SeqCst);
+        match &*args.method {
+            "x.ai/leader_reconnected" => {
+                self.capture
+                    .reconnected_count
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            "x.ai/models/update" => {
+                self.capture
+                    .models_update_count
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            "x.ai/settings/update" => {
+                self.capture
+                    .settings_update_count
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -180,9 +195,43 @@ impl LeaderFixture {
         Self::start_with_binary_timeout(binary, server, cwd, sandbox, Duration::from_secs(30)).await
     }
 
+    /// Start a leader pointed at an arbitrary base URL; offline-startup tests
+    /// aim it at an unreachable endpoint to prove it boots from local data.
+    pub async fn start_with_base_url(
+        base_url: &str,
+        cwd: &Path,
+        sandbox: &TestSandbox,
+    ) -> io::Result<Self> {
+        Self::start_with_binary_base_url_timeout(
+            &grok_binary(),
+            base_url,
+            cwd,
+            sandbox,
+            Duration::from_secs(30),
+        )
+        .await
+    }
+
     async fn start_with_binary_timeout(
         binary: &Path,
         server: &MockInferenceServer,
+        cwd: &Path,
+        sandbox: &TestSandbox,
+        readiness_timeout: Duration,
+    ) -> io::Result<Self> {
+        Self::start_with_binary_base_url_timeout(
+            binary,
+            &server.url(),
+            cwd,
+            sandbox,
+            readiness_timeout,
+        )
+        .await
+    }
+
+    async fn start_with_binary_base_url_timeout(
+        binary: &Path,
+        base_url: &str,
         cwd: &Path,
         sandbox: &TestSandbox,
         readiness_timeout: Duration,
@@ -202,11 +251,11 @@ impl LeaderFixture {
         .stdout(std::process::Stdio::null());
         sandbox.apply_to_std_command(&mut cmd);
         cmd.envs(xai_tty_utils::pager_env())
-            .env("GROK_CLI_CHAT_PROXY_BASE_URL", server.url())
-            .env("GROK_XAI_API_BASE_URL", server.url())
-            .env("GROK_MODELS_BASE_URL", server.url())
-            .env("GROK_FEEDBACK_BASE_URL", server.url())
-            .env("GROK_TRACE_UPLOAD_URL", server.url())
+            .env("GROK_CLI_CHAT_PROXY_BASE_URL", base_url)
+            .env("GROK_XAI_API_BASE_URL", base_url)
+            .env("GROK_MODELS_BASE_URL", base_url)
+            .env("GROK_FEEDBACK_BASE_URL", base_url)
+            .env("GROK_TRACE_UPLOAD_URL", base_url)
             .env("XAI_API_KEY", "test-key-for-ci")
             .env("GROK_LEADER_SOCKET", &socket)
             .env("RUST_LOG", "xai_grok_shell=debug");
@@ -263,13 +312,25 @@ impl LeaderFixture {
         cwd: &Path,
         sandbox: &TestSandbox,
     ) -> io::Result<LeaderStdioClient> {
+        self.spawn_client_with_base_url(&server.url(), cwd, sandbox)
+            .await
+    }
+
+    /// Spawn a relay client whose own endpoints point at an arbitrary base URL;
+    /// pairs with [`Self::start_with_base_url`] for a fully offline stack.
+    pub async fn spawn_client_with_base_url(
+        &self,
+        base_url: &str,
+        cwd: &Path,
+        sandbox: &TestSandbox,
+    ) -> io::Result<LeaderStdioClient> {
         let binary = self
             .inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .binary
             .clone();
-        self.spawn_client_with_binary(&binary, server, cwd, sandbox)
+        self.spawn_client_with_binary_base_url(&binary, base_url, cwd, sandbox)
             .await
     }
 
@@ -277,6 +338,17 @@ impl LeaderFixture {
         &self,
         binary: &Path,
         server: &MockInferenceServer,
+        cwd: &Path,
+        sandbox: &TestSandbox,
+    ) -> io::Result<LeaderStdioClient> {
+        self.spawn_client_with_binary_base_url(binary, &server.url(), cwd, sandbox)
+            .await
+    }
+
+    async fn spawn_client_with_binary_base_url(
+        &self,
+        binary: &Path,
+        base_url: &str,
         cwd: &Path,
         sandbox: &TestSandbox,
     ) -> io::Result<LeaderStdioClient> {
@@ -289,7 +361,7 @@ impl LeaderFixture {
         let registration = FixtureClientRegistration::new(&self.inner);
         LeaderStdioClient::spawn_with_binary_and_socket(
             binary,
-            server,
+            base_url,
             cwd,
             sandbox,
             socket,
@@ -550,7 +622,7 @@ fn wait_std_child_bounded(
 impl LeaderStdioClient {
     async fn spawn_with_binary_and_socket(
         binary: &Path,
-        server: &MockInferenceServer,
+        base_url: &str,
         cwd: &Path,
         sandbox: &TestSandbox,
         leader_socket: PathBuf,
@@ -565,11 +637,11 @@ impl LeaderStdioClient {
                 .label("grok leader stdio client")
                 .stdin(TestStdin::Piped)
                 .stdout(TestOutput::Piped)
-                .env("GROK_CLI_CHAT_PROXY_BASE_URL", server.url())
-                .env("GROK_XAI_API_BASE_URL", server.url())
-                .env("GROK_MODELS_BASE_URL", server.url())
-                .env("GROK_FEEDBACK_BASE_URL", server.url())
-                .env("GROK_TRACE_UPLOAD_URL", server.url())
+                .env("GROK_CLI_CHAT_PROXY_BASE_URL", base_url)
+                .env("GROK_XAI_API_BASE_URL", base_url)
+                .env("GROK_MODELS_BASE_URL", base_url)
+                .env("GROK_FEEDBACK_BASE_URL", base_url)
+                .env("GROK_TRACE_UPLOAD_URL", base_url)
                 .env("XAI_API_KEY", "test-key-for-ci")
                 .env("GROK_LEADER_SOCKET", leader_socket)
                 .env("RUST_LOG", "xai_grok_shell=debug"),
@@ -752,6 +824,16 @@ impl LeaderStdioClient {
 
     pub fn notification_count(&self) -> u32 {
         self.capture.notification_count.load(Ordering::SeqCst)
+    }
+
+    /// Count of `x.ai/models/update` notifications received (catalog self-heal).
+    pub fn models_update_count(&self) -> u32 {
+        self.capture.models_update_count.load(Ordering::SeqCst)
+    }
+
+    /// Count of `x.ai/settings/update` notifications received (settings self-heal).
+    pub fn settings_update_count(&self) -> u32 {
+        self.capture.settings_update_count.load(Ordering::SeqCst)
     }
 }
 

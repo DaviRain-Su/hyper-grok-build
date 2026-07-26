@@ -502,6 +502,13 @@ struct SettingsUpdateNotification {
     tips: Option<Vec<String>>,
     slash_command_tags: Option<std::collections::BTreeMap<String, String>>,
     announcements: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
+    /// Remote campaigns snapshot for the client's process-global campaign
+    /// cache. `Some` whenever settings exist (empty means campaigns were
+    /// withdrawn); `None` when the agent has no settings yet, which clients
+    /// treat as "leave the cache alone". In leader mode this push is the only
+    /// seam that seeds the TUI process, so a `/model` pick can record a remote
+    /// campaign's dismissal even when the TUI's own startup prefetch missed.
+    campaigns: Option<Vec<crate::util::config::CampaignOverride>>,
     gate_message: Option<String>,
     gate_url: Option<String>,
     gate_label: Option<String>,
@@ -702,8 +709,17 @@ pub struct MvpAgent {
     /// external-auth users bypass the check). When `false`, the pager shows a
     /// gate CTA instead of the prompt.
     tier_allowed: std::cell::Cell<bool>,
-    /// Storage mode - determines whether to sync to backend (writeback) or local only
-    storage_mode: StorageMode,
+    /// The `user_id` the current `tier_allowed` verdict was resolved for.
+    /// `cfg.remote_settings` isn't reset on account switch, so a mismatch here
+    /// means "unknown" (provisional open), like `OtelGate::rearm_on_switch`.
+    allow_access_resolved_for: std::cell::RefCell<Option<String>>,
+    /// Writeback vs local. `Cell` so [`Self::reapply_storage_mode`] can
+    /// upgrade it when remote settings land; persistence reads the live value.
+    /// Authoritative post-construction — `Config.storage_mode` is only the
+    /// boot seed.
+    storage_mode: std::cell::Cell<StorageMode>,
+    /// External-OTEL emission gate; see [`crate::agent::otel_gate`].
+    otel_gate: crate::agent::otel_gate::OtelGate,
     /// Default YOLO mode - when true, sessions start with auto-approve enabled.
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
@@ -868,6 +884,13 @@ pub struct MvpAgent {
     /// once (on the first `spawn_and_register_session`). See
     /// `ensure_session_supervisor`.
     supervisor_started: std::cell::Cell<bool>,
+    /// Dedup guard for `spawn_settings_reapply`; at most one task in flight.
+    /// `Rc` so the drop-guard owns a clone without dereferencing the agent.
+    settings_reapply_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Separate dedup guard for `spawn_post_auth_settings`, so an in-flight
+    /// reapply can't coalesce away a freshly authenticated identity's gate and
+    /// settings resolution.
+    post_auth_settings_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
     /// Last value handed out by `next_announcements_gen` (single-threaded
     /// LocalSet, so a plain `Cell` suffices). LEADER-SAFE(shared): one
     /// agent-wide push stream.
@@ -903,18 +926,18 @@ pub struct MvpAgent {
     /// actually spawned. Asserts `ensure_session_supervisor` is idempotent.
     #[cfg(test)]
     supervisor_spawn_count: std::cell::Cell<usize>,
+    /// Test-only: counts `spawn_settings_reapply` tasks spawned past the
+    /// in-flight guard.
+    #[cfg(test)]
+    settings_reapply_spawn_count: std::cell::Cell<usize>,
+    /// Test-only: counts `spawn_post_auth_settings` tasks spawned past its
+    /// own guard.
+    #[cfg(test)]
+    post_auth_settings_spawn_count: std::cell::Cell<usize>,
 }
-/// Kick off background warmup of the async shared HTTP client.
-///
-/// Building a `reqwest::Client` is expensive (~95ms) because it loads TLS
-/// root certificates. This function spawns a thread to initialize both
-/// the shared client and a throwaway sampling client concurrently so
-/// that TLS roots are cached before the first session needs them.
-///
-/// Safe to call multiple times — the underlying `OnceLock` ensures only
-/// the first initialization does real work for `shared_client()`. The
-/// sampling client is discarded, but the TLS root certificates it loads
-/// are cached at the process level by `rustls-native-certs`.
+/// Spawn a thread to warm the shared async HTTP client (`OnceLock`-cached).
+/// Loading TLS root certs is ~95ms; doing it here avoids a cold-start hit
+/// on the first request. Idempotent.
 pub fn warm_async_http_client() {
     std::thread::spawn(|| {
         let _timer = crate::instrumentation_timer!("startup.async_http_warmup");
@@ -1769,15 +1792,27 @@ impl MvpAgent {
     /// Check whether the user has access via remote settings `allow_access`.
     ///
     /// Non-xAI auth (API keys, enterprise) always passes. For xAI OAuth2
-    /// users, reads `allow_access` from remote settings. Defaults to
-    /// `false` (blocked) when remote settings are unavailable.
+    /// users, reads `allow_access` from remote settings. When settings exist
+    /// but the field is absent/false, defaults to `false` (blocked); when
+    /// settings have not arrived yet (background fetch pending) the gate is
+    /// provisionally open and re-resolved on arrival.
     pub(super) async fn enforce_grok_code_access(&self, auth: &crate::auth::GrokAuth) {
         if !auth.is_xai_auth() {
             self.tier_allowed.set(true);
             return;
         }
+        let settings_for_this_identity = self.cfg.borrow().remote_settings.is_some()
+            && self.allow_access_resolved_for.borrow().as_deref()
+                == Some(auth.user_id.as_str());
+        if !settings_for_this_identity
+            && crate::util::config::resolve_remote_fetch_enabled()
+        {
+            self.tier_allowed.set(true);
+            return;
+        }
         let allow = settings_allow_access(self.cfg.borrow().remote_settings.as_ref());
         self.tier_allowed.set(allow);
+        *self.allow_access_resolved_for.borrow_mut() = Some(auth.user_id.clone());
         if !allow {
             tracing::info!(
                 "auth: user blocked by allow_access (remote settings grok_build_access_gate)"
@@ -1832,18 +1867,11 @@ impl MvpAgent {
                 }),
                 ),
             );
-            if let Some(settings) = unblocked.settings {
-                let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
-                {
-                    let mut cfg = self.cfg.borrow_mut();
-                    cfg.remote_settings = Some(settings);
-                    crate::agent::config::apply_remote_settings_side_effects(
-                        cfg.remote_settings.as_ref(),
-                    );
-                }
-                self.sync_collection_config_gate();
-                self.emit_announcements(AnnouncementsPushMode::IfChanged);
-                self.reconfigure_heap_profile_monitor();
+            let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
+            if let Some(auth) = self.auth_manager.current()
+                && let Some(settings) = self.fetch_settings_resolving_gate(&auth).await
+            {
+                self.install_remote_settings(settings);
                 if remote_was_absent {
                     self.spawn_auto_worktree_gc();
                 }
@@ -2029,43 +2057,17 @@ impl MvpAgent {
         if self.cfg.borrow().remote_settings.is_some() {
             return;
         }
+        if !crate::util::config::resolve_remote_fetch_enabled() {
+            return;
+        }
         let Some(auth) = self.auth_manager.current() else {
             return;
         };
-        let is_xai_auth = auth.is_xai_auth();
-        let Some(settings) = self.fetch_remote_settings(auth).await else {
+        let Some(settings) = self.fetch_settings_resolving_gate(&auth).await else {
             return;
         };
         tracing::info!("post-auth remote_settings fetch succeeded");
-        {
-            let mut cfg = self.cfg.borrow_mut();
-            cfg.remote_settings = Some(settings);
-            crate::agent::config::apply_remote_settings_side_effects(
-                cfg.remote_settings.as_ref(),
-            );
-            if cfg.storage_mode == StorageMode::Local
-                && cfg.mode != crate::agent::config::AgentMode::Generic
-            {
-                cfg.storage_mode = StorageMode::resolve(
-                    None,
-                    cfg.remote_settings.as_ref(),
-                );
-                if cfg.storage_mode == StorageMode::Writeback && !is_xai_auth {
-                    cfg.storage_mode = StorageMode::Local;
-                }
-            }
-            if let Some(v) = cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|s| s.path_not_found_hints)
-            {
-                cfg.path_not_found_hints = v;
-            }
-        }
-        self.sync_collection_config_gate();
-        self.emit_settings_update_notification();
-        self.emit_announcements(AnnouncementsPushMode::IfChanged);
-        self.reconfigure_heap_profile_monitor();
+        self.install_remote_settings(settings);
         self.spawn_auto_worktree_gc();
     }
     /// Resolve current auto-GC policy and run it on the blocking pool.
@@ -2095,6 +2097,7 @@ impl MvpAgent {
                 tips: rs.and_then(|s| s.tips.clone()),
                 slash_command_tags: rs.and_then(|s| s.slash_command_tags.clone()),
                 announcements: rs.and_then(|s| s.announcements.clone()),
+                campaigns: rs.map(|s| s.campaigns.clone()),
                 gate_message: rs.and_then(|s| s.gate_message.clone()),
                 gate_url: rs.and_then(|s| s.gate_url.clone()),
                 gate_label: rs.and_then(|s| s.gate_label.clone()),

@@ -237,6 +237,59 @@ pub fn load_effective_config_disk_only() -> std::io::Result<toml::Value> {
     Ok(ConfigLayers::load()?.effective_config_disk_only())
 }
 
+/// The effective `models.default` while an **active** campaign drives it, plus
+/// the pre-campaign base value it overrode.
+pub struct CampaignModelsDefault {
+    /// The campaign-nudged default model.
+    pub value: String,
+    /// The pre-campaign base `models.default` (`None` when the user had none).
+    pub pre_campaign: Option<String>,
+}
+
+/// Resolve [`CampaignModelsDefault`] fresh from the config layers, the remote
+/// campaign cache, and the on-disk dismiss state.
+///
+/// `None` unless an active (non-dismissed, kill-switch-respecting,
+/// requirements-losing) campaign changes the effective `models.default`.
+/// Session creation uses this to apply a campaign to `/new` even when remote
+/// settings arrived only after boot: the `ModelsManager`'s `current_model_id`
+/// was resolved pre-campaign, and a campaign-only flip deliberately never
+/// re-targets it (see `ModelsManager::apply_config`), so `/new` re-evaluates
+/// here instead.
+///
+/// Reading the dismiss state fresh makes a `/model` pick win instantly:
+/// [`persist_user_choice`] records the dismissal before the config write, so
+/// the very next `/new` resolves campaign-free.
+pub fn campaign_driven_models_default() -> Option<CampaignModelsDefault> {
+    let layers = ConfigLayers::load().ok()?;
+    campaign_driven_models_default_from(&layers, &cached_remote_campaigns(), &load_dismissed_ids())
+}
+
+/// Env-free resolution core of [`campaign_driven_models_default`] (unit-testable
+/// without touching `GROK_HOME` / the process-global cache).
+fn campaign_driven_models_default_from(
+    layers: &ConfigLayers,
+    remote: &[CampaignEntry],
+    dismissed: &HashSet<String>,
+) -> Option<CampaignModelsDefault> {
+    let base = layers.effective_config_base();
+    let active = resolve_active_campaigns_from_layers(layers, &base, remote, dismissed);
+    if active.is_empty() {
+        return None;
+    }
+    let mut effective = base.clone();
+    layers.apply_campaign_overrides(&mut effective, &active);
+    let base_value = read_path(&base, MODELS_DEFAULT_PATH);
+    let value = read_path(&effective, MODELS_DEFAULT_PATH);
+    if value == base_value {
+        return None;
+    }
+    Some(CampaignModelsDefault {
+        value: as_string(value)?,
+        pre_campaign: as_string(base_value),
+    })
+}
+
 /// Read the value at `path` from an effective-config tree.
 fn read_path(tree: &toml::Value, path: PatchPath) -> Option<toml::Value> {
     let mut cur = tree;
@@ -510,6 +563,48 @@ mod tests {
                 .iter()
                 .any(|c| c.id == "dismiss-during-kill-switch"),
             "kill switch must not hide a campaign from dismiss bookkeeping"
+        );
+    }
+
+    /// `campaign_driven_models_default_from` tracks remote entries and
+    /// dismissals: `Some` while the campaign is active, `None` the instant its
+    /// dismissal lands, so a `/new` right after a `/model` pick never re-nudges.
+    #[test]
+    #[serial]
+    fn campaign_driven_models_default_tracks_remote_and_dismissals() {
+        let _over = EnvGuard::unset("GROK_CAMPAIGNS_OVERRIDE");
+        let _kill = EnvGuard::unset("GROK_CAMPAIGNS");
+
+        let layers = ConfigLayers {
+            user: toml::from_str("[models]\ndefault = \"config-model\"\n").unwrap(),
+            ..Default::default()
+        };
+        let remote = vec![CampaignEntry {
+            id: "t-models-nudge".into(),
+            patch: models_default_patch("campaign-model"),
+        }];
+
+        let nudge = campaign_driven_models_default_from(&layers, &remote, &HashSet::new())
+            .expect("active campaign drives the default");
+        assert_eq!(nudge.value, "campaign-model");
+        assert_eq!(nudge.pre_campaign.as_deref(), Some("config-model"));
+
+        // A dismissal (what a `/model` pick records first) deactivates the
+        // nudge for the very next resolution.
+        let dismissed: HashSet<String> = ["t-models-nudge".to_string()].into_iter().collect();
+        assert!(
+            campaign_driven_models_default_from(&layers, &remote, &dismissed).is_none(),
+            "a dismissed campaign must not nudge"
+        );
+
+        // A campaign that loses to a requirements pin never reports
+        // campaign-driven.
+        let mut pinned = layers.clone();
+        pinned.user_requirements =
+            Some(toml::from_str("[models]\ndefault = \"config-model\"\n").unwrap());
+        assert!(
+            campaign_driven_models_default_from(&pinned, &remote, &HashSet::new()).is_none(),
+            "a requirements-pinned default must not report campaign-driven"
         );
     }
 

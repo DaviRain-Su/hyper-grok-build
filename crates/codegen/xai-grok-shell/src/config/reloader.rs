@@ -279,7 +279,7 @@ impl ConfigReloader {
         }
     }
 
-    fn reload_auth(&mut self) -> anyhow::Result<()> {
+    pub(crate) fn reload_auth(&mut self) -> anyhow::Result<()> {
         let auth_path = self.grok_home.join("auth.json");
         let store = read_auth_json(&auth_path)?;
 

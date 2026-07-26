@@ -129,7 +129,7 @@ async fn test_fetch_settings_blocking_round_trip() {
         let result = tokio::task::spawn_blocking({
             let url = server.url().to_string();
             let auth = auth.clone();
-            move || xai_grok_shell::remote::fetch_settings_blocking(&url, &auth, None)
+            move || xai_grok_shell::remote::fetch_settings_blocking(&url, &auth, None).into_option()
         })
         .await
         .unwrap();
@@ -146,7 +146,7 @@ async fn test_fetch_settings_blocking_round_trip() {
         let result = tokio::task::spawn_blocking({
             let url = server.url().to_string();
             let auth = auth.clone();
-            move || xai_grok_shell::remote::fetch_settings_blocking(&url, &auth, None)
+            move || xai_grok_shell::remote::fetch_settings_blocking(&url, &auth, None).into_option()
         })
         .await
         .unwrap();

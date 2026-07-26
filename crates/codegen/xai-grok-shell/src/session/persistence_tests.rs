@@ -32,6 +32,8 @@ fn test_actor_with_remote_sync(
             pending_notification: None,
             rx,
             remote_sync,
+            // Resumed-style actor for these tests; upgrade backfill is fresh-only.
+            created_fresh: false,
             relay_sync: None,
             summary: crate::session::summary::SummaryGenerator::new(
                 crate::session::summary::SummaryConfig {
@@ -62,6 +64,37 @@ fn notification(info: &Info, text: &str) -> acp::SessionNotification {
 
 fn neutral_update(info: &Info, text: &str) -> SessionUpdate {
     SessionUpdate::Acp(Box::new(notification(info, text)))
+}
+
+#[tokio::test]
+async fn writeback_backfill_is_fresh_only_and_acp_only() {
+    let info = Info {
+        id: acp::SessionId::new("wb-backfill"),
+        cwd: "/test".into(),
+    };
+
+    // Fresh session: every ACP update is queued to the writeback sync.
+    let (sync, mut observed) = RemoteSync::test_observer();
+    let updates = vec![neutral_update(&info, "a"), neutral_update(&info, "b")];
+    let n = backfill_updates_to_sync(true, updates, &sync);
+    assert_eq!(n, 2, "a fresh session backfills its full local ACP history");
+    for _ in 0..2 {
+        tokio::time::timeout(std::time::Duration::from_secs(1), observed.recv())
+            .await
+            .expect("backfilled notification not observed within 1s")
+            .expect("observer channel closed unexpectedly");
+    }
+
+    // Resumed session: nothing is backfilled (prior history may already be synced).
+    let (sync2, mut observed2) = RemoteSync::test_observer();
+    let n2 = backfill_updates_to_sync(false, vec![neutral_update(&info, "a")], &sync2);
+    assert_eq!(n2, 0, "a resumed session is forward-only, no backfill");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), observed2.recv())
+            .await
+            .is_err(),
+        "resumed session must not re-send any prior history",
+    );
 }
 
 fn break_summary_writes(dir: &std::path::Path) {

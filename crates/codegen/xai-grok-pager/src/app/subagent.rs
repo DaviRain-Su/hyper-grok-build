@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
+use xai_grok_shell::session::storage::{ReplayEmission, stream_replay_updates_at};
 /// Enriched subagent tracking info.
 ///
 /// Keyed by `child_session_id` in `AgentView::subagent_sessions`.
@@ -113,15 +114,24 @@ struct SubagentMetaSlice {
     #[serde(default)]
     worktree_path: Option<String>,
 }
+/// Grok home for the replay path. In production this is just `grok_home()`; the
+/// whole test override below is `#[cfg(test)]`, so no thread-local or dead
+/// always-false branch ships in release.
+#[cfg(not(test))]
+fn effective_grok_home() -> std::path::PathBuf {
+    xai_grok_shell::util::grok_home::grok_home()
+}
+#[cfg(test)]
 thread_local! {
     static REPLAY_GROK_HOME: std::cell::RefCell<Option<std::path::PathBuf>> =
         const { std::cell::RefCell::new(None) };
 }
-/// Override grok home for disk-replay unit tests (thread-local; production never sets this).
+/// Override grok home for disk-replay unit tests (thread-local).
 #[cfg(test)]
 pub(crate) fn set_replay_grok_home_for_tests(home: Option<std::path::PathBuf>) {
     REPLAY_GROK_HOME.with(|h| *h.borrow_mut() = home);
 }
+#[cfg(test)]
 fn effective_grok_home() -> std::path::PathBuf {
     if let Some(home) = REPLAY_GROK_HOME.with(|h| h.borrow().clone()) {
         return home;
@@ -167,39 +177,31 @@ fn enrich_from_meta_with_home(
     info.child_cwd = meta.child_cwd.map(Arc::from);
     info.worktree_path = meta.worktree_path.map(Arc::from);
 }
-/// Best-effort replay of inherited conversation for a child subagent.
-///
-/// Reads `updates.jsonl` from the child session directory via
-/// [`load_updates_for_replay`], then feeds ACP updates through the child's
-/// tracker with replay semantics. No-ops when the child session or file is
-/// missing (typical for a live spawn before the shell has persisted updates).
+/// Best-effort replay of a child's inherited conversation, streamed one typed
+/// update at a time so a large inherited transcript is not materialized as a
+/// full `Vec` of typed structs (peak stays near the file size rather than
+/// several multiples of it). No-ops when the child session or file is missing.
 pub(crate) fn replay_inherited_updates(
     child_view: &mut crate::app::agent_view::AgentView,
     child_session_id: &str,
 ) {
     let home = effective_grok_home();
-    let updates = match xai_grok_shell::session::storage::load_updates_for_replay_at(
-        child_session_id,
-        &home,
-    ) {
-        Ok(Some(u)) => u,
-        Ok(None) => return,
-        Err(e) => {
-            tracing::debug!(session_id = %child_session_id, error = %e, "failed to load updates for replay");
-            return;
-        }
-    };
     let replay_meta = crate::acp::meta::NotificationMeta {
         is_replay: true,
         ..Default::default()
     };
-    let replayed_any = !updates.is_empty();
-    for update in updates {
+    let outcome = match stream_replay_updates_at(child_session_id, &home, |update| {
         child_view
             .session
             .handle_update(update, &replay_meta, &mut child_view.scrollback);
-    }
-    if replayed_any {
+    }) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tracing::warn!(session_id = %child_session_id, error = %e, "failed to read updates for replay");
+            return;
+        }
+    };
+    if outcome == ReplayEmission::Emitted {
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
 }

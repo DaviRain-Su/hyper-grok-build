@@ -21,6 +21,7 @@
 //! - [`grok_binary`] — Resolve the grok binary path (GROK_BINARY env or cargo_bin)
 //! - [`spawn_counting_server`] — Connection-counting HTTP/1.1 server for wire/pooling tests
 //! - [`uds_proxy::UdsProxy`] — Frame-aware fault-injection proxy for leader IPC sockets (unix)
+//! - [`ResourceSnapshot`] — RSS/threads/fds sampling for soak tests
 /// Multiply a harness timeout by `GROK_TEST_TIMEOUT_SCALE` (positive integer,
 /// default 1). CI lanes on shared runner pools raise it so pool load slows
 /// tests instead of failing them (see the Grok Build merge CI workflow).
@@ -41,6 +42,7 @@ mod inference_override;
 pub mod leader;
 pub mod mock_server;
 pub mod process;
+pub mod resources;
 pub mod sandbox;
 pub mod scripted;
 pub mod sse;
@@ -67,4 +69,5 @@ pub use process::{
     TestOutput, TestOutputSnapshot, TestProcess, TestProcessConfig, TestProcessState,
     TestProcessStderr, TestProcessStdout, TestProcessTermination, TestProcessTree, TestStdin,
 };
+pub use resources::{ResourceGrowth, ResourceSnapshot};
 pub use sandbox::{TestSandbox, TestSandboxBuilder};

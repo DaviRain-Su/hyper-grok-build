@@ -124,6 +124,14 @@ const PERMANENT_FAILURE_TTL: StdDuration = StdDuration::from_secs(300);
 /// `attempted_verdict_key`, when a verdict is stored), never co-held. Never hold
 /// a `parking_lot` guard across `.await`. Refreshers return [`RefreshOutcome`]
 /// for `refresh_chain` to apply.
+/// Redacted `Debug` so `AuthManager` (held via `Arc` inside `Debug`-derived
+/// types like `PersistenceMsg`) never leaks credentials into logs or panics.
+impl std::fmt::Debug for AuthManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthManager").finish_non_exhaustive()
+    }
+}
+
 pub struct AuthManager {
     /// In-memory bearer. Mutate via [`Self::with_inner_write`] or
     /// [`Self::refresh_chain`]; the closure helpers' sync return type

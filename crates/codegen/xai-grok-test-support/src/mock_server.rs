@@ -267,6 +267,9 @@ pub struct MockInferenceServer {
     chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
     /// Mock `/v1/storage` 401 gate + accepted-upload record.
     storage: Arc<StorageState>,
+    /// When set, `/v1/models` and `/v1/settings` hang forever (never
+    /// respond); see [`Self::set_hang`].
+    hang: Arc<std::sync::atomic::AtomicBool>,
     /// See [`Self::set_user_subscription_tier`].
     user_tier: Arc<std::sync::RwLock<Option<String>>>,
 }
@@ -306,6 +309,7 @@ impl MockInferenceServer {
         let messages_stop_reason = Arc::new(std::sync::RwLock::new("end_turn".to_string()));
         let chunk_delay = Arc::new(std::sync::RwLock::new(None::<Duration>));
         let storage = Arc::new(StorageState::default());
+        let hang = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let user_tier = Arc::new(std::sync::RwLock::new(None::<String>));
         let app = Self::build_router(
             log.clone(),
@@ -317,6 +321,7 @@ impl MockInferenceServer {
             messages_stop_reason.clone(),
             chunk_delay.clone(),
             storage.clone(),
+            hang.clone(),
             user_tier.clone(),
         );
 
@@ -356,6 +361,7 @@ impl MockInferenceServer {
             messages_stop_reason,
             chunk_delay,
             storage,
+            hang,
             user_tier,
         })
     }
@@ -424,6 +430,12 @@ impl MockInferenceServer {
     /// `false` and would sit on the upsell screen).
     pub fn preset_allow_access(&self) {
         self.set_settings(json!({ "allow_access": true }));
+    }
+
+    /// Make `/v1/models` and `/v1/settings` hang forever, standing in for a
+    /// black-holed backend in non-blocking-startup tests.
+    pub fn set_hang(&self, hang: bool) {
+        self.hang.store(hang, std::sync::atomic::Ordering::Release);
     }
 
     /// Set the `subscriptionTier` served by `GET /v1/user`. `None`
@@ -663,8 +675,11 @@ impl MockInferenceServer {
         messages_stop_reason: Arc<std::sync::RwLock<String>>,
         chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
         storage: Arc<StorageState>,
+        hang: Arc<std::sync::atomic::AtomicBool>,
         user_tier: Arc<std::sync::RwLock<Option<String>>>,
     ) -> Router {
+        let hang_models = hang.clone();
+        let hang_settings = hang;
         let log_cc = log.clone();
         let log_rs = log.clone();
         let log_msg = log.clone();
@@ -920,8 +935,12 @@ impl MockInferenceServer {
                     move || {
                         let log = log.clone();
                         let models = models.clone();
+                        let hang = hang_models.clone();
                         async move {
                             log.record("GET", "/v1/models", None, None, Vec::new());
+                            if hang.load(std::sync::atomic::Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_secs(3600)).await;
+                            }
                             let models_json = models.read().unwrap().clone();
                             Json(json!({
                                 "object": "list",
@@ -935,12 +954,18 @@ impl MockInferenceServer {
                 "/v1/settings",
                 get({
                     let log = log.clone();
+                    let settings = settings.clone();
+                    let hang = hang_settings.clone();
                     move || {
                         let log = log.clone();
                         let settings = settings.clone();
                         let overrides = overrides_settings.clone();
+                        let hang = hang.clone();
                         async move {
                             log.record("GET", "/v1/settings", None, None, Vec::new());
+                            if hang.load(std::sync::atomic::Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_secs(3600)).await;
+                            }
                             // Scripted one-shots take precedence (FIFO), so a
                             // test can serve a transient payload (e.g. one
                             // stale gated snapshot) and fall back to the

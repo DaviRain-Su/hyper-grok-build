@@ -79,7 +79,7 @@ impl AgentView {
     /// the shell-read file body), then falls back to the on-disk plan file.
     /// Request body first keeps file-backed previews working when the path
     /// resolution fails or the file disappears between intercept and open.
-    fn plan_body_for_preview(&self) -> Option<String> {
+    pub(super) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
             .as_ref()

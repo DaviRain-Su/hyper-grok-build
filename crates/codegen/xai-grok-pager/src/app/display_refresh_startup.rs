@@ -123,6 +123,8 @@ fn spawn_terminal_and_display_refresh_telemetry(tel: StartupTel) {
             terminal.tmux_version = %t.tmux_version,
             terminal.term_var = %t.term_var,
             terminal.xtversion = %t.xtversion,
+            terminal.term_version = %t.term_version,
+            terminal.term_version_source = %t.term_version_source,
         )
         .entered();
         tracing::info!("terminal environment detected");

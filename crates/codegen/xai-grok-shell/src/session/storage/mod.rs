@@ -1309,81 +1309,119 @@ pub(crate) struct RawChunkMetaPeek {
     pub host_turn: Option<bool>,
 }
 
-/// Filter rewind dead branches from raw JSONL lines.
-/// Skips parsing entirely when no rewind markers are present.
-///
-/// This is the canonical implementation of rewind dead-branch filtering,
-/// used by both the initial replay and delta replay paths.
-pub(crate) fn filter_rewind_lines<'a>(lines: Vec<&'a str>) -> Vec<&'a str> {
-    let has_rewinds = lines.iter().any(|l| l.contains(&*REWIND_MARKER));
-    if !has_rewinds {
-        return lines;
-    }
+/// Role of one item in the rewind timeline, as seen by [`filter_rewind_by`].
+enum RewindStep {
+    /// Rewind marker: truncate survivors back to `target`'s prompt boundary.
+    Rewind { target: usize },
+    /// User-message chunk opening (or continuing) a prompt run.
+    UserChunk { prompt_index: Option<usize> },
+    /// Anything else: kept, but ends the current user run.
+    Other,
+}
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len());
+/// Shared rewind dead-branch filter. `classify` maps each item to its
+/// [`RewindStep`]; the driver tracks prompt boundaries and, on a marker,
+/// truncates survivors back to the target prompt. [`filter_rewind_lines`] and
+/// [`filter_rewind_updates`] wrap this over raw JSONL and typed updates so the
+/// two paths share one algorithm.
+fn filter_rewind_by<T>(items: Vec<T>, classify: impl Fn(&T) -> RewindStep) -> Vec<T> {
+    let mut result: Vec<T> = Vec::with_capacity(items.len());
     let mut prompt_starts: Vec<usize> = Vec::new();
     let mut tracker = UserRunTurnTracker::new();
 
-    for line in &lines {
-        let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
-            let raw = env.params.map(|p| p.get()).unwrap_or(line);
-            let xai = env.method == Some(XAI_SESSION_UPDATE_METHOD);
-            (raw, xai)
-        } else {
-            (*line, false)
-        };
-
-        let peek = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
-            .ok()
-            .and_then(|p| p.update);
-        let tag = peek
-            .as_ref()
-            .map(|u| (u.session_update, u.target_prompt_index));
-
-        if is_xai
-            && let Some((s, Some(target))) = tag.as_ref().map(|(s, t)| (*s, *t))
-            && s == *REWIND_MARKER
-        {
-            let trunc = prompt_starts.get(target).copied().unwrap_or(result.len());
-            result.truncate(trunc);
-            prompt_starts.truncate(target);
-            tracker.on_non_user();
-            continue;
-        }
-
-        let is_host_turn = peek
-            .as_ref()
-            .and_then(|u| u.meta.as_ref())
-            .and_then(|m| m.host_turn)
-            .unwrap_or(false);
-        let is_user_chunk = !is_xai
-            && !is_host_turn
-            && tag
-                .as_ref()
-                .map(|(s, _)| *s == *USER_MESSAGE_CHUNK)
-                .unwrap_or(false);
-        if is_user_chunk {
-            let pi = peek.as_ref().and_then(|u| {
-                u.meta
-                    .as_ref()
-                    .and_then(|m| m.prompt_index.map(|v| v as usize))
-            });
-            if tracker.on_user_chunk(pi) {
-                prompt_starts.push(result.len());
+    for item in items {
+        match classify(&item) {
+            RewindStep::Rewind { target } => {
+                // Out-of-range target keeps every survivor: fold to `result.len()`.
+                let trunc = prompt_starts.get(target).copied().unwrap_or(result.len());
+                result.truncate(trunc);
+                prompt_starts.truncate(target);
+                tracker.on_non_user();
+                continue;
             }
-        } else {
-            tracker.on_non_user();
+            RewindStep::UserChunk { prompt_index } => {
+                if tracker.on_user_chunk(prompt_index) {
+                    prompt_starts.push(result.len());
+                }
+            }
+            RewindStep::Other => tracker.on_non_user(),
         }
-        result.push(line);
+        result.push(item);
     }
     result
 }
 
+/// Classify a raw JSONL line by peeking at its tag and `_meta` without fully
+/// deserializing the payload.
+fn rewind_step_for_line(line: &str) -> RewindStep {
+    let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line) {
+        let raw = env.params.map(|p| p.get()).unwrap_or(line);
+        (raw, env.method == Some(XAI_SESSION_UPDATE_METHOD))
+    } else {
+        (line, false)
+    };
+
+    let Some(u) = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
+        .ok()
+        .and_then(|p| p.update)
+    else {
+        return RewindStep::Other;
+    };
+
+    if is_xai
+        && u.session_update == *REWIND_MARKER
+        && let Some(target) = u.target_prompt_index
+    {
+        return RewindStep::Rewind { target };
+    }
+
+    let is_host_turn = u.meta.as_ref().and_then(|m| m.host_turn).unwrap_or(false);
+    if !is_xai && !is_host_turn && u.session_update == *USER_MESSAGE_CHUNK {
+        let prompt_index = u
+            .meta
+            .as_ref()
+            .and_then(|m| m.prompt_index.map(|v| v as usize));
+        return RewindStep::UserChunk { prompt_index };
+    }
+
+    RewindStep::Other
+}
+
+/// Classify a typed `SessionUpdate`.
+fn rewind_step_for_update(update: &SessionUpdate) -> RewindStep {
+    if let SessionUpdate::Xai(n) = update
+        && let crate::extensions::notification::SessionUpdate::RewindMarker {
+            target_prompt_index,
+            ..
+        } = &n.update
+    {
+        return RewindStep::Rewind {
+            target: *target_prompt_index,
+        };
+    }
+    if is_acp_user_message_chunk(update) && !is_host_turn_update(update) {
+        return RewindStep::UserChunk {
+            prompt_index: acp_user_chunk_prompt_index(update),
+        };
+    }
+    RewindStep::Other
+}
+
+/// Filter rewind dead branches from raw JSONL lines.
+///
+/// Canonical raw-line rewind filter used by the initial and delta replay paths.
+/// Skips parsing entirely when no rewind markers are present.
+pub(crate) fn filter_rewind_lines(lines: Vec<&str>) -> Vec<&str> {
+    if !lines.iter().any(|l| l.contains(&*REWIND_MARKER)) {
+        return lines;
+    }
+    filter_rewind_by(lines, |line| rewind_step_for_line(line))
+}
+
 /// Filter rewind dead branches from typed `SessionUpdate` values.
 ///
-/// This is the typed equivalent of [`filter_rewind_lines`] — same algorithm
-/// (prompt-boundary tracking + truncation on `RewindMarker`) but operates on
-/// fully-deserialized updates instead of raw JSON strings.
+/// Typed equivalent of [`filter_rewind_lines`] over the same
+/// [`filter_rewind_by`] driver, operating on fully-deserialized updates.
 pub fn filter_rewind_updates(updates: Vec<SessionUpdate>) -> Vec<SessionUpdate> {
     let has_rewinds = updates.iter().any(|u| {
         matches!(
@@ -1397,39 +1435,7 @@ pub fn filter_rewind_updates(updates: Vec<SessionUpdate>) -> Vec<SessionUpdate> 
     if !has_rewinds {
         return updates;
     }
-
-    let mut result: Vec<SessionUpdate> = Vec::with_capacity(updates.len());
-    let mut prompt_starts: Vec<usize> = Vec::new();
-    let mut tracker = UserRunTurnTracker::new();
-
-    for update in updates {
-        // Check for rewind marker — truncate back to the target prompt.
-        if let SessionUpdate::Xai(ref n) = update
-            && let crate::extensions::notification::SessionUpdate::RewindMarker {
-                target_prompt_index,
-                ..
-            } = &n.update
-        {
-            let trunc = prompt_starts
-                .get(*target_prompt_index)
-                .copied()
-                .unwrap_or(result.len());
-            result.truncate(trunc);
-            prompt_starts.truncate(*target_prompt_index);
-            tracker.on_non_user();
-            continue;
-        }
-
-        if is_acp_user_message_chunk(&update) && !is_host_turn_update(&update) {
-            if tracker.on_user_chunk(acp_user_chunk_prompt_index(&update)) {
-                prompt_starts.push(result.len());
-            }
-        } else {
-            tracker.on_non_user();
-        }
-        result.push(update);
-    }
-    result
+    filter_rewind_by(updates, rewind_step_for_update)
 }
 
 /// Strip `<fork-context>` and `<resume-context>` XML wrappers from user
@@ -1458,21 +1464,14 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
     acp::SessionUpdate::UserMessageChunk(chunk)
 }
 
-/// Load session updates from disk, ready for replay or export.
-///
-/// This is the canonical way to get replay-ready typed updates from a session
-/// ID. It:
-/// 1. Locates the session directory via [`find_session_dir_by_id`]
-/// 2. Opens `updates.jsonl` via [`UpdatesIterator`]
-/// 3. Collects all parseable updates (skipping malformed lines)
-/// 4. Filters rewind dead branches via [`filter_rewind_updates`]
-/// 5. Strips `<fork-context>` / `<resume-context>` wrappers from user messages
-///    via [`strip_context_wrappers`]
-///
-/// Returns `None` if the session is not found or has no `updates.jsonl`.
-/// Returns only `SessionUpdate::Acp` updates (xAI-extension updates like
-/// rewind markers and compaction signals are consumed by the filter and not
-/// included in the output).
+// Replay-loader family, all resolving through `replay_updates_path_in_dir` and
+// reading through `for_each_replay_update_in_file`. Pick by need:
+//   - production, current grok home:   `load_updates_for_replay`
+//   - production, streaming (bounded): `stream_replay_updates_at`
+//   - tests, explicit grok home:       `load_updates_for_replay_at` (typed reference)
+
+/// Load replay-ready typed ACP updates for a session, or `None` when the
+/// session or its `updates.jsonl` is missing.
 pub fn load_updates_for_replay(
     session_id: &str,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
@@ -1481,14 +1480,53 @@ pub fn load_updates_for_replay(
     else {
         return Ok(None);
     };
-    load_updates_for_replay_from_dir(&session_dir)
+    let Some(updates_path) = replay_updates_path_in_dir(&session_dir) else {
+        return Ok(None);
+    };
+    Ok(Some(collect_replay_updates(&updates_path)?))
 }
 
-/// Like [`load_updates_for_replay`], but resolves the session under a specific grok home.
+/// Like [`load_updates_for_replay`], but resolves the session under a specific
+/// grok home. Typed, materialize-all replay reader: collects every update into
+/// owned `Vec`s. Production forwards replay through [`stream_replay_updates_at`]
+/// to bound peak memory, so this has no production caller and is compiled only
+/// for tests: the `testkit_synth_roundtrip` and `session_load_perf` parity
+/// references and the in-crate relocation tests.
+#[cfg(any(test, feature = "test-support"))]
 pub fn load_updates_for_replay_at(
     session_id: &str,
     grok_home: &std::path::Path,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
+    let Some(updates_path) = resolve_replay_updates_path(session_id, grok_home)? else {
+        return Ok(None);
+    };
+    Ok(Some(collect_replay_updates(&updates_path)?))
+}
+
+/// The session dir's `updates.jsonl` path if it exists, else `None`. Sole owner
+/// of the "does this dir have a replayable updates file" gate.
+fn replay_updates_path_in_dir(session_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let updates_path = session_dir.join(UPDATES_FILE);
+    updates_path.exists().then_some(updates_path)
+}
+
+/// Collect every replay-ready ACP update from `updates_path` into a `Vec`, the
+/// materializing counterpart of the streaming [`for_each_replay_update_in_file`].
+fn collect_replay_updates(
+    updates_path: &std::path::Path,
+) -> std::io::Result<Vec<acp::SessionUpdate>> {
+    let mut acp_updates: Vec<acp::SessionUpdate> = Vec::new();
+    for_each_replay_update_in_file(updates_path, |u| acp_updates.push(u))?;
+    Ok(acp_updates)
+}
+
+/// Resolve `updates.jsonl` for `session_id` under `grok_home`, or `None` when
+/// the session directory or the file is missing. Shared by the typed
+/// `load_updates_for_replay_at` and the streaming [`stream_replay_updates_at`].
+fn resolve_replay_updates_path(
+    session_id: &str,
+    grok_home: &std::path::Path,
+) -> std::io::Result<Option<std::path::PathBuf>> {
     let sessions_root = grok_home.join("sessions");
     let Some(session_dir) =
         crate::session::persistence::find_persisted_session_dir_by_id_in_root_result(
@@ -1498,45 +1536,103 @@ pub fn load_updates_for_replay_at(
     else {
         return Ok(None);
     };
-    load_updates_for_replay_from_dir(&session_dir)
+    Ok(replay_updates_path_in_dir(&session_dir))
 }
 
-fn load_updates_for_replay_from_dir(
-    session_dir: &std::path::Path,
-) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let updates_path = session_dir.join(UPDATES_FILE);
-    let Some(iter) = UpdatesIterator::open(&updates_path)? else {
-        return Ok(None);
+/// Whether a replay stream forwarded any update. Gates the caller's
+/// post-replay memory purge: `Empty` means nothing was reclaimable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum ReplayEmission {
+    Emitted,
+    Empty,
+}
+
+/// Invoke `f` once per replay-ready ACP update for a session under `grok_home`,
+/// never building the full typed `Vec`. Reads the session's JSONL transcript
+/// directly; a non-JSONL backend would need its own bounded replay.
+///
+/// Forking or resuming replays the inherited transcript. The typed load parsed
+/// the whole file and copied it several times, so a large session briefly held
+/// several times its size in live heap and a per-user memory cgroup OOM-killed
+/// it. Streaming holds one typed update at a time, so peak drops to about the
+/// file size.
+///
+/// `Empty` folds the missing-session, missing-file, and no-ACP-updates cases;
+/// the typed `load_updates_for_replay_at` keeps them distinct (`Ok(None)` vs
+/// `Ok(Some(vec![]))`) since it returns the parsed contents rather than a purge
+/// signal.
+///
+/// The sink is infallible by design: replay only rehydrates UI scrollback, a
+/// best-effort step, so failing to apply one update must neither abort the
+/// stream nor surface an error. I/O errors from reading the file still
+/// propagate via the `Result`.
+pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
+    session_id: &str,
+    grok_home: &std::path::Path,
+    f: F,
+) -> std::io::Result<ReplayEmission> {
+    let Some(updates_path) = resolve_replay_updates_path(session_id, grok_home)? else {
+        return Ok(ReplayEmission::Empty);
     };
-
-    let all: Vec<SessionUpdate> = iter.filter_map(|r| r.ok()).collect();
-    let filtered = filter_rewind_updates(all);
-
-    let acp_updates: Vec<acp::SessionUpdate> = filtered
-        .into_iter()
-        .filter_map(|u| match u {
-            SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
-            SessionUpdate::Xai(_) => None,
-        })
-        .collect();
-
-    Ok(Some(acp_updates))
+    Ok(if for_each_replay_update_in_file(&updates_path, f)? {
+        ReplayEmission::Emitted
+    } else {
+        ReplayEmission::Empty
+    })
 }
 
-pub(crate) struct PreparedReplay<'a> {
+// Rewind can drop earlier lines, so surviving lines are held until the end of
+// the file; one `String` plus `&str` slices keeps that minimal. Output matches
+// the typed load. Returns whether any ACP update was forwarded.
+fn for_each_replay_update_in_file<F: FnMut(acp::SessionUpdate)>(
+    updates_path: &std::path::Path,
+    mut f: F,
+) -> std::io::Result<bool> {
+    // Whole-file read is bounded by file size; only the forwarding is streamed.
+    let raw_contents = std::fs::read_to_string(updates_path)?;
+    let live: Vec<&str> = filter_rewind_lines(
+        raw_contents
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect(),
+    );
+    let mut forwarded = false;
+    for line in live {
+        match SessionUpdateEnvelope::from_str(line) {
+            // Only ACP updates replay.
+            Ok(SessionUpdate::Acp(notif)) => {
+                forwarded = true;
+                f(strip_context_wrappers(notif.update));
+            }
+            // Xai extensions (rewind markers, compaction signals) are consumed
+            // by the filter and intentionally dropped (matching the typed load).
+            Ok(SessionUpdate::Xai(_)) => {}
+            // Best-effort: an unparseable line (e.g. a partially written trailing
+            // line) is skipped rather than aborting replay; the typed load drops
+            // it too. Logged for diagnostics.
+            Err(e) => tracing::debug!(error = %e, "skipping unparseable replay line"),
+        }
+    }
+    Ok(forwarded)
+}
+
+#[doc(hidden)]
+pub struct PreparedReplay<'a> {
+    /// Rewind-filtered replay lines, each borrowed from the input transcript.
     pub lines: Vec<&'a str>,
-    pub mark_replay: bool,
-    pub last_tokens: u64,
+    pub(crate) mark_replay: bool,
+    pub(crate) last_tokens: u64,
     /// Highest `eventId` counter across all live (rewind-filtered) lines, used
     /// to re-seed the process-global event counter on resume so post-load live
     /// events keep monotonically increasing ids (see
     /// [`crate::util::event_id::ensure_event_counter_at_least`]). `None` when no
     /// line carried a parseable `eventId` (older shell).
-    pub max_event_seq: Option<u64>,
-    pub total_live: usize,
-    /// Replayed spawns with no matching finish (a rewind can drop the finish) —
+    pub(crate) max_event_seq: Option<u64>,
+    pub(crate) total_live: usize,
+    /// Replayed spawns with no matching finish (a rewind can drop the finish):
     /// `(subagent_id, child_session_id)`, reconciled on load.
-    pub unfinished_subagents: Vec<(String, String)>,
+    pub(crate) unfinished_subagents: Vec<(String, String)>,
 }
 
 /// Unpaired spawns across the rewind-filtered timeline. Substring pre-filter
@@ -1660,23 +1756,18 @@ fn line_has_event_id(line: &str, cursor_id: &str) -> bool {
     line_event_id(line).as_deref() == Some(cursor_id)
 }
 
-/// Rewind-filter, resolve the reconnect cursor, drop redundant command catalogs,
-/// and scan `totalTokens`. Pure data processing — no gateway, no async.
+/// Rewind-filter, resolve the reconnect cursor, drop redundant command
+/// catalogs, and scan `totalTokens`. Pure data processing, no I/O.
 ///
-/// The cursor is resolved BEFORE dropping ACUs: ACUs carry `_meta.eventId` and the
-/// post-load re-advertise is usually the *last* persisted event, so an idle client
-/// commonly reconnects with an ACU's eventId as its cursor. Resolving against the
-/// ACU-inclusive set keeps incremental reconnect cheap instead of a full replay.
-pub(crate) fn prepare_replay_lines<'a>(
-    raw_contents: &'a str,
-    cursor: Option<&str>,
-) -> PreparedReplay<'a> {
-    let filtered = filter_rewind_lines(
-        raw_contents
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect(),
-    );
+/// The cursor is resolved before dropping ACUs, because an idle client often
+/// reconnects with an ACU's `eventId` as its cursor; resolving against the
+/// ACU-inclusive set keeps reconnect incremental instead of a full replay.
+///
+/// `#[doc(hidden)] pub` (not stable API): production replay uses it, and the
+/// session-load memory test drives it to check the peek stays zero-copy.
+#[doc(hidden)]
+pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> PreparedReplay<'a> {
+    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
 
     // Highest `eventId` counter across all live (rewind-filtered) lines, used to
     // re-seed the process-global event counter on resume so post-load live events
@@ -2993,6 +3084,178 @@ mod tests {
         assert!(result[0].contains("p1"));
         assert!(result[1].contains("r1"));
         assert!(result[2].contains("final"));
+    }
+
+    /// The raw-line filter and the typed filter must truncate an identical
+    /// rewind timeline to the same surviving updates, in the same order.
+    #[test]
+    fn filter_rewind_lines_and_updates_agree() {
+        let u1 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p1"}}"#,
+        );
+        let a1 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r1"}}"#,
+        );
+        let u2 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p2"}}"#,
+        );
+        let a2 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r2"}}"#,
+        );
+        let rw1 = xai_envelope(
+            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":2,"created_at":"2024-01-01"}"#,
+        );
+        let u3 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p3"}}"#,
+        );
+        let a3 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r3"}}"#,
+        );
+        let rw2 = xai_envelope(
+            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
+        );
+        let u4 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"final"}}"#,
+        );
+
+        let lines = vec![
+            u1.as_str(),
+            a1.as_str(),
+            u2.as_str(),
+            a2.as_str(),
+            rw1.as_str(),
+            u3.as_str(),
+            a3.as_str(),
+            rw2.as_str(),
+            u4.as_str(),
+        ];
+
+        let ser = |u: &SessionUpdate| serde_json::to_string(u).unwrap();
+        let via_lines: Vec<String> = filter_rewind_lines(lines.clone())
+            .iter()
+            .map(|l| ser(&SessionUpdateEnvelope::from_str(l).unwrap()))
+            .collect();
+        let typed: Vec<SessionUpdate> = lines
+            .iter()
+            .map(|l| SessionUpdateEnvelope::from_str(l).unwrap())
+            .collect();
+        let via_updates: Vec<String> = filter_rewind_updates(typed).iter().map(ser).collect();
+
+        assert_eq!(via_lines, via_updates);
+    }
+
+    /// An out-of-range rewind target folds to `result.len()` (the
+    /// `unwrap_or(result.len())` branch in `filter_rewind_by`), so truncation is
+    /// a no-op and every survivor is kept.
+    #[test]
+    fn filter_rewind_out_of_range_target_keeps_all() {
+        let u1 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p1"}}"#,
+        );
+        let a1 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r1"}}"#,
+        );
+        // Only prompt index 0 exists; target 5 is out of range.
+        let rw = xai_envelope(
+            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":5,"created_at":"2024-01-01"}"#,
+        );
+        let u2 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p2"}}"#,
+        );
+
+        let lines = vec![u1.as_str(), a1.as_str(), rw.as_str(), u2.as_str()];
+        let result = filter_rewind_lines(lines);
+
+        // Marker is dropped; the three ACP survivors remain in order.
+        assert_eq!(result.len(), 3);
+        assert!(result[0].contains("p1"));
+        assert!(result[1].contains("r1"));
+        assert!(result[2].contains("p2"));
+    }
+
+    /// A session with no `updates.jsonl` streams nothing, so the emission gate
+    /// reports `Empty` and forwards no updates.
+    #[test]
+    fn stream_replay_updates_at_missing_session_is_empty() {
+        let grok_home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(grok_home.path().join("sessions")).unwrap();
+
+        let mut count = 0usize;
+        let emission =
+            stream_replay_updates_at("does-not-exist", grok_home.path(), |_| count += 1).unwrap();
+
+        assert_eq!(emission, ReplayEmission::Empty);
+        assert_eq!(count, 0);
+    }
+
+    /// A resolvable session whose `updates.jsonl` cannot be read surfaces the
+    /// error rather than folding to `Empty`, so the caller logs a real fault
+    /// instead of mistaking it for an absent transcript. (The path is a
+    /// directory, which `read_to_string` rejects.)
+    #[test]
+    fn stream_replay_updates_at_surfaces_read_errors() {
+        let grok_home = tempfile::tempdir().unwrap();
+        let session_dir = grok_home.path().join("sessions").join("cwd").join("sess");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join(SUMMARY_FILE), "{}").unwrap();
+        std::fs::create_dir(session_dir.join(UPDATES_FILE)).unwrap();
+
+        let result = stream_replay_updates_at("sess", grok_home.path(), |_| {});
+        assert!(
+            result.is_err(),
+            "read fault must surface, not fold to Empty: {result:?}"
+        );
+    }
+
+    /// End-to-end: the streaming core (`for_each_replay_update_in_file`, what
+    /// `stream_replay_updates_at` wraps) applies rewind over a real file and
+    /// yields the same survivors as the typed parse-all path.
+    #[test]
+    fn streaming_replay_applies_rewind_like_the_typed_path() {
+        let u1 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p1"}}"#,
+        );
+        let a1 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"r1"}}"#,
+        );
+        let u2 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p2"}}"#,
+        );
+        // Rewind to prompt 1 drops p2.
+        let rw = xai_envelope(
+            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
+        );
+        let u3 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"final"}}"#,
+        );
+        let raw = format!("{u1}\n{a1}\n{u2}\n{rw}\n{u3}\n");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UPDATES_FILE);
+        std::fs::write(&path, &raw).unwrap();
+
+        let mut streamed = Vec::new();
+        let forwarded = for_each_replay_update_in_file(&path, |u| streamed.push(u)).unwrap();
+        assert!(forwarded);
+
+        // Typed reference: parse all, rewind-filter, map ACP survivors.
+        let typed: Vec<SessionUpdate> = raw
+            .lines()
+            .map(|l| SessionUpdateEnvelope::from_str(l).unwrap())
+            .collect();
+        let reference: Vec<acp::SessionUpdate> = filter_rewind_updates(typed)
+            .into_iter()
+            .filter_map(|u| match u {
+                SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
+                SessionUpdate::Xai(_) => None,
+            })
+            .collect();
+
+        let ser = |u: &acp::SessionUpdate| serde_json::to_string(u).unwrap();
+        assert_eq!(
+            streamed.iter().map(ser).collect::<Vec<_>>(),
+            reference.iter().map(ser).collect::<Vec<_>>(),
+        );
     }
 
     // ── prepare_replay_lines tests ───────────────────────────────────────────

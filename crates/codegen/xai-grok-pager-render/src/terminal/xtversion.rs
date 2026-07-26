@@ -193,6 +193,10 @@ mod tests {
                 !gate_allows_probe(&ctx(brand, MultiplexerKind::Tmux)),
                 "{brand:?} under tmux should be skipped"
             );
+            assert!(
+                !gate_allows_probe(&ctx(brand, MultiplexerKind::Herdr)),
+                "{brand:?} under herdr should be skipped"
+            );
         }
         // JediTerm renders the query as garbage and must never be probed.
         assert!(!gate_allows_probe(&ctx(

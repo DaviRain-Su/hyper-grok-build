@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
 
@@ -305,16 +306,55 @@ fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Test-only, path-scoped write fault: `write_auth_json_atomic` fails with
+/// `Unsupported` for exactly this `auth.json` path. Path-scoped so parallel
+/// tests in the same process do not sabotage each other.
+#[cfg(test)]
+pub(super) static WRITE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 /// Atomic write: tmp + rename. Unix `rename(2)` replaces atomically;
 /// Windows `rename` requires removing the target first.
 fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
-    let tmp = auth_file.with_extension(format!("json.{}.tmp", std::process::id()));
+    #[cfg(test)]
+    if WRITE_FAULT_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        == Some(auth_file)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "injected write fault (WRITE_FAULT_PATH)",
+        ));
+    }
+    // Unique per write (pid + monotonic seq): two concurrent in-process writers
+    // (e.g. background mint + proactive refresher) must not share one tmp path.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = auth_file.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    // Reclaim the temp file on any early return (write/sync/rename failure); the
+    // unique name otherwise accumulates one orphan per failed write.
+    struct TmpReclaim<'a>(Option<&'a Path>);
+    impl Drop for TmpReclaim<'_> {
+        fn drop(&mut self) {
+            if let Some(p) = self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let mut tmp_reclaim = TmpReclaim(Some(&tmp));
+
     write_store_to(&tmp, auth_store)?;
     #[cfg(windows)]
     {
         let _ = std::fs::remove_file(auth_file);
     }
     std::fs::rename(&tmp, auth_file)?;
+    tmp_reclaim.0 = None; // renamed into place; nothing to reclaim
     // Re-assert on the final path (covers rename edge cases / FS quirks).
     // Best-effort: rename already published the new tokens.
     if let Err(e) = crate::util::secure_file::ensure_owner_only_permissions(auth_file) {
@@ -1291,6 +1331,31 @@ mod write_fallback_tests {
         let path = dir.path().join("auth.json");
         write_auth_json(&path, &sample_store()).unwrap();
         assert_eq!(read_key(&path).as_deref(), Some("secret-key"));
+    }
+
+    /// On a failed atomic write, the `TmpReclaim` guard must remove the temp
+    /// file so no orphan accumulates. Here `auth.json` is a directory, so the
+    /// `rename` fails after the temp file is written.
+    #[test]
+    fn atomic_write_reclaims_tmp_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(
+            write_auth_json_atomic(&path, &sample_store()).is_err(),
+            "rename onto a directory must fail"
+        );
+
+        let orphans: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "TmpReclaim must remove the temp file on failure: {orphans:?}"
+        );
     }
 
     /// A fallback write that truncates then fails must roll back to the prior

@@ -54,6 +54,19 @@ impl AgentView {
         }
     }
 
+    pub(super) fn copy_plan_full(&mut self) -> InputOutcome {
+        let text = self
+            .line_viewer
+            .as_ref()
+            .and_then(|v| v.markdown_content_for_feedback())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.plan_body_for_preview());
+        if let Some(text) = text {
+            self.copy_to_clipboard(&text);
+        }
+        InputOutcome::Changed
+    }
+
     /// Handle a key event while the line viewer is open.
     pub(super) fn handle_line_viewer_key(&mut self, key: &KeyEvent) -> InputOutcome {
         let in_plan_approval = self.plan_approval_view.is_some();
@@ -185,8 +198,10 @@ impl AgentView {
             self.confirm_line_viewer(false);
             return InputOutcome::Changed;
         }
-        // y: copy selected line(s) to system clipboard.
         if key!('y').matches(key) {
+            if self.is_plan_viewer() {
+                return self.copy_plan_full();
+            }
             if let Some(ref viewer) = self.line_viewer {
                 let text = if viewer.list_state.visual_mode {
                     if let Some(ref range) = viewer.list_state.multi_range() {
@@ -219,8 +234,10 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        // Y: copy filename to clipboard.
         if key!('Y').matches(key) {
+            if self.is_plan_viewer() {
+                return InputOutcome::Changed;
+            }
             if let Some(ref viewer) = self.line_viewer {
                 let name = viewer
                     .title_override
@@ -392,6 +409,7 @@ impl AgentView {
         let abandon_area = viewer.plan_ref().and_then(|p| p.abandon_button_area);
         let approve_area = viewer.plan_ref().and_then(|p| p.approve_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
+        let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
         // the line_viewer is mutably borrowed below.
         let is_plan_preview =
@@ -439,6 +457,9 @@ impl AgentView {
                     // explicit and to match the abandon/approve hit
                     // patterns just above.
                     return InputOutcome::Changed;
+                }
+                if copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    return self.copy_plan_full();
                 }
                 if send_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
@@ -526,6 +547,13 @@ impl AgentView {
                 let prev_comment_btn = viewer.plan_ref().is_some_and(|p| p.comment_hovered);
                 if comment_btn_hover != prev_comment_btn {
                     viewer.plan_mut().comment_hovered = comment_btn_hover;
+                    changed = true;
+                }
+                let copy_btn_hover =
+                    copy_btn_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_copy_btn = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
+                if copy_btn_hover != prev_copy_btn {
+                    viewer.plan_mut().copy_hovered = copy_btn_hover;
                     changed = true;
                 }
                 if self.plan_approval_view.is_some()

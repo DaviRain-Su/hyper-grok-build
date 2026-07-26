@@ -1,6 +1,9 @@
 //! `/gboom` easter egg: a tiny single-level raycaster shooter rendered in
 //! the terminal via the kitty graphics protocol.
 //!
+//! Not production code — this is for fun and is not maintained to the
+//! standards in `crates/codegen/AGENTS.md`.
+//!
 //! Typing `/gboom` (and nothing else) opens a modal overlay — the same
 //! surface the imagine-video player uses — and streams PNG frames via
 //! per-frame kitty `a=T` retransmission at the ~30 fps animation tick. The

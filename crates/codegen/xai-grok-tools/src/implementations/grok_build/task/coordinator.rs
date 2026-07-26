@@ -20,9 +20,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, InternalEvent,
-    ListRequest, MAX_COMPLETED_ENTRIES, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture,
-    TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
-    completed_snapshot, completion_summary, sleep_until, workflow_outstanding,
+    ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
+    active_summary, background_at_deadline, background_if_caller_gone, completed_snapshot,
+    completion_summary, sleep_until, workflow_outstanding,
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome,
@@ -32,8 +32,8 @@ use super::types::{
 
 pub use super::coordinator_state::{
     ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
-    CompletionDisposition, CoordinatorConfig, LocalBoxFuture, SendBoxFuture, StartedChild,
-    SubagentProgress,
+    CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES, SendBoxFuture,
+    StartedChild, SubagentProgress,
 };
 
 /// Channel-owned subagent lifecycle actor.

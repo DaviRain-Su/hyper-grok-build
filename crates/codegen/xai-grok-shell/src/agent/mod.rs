@@ -13,6 +13,7 @@ pub mod model_providers;
 pub mod models;
 pub mod mvp_agent;
 pub(crate) mod platform_models_fetch;
+pub(crate) mod otel_gate;
 pub(crate) mod proxy;
 pub mod relay;
 pub(crate) mod restore_code;

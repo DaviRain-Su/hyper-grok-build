@@ -15,12 +15,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 - **Subagent model-pin activation** — Saving a model pin in `/agents` now performs an acknowledged shell reload before releasing the modal, so fresh subagent spawns use the new model immediately even after a long-running session; resumed agents still retain their original model.
 - **Claude OAuth safety** — Require an exact OAuth `state` match before callback success or token exchange, use Anthropic’s registered callback for the bundled client, reject unsupported loopback redirects, and serialize rotating refresh tokens across processes.
 - **Provider and policy regressions** — Preserve Nexus custom gateway URLs end-to-end, trusted managed-config signature controls, fail-closed settings-only startup prefetch, tolerant MCP parsing, and Unix file-descriptor limit raising.
+- **Provider credential fallback** — When a BYOK or platform OAuth credential is cleared or expires, a newly locked provider model can no longer remain the active sampling model; the session falls back to an available default before the catalog update is published.
 - **Pager registry coverage** — Reserve the new provider/scoped-model commands and aliases, complete translations across all supported locales, and refresh deterministic usage snapshots.
 
 ### Changed
-- **Upstream sync** — Sync the community build with upstream `main` at `SOURCE_REV` `d02693a856a54f1030695b36b91d276e96b30b23`.
+- **Upstream sync** — Sync the community build with upstream `main` at `SOURCE_REV` `91d8cf309110a3b879c1b8198f7525aed545dfb4`, including instant UI startup with background model/settings fetch, bounded session-load and fork-replay memory, subagent lifecycle resource bounds, full-plan copy with `y`, terminal-version telemetry, and managed-policy hardening.
 
 ### Notes
+- `v0.2.113` was republished after this upstream sync; replace any earlier archive and checksum file together because the rebuilt assets have different digests.
 - Wire version remains lockstep with Hyper crate versions (`0.2.113`).
 
 ### Install

@@ -552,24 +552,60 @@ impl BackendClient {
         Ok(())
     }
 }
-/// Fetch remote settings from cli-chat-proxy `GET /v1/settings`.
-///
-/// This is a blocking call intended for use in the early prefetch thread
-/// (`std::thread::spawn`, no tokio runtime). Returns `None` on any error
-/// so startup is never blocked by a settings fetch failure.
-///
-/// Retries up to 2 times (3 attempts total) on transient errors (5xx,
-/// network). 4xx and parse errors are not retried.
+/// Outcome of a blocking settings fetch. Distinguishes the three cases the
+/// external-OTEL gate cares about (see [`crate::agent::mvp_agent`]).
+#[derive(Debug)]
+#[must_use]
+#[non_exhaustive]
+pub enum SettingsFetch {
+    /// Settings fetched and parsed; carries the policy that resolves the gate.
+    /// Boxed because `RemoteSettings` is large and the other variants are unit-sized.
+    Fetched(Box<crate::util::config::RemoteSettings>),
+    /// Credential unambiguously rejected (401): the remote policy will never reach
+    /// this leader, so the gate may open without waiting.
+    Rejected,
+    /// Transient/ambiguous (network, 5xx exhausted, 403/429/other 4xx, unparseable
+    /// 2xx): outcome unknown. Leave the gate closed (fail-closed), retry later.
+    Retry,
+}
+impl SettingsFetch {
+    /// For callers that only want the settings and treat every failure alike.
+    pub fn into_option(self) -> Option<crate::util::config::RemoteSettings> {
+        match self {
+            SettingsFetch::Fetched(s) => Some(*s),
+            SettingsFetch::Rejected | SettingsFetch::Retry => None,
+        }
+    }
+}
+/// Blocking settings fetch; makes up to
+/// [`crate::http::SETTINGS_FETCH_MAX_ATTEMPTS`] attempts on transient failures.
 pub fn fetch_settings_blocking(
     cli_chat_proxy_base_url: &str,
     auth: &GrokAuth,
     alpha_test_key: Option<&str>,
-) -> Option<crate::util::config::RemoteSettings> {
-    let client = crate::http::shared_blocking_client();
-    let url = format!("{}/settings", cli_chat_proxy_base_url);
-    for attempt in 0u64..3 {
+) -> SettingsFetch {
+    fetch_settings_blocking_with_attempts(
+        cli_chat_proxy_base_url,
+        auth,
+        alpha_test_key,
+        crate::http::SETTINGS_FETCH_MAX_ATTEMPTS,
+    )
+}
+/// Settings-fetch core with a caller-chosen attempt budget. Private so the
+/// attempt count stays out of the public API; tests use it to skip retry
+/// backoff on the transient-failure paths.
+fn fetch_settings_blocking_with_attempts(
+    cli_chat_proxy_base_url: &str,
+    auth: &GrokAuth,
+    alpha_test_key: Option<&str>,
+    max_attempts: u32,
+) -> SettingsFetch {
+    let client = crate::http::shared_startup_blocking_client();
+    let url = format!("{cli_chat_proxy_base_url}/settings");
+    let max_attempts = max_attempts.max(1);
+    for attempt in 0u32..max_attempts {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
+            std::thread::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)));
         }
         let request =
             add_cli_chat_proxy_headers_blocking(client.get(&url), auth, alpha_test_key, &url);
@@ -577,11 +613,11 @@ pub fn fetch_settings_blocking(
             Ok(resp) if resp.status().is_success() => match resp.json() {
                 Ok(settings) => {
                     tracing::debug!("Fetched remote settings from cli-chat-proxy");
-                    return Some(settings);
+                    return SettingsFetch::Fetched(Box::new(settings));
                 }
                 Err(e) => {
                     tracing::warn!(attempt, "Failed to parse settings response: {e}");
-                    return None;
+                    return SettingsFetch::Retry;
                 }
             },
             Ok(resp) if resp.status().is_server_error() => {
@@ -592,9 +628,19 @@ pub fn fetch_settings_blocking(
                 );
                 continue;
             }
+            Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                tracing::warn!(
+                    status = resp.status().as_u16(),
+                    "Settings fetch rejected (401)"
+                );
+                return SettingsFetch::Rejected;
+            }
             Ok(resp) => {
-                tracing::warn!(status = resp.status().as_u16(), "Failed to fetch settings");
-                return None;
+                tracing::warn!(
+                    status = resp.status().as_u16(),
+                    "Settings fetch failed (non-2xx)"
+                );
+                return SettingsFetch::Retry;
             }
             Err(e) => {
                 tracing::warn!(attempt, "Settings fetch network error: {e}");
@@ -602,8 +648,8 @@ pub fn fetch_settings_blocking(
             }
         }
     }
-    tracing::error!("Settings fetch failed after 3 attempts");
-    None
+    tracing::error!(max_attempts, "Settings fetch failed");
+    SettingsFetch::Retry
 }
 #[derive(Deserialize)]
 struct LoginConfigResponse {
@@ -720,7 +766,7 @@ pub(crate) fn fetch_models_blocking(
     auth: Option<&GrokAuth>,
     fetch_auth: crate::agent::models::ModelFetchAuth,
 ) -> Result<FetchModelsResult, BackendError> {
-    let client = crate::http::shared_blocking_client();
+    let client = crate::http::shared_startup_blocking_client();
     let source = ListModelsEndpoint::from_endpoints(endpoints, fetch_auth);
     let inference_base_url = endpoints.resolve_inference_base_url();
     tracing::info!("Fetching models from {}", source.url);
@@ -1176,6 +1222,54 @@ mod tests {
         assert_eq!(h.authorization, None, "must not send Authorization");
         assert_eq!(h.user_id, None, "must not send x-userid");
         assert_eq!(h.email, None, "must not send x-email");
+    }
+    /// Mock cli-chat-proxy serving `GET /settings` with a fixed status + body.
+    async fn start_settings_server(
+        status: StatusCode,
+        body: String,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let app = Router::new().route(
+            "/settings",
+            get(move || {
+                let body = body.clone();
+                async move { (status, body) }
+            }),
+        );
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, handle)
+    }
+    /// `fetch_settings_blocking` maps each HTTP outcome to the [`SettingsFetch`]
+    /// variant the external-OTEL gate relies on; 401 is the only outcome that
+    /// yields `Rejected`, everything else non-2xx fails closed as `Retry`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settings_fetch_maps_status_to_outcome() {
+        let auth = GrokAuth::test_default();
+        let cases: [(StatusCode, &str, &str); 6] = [
+            (StatusCode::OK, "{}", "Fetched"),
+            (StatusCode::UNAUTHORIZED, "{}", "Rejected"),
+            (StatusCode::FORBIDDEN, "{}", "Retry"),
+            (StatusCode::TOO_MANY_REQUESTS, "{}", "Retry"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "{}", "Retry"),
+            (StatusCode::OK, "not json", "Retry"),
+        ];
+        for (status, body, expected) in cases {
+            let (base, server) = start_settings_server(status, body.to_string()).await;
+            let a = auth.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                fetch_settings_blocking_with_attempts(&base, &a, None, 1)
+            })
+            .await
+            .unwrap();
+            server.abort();
+            let got = match outcome {
+                SettingsFetch::Fetched(_) => "Fetched",
+                SettingsFetch::Rejected => "Rejected",
+                SettingsFetch::Retry => "Retry",
+            };
+            assert_eq!(got, expected, "status {status}, body {body:?}");
+        }
     }
     #[derive(Debug, Default, Clone)]
     struct SeenHeaders {

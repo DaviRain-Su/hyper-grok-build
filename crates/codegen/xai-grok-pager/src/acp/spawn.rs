@@ -190,8 +190,13 @@ pub async fn spawn_grok_shell(
     // re-login). No-op where the OS listener is unavailable.
     auth_manager.start_system_power_listener();
 
+    // Both embedded-agent paths (`--no-leader` and leader fallback) converge
+    // here, so the agent's external-OTEL gate is applied exactly once, before boot.
+    xai_grok_shell::agent::app::apply_otel_config(&auth_manager, &agent_config.grok_com_config);
+
     // Best-effort refresh of managed policy before bootstrap reads it (repairs a wrong-identity/missing
-    // cache). Never errors — the OS-protected system/MDM layers still apply.
+    // cache). Never errors — the OS-protected system/MDM layers still apply, and every network step
+    // inside is bounded (SESSION_START_AUTH_DEADLINE / SyncBudget::SessionStart).
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 
     // Run the full bootstrap sequence: config resolution, process-level
@@ -202,6 +207,9 @@ pub async fn spawn_grok_shell(
     models_manager
         .list_models(RefreshStrategy::OnlineIfUncached)
         .await;
+    // Self-heal a cold-cache/failed boot fetch once the backend recovers,
+    // matching the leader and stdio paths.
+    models_manager.spawn_background_refresh();
 
     let agent_cancel = cancel.child_token();
     let (acp_client, acp_agent) = acp_channels();

@@ -220,6 +220,9 @@ async fn run_external_auth_provider(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // TODO: `kill_on_drop` SIGKILLs only the direct `sh` child; a provider that
+    // backgrounds work (setsid / `&`) leaks the grandchild on shutdown-cancel.
+    // Proper fix: pgid-kill via xai-tty-utils.
 
     // TUI: pipe stderr and forward via callback — inherit would corrupt the
     // alternate screen. CLI / headless: inherit so URLs and progress appear in
@@ -675,12 +678,23 @@ async fn run_auth_flow_inner(
 ///
 /// Returns `None` when no valid credentials can be obtained non-interactively.
 pub async fn try_ensure_fresh_auth(grok_com_config: &GrokComConfig) -> Option<GrokAuth> {
-    let grok_home = grok_home::grok_home();
-    let auth_manager = std::sync::Arc::new(AuthManager::new(&grok_home, grok_com_config.clone()));
+    try_ensure_fresh_auth_with(&build_startup_auth_manager(grok_com_config)).await
+}
 
-    // auth() handles cached-valid (fast path), OIDC refresh, external
-    // binary -- all through refresh_chain (single mutation point).
+/// Builds and configures the startup `AuthManager`; the policy helpers below
+/// take it injected so tests can substitute their own.
+fn build_startup_auth_manager(grok_com_config: &GrokComConfig) -> Arc<AuthManager> {
+    let auth_manager = Arc::new(AuthManager::new(
+        &grok_home::grok_home(),
+        grok_com_config.clone(),
+    ));
+    // auth()'s OIDC/external refresh needs the refresher configured first.
     auth_manager.configure_refresher(grok_com_config.auth_provider_command.clone(), None);
+    auth_manager
+}
+
+/// Policy: cached-valid creds, else silent refresh (no interactive login).
+async fn try_ensure_fresh_auth_with(auth_manager: &Arc<AuthManager>) -> Option<GrokAuth> {
     match auth_manager.auth().await {
         Ok(auth) => Some(auth),
         Err(e) => {
@@ -690,24 +704,37 @@ pub async fn try_ensure_fresh_auth(grok_com_config: &GrokComConfig) -> Option<Gr
     }
 }
 
-/// Like `try_ensure_fresh_auth` but also mints on cold start (external provider /
-/// devbox, never a browser; may take up to ~300s). For detached modes only.
-pub(crate) async fn try_ensure_session_noninteractive(
+/// Readiness-path auth: a bounded refresh plus the expired-but-refreshable
+/// cached session, but no cold mint (which can run a provider command up to
+/// `STARTUP_AUTH_TIMEOUT`). Minting is deferred to the post-readiness
+/// background task, so readiness waits at most `STARTUP_AUTH_REFRESH_TIMEOUT`.
+pub(crate) async fn try_noninteractive_auth_no_mint(
     grok_com_config: &GrokComConfig,
 ) -> Option<GrokAuth> {
-    if let Some(auth) = try_ensure_fresh_auth(grok_com_config).await {
-        return Some(auth);
-    }
-    let grok_home = grok_home::grok_home();
-    let auth_manager = Arc::new(AuthManager::new(&grok_home, grok_com_config.clone()));
+    try_noninteractive_auth_no_mint_with(&build_startup_auth_manager(grok_com_config)).await
+}
 
-    // Transient refresh failure: credentials remain (usable on 401 recovery).
-    // Permanent failure already discarded them.
-    if let Some(expired) = expired_refreshable_session(&auth_manager) {
-        return Some(expired);
+/// Policy behind [`try_noninteractive_auth_no_mint`], with the `AuthManager`
+/// injected for tests.
+async fn try_noninteractive_auth_no_mint_with(auth_manager: &Arc<AuthManager>) -> Option<GrokAuth> {
+    match tokio::time::timeout(
+        crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+        try_ensure_fresh_auth_with(auth_manager),
+    )
+    .await
+    {
+        Ok(Some(auth)) => return Some(auth),
+        Ok(None) => {}
+        Err(_elapsed) => {
+            tracing::warn!(
+                timeout_secs = crate::http::STARTUP_AUTH_REFRESH_TIMEOUT.as_secs(),
+                "boot auth refresh timed out; using cached/expired session (mint deferred to background)"
+            );
+        }
     }
-
-    mint_session_noninteractive(&auth_manager, grok_com_config).await
+    // Expired-but-refreshable cached session self-heals on the first 401; no
+    // cold mint on the readiness path.
+    expired_refreshable_session(auth_manager)
 }
 
 /// A cached, refreshable session (not BYOK/ApiKey). Reached only after fresh
@@ -719,11 +746,14 @@ fn expired_refreshable_session(auth_manager: &AuthManager) -> Option<GrokAuth> {
 }
 
 /// Cold-start mint via non-interactive providers (external command, devbox);
-/// `None` when none is available.
-async fn mint_session_noninteractive(
+/// `None` when none is available. Persists the result into `auth_manager` (disk
+/// and in-memory) so per-request `auth()` self-heals. Carries no timeout of its
+/// own: the readiness-path caller imposes `STARTUP_AUTH_TIMEOUT`, while the
+/// leader's background re-mint runs uncapped (only the provider's ~300s ceiling).
+pub(crate) async fn mint_session_noninteractive(
     auth_manager: &Arc<AuthManager>,
-    grok_com_config: &GrokComConfig,
 ) -> Option<GrokAuth> {
+    let grok_com_config = auth_manager.grok_com_config();
     // preferred_method=api_key: never auto-mint OIDC (fail-closed).
     if grok_com_config.blocks_automatic_oidc() {
         tracing::debug!(
@@ -1279,7 +1309,7 @@ mod tests {
             AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url(&dead_proxy_url()),
         );
 
-        let auth = mint_session_noninteractive(&mgr, &cfg).await;
+        let auth = mint_session_noninteractive(&mgr).await;
         assert_eq!(auth.map(|a| a.key), Some("xai-ext-token".to_string()));
     }
 
@@ -2090,5 +2120,77 @@ mod tests {
             !auth_path.exists(),
             "wrong-team auth.json must be cleared, forcing a compliant re-login"
         );
+    }
+
+    /// Mock OIDC IdP whose `/token` endpoint never responds, so a refresh
+    /// attempt hangs until the caller bounds it.
+    async fn start_hanging_oidc_idp() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let b = base.clone();
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || {
+                    let b = b.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "authorization_endpoint": format!("{b}/authorize"),
+                            "token_endpoint": format!("{b}/token"),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    // Never responds: the caller must bound the refresh.
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    axum::Json(serde_json::json!({}))
+                }),
+            );
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, handle)
+    }
+
+    /// The readiness-path `_no_mint` variant bounds the refresh (~5s) and never
+    /// engages the cold-mint fallback, so leader readiness can't block on a
+    /// provider command up to the 60s `STARTUP_AUTH_TIMEOUT` cap.
+    #[tokio::test]
+    async fn no_mint_readiness_auth_is_bounded() {
+        let (idp_base, server) = start_hanging_oidc_idp().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = GrokComConfig::default();
+        let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
+        am.configure_refresher(cfg.auth_provider_command.clone(), None);
+        am.hot_swap(GrokAuth {
+            key: "expired".into(),
+            auth_mode: AuthMode::Oidc,
+            oidc_issuer: Some(idp_base.clone()),
+            oidc_client_id: Some("test-client".into()),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..GrokAuth::test_default()
+        });
+
+        let started = std::time::Instant::now();
+        let result = try_noninteractive_auth_no_mint_with(&am).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+            "expected a bounded refresh attempt (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < crate::http::STARTUP_AUTH_TIMEOUT,
+            "no-mint readiness auth must not engage the 60s cold-mint cap              (elapsed {elapsed:?}); readiness would block on a provider command"
+        );
+        assert!(
+            result.is_none(),
+            "a non-xAI expired session is no first-party fallback and no mint              runs on this path, so no auth is produced"
+        );
+
+        server.abort();
     }
 }

@@ -137,6 +137,8 @@ pub(super) static ALLOWED_STRING_KEYS: &[&str] = &[
     "terminal.multiplexer",
     "terminal.tmux_version",
     "terminal.term_var",
+    "terminal.term_version",
+    "terminal.term_version_source",
     "skip_reason",
     "auto_cadence_reason",
 ];
@@ -491,6 +493,8 @@ mod tests {
             "terminal.multiplexer",
             "terminal.tmux_version",
             "terminal.term_var",
+            "terminal.term_version",
+            "terminal.term_version_source",
             "skip_reason",
             "auto_cadence_reason",
         ];

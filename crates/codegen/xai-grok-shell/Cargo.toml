@@ -8,7 +8,11 @@ edition.workspace = true
 default = []
 unstable = []
 dhat-heap = ["dep:dhat"]
-default-bazel = []
+# Session synthesis + in-process e2e harness (`session::testkit`) for soak,
+# load, and bench tests. Off by default; the tests/benches that use it declare
+# it via `required-features`.
+test-support = []
+default-bazel = ["test-support"]
 
 [dependencies]
 dunce = { workspace = true }
@@ -223,6 +227,24 @@ harness = false
 [[bench]]
 name = "fork_copy"
 harness = false
+required-features = ["test-support"]
+
+# Consume `session::testkit`, so they need the gate (on by default under Bazel).
+[[test]]
+name = "test_session_load_memory"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_fork_replay_memory"
+required-features = ["test-support"]
+
+[[test]]
+name = "session_load_perf"
+required-features = ["test-support"]
+
+[[test]]
+name = "testkit_synth_roundtrip"
+required-features = ["test-support"]
 
 [lints]
 workspace = true

@@ -159,7 +159,7 @@ fn fetch_one_platform_models(
     if platform == PlatformId::Nexus {
         return fetch_nexus_models(bearer);
     }
-    let client = crate::http::shared_blocking_client();
+    let client = crate::http::shared_startup_blocking_client();
     let url = platform.models_list_url();
     tracing::info!(platform = platform.as_str(), %url, "fetching platform models");
     let mut request = client
@@ -276,7 +276,7 @@ fn fetch_nexus_models(bearer: &str) -> Result<Vec<ModelEntryConfig>, PlatformMod
 
 /// `GET {base}/models` with Bearer auth; parse the wire listing.
 fn fetch_nexus_endpoint(bearer: &str, base: &str) -> Result<Vec<WireModel>, PlatformModelsError> {
-    let client = crate::http::shared_blocking_client();
+    let client = crate::http::shared_startup_blocking_client();
     let url = format!("{}/models", base.trim_end_matches('/'));
     tracing::info!(%url, "fetching nexus models");
     let response = client
