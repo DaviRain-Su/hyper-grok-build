@@ -50,6 +50,39 @@ async fn subagent_model_reload_effect_round_trips_ack_without_debounce() {
     ));
 }
 
+#[tokio::test]
+async fn set_platform_api_key_effect_forwards_optional_base_url() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+
+    execute(
+        Effect::SetPlatformApiKey {
+            platform: "nexus".to_string(),
+            api_key: "sk-test".to_string(),
+            base_url: Some("https://gw.example".to_string()),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+
+    let message = rx.recv().await.expect("set-platform request must be sent");
+    let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = message else {
+        panic!("expected set-platform ext_method request");
+    };
+    assert_eq!(
+        args.request.method.as_ref(),
+        "x.ai/internal/set_platform_api_key"
+    );
+    let params: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+    assert_eq!(params["platform"], "nexus");
+    assert_eq!(params["apiKey"], "sk-test");
+    assert_eq!(params["baseUrl"], "https://gw.example");
+}
+
 #[test]
 fn subagent_model_reload_requires_positive_shell_acknowledgement() {
     assert!(

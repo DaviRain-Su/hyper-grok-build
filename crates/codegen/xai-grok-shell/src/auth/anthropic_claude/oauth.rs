@@ -23,9 +23,10 @@ use crate::auth::model::{AuthMode, GrokAuth};
 const CLIENT_ID_DEFAULT: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL_DEFAULT: &str = "https://claude.ai/oauth/authorize";
 const TOKEN_URL_DEFAULT: &str = "https://console.anthropic.com/v1/oauth/token";
-/// Loopback redirect the browser flow listens on. Port differs from Codex's
-/// 1455 so both logins can run without colliding.
-const REDIRECT_URI_DEFAULT: &str = "http://localhost:1456/callback";
+/// Redirect registered for the bundled Claude Code client. It returns a
+/// provider-hosted manual `code#state` page; loopback may be used only when
+/// `GROK_ANTHROPIC_CLAUDE_REDIRECT_URI` points at a client registered for it.
+const REDIRECT_URI_DEFAULT: &str = "https://console.anthropic.com/oauth/code/callback";
 pub(crate) const BROWSER_CALLBACK_PORT: u16 = 1456;
 pub(crate) const BROWSER_CALLBACK_PATH: &str = "/callback";
 const SCOPE_DEFAULT: &str = "org:create_api_key user:profile user:inference";
@@ -57,6 +58,32 @@ fn token_url() -> String {
 pub(crate) fn redirect_uri() -> String {
     env_or("GROK_ANTHROPIC_CLAUDE_REDIRECT_URI", REDIRECT_URI_DEFAULT)
 }
+
+pub(crate) fn validate_loopback_redirect_uri() -> anyhow::Result<bool> {
+    let redirect = redirect_uri();
+    let url = url::Url::parse(&redirect)
+        .map_err(|e| anyhow::anyhow!("invalid Anthropic Claude redirect URI: {e}"))?;
+    let is_loopback = matches!(
+        url.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    );
+    if !is_loopback {
+        return Ok(false);
+    }
+    let port = url.port_or_known_default();
+    if url.scheme() != "http"
+        || !matches!(url.host_str(), Some("localhost") | Some("127.0.0.1"))
+        || port != Some(BROWSER_CALLBACK_PORT)
+        || url.path() != BROWSER_CALLBACK_PATH
+    {
+        anyhow::bail!(
+            "unsupported Anthropic Claude loopback redirect URI '{redirect}'; \
+             supported loopback redirect is http://localhost:{BROWSER_CALLBACK_PORT}{BROWSER_CALLBACK_PATH}"
+        );
+    }
+    Ok(true)
+}
+
 fn scope() -> String {
     env_or("GROK_ANTHROPIC_CLAUDE_SCOPE", SCOPE_DEFAULT)
 }
@@ -223,8 +250,9 @@ pub(crate) fn credentials_from_token(
 
 /// Parse the pasted/loopback authorization input into `(code, state)`.
 ///
-/// Accepts the Claude Code `code#state` fragment shape, a full redirect URL
-/// with `?code=&state=`, or a bare code (state falls back to the flow state).
+/// Accepts the Claude Code `code#state` fragment shape or a full redirect URL
+/// with `?code=&state=`. The state must be present and must match the generated
+/// flow state; missing/mismatched state is rejected rather than substituted.
 pub(crate) fn parse_authorization_input(input: &str, flow_state: &str) -> Option<(String, String)> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -242,24 +270,28 @@ pub(crate) fn parse_authorization_input(input: &str, flow_state: &str) -> Option
                     _ => {}
                 }
             }
-            if let Some(code) = code {
-                return Some((code, state.unwrap_or_else(|| flow_state.to_owned())));
+            if let (Some(code), Some(state)) = (code, state)
+                && !code.is_empty()
+                && state == flow_state
+            {
+                return Some((code, state));
             }
+            return None;
         }
     }
     // `code#state` fragment shape.
     if let Some((code, state)) = trimmed.split_once('#') {
-        if !code.is_empty() {
+        if !code.is_empty() && state == flow_state {
             return Some((code.to_owned(), state.to_owned()));
         }
     }
-    // Bare code.
-    Some((trimmed.to_owned(), flow_state.to_owned()))
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xai_grok_test_support::EnvGuard;
 
     #[test]
     fn authorize_url_carries_pkce_and_state() {
@@ -272,23 +304,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_input_accepts_fragment_url_and_bare() {
+    fn parse_input_accepts_fragment_and_url_only_with_matching_state() {
         assert_eq!(
-            parse_authorization_input("abc#xyz", "flow"),
-            Some(("abc".into(), "xyz".into()))
+            parse_authorization_input("abc#flow", "flow"),
+            Some(("abc".into(), "flow".into()))
         );
         assert_eq!(
             parse_authorization_input(
-                "https://console.anthropic.com/oauth/code/callback?code=abc&state=xyz",
+                "https://console.anthropic.com/oauth/code/callback?code=abc&state=flow",
                 "flow"
             ),
-            Some(("abc".into(), "xyz".into()))
+            Some(("abc".into(), "flow".into()))
         );
+        assert_eq!(parse_authorization_input("abc#wrong", "flow"), None);
         assert_eq!(
-            parse_authorization_input("  rawcode  ", "flow"),
-            Some(("rawcode".into(), "flow".into()))
+            parse_authorization_input(
+                "https://console.anthropic.com/oauth/code/callback?code=abc",
+                "flow"
+            ),
+            None
         );
+        assert_eq!(parse_authorization_input("  rawcode  ", "flow"), None);
         assert_eq!(parse_authorization_input("   ", "flow"), None);
+    }
+
+    #[test]
+    #[serial_test::serial(anthropic_claude_oauth_env)]
+    fn loopback_redirect_validation_accepts_only_supported_local_callback() {
+        let _g = EnvGuard::set(
+            "GROK_ANTHROPIC_CLAUDE_REDIRECT_URI",
+            "http://localhost:1456/callback",
+        );
+        assert!(validate_loopback_redirect_uri().unwrap());
+
+        let _g = EnvGuard::set(
+            "GROK_ANTHROPIC_CLAUDE_REDIRECT_URI",
+            "http://127.0.0.1:1456/callback",
+        );
+        assert!(validate_loopback_redirect_uri().unwrap());
+
+        let _g = EnvGuard::set(
+            "GROK_ANTHROPIC_CLAUDE_REDIRECT_URI",
+            "http://localhost:9999/callback",
+        );
+        assert!(validate_loopback_redirect_uri().is_err());
+
+        let _g = EnvGuard::set(
+            "GROK_ANTHROPIC_CLAUDE_REDIRECT_URI",
+            "http://localhost:1456/other",
+        );
+        assert!(validate_loopback_redirect_uri().is_err());
+    }
+
+    #[test]
+    #[serial_test::serial(anthropic_claude_oauth_env)]
+    fn default_redirect_is_provider_hosted_manual_callback() {
+        let _g = EnvGuard::unset("GROK_ANTHROPIC_CLAUDE_REDIRECT_URI");
+        assert_eq!(
+            redirect_uri(),
+            "https://console.anthropic.com/oauth/code/callback"
+        );
+        assert!(!validate_loopback_redirect_uri().unwrap());
     }
 
     #[test]

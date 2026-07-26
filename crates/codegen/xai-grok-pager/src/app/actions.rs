@@ -383,6 +383,12 @@ pub enum Action {
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),
+    /// Refresh the shell's live `[subagents.models]` map after the agents
+    /// modal commits a model pin. The originating modal remains blocked until
+    /// completion, even if the active view changes before dispatch.
+    ReloadSubagentModels {
+        agent_id: AgentId,
+    },
     /// Trigger OAuth for an MCP server from the modal.
     McpAuthTrigger {
         server_name: String,
@@ -1609,6 +1615,9 @@ pub enum Effect {
         api_key: String,
         base_url: Option<String>,
     },
+    /// Reload live subagent model pins from the just-committed config file and
+    /// wait for the shell acknowledgement before releasing modal input.
+    ReloadSubagentModels { agent_id: AgentId },
     /// Kill a background task.
     KillBgTask {
         session_id: acp::SessionId,
@@ -2462,6 +2471,11 @@ pub enum TaskResult {
         /// Env var *names* still set after clear (values never included).
         env_still_active: Vec<String>,
         error: Option<String>,
+    },
+    /// Live subagent model-pin reload completed.
+    SubagentModelsReloaded {
+        agent_id: AgentId,
+        result: Result<(), String>,
     },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as

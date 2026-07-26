@@ -613,6 +613,37 @@ pub fn store_anthropic_claude_auth(grok_home: &Path, auth: &GrokAuth) -> std::io
     })
 }
 
+/// Like [`store_anthropic_claude_auth`], but if a sibling already rotated past
+/// `spent_refresh`, adopt their on-disk entry instead of overwriting. Returns
+/// the credential that is on disk after the call.
+pub(crate) fn store_anthropic_claude_auth_after_refresh_locked(
+    grok_home: &Path,
+    candidate: &GrokAuth,
+    spent_refresh: &str,
+    file_lock: &AuthFileLock,
+) -> std::io::Result<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    ensure_live_auth_file_lock(file_lock, &path)?;
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    if let Some(existing) = map.get(ANTHROPIC_CLAUDE_OAUTH_SCOPE).cloned()
+        && existing.auth_mode == AuthMode::AnthropicClaude
+        && !super::model::is_expired(&existing)
+    {
+        let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
+        if existing_rt != spent_refresh {
+            return Ok(existing);
+        }
+        if existing.key == candidate.key {
+            return Ok(existing);
+        }
+    }
+    let mut stored = candidate.clone();
+    stored.auth_mode = AuthMode::AnthropicClaude;
+    map.insert(ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_owned(), stored.clone());
+    write_auth_json(&path, &map)?;
+    Ok(stored)
+}
+
 /// Remove the Anthropic Claude OAuth scope from auth.json.
 pub fn clear_anthropic_claude_auth(grok_home: &Path) -> std::io::Result<()> {
     let path = resolve_auth_json_path(grok_home);
@@ -919,6 +950,58 @@ mod scope_lock_tests {
             Some("fresh-kimi-access".to_string())
         );
         assert!(auth_path.is_file());
+    }
+
+    #[test]
+    #[serial]
+    fn claude_refresh_persist_adopts_rotated_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock { _file: file };
+
+        let existing = GrokAuth {
+            key: "sibling-access".to_string(),
+            auth_mode: AuthMode::AnthropicClaude,
+            refresh_token: Some("rotated-refresh".to_string()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_string(), existing.clone());
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "candidate-access".to_string(),
+            auth_mode: AuthMode::AnthropicClaude,
+            refresh_token: Some("candidate-refresh".to_string()),
+            ..Default::default()
+        };
+        let stored = store_anthropic_claude_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "spent-refresh",
+            &file_lock,
+        )
+        .unwrap();
+
+        assert_eq!(stored.key, "sibling-access");
+        assert_eq!(
+            read_anthropic_claude_auth(dir.path())
+                .unwrap()
+                .refresh_token
+                .as_deref(),
+            Some("rotated-refresh")
+        );
     }
 
     #[cfg(unix)]

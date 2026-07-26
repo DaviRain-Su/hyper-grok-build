@@ -489,6 +489,7 @@ async fn build_auth(
         oidc_issuer: Some(issuer.to_owned()),
         oidc_client_id: Some(client_id.to_owned()),
         account_id: None,
+        platform_base_url: None,
     };
 
     auth_manager.enrich_auth_inline(&mut auth).await;

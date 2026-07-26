@@ -37,6 +37,7 @@ pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<Grok
         oidc_issuer: parsed.issuer,
         oidc_client_id: None,
         account_id: None,
+        platform_base_url: None,
     })
 }
 

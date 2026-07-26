@@ -1534,14 +1534,21 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SetPlatformApiKey { platform, api_key } => {
+        Effect::SetPlatformApiKey {
+            platform,
+            api_key,
+            base_url,
+        } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
                 let platform_for_err = platform.clone();
-                let params = serde_json::json!({
+                let mut params = serde_json::json!({
                     "platform": platform,
                     "apiKey": api_key,
                 });
+                if let Some(base_url) = base_url {
+                    params["baseUrl"] = serde_json::Value::String(base_url);
+                }
                 let req = acp::ExtRequest::new(
                     "x.ai/internal/set_platform_api_key",
                     serde_json::value::to_raw_value(&params)

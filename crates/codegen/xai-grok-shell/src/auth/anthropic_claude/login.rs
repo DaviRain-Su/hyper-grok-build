@@ -21,12 +21,15 @@ use crate::auth::flow::AuthChannels;
 use crate::auth::model::GrokAuth;
 use crate::auth::storage::{
     auth_json_path, read_anthropic_claude_auth, store_anthropic_claude_auth,
+    store_anthropic_claude_auth_after_refresh_locked,
 };
 
 /// Hard timeout for the interactive login (matches Codex: 15 minutes).
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 /// Bound blocking resolver refreshes so a stalled network path cannot wedge
 /// the caller.
+const REFRESH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const REFRESH_LOCK_TIMEOUT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const REFRESH_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Run interactive Anthropic Claude login and persist the token set.
@@ -63,28 +66,46 @@ struct Callback {
 
 type CallbackResult = Result<Callback, String>;
 
-async fn handle_callback(
-    State(tx): State<tokio::sync::mpsc::Sender<CallbackResult>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> (StatusCode, Html<String>) {
-    let result = if let Some(error) = params.get("error") {
+#[derive(Clone)]
+struct CallbackState {
+    tx: tokio::sync::mpsc::Sender<CallbackResult>,
+    flow_state: String,
+}
+
+fn validate_callback_params(
+    params: &std::collections::HashMap<String, String>,
+    flow_state: &str,
+) -> CallbackResult {
+    if let Some(error) = params.get("error") {
         let desc = params.get("error_description").cloned().unwrap_or_default();
-        Err(if desc.is_empty() {
+        return Err(if desc.is_empty() {
             error.clone()
         } else {
             format!("{error}: {desc}")
-        })
-    } else {
-        match params.get("code") {
-            Some(code) => Ok(Callback {
-                code: code.clone(),
-                state: params.get("state").cloned(),
-            }),
-            None => Err("Missing authorization code.".to_owned()),
-        }
+        });
+    }
+    let Some(code) = params.get("code").filter(|s| !s.trim().is_empty()) else {
+        return Err("Missing authorization code.".to_owned());
     };
+    let Some(state) = params.get("state") else {
+        return Err("Missing OAuth state.".to_owned());
+    };
+    if state != flow_state {
+        return Err("OAuth state mismatch.".to_owned());
+    }
+    Ok(Callback {
+        code: code.clone(),
+        state: Some(state.clone()),
+    })
+}
+
+async fn handle_callback(
+    State(state): State<CallbackState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Html<String>) {
+    let result = validate_callback_params(&params, &state.flow_state);
     let ok = result.is_ok();
-    if tx.try_send(result).is_err() {
+    if state.tx.try_send(result).is_err() {
         tracing::error!("anthropic-claude auth: callback channel send failed");
     }
     let (title, message) = if ok {
@@ -124,17 +145,26 @@ async fn wait_for_authorization_code(
 ) -> anyhow::Result<(String, String)> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<CallbackResult>(1);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let flow_state_owned = flow_state.to_owned();
 
     let server = listener.map(|listener| {
+        let callback_state = CallbackState {
+            tx: tx.clone(),
+            flow_state: flow_state_owned.clone(),
+        };
         let app = Router::new()
             .route(BROWSER_CALLBACK_PATH, get(handle_callback))
             .fallback(|| async {
                 (
                     StatusCode::NOT_FOUND,
-                    Html(callback_page("Not found", "Callback route not found.", false)),
+                    Html(callback_page(
+                        "Not found",
+                        "Callback route not found.",
+                        false,
+                    )),
                 )
             })
-            .with_state(tx.clone());
+            .with_state(callback_state);
         tokio::spawn(async move {
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
@@ -145,7 +175,6 @@ async fn wait_for_authorization_code(
     });
 
     // Manual paste — via the TUI code channel or stdin.
-    let flow_state_owned = flow_state.to_owned();
     match channels {
         Some(AuthChannels { mut code_rx, .. }) => {
             let paste_tx = tx.clone();
@@ -206,7 +235,12 @@ async fn wait_for_authorization_code(
     }
 
     let callback = result.map_err(|e| anyhow::anyhow!("Anthropic Claude login failed: {e}"))?;
-    let state = callback.state.unwrap_or(flow_state_owned);
+    let Some(state) = callback.state else {
+        anyhow::bail!("Anthropic Claude login failed: missing OAuth state");
+    };
+    if state != flow_state_owned {
+        anyhow::bail!("Anthropic Claude login failed: OAuth state mismatch");
+    }
     Ok((callback.code, state))
 }
 
@@ -215,16 +249,20 @@ async fn browser_login(channels: Option<AuthChannels>) -> anyhow::Result<GrokAut
     let flow_state = oauth::create_state();
     let auth_url = oauth::build_authorize_url(&pkce.challenge, &flow_state);
 
-    let listener = match TcpListener::bind(("127.0.0.1", BROWSER_CALLBACK_PORT)).await {
-        Ok(listener) => Some(listener),
-        Err(e) => {
-            tracing::warn!(error = %e, "anthropic-claude auth: could not bind loopback port");
-            eprintln!(
-                "Note: could not listen on 127.0.0.1:{BROWSER_CALLBACK_PORT} ({e}); \
-                 paste the redirect URL / code manually."
-            );
-            None
+    let listener = if oauth::validate_loopback_redirect_uri()? {
+        match TcpListener::bind(("127.0.0.1", BROWSER_CALLBACK_PORT)).await {
+            Ok(listener) => Some(listener),
+            Err(e) => {
+                tracing::warn!(error = %e, "anthropic-claude auth: could not bind loopback port");
+                eprintln!(
+                    "Note: could not listen on 127.0.0.1:{BROWSER_CALLBACK_PORT} ({e}); \
+                     paste the redirect URL / code manually."
+                );
+                None
+            }
         }
+    } else {
+        None
     };
 
     let (url_tx, code_rx) = match channels {
@@ -234,6 +272,9 @@ async fn browser_login(channels: Option<AuthChannels>) -> anyhow::Result<GrokAut
     if let Some(tx) = url_tx {
         let _ = tx.send(crate::auth::flow::AuthUrlInfo {
             url: auth_url.clone(),
+            // Existing TUI wire mode for "copy URL and show a paste box".
+            // With the bundled Claude client this is a provider-hosted manual
+            // `code#state` callback, not a localhost listener.
             mode: crate::auth::flow::AuthUrlMode::Loopback,
         });
     } else {
@@ -244,13 +285,17 @@ async fn browser_login(channels: Option<AuthChannels>) -> anyhow::Result<GrokAut
         eprintln!();
     }
     if code_rx.is_none() && std::io::stdin().is_terminal() {
-        eprintln!("Complete login in your browser, or paste the authorization code / redirect URL here:");
+        eprintln!(
+            "Complete login in your browser, or paste the authorization code / redirect URL here:"
+        );
     }
     {
         let url = auth_url.clone();
         match tokio::task::spawn_blocking(move || webbrowser::open(&url)).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::info!(error = %e, "anthropic-claude auth: could not open browser"),
+            Ok(Err(e)) => {
+                tracing::info!(error = %e, "anthropic-claude auth: could not open browser")
+            }
             Err(e) => tracing::info!(error = %e, "anthropic-claude auth: browser-open task failed"),
         }
     }
@@ -360,19 +405,130 @@ async fn refresh_anthropic_claude_auth(force: bool) -> Option<GrokAuth> {
     if refresh.is_empty() {
         return None;
     }
-    match oauth::refresh_access_token(&refresh).await {
+
+    let file_lock = match crate::auth::manager::lock::try_lock_auth_file_async(
+        &path,
+        REFRESH_LOCK_TIMEOUT,
+    )
+    .await
+    {
+        Some(lock) => lock,
+        None => {
+            tracing::warn!(
+                "anthropic-claude auth: refresh lock timed out; waiting for sibling then adopting if possible"
+            );
+            tokio::time::sleep(REFRESH_LOCK_TIMEOUT_WAIT).await;
+            return try_adopt_sibling_anthropic_claude_token(home, &refresh, force);
+        }
+    };
+
+    if let Some(adopted) = try_adopt_sibling_anthropic_claude_token(home, &refresh, force) {
+        return Some(adopted);
+    }
+
+    let file_lock = if file_lock.still_live(&path) {
+        file_lock
+    } else {
+        tracing::warn!("anthropic-claude auth: refresh lock lost before IdP; re-acquiring");
+        drop(file_lock);
+        match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT)
+            .await
+        {
+            Some(relock) => {
+                if let Some(adopted) =
+                    try_adopt_sibling_anthropic_claude_token(home, &refresh, force)
+                {
+                    return Some(adopted);
+                }
+                relock
+            }
+            None => return try_adopt_sibling_anthropic_claude_token(home, &refresh, force),
+        }
+    };
+
+    let result = oauth::refresh_access_token(&refresh).await;
+
+    let file_lock = if file_lock.still_live(&path) {
+        Some(file_lock)
+    } else {
+        tracing::warn!("anthropic-claude auth: refresh lock lost during IdP call");
+        drop(file_lock);
+        if let Some(adopted) = try_adopt_sibling_anthropic_claude_token(home, &refresh, force) {
+            return Some(adopted);
+        }
+        if result.is_err() {
+            None
+        } else {
+            tracing::warn!(
+                "anthropic-claude auth: re-acquiring the live lock to persist refreshed credentials"
+            );
+            match crate::auth::manager::lock::try_lock_auth_file_async(&path, REFRESH_LOCK_TIMEOUT)
+                .await
+            {
+                Some(relock) => Some(relock),
+                None => {
+                    tokio::time::sleep(REFRESH_LOCK_TIMEOUT_WAIT).await;
+                    if let Some(adopted) =
+                        try_adopt_sibling_anthropic_claude_token(home, &refresh, force)
+                    {
+                        return Some(adopted);
+                    }
+                    tracing::warn!(
+                        "anthropic-claude auth: could not re-acquire live lock; token will not be persisted"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    let out = match result {
         Ok(token) => {
             let refreshed = oauth::credentials_from_token(token, Some(&refresh));
-            if let Err(e) = store_anthropic_claude_auth(home, &refreshed) {
-                tracing::warn!(error = %e, "anthropic-claude auth: persist after refresh failed");
+            match file_lock.as_ref() {
+                Some(file_lock) => match store_anthropic_claude_auth_after_refresh_locked(
+                    home, &refreshed, &refresh, file_lock,
+                ) {
+                    Ok(on_disk) => Some(on_disk),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "anthropic-claude auth: persist after refresh failed");
+                        None
+                    }
+                },
+                None => None,
             }
-            Some(refreshed)
         }
         Err(e) => {
             tracing::warn!(error = %e, "anthropic-claude auth: token refresh failed");
             None
         }
+    };
+    drop(file_lock);
+    out
+}
+
+fn try_adopt_sibling_anthropic_claude_token(
+    home: &std::path::Path,
+    spent_refresh: &str,
+    force: bool,
+) -> Option<GrokAuth> {
+    let existing = read_anthropic_claude_auth(home)?;
+    let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
+    if existing_rt != spent_refresh {
+        if !crate::auth::is_expired(&existing) || !existing_rt.is_empty() {
+            tracing::info!("anthropic-claude auth: adopted sibling token family");
+            return Some(existing);
+        }
+        return None;
     }
+    if force {
+        return None;
+    }
+    if !crate::auth::is_expired(&existing) {
+        tracing::debug!("anthropic-claude auth: adopted unexpired disk token under lock");
+        return Some(existing);
+    }
+    None
 }
 
 async fn ensure_with_op_timeout() -> Option<GrokAuth> {
@@ -430,5 +586,26 @@ fn refresh_on_side_thread() -> Option<GrokAuth> {
             tracing::warn!(error = %e, "anthropic-claude auth: refresh thread spawn failed");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn callback_validation_rejects_missing_or_mismatched_state() {
+        let mut params = HashMap::from([
+            ("code".to_string(), "abc".to_string()),
+            ("state".to_string(), "flow".to_string()),
+        ]);
+        assert!(validate_callback_params(&params, "flow").is_ok());
+
+        params.remove("state");
+        assert!(validate_callback_params(&params, "flow").is_err());
+
+        params.insert("state".to_string(), "wrong".to_string());
+        assert!(validate_callback_params(&params, "flow").is_err());
     }
 }

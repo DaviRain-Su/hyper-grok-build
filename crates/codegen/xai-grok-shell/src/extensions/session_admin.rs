@@ -665,7 +665,9 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     })?;
     if platform_id.uses_oauth() {
         let login = match platform_id {
+            xai_grok_models::PlatformId::KimiCode => "/login kimi",
             xai_grok_models::PlatformId::OpenAiCodex => "/login openai",
+            xai_grok_models::PlatformId::AnthropicClaude => "/login claude",
             _ => "/login kimi",
         };
         return Err(acp::Error::invalid_params().data(format!(

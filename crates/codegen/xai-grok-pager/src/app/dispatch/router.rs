@@ -154,9 +154,7 @@ fn dispatch_cycle_scoped_model(app: &mut AppView, reverse: bool) -> Vec<Effect> 
     let patterns = crate::scoped_models::enabled_patterns();
     let list = crate::scoped_models::cycle_candidates(&agent.session.models, &patterns);
     if list.is_empty() {
-        agent.show_toast(
-            "No models to cycle — configure credentials or /scoped-models",
-        );
+        agent.show_toast("No models to cycle — configure credentials or /scoped-models");
         return vec![];
     }
     let current = agent.session.models.current.clone();
@@ -735,6 +733,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_open_extensions_modal(app, tab, trigger)
         }
         Action::OpenConfigAgentsModal(tab) => dispatch_open_config_agents_modal(app, tab),
+        Action::ReloadSubagentModels { agent_id } => {
+            vec![Effect::ReloadSubagentModels { agent_id }]
+        }
         Action::McpAuthTrigger { server_name } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];

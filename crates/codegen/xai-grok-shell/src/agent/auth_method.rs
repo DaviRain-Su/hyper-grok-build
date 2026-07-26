@@ -337,11 +337,7 @@ impl AuthMethodKind {
     pub fn needs_interactive_login(self) -> bool {
         matches!(
             self,
-            Self::GrokCom
-                | Self::Oidc
-                | Self::KimiCode
-                | Self::OpenAiCodex
-                | Self::AnthropicClaude
+            Self::GrokCom | Self::Oidc | Self::KimiCode | Self::OpenAiCodex | Self::AnthropicClaude
         )
     }
 
@@ -753,11 +749,11 @@ mod tests {
 
     /// Brand-new user (no API key, no cached token): `grok.com` leads so the
     /// pager shows the login screen with the primary xAI method, with
-    /// Kimi Code / OpenAI Codex OAuth always advertised as alternative
-    /// interactive methods. `default_auth_method_id` is None so the pager
-    /// falls back to the advertised login method.
+    /// Kimi Code / OpenAI Codex / Anthropic Claude OAuth always advertised as
+    /// alternative interactive methods. `default_auth_method_id` is None so the
+    /// pager falls back to the advertised login method.
     #[test]
-    fn fresh_user_requires_login_grok_com_first_kimi_code_advertised() {
+    fn fresh_user_requires_login_grok_com_first_subscription_methods_advertised() {
         let built = build_auth_methods(default_inputs());
 
         assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::GrokCom));
@@ -771,7 +767,8 @@ mod tests {
             [
                 AuthMethodKind::GrokCom,
                 AuthMethodKind::KimiCode,
-                AuthMethodKind::OpenAiCodex
+                AuthMethodKind::OpenAiCodex,
+                AuthMethodKind::AnthropicClaude,
             ],
         );
     }

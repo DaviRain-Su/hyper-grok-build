@@ -76,7 +76,7 @@ fn enabled_platforms(has_kimi_oauth: bool, platforms: &PlatformsConfig) -> Vec<P
             if !p.live_models_list_enabled() {
                 return false;
             }
-            if p.uses_oauth() {
+            if *p == PlatformId::KimiCode {
                 has_kimi_oauth
             } else {
                 resolve_platform_api_key(*p, platforms).is_some()
@@ -111,10 +111,10 @@ fn fetch_enabled_platform_models_inner(
     let mut map = IndexMap::new();
     let mut successes = 0usize;
     for platform in enabled {
-        let bearer = if platform.uses_oauth() {
+        let bearer = if platform == PlatformId::KimiCode {
             kimi_bearer
                 .clone()
-                .expect("enabled_platforms gated on OAuth presence")
+                .expect("enabled_platforms gated on Kimi OAuth presence")
         } else {
             resolve_platform_api_key(platform, platforms)
                 .expect("enabled_platforms gated on key presence")
@@ -167,7 +167,7 @@ fn fetch_one_platform_models(
         .header("Authorization", format!("Bearer {bearer}"));
     // Kimi Code subscription expects the same device-identity headers as
     // OAuth / inference; open platforms do not.
-    if platform.uses_oauth() {
+    if platform == PlatformId::KimiCode {
         match crate::auth::kimi::device_headers() {
             Ok(headers) => {
                 for (name, value) in headers {
@@ -215,9 +215,7 @@ fn resolve_nexus_root() -> String {
     let raw = std::env::var("GROK_NEXUS_BASE_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            crate::auth::read_platform_base_url(&xai_grok_config::grok_home(), "nexus")
-        })
+        .or_else(|| crate::auth::read_platform_base_url(&xai_grok_config::grok_home(), "nexus"))
         .unwrap_or_else(|| NEXUS_BASE_URL_DEFAULT.to_string());
     nexus_normalize_root(&raw)
 }
@@ -243,8 +241,7 @@ fn fetch_nexus_models(bearer: &str) -> Result<Vec<ModelEntryConfig>, PlatformMod
         Ok(wires) => {
             any_ok = true;
             for wire in wires {
-                let entry =
-                    nexus_wire_to_entry(wire, ApiBackend::ChatCompletions, &chat_base, "");
+                let entry = nexus_wire_to_entry(wire, ApiBackend::ChatCompletions, &chat_base, "");
                 out.insert(entry_key(&entry), entry);
             }
         }
@@ -278,10 +275,7 @@ fn fetch_nexus_models(bearer: &str) -> Result<Vec<ModelEntryConfig>, PlatformMod
 }
 
 /// `GET {base}/models` with Bearer auth; parse the wire listing.
-fn fetch_nexus_endpoint(
-    bearer: &str,
-    base: &str,
-) -> Result<Vec<WireModel>, PlatformModelsError> {
+fn fetch_nexus_endpoint(bearer: &str, base: &str) -> Result<Vec<WireModel>, PlatformModelsError> {
     let client = crate::http::shared_blocking_client();
     let url = format!("{}/models", base.trim_end_matches('/'));
     tracing::info!(%url, "fetching nexus models");
@@ -317,9 +311,8 @@ fn nexus_wire_to_entry(
 ) -> ModelEntryConfig {
     let platform = PlatformId::Nexus;
     let think_efforts = wire.think_efforts.as_ref().filter(|t| t.support);
-    let context_window = std::num::NonZeroU64::new(wire.context_length).unwrap_or_else(|| {
-        std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).expect("non-zero")
-    });
+    let context_window = std::num::NonZeroU64::new(wire.context_length)
+        .unwrap_or_else(|| std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).expect("non-zero"));
     let reasoning_efforts = think_efforts
         .map(think_efforts_to_options)
         .unwrap_or_default();
@@ -345,7 +338,10 @@ fn nexus_wire_to_entry(
         );
     }
     ModelEntryConfig {
-        id: Some(format!("{}{key_suffix}", platform.managed_model_key(&wire.id))),
+        id: Some(format!(
+            "{}{key_suffix}",
+            platform.managed_model_key(&wire.id)
+        )),
         name: Some(name),
         model: wire.id,
         base_url: base_url.to_owned(),
@@ -540,6 +536,20 @@ mod tests {
     use xai_grok_models::WireThinkEfforts;
 
     #[test]
+    fn kimi_oauth_token_only_enables_kimi_live_discovery() {
+        let enabled = enabled_platforms(true, &PlatformsConfig::default());
+        assert!(enabled.contains(&PlatformId::KimiCode));
+        assert!(
+            !enabled.contains(&PlatformId::AnthropicClaude),
+            "Claude live discovery must not be gated by or receive a Kimi token"
+        );
+        assert!(
+            !enabled.contains(&PlatformId::OpenAiCodex),
+            "Codex live discovery must not be gated by or receive a Kimi token"
+        );
+    }
+
+    #[test]
     fn think_efforts_maps_max_token_to_max_variant() {
         // Note: the wire token `"max"` parses to `ReasoningEffort::Max`
         // directly (see `ReasoningEffort::from_str` in xai-grok-sampling-types).
@@ -730,7 +740,10 @@ mod tests {
         // Nexus Messages still uses Bearer (NOT x-api-key like Anthropic).
         assert!(entry.auth_scheme.is_none());
         assert_eq!(
-            entry.extra_headers.get("anthropic-version").map(String::as_str),
+            entry
+                .extra_headers
+                .get("anthropic-version")
+                .map(String::as_str),
             Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE)
         );
     }

@@ -31,7 +31,10 @@ impl TokenType {
                 // Kimi Code / OpenAI Codex are not the primary AuthManager
                 // session; classify as ApiKey so xAI recovery paths do not
                 // treat them as OIDC.
-                AuthMode::ApiKey | AuthMode::KimiCode | AuthMode::OpenAiCodex => Self::ApiKey,
+                AuthMode::ApiKey
+                | AuthMode::KimiCode
+                | AuthMode::OpenAiCodex
+                | AuthMode::AnthropicClaude => Self::ApiKey,
             },
         }
     }

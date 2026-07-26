@@ -100,6 +100,7 @@ impl SlashCommand for LogoutCommand {
             return CommandResult::Action(Action::SetPlatformApiKey {
                 platform: platform.as_str().to_owned(),
                 api_key: String::new(),
+                base_url: None,
             });
         }
 
@@ -163,7 +164,9 @@ mod tests {
         let models = ModelState::default();
         let mut c = ctx(&models);
         match LogoutCommand.run(&mut c, "provider zai-coding") {
-            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key }) => {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform, api_key, ..
+            }) => {
                 assert_eq!(platform, "zai-coding");
                 assert!(api_key.is_empty());
             }
