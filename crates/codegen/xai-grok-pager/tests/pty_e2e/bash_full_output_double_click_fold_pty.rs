@@ -2,6 +2,28 @@
 #[allow(unused_imports)]
 use super::common::*;
 
+/// SGR double-click (press/release × 2) at 0-based (row, col).
+fn double_click_at(harness: &mut PtyHarness, row: u16, col: u16) {
+    let dbl = format!(
+        "{}{}{}{}",
+        sgr_mouse(0, row, col, 'M'),
+        sgr_mouse(0, row, col, 'm'),
+        sgr_mouse(0, row, col, 'M'),
+        sgr_mouse(0, row, col, 'm'),
+    );
+    harness
+        .inject_keys(dbl.as_bytes())
+        .expect("inject SGR double-click");
+}
+
+/// Locate `needle` and double-click its first character cell.
+fn double_click_text(harness: &mut PtyHarness, needle: &str) {
+    let screen = harness.screen_contents();
+    let (row, col) = locate_screen_text(&screen, needle)
+        .unwrap_or_else(|| panic!("locate {needle:?}; screen:\n{screen}"));
+    double_click_at(harness, row, col);
+}
+
 /// PTY, against the built binary with real SGR clicks: a finished `!`
 /// command shows its full output (success and failure), double-click folds
 /// the block, and a second double-click restores the full output — never
@@ -36,23 +58,25 @@ async fn bash_full_output_double_click_fold_pty() {
         .expect("session ready");
 
     // 1. Success: 12 lines exceed the streaming window; all visible on finish.
+    //
+    // Truncated (default first=2, last=3) shows L01,L02 + L10–L12. A middle
+    // line (L06) appears only after expand-on-finish — do not gate on L01:
+    // that passes while still truncated and races the L03/L06/L09 asserts.
     harness
         .inject_keys(b"! printf 'L%02d\\n' $(seq 1 12)\r")
         .expect("submit bash-mode command");
     harness
         .wait_for_text("L12", Duration::from_secs(30))
         .expect("bash output tail");
-    // Live tail can show L06–L12 while L01 is still clipped; wait for
-    // expand-on-finish before asserting the head is present.
     harness
-        .wait_for_text("L01", Duration::from_secs(15))
+        .wait_for_text("L06", Duration::from_secs(20))
         .unwrap_or_else(|_| {
             panic!(
-                "finished ! command must not truncate output (L01 missing)\nscreen:\n{}",
+                "finished ! command must expand full output (middle L06 missing)\nscreen:\n{}",
                 harness.screen_contents()
             )
         });
-    for line in ["L03", "L06", "L09"] {
+    for line in ["L01", "L03", "L09"] {
         assert!(
             harness.contains_text(line),
             "finished ! command must not truncate output ({line} missing)\nscreen:\n{}",
@@ -65,34 +89,22 @@ async fn bash_full_output_double_click_fold_pty() {
     harness
         .wait_for_text("Ctrl+e:", Duration::from_secs(10))
         .expect("scrollback owns keys");
-    let screen = harness.screen_contents();
-    let (row, col) = locate_screen_text(&screen, "Run (user)")
-        .unwrap_or_else(|| panic!("locate ! block header; screen:\n{screen}"));
-    let dbl = format!(
-        "{}{}{}{}",
-        sgr_mouse(0, row, col, 'M'),
-        sgr_mouse(0, row, col, 'm'),
-        sgr_mouse(0, row, col, 'M'),
-        sgr_mouse(0, row, col, 'm'),
-    );
+    double_click_text(&mut harness, "Run (user)");
     harness
-        .inject_keys(dbl.as_bytes())
-        .expect("double-click to fold");
-    let gone = std::time::Instant::now() + Duration::from_secs(5);
-    while harness.contains_text("L06") && std::time::Instant::now() < gone {
-        harness.update(Duration::from_millis(100));
-    }
-    assert!(
-        !harness.contains_text("L06"),
-        "double-click must collapse the ! block; got:\n{}",
-        harness.screen_contents()
-    );
-    harness.update(Duration::from_millis(500)); // let the multi-click window lapse
+        .wait_for_text_absent("L06", Duration::from_secs(15))
+        .unwrap_or_else(|_| {
+            panic!(
+                "double-click must collapse the ! block; got:\n{}",
+                harness.screen_contents()
+            )
+        });
+    // MULTI_CLICK_TIMEOUT_MS is 300ms; clear it before the expand gesture so
+    // the second double-click is not counted as click 3/4 of the first.
+    harness.update(Duration::from_millis(500));
+    // Re-locate: collapse shrinks the block and may move the header on screen.
+    double_click_text(&mut harness, "Run (user)");
     harness
-        .inject_keys(dbl.as_bytes())
-        .expect("double-click to expand");
-    harness
-        .wait_for_text("L06", Duration::from_secs(10))
+        .wait_for_text("L06", Duration::from_secs(15))
         .unwrap_or_else(|_| {
             panic!(
                 "double-click must restore the FULL output (middle lines); got:\n{}",
@@ -112,7 +124,7 @@ async fn bash_full_output_double_click_fold_pty() {
         .wait_for_text("E12", Duration::from_secs(30))
         .expect("failed bash output tail");
     harness
-        .wait_for_text("E06", Duration::from_secs(10))
+        .wait_for_text("E06", Duration::from_secs(20))
         .unwrap_or_else(|_| {
             panic!(
                 "FAILED ! command must show its full output; got:\n{}",

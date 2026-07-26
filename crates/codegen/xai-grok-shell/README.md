@@ -1731,6 +1731,32 @@ Grok discovers hooks from `.grok/hooks/` in the project directory. Manage them w
 /hooks-add <path>        # add a custom hook file or directory
 ```
 
+### Hooks in config files
+
+Hooks can also be defined directly in the config layers, so they can be
+distributed with your other configuration instead of as separate JSON files. Add
+a `[[hooks.<Event>]]` table to `config.toml` (your own), `managed_config.toml`, or
+`requirements.toml`:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash|Write|Edit"
+  [[hooks.PreToolUse.hooks]]
+  type = "command"
+  command = "/opt/guard/pretooluse.sh"   # use an absolute path
+  timeout = 10
+```
+
+The schema matches the JSON `hooks` object used in hook files. Hooks are read from
+every layer and combined additively: a lower-priority layer can add hooks but
+never removes or replaces another layer's block. Each hook's `/hooks-list` name is
+prefixed with the layer it came from (for example `managed:` or
+`requirements/user:`).
+
+Config-layer hooks are convenience distribution, not an enforcement boundary: on
+an unmanaged device a user can still edit these files. Tamper-resistant,
+admin-enforced hooks are tracked separately.
+
 ---
 
 ## Custom Models

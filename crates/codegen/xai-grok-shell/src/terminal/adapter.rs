@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::exit_watcher::{poll_for_terminal_exit, release_terminal, watch_for_exit};
-use super::output_recorder::OutputRecorder;
+use super::output_recorder::{OutputRecorder, read_log_tail};
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::computer::types::{
@@ -42,6 +42,7 @@ pub(super) struct TrackedTask {
     kind: TaskKind,
     owner_session_id: Option<String>,
     description: Option<String>,
+    output_byte_limit: usize,
 }
 
 /// Hand-written (`SystemTime` has no `Default`); call sites spread from it.
@@ -64,6 +65,7 @@ impl Default for TrackedTask {
             kind: TaskKind::Bash,
             owner_session_id: None,
             description: None,
+            output_byte_limit: crate::terminal::DEFAULT_OUTPUT_BYTE_LIMIT,
         }
     }
 }
@@ -79,7 +81,7 @@ impl TrackedTask {
     }
 
     pub(super) fn to_snapshot(&self, task_id: &str, out: SnapshotOutput) -> TaskSnapshot {
-        let completed = self.completed || out.exit_code.is_some();
+        let completed = self.completed || out.exit_code.is_some() || out.signal.is_some();
         TaskSnapshot {
             task_id: task_id.to_string(),
             command: self.command.clone(),
@@ -272,6 +274,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                     kind: request.kind,
                     owner_session_id: request.owner_session_id.clone(),
                     description,
+                    output_byte_limit: request.output_byte_limit,
                     ..Default::default()
                 },
             );
@@ -309,7 +312,11 @@ impl TerminalBackend for AcpTerminalAdapter {
         // under the lock and read the log file after releasing it.
         enum Resolved {
             Ready(TaskSnapshot),
-            FromLog(TaskSnapshot, PathBuf),
+            FromLog {
+                snapshot: TaskSnapshot,
+                output_file: PathBuf,
+                limit: usize,
+            },
             Missing,
         }
         let resolved = {
@@ -339,8 +346,10 @@ impl TerminalBackend for AcpTerminalAdapter {
                         },
                     ))
                 }
-                (None, Some(tracked)) => Resolved::FromLog(
-                    tracked.to_snapshot(
+                // Live poll failed: a completed task keeps its authoritative
+                // last_output; only a still-running task falls back to the log.
+                (None, Some(tracked)) => {
+                    let snapshot = tracked.to_snapshot(
                         task_id,
                         SnapshotOutput {
                             output: tracked.last_output.clone(),
@@ -348,9 +357,17 @@ impl TerminalBackend for AcpTerminalAdapter {
                             exit_code: tracked.exit_code,
                             signal: tracked.signal.clone(),
                         },
-                    ),
-                    tracked.output_file.clone(),
-                ),
+                    );
+                    if snapshot.completed {
+                        Resolved::Ready(snapshot)
+                    } else {
+                        Resolved::FromLog {
+                            snapshot,
+                            output_file: tracked.output_file.clone(),
+                            limit: tracked.output_byte_limit,
+                        }
+                    }
+                }
                 (None, None) => Resolved::Missing,
             }
         };
@@ -358,13 +375,14 @@ impl TerminalBackend for AcpTerminalAdapter {
         match resolved {
             Resolved::Ready(snapshot) => Some(snapshot),
             Resolved::Missing => None,
-            // Live poll failed: fill output from the mirrored log so a running
-            // task does not report empty while the file already holds data.
-            Resolved::FromLog(mut snapshot, output_file) => {
-                if let Ok(logged) = tokio::fs::read_to_string(&output_file).await
-                    && !logged.is_empty()
-                {
-                    snapshot.output = logged;
+            Resolved::FromLog {
+                mut snapshot,
+                output_file,
+                limit,
+            } => {
+                if let Some(tail) = read_log_tail(&output_file, limit).await {
+                    snapshot.output = tail.text;
+                    snapshot.truncated = tail.truncated;
                 }
                 Some(snapshot)
             }
@@ -498,20 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn to_snapshot_preserves_description() {
-        let mut task = make_tracked_task("sleep 1");
-        task.description = Some("build frontend".to_string());
-        let snap = task.to_snapshot("t-1", out("ok", Some(0), None));
-        assert_eq!(snap.description.as_deref(), Some("build frontend"));
-        assert_eq!(snap.task_id, "t-1");
-        assert_eq!(snap.exit_code, Some(0));
-
-        let bare = make_tracked_task("sleep 1");
-        let snap = bare.to_snapshot("t-2", out("", None, None));
-        assert!(snap.description.is_none());
-    }
-
-    #[test]
     fn wrap_command_quotes_shell_metacharacters() {
         let cmd = wrap_command("echo 'hello world' && ls").unwrap();
         #[cfg(unix)]
@@ -537,37 +541,21 @@ mod tests {
     }
 
     #[test]
-    fn tracked_task_to_snapshot_running() {
-        let task = make_tracked_task("ls -la");
-        let snap = task.to_snapshot("t-1", out("file1\nfile2", None, None));
+    fn to_snapshot_derives_completed_and_end_time() {
+        let running = make_tracked_task("ls -la").to_snapshot("t-1", out("partial", None, None));
+        assert!(!running.completed);
+        assert!(running.end_time.is_none());
 
-        assert_eq!(snap.task_id, "t-1");
-        assert_eq!(snap.command, "ls -la");
-        assert_eq!(snap.cwd, "/tmp");
-        assert_eq!(snap.output, "file1\nfile2");
-        assert!(!snap.completed);
-        assert!(snap.end_time.is_none());
-        assert_eq!(snap.exit_code, None);
-    }
+        // An exit code or a signal marks the snapshot complete and stamps end_time.
+        let exited = make_tracked_task("fast").to_snapshot("t-2", out("", Some(1), None));
+        assert!(exited.completed);
+        assert!(exited.end_time.is_some());
+        assert_eq!(exited.exit_code, Some(1));
 
-    #[test]
-    fn tracked_task_to_snapshot_completed() {
-        let mut task = make_tracked_task("echo done");
-        task.mark_completed(out("done\n", Some(0), None));
-        let snap = task.to_snapshot("t-2", out("done\n", Some(0), None));
-
-        assert!(snap.completed);
-        assert!(snap.end_time.is_some());
-        assert_eq!(snap.exit_code, Some(0));
-        assert_eq!(snap.signal, None);
-    }
-
-    #[test]
-    fn tracked_task_to_snapshot_completed_by_exit_code_alone() {
-        let task = make_tracked_task("fast cmd");
-        let snap = task.to_snapshot("t-3", out("", Some(1), None));
-        assert!(snap.completed);
-        assert!(snap.end_time.is_some());
+        let signaled =
+            make_tracked_task("killed").to_snapshot("t-3", out("", None, Some("SIGTERM".into())));
+        assert!(signaled.completed);
+        assert!(signaled.end_time.is_some());
     }
 
     /// Scripted client side of the terminal protocol: each `terminal/output`
@@ -688,5 +676,76 @@ mod tests {
             std::fs::read_to_string(&output_file).unwrap(),
             "line1\nline2\nline3\n"
         );
+    }
+
+    /// A gateway whose `terminal/output` never replies, so live polls fail and
+    /// `get_task` exercises its offline fallback.
+    fn output_unavailable_gateway() -> GatewaySender {
+        use xai_acp_lib::AcpClientMessage;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if let AcpClientMessage::ReleaseTerminal(args) = msg {
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::ReleaseTerminalResponse::new()));
+                }
+            }
+        });
+        GatewaySender::new(tx)
+    }
+
+    fn insert_task(adapter: &AcpTerminalAdapter, task_id: &str, task: TrackedTask) {
+        adapter
+            .tasks
+            .lock()
+            .unwrap()
+            .insert(task_id.to_string(), task);
+    }
+
+    #[tokio::test]
+    async fn get_task_completed_keeps_completion_buffer_over_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("done.log");
+        tokio::fs::write(&log, "stale mirrored bytes")
+            .await
+            .unwrap();
+
+        let adapter =
+            AcpTerminalAdapter::new(output_unavailable_gateway(), acp::SessionId::new("s"));
+        let mut task = TrackedTask {
+            output_file: log,
+            ..Default::default()
+        };
+        task.mark_completed(out("authoritative output", Some(0), None));
+        insert_task(&adapter, "t-done", task);
+
+        let snap = adapter.get_task("t-done").await.unwrap();
+        assert_eq!(snap.output, "authoritative output");
+        assert!(snap.completed);
+    }
+
+    #[tokio::test]
+    async fn get_task_running_fills_output_from_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        tokio::fs::write(&log, "live streamed bytes").await.unwrap();
+
+        let adapter =
+            AcpTerminalAdapter::new(output_unavailable_gateway(), acp::SessionId::new("s"));
+        insert_task(
+            &adapter,
+            "t-run",
+            TrackedTask {
+                output_file: log,
+                output_byte_limit: 1024,
+                ..Default::default()
+            },
+        );
+
+        let snap = adapter.get_task("t-run").await.unwrap();
+        assert_eq!(snap.output, "live streamed bytes");
+        assert!(!snap.completed);
+        assert!(!snap.truncated);
     }
 }

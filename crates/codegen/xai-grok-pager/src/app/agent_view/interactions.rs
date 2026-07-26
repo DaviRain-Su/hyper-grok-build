@@ -264,6 +264,7 @@ impl AgentView {
                             }
                         }
                         qv.focus = QuestionFocus::Navigation;
+                        self.last_prompt_click_ms = None;
                     }
                     return InputOutcome::Changed;
                 }
@@ -276,6 +277,7 @@ impl AgentView {
                 }
                 if key!('c', CONTROL).matches(key) {
                     qv.focus = QuestionFocus::Navigation;
+                    self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
                 }
                 match self.prompt.route_enter(key) {
@@ -306,6 +308,7 @@ impl AgentView {
                             }
                         }
                         qv.focus = QuestionFocus::Navigation;
+                        self.last_prompt_click_ms = None;
                         let last = qv.questions.len().saturating_sub(1);
                         if qv.active_tab < last {
                             self.swap_question_freeform();
@@ -349,7 +352,7 @@ impl AgentView {
                     && matches!(key.code, KeyCode::Char(c) if c != ' ')
                 {
                     let text = qv.activate_freeform_input();
-                    self.prompt.set_text(&text);
+                    self.prompt.set_text_preserving(&text);
                     let _ = self.prompt.handle_key(key);
                     return InputOutcome::Changed;
                 }
@@ -407,7 +410,7 @@ impl AgentView {
                     KeyCode::Char(' ') => {
                         if qv.is_on_freeform_row() {
                             let text = qv.activate_freeform_input();
-                            self.prompt.set_text(&text);
+                            self.prompt.set_text_preserving(&text);
                         } else {
                             let active = qv.active_tab;
                             let cursor = qv.cursor();
@@ -427,7 +430,7 @@ impl AgentView {
                     KeyCode::Enter => {
                         if qv.is_on_freeform_row() {
                             let text = qv.activate_freeform_input();
-                            self.prompt.set_text(&text);
+                            self.prompt.set_text_preserving(&text);
                         } else {
                             let cursor = qv.cursor();
                             let active = qv.active_tab;
@@ -448,7 +451,7 @@ impl AgentView {
                             let freeform_idx = qv.total_items(qv.active_tab).saturating_sub(1);
                             qv.set_cursor(freeform_idx);
                             let text = qv.activate_freeform_input();
-                            self.prompt.set_text(&text);
+                            self.prompt.set_text_preserving(&text);
                         }
                     }
                     KeyCode::Char('l') | KeyCode::Char(']') | KeyCode::Right
@@ -590,6 +593,7 @@ impl AgentView {
                             *sel = None;
                         }
                         qv.focus = crate::views::question_view::QuestionFocus::Navigation;
+                        self.last_prompt_click_ms = None;
                     }
                     let key_event = KeyEvent::new(
                         if key_ch == '\n' {
@@ -669,6 +673,11 @@ impl AgentView {
                         .contains((mouse.column, mouse.row).into())
                     {
                         let _ = self.prompt.handle_mouse(mouse);
+                        if self.prompt_click_is_double()
+                            && self.prompt.expand_paste_element_at_cursor()
+                        {
+                            self.prompt.refresh_slash(&self.session.models);
+                        }
                         return InputOutcome::Changed;
                     }
                     let idx = qv.active_tab;
@@ -687,6 +696,7 @@ impl AgentView {
                         *sel = None;
                     }
                     qv.focus = crate::views::question_view::QuestionFocus::Navigation;
+                    self.last_prompt_click_ms = None;
                 }
                 let prompt_area = self.pane_areas.prompt;
                 let footer_h = 3u16;
@@ -729,7 +739,7 @@ impl AgentView {
                             .get(active_tab)
                             .cloned()
                             .unwrap_or_default();
-                        self.prompt.set_text(&text);
+                        self.prompt.set_text_preserving(&text);
                         qv.focus = crate::views::question_view::QuestionFocus::InputMode;
                     }
                     return InputOutcome::Changed;
@@ -812,7 +822,7 @@ impl AgentView {
                             .get(tab)
                             .cloned()
                             .unwrap_or_default();
-                        self.prompt.set_text(&text);
+                        self.prompt.set_text_preserving(&text);
                         qv.focus = QuestionFocus::InputMode;
                     }
                 }
@@ -1028,7 +1038,7 @@ impl AgentView {
             .get(qv.active_tab)
             .map(|s| s.as_str())
             .unwrap_or("");
-        self.prompt.set_text(new_text);
+        self.prompt.set_text_preserving(new_text);
     }
     /// Dismiss (hide) the question view without submitting answers.
     ///
@@ -1231,6 +1241,7 @@ impl AgentView {
         self.hit_question_scrollbar.clear();
         self.inline_prompt_area = None;
         self.last_question_click = None;
+        self.last_prompt_click_ms = None;
     }
     /// Answer the ACTIVE question of this agent's pending
     /// `AskUserQuestion` from the dashboard peek panel.
@@ -1720,7 +1731,7 @@ mod question_no_freeform_tests {
             id: None,
         }
     }
-    fn open_question(agent: &mut AgentView, no_freeform: bool) {
+    pub(super) fn open_question(agent: &mut AgentView, no_freeform: bool) {
         let state = QuestionViewState::new(
             "tc-upsell".into(),
             vec![upsell_question()],
@@ -1734,7 +1745,7 @@ mod question_no_freeform_tests {
     }
     /// Draw one 80x30 frame so `pane_areas` and `question_scroll_region`
     /// hold the real rendered layout the mouse handler hit-tests against.
-    fn draw_frame(agent: &mut AgentView) {
+    pub(super) fn draw_frame(agent: &mut AgentView) {
         let area = Rect::new(0, 0, 80, 30);
         let reg = ActionRegistry::defaults();
         let bundle = crate::app::bundle::BundleState::default();
@@ -1755,7 +1766,7 @@ mod question_no_freeform_tests {
             crate::app::agent_view::AppRenderParams::default(),
         );
     }
-    fn down(col: u16, row: u16) -> MouseEvent {
+    pub(super) fn down(col: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
@@ -1771,7 +1782,7 @@ mod question_no_freeform_tests {
             modifiers: KeyModifiers::empty(),
         }
     }
-    fn qv(agent: &AgentView) -> &QuestionViewState {
+    pub(super) fn qv(agent: &AgentView) -> &QuestionViewState {
         agent.question_view.as_ref().expect("question view open")
     }
     /// Clicking the empty rows under the last option (option gap, footer)
@@ -1881,5 +1892,131 @@ mod question_no_freeform_tests {
         let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
         let _ = agent.handle_question_key(&z);
         assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+    }
+}
+#[cfg(test)]
+mod question_freeform_chip_tests {
+    //! Paste-chip round trip through the question freeform input:
+    //! re-entering input mode used to reload the unchanged draft with a
+    //! wholesale `set_text`, expanding every chip into raw text.
+    use super::super::test_fixtures::make_agent;
+    use super::question_no_freeform_tests::{down, draw_frame, open_question, qv};
+    use crate::app::agent_view::AgentView;
+    use crate::views::prompt_widget::KIND_PASTE;
+    use crate::views::question_view::QuestionFocus;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    const PASTE: &str = "line 1\nline 2\nline 3\nline 4\nline 5";
+    fn paste_chip_count(agent: &AgentView) -> usize {
+        agent
+            .prompt
+            .textarea()
+            .elements()
+            .iter()
+            .filter(|e| e.kind == KIND_PASTE)
+            .count()
+    }
+    /// Multi-line paste folds into a chip; Esc out and Enter back in must
+    /// keep the chip folded (not raw expanded text), and the string slot
+    /// keeps the full paste for the submit payload.
+    #[test]
+    fn paste_chip_survives_input_mode_round_trip() {
+        let mut agent = make_agent();
+        open_question(&mut agent, false);
+        let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&z);
+        assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+        let _ = agent.prompt.handle_paste(PASTE);
+        assert_eq!(paste_chip_count(&agent), 1, "paste must fold into a chip");
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&esc);
+        assert_eq!(qv(&agent).focus, QuestionFocus::Navigation);
+        assert_eq!(qv(&agent).per_question_freeform[0], PASTE);
+        assert!(qv(&agent).per_question_freeform_selected[0]);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&enter);
+        assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+        assert_eq!(
+            paste_chip_count(&agent),
+            1,
+            "re-entering input mode must keep the folded chip"
+        );
+        assert_eq!(agent.prompt.text(), PASTE, "buffer text must round-trip");
+    }
+    /// A slot rewritten by another surface (e.g. the dashboard peek answer
+    /// path) no longer matches the live draft, so re-entry must take the
+    /// normal `set_text` path and show the rewritten slot.
+    #[test]
+    fn rewritten_slot_replaces_stale_draft() {
+        let mut agent = make_agent();
+        open_question(&mut agent, false);
+        let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&z);
+        let _ = agent.prompt.handle_paste(PASTE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&esc);
+        agent.question_view.as_mut().unwrap().per_question_freeform[0] = "peek answer".to_string();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&enter);
+        assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+        assert_eq!(
+            agent.prompt.text(),
+            "peek answer",
+            "a stale draft must not shadow the rewritten slot"
+        );
+        assert_eq!(paste_chip_count(&agent), 0);
+    }
+    /// Double-click on the chip inside the question freeform input expands
+    /// it, exactly like the main prompt; a single click must not.
+    #[test]
+    fn double_click_expands_chip_in_question_input() {
+        let mut agent = make_agent();
+        open_question(&mut agent, false);
+        let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&z);
+        let _ = agent.prompt.handle_paste(PASTE);
+        assert_eq!(paste_chip_count(&agent), 1);
+        draw_frame(&mut agent);
+        let ta = agent.prompt.textarea_area();
+        assert!(ta.area() > 0, "inline textarea must have rendered");
+        let (col, row) = (ta.x + 2, ta.y);
+        let _ = agent.handle_question_mouse(&down(col, row));
+        assert_eq!(
+            paste_chip_count(&agent),
+            1,
+            "a single click must not expand the chip"
+        );
+        let _ = agent.handle_question_mouse(&down(col, row));
+        assert_eq!(
+            paste_chip_count(&agent),
+            0,
+            "double-click must expand the chip"
+        );
+        assert_eq!(agent.prompt.text(), PASTE, "content inlined as plain text");
+        assert_eq!(
+            qv(&agent).focus,
+            QuestionFocus::InputMode,
+            "expanding must not leave input mode"
+        );
+    }
+    /// A textarea click from before leaving InputMode must not pair with
+    /// the first click after re-entry as a double-click (exits clear the
+    /// pairing timer).
+    #[test]
+    fn click_before_exit_does_not_pair_with_click_after_reentry() {
+        let mut agent = make_agent();
+        open_question(&mut agent, false);
+        let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&z);
+        let _ = agent.prompt.handle_paste(PASTE);
+        draw_frame(&mut agent);
+        let ta = agent.prompt.textarea_area();
+        let (col, row) = (ta.x + 2, ta.y);
+        let _ = agent.handle_question_mouse(&down(col, row));
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&esc);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = agent.handle_question_key(&enter);
+        let _ = agent.handle_question_mouse(&down(col, row));
+        assert_eq!(paste_chip_count(&agent), 1, "chip must stay folded");
     }
 }

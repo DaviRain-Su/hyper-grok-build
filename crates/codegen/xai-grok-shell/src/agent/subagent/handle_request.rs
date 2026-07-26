@@ -860,7 +860,11 @@ pub(crate) async fn run_shell_child(
             let hooks_val = hooks_config.as_value();
             let (specs, errors) = xai_grok_hooks::config::parse_hooks_from_value_with_dir(
                 &hooks_val,
-                &format!("agent:{}", definition.name),
+                &format!(
+                    "{}{}",
+                    xai_grok_hooks::config::AGENT_HOOK_PREFIX,
+                    definition.name
+                ),
                 &ctx.parent_cwd,
             );
             for e in &errors {

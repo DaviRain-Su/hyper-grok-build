@@ -81,13 +81,23 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     let mut recorded = false;
     'attempts: for attempt in 0..3 {
         let mut h = spawn();
-        h.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT)
-            .unwrap_or_else(|_| {
-                panic!(
-                    "leader-mode welcome never rendered (attempt {attempt})\nscreen:\n{}",
-                    h.screen_contents()
-                )
-            });
+        // Cold leader bring-up (leader election plus an unoptimized-binary
+        // boot) can miss the welcome paint within LEADER_TIMEOUT under
+        // remote-runner load. The leader outlives this client, so a fresh spawn
+        // attaches to the now-live leader and paints promptly: retry like a
+        // missed campaign rather than hard-failing on the first loaded cold
+        // start, and only panic once all attempts are exhausted.
+        if h.wait_for_text(WELCOME_SCREEN_SENTINEL, LEADER_TIMEOUT)
+            .is_err()
+        {
+            let screen = h.screen_contents();
+            h.quit().expect("clean quit");
+            assert!(
+                attempt < 2,
+                "leader-mode welcome never rendered after 3 attempts\nscreen:\n{screen}"
+            );
+            continue;
+        }
         if !wait_for_model_via_new_sessions(&mut h, CAMPAIGN_MODEL, Duration::from_secs(60)) {
             // Campaign never applied on this spawn; try a fresh TUI.
             h.quit().expect("clean quit");

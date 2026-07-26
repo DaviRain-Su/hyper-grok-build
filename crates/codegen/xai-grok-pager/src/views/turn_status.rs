@@ -212,8 +212,7 @@ pub struct TurnStatusArgs<'a> {
     pub is_pending_user_input: bool,
     pub goal_verifying: bool,
     pub watchers: Watchers,
-    /// Parked on a sendable wait (`AgentView::renders_parked`): suppress the
-    /// running-turn chrome and render only the still-running cue.
+    /// Parked on a sendable wait (`AgentView::renders_parked`).
     pub parked: bool,
     /// Transparent right-side background so the row blends with the
     /// terminal's own background (minimal mode).
@@ -295,39 +294,55 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
-    // Idle or parked with watchers: persistent still-running cue (not
-    // scrollback — it must never scroll away). Lower priority than the
-    // starting-session and drain-blocked cues above.
-    if (state.is_idle() || parked)
-        && let Some(cue) = still_running_label(watchers)
-    {
-        // Pulsing concentric circle (○ ◎ ◉ ◎) on a calm ambient cadence:
-        // the agent is idle, so this breath runs slower than the active
-        // turn spinner (see MONITOR_PULSE_DIVISOR).
-        let frames = crate::glyphs::monitor_icon_frames();
-        let frame_idx = (tick / MONITOR_PULSE_DIVISOR) as usize % frames.len();
-        let icon = format!("{} ", frames[frame_idx]);
-        let label_fg = if buttons.is_some_and(|b| b.watching_hovered) {
-            theme.text_primary
+    // Idle or parked: persistent cue (not scrollback — it must never scroll
+    // away). Lower priority than the starting-session and drain-blocked cues
+    // above. Parked never falls through to the running-turn chrome
+    // (spinner/timers/[stop]) — the wait aborts the moment the user types,
+    // so that chrome would lie.
+    if state.is_idle() || parked {
+        // Parked with held queued rows: the queued hint IS the input-semantics
+        // story (Enter acts on the queue immediately), so it replaces the
+        // generic interrupt copy.
+        let parked_suffix = if held_queue > 0 && held_queue_top_sendable {
+            format!(" \u{00b7} {held_queue} queued — Enter to send now")
+        } else if held_queue > 0 {
+            format!(" \u{00b7} {held_queue} queued")
         } else {
-            theme.gray
+            " \u{00b7} send a message to interrupt".to_string()
         };
-        let cue_width = (icon.width() + cue.width()).min(area.width as usize) as u16;
-        let spans = vec![
-            Span::styled(icon, Style::default().fg(theme.accent_system)),
-            Span::styled(cue, Style::default().fg(label_fg)),
-        ];
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-        return TurnStatusOutput {
-            watching_cue: show_buttons.then(|| Rect::new(area.x, area.y, cue_width, 1)),
-            ..TurnStatusOutput::default()
+        let cue = match (still_running_label(watchers), parked) {
+            (Some(label), true) => Some(format!("{label}{parked_suffix}")),
+            (Some(label), false) => Some(label),
+            (None, true) => Some(format!("waiting{parked_suffix}")),
+            (None, false) => None,
         };
-    }
-
-    // Parked with no watchers left: render nothing. The stopped look must
-    // never fall through to the running-turn chrome (spinner/timers/[stop])
-    // — the wait aborts the moment the user types, so that chrome would lie.
-    if parked {
+        if let Some(cue) = cue {
+            // Pulsing concentric circle (○ ◎ ◉ ◎) on a calm ambient cadence:
+            // the agent is idle, so this breath runs slower than the active
+            // turn spinner (see MONITOR_PULSE_DIVISOR).
+            let frames = crate::glyphs::monitor_icon_frames();
+            let frame_idx = (tick / MONITOR_PULSE_DIVISOR) as usize % frames.len();
+            let icon = format!("{} ", frames[frame_idx]);
+            let label_fg = if buttons.is_some_and(|b| b.watching_hovered) {
+                theme.text_primary
+            } else {
+                theme.gray
+            };
+            let cue_width = (icon.width() + cue.width()).min(area.width as usize) as u16;
+            let spans = vec![
+                Span::styled(icon, Style::default().fg(theme.accent_system)),
+                Span::styled(cue, Style::default().fg(label_fg)),
+            ];
+            buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+            // The cue opens the tasks pane on click — only advertise the hit
+            // area when there are tasks to show (a watcherless parked cue has
+            // nothing behind it).
+            return TurnStatusOutput {
+                watching_cue: (show_buttons && watchers.total() > 0)
+                    .then(|| Rect::new(area.x, area.y, cue_width, 1)),
+                ..TurnStatusOutput::default()
+            };
+        }
         return TurnStatusOutput::default();
     }
 
@@ -787,9 +802,7 @@ fn render_starting_session(
 /// completion/events, scheduled `/loop` tasks fire prompts, and background
 /// subagents inject a completion turn, any of which can start a new turn.
 ///
-/// A parked turn (`parked` — the stopped look while blocked on a sendable
-/// wait) suppresses the running-turn chrome entirely: the row shows only when
-/// watchers exist, rendering the "… still running" cue.
+/// A parked turn always shows the row, watchers or not.
 ///
 /// Real MCP progress (`total > 0`) renders as a compact chip in the top status
 /// bar instead, so it does not affect this row.
@@ -801,7 +814,7 @@ pub fn should_show(
     parked: bool,
 ) -> bool {
     if parked {
-        return watchers.total() > 0;
+        return true;
     }
     !state.is_idle()
         || drain_blocked
@@ -1068,9 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn should_show_parked_only_with_watchers() {
-        // Parked (turn running but rendering the stopped look): the row shows
-        // only to carry the "… still running" cue — never the running chrome.
+    fn should_show_parked_always() {
         assert!(should_show(
             &AgentState::TurnRunning,
             false,
@@ -1081,7 +1092,7 @@ mod tests {
             },
             true
         ));
-        assert!(!should_show(
+        assert!(should_show(
             &AgentState::TurnRunning,
             false,
             None,
@@ -1435,16 +1446,14 @@ mod tests {
 
     #[test]
     fn parked_with_watchers_renders_cue_not_running_chrome() {
-        // A parked running turn renders the still-running cue — never the busy
-        // spinner/timers/[stop] chrome (the wait aborts as soon as the user
-        // types, so that chrome would lie).
+        // The wait aborts as soon as the user types, so busy chrome would lie.
         let text = render_parked_with_watchers(Watchers {
             commands: 2,
             ..Watchers::default()
         });
         assert!(
-            text.contains("2 commands still running"),
-            "parked with bg work must render the still-running cue, got: {text:?}"
+            text.contains("2 commands still running \u{00b7} send a message to interrupt"),
+            "parked with bg work must render the interruptible still-running cue, got: {text:?}"
         );
         assert!(
             !text.contains("Waiting") && !text.contains("[stop]"),
@@ -1453,11 +1462,39 @@ mod tests {
     }
 
     #[test]
-    fn parked_without_watchers_renders_nothing() {
+    fn parked_without_watchers_renders_waiting_cue() {
         let text = render_parked_with_watchers(Watchers::default());
         assert!(
-            text.trim().is_empty(),
-            "parked with no watchers must render nothing, got: {text:?}"
+            text.contains("waiting \u{00b7} send a message to interrupt"),
+            "watcherless parked must render the waiting interrupt cue, got: {text:?}"
+        );
+        assert!(
+            !text.contains("[stop]"),
+            "watcherless parked must not render the running-turn chrome, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn parked_with_held_queue_renders_queued_hint() {
+        // The queued hint replaces the interrupt copy (Enter = send-now).
+        let activity = Some(TurnActivity::Waiting(WaitingReason::TasksComplete));
+        let mut args = idle_args(Watchers {
+            commands: 1,
+            ..Watchers::default()
+        });
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        args.held_queue = 1;
+        args.held_queue_top_sendable = true;
+        let text = render_row_text(args, 80);
+        assert!(
+            text.contains("1 queued — Enter to send now"),
+            "parked with a held row must advertise the queued hint, got: {text:?}"
+        );
+        assert!(
+            !text.contains("send a message to interrupt"),
+            "queued hint replaces the interrupt copy, got: {text:?}"
         );
     }
 

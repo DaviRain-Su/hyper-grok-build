@@ -56,16 +56,27 @@ async fn empty_enter_sends_top_not_last_of_two() {
         .inject_keys(b"\r")
         .expect("empty Enter send-now top");
     turn_one.release();
-    // Alpha (the promoted TOP row) then bravo drain back-to-back. Each
-    // promoted "❯ …" block and the intermediate TURNTWO reply is scrolled
-    // above the viewport by the next turn's start-adoption before a 100ms poll
-    // can observe it, so gating on those transient markers is inherently racy.
-    // Gate only on the FINAL reply (stable at the viewport head) and prove the
-    // top-row order + send-now silence via the recorded wire below, which is
-    // not subject to scrolling.
-    harness
-        .wait_for_text("TURNTHREE", Duration::from_secs(90))
-        .expect("all queued turns drained through to the final reply");
+    // Alpha (the promoted TOP row) then bravo drain back-to-back after the
+    // completion release. Each promoted "❯ …" block and every reply —
+    // including the final TURNTHREE — can scroll above the viewport before a
+    // 100ms poll observes it, so gating on any on-screen marker is inherently
+    // racy (a flaky observation, not a real failure — same rationale as
+    // `removed_queued_prompt_never_sent`). Gate on the WIRE instead: wait
+    // until bravo's request has been sent, which is the authoritative record
+    // that both queued rows drained in order. Pump the event loop while
+    // waiting so the queued rows actually promote.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while !all_user_messages(&content)
+        .iter()
+        .any(|u| u.contains("queue-bravo-later"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queued rows never drained through to the final turn\nscreen:\n{}",
+            harness.screen_contents()
+        );
+        harness.update(Duration::from_millis(100));
+    }
     tokio::time::timeout(Duration::from_secs(10), turn_two.wait_satisfied())
         .await
         .expect("top queued row expectation satisfied");

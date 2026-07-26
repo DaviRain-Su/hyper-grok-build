@@ -15,6 +15,9 @@ pub struct ShareArgs {
 pub async fn run(args: &ShareArgs, agent_config: &AgentConfig) -> Result<()> {
     let cancel = CancellationToken::new();
     let spawned = crate::acp::spawn::spawn_grok_shell(agent_config.clone(), &cancel, None).await?;
+    // Cancel + join on every return path, including the `?`s below.
+    let _agent_guard =
+        crate::acp::spawn::AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
 
     let _init: acp::InitializeResponse = acp_send(
         acp::InitializeRequest::new(acp::ProtocolVersion::V1)
@@ -44,6 +47,5 @@ pub async fn run(args: &ShareArgs, agent_config: &AgentConfig) -> Result<()> {
     let response: ShareSessionResponse = serde_json::from_str(ext_resp.0.get())?;
 
     println!("{}", response.share_url);
-    cancel.cancel();
     Ok(())
 }

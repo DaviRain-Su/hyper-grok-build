@@ -60,9 +60,10 @@ pub struct LeaderAutoUpdateConfig {
 const AUTO_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// How long the auto-update shutdown waits for session actors to flush
-/// before the leader exits. Sessions are idle at this point, so the flush
-/// normally completes in milliseconds; the cap only bounds a wedged actor.
-const AUTO_UPDATE_FLUSH_GRACE: Duration = Duration::from_secs(10);
+/// before the leader exits. Aliases the shared
+/// [`crate::agent::activity::SESSION_FLUSH_GRACE`] so this path and the
+/// in-process agent's `/exit` / headless-quit flush cannot drift apart.
+const AUTO_UPDATE_FLUSH_GRACE: Duration = crate::agent::activity::SESSION_FLUSH_GRACE;
 
 /// Consecutive busy deferrals after which an installed update proceeds
 /// anyway (with the graceful flush). Bounds how long a permanently-"busy"
@@ -829,8 +830,8 @@ fn relay_config_for_session(
 }
 
 /// Start the leader's grok.com relay connection according to the start policy,
-/// returning the slot where the [`RelayHandle`](crate::agent::relay::RelayHandle)
-/// is parked once the connection task is running.
+/// parking the [`RelayHandle`](crate::agent::relay::RelayHandle) in `slot`
+/// once the connection task is running.
 ///
 /// * `relay_on_demand == false` (default — explicit `grok agent leader`
 ///   invocation: devbox / systemd / nohup): connect **eagerly**, right now.
@@ -854,29 +855,29 @@ fn relay_config_for_session(
 /// via `session/load`).
 ///
 /// Must be called within a `LocalSet` (uses `spawn_local`). The handle is
-/// parked in a slot rather than returned from the deferred task because
-/// `RelayHandle` cancels its loop on Drop; the leader shutdown path takes it
-/// out of the slot to stop the relay explicitly (the `cancel` token would stop
-/// it anyway).
+/// parked in the caller-owned `slot` rather than returned from the deferred
+/// task because `RelayHandle` cancels its loop on Drop; the leader shutdown
+/// path takes it out of the slot to stop the relay explicitly (the `cancel`
+/// token would stop it anyway). The slot is passed in (not created here) so
+/// a deferred arm ([`DeferredRelayArm`]) parks the handle in the same slot
+/// the shutdown path drains.
 fn spawn_leader_relay(
+    slot: Rc<std::cell::RefCell<Option<crate::agent::relay::RelayHandle>>>,
     relay_config: crate::agent::relay::RelayConfig,
     relay_on_demand: bool,
     mut relay_demand_rx: tokio::sync::watch::Receiver<bool>,
     ws_to_agent_tx: mpsc::UnboundedSender<String>,
     agent_to_ws_tx: Rc<Mutex<Option<mpsc::UnboundedSender<String>>>>,
     cancel: tokio_util::sync::CancellationToken,
-) -> Rc<std::cell::RefCell<Option<crate::agent::relay::RelayHandle>>> {
+) {
     use crate::agent::relay::spawn_relay_connection;
-
-    let slot: Rc<std::cell::RefCell<Option<crate::agent::relay::RelayHandle>>> =
-        Rc::new(std::cell::RefCell::new(None));
 
     if !relay_on_demand {
         info!("Starting relay connection (eager)");
         let (tx, handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
         *agent_to_ws_tx.lock() = Some(tx);
         *slot.borrow_mut() = Some(handle);
-        return slot;
+        return;
     }
 
     let slot_for_task = slot.clone();
@@ -903,14 +904,75 @@ fn spawn_leader_relay(
         *agent_to_ws_tx.lock() = Some(tx);
         *slot_for_task.borrow_mut() = Some(handle);
     });
-    slot
+}
+
+/// Everything needed to arm the leader's grok.com relay *after* startup.
+///
+/// A leader that boots without auth used to disable the relay forever — the
+/// decision was made once in [`run_leader`] and never revisited. On devboxes
+/// that turned a transient mint-provider outage at provision time into a
+/// permanently invisible box: the external auth provider succeeded minutes
+/// later and the config watcher hot-reloaded the token into the leader, but
+/// the relay never connected, the agent never registered, and tooling
+/// reported the (healthy) box as "not found online" for its whole lifetime.
+///
+/// These parts are captured in the no-auth startup path and consumed by the
+/// config-update loop on the first relay-eligible
+/// [`ConfigUpdate::Auth`](crate::config::reloader::ConfigUpdate::Auth).
+struct DeferredRelayArm {
+    relay_on_demand: bool,
+    relay_demand_rx: tokio::sync::watch::Receiver<bool>,
+    ws_to_agent_tx: mpsc::UnboundedSender<String>,
+    agent_to_ws_tx: Rc<Mutex<Option<mpsc::UnboundedSender<String>>>>,
+    cancel: tokio_util::sync::CancellationToken,
+    /// Shared with [`run_leader`]'s shutdown path, which drains it to stop
+    /// the relay explicitly.
+    slot: Rc<std::cell::RefCell<Option<crate::agent::relay::RelayHandle>>>,
+    grok_com_config: crate::auth::GrokComConfig,
+    alpha_test_key: Option<String>,
+}
+
+impl DeferredRelayArm {
+    /// Arm the relay for a hot-reloaded session if it is relay-eligible.
+    ///
+    /// Consumes the parts and returns `None` when the relay was armed.
+    /// Returns `Some(self)` when the session is not relay-eligible (BYOK /
+    /// non-x.ai issuer — see
+    /// [`RelayConfig::for_session`](crate::agent::relay::RelayConfig::for_session))
+    /// so a later eligible token can still arm.
+    ///
+    /// Must be called within a `LocalSet` (delegates to
+    /// [`spawn_leader_relay`]).
+    fn arm_if_eligible(self, session: &GrokAuth, auth_manager: &Arc<AuthManager>) -> Option<Self> {
+        let Some(relay_config) = crate::agent::relay::RelayConfig::for_session(
+            session,
+            &self.grok_com_config,
+            self.alpha_test_key.clone(),
+            Some(auth_manager.clone()),
+        ) else {
+            return Some(self);
+        };
+        info!("Relay-eligible auth token appeared after startup — arming grok.com relay");
+        spawn_leader_relay(
+            self.slot,
+            relay_config,
+            self.relay_on_demand,
+            self.relay_demand_rx,
+            self.ws_to_agent_tx,
+            self.agent_to_ws_tx,
+            self.cancel,
+        );
+        None
+    }
 }
 
 /// Run the agent in leader mode, accepting IPC connections from multiple clients.
 /// When a grok.com session is present, the leader connects to the websocket relay
-/// after startup (post-auth, post-prefetch); BYOK / no-session leaders skip it and
-/// serve clients over IPC only. See [`spawn_leader_relay`] for when the relay
-/// connection is opened (eager by default, demand-gated with `relay_on_demand`).
+/// after startup (post-auth, post-prefetch); BYOK / no-session leaders start
+/// serving clients over IPC only, then arm the relay if a relay-eligible token
+/// is hot-reloaded later (see [`DeferredRelayArm`]). See [`spawn_leader_relay`]
+/// for when the relay connection is opened (eager by default, demand-gated with
+/// `relay_on_demand`).
 ///
 /// Startup sequence (lock-then-socket):
 /// 1. Acquire the leader flock FIRST — bail if another process holds it.
@@ -1198,7 +1260,10 @@ pub async fn run_leader(
     // process so a refresh can't straddle a suspend.
     shared_auth_manager.start_system_power_listener();
 
-    // Decided once here; not (re)started if a client authenticates mid-session.
+    // Resolved from startup auth here; when this is `None` (leader booted
+    // without auth) the relay is NOT permanently off — the config-update loop
+    // arms it later via `DeferredRelayArm` when the watcher hot-reloads a
+    // relay-eligible token.
     // The refresher lands on `shared_auth_manager` during `MvpAgent`
     // construction below; a relay 401 in the window before that surfaces as
     // a transient recovery failure and is retried, not a dead end.
@@ -1363,19 +1428,42 @@ pub async fn run_leader(
             // connect unconditionally. Leaders auto-spawned by interactive
             // clients pass `relay_on_demand` and defer the WebSocket until the
             // first headless registration. See `spawn_leader_relay`.
-            let relay_handle_slot = if let Some(relay_config) = relay_config {
+            let relay_handle_slot: Rc<
+                std::cell::RefCell<Option<crate::agent::relay::RelayHandle>>,
+            > = Rc::new(std::cell::RefCell::new(None));
+            let mut deferred_relay_arm: Option<DeferredRelayArm> = None;
+            if let Some(relay_config) = relay_config {
                 spawn_leader_relay(
+                    relay_handle_slot.clone(),
                     relay_config,
                     relay_on_demand,
                     relay_demand_rx,
                     ws_to_agent_tx.clone(),
                     agent_to_ws_tx.clone(),
                     cancel_clone.clone(),
-                )
+                );
             } else {
-                info!("Relay disabled: no grok.com session token (BYOK / local-only leader)");
-                Rc::new(std::cell::RefCell::new(None))
-            };
+                // No relay-eligible auth at startup (BYOK / local-only — or a
+                // devbox whose initial mint failed transiently). Don't decide
+                // "relay off" forever: park the parts so the config-update
+                // loop below arms the relay when the watcher hot-reloads a
+                // relay-eligible token. See `DeferredRelayArm`.
+                info!(
+                    "Relay not started: no grok.com session token \
+                     (BYOK / local-only leader); will arm if an eligible \
+                     token is hot-reloaded"
+                );
+                deferred_relay_arm = Some(DeferredRelayArm {
+                    relay_on_demand,
+                    relay_demand_rx,
+                    ws_to_agent_tx: ws_to_agent_tx.clone(),
+                    agent_to_ws_tx: agent_to_ws_tx.clone(),
+                    cancel: cancel_clone.clone(),
+                    slot: relay_handle_slot.clone(),
+                    grok_com_config: agent_config.grok_com_config.clone(),
+                    alpha_test_key: agent_config.endpoints.alpha_test_key.clone(),
+                });
+            }
 
             // Spawn auto-update checker if configured.
             let update_cancel = cancel_clone.clone();
@@ -1502,7 +1590,24 @@ pub async fn run_leader(
                                     "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
                                 })),
                             );
+                            // Cloned only while a deferred relay arm is
+                            // pending (leader booted without auth) — `None`
+                            // for the lifetime of a normally-authed leader.
+                            let session_for_relay = deferred_relay_arm
+                                .is_some()
+                                .then(|| (*auth).clone());
                             auth_manager_for_config.hot_swap(*auth);
+                            // Deferred relay arm for a leader that booted
+                            // without auth (post-hot-swap, so the shared
+                            // manager already holds the token when the relay
+                            // connects). A non-eligible token (BYOK) hands
+                            // the parts back for a later attempt.
+                            if let (Some(arm), Some(session)) =
+                                (deferred_relay_arm.take(), session_for_relay)
+                            {
+                                deferred_relay_arm = arm
+                                    .arm_if_eligible(&session, &auth_manager_for_config);
+                            }
                             models_manager_for_config.on_auth_changed().await;
                             let line = internal_reload_request_line(
                                 "config-auth-reloaded",
@@ -1861,7 +1966,9 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let slot = spawn_leader_relay(
+                let slot = Rc::new(std::cell::RefCell::new(None));
+                spawn_leader_relay(
+                    slot.clone(),
                     config,
                     false, // eager: explicit `grok agent leader` invocation
                     demand_rx,
@@ -1900,7 +2007,13 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let _slot = spawn_leader_relay(
+                // Keep an Rc on the slot for the whole test: the demand task
+                // drops its clone after parking the handle, and `RelayHandle`
+                // cancels the relay loop on Drop (mirrors `run_leader`, which
+                // owns the slot until shutdown).
+                let slot = Rc::new(std::cell::RefCell::new(None));
+                spawn_leader_relay(
+                    slot.clone(),
                     config,
                     true, // on-demand: spawned via spawn_leader_subprocess
                     demand_rx,
@@ -1920,6 +2033,81 @@ mod tests {
                 // First headless registration → relay connects.
                 demand_tx.send(true).unwrap();
                 wait_for_connection(&count, "after headless demand signal").await;
+            })
+            .await;
+        cancel.cancel();
+    }
+
+    /// Regression test for the "leader booted without auth is invisible
+    /// forever" bug: a leader that starts with no session (e.g. a devbox
+    /// whose initial mint hit a transient provider outage) must arm the
+    /// relay when a relay-eligible token is later hot-reloaded — and must
+    /// hand the parts back (not consume them) for a non-eligible token, so
+    /// a later eligible one can still arm.
+    #[tokio::test]
+    async fn deferred_arm_connects_relay_when_auth_appears() {
+        let (addr, count) = spawn_mock_relay_server().await;
+        let cancel = CancellationToken::new();
+        let (ws_to_agent_tx, _ws_to_agent_rx) = mpsc::unbounded_channel();
+        let agent_to_ws_tx: Rc<Mutex<Option<mpsc::UnboundedSender<String>>>> =
+            Rc::new(Mutex::new(None));
+        let (_demand_tx, demand_rx) = watch::channel(false);
+        let slot = Rc::new(std::cell::RefCell::new(None));
+
+        let grok_com_config = crate::auth::GrokComConfig {
+            grok_ws_url: format!("ws://{addr}"),
+            grok_ws_origin: format!("http://{addr}"),
+            ..Default::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_manager = Arc::new(AuthManager::new(tmp.path(), grok_com_config.clone()));
+
+        let arm = DeferredRelayArm {
+            relay_on_demand: false, // bare leader: eager once armed
+            relay_demand_rx: demand_rx,
+            ws_to_agent_tx,
+            agent_to_ws_tx: agent_to_ws_tx.clone(),
+            cancel: cancel.clone(),
+            slot: slot.clone(),
+            grok_com_config,
+            alpha_test_key: None,
+        };
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // A non-relay-eligible token (no x.ai issuer) must not arm
+                // and must hand the parts back.
+                let ineligible = GrokAuth::test_default();
+                let arm = arm
+                    .arm_if_eligible(&ineligible, &auth_manager)
+                    .expect("non-eligible token must hand the parts back");
+                assert!(slot.borrow().is_none(), "no handle parked yet");
+                assert_eq!(
+                    count.load(Ordering::SeqCst),
+                    0,
+                    "non-eligible token must not connect the relay"
+                );
+
+                // A relay-eligible x.ai OIDC token arms the relay eagerly.
+                let eligible = GrokAuth {
+                    auth_mode: AuthMode::Oidc,
+                    oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+                    ..GrokAuth::test_default()
+                };
+                assert!(
+                    arm.arm_if_eligible(&eligible, &auth_manager).is_none(),
+                    "eligible token must consume the arm parts"
+                );
+                assert!(
+                    slot.borrow().is_some(),
+                    "handle must be parked in the shared shutdown slot"
+                );
+                assert!(
+                    agent_to_ws_tx.lock().is_some(),
+                    "outbound relay sender must be installed"
+                );
+                wait_for_connection(&count, "deferred arm after auth hot-reload").await;
             })
             .await;
         cancel.cancel();

@@ -53,9 +53,6 @@ pub(super) fn dispatch_interject(
     agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));
-    // Interjecting into a parked wait continues the turn below this block —
-    // the withheld "Worked for …" marker must not fire late beneath it.
-    agent.suppress_parked_marker_on_interject();
 
     // The composer is NOT touched here: the producer that consumed composer
     // text (the InterjectPrompt registry arm) clears it at the call site;
@@ -145,7 +142,6 @@ pub(super) fn dispatch_send_prompt_now(
         // The arm hides the queue echo pushed below — paint the block now.
         super::queue::push_send_now_user_block(agent, &prompt_id, "prompt", &text, false);
     }
-    agent.suppress_parked_marker_on_interject();
 
     let blocks = crate::prompt_images::build_content_blocks_with_workspace(
         text.clone(),

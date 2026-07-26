@@ -767,11 +767,7 @@ impl ScrollbackState {
     /// failed") that can accept a live `stop`/`stop_failure` batch arriving
     /// after the marker (viewer order). The walk skips blocks appended after
     /// the marker. A stamped batch needs the marker to carry the same prompt
-    /// id — and treats parked markers as transparent: they never
-    /// accept hooks themselves (their turn is still running), and pid-exact
-    /// attribution cannot misattach, so a late prior-turn batch may cross
-    /// the current turn's not-yet-settled boundary into its own turn's
-    /// marker. An unstamped batch is positional (tail only) and stops at ANY
+    /// id. An unstamped batch is positional (tail only) and stops at ANY
     /// terminal-event marker — without a pid there is no proof it belongs
     /// further back. A same-name repeat (e.g. the session-end `stop`) is
     /// always refused.
@@ -786,14 +782,6 @@ impl ScrollbackState {
             };
             if !b.event.is_turn_terminal() {
                 continue;
-            }
-            if !b.accepts_stop_hooks() {
-                // Parked: transparent to a stamped batch, a hard stop for
-                // a positional one.
-                if batch_prompt_id.is_some() {
-                    continue;
-                }
-                return None;
             }
             if b.stop_hooks.iter().any(|(name, _)| name == event_name) {
                 return None;
@@ -812,9 +800,8 @@ impl ScrollbackState {
     /// entry and collapse it so the right-justified summary — not the
     /// fold-out detail — is the resting state. Returns `false` unless the
     /// entry is a turn-terminal session event the batch can be attributed to
-    /// (see [`Self::latest_turn_marker_accepting`]) — never a parked
-    /// marker; re-checked here so a stray caller can't attach hooks to the
-    /// wrong entry.
+    /// (see [`Self::latest_turn_marker_accepting`]); re-checked here so a
+    /// stray caller can't attach hooks to the wrong entry.
     pub fn attach_stop_hooks_to_marker(
         &mut self,
         id: EntryId,
@@ -828,7 +815,7 @@ impl ScrollbackState {
         let RenderBlock::SessionEvent(ref mut block) = entry.block else {
             return false;
         };
-        if !block.accepts_stop_hooks() {
+        if !block.event.is_turn_terminal() {
             return false;
         }
         let attributable = match (batch_prompt_id, block.prompt_id.as_deref()) {
@@ -845,59 +832,6 @@ impl ScrollbackState {
         }
         entry.invalidate_cache();
         self.mark_structurally_dirty(id);
-        true
-    }
-
-    /// Fold a turn completion into a tail-adjacent parked "Worked for X"
-    /// marker from the same prompt turn: the parked row already IS the
-    /// turn's boundary, so it takes the final elapsed + stop hooks in place
-    /// (unparked) instead of an identical row stacking beneath it. Returns
-    /// `false` (caller pushes a fresh marker) when the tail doesn't match,
-    /// the event isn't a completion (a failure/cancel is a different
-    /// outcome), or minimal mode already committed the row — print-once: an
-    /// in-place mutation would never reach the terminal.
-    pub fn fold_completion_into_tail_parked_marker(
-        &mut self,
-        event: &super::blocks::SessionEvent,
-        stop_hooks: &[(String, Vec<super::blocks::tool::HookRunEntry>)],
-        prompt_id: Option<&str>,
-    ) -> bool {
-        use super::blocks::SessionEvent;
-        // `is_none` also keeps `None` from matching a pid-less parked marker.
-        if prompt_id.is_none() || !matches!(event, SessionEvent::TurnCompleted { .. }) {
-            return false;
-        }
-        let tail_match = self.last().and_then(|entry| match &entry.block {
-            RenderBlock::SessionEvent(b) if b.parked && b.prompt_id.as_deref() == prompt_id => {
-                Some(entry.id)
-            }
-            _ => None,
-        });
-        let Some(id) = tail_match else {
-            return false;
-        };
-        if self.is_committed(id) {
-            return false;
-        }
-        let Some(entry) = self.entries.get_mut(&id) else {
-            return false;
-        };
-        let RenderBlock::SessionEvent(ref mut b) = entry.block else {
-            return false;
-        };
-        b.event = event.clone();
-        b.parked = false;
-        b.stop_hooks = stop_hooks.to_vec();
-        // A hook-carrying marker rests Collapsed (the right-justified summary)
-        // on every sibling path — fresh pushes via `default_display_mode` and
-        // `attach_stop_hooks_to_marker` — so the fold matches.
-        if b.has_stop_hook_content() && !entry.display_mode_pinned {
-            entry.display_mode = DisplayMode::Collapsed;
-        }
-        entry.invalidate_cache();
-        self.mark_structurally_dirty(id);
-        // The marker's searchable text changed (parked elapsed → final).
-        self.bump_content_generation();
         true
     }
 
@@ -2264,17 +2198,6 @@ mod tests {
         };
 
         let mut state = ScrollbackState::new();
-        // A parked marker renders mid-turn — it must never accept hooks, at
-        // the lookup and at the mutation site alike.
-        let mut parked_block =
-            crate::scrollback::blocks::SessionEventBlock::new(SessionEvent::TurnCompleted {
-                elapsed: Some(std::time::Duration::from_secs(1)),
-            });
-        parked_block.parked = true;
-        let parked = state.push_block(RenderBlock::SessionEvent(parked_block));
-        assert_eq!(state.latest_turn_marker_accepting("stop", None), None);
-        assert!(!state.attach_stop_hooks_to_marker(parked, "stop".into(), entries(), None));
-
         let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }));
@@ -2408,68 +2331,6 @@ mod tests {
         ));
         assert_eq!(
             state.latest_turn_marker_accepting("stop", Some("pid-new")),
-            None
-        );
-    }
-
-    #[test]
-    fn stamped_stop_hooks_cross_parked_marker_to_their_turns_marker() {
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-        use crate::scrollback::blocks::{SessionEvent, SessionEventBlock};
-        let entries = || {
-            vec![HookRunEntry {
-                name: "h".into(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }]
-        };
-
-        // A prior turn's settled marker, then the current turn's parked
-        // EndLine at the tail (viewer/reattach shape).
-        let mut state = ScrollbackState::new();
-        let prior = state.push_block(RenderBlock::SessionEvent(
-            SessionEventBlock::with_stop_hooks(
-                SessionEvent::TurnCompleted {
-                    elapsed: Some(std::time::Duration::from_secs(2)),
-                },
-                Vec::new(),
-                Some("pid-a".into()),
-            ),
-        ));
-        let mut parked_block = SessionEventBlock::new(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(1)),
-        });
-        parked_block.parked = true;
-        parked_block.prompt_id = Some("pid-b".into());
-        let parked = state.push_block(RenderBlock::SessionEvent(parked_block));
-
-        // A late batch stamped for the PRIOR turn crosses the parked marker
-        // (pid-exact attribution cannot misattach) and merges into its own
-        // turn's marker; the parked marker itself is untouched.
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-a")),
-            Some(prior)
-        );
-        assert!(state.attach_stop_hooks_to_marker(prior, "stop".into(), entries(), Some("pid-a")));
-        match &state.get_by_id(parked).unwrap().block {
-            RenderBlock::SessionEvent(b) => {
-                assert!(b.parked);
-                assert!(b.stop_hooks.is_empty(), "the parked marker stays clean");
-            }
-            other => panic!("expected the parked marker, got {other:?}"),
-        }
-
-        // The parked turn's own pid still never accepts (its Stop hooks
-        // cannot have fired yet), and an unstamped positional batch stops at
-        // the parked tail marker as before.
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop_failure", Some("pid-b")),
-            None
-        );
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop_failure", None),
             None
         );
     }

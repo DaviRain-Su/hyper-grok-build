@@ -52,6 +52,11 @@ impl ProviderRouterAgent {
     pub(crate) fn advertise_commands_all_sessions(&self) -> usize {
         self.grok.advertise_commands_all_sessions()
     }
+
+    /// Flush every live session before the in-process worker exits.
+    pub(crate) async fn flush_all_sessions(&self, grace: std::time::Duration) {
+        self.grok.flush_all_sessions(grace).await;
+    }
 }
 
 #[async_trait::async_trait(?Send)]

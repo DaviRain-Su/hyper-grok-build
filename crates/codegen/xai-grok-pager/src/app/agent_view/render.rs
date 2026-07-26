@@ -20,7 +20,7 @@ use crate::theme::Theme;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
-use crate::views::prompt_widget::{PromptFlag, PromptInfo, PromptStyle};
+use crate::views::prompt_widget::{PromptBg, PromptFlag, PromptInfo, PromptStyle};
 use crate::views::question_view::QUESTION_VIEW_HPAD;
 use crate::views::shortcuts_bar::{HintItem, PendingHint, ShortcutsBar};
 use crate::views::{agent, turn_status};
@@ -822,7 +822,7 @@ impl AgentView {
             chrome: true,
             chrome_pad_left: layout_cfg.block_pad_left,
             chrome_pad_right: layout_cfg.block_pad_right,
-            bg_override: None,
+            bg: PromptBg::Default,
             accent_color_override: if let Some(c) = self.prompt_input_mode.accent_color(&theme) {
                 Some(c)
             } else if effective_plan || casual_commenting {
@@ -964,7 +964,7 @@ impl AgentView {
             chrome: false,
             chrome_pad_left: 0,
             chrome_pad_right: 0,
-            bg_override: Some(theme.bg_visual),
+            bg: PromptBg::Panel(theme.bg_visual),
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
@@ -999,7 +999,7 @@ impl AgentView {
                 chrome: false,
                 chrome_pad_left: 0,
                 chrome_pad_right: 0,
-                bg_override: Some(theme.bg_visual),
+                bg: PromptBg::Panel(theme.bg_visual),
                 accent_color_override: None,
                 border_color_override: None,
                 prefix_override: None,
@@ -2381,7 +2381,7 @@ impl AgentView {
                         chrome: false,
                         chrome_pad_left: 0,
                         chrome_pad_right: 0,
-                        bg_override: Some(row_bg),
+                        bg: PromptBg::Panel(row_bg),
                         accent_color_override: None,
                         border_color_override: None,
                         prefix_override: None,

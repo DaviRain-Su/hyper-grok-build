@@ -27,9 +27,9 @@ pub mod defs;
 pub mod registry;
 
 pub use registry::{
-    DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
-    SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry,
-    StringValidator, canonical_hunk_tracker_mode, canonical_screen_mode,
+    CodingDataSharingLock, DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot,
+    SettingCategory, SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue,
+    SettingsRegistry, StringValidator, canonical_hunk_tracker_mode, canonical_screen_mode,
     canonical_voice_capture_mode, canonical_voice_stt_language, current_value_for,
     default_value_for, dynamic_enum_choices,
 };

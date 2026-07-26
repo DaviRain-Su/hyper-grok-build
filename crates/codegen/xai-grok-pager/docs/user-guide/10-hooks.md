@@ -68,9 +68,12 @@ Hooks are discovered from several places (all are merged):
 | Project | `<project>/.grok/hooks/*.json` | Requires trust | Per-repo automation |
 | Project | `<project>/.claude/settings.json` (and `settings.local.json`) | Requires trust | Claude compatibility (configurable) |
 | Project | `<project>/.cursor/hooks.json` | Requires trust | Cursor compatibility (configurable) |
+| Config | `~/.grok/config.toml` | Always | Your hooks alongside the rest of your config |
+| Config | `managed_config.toml` (`$GROK_HOME` and `/etc/grok`) | Always | Organization-distributed hooks (server-synced and on-device) |
+| Config | `requirements.toml` (user and system) | Always | Organization-distributed hooks in the requirements layer |
 | Plugin | Bundled inside installed plugins | Per-plugin | Shared team hooks |
 
-The Claude and Cursor hook sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] hooks = false` in `~/.grok/config.toml` or the corresponding environment variable. See [Configuration](05-configuration.md#harness-compatibility) for details.
+Config-file hooks live in the same TOML your organization already controls; see [Hooks in Config Files](#hooks-in-config-files) for the format. The compatible vendor hook sources are scanned by default. To disable scanning for a specific vendor, set `[compat.<vendor>] hooks = false` in `~/.grok/config.toml` or the corresponding environment variable. See [Configuration](05-configuration.md#harness-compatibility) for details.
 
 **Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run -- until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.grok/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.grok/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
 
@@ -165,6 +168,47 @@ In a `matcher`, Grok maps Claude-style tool names to its own so hooks migrated f
 - `Task` → `spawn_subagent`
 
 A matcher keeps its original name too, so `Bash` matches both `Bash` and `run_terminal_command`.
+
+---
+
+## Hooks in Config Files
+
+Hooks can also live directly in your Grok config, so a team can distribute them with the rest of their configuration instead of shipping separate JSON files. The same `hooks` object is read from three TOML files:
+
+| File | Tier | Who sets it |
+|------|------|-------------|
+| `~/.grok/config.toml` | User | You |
+| `managed_config.toml` (`$GROK_HOME`, `/etc/grok`) | Managed / system | Your organization |
+| `requirements.toml` (user and system) | Requirements | Your organization |
+
+The TOML is structurally identical to the JSON hook object, so an existing hook transliterates directly:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash|Write|Edit"
+hooks = [
+  { type = "command", command = "/opt/guard/pretooluse.sh", timeout = 10 },
+]
+```
+
+Each matcher group is a `[[hooks.<Event>]]` entry with an optional `matcher` and an inner `hooks` array of handlers. The handler fields (`type`, `command`, `url`, `timeout`, `env`) and event names are exactly the same as the [JSON format](#the-hook-json-format).
+
+TOML offers two equivalent notations for the inner handlers, and both parse to the identical structure. The inline-table array shown above is recommended: it reads best for the common single-handler case. The nested array-of-tables form is also accepted:
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash|Write|Edit"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/opt/guard/pretooluse.sh"
+timeout = 10
+```
+
+Prefer the inline form to avoid repeating the `[[hooks.<Event>.hooks]]` header for each handler.
+
+- **Additive across layers.** Every layer's hooks run; a lower-priority layer adds hooks but never replaces another layer's block. A hook defined identically in more than one layer is deduplicated, keeping the highest-authority copy.
+- **Provenance labels.** Config hooks appear in `/hooks` tagged by origin (`managed:`, `requirements/user:`, `user:`, and so on) so you can see which layer contributed each one.
+- **No read-time expansion.** A literal `${VAR}` in a `command` or `url` reaches the hook runner unchanged, matching JSON hook-file semantics; the runner performs the single expansion.
 
 ---
 

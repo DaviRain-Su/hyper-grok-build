@@ -1,23 +1,39 @@
 //! Ed25519-signed, identity-bound managed-policy envelope.
 //!
-//! The server signs a canonical payload (the served policy, the bound principal,
-//! an expiry) with an Ed25519 private key; the client verifies it against a
-//! compiled-in trusted key set (selected by the signed `key_id`, so keys can
-//! rotate), binds it to the active principal, and checks the on-disk policy
-//! matches the signed bytes — so an in-place edit is caught, not just a deletion.
-//! Inert until a public key is provisioned: with no embedded keys the cache
-//! marker stays the (best-effort) authority.
+//! Server signs policy + principal + expiry; client verifies against a compiled-in
+//! key set (by signed `key_id`), binds principal, and checks on-disk bytes match.
+//! This build is armed (prod `v1` key); keyless (`&[]`) keeps the cache marker as authority.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use base64::Engine;
+
+// Shared wire types with the deployment-config server: a field rename breaks compile on both sides.
 pub use prod_mc_cli_chat_proxy_types::{
     MANAGED_CONFIG_NONCE_ECHO_HEADER, MANAGED_IDENTITY_TYP, MANAGED_POLICY_TYP,
     ManagedIdentityClaim, SignatureEnvelope, SignedPayload, is_server_nonce_shape, now_unix,
 };
-/// Compiled-in trusted Ed25519 public keys, `(key_id, raw 32 bytes)`; more than one
-/// entry only during a rotation. Empty ships dark (see [`verification_active`]).
-/// Compile-time, not an env flag: the local attacker controls their env.
-/// Provisioning order: keyed clients reject `typ`-less envelopes, so the
-/// typ-emitting server must be fully rolled out before any client embeds a key.
-pub const EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS: &[(&str, &[u8])] = &[];
+
+/// Compiled-in trusted keys `(key_id, raw 32 bytes)`. Prod `v1`. Empty = dark (no verification).
+/// The private signing key never lives in this crate or in client env flags.
+///
+/// - base64: `BxP2cxaRIzlhxUvqmlz9e/dIBeWX58P4whEW0sFrdzI=`
+/// - SHA-256: `fb4dcc77c757465b953265146d495166527fcc1c2b365352f8d20c3d8f6de620`
+///
+/// Ship only after the server is emitting valid envelopes for this key id.
+pub const EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS: &[(&str, &[u8])] = &[(
+    "v1",
+    &[
+        7, 19, 246, 115, 22, 145, 35, 57, 97, 197, 75, 234, 154, 92, 253, 123, 247, 72, 5, 229,
+        151, 231, 195, 248, 194, 17, 22, 210, 193, 107, 119, 50,
+    ],
+)];
+
+/// SHA-256 of raw `v1` pubkey (hex); test pin against silent typos.
+pub const EMBEDDED_V1_PUBKEY_SHA256_HEX: &str =
+    "fb4dcc77c757465b953265146d495166527fcc1c2b365352f8d20c3d8f6de620";
+
+// Compile-time sanity for the key set.
 const _: () = {
     let keys = EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS;
     let mut i = 0;
@@ -41,6 +57,7 @@ const _: () = {
         i += 1;
     }
 };
+
 const fn const_str_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
@@ -55,16 +72,95 @@ const fn const_str_eq(a: &str, b: &str) -> bool {
     }
     true
 }
-/// Run `f` over the trusted key set — the compiled-in [`EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS`],
-/// unless the compile-time-excluded test seam overrides it.
-fn with_embedded_keys<R>(f: impl FnOnce(&[(&str, &[u8])]) -> R) -> R {
-    f(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS)
+
+/// Debug-only key override for tests (`test` or `test-signing-seam`); never release.
+#[cfg(all(test, debug_assertions))]
+pub mod test_seam {
+    use std::cell::RefCell;
+    use std::sync::RwLock;
+
+    /// Owned key list: `(key_id, raw 32-byte pubkey)`.
+    type OwnedKeys = Vec<(String, Vec<u8>)>;
+    /// `None` = compiled-in keys; `Some([])` = dark; `Some(non-empty)` = override.
+    type KeyOverride = Option<OwnedKeys>;
+
+    // Process override.
+    pub(super) static GLOBAL_OVERRIDE: RwLock<KeyOverride> = RwLock::new(None);
+
+    // Thread-local override (unit tests; avoids racing armed global).
+    // Outer `Option`: unset vs set on this thread. Inner is [`KeyOverride`].
+    thread_local! {
+        static LOCAL_OVERRIDE: RefCell<Option<KeyOverride>> = const { RefCell::new(None) };
+    }
+
+    fn to_owned_keys(keys: Option<&[(&str, &[u8])]>) -> KeyOverride {
+        keys.map(|ks| {
+            ks.iter()
+                .map(|(id, key)| ((*id).to_owned(), key.to_vec()))
+                .collect()
+        })
+    }
+
+    /// Process keys: `None` clear, `Some(&[])` dark, else these keys.
+    pub fn set_embedded_keys(keys: Option<&[(&str, &[u8])]>) {
+        *GLOBAL_OVERRIDE.write().unwrap_or_else(|e| e.into_inner()) = to_owned_keys(keys);
+    }
+
+    /// Dark keys on this thread for `f` only.
+    pub fn with_dark<R>(f: impl FnOnce() -> R) -> R {
+        LOCAL_OVERRIDE.with(|cell| {
+            let prev = cell.replace(Some(Some(Vec::new())));
+            struct Restore(Option<KeyOverride>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    let prev = self.0.take();
+                    LOCAL_OVERRIDE.with(|cell| {
+                        *cell.borrow_mut() = prev;
+                    });
+                }
+            }
+            let _restore = Restore(prev);
+            f()
+        })
+    }
+
+    pub(super) fn with_override<R>(f: impl FnOnce(Option<&[(String, Vec<u8>)]>) -> R) -> R {
+        if let Some(local) = LOCAL_OVERRIDE.with(|c| c.borrow().clone()) {
+            f(local.as_deref())
+        } else {
+            let global = GLOBAL_OVERRIDE.read().unwrap_or_else(|e| e.into_inner());
+            f(global.as_deref())
+        }
+    }
 }
+
+fn with_embedded_keys<R>(f: impl FnOnce(&[(&str, &[u8])]) -> R) -> R {
+    #[cfg(all(test, debug_assertions))]
+    {
+        test_seam::with_override(|overridden| match overridden {
+            Some(keys) => {
+                let view: Vec<(&str, &[u8])> = keys
+                    .iter()
+                    .map(|(id, key)| (id.as_str(), key.as_slice()))
+                    .collect();
+                f(&view)
+            }
+            None => f(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS),
+        })
+    }
+    #[cfg(not(all(test, debug_assertions)))]
+    {
+        f(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS)
+    }
+}
+
 /// Sidecar persisted next to the policy so the load-time gate can re-verify it offline.
 pub const SIGNATURE_SIDECAR_FILE: &str = "managed_config.sig.json";
+
 /// The is-managed claim's own sidecar (see
 /// [`prod_mc_cli_chat_proxy_types::ManagedIdentityClaim`]).
 pub const MANAGED_IDENTITY_SIDECAR_FILE: &str = "managed_identity.sig.json";
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SigError {
     #[error("signature is not valid base64")]
@@ -88,17 +184,56 @@ pub enum SigError {
     #[error("on-disk {0} cannot be read")]
     Unreadable(&'static str),
 }
-/// Whether the client must require + verify a signature — true iff the key set is
-/// non-empty (no env toggle; see [`EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS`]).
+
+/// Remote kill-switch; set only from authenticated remote settings.
+static REMOTE_VERIFICATION_DISARMED: AtomicBool = AtomicBool::new(false);
+
+/// True when keys are embedded and the remote kill-switch has not disarmed.
 pub fn verification_active() -> bool {
+    if REMOTE_VERIFICATION_DISARMED.load(Ordering::Relaxed) {
+        return false;
+    }
     with_embedded_keys(|keys| !keys.is_empty())
 }
+
+/// Apply remote `managed_config_signature_verification`.
+///
+/// - `Some(false)` disarms only when `settings_origin_trusted` is true **or** no
+///   keys are embedded (dark: disarm is a no-op for enforcement). An untrusted
+///   origin (env-overridden proxy) cannot disarm a keyed client — that would make
+///   the kill-switch an env toggle.
+/// - `None` / `Some(true)` re-arm always (stronger / default).
+///
+/// Call only when settings were successfully fetched. Logs on state change.
+pub fn apply_remote_managed_config_signature_verification(
+    setting: Option<bool>,
+    settings_origin_trusted: bool,
+) {
+    let want_disarm = setting == Some(false);
+    let keys_embedded = with_embedded_keys(|keys| !keys.is_empty());
+    if want_disarm && keys_embedded && !settings_origin_trusted {
+        tracing::warn!(
+            "ignoring managed_config_signature_verification=false from untrusted settings origin"
+        );
+        return;
+    }
+    let disarm = want_disarm;
+    let prev = REMOTE_VERIFICATION_DISARMED.swap(disarm, Ordering::Relaxed);
+    if prev != disarm {
+        tracing::warn!(
+            disarmed = disarm,
+            "managed-config signature verification kill-switch changed"
+        );
+    }
+}
+
 /// Whether `key_id` names a trusted key. Only PICKS among served envelopes;
 /// verification re-selects the key from the signed bytes, so a lying hint can at
 /// most cause a verification failure.
 pub fn embedded_key_id_trusted(key_id: &str) -> bool {
     with_embedded_keys(|keys| keys.iter().any(|(id, _)| *id == key_id))
 }
+
 /// Verify `signature_b64` over `signed_payload` against `trusted_keys`, returning the
 /// parsed payload. The verifying key is selected by the SIGNED payload's `key_id` —
 /// safe to read pre-verification because selection can only land within the trusted
@@ -118,6 +253,7 @@ pub fn verify_signed_payload(
     }
     Ok(payload)
 }
+
 /// [`verify_signed_payload`]'s mirror for claims (requires [`MANAGED_IDENTITY_TYP`]).
 pub fn verify_managed_identity_claim(
     signed_payload: &str,
@@ -132,6 +268,7 @@ pub fn verify_managed_identity_claim(
     }
     Ok(claim)
 }
+
 /// Shared Ed25519 check: select the trusted key named by the signed bytes' `key_id`, verify.
 fn verify_signature_with_keys(
     signed_payload: &str,
@@ -150,6 +287,7 @@ fn verify_signature_with_keys(
         .verify(signed_payload.as_bytes(), &sig)
         .map_err(|_| SigError::SignatureMismatch)
 }
+
 /// Fetch-time identity binding for a VERIFIED payload, expiry enforced: a
 /// deployment-signed payload is trusted on signature alone; a team-signed payload
 /// must match the active team. Lenient on a missing active team — an `auth.json`
@@ -173,6 +311,7 @@ pub fn check_fetch_identity(
     }
     Ok(())
 }
+
 /// Whether the payload's effective principal (`deployment_id`, else `team_id`) matches
 /// ours — the at-rest identity rule, so another tenant's cache reads foreign. Lenient
 /// when either side is unknown. Deliberately expiry-free: the gate orders identity
@@ -187,6 +326,7 @@ fn signed_principal_matches(payload: &SignedPayload, expected_principal: Option<
         (Some(signed), Some(expected)) if signed != expected
     )
 }
+
 /// Full verification of a fetched envelope against the embedded trusted keys
 /// (signature, binding, expiry), returning the trusted payload to persist.
 pub fn verify_fetched(
@@ -196,6 +336,7 @@ pub fn verify_fetched(
 ) -> Result<SignedPayload, SigError> {
     with_embedded_keys(|keys| verify_fetched_with_keys(sidecar, keys, active_team_id, now_unix))
 }
+
 /// Fetch-time claim verification (signature + expiry; binding is the caller's rule).
 pub fn verify_fetched_claim(
     sidecar: &SignatureEnvelope,
@@ -203,6 +344,7 @@ pub fn verify_fetched_claim(
 ) -> Result<ManagedIdentityClaim, SigError> {
     with_embedded_keys(|keys| verify_fetched_claim_with_keys(sidecar, keys, now_unix))
 }
+
 /// Key-injected core of [`verify_fetched_claim`] so tests can supply throwaway keys.
 fn verify_fetched_claim_with_keys(
     sidecar: &SignatureEnvelope,
@@ -216,6 +358,7 @@ fn verify_fetched_claim_with_keys(
     }
     Ok(claim)
 }
+
 /// Key-injected core of [`verify_fetched`] so tests can supply throwaway keypairs.
 fn verify_fetched_with_keys(
     sidecar: &SignatureEnvelope,
@@ -227,6 +370,7 @@ fn verify_fetched_with_keys(
     check_fetch_identity(&payload, active_team_id, now_unix)?;
     Ok(payload)
 }
+
 /// True when something occupies `path` that is not a regular file — directory,
 /// symlink, fifo, … NO-FOLLOW, so even a symlink to a byte-identical file counts:
 /// a squatter blocks or redirects reads/rewrites, which is tamper, never a blip.
@@ -234,6 +378,7 @@ fn verify_fetched_with_keys(
 fn non_regular_file_at(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| !m.is_file())
 }
+
 /// Confirm the on-disk artifacts match the signed payload byte-for-byte — an in-place
 /// edit is caught, not just a deletion. A signed-ABSENT slot must be empty on disk: a
 /// locally planted `requirements.toml` (the highest-precedence layer) is tamper, not
@@ -275,9 +420,11 @@ pub fn check_on_disk_matches(
     }
     Ok(())
 }
+
 pub(crate) fn sidecar_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(SIGNATURE_SIDECAR_FILE)
 }
+
 /// Outcome of reading the on-disk sidecar; mirrors the artifact-slot semantics of
 /// [`check_on_disk_matches`].
 enum SidecarRead {
@@ -289,9 +436,11 @@ enum SidecarRead {
     /// gate must not refuse on it, but the refetch trigger fires to self-heal.
     Unreadable,
 }
+
 fn read_sidecar(home: &std::path::Path) -> SidecarRead {
     read_envelope_at(&sidecar_path(home))
 }
+
 fn read_envelope_at(path: &std::path::Path) -> SidecarRead {
     if non_regular_file_at(path) {
         return SidecarRead::Absent;
@@ -306,15 +455,18 @@ fn read_envelope_at(path: &std::path::Path) -> SidecarRead {
         Err(_) => SidecarRead::Absent,
     }
 }
+
 /// Persist the sidecar atomically — a torn sidecar would fail the load-time gate.
 /// Written 0600 on unix: for a deployment-key principal the signed payload embeds
 /// the key, so the sidecar is a second at-rest copy of a bearer credential.
 pub fn write_sidecar(home: &std::path::Path, sidecar: &SignatureEnvelope) -> std::io::Result<()> {
     write_envelope_at(&sidecar_path(home), sidecar)
 }
+
 pub(crate) fn managed_identity_sidecar_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(MANAGED_IDENTITY_SIDECAR_FILE)
 }
+
 /// [`write_sidecar`] for the claim (0600 for uniformity; the claim has no secret).
 pub fn write_managed_identity_sidecar(
     home: &std::path::Path,
@@ -322,11 +474,13 @@ pub fn write_managed_identity_sidecar(
 ) -> std::io::Result<()> {
     write_envelope_at(&managed_identity_sidecar_path(home), sidecar)
 }
+
 fn write_envelope_at(path: &std::path::Path, sidecar: &SignatureEnvelope) -> std::io::Result<()> {
     let json = serde_json::to_string(sidecar)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     crate::fs_atomic::write_atomically(path, &json, Some(0o600))
 }
+
 /// Persisted envelope nonce for [`MANAGED_CONFIG_NONCE_ECHO_HEADER`] (unverified;
 /// telemetry only, never a trust input). Both guards fail open by skipping the
 /// echo: only the server mint shape (header-safe, so a corrupt sidecar can't brick
@@ -341,6 +495,7 @@ pub fn stored_envelope_nonce(
         return None;
     };
     let payload: SignedPayload = serde_json::from_str(&sidecar.signed_payload).ok()?;
+    // Effective principal mirrors the server's bookkeeping: deployment over team.
     let issued_to = payload
         .deployment_id
         .as_deref()
@@ -348,6 +503,7 @@ pub fn stored_envelope_nonce(
     (issued_to == Some(fetch_principal) && is_server_nonce_shape(&payload.nonce))
         .then_some(payload.nonce)
 }
+
 /// Whether an authentic claim IMPOSES fail-closed enforcement: verified, bound to
 /// the KNOWN `expected_principal`, in-date vs the caller-clamped `now_unix`, and
 /// `fail_closed`. Anything else imposes nothing: permissive (must not override a
@@ -365,6 +521,7 @@ pub fn managed_identity_claim_imposes(
         managed_identity_claim_imposes_with_keys(home, keys, expected_principal, now_unix)
     })
 }
+
 /// Key-injected core of [`managed_identity_claim_imposes`] so tests can supply throwaway keys.
 fn managed_identity_claim_imposes_with_keys(
     home: &std::path::Path,
@@ -386,9 +543,10 @@ fn managed_identity_claim_imposes_with_keys(
     };
     claim.principal == expected && now_unix <= claim.expires_at && claim.fail_closed
 }
+
 /// True when signature verification is active AND a cloud-cache policy on disk is
 /// NOT covered by a valid, in-date, identity-bound, content-matching signature.
-/// Dark build or no policy on disk → false (behavior unchanged until a key ships).
+/// Keyless build or no policy on disk → false.
 pub fn cloud_cache_signature_invalid(
     home: &std::path::Path,
     expected_principal: Option<&str>,
@@ -401,6 +559,7 @@ pub fn cloud_cache_signature_invalid(
         cloud_cache_signature_invalid_with_keys(home, keys, expected_principal, now_unix)
     })
 }
+
 /// Key-injected core of [`cloud_cache_signature_invalid`] so tests can supply throwaway keys.
 fn cloud_cache_signature_invalid_with_keys(
     home: &std::path::Path,
@@ -415,10 +574,13 @@ fn cloud_cache_signature_invalid_with_keys(
     }
     use SignedCacheEvaluation as Eval;
     match evaluate_signed_cache(home, trusted_keys, expected_principal, now_unix) {
+        // ANY deviation refetches — including read blips (self-heal what the gate stays
+        // lenient on) and a foreign-but-authentic cache (which would otherwise never rebind).
         Eval::NoAuthenticSidecar | Eval::SidecarUnreadable => true,
         Eval::Facts(f) => !f.identity_ok || f.expired || f.disk != DiskStatus::Match,
     }
 }
+
 /// On-disk status of the signed artifact slots, from [`check_on_disk_matches`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiskStatus {
@@ -430,6 +592,7 @@ enum DiskStatus {
     /// the gate.
     Unreadable,
 }
+
 /// What one verification pass over the on-disk sidecar establishes. The two public
 /// checks are projections over the same facts: the refetch trigger flags ANY
 /// deviation; the gate applies the fail-closed rules.
@@ -441,6 +604,7 @@ struct SignedCacheFacts {
     fail_closed: bool,
     disk: DiskStatus,
 }
+
 /// One evaluation of the on-disk sidecar; both public checks project from this.
 enum SignedCacheEvaluation {
     /// No authentic sidecar: missing, corrupt, a squatting non-file, forged, or
@@ -451,6 +615,7 @@ enum SignedCacheEvaluation {
     SidecarUnreadable,
     Facts(SignedCacheFacts),
 }
+
 /// Read the sidecar, verify it against `trusted_keys`, reduce to a [`SignedCacheEvaluation`].
 fn evaluate_signed_cache(
     home: &std::path::Path,
@@ -479,6 +644,7 @@ fn evaluate_signed_cache(
         },
     })
 }
+
 /// Verdict of the signed-sidecar check for the load-time gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignedVerdict {
@@ -508,6 +674,7 @@ pub enum SignedVerdict {
     /// disk, expired, or bound to a different principal. Refuse — always.
     Compromised,
 }
+
 /// The signed verdict for the on-disk cache; see [`SignedVerdict`]. The fail-closed
 /// opt-in is read from the SIGNED bytes, not the forgeable marker. `expected_principal`
 /// is the machine's managed principal (active team id, or the recorded deployment id);
@@ -524,6 +691,7 @@ pub fn signed_cache_compromised(
         signed_cache_compromised_with_keys(home, keys, expected_principal, now_unix)
     })
 }
+
 /// Key-injected core of [`signed_cache_compromised`] so tests can supply throwaway keys.
 fn signed_cache_compromised_with_keys(
     home: &std::path::Path,
@@ -535,12 +703,18 @@ fn signed_cache_compromised_with_keys(
     match evaluate_signed_cache(home, trusted_keys, expected_principal, now_unix) {
         Eval::NoAuthenticSidecar => SignedVerdict::NoAuthenticSidecar,
         Eval::SidecarUnreadable => SignedVerdict::SidecarUnreadable,
+        // Identity precedes the fail_closed short-circuit: a foreign-bound but
+        // permissive policy can't be replayed to escape a strict one offline.
         Eval::Facts(f) if !f.identity_ok => SignedVerdict::Compromised,
         Eval::Facts(f) if !f.fail_closed => SignedVerdict::Trusted,
+        // Opted-in and bound to us: expired or tampered-on-disk refuses; an
+        // Unreadable blip does not.
         Eval::Facts(f) if f.expired || f.disk == DiskStatus::Mismatch => SignedVerdict::Compromised,
         Eval::Facts(_) => SignedVerdict::Trusted,
     }
 }
+
+// Tests in a sibling file (they dwarf the module) but a child module, for private access.
 #[cfg(test)]
 #[path = "signed_policy/tests.rs"]
 mod tests;

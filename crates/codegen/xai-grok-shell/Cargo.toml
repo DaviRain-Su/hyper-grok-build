@@ -220,6 +220,10 @@ workspace = true
 name = "session_list"
 harness = false
 
+[[bench]]
+name = "fork_copy"
+harness = false
+
 [lints]
 workspace = true
 [build-dependencies]

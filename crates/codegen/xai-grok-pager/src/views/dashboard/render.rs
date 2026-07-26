@@ -2870,7 +2870,7 @@ fn render_dispatch(
 ) -> Option<(u16, u16)> {
     use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
-    use crate::views::prompt_widget::PromptStyle;
+    use crate::views::prompt_widget::{PromptBg, PromptStyle};
 
     if area.area() == 0 {
         return None;
@@ -3046,7 +3046,7 @@ fn render_dispatch(
         show_prefix: true,
         vpad_top: 0,
         chrome: false,
-        bg_override: Some(theme.bg_base),
+        bg: PromptBg::Canvas(theme.bg_base),
         image_preview: false,
         ..PromptStyle::default()
     };

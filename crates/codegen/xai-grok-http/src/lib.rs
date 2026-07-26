@@ -347,13 +347,15 @@ pub fn shared_upload_client() -> reqwest::Client {
 /// `pool_max_idle_per_host(0)` + `http1_only()` so each request opens a new connection, and no
 /// connect timeout (callers bound each request with their own total timeout). The retry escape
 /// policy that reaches for this client to dodge a poisoned pool lives on `send_with_retry_escaping_pool`.
-pub(crate) fn fresh_http1_client() -> reqwest::Client {
+///
+/// Fallible: build can fail under fd/TLS pressure; the caller must not
+/// panic on error (fallback policy lives at the call site).
+pub(crate) fn fresh_http1_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .http1_only()
         .pool_max_idle_per_host(0)
         .user_agent(process_user_agent_string())
         .build()
-        .expect("failed to build fresh HTTP/1.1 client")
 }
 
 /// Joins an error's `source()` chain into one string. A `reqwest::Error`'s `Display`
@@ -456,7 +458,18 @@ where
         // Only the final attempt of a multi-attempt run escapes onto a fresh pool-less connection; a
         // single-attempt caller keeps the pooled client (there is no prior failure to escape).
         let client = if attempt > 0 && attempt + 1 == max_attempts {
-            fresh.get_or_insert_with(fresh_http1_client).clone()
+            match &fresh {
+                Some(c) => c.clone(),
+                None => match fresh_http1_client() {
+                    Ok(c) => fresh.insert(c).clone(),
+                    // Can't escape the pool (e.g. fd exhaustion); a pooled
+                    // final attempt still beats aborting the process.
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to build pool-escape client; final attempt stays on pooled client");
+                        pooled.clone()
+                    }
+                },
+            }
         } else {
             pooled.clone()
         };

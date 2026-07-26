@@ -7602,6 +7602,7 @@ pub(crate) mod tests {
                 timeout_ms: 10_000,
                 source_dir: std::path::PathBuf::from("/tmp"),
                 extra_env: std::collections::HashMap::new(),
+                layer: xai_grok_hooks::config::HookProvenance::File,
             };
             handle.shared.hook_registry.write().append_specs(vec![spec]);
         }

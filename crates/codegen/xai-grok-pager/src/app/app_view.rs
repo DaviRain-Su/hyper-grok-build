@@ -1243,6 +1243,17 @@ impl AppView {
                 .as_deref()
                 .is_some_and(|r| r.eq_ignore_ascii_case("admin"))
     }
+    /// Why `coding_data_sharing` is locked for this user (`None` = editable).
+    /// Mirrors the dispatch guards in `set_coding_data_sharing`.
+    pub fn coding_data_sharing_lock(&self) -> Option<crate::settings::CodingDataSharingLock> {
+        if self.is_zdr {
+            Some(crate::settings::CodingDataSharingLock::Zdr)
+        } else if self.is_team_non_admin() {
+            Some(crate::settings::CodingDataSharingLock::TeamManaged)
+        } else {
+            None
+        }
+    }
     /// Welcome privacy banner visibility gates.
     pub fn privacy_banner_should_show(&self) -> bool {
         if self.screen_mode.is_minimal() {

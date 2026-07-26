@@ -19,7 +19,7 @@ use xai_grok_pager::render::Renderable;
 use xai_grok_pager::scrollback::state::ScrollbackState;
 use xai_grok_pager::scrollback::wrappers::EntryRenderer;
 use xai_grok_pager::theme::Theme;
-use xai_grok_pager::views::prompt_widget::PromptStyle;
+use xai_grok_pager::views::prompt_widget::{PromptBg, PromptStyle};
 use xai_grok_pager::views::turn_status;
 /// Left inset (columns) for every auxiliary live-region row: the status row,
 /// the info bar, the exit hint, and the todo panel — and the prompt's
@@ -81,7 +81,7 @@ pub(super) fn prompt_style(
         chrome: true,
         chrome_pad_left: live_left_inset(appearance),
         chrome_pad_right: 0,
-        bg_override: Some(Color::Reset),
+        bg: PromptBg::Canvas(Color::Reset),
         accent_color_override: input_mode.accent_color(theme),
         border_color_override: None,
         prefix_override: input_mode.prefix_override(theme),
@@ -513,12 +513,11 @@ fn minimal_advance_phase_timer(
 /// surfaces the same rich activity detail (`Run …` / `Thinking…` /
 /// `Waiting on subagent…` / `Retrying (attempt N)…` / `Cancelling…`), the
 /// per-phase + turn timers, and the "… still running" cue (running commands /
-/// monitors / loops / background subagents, shown while idle or parked) —
-/// instead of collapsing everything to "working…". Keyboard-only, so the
-/// mouse `[stop]` / `[↓]` buttons are suppressed (`None`), and
-/// `flat_background` keeps the row transparent like the rest of the live
-/// region. When the widget would draw nothing (plain idle or parked, no
-/// watchers) a small `minimal · /help` hint is shown instead.
+/// monitors / loops / background subagents) — instead of collapsing
+/// everything to "working…". Keyboard-only, so the mouse `[stop]` / `[↓]`
+/// buttons are suppressed (`None`), and `flat_background` keeps the row
+/// transparent like the rest of the live region. When the widget would draw
+/// nothing a small `minimal · /help` hint is shown instead.
 fn render_minimal_status(
     buf: &mut Buffer,
     area: Rect,

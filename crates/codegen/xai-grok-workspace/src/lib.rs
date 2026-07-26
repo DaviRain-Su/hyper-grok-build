@@ -15,6 +15,7 @@ pub mod diag_server;
 pub mod discovery;
 pub mod envrc;
 pub mod error;
+pub mod export_github;
 pub mod file_system;
 pub mod folder_trust;
 pub mod foreign_sessions;

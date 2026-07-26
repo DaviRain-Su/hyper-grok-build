@@ -711,6 +711,9 @@ pub struct RemoteSettings {
     /// Tighten-only, like `external_otel_disabled`.
     #[serde(default)]
     pub external_otel_content_gates_locked: Option<bool>,
+    /// `Some(false)` disarms managed-config signature verification (remote kill-switch).
+    #[serde(default)]
+    pub managed_config_signature_verification: Option<bool>,
     #[serde(default)]
     pub telemetry_enabled: Option<bool>,
     /// Telemetry mode override (string): `"session-metrics"`, `"full"`, `"off"`.

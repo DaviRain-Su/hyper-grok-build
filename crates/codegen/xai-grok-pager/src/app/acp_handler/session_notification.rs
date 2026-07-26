@@ -249,9 +249,40 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 false
             } else if is_wake_prompt(&prompt_id) {
                 if agent.session.state.is_busy() {
+                    if agent.session.state.command_in_flight().is_some() {
+                        agent.session.tracker.snapshot_output_epoch();
+                    }
+                    let errored = matches!(stop_reason.as_str(), "error" | "rate_limit");
+                    if errored && agent.failed_wake_marker_for.as_deref() != Some(&*prompt_id) {
+                        agent.failed_wake_marker_for = Some(prompt_id.clone());
+                        agent.push_end_marker_block(
+                            crate::scrollback::blocks::SessionEvent::TurnFailed {
+                                error: agent_result
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown error".to_string()),
+                                elapsed: None,
+                            },
+                            Vec::new(),
+                            Some(prompt_id.clone()),
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    finish_wake_turn(agent, &prompt_id, &stop_reason, agent_result.as_deref());
+                    true
+                }
+            } else if is_server_initiated_prompt(&prompt_id)
+                && !is_scheduler_fired_prompt(&prompt_id)
+            {
+                if agent.session.state.is_busy() {
+                    if agent.session.state.command_in_flight().is_some() {
+                        agent.session.tracker.snapshot_output_epoch();
+                    }
                     false
                 } else {
-                    finish_wake_turn(agent);
+                    agent.session.tracker.finish_turn(&mut agent.scrollback);
                     true
                 }
             } else {
@@ -496,7 +527,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     info.scrollback_entry_id = Some(entry_id);
                     info.is_background = is_background;
                 }
-                agent.maybe_push_parked_marker();
             } else if let Some(info) = agent.subagent_sessions.get_mut(&child_session_id) {
                 info.is_background = is_background;
             }
@@ -640,9 +670,6 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 if !resuming {
                     crate::app::subagent::finalize_finished_child_view(child_view, elapsed_dur);
                 }
-            }
-            if !resuming {
-                agent.maybe_push_parked_marker();
             }
             true
         }

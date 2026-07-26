@@ -1286,6 +1286,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     }
 
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
+    let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
     let show_tips_from_app = app.show_tips;
     let auto_update_from_app = app.auto_update;
     let respect_manual_folds_from_app = app.appearance.scrollback.scroll.respect_manual_folds;
@@ -1390,6 +1391,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
                     .map(|(id, info)| (info.name.clone(), id.clone()))
                     .collect(),
                 coding_data_sharing_opt_out: coding_data_sharing_opt_out_from_app,
+                coding_data_sharing_lock: coding_data_sharing_lock_from_app,
                 plan_mode_active: false,
                 show_tips: show_tips_from_app,
                 auto_update: auto_update_from_app,

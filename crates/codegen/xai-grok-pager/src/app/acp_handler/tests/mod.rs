@@ -242,26 +242,7 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
             },
         );
 }
-/// Marker texts of all parked blocks in scrollback, in order — one per
-/// park episode (re-pushed only after new parent output, i.e. a re-park).
-pub(super) fn parked_marker_messages(agent: &AgentView) -> Vec<String> {
-    (0..agent.scrollback.len())
-        .filter_map(|i| match agent.scrollback.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.parked => Some(b.event.message()),
-            _ => None,
-        })
-        .collect()
-}
-pub(super) fn parked_marker_ids(agent: &AgentView) -> Vec<EntryId> {
-    (0..agent.scrollback.len())
-        .filter_map(|i| {
-            let entry = agent.scrollback.get(i)?;
-            matches!(&entry.block, RenderBlock::SessionEvent(b) if b.parked)
-                .then_some(entry.id)
-        })
-        .collect()
-}
-pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) -> EntryId {
+pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) {
     use crate::app::agent_view::test_fixtures::simulate_wait_all;
     agent.session.state = AgentState::TurnRunning;
     agent.session.current_prompt_id = Some("p1".into());
@@ -269,9 +250,7 @@ pub(super) fn park_on_subagents(agent: &mut AgentView, child_ids: &[&str]) -> En
         agent.subagent_sessions.insert(child_id.into(), make_subagent_info(child_id));
     }
     simulate_wait_all(agent);
-    agent.maybe_push_parked_marker();
     assert!(agent.renders_parked());
-    parked_marker_ids(agent)[0]
 }
 pub(super) fn follow_ups_ext(
     response_id: &str,

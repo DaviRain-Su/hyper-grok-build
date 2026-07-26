@@ -1460,25 +1460,24 @@ async fn run_agent_command(
         }
     }
 }
-/// Raise the per-process file descriptor soft limit on macOS.
+/// Raise the per-process fd soft limit toward the hard limit.
 ///
-/// macOS has a conservative default soft `RLIMIT_NOFILE` (256) that is easily
-/// exceeded by parallel directory walking + file copying in worktree creation,
-/// stdio MCP servers, tool subprocesses, and async runtime sockets.
+/// Default soft limits (256 macOS, commonly 1024 Linux) are easily exceeded:
+/// each session thread's runtime costs ~3 fds, and a wide parallel subagent
+/// wave adds spawn-burst transients — a 1024 limit fails with EMFILE under a
+/// ~100-session wave. Targets 65536 on Linux (hard limits typically >= 1M)
+/// and 8192 on macOS (`kern.maxfilesperproc` is often ~10k). No known
+/// in-tree `select(2)` users (Rust std/tokio use epoll/kqueue); residual
+/// third-party `FD_SETSIZE` risk is accepted — the prior 8192 cap already
+/// exceeded FD_SETSIZE.
 ///
-/// We raise the soft limit toward the hard limit, capped at 8192 to stay below
-/// `FD_SETSIZE` (1024 on macOS) safety boundaries in any C dependency that may
-/// still use `select(2)` -- Rust std + tokio use `kqueue`, but vendored C code
-/// can corrupt the stack if it select()'s on an fd >= FD_SETSIZE. 8192 also
-/// keeps fork-time fd-table iteration cheap for any child that does
-/// "close all fds up to rlim_cur" on exec.
-///
-/// Best-effort: silently ignores all errors (process limits can be tightened by
-/// containers/cgroups and we should never block startup on a non-essential
-/// optimization).
-#[cfg(target_os = "macos")]
+/// Best-effort: never blocks startup (containers/cgroups may pin limits).
+#[cfg(unix)]
 fn raise_fd_limit() {
+    #[cfg(target_os = "macos")]
     const TARGET: libc::rlim_t = 8192;
+    #[cfg(not(target_os = "macos"))]
+    const TARGET: libc::rlim_t = 65536;
     unsafe {
         let mut rlim = libc::rlimit {
             rlim_cur: 0,
@@ -1498,7 +1497,7 @@ fn raise_fd_limit() {
         }
     }
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(unix))]
 fn raise_fd_limit() {}
 /// Consume the bare `dashboard` soft-subcommand and mark the terminal
 /// dashboard for startup. `dashboard --web` is a real command and deliberately

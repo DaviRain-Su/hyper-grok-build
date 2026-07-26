@@ -319,26 +319,109 @@ pub(crate) fn is_safe_write_sink(path: &str) -> bool {
     matches!(path, "/dev/null" | "/dev/stdout" | "/dev/stderr")
 }
 
-/// Whether an already-resolved direct edit target needs explicit confirmation.
+/// Why acceptEdits must still prompt for this edit target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedEditReason {
+    HookRoot,
+    GitHooks,
+    Ssh,
+    StartupFile,
+    Etc,
+    GrokConfig,
+    ClaudeSettings,
+    CursorHooks,
+    /// Fail-closed / unclassified sensitive path; no user copy yet.
+    Sensitive,
+}
+
+impl ProtectedEditReason {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::HookRoot => "hook_root",
+            Self::GitHooks => "git_hooks",
+            Self::Ssh => "ssh",
+            Self::StartupFile => "startup_file",
+            Self::Etc => "etc",
+            Self::GrokConfig => "grok_config",
+            Self::ClaudeSettings => "claude_settings",
+            Self::CursorHooks => "cursor_hooks",
+            Self::Sensitive => "sensitive",
+        }
+    }
+
+    pub fn description(self) -> Option<&'static str> {
+        match self {
+            Self::HookRoot => Some(
+                "Note: This edit contains changes to hooks, which can be executed as code on later sessions without a separate execution approval.",
+            ),
+            Self::GitHooks => Some(
+                "Note: This edit contains changes to Git hooks, which can run automatically on commit, push, or other Git actions without a separate execution approval.",
+            ),
+            Self::Ssh => Some(
+                "Note: This edit contains changes under `.ssh`, which can affect credentials and authentication for future sessions.",
+            ),
+            Self::StartupFile => Some(
+                "Note: This edit contains changes to a shell startup file, which can run automatically in future terminals without a separate execution approval.",
+            ),
+            Self::Etc => Some(
+                "Note: This edit contains changes under `/etc`, which is system configuration and can affect this machine beyond the current project.",
+            ),
+            Self::GrokConfig => Some(
+                "Note: This edit contains changes to Grok config, which can alter permissions, tools, and other behavior in later sessions.",
+            ),
+            Self::ClaudeSettings => Some(
+                "Note: This edit contains changes to Claude-compatible settings, which can install hooks or change permission mode without a separate execution approval.",
+            ),
+            Self::CursorHooks => Some(
+                "Note: This edit contains changes to Cursor hooks, which can run automatically in later sessions without a separate execution approval.",
+            ),
+            Self::Sensitive => None,
+        }
+    }
+}
+
+/// ACP `_meta` payload for protected-edit prompts (pager reads this for description).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectedEditPermission {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl ProtectedEditPermission {
+    pub fn from_reason(reason: ProtectedEditReason) -> Self {
+        Self {
+            kind: reason.kind().to_owned(),
+            description: reason.description().map(str::to_owned),
+        }
+    }
+}
+
+/// Whether an already-resolved direct edit target needs confirmation, and why.
 ///
 /// The caller uses the edit tools' shared model-path resolver first. This helper
 /// preserves its uncollapsed components for physical symlink + `..` resolution,
 /// while checking a separate lexical normalization for traversal aliases.
-pub(crate) fn edit_target_requires_prompt(path: &Path) -> bool {
+pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
     if !path.is_absolute() {
-        return true;
+        return Some(ProtectedEditReason::Sensitive);
     }
     let lexical = xai_grok_paths::normalize_lexically(path);
-    if protected_edit_path(&lexical) {
-        return true;
+    if let Some(reason) = protected_edit_reason(&lexical) {
+        return Some(reason);
     }
     let Some(resolved) = resolve_following_symlinks(path, 0) else {
-        return true;
+        return Some(ProtectedEditReason::Sensitive);
     };
-    protected_edit_path(&resolved) || resolved_path_is_within_root(&resolved, Path::new("/etc"))
+    if let Some(reason) = protected_edit_reason(&resolved) {
+        return Some(reason);
+    }
+    resolved_path_is_within_root(&resolved, Path::new("/etc"))
+        .then_some(ProtectedEditReason::Sensitive)
 }
 
-fn protected_edit_path(path: &Path) -> bool {
+fn protected_edit_reason(path: &Path) -> Option<ProtectedEditReason> {
     let components: Vec<String> = path
         .components()
         .filter_map(|component| match component {
@@ -368,12 +451,49 @@ fn protected_edit_path(path: &Path) -> bool {
         ".xprofile",
     ];
 
-    STARTUP_FILES.contains(&file)
-        || protected_git_hooks_path(&string_components)
-        || string_components.contains(&".ssh")
-        || string_components.ends_with(&[".grok", "config.toml"])
-        || path == Path::new("/etc")
-        || path.starts_with(Path::new("/etc"))
+    if protected_grok_hook_root(path, &string_components) {
+        return Some(ProtectedEditReason::HookRoot);
+    }
+    if string_components.ends_with(&[".claude", "settings.json"])
+        || string_components.ends_with(&[".claude", "settings.local.json"])
+    {
+        return Some(ProtectedEditReason::ClaudeSettings);
+    }
+    if string_components.ends_with(&[".cursor", "hooks.json"]) {
+        return Some(ProtectedEditReason::CursorHooks);
+    }
+    if protected_git_hooks_path(&string_components) {
+        return Some(ProtectedEditReason::GitHooks);
+    }
+    if string_components.contains(&".ssh") {
+        return Some(ProtectedEditReason::Ssh);
+    }
+    if STARTUP_FILES.contains(&file) {
+        return Some(ProtectedEditReason::StartupFile);
+    }
+    if string_components.ends_with(&[".grok", "config.toml"]) {
+        return Some(ProtectedEditReason::GrokConfig);
+    }
+    if path == Path::new("/etc") || path.starts_with(Path::new("/etc")) {
+        return Some(ProtectedEditReason::Etc);
+    }
+    None
+}
+
+fn path_is_under_user_grok_hook_root(path: &Path, grok_home: &Path) -> bool {
+    path.starts_with(grok_home.join("hooks")) || path == grok_home.join("hooks-paths")
+}
+
+fn protected_grok_hook_root(path: &Path, components: &[&str]) -> bool {
+    components.windows(2).any(|pair| pair == [".grok", "hooks"])
+        || components.ends_with(&[".grok", "hooks-paths"])
+        || xai_grok_config::user_grok_home().is_some_and(|grok_home| {
+            let lexical_home = xai_grok_paths::normalize_lexically(&grok_home);
+            path_is_under_user_grok_hook_root(path, &lexical_home)
+                || resolve_following_symlinks(&lexical_home, 0).is_some_and(|resolved_home| {
+                    path_is_under_user_grok_hook_root(path, &resolved_home)
+                })
+        })
 }
 
 fn protected_git_hooks_path(components: &[&str]) -> bool {
@@ -1251,7 +1371,7 @@ mod tests {
             "/work/subdir/../.git/hooks/pre-commit",
         ] {
             assert!(
-                edit_target_requires_prompt(Path::new(path)),
+                edit_target_protection(Path::new(path)).is_some(),
                 "protected edit target must prompt: {path}"
             );
         }
@@ -1260,7 +1380,7 @@ mod tests {
             "/work/project/.grok/config.toml/backup",
         ] {
             assert!(
-                !edit_target_requires_prompt(Path::new(path)),
+                edit_target_protection(Path::new(path)).is_none(),
                 "ordinary edit target should not prompt: {path}"
             );
         }
@@ -1275,7 +1395,7 @@ mod tests {
             "/work/subdir/../.git/modules/foo/hooks/pre-commit",
         ] {
             assert!(
-                edit_target_requires_prompt(Path::new(path)),
+                edit_target_protection(Path::new(path)).is_some(),
                 "submodule hook target must prompt: {path}"
             );
         }
@@ -1287,8 +1407,106 @@ mod tests {
             "/work/src/modules/foo/hooks/pre-commit",
         ] {
             assert!(
-                !edit_target_requires_prompt(Path::new(path)),
+                edit_target_protection(Path::new(path)).is_none(),
                 "non-hook control must not prompt: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_target_protection_classifies_reasons() {
+        let cases = [
+            (
+                "/home/user/.grok/hooks/evil.json",
+                ProtectedEditReason::HookRoot,
+            ),
+            ("/work/.git/hooks/pre-commit", ProtectedEditReason::GitHooks),
+            ("/home/user/.ssh/id_rsa", ProtectedEditReason::Ssh),
+            ("/home/user/.zshrc", ProtectedEditReason::StartupFile),
+            ("/etc/hosts", ProtectedEditReason::Etc),
+            (
+                "/home/user/.grok/config.toml",
+                ProtectedEditReason::GrokConfig,
+            ),
+            (
+                "/home/user/.claude/settings.json",
+                ProtectedEditReason::ClaudeSettings,
+            ),
+            (
+                "/home/user/.cursor/hooks.json",
+                ProtectedEditReason::CursorHooks,
+            ),
+        ];
+        for (path, reason) in cases {
+            assert_eq!(
+                edit_target_protection(Path::new(path)),
+                Some(reason),
+                "{path}"
+            );
+            assert!(reason.description().is_some(), "{path}");
+        }
+        assert_eq!(
+            edit_target_protection(Path::new("/home/user/project/src/main.rs")),
+            None
+        );
+        assert!(ProtectedEditReason::Sensitive.description().is_none());
+    }
+
+    #[test]
+    fn sensitive_edit_targets_include_hook_roots() {
+        for path in [
+            "/home/user/.grok/hooks/evil.json",
+            "/home/user/.grok/hooks/nested/deep.json",
+            "/home/user/.grok/hooks-paths",
+            "/home/user/.claude/settings.json",
+            "/home/user/.claude/settings.local.json",
+            "/home/user/.cursor/hooks.json",
+            "/work/project/.grok/hooks/local.json",
+            "/work/project/.grok/hooks-paths",
+        ] {
+            assert!(
+                edit_target_protection(Path::new(path)).is_some(),
+                "hook root edit target must prompt: {path}"
+            );
+        }
+        for path in [
+            "/home/user/.grok/hooks-disabled/note.json",
+            "/home/user/.grok/hooks-evil/note.json",
+            "/home/user/project/src/hooks.json",
+            "/home/user/.claude/other.json",
+            "/home/user/.cursor/settings.json",
+        ] {
+            assert!(
+                edit_target_protection(Path::new(path)).is_none(),
+                "ordinary edit target should not prompt: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_is_under_user_grok_hook_root_matches_relocated_home() {
+        let home = Path::new("/custom/grok-home");
+        for path in [
+            "/custom/grok-home/hooks/x.json",
+            "/custom/grok-home/hooks/nested/deep.json",
+            "/custom/grok-home/hooks",
+            "/custom/grok-home/hooks-paths",
+        ] {
+            assert!(
+                path_is_under_user_grok_hook_root(Path::new(path), home),
+                "must match under custom grok home: {path}"
+            );
+        }
+        for path in [
+            "/custom/grok-home/hooks-disabled/note.json",
+            "/custom/grok-home/hooks-evil/note.json",
+            "/custom/grok-home/config.toml",
+            "/custom/other/hooks/x.json",
+            "/custom/grok-home-extra/hooks/x.json",
+        ] {
+            assert!(
+                !path_is_under_user_grok_hook_root(Path::new(path), home),
+                "must not match outside hook roots: {path}"
             );
         }
     }
@@ -1314,14 +1532,19 @@ mod tests {
             ws.path().join("module-hooks-link"),
         )
         .unwrap();
+        let grok_hook = outside.path().join(".grok/hooks/evil.json");
+        std::fs::create_dir_all(grok_hook.parent().unwrap()).unwrap();
+        std::fs::write(&grok_hook, b"{}").unwrap();
+        symlink(&grok_hook, ws.path().join("grok-hook-link")).unwrap();
 
         for path in [
             ws.path().join("file-link"),
             ws.path().join("hooks-link/new-hook"),
             ws.path().join("module-hooks-link/new-hook"),
+            ws.path().join("grok-hook-link"),
         ] {
             assert!(
-                edit_target_requires_prompt(&path),
+                edit_target_protection(&path).is_some(),
                 "symlinked protected edit target must prompt: {}",
                 path.display()
             );
@@ -1344,7 +1567,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn private_etc_alias_requires_prompt() {
-        assert!(edit_target_requires_prompt(Path::new("/private/etc/hosts")));
+        assert!(edit_target_protection(Path::new("/private/etc/hosts")).is_some());
     }
 
     #[test]

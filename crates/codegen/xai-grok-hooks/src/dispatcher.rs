@@ -551,6 +551,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
+            layer: crate::config::HookProvenance::File,
         }
     }
 

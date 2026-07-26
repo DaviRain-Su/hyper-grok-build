@@ -28,10 +28,11 @@ pub(crate) const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
 /// session spawn) on the agent's single-threaded runtime, and the client-side
 /// `acp_send` has no timeout — so under the fully-parallel pty_e2e suite the
 /// starved agent thread can push this well past the 20s `WELCOME_TIMEOUT`
-/// (leaving the "Loading session…" placeholder up). Sized generously for the
-/// same contention reason as `WRAP_TIMEOUT`, not because resume is slow when
-/// run alone.
-pub(crate) const RESUME_TIMEOUT: Duration = Duration::from_secs(60);
+/// (leaving the "Loading session…" placeholder up). A prior 60s budget still
+/// timed out under CI load with the same stuck-loading signature; match
+/// [`WRAP_TIMEOUT`] (120s) for the same contention reason, not because resume
+/// is slow when run alone.
+pub(crate) const RESUME_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Substring we wait for on the welcome screen. Matches the menu label `"Quit"`
 /// (`render_welcome_done` / gate menus); case-sensitive, so it does **not**
@@ -976,13 +977,16 @@ pub(crate) fn wait_minimal_ready(harness: &mut PtyHarness) {
 
 /// Quit minimal cleanly. The prompt is always focused (a bare `q` would type
 /// into it), so quit is Ctrl+Q pressed twice (it requires confirmation). Falls
-/// back to the harness kill path if the chord doesn't take.
+/// back to the harness kill path if the chord doesn't take. Give the confirm
+/// chord and process exit enough time under suite load so a SIGKILL does not
+/// cut off the agent mid-`updates.jsonl` flush (which breaks a subsequent
+/// `--continue` resume).
 pub(crate) fn quit_minimal(harness: &mut PtyHarness) {
     let _ = harness.inject_keys(b"\x11"); // Ctrl+Q — arms the confirm
-    harness.update(Duration::from_millis(80));
+    harness.update(Duration::from_millis(200));
     let _ = harness.inject_keys(b"\x11"); // Ctrl+Q — confirms
     match harness
-        .wait_exit_code(Duration::from_secs(5))
+        .wait_exit_code(Duration::from_secs(15))
         .expect("wait for minimal pager exit")
     {
         PtyExitPoll::Running => harness.quit().expect("kill minimal pager after timeout"),

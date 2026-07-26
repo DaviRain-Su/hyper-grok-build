@@ -303,9 +303,28 @@ fn build_permission_display(
         }
     };
 
-    let description = mcp_args_lines(req);
+    let description = permission_description_lines(req);
     let bash_cmd = if is_execute { raw_command } else { None };
     (title, description, bash_cmd)
+}
+
+/// Lines shown under the permission title: protected-edit note (if any), then
+/// MCP planned-argument lines (empty for bash/edit).
+fn permission_description_lines(req: &acp::RequestPermissionRequest) -> Vec<String> {
+    let mut lines = mcp_args_lines(req);
+    if is_edit_permission(req)
+        && let Some(desc) = protected_edit_description(req)
+    {
+        lines.insert(0, desc);
+    }
+    lines
+}
+
+fn protected_edit_description(req: &acp::RequestPermissionRequest) -> Option<String> {
+    let meta = req.meta.as_ref()?;
+    let protected: xai_grok_workspace::permission::ProtectedEditPermission =
+        serde_json::from_value(serde_json::Value::Object(meta.clone())).ok()?;
+    protected.description.filter(|s| !s.is_empty())
 }
 
 /// Maximum stored lines for the MCP planned-arguments display. The overlay

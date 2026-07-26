@@ -61,6 +61,9 @@ pub struct AcpConnection {
     pub auth_methods: Vec<acp::AuthMethod>,
     /// Cancellation token to stop the agent.
     pub cancel: CancellationToken,
+    /// In-process agent worker thread (`connect` only). Join after cancel so
+    /// session actors can flush SessionEnd hooks. `None` in leader mode.
+    pub agent_thread: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
     /// ACP-advertised slash commands parsed from `InitializeResponse.meta.availableCommands`.
     /// Seeded into every new `AgentSession` so autocomplete has shell builtins
     /// and skills immediately, before any `AvailableCommandsUpdate` arrives.
@@ -228,6 +231,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         is_grok_shell,
         auth_methods,
         cancel: spawned.cancel,
+        agent_thread: Some(spawned.thread_handle),
         available_commands,
         needs_login,
         login_label,
@@ -354,6 +358,7 @@ pub async fn connect_via_leader(
         is_grok_shell,
         auth_methods,
         cancel: bridge.cancel,
+        agent_thread: None,
         available_commands,
         needs_login,
         login_label,

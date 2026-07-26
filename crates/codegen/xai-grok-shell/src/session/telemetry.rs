@@ -88,22 +88,19 @@ pub(crate) fn format_hook_name(spec: &xai_grok_hooks::config::HookSpec) -> Strin
     }
 }
 
-/// Provenance from the namespace prefix each loader stamps on the spec name:
-/// `global/` → user, `project/` → project, `plugin/` → plugin, `agent:` →
-/// agent, else unknown. (Source-dir classification was wrong — both global and
-/// project dirs contain `/.grok/`.)
+/// Provenance for telemetry, mapped from the shared [`hook_origin`] classifier so
+/// this and `/hooks` inspect can't diverge.
 fn format_hook_source(spec: &xai_grok_hooks::config::HookSpec) -> &'static str {
-    let name = spec.name.as_str();
-    if name.starts_with("global/") {
-        "userSettings"
-    } else if name.starts_with("project/") {
-        "projectSettings"
-    } else if name.starts_with("plugin/") {
-        "pluginHook"
-    } else if name.starts_with("agent:") {
-        "agentHook"
-    } else {
-        "unknown"
+    use xai_grok_hooks::config::HookOrigin as O;
+    match xai_grok_hooks::config::hook_origin(spec) {
+        O::SystemManaged | O::Managed => "managedConfig",
+        O::Requirements => "requirementsConfig",
+        O::UserConfig => "userConfig",
+        O::UserFile => "userSettings",
+        O::ProjectFile => "projectSettings",
+        O::Plugin => "pluginHook",
+        O::Agent => "agentHook",
+        O::Unknown => "unknown",
     }
 }
 

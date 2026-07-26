@@ -25,7 +25,8 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 /// `subagent-completed-…`, `notifications-…`). These run non-adopted — no
 /// `PromptResponse`, no viewer finalize — so their durable `TurnCompleted` is
 /// the only signal marking the back-to-idle point (see [`finish_wake_turn`];
-/// wake turns close markerless). Deliberately narrower than "non-adopted
+/// a chatty wake closes with a marker, a silent one stays markerless).
+/// Deliberately narrower than "non-adopted
 /// synthetic": goal turns render through the goal chip/loop chrome and
 /// `plan-resume-…` keeps its own markerless shape.
 pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
@@ -86,10 +87,64 @@ pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Insta
         .unwrap_or(now)
 }
 
-/// Close out a wake turn: markerless, but the stream must be finished here —
-/// wake turns skip `PromptResponse`, so this is the only flush site for an
-/// in-flight streamed entry (dead wakes included). Leaves a real turn's
-/// stop-hook stash pending for its own marker rail.
-pub(super) fn finish_wake_turn(agent: &mut AgentView) {
+/// Close out a wake turn — the only flush site for its in-flight streamed
+/// entries (wake turns skip `PromptResponse`). Markers: visible output closes
+/// with one; silence closes with none — except failures, which surface even
+/// when silent (the user's standing instruction stopped executing invisibly).
+/// Silent rate limits defer to the retry notifications, like the real-turn
+/// rails.
+pub(super) fn finish_wake_turn(
+    agent: &mut AgentView,
+    prompt_id: &str,
+    stop_reason: &str,
+    agent_result: Option<&str>,
+) {
+    use crate::scrollback::blocks::SessionEvent;
+
+    let had_output = agent.session.tracker.output_since_last_finish();
     agent.session.tracker.finish_turn(&mut agent.scrollback);
+    // The stored `turn_start_ms` may belong to an earlier turn (a silent wake
+    // streamed no deltas of its own; interleaved deltas can re-stamp it) —
+    // claim an elapsed only when the anchor is provably this wake's.
+    let anchor_is_ours = agent.turn_start_ms_prompt.as_deref() == Some(prompt_id);
+    let elapsed = if had_output && anchor_is_ours {
+        agent.turn_start_ms.and_then(|start_ms| {
+            let ms = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(start_ms);
+            (ms >= 0).then(|| std::time::Duration::from_millis(ms as u64))
+        })
+    } else {
+        None
+    };
+    let already_failed = agent.failed_wake_marker_for.as_deref() == Some(prompt_id);
+    let event = match stop_reason {
+        "error" | "rate_limit"
+            if already_failed || (stop_reason == "rate_limit" && !had_output) =>
+        {
+            None
+        }
+        "error" | "rate_limit" => {
+            agent.failed_wake_marker_for = Some(prompt_id.to_string());
+            Some(SessionEvent::TurnFailed {
+                error: agent_result.map(str::to_string).unwrap_or_else(|| {
+                    if stop_reason == "error" {
+                        "unknown error".to_string()
+                    } else {
+                        "rate limited".to_string()
+                    }
+                }),
+                elapsed,
+            })
+        }
+        "cancelled" if !had_output => None,
+        "cancelled" => Some(SessionEvent::TurnCancelled {
+            elapsed: elapsed.unwrap_or_default(),
+        }),
+        _ if !had_output => None,
+        _ => Some(SessionEvent::TurnCompleted { elapsed }),
+    };
+    if event.is_some() {
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event, Some(prompt_id));
+    }
 }

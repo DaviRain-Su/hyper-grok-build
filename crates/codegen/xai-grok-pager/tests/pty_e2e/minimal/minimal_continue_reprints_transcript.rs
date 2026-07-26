@@ -26,6 +26,14 @@ async fn minimal_continue_reprints_transcript() {
     first
         .wait_for_full_text(&turn_sentinel(1), Duration::from_secs(30))
         .expect("turn 1 committed to scrollback");
+    // Idle before quit so the agent finishes turn completion + updates.jsonl
+    // flush. Quitting mid-finalize under suite load left `--continue` loading a
+    // session with the user message but no assistant payload (resume then
+    // shows "Loading session…" / empty chrome past RESUME_TIMEOUT).
+    first
+        .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(15))
+        .expect("turn 1 returned to idle before quit");
+    first.update(Duration::from_millis(300));
     quit_minimal(&mut first);
 
     // Resume the same session. The transcript is reprinted into native

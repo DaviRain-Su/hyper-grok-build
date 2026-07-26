@@ -737,35 +737,6 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
 }
-/// How the parked-marker slot was consumed. Both variants carry the turn's
-/// prompt id and both keep the parked (idle) chrome. `Rendered` markers are
-/// one-per-park-episode — a re-park after new parent output (epoch bump)
-/// pushes a fresh one (see `maybe_push_parked_marker`); `Forgone` (an
-/// interjection continued the parked turn) is final — a later "Worked for"
-/// line would land below the interjected message, flipping the transcript.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ParkedMarkerSlot {
-    /// A "Worked for X" marker block was pushed.
-    Rendered {
-        prompt_id: String,
-        /// The parent-output boundary at push time: chips/completions landing
-        /// under the marker don't bump it, so a matching epoch means "same
-        /// park episode — don't re-push".
-        agent_output_epoch: u64,
-    },
-    /// The marker was forgone: an interjection continued the parked turn.
-    Forgone(String),
-}
-impl ParkedMarkerSlot {
-    /// The prompt id the slot was consumed for, regardless of variant.
-    pub(crate) fn prompt_id(&self) -> &str {
-        match self {
-            ParkedMarkerSlot::Rendered { prompt_id, .. } | ParkedMarkerSlot::Forgone(prompt_id) => {
-                prompt_id
-            }
-        }
-    }
-}
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -848,6 +819,10 @@ pub struct AgentView {
     /// turn that already ended (otherwise the viewer re-strands on "Waiting…").
     /// Reset at the start of every load so it never leaks across loads.
     pub(crate) replayed_terminal_prompts: HashSet<String>,
+    /// Wake prompt id whose failure marker already rendered — a re-delivered
+    /// errored wake terminal must not stack a second "Turn failed" row (the
+    /// output-epoch dedupe only covers chatty closes; failures bypass it).
+    pub(crate) failed_wake_marker_for: Option<String>,
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
@@ -916,10 +891,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// The consumed parked-wait marker slot for the current turn, if any.
-    /// Keyed by prompt id: a new turn naturally invalidates the slot with no
-    /// explicit clear site. See [`ParkedMarkerSlot`].
-    pub(crate) parked_wait_marker_for: Option<ParkedMarkerSlot>,
     /// Live `stop`/`stop_failure` hook runs held for the turn's terminal
     /// marker (driver order: the hooks arrive before the `PromptResponse`
     /// that pushes it). Consumed or flushed by `push_turn_terminal_marker`;
@@ -938,6 +909,10 @@ pub struct AgentView {
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.
     pub turn_start_ms: Option<i64>,
+    /// Prompt id the stored `turn_start_ms` belongs to (stamped together from
+    /// the same delta meta): wake markers may only claim an elapsed whose
+    /// anchor is provably their own turn's.
+    pub turn_start_ms_prompt: Option<String>,
     /// Local wall-clock time when the current turn started.
     /// Set by `maybe_drain_queue` when a prompt is sent. Used to compute
     /// elapsed time for "Worked for Xm Ys" system messages.
@@ -2440,15 +2415,17 @@ pub(crate) mod test_fixtures {
             child_updates_replayed: false,
         }
     }
-    /// Count of parked ("Worked for X") marker blocks in the agent's
-    /// scrollback.
-    pub fn count_parked(agent: &AgentView) -> usize {
+    /// Count of "Worked for X" (`TurnCompleted`) marker blocks in the
+    /// agent's scrollback.
+    pub fn count_turn_markers(agent: &AgentView) -> usize {
         use crate::scrollback::block::RenderBlock;
+        use crate::scrollback::blocks::SessionEvent;
         (0..agent.scrollback.len())
             .filter(|i| {
                 matches!(
                     agent.scrollback.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::SessionEvent(b)) if b.parked
+                    Some(RenderBlock::SessionEvent(b))
+                        if matches!(b.event, SessionEvent::TurnCompleted { .. })
                 )
             })
             .count()

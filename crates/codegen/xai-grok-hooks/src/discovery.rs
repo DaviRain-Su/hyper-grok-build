@@ -63,34 +63,37 @@ impl HookRegistry {
         }
     }
 
+    /// Flatten the registry into a spec list in [`HookEventName::ALL`] order, so
+    /// rebuilding from the result is stable regardless of `HashMap` iteration.
+    pub fn into_specs(self) -> Vec<HookSpec> {
+        let mut hooks = self.hooks;
+        let mut out = Vec::new();
+        for event in HookEventName::ALL {
+            if let Some(specs) = hooks.remove(event) {
+                out.extend(specs);
+            }
+        }
+        // Defensive: `ALL` covers every variant, but keep leftovers in a stable order.
+        if !hooks.is_empty() {
+            let mut leftover: Vec<(HookEventName, Vec<HookSpec>)> = hooks.into_iter().collect();
+            // Typed order, not `Display` (which collapses SubagentStop/SubagentEnd).
+            leftover.sort_by_key(|(event, _)| *event);
+            for (_, specs) in leftover {
+                out.extend(specs);
+            }
+        }
+        out
+    }
+
     pub fn remove_by_prefix(&mut self, prefix: &str) {
         for specs in self.hooks.values_mut() {
             specs.retain(|s| !s.name.starts_with(prefix));
         }
     }
 
-    /// All event types in canonical display order.
-    const ALL_EVENTS: &[HookEventName] = &[
-        HookEventName::SessionStart,
-        HookEventName::UserPromptSubmit,
-        HookEventName::PreToolUse,
-        HookEventName::PostToolUse,
-        HookEventName::PostToolUseFailure,
-        HookEventName::PermissionDenied,
-        HookEventName::Stop,
-        HookEventName::StopFailure,
-        HookEventName::Notification,
-        HookEventName::SubagentStart,
-        HookEventName::SubagentStop,
-        HookEventName::SubagentEnd,
-        HookEventName::PreCompact,
-        HookEventName::PostCompact,
-        HookEventName::SessionEnd,
-    ];
-
     pub fn all_hooks(&self) -> Vec<&HookSpec> {
         let mut all = Vec::new();
-        for event in Self::ALL_EVENTS {
+        for event in HookEventName::ALL {
             all.extend(self.hooks_for(*event));
         }
         all
@@ -125,8 +128,7 @@ impl HookRegistry {
 
 #[derive(Debug, Clone)]
 pub enum HookSource<'a> {
-    /// A JSON settings file (e.g. `~/.claude/settings.json`); only its `hooks`
-    /// key is used.
+    /// A JSON settings file; only its `hooks` key is used.
     SettingsFile(&'a Path),
     /// A directory of `*.json` hook files (e.g. `~/.grok/hooks/`).
     Directory(&'a Path),
@@ -140,6 +142,35 @@ pub fn load_hooks_from_sources(
     global_sources: &[HookSource<'_>],
     project_sources: &[HookSource<'_>],
 ) -> (HookRegistry, Vec<HookError>) {
+    let (specs, errors) = collect_specs_from_sources(global_sources, project_sources);
+    let registry = registry_from_specs_deduped(specs);
+    tracing::info!(
+        total_hooks = registry.len(),
+        session_start = registry.hooks_for(HookEventName::SessionStart).len(),
+        pre_tool = registry.hooks_for(HookEventName::PreToolUse).len(),
+        post_tool = registry.hooks_for(HookEventName::PostToolUse).len(),
+        session_end = registry.hooks_for(HookEventName::SessionEnd).len(),
+        stop = registry.hooks_for(HookEventName::Stop).len(),
+        notification = registry.hooks_for(HookEventName::Notification).len(),
+        user_prompt_submit = registry.hooks_for(HookEventName::UserPromptSubmit).len(),
+        subagent_start = registry.hooks_for(HookEventName::SubagentStart).len(),
+        subagent_stop = registry.hooks_for(HookEventName::SubagentStop).len()
+            + registry.hooks_for(HookEventName::SubagentEnd).len(),
+        "hooks: discovery complete"
+    );
+
+    (registry, errors)
+}
+
+/// Load hook specs from global and project sources WITHOUT deduplicating, so a
+/// caller can combine them with specs from other origins (e.g. config layers) and
+/// run a single dedup pass. Global specs are prefixed `global/` and project specs
+/// `project/`; global specs precede project specs so a later first-wins dedup
+/// keeps the global copy of an identical duplicate.
+pub fn collect_specs_from_sources(
+    global_sources: &[HookSource<'_>],
+    project_sources: &[HookSource<'_>],
+) -> (Vec<HookSpec>, Vec<HookError>) {
     tracing::debug!(
         global_sources = global_sources.len(),
         project_sources = project_sources.len(),
@@ -152,7 +183,7 @@ pub fn load_hooks_from_sources(
     for source in global_sources {
         let (mut specs, errors) = load_from_source(source);
         for spec in &mut specs {
-            spec.name = format!("global/{}", spec.name);
+            spec.name = format!("{}{}", crate::config::GLOBAL_HOOK_PREFIX, spec.name);
         }
         tracing::debug!(
             source = ?source,
@@ -166,7 +197,7 @@ pub fn load_hooks_from_sources(
     for source in project_sources {
         let (mut specs, errors) = load_from_source(source);
         for spec in &mut specs {
-            spec.name = format!("project/{}", spec.name);
+            spec.name = format!("{}{}", crate::config::PROJECT_HOOK_PREFIX, spec.name);
         }
         tracing::debug!(
             source = ?source,
@@ -177,15 +208,18 @@ pub fn load_hooks_from_sources(
         all_errors.extend(errors);
     }
 
-    // Deduplicate across sources on (canonical event, command_raw, url_raw,
-    // configured_matcher) so a hook defined in several sources runs once, while
-    // hooks sharing a command/URL but differing by matcher all still run. The
-    // canonical event collapses aliases (`SubagentStop`/`SubagentEnd`). Global
-    // hooks win because they are loaded first.
+    (all_specs, all_errors)
+}
+
+/// Build a registry from specs, deduping on (canonical event, command_raw,
+/// url_raw, configured_matcher) so a hook from several origins runs once; earlier
+/// specs win, so callers place higher-authority first. `timeout_ms`/`extra_env`
+/// are intentionally excluded from the key.
+pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     let mut hooks: HashMap<HookEventName, Vec<HookSpec>> = HashMap::new();
     let mut seen_content: std::collections::HashSet<(HookEventName, String, String, String)> =
         std::collections::HashSet::new();
-    for spec in all_specs {
+    for spec in specs {
         let key = (
             spec.event.canonical(),
             spec.command_raw.clone().unwrap_or_default(),
@@ -203,24 +237,7 @@ pub fn load_hooks_from_sources(
             );
         }
     }
-
-    let registry = HookRegistry { hooks };
-    tracing::info!(
-        total_hooks = registry.len(),
-        session_start = registry.hooks_for(HookEventName::SessionStart).len(),
-        pre_tool = registry.hooks_for(HookEventName::PreToolUse).len(),
-        post_tool = registry.hooks_for(HookEventName::PostToolUse).len(),
-        session_end = registry.hooks_for(HookEventName::SessionEnd).len(),
-        stop = registry.hooks_for(HookEventName::Stop).len(),
-        notification = registry.hooks_for(HookEventName::Notification).len(),
-        user_prompt_submit = registry.hooks_for(HookEventName::UserPromptSubmit).len(),
-        subagent_start = registry.hooks_for(HookEventName::SubagentStart).len(),
-        subagent_stop = registry.hooks_for(HookEventName::SubagentStop).len()
-            + registry.hooks_for(HookEventName::SubagentEnd).len(),
-        "hooks: discovery complete"
-    );
-
-    (registry, all_errors)
+    HookRegistry { hooks }
 }
 
 /// Convenience wrapper: load hooks from a single global directory and optional
@@ -364,60 +381,14 @@ mod tests {
         .to_string()
     }
 
-    /// Drift guard for the hand-maintained `ALL_EVENTS`: a new `HookEventName`
-    /// variant breaks the exhaustive match below, then fails the assertion until
-    /// it is added to `ALL_EVENTS`, so no event vanishes from the flat listing.
-    #[test]
-    fn all_events_lists_every_variant() {
-        let every_variant = [
-            HookEventName::SessionStart,
-            HookEventName::UserPromptSubmit,
-            HookEventName::PreToolUse,
-            HookEventName::PostToolUse,
-            HookEventName::PostToolUseFailure,
-            HookEventName::PermissionDenied,
-            HookEventName::Stop,
-            HookEventName::StopFailure,
-            HookEventName::Notification,
-            HookEventName::SubagentStart,
-            HookEventName::SubagentStop,
-            HookEventName::SubagentEnd,
-            HookEventName::PreCompact,
-            HookEventName::PostCompact,
-            HookEventName::SessionEnd,
-        ];
-        for event in every_variant {
-            match event {
-                HookEventName::SessionStart
-                | HookEventName::UserPromptSubmit
-                | HookEventName::PreToolUse
-                | HookEventName::PostToolUse
-                | HookEventName::PostToolUseFailure
-                | HookEventName::PermissionDenied
-                | HookEventName::Stop
-                | HookEventName::StopFailure
-                | HookEventName::Notification
-                | HookEventName::SubagentStart
-                | HookEventName::SubagentStop
-                | HookEventName::SubagentEnd
-                | HookEventName::PreCompact
-                | HookEventName::PostCompact
-                | HookEventName::SessionEnd => {}
-            }
-            assert!(
-                HookRegistry::ALL_EVENTS.contains(&event),
-                "{event} is missing from ALL_EVENTS"
-            );
-        }
-    }
-
     /// Drift guard: gate events must match the `blockingEvents` the agent
     /// advertises (extensions/hooks.rs). A new gate event fails here.
     #[test]
     fn gate_events_are_the_known_set() {
         use crate::event::GateKind;
-        // Canonicalize first: `traits()` is unreachable on alias variants.
-        let gates: std::collections::HashSet<_> = HookRegistry::ALL_EVENTS
+        // Canonicalize first to dedup alias spellings into one set entry
+        // (`traits()` itself already canonicalizes, so it's safe on aliases).
+        let gates: std::collections::HashSet<_> = HookEventName::ALL
             .iter()
             .map(|e| e.canonical())
             .filter(|e| e.traits().gate != GateKind::Observe)
@@ -923,6 +894,7 @@ mod tests {
             timeout_ms: 5_000,
             source_dir: PathBuf::from("/tmp"),
             extra_env: Default::default(),
+            layer: crate::config::HookProvenance::File,
         }
     }
 

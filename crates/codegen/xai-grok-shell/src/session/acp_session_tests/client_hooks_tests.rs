@@ -711,6 +711,7 @@ fn file_registry_with_stop_spec(
         timeout_ms: 5000,
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
+        layer: xai_grok_hooks::config::HookProvenance::File,
     }]);
     registry
 }

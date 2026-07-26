@@ -96,6 +96,9 @@ enum WorktreeDbCommand {
 pub async fn run(args: WorktreeArgs, agent_config: &AgentConfig) -> Result<()> {
     let cancel = CancellationToken::new();
     let spawned = crate::acp::spawn::spawn_grok_shell(agent_config.clone(), &cancel, None).await?;
+    // Cancel + join on every return path, including the `?` below.
+    let _agent_guard =
+        crate::acp::spawn::AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
 
     let _init: acp::InitializeResponse = acp_send(
         acp::InitializeRequest::new(acp::ProtocolVersion::V1)
@@ -116,9 +119,7 @@ pub async fn run(args: WorktreeArgs, agent_config: &AgentConfig) -> Result<()> {
     )
     .await?;
 
-    let result = dispatch(args.command, &spawned.channel.tx).await;
-    cancel.cancel();
-    result
+    dispatch(args.command, &spawned.channel.tx).await
 }
 
 async fn dispatch(command: WorktreeCommand, tx: &xai_acp_lib::AcpAgentTx) -> Result<()> {

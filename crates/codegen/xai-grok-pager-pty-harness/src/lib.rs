@@ -42,8 +42,8 @@ pub use content::{
 pub use env::pager_binary;
 pub use flows::{
     inference_request_count, oauth_credential_ops, seed_fake_oauth,
-    seed_fake_oauth_coding_data_opted_out, submit_turn, wait_for_labels_absent,
-    wait_for_model_via_new_sessions,
+    seed_fake_oauth_coding_data_opted_out, seed_fake_oauth_team_member, seed_fake_oauth_zdr_team,
+    submit_turn, wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
 pub use host_clipboard::HostClipboardTextGuard;
 pub use leader::LeaderCluster;

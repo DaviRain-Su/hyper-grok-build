@@ -21,6 +21,11 @@ pub enum AgentBuildError {
     #[error("IO error during agent construction: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// Failed to build the session's tokio runtime (fd exhaustion: the
+    /// runtime needs epoll/kqueue + waker fds).
+    #[error("failed to build session runtime: {0}")]
+    RuntimeBuild(std::io::Error),
+
     /// MiniJinja template rendering failed (extend or full mode).
     /// Includes line numbers and context from the template.
     #[error("template rendering error: {0}")]

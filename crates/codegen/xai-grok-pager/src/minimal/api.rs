@@ -562,10 +562,7 @@ pub fn resolve_turn_activity(v: &AgentView) -> Option<TurnActivity> {
     v.resolve_turn_activity()
 }
 
-/// [`AgentView::renders_parked`] — while the parked-wait marker's turn is
-/// parked, minimal renders the "… still running" cue (watchers running) or the
-/// idle hint (none), mirroring the full TUI. The marker itself is pushed by
-/// the shared ACP notification path, so minimal's scrollback carries it too.
+/// [`AgentView::renders_parked`].
 pub fn renders_parked(v: &AgentView) -> bool {
     v.renders_parked()
 }

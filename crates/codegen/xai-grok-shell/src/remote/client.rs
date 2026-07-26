@@ -294,7 +294,10 @@ impl BackendClient {
             .connect_timeout(Duration::from_secs(10))
             .timeout(DEFAULT_TIMEOUT)
             .build()
-            .expect("failed to build HTTP client")
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to build backend HTTP client; falling back to shared client");
+                crate::http::shared_client()
+            })
     }
     pub fn new() -> Self {
         let reqwest_client = Self::build_default_client();
@@ -435,7 +438,7 @@ impl BackendClient {
     ) -> Result<reqwest::Response, BackendError> {
         let headers = self.auth_header_map().await?;
         let builder = xai_file_utils::trace_context::inject_trace_context_into_request(
-            builder.headers(headers),
+            builder.timeout(DEFAULT_TIMEOUT).headers(headers),
         );
         let request = builder.build()?;
         self.client.execute(request).await.map_err(|e| match e {

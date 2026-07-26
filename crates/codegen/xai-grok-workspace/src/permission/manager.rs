@@ -19,8 +19,8 @@ use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome};
 use crate::permission::shell_access::{
-    command_write_paths_in_tree, edit_target_requires_prompt, is_safe_write_sink,
-    tree_has_opaque_shell, words_are_opaque_shell,
+    command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, tree_has_opaque_shell,
+    words_are_opaque_shell,
 };
 use crate::permission::state::{PermissionState, load_state_from_disk, persist_state};
 use crate::permission::types::{
@@ -1569,15 +1569,15 @@ fn spawn_permission_manager_with_pin(
                                 context.display_cwd.as_deref(),
                                 path,
                             );
-                            edit_target_requires_prompt(&resolved)
+                            edit_target_protection(&resolved)
                         }
                         // Direct workspace callers predate per-request context and execute
                         // against the manager cwd; the shell always supplies context.
                         (AccessKind::Edit(path), None) => {
                             let resolved = resolve_model_path(cwd.as_path(), None, path);
-                            edit_target_requires_prompt(&resolved)
+                            edit_target_protection(&resolved)
                         }
-                        _ => false,
+                        _ => None,
                     };
 
                     // Evaluate managed policy (direct access + per-segment Bash command
@@ -1627,7 +1627,7 @@ fn spawn_permission_manager_with_pin(
                     // Ask floors fall through so managed Ask / shell-file Ask stay binding.
                     if !policy_forced_prompt
                         && !shell_forced_prompt
-                        && !protected_edit
+                        && protected_edit.is_none()
                         && let Some((decision, reason)) = session_grant_pre_decision(
                             &access,
                             bash_evaluation.as_ref(),
@@ -1651,7 +1651,7 @@ fn spawn_permission_manager_with_pin(
                     if auto_mode
                         && !policy_forced_prompt
                         && !shell_forced_prompt
-                        && !protected_edit
+                        && protected_edit.is_none()
                         && !bash_request_floor_requires_prompt(bash_evaluation.as_ref())
                         && matches!(policy_decision, Some(Decision::Allow))
                     {
@@ -1681,8 +1681,8 @@ fn spawn_permission_manager_with_pin(
                             AutoFastPath, ClassifierVerdict, access_requires_user_interaction,
                             auto_mode_fast_path,
                         };
-                        let needs_user =
-                            protected_edit || access_requires_user_interaction(&tool_name, &access);
+                        let needs_user = protected_edit.is_some()
+                            || access_requires_user_interaction(&tool_name, &access);
                         let fast = auto_mode_fast_path(&access, &tool_name, needs_user);
                         match fast {
                             AutoFastPath::Allow => {
@@ -1901,7 +1901,7 @@ fn spawn_permission_manager_with_pin(
                             );
                         }
                         Some(Decision::Allow)
-                            if protected_edit
+                            if protected_edit.is_some()
                                 || bash_request_floor_requires_prompt(bash_evaluation.as_ref()) =>
                         {
                             tracing::info!(
@@ -1961,7 +1961,7 @@ fn spawn_permission_manager_with_pin(
                         )
                         .map(|d| (d, reasons::PERSISTED_GRANT)),
                         AccessKind::Edit(_) => {
-                            if allow_edits_for_session && !protected_edit {
+                            if allow_edits_for_session && protected_edit.is_none() {
                                 Some((Decision::Allow, reasons::PERSISTED_GRANT))
                             } else {
                                 match state.edit_policy {
@@ -2117,7 +2117,7 @@ fn spawn_permission_manager_with_pin(
                             // (e.g. `curl … && sh` must not become two separate
                             // prompts for `curl …` then `sh`).
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update) => outcome,
+                                outcome = prompter.request(&access, &tool_call_update, protected_edit) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
 
@@ -2173,7 +2173,7 @@ fn spawn_permission_manager_with_pin(
                         _ => {
                             // Non-bash access kinds keep the single-prompt flow.
                             let prompt_outcome = tokio::select! {
-                                outcome = prompter.request(&access, &tool_call_update) => outcome,
+                                outcome = prompter.request(&access, &tool_call_update, protected_edit) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
                             let (decision, outcome_str) = match &prompt_outcome {
@@ -5123,46 +5123,43 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let mut auto = crate::permission::types::PermissionConfig::new(vec![]);
-                auto.prompt_policy = PromptPolicy::Auto;
-                let allow = crate::permission::types::PermissionConfig::new(vec![PermissionRule {
-                    action: RuleAction::Allow,
-                    tool: ToolFilter::Edit,
-                    pattern: None,
-                    pattern_mode: Default::default(),
-                }]);
-                let mut deny = crate::permission::types::PermissionConfig::new(vec![]);
-                deny.prompt_policy = PromptPolicy::Deny;
+                for path in ["/etc/hosts", "/home/user/.grok/hooks/evil.json"] {
+                    let mut auto = crate::permission::types::PermissionConfig::new(vec![]);
+                    auto.prompt_policy = PromptPolicy::Auto;
+                    let allow =
+                        crate::permission::types::PermissionConfig::new(vec![PermissionRule {
+                            action: RuleAction::Allow,
+                            tool: ToolFilter::Edit,
+                            pattern: None,
+                            pattern_mode: Default::default(),
+                        }]);
+                    let mut deny = crate::permission::types::PermissionConfig::new(vec![]);
+                    deny.prompt_policy = PromptPolicy::Deny;
 
-                for (name, config, expected_prompts, policy_deny) in [
-                    ("auto", auto, 1, false),
-                    ("configured allow", allow, 1, false),
-                    ("dontAsk", deny, 0, true),
-                ] {
-                    let tmp = tempfile::tempdir().unwrap();
-                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
-                    let client = RecordingClient::default();
-                    let prompts = client.prompts.clone();
-                    let (mgr, _events) = manager_with_recording_client(
-                        &cwd,
-                        Some(config),
-                        client,
-                        ClientType::Generic,
-                    );
-                    let decision = mgr
-                        .request(
-                            AccessKind::Edit("/etc/hosts".into()),
-                            tool_call(),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                    assert_eq!(prompts.borrow().len(), expected_prompts, "{name}");
-                    if policy_deny {
-                        assert!(matches!(decision, Decision::PolicyDeny(_)), "{name}");
-                    } else {
-                        assert!(matches!(decision, Decision::Reject(_)), "{name}");
+                    for (name, config, expected_prompts, policy_deny) in [
+                        ("auto", auto, 1, false),
+                        ("configured allow", allow, 1, false),
+                        ("dontAsk", deny, 0, true),
+                    ] {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                        let client = RecordingClient::default();
+                        let prompts = client.prompts.clone();
+                        let (mgr, _events) = manager_with_recording_client(
+                            &cwd,
+                            Some(config),
+                            client,
+                            ClientType::Generic,
+                        );
+                        let decision = mgr
+                            .request(AccessKind::Edit(path.into()), tool_call(), None, None, None)
+                            .await;
+                        assert_eq!(prompts.borrow().len(), expected_prompts, "{name} {path}");
+                        if policy_deny {
+                            assert!(matches!(decision, Decision::PolicyDeny(_)), "{name} {path}");
+                        } else {
+                            assert!(matches!(decision, Decision::Reject(_)), "{name} {path}");
+                        }
                     }
                 }
             })

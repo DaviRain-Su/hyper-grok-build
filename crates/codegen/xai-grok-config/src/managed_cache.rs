@@ -382,7 +382,7 @@ fn effective_now(cache: Option<&ManagedConfigCache>) -> u64 {
 /// A signing-enabled build over a legacy unsigned / edited / forged or foreign-bound
 /// cache refetches a signed copy; likewise when an imposing claim has no policy
 /// sidecar satisfying it — the states the gate refuses on, so refusal always comes
-/// with a pending self-heal. Dark build or no policy on disk → false.
+/// with a pending self-heal. Keyless build or no policy on disk → false.
 fn signed_cache_needs_refetch(
     home: &Path,
     cache: Option<&ManagedConfigCache>,

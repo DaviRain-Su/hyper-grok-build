@@ -62,7 +62,8 @@ use routing::{
 
 use prompt_origin::{finish_wake_turn, viewer_turn_anchor};
 pub(crate) use prompt_origin::{
-    is_server_initiated_prompt, is_wake_prompt, should_adopt_running_prompt,
+    is_scheduler_fired_prompt, is_server_initiated_prompt, is_wake_prompt,
+    should_adopt_running_prompt,
 };
 
 pub(crate) use subagent_activity::finalize_killed_subagent;
@@ -145,13 +146,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
         AcpClientMessage::SessionNotification(notif) => {
             let mut meta = NotificationMeta::from_json(notif.request.meta.as_ref());
 
-            // Wait-state bookkeeping after the agent borrow ends (parked marker).
-            let mut wait_state_agent: Option<AgentId> = None;
-
             let affected = match find_session_match(app, &notif.request.session_id) {
                 Some(SessionMatch::Root(id)) => {
                     let is_active = is_matched_agent_active(app, id);
-                    wait_state_agent = Some(id);
                     // Read before the agent borrow below.
                     let stashed_adoption_pid = app
                         .pending_running_adoptions
@@ -250,6 +247,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         }
                         if let Some(ts) = meta.turn_start_ms {
                             agent.turn_start_ms = Some(ts);
+                            agent.turn_start_ms_prompt = meta.prompt_id.clone();
                         }
                     }
 
@@ -616,12 +614,6 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     false
                 }
             };
-            if let Some(aid) = wait_state_agent {
-                // Parked marker (any tab — the update that created the wait state stamps the park time).
-                if let Some(agent) = app.agents.get_mut(&aid) {
-                    agent.maybe_push_parked_marker();
-                }
-            }
             notif.response_tx.send(Ok(())).ok();
             affected
         }
@@ -799,11 +791,6 @@ fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool 
     agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(text));
-    // Interjecting into a parked wait continues the turn below this block —
-    // the withheld "Worked for …" marker must not fire late beneath it
-    // (shared-queue interjects render only via this broadcast, and the shell
-    // emits the queue-emptying `x.ai/queue/changed` right after it).
-    agent.suppress_parked_marker_on_interject();
     is_active
 }
 

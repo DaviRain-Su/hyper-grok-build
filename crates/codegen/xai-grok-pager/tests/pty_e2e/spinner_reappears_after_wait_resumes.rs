@@ -1,14 +1,7 @@
-//! PTY: the parked look is not sticky — when a parked sendable wait RETURNS
-//! and the model resumes streaming in the SAME turn, the running chrome
-//! (turn-status row + cancel keybar) must come back while the continuation
-//! streams (regression: stale tracker waits kept the idle look after resume).
-//!
-//! Flag-file driven like `endline_park_two_static_markers`: background a
-//! flag-gated command, hold the turn on a flag-gated foreground command while
-//! the runtime task id is extracted, then block on
-//! `get_command_or_subagent_output(timeout_ms: 600000)` — the pager parks.
-//! Releasing the flag completes the task, the wait returns, and the scripted
-//! slow continuation streams in the same turn.
+//! PTY, flag-file driven like `endline_park_is_markerless`: the pager parks
+//! on a blocking wait; releasing the flag completes the task and a slow
+//! continuation streams in the SAME turn. Asserts the running chrome returns
+//! (regression: stale tracker waits kept the idle look after resume).
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -105,23 +98,23 @@ async fn spinner_reappears_after_wait_resumes() {
 
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
-    // Parked look: the plain marker renders, the "… still running" cue takes
-    // the status row, and the running chrome (cancel keybar) drops — the
+    // Parked look: the parked cue takes the status row (parks write no
+    // transcript row) and the running chrome (cancel keybar) drops — the
     // session reads as stopped.
     harness
-        .wait_for_text("Worked for", Duration::from_secs(60))
+        .wait_for_text("1 command still running", Duration::from_secs(60))
         .unwrap_or_else(|_| {
             panic!(
-                "parked marker never appeared; screen:\n{}\n--- non-system messages ---\n{}",
+                "parked watching cue never appeared; screen:\n{}\n--- non-system messages ---\n{}",
                 harness.screen_contents(),
                 dump_non_system_messages(&content.request_bodies())
             )
         });
     harness
-        .wait_for_text("1 command still running", Duration::from_secs(30))
+        .wait_for_text("send a message to interrupt", Duration::from_secs(30))
         .unwrap_or_else(|_| {
             panic!(
-                "parked watching cue never appeared; screen:\n{}",
+                "parked interrupt cue never appeared; screen:\n{}",
                 harness.screen_contents()
             )
         });

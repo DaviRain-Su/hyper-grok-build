@@ -42,7 +42,7 @@ use xai_grok_pager::appearance::LayoutConfig;
 use xai_grok_pager::minimal_api;
 use xai_grok_pager::render::SafeBuf as _;
 use xai_grok_pager::theme::Theme;
-use xai_grok_pager::views::prompt_widget::{PromptStyle, PromptWidget};
+use xai_grok_pager::views::prompt_widget::{PromptBg, PromptStyle, PromptWidget};
 
 /// Which prompt-anchored dropdown is currently shown.
 ///
@@ -799,7 +799,7 @@ fn inline_input_style(theme: &Theme) -> PromptStyle {
         chrome: false,
         chrome_pad_left: 0,
         chrome_pad_right: 0,
-        bg_override: Some(theme.bg_visual),
+        bg: PromptBg::Panel(theme.bg_visual),
         accent_color_override: None,
         border_color_override: None,
         prefix_override: None,

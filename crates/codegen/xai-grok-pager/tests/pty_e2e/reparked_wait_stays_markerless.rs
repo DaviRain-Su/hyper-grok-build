@@ -1,14 +1,7 @@
-//! PTY: a re-parked wait (new parent output between parks) pushes a fresh
-//! parked marker for the new park episode, so the transcript keeps a
-//! boundary where each park began, while the persistent "… still running"
-//! status row explains the still-running background work.
-//!
-//! Wire journey, flag-file driven like `endline_park_two_static_markers`:
-//! background a flag-gated command, hold on a flag-gated foreground command
-//! while the runtime task id is extracted, then script three more rounds on
-//! the real id — a short wait (`timeout_ms: 4000`) that expires with the
-//! task still running (park #1 + marker), a quick foreground echo, and a
-//! long wait (park #2: chrome hidden and a fresh marker for the new episode).
+//! PTY, flag-file driven like `endline_park_is_markerless`: a short wait that
+//! expires (park #1), foreground work between the parks, then a long wait on
+//! the same still-running task (park #2). Asserts neither park writes a
+//! transcript row and only the real turn end pushes the single "Worked for X".
 #[allow(unused_imports)]
 use super::common::*;
 
@@ -28,7 +21,7 @@ const FINAL: &str = "REPARK_FINAL_ANSWER";
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
-async fn reparked_wait_repushes_buried_marker() {
+async fn reparked_wait_stays_markerless() {
     let content = ContentController::start().await.expect("start content");
     // Gates the background command both waits block on (released at the end).
     let park_flag = content.home().join("repark_flag");
@@ -99,8 +92,7 @@ async fn reparked_wait_repushes_buried_marker() {
         )
     });
 
-    // Tool call 3 — park #1: a short wait that expires with the task still
-    // running.
+    // Tool call 3 — park #1: a short wait that expires with the task still running.
     let short_wait_args = json!({
         "task_ids": [task_id],
         "timeout_ms": 4_000
@@ -113,8 +105,7 @@ async fn reparked_wait_repushes_buried_marker() {
         short_wait_args,
     );
 
-    // Tool call 4: foreground work between the parks (`MIDWORK` is the
-    // on-screen sentinel).
+    // Tool call 4: foreground work between the parks (`MIDWORK` is the on-screen sentinel).
     let midwork_args = json!({
         "command": "echo repark-midwork-done",
         "description": MIDWORK
@@ -143,27 +134,20 @@ async fn reparked_wait_repushes_buried_marker() {
     // Everything downstream is scripted — release the id-extraction hold.
     std::fs::write(&id_ready_flag, b"ready").expect("release id-extraction hold");
 
-    // Park #1 marker (plain "Worked for X" — no still-running suffix).
-    harness
-        .wait_for_text("Worked for", Duration::from_secs(90))
-        .unwrap_or_else(|_| {
-            panic!(
-                "park #1 marker never appeared; screen:\n{}\n--- non-system messages ---\n{}",
-                harness.screen_contents(),
-                dump_non_system_messages(&content.request_bodies())
-            )
-        });
-    // The parked status row carries the still-running story instead.
-    harness
-        .wait_for_text("1 command still running", Duration::from_secs(30))
-        .unwrap_or_else(|_| {
-            panic!(
-                "parked watching cue never appeared; screen:\n{}",
-                harness.screen_contents()
-            )
-        });
+    let park_one = wait_until(Duration::from_secs(90), || {
+        harness.update(Duration::from_millis(100));
+        let screen = harness.screen_contents();
+        screen.contains("1 command still running")
+            && screen.contains("send a message to interrupt")
+            && !screen.contains("Worked for")
+    });
+    assert!(
+        park_one,
+        "park #1 must show the parked cue with no marker; screen:\n{}\n--- non-system messages ---\n{}",
+        harness.screen_contents(),
+        dump_non_system_messages(&content.request_bodies())
+    );
 
-    // The short wait expires and the same turn resumes.
     harness
         .wait_for_text(MIDWORK, Duration::from_secs(60))
         .unwrap_or_else(|_| {
@@ -174,7 +158,6 @@ async fn reparked_wait_repushes_buried_marker() {
             )
         });
 
-    // Park #2: the running chrome drops again.
     let chrome_hidden = wait_until(Duration::from_secs(30), || {
         harness.update(Duration::from_millis(100));
         !harness.contains_text(CANCEL_HINT)
@@ -185,44 +168,21 @@ async fn reparked_wait_repushes_buried_marker() {
         harness.screen_contents()
     );
 
-    // Park #2 pushes a second marker below the between-parks content (a new
-    // park episode after new parent output).
-    let repushed = wait_until(Duration::from_secs(30), || {
+    let park_two = wait_until(Duration::from_secs(30), || {
         harness.update(Duration::from_millis(100));
-        harness.screen_contents().matches("Worked for").count() == 2
+        let screen = harness.screen_contents();
+        screen.contains("1 command still running") && !screen.contains("Worked for")
     });
     assert!(
-        repushed,
-        "re-park after buried marker must push a fresh marker; screen:\n{}",
+        park_two,
+        "park #2 must stay markerless with the parked cue up; screen:\n{}",
         harness.screen_contents()
     );
     let screen = harness.screen_contents();
-
-    // Screen text is row-major: marker, content, re-pushed marker in order.
-    let first_marker = screen.find("Worked for").expect("first marker");
+    // U+2800–U+28FF = the braille spinner glyphs.
     let midwork_at = screen
         .rfind(MIDWORK)
         .expect("between-parks content on screen");
-    let second_marker = screen.rfind("Worked for").expect("re-pushed marker");
-    assert!(
-        first_marker < midwork_at && midwork_at < second_marker,
-        "expected marker, content, then the re-pushed marker in order; screen:\n{screen}"
-    );
-    // The still-running story lives in the status row, not the transcript:
-    // no "Worked for" line carries the suffix (line-scoped like the sibling
-    // suites — other surfaces may legitimately use the phrase).
-    assert!(
-        screen
-            .lines()
-            .filter(|l| l.contains("Worked for"))
-            .all(|l| !l.contains("still running")),
-        "no marker line may carry the still-running suffix; screen:\n{screen}"
-    );
-    assert!(
-        screen.contains("1 command still running"),
-        "the parked status row keeps the still-running cue during park #2; screen:\n{screen}"
-    );
-    // The parked look still hides spinner and chrome.
     let below_midwork = &screen[midwork_at..];
     assert!(
         !below_midwork
@@ -235,10 +195,9 @@ async fn reparked_wait_repushes_buried_marker() {
         "parked look keeps the running chrome hidden during park #2; screen:\n{screen}"
     );
 
-    eprintln!("── re-park with buried marker: tail explains the park ──\n{screen}\n── end ──");
+    eprintln!("── re-park stays markerless: status cue explains the park ──\n{screen}\n── end ──");
 
-    // Liveness: releasing the flag completes the wait and the same turn
-    // streams the final answer.
+    // Releasing the flag completes the wait and lets the turn finish.
     std::fs::write(&park_flag, b"done").expect("release flag");
     harness
         .wait_for_text(FINAL, Duration::from_secs(90))
@@ -253,11 +212,20 @@ async fn reparked_wait_repushes_buried_marker() {
     harness
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle");
+    let one_final_marker = wait_until(Duration::from_secs(30), || {
+        harness.update(Duration::from_millis(100));
+        harness.screen_contents().matches("Worked for").count() == 1
+    });
+    assert!(
+        one_final_marker,
+        "exactly one marker — the real turn end's; screen:\n{}",
+        harness.screen_contents()
+    );
     assert!(
         !harness.contains_text("panicked"),
         "pager panicked\nscreen:\n{}",
         harness.screen_contents()
     );
-    write_cast_if_requested(&harness, "reparked_wait_repushes_buried_marker.cast");
+    write_cast_if_requested(&harness, "reparked_wait_stays_markerless.cast");
     harness.quit().expect("clean quit");
 }

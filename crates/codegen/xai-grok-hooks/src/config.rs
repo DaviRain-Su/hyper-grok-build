@@ -7,50 +7,87 @@ use crate::error::HookError;
 use crate::event::HookEventName;
 use crate::matcher::HookMatcher;
 
-/// The parsed `hooks` object from a compatible JSON settings file.
-///
-/// Parsing is lenient: unrecognized event names are skipped (not errors) so a
-/// `~/.claude/settings.json` with unsupported events still loads the rest.
+pub use xai_grok_config::HookProvenance;
+
+/// Parsed `hooks` object. Unknown event names are skipped, not errors.
 #[derive(Debug)]
 pub struct HooksMap {
     pub events: HashMap<HookEventName, Vec<MatcherGroup>>,
     pub skipped_events: Vec<String>,
 }
 
-impl HooksMap {
-    pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
-        let raw_map: HashMap<String, serde_json::Value> =
-            serde_json::from_value(value).map_err(|e| format!("invalid hooks structure: {e}"))?;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupErrorPolicy {
+    Fail,
+    SkipEvent,
+}
 
+impl HooksMap {
+    fn assemble<V>(
+        entries: HashMap<String, V>,
+        mut parse_groups: impl FnMut(V) -> Result<Vec<MatcherGroup>, String>,
+        group_errors: GroupErrorPolicy,
+    ) -> Result<Self, String> {
         let mut events: HashMap<HookEventName, Vec<MatcherGroup>> = HashMap::new();
         let mut skipped_events = Vec::new();
 
-        for (key, val) in raw_map {
-            let event_name: HookEventName =
-                match serde_json::from_value(serde_json::Value::String(key.clone())) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        skipped_events.push(key);
-                        continue;
-                    }
-                };
-
-            let matcher_groups: Vec<MatcherGroup> = match serde_json::from_value(val) {
-                Ok(groups) => groups,
-                Err(e) => {
-                    return Err(format!("invalid matcher groups for event '{key}': {e}"));
+        for (key, val) in entries {
+            let event_name = match HookEventName::parse_key(&key) {
+                Some(name) => name,
+                None => {
+                    skipped_events.push(key);
+                    continue;
                 }
             };
 
-            // Aliases (e.g. `SubagentEnd`) can parse to one event, so merge
-            // groups rather than insert, which would drop all but one.
-            events.entry(event_name).or_default().extend(matcher_groups);
+            match parse_groups(val) {
+                Ok(groups) => events.entry(event_name).or_default().extend(groups),
+                Err(detail) => match group_errors {
+                    GroupErrorPolicy::Fail => {
+                        return Err(format!(
+                            "invalid matcher groups for event '{key}': {detail}"
+                        ));
+                    }
+                    GroupErrorPolicy::SkipEvent => {
+                        tracing::warn!(
+                            event = %key,
+                            error = %detail,
+                            "hooks: skipping malformed event in config layer (other events still load)"
+                        );
+                        skipped_events.push(key);
+                    }
+                },
+            }
         }
 
         Ok(HooksMap {
             events,
             skipped_events,
         })
+    }
+
+    /// Parse a `hooks` object from JSON. A malformed event fails the whole parse.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
+        let entries: HashMap<String, serde_json::Value> =
+            serde_json::from_value(value).map_err(|e| format!("invalid hooks structure: {e}"))?;
+        Self::assemble(
+            entries,
+            |v| serde_json::from_value(v).map_err(|e| e.to_string()),
+            GroupErrorPolicy::Fail,
+        )
+    }
+
+    /// Parse a `hooks` table from TOML. Unlike [`Self::from_value`], a malformed
+    /// event is skipped so one bad event can't drop the layer.
+    pub fn from_toml_value(value: toml::Value) -> Result<Self, String> {
+        let entries: HashMap<String, toml::Value> = value
+            .try_into()
+            .map_err(|e: toml::de::Error| format!("invalid hooks structure: {e}"))?;
+        Self::assemble(
+            entries,
+            |v| v.try_into().map_err(|e: toml::de::Error| e.to_string()),
+            GroupErrorPolicy::SkipEvent,
+        )
     }
 }
 
@@ -69,15 +106,13 @@ pub struct RawHandler {
     pub url: Option<String>,
     /// Seconds (converted to milliseconds internally).
     pub timeout: Option<u64>,
-    /// Extra env vars for the hook process; merged into [`HookSpec::extra_env`]
-    /// (see its rustdoc for precedence and reserved-key stripping).
+    /// Extra env vars, merged into [`HookSpec::extra_env`].
     #[serde(default, deserialize_with = "deserialize_optional_string_map")]
     pub env: HashMap<String, String>,
 }
 
-/// Accepts `null`, an absent field, or a string map. Serde otherwise rejects an
-/// explicit `"env": null` for a `HashMap` field even with `#[serde(default)]`;
-/// treating `null` as "no env" matches user intent.
+/// Treat `null` or an absent field as an empty map (serde otherwise rejects
+/// `null` for a `HashMap`).
 fn deserialize_optional_string_map<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -104,8 +139,7 @@ fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
     }
 }
 
-/// The validated handler kind. `RawHandler::handler_type` keeps the untrusted
-/// string; parsing validates it into this so consumers dispatch exhaustively.
+/// The validated handler kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandlerType {
@@ -122,60 +156,99 @@ impl HandlerType {
     }
 }
 
-/// A validated hook specification, ready for use by the dispatcher.
+impl std::str::FromStr for HandlerType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "command" => Ok(Self::Command),
+            "http" => Ok(Self::Http),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A validated hook specification, ready for the dispatcher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookSpec {
     pub name: String,
     pub event: HookEventName,
     pub handler_type: HandlerType,
-    /// Raw pattern as written, kept for `/hooks-list` display (the compiled form
-    /// is [`matcher`](HookSpec::matcher)).
+    /// Pattern as written; the compiled form is `matcher`.
     pub configured_matcher: Option<String>,
     #[serde(skip)]
     pub matcher: Option<HookMatcher>,
     pub enabled: bool,
-    /// Executable path (command handlers), post-expansion: parse-time-resolvable
-    /// `$VAR` refs are substituted, unresolved/modifier forms (`${VAR:-x}`) kept
-    /// for the runner's `sh -c` branch. Unlike [`url`](HookSpec::url), commands
-    /// are NOT re-expanded at run time, so only `sh -c` sees mid-session env
-    /// changes. Display via [`command_raw`](HookSpec::command_raw) so resolved
-    /// secrets never leak.
+    /// Command path, env-expanded; unresolved/modifier forms kept for the runner's
+    /// `sh -c` branch. Not re-expanded at run time. Display via `command_raw`.
     pub command: Option<PathBuf>,
-    /// Pre-expansion source for `command`; use it for display so resolved `env`
-    /// values (possibly secrets) never leak past the runner.
+    /// Pre-expansion `command` for display, so resolved secrets never leak.
     pub command_raw: Option<String>,
-    /// URL endpoint (http handlers), post-expanded like [`command`](HookSpec::command).
-    /// The HTTP runner re-expands it at run time before SSRF validation, so plugin
-    /// URLs referencing later-injected `extra_env` keys resolve: mid-session env
-    /// changes take effect for URLs but not commands (deliberate asymmetry).
-    /// Display via [`url_raw`](HookSpec::url_raw).
+    /// URL (http handlers), env-expanded. Unlike `command`, the HTTP runner
+    /// re-expands at run time before SSRF validation (deliberate asymmetry).
     pub url: Option<String>,
-    /// Pre-expansion source for `url`, for display; see [`command_raw`](HookSpec::command_raw).
+    /// Pre-expansion `url` for display; see `command_raw`.
     pub url_raw: Option<String>,
     pub timeout_ms: u64,
     pub source_dir: PathBuf,
-    /// Extra environment variables injected into the hook process.
-    ///
-    /// Sources, lowest to highest precedence:
-    ///
-    /// 1. The user-declared `env` map (populated by [`parse_hook_file`]).
-    ///    Runner-reserved keys (`GROK_HOOK_EVENT`, `GROK_HOOK_NAME`,
-    ///    `GROK_SESSION_ID`, `GROK_WORKSPACE_ROOT`, `CLAUDE_PROJECT_DIR`) are
-    ///    stripped at load time with a tracing warning.
-    /// 2. Plugin-injected vars merged by the plugin adapter
-    ///    (`xai-grok-agent::plugins::hooks_adapter`): `GROK_PLUGIN_ROOT`,
-    ///    `CLAUDE_PLUGIN_ROOT`, `GROK_PLUGIN_DATA`, `CLAUDE_PLUGIN_DATA`, which
-    ///    override any user values for those keys.
-    /// 3. Runner-injected vars applied at spawn time AFTER `extra_env`, so they
-    ///    always win even if a reserved key leaks through the layers above. This
-    ///    is a security property: the child must see authentic identity/event
-    ///    signals, never spoofed values. See the regression test
-    ///    `runner_injected_vars_override_extra_env_at_spawn` in
-    ///    `tests/integration.rs`.
-    ///
-    /// Besides being passed to the child, this map is consulted by the load-time
-    /// expansion of `command` and `url` (see [`crate::env_expand`]).
+    /// Env injected into the hook process, and consulted by load-time `command`/
+    /// `url` expansion. Precedence low→high: user `env` (reserved keys stripped) <
+    /// plugin-injected < runner-injected at spawn (authentic identity always wins).
     pub extra_env: std::collections::HashMap<String, String>,
+    /// The hook's origin and single source of truth for classification: `File`
+    /// (JSON files, agent frontmatter), a config tier, or `Plugin`. `#[serde(default)]`
+    /// reads pre-field wire specs as `File`.
+    #[serde(default)]
+    pub layer: HookProvenance,
+}
+
+/// Namespace prefixes stamped on hook names, matched by [`hook_origin`]. Shared
+/// so a rename can't silently reclassify a tier.
+pub const GLOBAL_HOOK_PREFIX: &str = "global/";
+pub const PROJECT_HOOK_PREFIX: &str = "project/";
+pub const PLUGIN_HOOK_PREFIX: &str = "plugin/";
+pub const AGENT_HOOK_PREFIX: &str = "agent:";
+
+/// A hook's classified origin for display and telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookOrigin {
+    SystemManaged,
+    Managed,
+    Requirements,
+    UserConfig,
+    UserFile,
+    ProjectFile,
+    Plugin,
+    Agent,
+    Unknown,
+}
+
+/// Classify a hook's origin from [`HookProvenance`], falling back to the name
+/// prefix for `File`-tier hooks.
+pub fn hook_origin(spec: &HookSpec) -> HookOrigin {
+    match spec.layer {
+        HookProvenance::SystemManaged => HookOrigin::SystemManaged,
+        HookProvenance::Managed => HookOrigin::Managed,
+        HookProvenance::Requirements => HookOrigin::Requirements,
+        HookProvenance::User => HookOrigin::UserConfig,
+        HookProvenance::Plugin => HookOrigin::Plugin,
+        HookProvenance::Unknown => HookOrigin::Unknown,
+        HookProvenance::File => {
+            let name = spec.name.as_str();
+            if name.starts_with(GLOBAL_HOOK_PREFIX) {
+                HookOrigin::UserFile
+            } else if name.starts_with(PROJECT_HOOK_PREFIX) {
+                HookOrigin::ProjectFile
+            } else if name.starts_with(AGENT_HOOK_PREFIX) {
+                HookOrigin::Agent
+            } else if name.starts_with(PLUGIN_HOOK_PREFIX) {
+                // Defensive: a plugin hook whose adapter didn't stamp `layer`.
+                HookOrigin::Plugin
+            } else {
+                HookOrigin::Unknown
+            }
+        }
+    }
 }
 
 /// Parse hooks from a JSON value (e.g. from agent definition frontmatter).
@@ -189,24 +262,104 @@ pub fn parse_hooks_from_value(
     parse_hooks_from_value_with_dir(hooks, source_name, std::path::Path::new("."))
 }
 
-/// Like `parse_hooks_from_value` but with an explicit `source_dir` for
-/// resolving relative command paths.
+/// [`parse_hooks_from_value`] with an explicit `source_dir`. Parses the decoded
+/// value directly (no re-parse round-trip); a malformed event is a hard error.
 pub fn parse_hooks_from_value_with_dir(
     hooks: &serde_json::Value,
     source_name: &str,
     source_dir: &Path,
 ) -> (Vec<HookSpec>, Vec<HookError>) {
-    let wrapper = serde_json::json!({ "hooks": hooks });
-    let (mut specs, errors) =
-        parse_hook_file(&wrapper.to_string(), std::path::Path::new(source_name));
-    for spec in &mut specs {
-        spec.source_dir = source_dir.to_path_buf();
+    let error_path = Path::new(source_name);
+    let hooks_map = match HooksMap::from_value(hooks.clone()) {
+        Ok(map) => map,
+        Err(detail) => {
+            return (
+                Vec::new(),
+                vec![HookError::ParseFile {
+                    path: error_path.to_path_buf(),
+                    detail,
+                }],
+            );
+        }
+    };
+    if !hooks_map.skipped_events.is_empty() {
+        tracing::warn!(
+            source = %source_name,
+            skipped = ?hooks_map.skipped_events,
+            "hooks: skipped unrecognized event names (check for typos)"
+        );
     }
-    (specs, errors)
+
+    let name_prefix = error_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    build_specs(
+        hooks_map,
+        SpecContext {
+            name_prefix,
+            source_dir,
+            error_path,
+            provenance: HookProvenance::File,
+        },
+    )
+}
+
+/// Build specs from config-layer `hooks` blocks, tagging each with its layer's
+/// `source_name`. Layers arrive highest-authority-first and specs preserve that
+/// order, so the caller's dedup keeps the higher-authority copy. Relative commands
+/// resolve against each layer's own directory; a layer that fails to parse is
+/// recorded and skipped, the rest still load.
+pub fn parse_hooks_from_config_layers(
+    layers: &[xai_grok_config::HookConfigLayer],
+) -> (Vec<HookSpec>, Vec<HookError>) {
+    let home = xai_grok_config::user_grok_home();
+    let mut all_specs = Vec::new();
+    let mut all_errors = Vec::new();
+
+    for layer in layers {
+        let source_name = layer.source_name();
+        let error_path = layer.path();
+        // Resolve relative commands against the layer's own dir, not the user home.
+        let source_dir = match error_path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => home.clone().unwrap_or_else(|| PathBuf::from(".")),
+        };
+        let hooks_map = match HooksMap::from_toml_value(layer.hooks().clone()) {
+            Ok(map) => map,
+            Err(detail) => {
+                all_errors.push(HookError::ParseFile {
+                    path: error_path.to_path_buf(),
+                    detail,
+                });
+                continue;
+            }
+        };
+        if !hooks_map.skipped_events.is_empty() {
+            tracing::warn!(
+                source = %source_name,
+                skipped = ?hooks_map.skipped_events,
+                "hooks: skipped unrecognized or malformed events in config layer"
+            );
+        }
+        let (specs, errors) = build_specs(
+            hooks_map,
+            SpecContext {
+                name_prefix: source_name,
+                source_dir: &source_dir,
+                error_path,
+                provenance: layer.provenance(),
+            },
+        );
+        all_specs.extend(specs);
+        all_errors.extend(errors);
+    }
+
+    (all_specs, all_errors)
 }
 
 pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
-    let mut specs = Vec::new();
+    let specs = Vec::new();
     let mut errors = Vec::new();
 
     let top_level: serde_json::Value = match serde_json::from_str(content) {
@@ -250,119 +403,52 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
 
-    // HashMap event order is nondeterministic, but dispatch is per-event so it
-    // doesn't matter; within an event, source order is preserved.
-    for (event, matcher_groups) in hooks_map.events {
+    build_specs(
+        hooks_map,
+        SpecContext {
+            name_prefix: file_stem,
+            source_dir: &source_dir,
+            error_path: file_path,
+            provenance: HookProvenance::File,
+        },
+    )
+}
+
+/// Build [`HookSpec`]s from a [`HooksMap`], shared by the JSON and config paths
+/// so the two never diverge.
+fn build_specs(hooks_map: HooksMap, ctx: SpecContext<'_>) -> (Vec<HookSpec>, Vec<HookError>) {
+    let mut specs = Vec::new();
+    let mut errors = Vec::new();
+
+    // Stable event order for reproducible output; source order kept within an event.
+    let mut events: Vec<(HookEventName, Vec<MatcherGroup>)> =
+        hooks_map.events.into_iter().collect();
+    events.sort_by_key(|(event, _)| *event);
+    for (event, matcher_groups) in events {
         for (group_idx, group) in matcher_groups.into_iter().enumerate() {
-            let matcher_pattern = group
-                .matcher
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-
-            // Events with an `Ignored` matcher policy keep the configured pattern
-            // for display but never compile it, so the hook always fires.
-            let matcher_ignored = matcher_pattern.is_some()
-                && event.traits().matcher == crate::event::MatcherPolicy::Ignored;
-            if matcher_ignored {
-                tracing::warn!(
-                    hook = %format!("{file_stem}:{event}[{group_idx}]"),
-                    path = %file_path.display(),
-                    "hooks: matcher on a {event} group is ignored (this event always fires)"
-                );
-            }
-
-            let compiled_matcher = match matcher_pattern.as_ref().filter(|_| !matcher_ignored) {
-                Some(pattern) => match HookMatcher::new(pattern) {
-                    Ok(m) => Some(m),
+            let group_label = format!("{}:{event}[{group_idx}]", ctx.name_prefix);
+            let (configured_matcher, compiled_matcher) =
+                match resolve_group_matcher(group.matcher.as_deref(), event, &group_label, &ctx) {
+                    Ok(pair) => pair,
                     Err(e) => {
-                        let name = format!("{file_stem}:{event}[{group_idx}]");
-                        errors.push(HookError::InvalidMatcher {
-                            name,
-                            path: file_path.to_path_buf(),
-                            source: e,
-                        });
+                        errors.push(e);
                         continue;
                     }
-                },
-                None => None,
-            };
+                };
 
             for (hook_idx, handler) in group.hooks.into_iter().enumerate() {
-                let name = format!("{file_stem}:{event}[{group_idx}].hooks[{hook_idx}]");
-
-                // `matcher` is deliberately NOT env-expanded: `$` is the regex
-                // end-of-line anchor, so `$VAR` substitution would corrupt it.
-
-                let timeout_ms = handler
-                    .timeout
-                    .map(|secs| secs * 1000)
-                    .unwrap_or(default_timeout_ms(event));
-
-                let mut extra_env: HashMap<String, String> = handler.env;
-                strip_reserved_env_keys(&mut extra_env, &name, file_path);
-
-                let handler_type = match handler.handler_type.as_str() {
-                    "command" => HandlerType::Command,
-                    "http" => HandlerType::Http,
-                    _ => {
-                        errors.push(HookError::UnsupportedHandlerType {
-                            name,
-                            path: file_path.to_path_buf(),
-                            handler_type: handler.handler_type,
-                        });
-                        continue;
-                    }
-                };
-
-                // Expand `command`/`url` now (`extra_env` first, then process
-                // env). Unset refs are preserved: command hooks defer to the
-                // runner, and the HTTP runner re-expands before SSRF validation
-                // in case `extra_env` was populated after parsing.
-                let (command, command_raw, url, url_raw) = match handler_type {
-                    HandlerType::Command => {
-                        let Some(command) = handler.command else {
-                            errors.push(HookError::InvalidConfig {
-                                name,
-                                path: file_path.to_path_buf(),
-                                detail: "command handler requires a 'command' field".into(),
-                            });
-                            continue;
-                        };
-                        let expanded =
-                            crate::env_expand::expand_env_vars_with_extra(&command, &extra_env);
-                        (Some(PathBuf::from(expanded)), Some(command), None, None)
-                    }
-                    HandlerType::Http => {
-                        let Some(url) = handler.url else {
-                            errors.push(HookError::InvalidConfig {
-                                name,
-                                path: file_path.to_path_buf(),
-                                detail: "http handler requires a 'url' field".into(),
-                            });
-                            continue;
-                        };
-                        let expanded =
-                            crate::env_expand::expand_env_vars_with_extra(&url, &extra_env);
-                        (None, None, Some(expanded), Some(url))
-                    }
-                };
-
-                specs.push(HookSpec {
-                    name,
+                let name = format!("{group_label}.hooks[{hook_idx}]");
+                match build_one_spec(
+                    handler,
                     event,
-                    handler_type,
-                    configured_matcher: matcher_pattern.clone(),
-                    matcher: compiled_matcher.clone(),
-                    enabled: true,
-                    command,
-                    command_raw,
-                    url,
-                    url_raw,
-                    timeout_ms,
-                    source_dir: source_dir.clone(),
-                    extra_env,
-                });
+                    name,
+                    configured_matcher.clone(),
+                    compiled_matcher.clone(),
+                    &ctx,
+                ) {
+                    Ok(spec) => specs.push(spec),
+                    Err(e) => errors.push(e),
+                }
             }
         }
     }
@@ -370,11 +456,128 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
     (specs, errors)
 }
 
-/// Strip user-supplied `env` entries that override runner-reserved keys.
-///
-/// Redundant with the spawn-time ordering in `runner/command.rs`, but stripping
-/// here gives a clear "ignored" signal and covers load paths that bypass
-/// `parse_hook_file`.
+/// Resolve a group's `(configured_matcher, compiled_matcher)`. The compiled
+/// matcher is `None` with no pattern, or when the event ignores matchers (pattern
+/// kept for display, hook always fires). Errors only on an invalid regex.
+fn resolve_group_matcher(
+    group_matcher: Option<&str>,
+    event: HookEventName,
+    group_label: &str,
+    ctx: &SpecContext<'_>,
+) -> Result<(Option<String>, Option<HookMatcher>), HookError> {
+    let configured = group_matcher
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    if configured.is_some() && event.traits().matcher == crate::event::MatcherPolicy::Ignored {
+        tracing::warn!(
+            hook = %group_label,
+            path = %ctx.error_path.display(),
+            "hooks: matcher on a {event} group is ignored (this event always fires)"
+        );
+        return Ok((configured, None));
+    }
+
+    let compiled = match configured.as_deref() {
+        Some(pattern) => {
+            Some(
+                HookMatcher::new(pattern).map_err(|source| HookError::InvalidMatcher {
+                    name: group_label.to_string(),
+                    path: ctx.error_path.to_path_buf(),
+                    source,
+                })?,
+            )
+        }
+        None => None,
+    };
+    Ok((configured, compiled))
+}
+
+/// Per-call constants shared by every group and handler in one [`build_specs`].
+struct SpecContext<'a> {
+    /// Labels specs as `"{name_prefix}:{event}[..]"` (file stem or config `source_name`).
+    name_prefix: &'a str,
+    source_dir: &'a Path,
+    error_path: &'a Path,
+    provenance: HookProvenance,
+}
+
+/// Build one [`HookSpec`] from a handler entry, or the [`HookError`] preventing it.
+/// `command`/`url` are env-expanded (unset refs kept for the runner); `matcher` is
+/// not, since `$` is the regex end anchor.
+fn build_one_spec(
+    handler: RawHandler,
+    event: HookEventName,
+    name: String,
+    configured_matcher: Option<String>,
+    compiled_matcher: Option<HookMatcher>,
+    ctx: &SpecContext<'_>,
+) -> Result<HookSpec, HookError> {
+    let timeout_ms = handler
+        .timeout
+        // Untrusted config value: saturate rather than overflow (debug panic /
+        // release wrap) on an absurd timeout.
+        .map(|secs| secs.saturating_mul(1000))
+        .unwrap_or(default_timeout_ms(event));
+
+    let mut extra_env: HashMap<String, String> = handler.env;
+    strip_reserved_env_keys(&mut extra_env, &name, ctx.error_path);
+
+    let handler_type = match handler.handler_type.parse::<HandlerType>() {
+        Ok(ht) => ht,
+        Err(()) => {
+            return Err(HookError::UnsupportedHandlerType {
+                name,
+                path: ctx.error_path.to_path_buf(),
+                handler_type: handler.handler_type,
+            });
+        }
+    };
+
+    let (command, command_raw, url, url_raw) = match handler_type {
+        HandlerType::Command => {
+            let Some(command) = handler.command else {
+                return Err(HookError::InvalidConfig {
+                    name,
+                    path: ctx.error_path.to_path_buf(),
+                    detail: "command handler requires a 'command' field".into(),
+                });
+            };
+            let expanded = crate::env_expand::expand_env_vars_with_extra(&command, &extra_env);
+            (Some(PathBuf::from(expanded)), Some(command), None, None)
+        }
+        HandlerType::Http => {
+            let Some(url) = handler.url else {
+                return Err(HookError::InvalidConfig {
+                    name,
+                    path: ctx.error_path.to_path_buf(),
+                    detail: "http handler requires a 'url' field".into(),
+                });
+            };
+            let expanded = crate::env_expand::expand_env_vars_with_extra(&url, &extra_env);
+            (None, None, Some(expanded), Some(url))
+        }
+    };
+
+    Ok(HookSpec {
+        name,
+        event,
+        handler_type,
+        configured_matcher,
+        matcher: compiled_matcher,
+        enabled: true,
+        command,
+        command_raw,
+        url,
+        url_raw,
+        timeout_ms,
+        source_dir: ctx.source_dir.to_path_buf(),
+        extra_env,
+        layer: ctx.provenance,
+    })
+}
+
+/// Strip user `env` entries that would shadow runner-reserved keys, with a warning.
 fn strip_reserved_env_keys(
     extra_env: &mut HashMap<String, String>,
     spec_name: &str,
@@ -396,6 +599,78 @@ fn strip_reserved_env_keys(
 mod tests {
     use super::*;
     use crate::test_support::with_env_var;
+
+    fn config_layer(source_name: &str, toml_src: &str) -> xai_grok_config::HookConfigLayer {
+        let value: toml::Value = toml::from_str(toml_src).unwrap();
+        let hooks = value.get("hooks").cloned().unwrap();
+        xai_grok_config::HookConfigLayer::new(
+            xai_grok_config::HookProvenance::Managed,
+            source_name,
+            hooks,
+        )
+    }
+
+    #[test]
+    fn config_layer_hook_parses_like_the_json_path() {
+        let layer = config_layer(
+            "managed",
+            "[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"bin/check.sh\"\ntimeout = 2\n",
+        );
+        let (specs, errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(specs.len(), 1);
+        let s = &specs[0];
+        assert_eq!(s.event, HookEventName::PreToolUse);
+        assert_eq!(s.handler_type, HandlerType::Command);
+        assert_eq!(s.timeout_ms, 2000);
+        assert_eq!(s.layer, HookProvenance::Managed);
+        assert!(s.name.starts_with("managed:"), "got {}", s.name);
+    }
+
+    #[test]
+    fn config_layer_keeps_valid_events_when_one_is_malformed() {
+        // A config layer skips a malformed event and keeps the rest, unlike the
+        // JSON path which fails the whole file.
+        let layer = config_layer(
+            "managed",
+            "hooks.PreToolUse = \"oops\"\n[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"ok.sh\"\n",
+        );
+        let (specs, _errors) = parse_hooks_from_config_layers(std::slice::from_ref(&layer));
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].event, HookEventName::PostToolUse);
+    }
+
+    #[test]
+    fn config_layers_additive_and_dedup_keeps_higher_authority() {
+        let mk = |src: &str, prov, cmd: &str| {
+            let toml_src = format!(
+                "[[PreToolUse]]\n[[PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"{cmd}\"\n"
+            );
+            xai_grok_config::HookConfigLayer::new(
+                prov,
+                src,
+                toml::from_str::<toml::Value>(&toml_src).unwrap(),
+            )
+        };
+
+        // Distinct commands are additive; an identical command dedupes to the
+        // higher-authority (first-listed) copy.
+        use xai_grok_config::HookProvenance::{Managed, User};
+        let (additive, _) = parse_hooks_from_config_layers(&[
+            mk("managed", Managed, "m.sh"),
+            mk("user", User, "u.sh"),
+        ]);
+        assert_eq!(additive.len(), 2);
+
+        let (dup, _) = parse_hooks_from_config_layers(&[
+            mk("managed", Managed, "same.sh"),
+            mk("user", User, "same.sh"),
+        ]);
+        let registry = crate::discovery::registry_from_specs_deduped(dup);
+        let pre = registry.hooks_for(HookEventName::PreToolUse);
+        assert_eq!(pre.len(), 1);
+        assert!(pre[0].name.starts_with("managed:"), "got {}", pre[0].name);
+    }
 
     #[test]
     fn parse_claude_format_single_hook() {

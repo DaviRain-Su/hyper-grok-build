@@ -12,8 +12,8 @@ use super::state::*;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind, SettingMeta,
-    SettingOwner, SettingValue, SettingsRegistry, StringValidator,
+    CodingDataSharingLock, EnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey,
+    SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry, StringValidator,
 };
 use crate::theme::Theme;
 use xai_grok_shell::agent::config::UiConfig;
@@ -542,6 +542,7 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
         &theme,
         false, // is_expanded
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -979,6 +980,7 @@ fn selected_browse_row_label_is_bold() {
         &theme,
         false,
         false,
+        None,
     );
 
     assert!(
@@ -1436,6 +1438,7 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &theme,
         true,  // is_expanded — gate on
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1460,6 +1463,7 @@ fn render_setting_row_emits_restart_pill_when_required() {
         &theme,
         false, // is_expanded — off
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -1508,6 +1512,7 @@ fn render_setting_row_hides_restart_pill_when_at_default_and_collapsed() {
         &theme,
         false, // is_expanded
         false, // is_hovered
+        None,
     );
     let mut rendered = String::new();
     for x in 0..area.width {
@@ -4492,6 +4497,7 @@ fn narrow_terminal_drops_value_to_second_line() {
         &theme,
         false,
         false, // is_hovered
+        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4555,6 +4561,7 @@ fn wide_terminal_keeps_value_on_first_line() {
         &theme,
         false,
         false, // is_hovered
+        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -4596,6 +4603,7 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
         &theme,
         false,
         false, // is_hovered
+        None,
     );
     let line1 = buf_row_text(&buf, 0, area.x, area.width);
     let line2 = buf_row_text(&buf, 1, area.x, area.width);
@@ -5344,6 +5352,7 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
+        None,
     );
     // Use `find_text_col` so the
     // column index is the actual buffer position, not a byte
@@ -5376,6 +5385,7 @@ fn bool_off_value_renders_in_dim_color() {
         &theme,
         false,
         false,
+        None,
     );
     let on_col = find_text_col(&buf_on, 0, "on").expect("must find `on` substring");
     let on_cell = buf_on.cell((on_col, 0)).expect("on cell");
@@ -5447,6 +5457,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
 
     // Enum row — chevron column contains the `›` glyph.
@@ -5461,6 +5472,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
 
     // The chevron column is a 2-cell block at
@@ -5532,6 +5544,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
     let _ = render_setting_row(
         &mut buf_multi,
@@ -5543,6 +5556,7 @@ fn chevron_column_is_at_constant_right_offset() {
         &theme,
         false,
         false,
+        None,
     );
     // Bool row's `off` ends at column N; Enum row's `›` glyph
     // lands at column M. The contract: N == M's column
@@ -5599,6 +5613,7 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
+        None,
     );
     let area_one = Rect {
         x: 0,
@@ -5617,6 +5632,7 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
         &theme,
         false,
         false,
+        None,
     );
     // The column offset from the area's right edge is constant:
     // `area.right - ROW_RIGHT_PAD_W - 1` is the `›` glyph
@@ -7472,5 +7488,182 @@ fn preview_remains_clamped_when_pending_exceeds_widened_width() {
     assert!(
         find_text_row(&buf, area, "note: clamped").is_some(),
         "clamped note must render when pending > interior, even after widening",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Locked coding_data_sharing row (ZDR / team non-admin)
+// ---------------------------------------------------------------------------
+
+fn make_locked_state(lock: CodingDataSharingLock) -> SettingsModalState {
+    SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot {
+            coding_data_sharing_lock: Some(lock),
+            ..PagerLocalSnapshot::default()
+        },
+    )
+}
+
+fn coding_data_sharing_row_idx(s: &SettingsModalState) -> usize {
+    s.rows
+        .iter()
+        .position(|r| matches!(r, RowEntry::Setting { key, .. } if *key == "coding_data_sharing"))
+        .expect("coding_data_sharing must be registered")
+}
+
+/// A locked `coding_data_sharing` row must NOT open the enum picker —
+/// neither via `try_enter_picking_enum` directly (the shared entry point
+/// for Enter, mouse value clicks, and the `focus_key` auto-open path) nor
+/// via the Browse Enter key. With no lock, the same row opens the picker.
+#[test]
+fn locked_coding_data_sharing_row_does_not_open_picker() {
+    for lock in [
+        CodingDataSharingLock::Zdr,
+        CodingDataSharingLock::TeamManaged,
+    ] {
+        let mut s = make_locked_state(lock);
+        s.selected = coding_data_sharing_row_idx(&s);
+        assert!(
+            !s.try_enter_picking_enum(),
+            "try_enter_picking_enum must return false for a locked row ({lock:?})"
+        );
+        assert!(
+            matches!(s.mode(), SettingsModalMode::Browse),
+            "mode must stay Browse for a locked row ({lock:?}), got {:?}",
+            s.mode()
+        );
+        let out = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(out, SettingsKeyOutcome::Unchanged),
+            "Enter on a locked row must be a no-op ({lock:?}), got {out:?}"
+        );
+        assert!(matches!(s.mode(), SettingsModalMode::Browse));
+    }
+
+    // Control arm: no lock → the picker opens (existing behavior).
+    let mut s = make_state();
+    s.selected = coding_data_sharing_row_idx(&s);
+    assert!(s.try_enter_picking_enum());
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+}
+
+/// Locked rows drop the `›` enter-affordance and render a per-variant
+/// value: ZDR replaces opt-in/out with "ZDR"; team-managed keeps the
+/// value with an " · Admin Managed" suffix. Unlocked rows keep the plain
+/// value + chevron.
+#[test]
+fn locked_coding_data_sharing_row_renders_locked_value_without_chevron() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 60,
+    };
+    let theme = Theme::current();
+    let chevron = crate::glyphs::chevron();
+
+    let mut s = make_locked_state(CodingDataSharingLock::Zdr);
+    let idx = coding_data_sharing_row_idx(&s);
+    s.selected = idx;
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let rect = s.row_rects[idx];
+    let line = buf_row_text(&buf, rect.y, area.x, area.width);
+    assert!(
+        line.contains("ZDR") && !line.contains("Opt"),
+        "ZDR lock must replace the opt-in/out value with `ZDR`: {line:?}"
+    );
+    assert!(
+        !line.contains(chevron),
+        "locked row must not render the `{chevron}` enter affordance: {line:?}"
+    );
+
+    let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
+    s.selected = idx;
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let rect = s.row_rects[idx];
+    let line = buf_row_text(&buf, rect.y, area.x, area.width);
+    assert!(
+        line.contains("Opt out \u{00B7} Admin Managed"),
+        "team-managed lock must append ` · Admin Managed`: {line:?}"
+    );
+    assert!(
+        !line.contains(chevron),
+        "locked row must not render the `{chevron}` enter affordance: {line:?}"
+    );
+
+    // Control arm: unlocked row shows the plain value + chevron.
+    let mut s = make_state();
+    s.selected = idx;
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let rect = s.row_rects[idx];
+    let line = buf_row_text(&buf, rect.y, area.x, area.width);
+    assert!(
+        line.contains("Opt out") && !line.contains("locked"),
+        "unlocked row must show the plain value: {line:?}"
+    );
+    assert!(
+        line.contains(chevron),
+        "unlocked row must keep the `{chevron}` enter affordance: {line:?}"
+    );
+}
+
+/// Expanding a locked row replaces the registry description with the lock
+/// reason; the unlocked expansion shows the description.
+#[test]
+fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 60,
+    };
+    let theme = Theme::current();
+    // Word-wrap may split the reason across lines; normalize the whole
+    // buffer to a single whitespace-collapsed string before matching.
+    let flatten = |buf: &Buffer| -> String {
+        (0..area.height)
+            .map(|y| buf_row_text(buf, y, area.x, area.width))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let mut s = make_locked_state(CodingDataSharingLock::TeamManaged);
+    let idx = coding_data_sharing_row_idx(&s);
+    s.selected = idx;
+    s.expanded_keys.insert("coding_data_sharing");
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let text = flatten(&buf);
+    assert!(
+        text.contains("Managed by your team admin."),
+        "expanded locked row must show the lock reason: {text:?}"
+    );
+    assert!(
+        !text.contains("Controls whether"),
+        "locked expansion must replace the description, not append to it: {text:?}"
+    );
+
+    // Control arm: unlocked expansion shows the description only.
+    let mut s = make_state();
+    s.selected = idx;
+    s.expanded_keys.insert("coding_data_sharing");
+    let mut buf = Buffer::empty(area);
+    render_rows(&mut buf, area, &mut s, &theme);
+    let text = flatten(&buf);
+    assert!(
+        text.contains("Controls whether"),
+        "expanded row must render the registry description: {text:?}"
+    );
+    assert!(
+        !text.contains("Managed by your team admin."),
+        "unlocked expansion must not mention the team-admin lock: {text:?}"
     );
 }

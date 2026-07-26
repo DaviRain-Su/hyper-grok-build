@@ -3700,17 +3700,21 @@ fn interactive_cancel_supersedes_send_now_expectation() {
     );
 }
 
-/// The parked "Worked for" marker stays the only marker across a send-now cancel.
+/// A send-now cancel out of a park leaves no markers at all: the park is
+/// markerless and the armed expectation suppresses the cancel marker.
 #[test]
-fn send_now_cancel_after_park_leaves_single_parked_marker() {
-    use crate::app::agent_view::test_fixtures::{count_parked, simulate_task_output_wait};
+fn send_now_cancel_after_park_leaves_no_markers() {
+    use crate::app::agent_view::test_fixtures::{count_turn_markers, simulate_task_output_wait};
 
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     dispatch(Action::SendPrompt("first".into()), &mut app);
     simulate_task_output_wait(app.agents.get_mut(&id).unwrap(), "bg-1");
-    app.agents.get_mut(&id).unwrap().maybe_push_parked_marker();
-    assert_eq!(count_parked(&app.agents[&id]), 1);
+    assert_eq!(
+        count_turn_markers(&app.agents[&id]),
+        0,
+        "a park writes no marker"
+    );
 
     // Typing into the parked wait: plain send arms the expectation; cancel arrives meta-less.
     let _ = dispatch(Action::SendPrompt("next thing".into()), &mut app);
@@ -3719,14 +3723,8 @@ fn send_now_cancel_after_park_leaves_single_parked_marker() {
     assert_eq!(count_cancelled_markers(&app, id), 0);
     assert_eq!(
         count_completed_markers(&app, id),
-        1,
-        "the parked marker stays the only completed line (no duplicate)"
-    );
-    app.agents.get_mut(&id).unwrap().maybe_push_parked_marker();
-    assert_eq!(
-        count_parked(&app.agents[&id]),
-        1,
-        "no late parked marker after the send-now cancel"
+        0,
+        "no completed marker renders for the cancelled parked turn"
     );
 }
 

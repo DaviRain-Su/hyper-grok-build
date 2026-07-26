@@ -45,7 +45,9 @@ pub enum McpServerTransportConfig {
         cwd: Option<String>,
     },
     StreamableHttp {
-        #[serde(default, alias = "urlTemplate", alias = "url_template")]
+        // Not `default`: a missing url must fail to deserialize, not become a
+        // fake HTTP server with an empty url.
+        #[serde(alias = "urlTemplate", alias = "url_template")]
         url: String,
         #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
         transport_type: Option<String>,
@@ -66,7 +68,53 @@ pub enum McpServerTransportConfig {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpServerProblemSeverity {
+    Error,
+    Warning,
+}
+
+/// A problem found loading an `[mcp_servers.*]` entry. Reported (never fatal)
+/// and surfaced through `grok inspect`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfigProblem {
+    pub server: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    pub severity: McpServerProblemSeverity,
+    pub message: String,
+}
+
+/// Recognized wire keys for an `[mcp_servers.*]` entry. Needed because the
+/// flattened untagged transport enum bypasses `serde_ignored`. Kept in sync by
+/// `known_mcp_server_fields_cover_serialized_keys`.
+pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
+    "args",
+    "bearer_token_env_var",
+    "command",
+    "cwd",
+    "enabled",
+    "env",
+    "expose_image_base64",
+    "headers",
+    "oauth",
+    "oauth_client_id",
+    "oauth_client_secret_env_var",
+    "oauth_scopes",
+    "setup",
+    "startup_timeout_sec",
+    "tool_timeout_sec",
+    "tool_timeouts",
+    "type",
+    "url",
+    // Deserialize-only aliases for `url`.
+    "urlTemplate",
+    "url_template",
+];
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpJsonOAuthBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +234,22 @@ pub struct McpServerConfig {
     /// ~2× tokens per image. Overridden by `_meta.mcpConfig.<server>.exposeImageBase64`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expose_image_base64: Option<bool>,
+}
+
+impl McpServerConfig {
+    /// The transport field (`command` or `url`) that is present but blank, if
+    /// any. Such a server can never connect, so the loader drops it.
+    pub fn blank_transport_field(&self) -> Option<&'static str> {
+        match &self.transport {
+            McpServerTransportConfig::Stdio { command, .. } if command.trim().is_empty() => {
+                Some("command")
+            }
+            McpServerTransportConfig::StreamableHttp { url, .. } if url.trim().is_empty() => {
+                Some("url")
+            }
+            _ => None,
+        }
+    }
 }
 
 fn render_setup_template(
@@ -516,6 +580,106 @@ mod tests {
                 }
             }
         }"#
+    }
+
+    #[test]
+    fn transport_less_entry_fails_to_deserialize() {
+        for value in [
+            serde_json::json!({ "enabled": false }),
+            serde_json::json!({ "enabled": true }),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<McpServerConfig>(value.clone()).is_err(),
+                "transport-less entry must not deserialize: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_transport_field_is_detected_symmetrically() {
+        let blank_url: McpServerConfig =
+            serde_json::from_value(serde_json::json!({ "url": "  " })).unwrap();
+        assert_eq!(blank_url.blank_transport_field(), Some("url"));
+
+        let blank_command: McpServerConfig =
+            serde_json::from_value(serde_json::json!({ "command": "\t" })).unwrap();
+        assert_eq!(blank_command.blank_transport_field(), Some("command"));
+
+        let ok: McpServerConfig =
+            serde_json::from_value(serde_json::json!({ "command": "npx" })).unwrap();
+        assert_eq!(ok.blank_transport_field(), None);
+    }
+
+    /// A newly added field cannot silently escape `KNOWN_MCP_SERVER_FIELDS`.
+    #[test]
+    fn known_mcp_server_fields_cover_serialized_keys() {
+        let stdio = McpServerConfig {
+            transport: McpServerTransportConfig::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into()],
+                env: Some(HashMap::from([("A".into(), "b".into())])),
+                cwd: Some("/tmp".into()),
+            },
+            enabled: true,
+            oauth: Some(McpJsonOAuthBlock::default()),
+            setup: None,
+            startup_timeout_sec: Some(10),
+            tool_timeout_sec: Some(20),
+            tool_timeouts: Some(HashMap::from([("t".into(), 1)])),
+            expose_image_base64: Some(true),
+        };
+        let http = McpServerConfig {
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "https://x/mcp".into(),
+                transport_type: Some("http".into()),
+                bearer_token_env_var: Some("TOK".into()),
+                headers: Some(HashMap::from([("H".into(), "v".into())])),
+                oauth_client_id: Some("id".into()),
+                oauth_client_secret_env_var: Some("SEC".into()),
+                oauth_scopes: Some(vec!["s".into()]),
+            },
+            enabled: true,
+            oauth: None,
+            setup: None,
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
+            tool_timeouts: None,
+            expose_image_base64: None,
+        };
+        for config in [stdio, http] {
+            let value = serde_json::to_value(&config).unwrap();
+            for key in value.as_object().unwrap().keys() {
+                assert!(
+                    KNOWN_MCP_SERVER_FIELDS.contains(&key.as_str()),
+                    "field `{key}` is serialized but missing from KNOWN_MCP_SERVER_FIELDS"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stdio_and_http_still_parse() {
+        let stdio: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "npx",
+            "args": ["-y", "pkg"]
+        }))
+        .unwrap();
+        assert!(stdio.enabled);
+        assert!(matches!(
+            stdio.transport,
+            McpServerTransportConfig::Stdio { .. }
+        ));
+
+        let http: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "url": "https://mcp.example.com/mcp"
+        }))
+        .unwrap();
+        assert!(matches!(
+            http.transport,
+            McpServerTransportConfig::StreamableHttp { .. }
+        ));
+        assert!(http.to_acp_mcp_server("x").is_some());
     }
 
     #[test]

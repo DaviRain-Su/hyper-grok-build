@@ -25,6 +25,7 @@ use xai_grok_workspace_types::rpc::code_nav::{
     CodeFindDefinitionsReq, CodeFindReferencesReq, CodeGotoDefinitionReq, CodeGotoReferencesReq,
     CodeIndexStatusReq, CodeIndexStatusResponse, CodeNavResponse,
 };
+use xai_grok_workspace_types::rpc::export_github::{ExportGithubReq, ExportGithubResponse};
 use xai_grok_workspace_types::rpc::fs::{
     FsDeleteFileReq, FsExistsData, FsExistsReq, FsListData, FsListReq, FsReadFileData,
     FsReadFileReq, FsWriteFileReq, GetFilesReq, GetFilesRes, PutFilesReq, PutFilesRes,
@@ -347,6 +348,12 @@ impl WorkspaceClient {
         self.rpc(req).await
     }
     pub async fn get_files(&self, req: &GetFilesReq) -> Result<GetFilesRes, WorkspaceClientError> {
+        self.rpc(req).await
+    }
+    pub async fn export_github(
+        &self,
+        req: &ExportGithubReq,
+    ) -> Result<ExportGithubResponse, WorkspaceClientError> {
         self.rpc(req).await
     }
     pub async fn fs_list(&self, req: &FsListReq) -> Result<FsListData, WorkspaceClientError> {

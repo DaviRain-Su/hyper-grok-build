@@ -26,7 +26,7 @@ use xai_grok_pager::minimal_api;
 use xai_grok_pager::scrollback::block::RenderBlock;
 use xai_grok_pager::theme::Theme;
 use xai_grok_pager::views::plan_approval_view::PlanApprovalFocus;
-use xai_grok_pager::views::prompt_widget::PromptStyle;
+use xai_grok_pager::views::prompt_widget::{PromptBg, PromptStyle};
 
 /// The active plan-approval focus, defaulting to `Preview`.
 fn focus(agent: &AgentView) -> PlanApprovalFocus {
@@ -227,7 +227,7 @@ fn input_style(theme: &Theme) -> PromptStyle {
         chrome: false,
         chrome_pad_left: 0,
         chrome_pad_right: 0,
-        bg_override: Some(theme.bg_visual),
+        bg: PromptBg::Panel(theme.bg_visual),
         accent_color_override: None,
         border_color_override: None,
         prefix_override: None,

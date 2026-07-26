@@ -268,6 +268,7 @@ pub struct AcpUpdateTracker {
     last_stream_start_ms: Option<i64>,
     /// Monotonic count of live parent-agent updates that changed scrollback.
     agent_output_epoch: u64,
+    epoch_at_last_finish: u64,
     /// Session project cwd for display-only redundant-`cd` stripping.
     /// Set from [`AgentSession::cwd`]; not used for execution.
     session_cwd: Option<PathBuf>,
@@ -376,9 +377,15 @@ impl AcpUpdateTracker {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Current boundary for visible live parent-agent output.
-    pub(crate) fn agent_output_epoch(&self) -> u64 {
-        self.agent_output_epoch
+    pub(crate) fn output_since_last_finish(&self) -> bool {
+        self.agent_output_epoch != self.epoch_at_last_finish
+    }
+    /// Mark all output so far as accounted for without finishing the turn —
+    /// for terminals that must be skipped while a client command owns the
+    /// screen (a full `finish_turn` would flush mid-command state such as
+    /// `pending_compaction`).
+    pub(crate) fn snapshot_output_epoch(&mut self) {
+        self.epoch_at_last_finish = self.agent_output_epoch;
     }
     fn bump_agent_output_epoch(&mut self) {
         self.agent_output_epoch = self.agent_output_epoch.wrapping_add(1);
@@ -827,6 +834,7 @@ impl AcpUpdateTracker {
     }
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
+        self.epoch_at_last_finish = self.agent_output_epoch;
         self.finish_thinking(scrollback);
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
@@ -2782,31 +2790,51 @@ mod tests {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
         assert!(tracker.handle_update(user_message("prompt"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch(), 0);
+        assert_eq!(tracker.agent_output_epoch, 0);
         assert!(tracker.handle_update(agent_chunk("response"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch(), 1);
+        assert_eq!(tracker.agent_output_epoch, 1);
         let replay = NotificationMeta {
             is_replay: true,
             ..Default::default()
         };
         assert!(tracker.handle_update(agent_chunk(" replay"), &replay, &mut sb));
-        assert_eq!(tracker.agent_output_epoch(), 1);
+        assert_eq!(tracker.agent_output_epoch, 1);
         assert!(tracker.handle_update(thought_chunk("thinking"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch(), 2);
+        assert_eq!(tracker.agent_output_epoch, 2);
         assert!(tracker.handle_update(
             tool_call("read-1", acp::ToolKind::Read, "read_file"),
             &meta(),
             &mut sb,
         ));
-        assert_eq!(tracker.agent_output_epoch(), 3);
+        assert_eq!(tracker.agent_output_epoch, 3);
         assert!(tracker.handle_update(tool_update_completed("read-1"), &meta(), &mut sb));
-        assert_eq!(tracker.agent_output_epoch(), 4);
+        assert_eq!(tracker.agent_output_epoch, 4);
         assert!(!tracker.handle_update(
             tool_call("todo-1", acp::ToolKind::Other, "TodoWrite"),
             &meta(),
             &mut sb,
         ));
-        assert_eq!(tracker.agent_output_epoch(), 4);
+        assert_eq!(tracker.agent_output_epoch, 4);
+    }
+    #[test]
+    fn output_since_last_finish_flips_per_turn() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.finish_turn(&mut sb);
+        assert!(
+            !tracker.output_since_last_finish(),
+            "no output right after a finish"
+        );
+        assert!(tracker.handle_update(agent_chunk("wake reply"), &meta(), &mut sb));
+        assert!(
+            tracker.output_since_last_finish(),
+            "an agent message chunk flips the flag"
+        );
+        tracker.finish_turn(&mut sb);
+        assert!(
+            !tracker.output_since_last_finish(),
+            "the next finish snapshots the epoch again"
+        );
     }
     #[test]
     fn streaming_thinking() {
@@ -5858,7 +5886,7 @@ mod tests {
         );
         assert_eq!(sb.len(), 1);
         assert_eq!(tracker.pending_tools.len(), 1);
-        let output_epoch = tracker.agent_output_epoch();
+        let output_epoch = tracker.agent_output_epoch;
         let modified = tracker.handle_update(
             tool_update_in_progress_bg("tc1", b"started"),
             &meta(),
@@ -5869,9 +5897,8 @@ mod tests {
             "bg tool deferral should suppress further output streaming"
         );
         assert_eq!(
-            tracker.agent_output_epoch(),
-            output_epoch,
-            "deferral must not bump the epoch (re-pushes the parked marker)"
+            tracker.agent_output_epoch, output_epoch,
+            "deferral must not bump the epoch (it is not visible agent output)"
         );
         assert_eq!(sb.len(), 1, "real execute entry kept for demotion");
         assert!(
@@ -5889,7 +5916,7 @@ mod tests {
         );
     }
     /// Regression: a bg-tool deferral (here dropping the placeholder row) must
-    /// not bump `agent_output_epoch` — bumping re-pushed the parked marker.
+    /// not bump `agent_output_epoch` — it is not visible agent output.
     #[test]
     fn bg_tool_deferral_does_not_bump_agent_output_epoch() {
         let mut sb = ScrollbackState::new();
@@ -5900,7 +5927,7 @@ mod tests {
             &mut sb,
         );
         assert_eq!(sb.len(), 1);
-        let epoch = tracker.agent_output_epoch();
+        let epoch = tracker.agent_output_epoch;
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from("tc1")),
             acp::ToolCallUpdateFields::new()
@@ -5914,9 +5941,8 @@ mod tests {
         assert_eq!(sb.len(), 0, "placeholder dropped on deferral");
         assert!(tracker.bg_deferred_tools.contains_key("tc1"));
         assert_eq!(
-            tracker.agent_output_epoch(),
-            epoch,
-            "deferral must not bump the epoch (re-pushes the parked marker)"
+            tracker.agent_output_epoch, epoch,
+            "deferral must not bump the epoch (it is not visible agent output)"
         );
     }
     /// Eager kind=Other title=`run_terminal_command` must not flash in the TUI.

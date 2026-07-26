@@ -649,6 +649,7 @@ mod tests {
             timeout_ms: 1000,
             source_dir: std::env::temp_dir(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = HookEventEnvelope {
@@ -727,6 +728,7 @@ mod tests {
             timeout_ms: 500,
             source_dir: std::env::temp_dir(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
         let envelope = HookEventEnvelope {
             hook_event_name: HookEventName::PreToolUse,

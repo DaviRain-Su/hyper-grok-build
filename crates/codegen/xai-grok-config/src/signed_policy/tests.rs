@@ -490,23 +490,76 @@ fn sidecar_round_trips_on_disk() {
 }
 
 #[test]
-fn verification_inert_without_embedded_key() {
-    // The feature ships dark: no compiled-in key, no verification.
-    assert!(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS.is_empty());
-    assert!(!verification_active());
+fn verification_armed_with_embedded_key() {
+    // Armed: prod v1 key compiled in.
+    assert!(verification_active());
+    assert_eq!(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS.len(), 1);
+    assert_eq!(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS[0].0, "v1");
+    assert!(embedded_key_id_trusted("v1"));
+    assert!(!embedded_key_id_trusted("v0"));
+    // Fingerprint pin against silent typos.
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS[0].1,
+    );
+    let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hex, EMBEDDED_V1_PUBKEY_SHA256_HEX,
+        "embedded v1 pubkey bytes must match the documented SHA-256 fingerprint"
+    );
 }
 
-/// Dark build: the public gate is false even with a policy on disk and no sidecar.
+/// Empty seam → verification off (incident-disarm shape).
 #[test]
-fn cloud_cache_signature_invalid_is_false_when_dark() {
+fn with_dark_forces_keyless_verification_inactive() {
+    test_seam::with_dark(|| {
+        assert!(
+            !verification_active(),
+            "Some(&[]) must force the keyless build for rollback tests"
+        );
+        assert!(!embedded_key_id_trusted("v1"));
+    });
+    // restored
+    assert!(verification_active());
+}
+
+/// Armed: flags missing/untrusted sidecar; nothing on disk → not invalid.
+#[test]
+fn cloud_cache_signature_invalid_when_armed() {
     let dir = tempfile::tempdir().unwrap();
-    write_policy(dir.path(), &payload());
-    assert!(!verification_active());
+    assert!(verification_active());
     assert!(!cloud_cache_signature_invalid(
         dir.path(),
         Some("team-007"),
         1_000
     ));
+    write_policy(dir.path(), &payload());
+    assert!(cloud_cache_signature_invalid(
+        dir.path(),
+        Some("team-007"),
+        1_000
+    ));
+    let (kp, _) = test_keypair();
+    write_sidecar(dir.path(), &sign(&kp, &payload())).unwrap();
+    assert!(cloud_cache_signature_invalid(
+        dir.path(),
+        Some("team-007"),
+        1_000
+    ));
+}
+
+/// Keyless: public gate inert with unsigned policy on disk.
+#[test]
+fn cloud_cache_signature_invalid_inert_when_dark() {
+    test_seam::with_dark(|| {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(dir.path(), &payload());
+        assert!(!verification_active());
+        assert!(
+            !cloud_cache_signature_invalid(dir.path(), Some("team-007"), 1_000),
+            "dark build must not flag unsigned on-disk policy"
+        );
+    });
 }
 
 /// No policy on disk → nothing to verify → not invalid.
@@ -813,10 +866,24 @@ fn signed_cache_compromised_rejects_foreign_permissive_policy() {
     );
 }
 
-/// Dark build: the public entry reads Inactive even with an authentic, opted-in,
-/// tampered cache on disk — the marker path then decides.
+/// Keyless: public entry → Inactive.
 #[test]
-fn signed_cache_compromised_is_inactive_when_dark() {
+fn signed_cache_compromised_inactive_when_dark() {
+    test_seam::with_dark(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        write_policy(home, &payload());
+        assert!(!verification_active());
+        assert_eq!(
+            signed_cache_compromised(home, Some("team-007"), 1_000),
+            SignedVerdict::Inactive
+        );
+    });
+}
+
+/// Armed: foreign key → NoAuthenticSidecar (never Inactive).
+#[test]
+fn signed_cache_compromised_is_no_authentic_sidecar_when_armed() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let (kp, _) = test_keypair();
@@ -826,15 +893,10 @@ fn signed_cache_compromised_is_inactive_when_dark() {
     };
     write_policy(home, &p);
     write_sidecar(home, &sign(&kp, &p)).unwrap();
-    std::fs::write(
-        home.join("requirements.toml"),
-        "[features]\nweb_fetch = true\n",
-    )
-    .unwrap();
-    assert!(!verification_active());
+    assert!(verification_active());
     assert_eq!(
         signed_cache_compromised(home, Some("team-007"), 1_000),
-        SignedVerdict::Inactive
+        SignedVerdict::NoAuthenticSidecar
     );
 }
 
@@ -967,3 +1029,61 @@ fn rotation_selects_the_trusted_key_by_signed_key_id() {
 // 1k-line mark); same private access via the #[path] include below.
 #[path = "claim_tests.rs"]
 mod claim_tests;
+
+/// Serialize tests that mutate the process-global kill-switch / key seam.
+fn with_remote_disarm_lock<R>(f: impl FnOnce() -> R) -> R {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
+#[test]
+fn remote_kill_switch_dark_embed_stays_inactive() {
+    with_remote_disarm_lock(|| {
+        // Forced dark: inactive regardless of kill-switch (prod embed is keyed).
+        test_seam::with_dark(|| {
+            apply_remote_managed_config_signature_verification(Some(true), true);
+            assert!(!verification_active());
+
+            apply_remote_managed_config_signature_verification(Some(false), true);
+            assert!(!verification_active());
+
+            apply_remote_managed_config_signature_verification(None, true);
+            assert!(!verification_active());
+        });
+    });
+}
+
+/// With keys embedded (prod pin), disarm flips verification off and re-arm restores it.
+/// Untrusted origin cannot disarm.
+#[test]
+fn remote_kill_switch_with_keys_disarms_and_rearms() {
+    with_remote_disarm_lock(|| {
+        apply_remote_managed_config_signature_verification(Some(true), true);
+        assert!(
+            verification_active(),
+            "keys embedded + armed must be verification_active"
+        );
+
+        apply_remote_managed_config_signature_verification(Some(false), true);
+        assert!(
+            !verification_active(),
+            "trusted Some(false) must disarm keyed verification"
+        );
+
+        apply_remote_managed_config_signature_verification(Some(true), true);
+        assert!(
+            verification_active(),
+            "Some(true) must re-arm keyed verification"
+        );
+
+        apply_remote_managed_config_signature_verification(Some(false), false);
+        assert!(
+            verification_active(),
+            "untrusted Some(false) must not disarm when keys are embedded"
+        );
+
+        apply_remote_managed_config_signature_verification(None, true);
+        assert!(verification_active());
+    });
+}

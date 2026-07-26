@@ -834,6 +834,7 @@ mod tests {
                 timeout_ms: 5000,
                 source_dir: std::path::PathBuf::from(source),
                 extra_env: std::collections::HashMap::new(),
+                layer: crate::config::HookProvenance::File,
             };
         use crate::config::HandlerType;
         assert_eq!(
@@ -876,6 +877,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::env::temp_dir(),
             extra_env: std::collections::HashMap::new(),
+            layer: crate::config::HookProvenance::File,
         }
     }
 
@@ -1038,6 +1040,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: tmp.path().to_path_buf(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1096,6 +1099,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: tmp.path().to_path_buf(),
             extra_env: std::collections::HashMap::new(),
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1225,6 +1229,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::env::temp_dir(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1298,6 +1303,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: std::env::temp_dir(),
             extra_env,
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();
@@ -1363,6 +1369,7 @@ mod tests {
             timeout_ms: 5000,
             source_dir: tmp.path().to_path_buf(),
             extra_env: std::collections::HashMap::new(),
+            layer: crate::config::HookProvenance::File,
         };
 
         let envelope = make_envelope();

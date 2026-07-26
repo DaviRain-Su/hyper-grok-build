@@ -220,11 +220,6 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                     new_text: None,
                 });
         }
-        // A queue change can empty the visible queue mid-wait — the marker
-        // may become eligible now (see `maybe_push_parked_marker`).
-        if let Some(agent) = app.agents.get_mut(&aid) {
-            agent.maybe_push_parked_marker();
-        }
     }
 
     // Adoption / turn-start correlation.

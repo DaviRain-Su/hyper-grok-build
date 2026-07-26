@@ -271,10 +271,7 @@ impl SessionEvent {
 
     /// Whether this event marks the end of an agent turn (the "Turn
     /// completed/cancelled/failed" markers). These are the only events that
-    /// can carry the turn's stop/stop_failure hook runs inline — but a
-    /// parked marker renders mid-turn while the turn is still running
-    /// shell-side, before any Stop hook fires, so hook eligibility is the
-    /// block-level [`SessionEventBlock::accepts_stop_hooks`].
+    /// can carry the turn's stop/stop_failure hook runs inline.
     pub fn is_turn_terminal(&self) -> bool {
         matches!(
             self,
@@ -312,12 +309,6 @@ pub struct SessionEventBlock {
     /// The prompt turn a terminal marker belongs to, when known. Gates
     /// which stop-hook batches may merge into it.
     pub prompt_id: Option<String>,
-    /// The marker was pushed at park time (user-interruptible blocking
-    /// wait): the turn is still running shell-side, so it must never accept
-    /// stop hooks. Rendering is unchanged — a parked wait reads as stopped.
-    /// Cleared when the completion folds into the uncommitted tail marker;
-    /// a committed tail (minimal print-once) gets a fresh row instead.
-    pub parked: bool,
 }
 
 impl SessionEventBlock {
@@ -327,7 +318,6 @@ impl SessionEventBlock {
             event,
             stop_hooks: Vec::new(),
             prompt_id: None,
-            parked: false,
         }
     }
 
@@ -342,15 +332,7 @@ impl SessionEventBlock {
             event,
             stop_hooks,
             prompt_id,
-            parked: false,
         }
-    }
-
-    /// Whether this marker may carry/accept stop-hook runs: a turn-terminal
-    /// event that is not a parked line (which renders while the turn is
-    /// still running shell-side, before any Stop hook fires).
-    pub fn accepts_stop_hooks(&self) -> bool {
-        self.event.is_turn_terminal() && !self.parked
     }
 
     /// Whether any attached stop hook actually ran (non-skipped). Gates the
@@ -1344,44 +1326,16 @@ mod tests {
         );
     }
 
-    /// A parked marker block — the shape `maybe_push_parked_marker` pushes.
-    fn parked_marker() -> SessionEventBlock {
-        SessionEventBlock {
-            event: SessionEvent::TurnCompleted {
-                elapsed: Some(Duration::from_secs(24)),
-            },
-            stop_hooks: Vec::new(),
-            prompt_id: None,
-            parked: true,
-        }
-    }
-
     #[test]
-    fn parked_markers_never_accept_stop_hooks() {
-        // A parked marker renders mid-turn, before any Stop hook fires.
-        let block = parked_marker();
-        assert!(!block.accepts_stop_hooks(), "parked marker refuses hooks");
-
-        // The real terminal marker accepts.
+    fn only_turn_terminal_events_accept_stop_hooks() {
         let settled = SessionEventBlock::new(SessionEvent::TurnCompleted {
             elapsed: Some(Duration::from_secs(24)),
         });
-        assert!(settled.accepts_stop_hooks());
-        // Non-terminal events never accept, parked or not.
+        assert!(settled.event.is_turn_terminal());
         let recap = SessionEventBlock::new(SessionEvent::Recap {
             summary: "did stuff".into(),
             auto: false,
         });
-        assert!(!recap.accepts_stop_hooks());
-    }
-
-    #[test]
-    fn parked_marker_output_reads_as_plain_completed_marker() {
-        // The parked marker renders the plain event text — still-running
-        // background work is the status row's "… still running" cue, never a
-        // transcript suffix.
-        let block = parked_marker();
-        let out = block.output(&ctx());
-        assert_eq!(plain(&out.lines[0]), "Worked for 24s");
+        assert!(!recap.event.is_turn_terminal());
     }
 }

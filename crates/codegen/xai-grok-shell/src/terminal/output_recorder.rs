@@ -146,6 +146,40 @@ fn largest_overlap(
     overlap
 }
 
+pub(crate) struct LogTail {
+    pub(crate) text: String,
+    pub(crate) truncated: bool,
+}
+
+pub(crate) async fn read_log_tail(path: &std::path::Path, limit: usize) -> Option<LogTail> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let len = file.seek(std::io::SeekFrom::End(0)).await.ok()?;
+    let back = len.min(limit as u64);
+    let truncated = back < len;
+    file.seek(std::io::SeekFrom::End(-i64::try_from(back).ok()?))
+        .await
+        .ok()?;
+    let mut buf = Vec::with_capacity(back as usize);
+    file.take(back).read_to_end(&mut buf).await.ok()?;
+    let head = buf
+        .iter()
+        .position(|&b| b & 0xC0 != 0x80)
+        .unwrap_or(buf.len());
+    let text = match std::str::from_utf8(&buf[head..]) {
+        Ok(s) => s,
+        Err(e) => std::str::from_utf8(&buf[head..head + e.valid_up_to()])
+            .expect("valid_up_to() yields a valid UTF-8 prefix"),
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(LogTail {
+        text: text.to_owned(),
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +266,29 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "line1\nline2\nline3\n"
         );
+    }
+
+    #[tokio::test]
+    async fn read_log_tail_drops_leading_partial_char() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lead.log");
+        // "€ab" is [E2 82 AC 61 62]; a 3-byte limit cuts inside the euro sign.
+        tokio::fs::write(&path, "€ab").await.unwrap();
+        let tail = read_log_tail(&path, 3).await.unwrap();
+        assert_eq!(tail.text, "ab");
+        assert!(tail.truncated);
+    }
+
+    #[tokio::test]
+    async fn read_log_tail_drops_trailing_partial_char() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trail.log");
+        // File ends mid-character: "ab" then the first two bytes of the euro sign.
+        tokio::fs::write(&path, [b'a', b'b', 0xE2, 0x82])
+            .await
+            .unwrap();
+        let tail = read_log_tail(&path, 1024).await.unwrap();
+        assert_eq!(tail.text, "ab");
+        assert!(!tail.truncated);
     }
 }

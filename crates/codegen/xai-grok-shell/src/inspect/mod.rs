@@ -75,6 +75,9 @@ pub struct InspectReport {
     pub external_compat: ExternalCompatReport,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub config_warnings: Vec<crate::agent::config_model_override_parse::ConfigWarning>,
+    /// Invalid or ignored `[mcp_servers.*]` entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_config_problems: Vec<crate::util::config::McpServerConfigProblem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -382,6 +385,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
         .as_ref()
         .map(|c| c.config_warnings.clone())
         .unwrap_or_default();
+    let mcp_config_problems = crate::util::config::load_mcp_server_problems_with_project(cwd);
 
     InspectReport {
         grok_version: xai_grok_version::VERSION.to_string(),
@@ -404,6 +408,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
         config_sources: configs,
         external_compat,
         config_warnings,
+        mcp_config_problems,
     }
 }
 
@@ -664,36 +669,42 @@ fn list_hooks(
     discovered_plugins: &[xai_grok_agent::plugins::DiscoveredPlugin],
 ) -> Vec<HookEntry> {
     let all_on = xai_grok_tools::types::compat::CompatConfig::default();
-    let source_paths = crate::util::hooks::discover_hook_source_paths(git_root, &all_on);
-    let (global_sources, project_sources) = source_paths.as_sources(project_trusted);
-
+    // Route through the same assembly as session startup so config-layer hooks
+    // (config.toml / managed_config.toml / requirements.toml) appear in `/hooks`
+    // status alongside file hooks, each carrying its provenance name prefix.
+    let config_layers = xai_grok_config::hook_config_layers();
     let (registry, _errors) =
-        xai_grok_hooks::discovery::load_hooks_from_sources(&global_sources, &project_sources);
-
-    let home_dir = dirs::home_dir();
-    let grok_home = xai_grok_config::grok_home();
+        crate::util::hooks::assemble_hooks(&config_layers, git_root, &all_on, project_trusted);
 
     let mut entries: Vec<HookEntry> = registry
         .all_hooks()
         .into_iter()
         .map(|h| {
-            let is_user_scope = h.source_dir.starts_with(&grok_home)
-                || home_dir.as_deref().is_some_and(|home| {
-                    h.source_dir.starts_with(home.join(".cursor"))
-                        || h.source_dir.starts_with(home.join(".claude"))
-                });
-            let source = if is_user_scope {
-                ConfigSource::User {
-                    path: h.source_dir.clone(),
-                }
-            } else {
-                ConfigSource::Project {
-                    path: h.source_dir.clone(),
-                }
+            // Classify via the shared `hook_origin` (typed provenance + file-tier
+            // name prefix), the same classifier telemetry uses, so admin/system
+            // hooks aren't mislabeled and the two surfaces can't diverge.
+            use xai_grok_hooks::config::HookOrigin as O;
+            // Config-layer hooks store the layer's directory in `source_dir`;
+            // rejoin the tier's filename so inspect shows the actual config file.
+            let config_file = |name: &str| h.source_dir.join(name);
+            let path = h.source_dir.clone();
+            let source = match xai_grok_hooks::config::hook_origin(h) {
+                O::SystemManaged | O::Managed => ConfigSource::Managed {
+                    path: Some(config_file(xai_grok_config::MANAGED_CONFIG_FILENAME)),
+                },
+                O::Requirements => ConfigSource::Managed {
+                    path: Some(config_file(xai_grok_config::REQUIREMENTS_FILENAME)),
+                },
+                O::UserConfig => ConfigSource::ConfigToml {
+                    path: config_file(xai_grok_config::USER_CONFIG_FILENAME),
+                },
+                O::ProjectFile => ConfigSource::Project { path },
+                // File/plugin/agent/unknown hooks are user-scoped for display.
+                O::UserFile | O::Plugin | O::Agent | O::Unknown => ConfigSource::User { path },
             };
             let vendor = derive_vendor(&h.source_dir.display().to_string()).map(String::from);
             HookEntry {
-                event: format!("{:?}", h.event),
+                event: h.event.to_string(),
                 hook_type: h.handler_type.as_str().to_string(),
                 target: h
                     .command
@@ -1243,6 +1254,25 @@ fn render_config_warnings(
     out
 }
 
+fn render_mcp_config_problems(problems: &[crate::util::config::McpServerConfigProblem]) -> String {
+    use crate::util::config::McpServerProblemSeverity;
+    use std::fmt::Write as _;
+
+    if problems.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n  MCP Config Problems\n");
+    let _ = writeln!(out, "  {TREE} {} problem(s)", problems.len());
+    for p in problems {
+        let severity = match p.severity {
+            McpServerProblemSeverity::Error => "error",
+            McpServerProblemSeverity::Warning => "warning",
+        };
+        let _ = writeln!(out, "    {TREE} [{severity}] {}", p.message);
+    }
+    out
+}
+
 fn render_harness_compatibility(report: &ExternalCompatReport) -> String {
     use std::fmt::Write as _;
 
@@ -1514,6 +1544,7 @@ fn print_human(r: &InspectReport) {
     }
 
     print!("{}", render_config_warnings(&r.config_warnings));
+    print!("{}", render_mcp_config_problems(&r.mcp_config_problems));
 
     print!("{}", render_harness_compatibility(&r.external_compat));
 }

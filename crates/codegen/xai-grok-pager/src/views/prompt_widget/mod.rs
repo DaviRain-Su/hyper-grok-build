@@ -158,10 +158,8 @@ pub struct PromptStyle {
     /// Only used when `chrome` is true.
     pub chrome_pad_left: u16,
     pub chrome_pad_right: u16,
-    /// Override the background color. When `Some`, the prompt uses this bg
-    /// instead of computing one from focus state. Useful for rendering the
-    /// prompt inline within another widget (e.g., question view).
-    pub bg_override: Option<ratatui::style::Color>,
+    /// Background surface for the prompt; see [`PromptBg`].
+    pub bg: PromptBg,
     /// Override the accent line color. When `Some`, uses this color instead
     /// of the default `accent_user` / `gray_dim`. Used for plan mode (golden).
     pub accent_color_override: Option<ratatui::style::Color>,
@@ -195,6 +193,35 @@ pub struct PromptStyle {
     pub image_preview: bool,
 }
 
+/// Background for the prompt widget.
+///
+/// Paste chips bake `theme.paste_bg` — a badge color tuned for the default
+/// canvas — into their display `Line` at paste time, so the background says
+/// what *kind* of surface the prompt sits on, not just its color.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptBg {
+    /// The standalone prompt's default fill (`theme.bg_base`).
+    #[default]
+    Default,
+    /// Explicit canvas color for prompts rendered inline within another
+    /// widget whose surface matches the main prompt's (dashboard dispatch
+    /// box, peek reply). Chips keep their badge background.
+    Canvas(ratatui::style::Color),
+    /// Inline panel color (question freeform input, permission follow-up).
+    /// Chip cells are repainted to blend into the panel.
+    Panel(ratatui::style::Color),
+}
+
+impl PromptBg {
+    /// Effective fill color; `default` is the standalone prompt's.
+    fn color(self, default: ratatui::style::Color) -> ratatui::style::Color {
+        match self {
+            Self::Default => default,
+            Self::Canvas(c) | Self::Panel(c) => c,
+        }
+    }
+}
+
 impl Default for PromptStyle {
     fn default() -> Self {
         Self {
@@ -204,7 +231,7 @@ impl Default for PromptStyle {
             chrome: true,
             chrome_pad_left: 2,
             chrome_pad_right: 1,
-            bg_override: None,
+            bg: PromptBg::Default,
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
@@ -238,7 +265,7 @@ impl PromptStyle {
             chrome: false,
             chrome_pad_left: 0,
             chrome_pad_right: 0,
-            bg_override: Some(bg),
+            bg: PromptBg::Panel(bg),
             accent_color_override: None,
             border_color_override: None,
             prefix_override: None,
@@ -985,6 +1012,17 @@ impl PromptWidget {
             crate::prompt_images::reset_counter(&mut self.image_counter);
         }
         self.update_file_search_context();
+    }
+
+    /// [`Self::set_text`] unless the buffer already holds exactly `text`.
+    ///
+    /// Skipping the no-op swap keeps chip elements, images, and undo history
+    /// intact when a surface reloads an unchanged draft (the question view's
+    /// freeform slots); any real content change takes the normal reset path.
+    pub fn set_text_preserving(&mut self, text: &str) {
+        if self.text() != text {
+            self.set_text(text);
+        }
     }
 
     /// Append plain text at the end without replacing existing chip elements.
@@ -2857,11 +2895,7 @@ impl PromptWidget {
         }
 
         let theme = Theme::current();
-        let bg = if let Some(override_bg) = style.bg_override {
-            override_bg
-        } else {
-            theme.bg_base
-        };
+        let bg = style.bg.color(theme.bg_base);
 
         let border_color = style.border_color_override.unwrap_or(if style.focused {
             theme.prompt_border_active
@@ -2987,6 +3021,21 @@ impl PromptWidget {
         self.textarea_area = ta_area;
 
         (&self.textarea).render_ref(ta_area, buf, &mut self.textarea_state);
+
+        // Chip bg remap (see `PromptBg::Panel`): chip `Line`s bake in
+        // `paste_bg` at paste time and the same element can render on
+        // multiple surfaces, so restyle at paint time.
+        if matches!(style.bg, PromptBg::Panel(_)) && bg != theme.paste_bg {
+            for y in ta_area.top()..ta_area.bottom() {
+                for x in ta_area.left()..ta_area.right() {
+                    if let Some(cell) = buf.cell_mut((x, y))
+                        && cell.bg == theme.paste_bg
+                    {
+                        cell.bg = bg;
+                    }
+                }
+            }
+        }
 
         // Slash overlays: teal command name + args ghost text. Both use the
         // same snapshot, so clone once. Capture flags for later ghost text
@@ -3198,8 +3247,8 @@ impl PromptWidget {
         }
 
         // Unfocused dimming: blend fg toward bg (bg already precomputed above).
-        // Skip when bg_override is set — the prompt is inline in another widget.
-        if !style.focused && style.bg_override.is_none() {
+        // Skip when the bg is overridden — the prompt is inline in another widget.
+        if !style.focused && style.bg == PromptBg::Default {
             // Dim only the content inside the box (skip all border chars).
             let dim_area = Rect {
                 x: area.x + 1,
