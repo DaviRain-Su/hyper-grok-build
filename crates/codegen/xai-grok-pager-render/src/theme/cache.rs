@@ -57,6 +57,18 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::RosePineMoon as u8 => ThemeKind::RosePineMoon,
         x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
         x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
+        x if x == ThemeKind::Everforest as u8 => ThemeKind::Everforest,
+        x if x == ThemeKind::Nord as u8 => ThemeKind::Nord,
+        x if x == ThemeKind::Dracula as u8 => ThemeKind::Dracula,
+        x if x == ThemeKind::Gruvbox as u8 => ThemeKind::Gruvbox,
+        x if x == ThemeKind::CatppuccinMocha as u8 => ThemeKind::CatppuccinMocha,
+        x if x == ThemeKind::SolarizedDark as u8 => ThemeKind::SolarizedDark,
+        x if x == ThemeKind::DeepOcean as u8 => ThemeKind::DeepOcean,
+        x if x == ThemeKind::Ember as u8 => ThemeKind::Ember,
+        x if x == ThemeKind::MidnightOled as u8 => ThemeKind::MidnightOled,
+        x if x == ThemeKind::SolarizedLight as u8 => ThemeKind::SolarizedLight,
+        x if x == ThemeKind::CatppuccinLatte as u8 => ThemeKind::CatppuccinLatte,
+        x if x == ThemeKind::Paper as u8 => ThemeKind::Paper,
         _ => ThemeKind::GrokNight,
     }
 }

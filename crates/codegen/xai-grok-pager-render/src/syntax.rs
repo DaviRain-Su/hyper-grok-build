@@ -148,11 +148,25 @@ pub fn get_syntect() -> &'static Syntect {
         ThemeKind::GrokNight
         | ThemeKind::RosePineMoon
         | ThemeKind::OscuraMidnight
-        | ThemeKind::Auto => SYNTECT_GROKNIGHT
+        | ThemeKind::Auto
+        // Dark Hyper presets share the night syntect palette.
+        | ThemeKind::Everforest
+        | ThemeKind::Nord
+        | ThemeKind::Dracula
+        | ThemeKind::Gruvbox
+        | ThemeKind::CatppuccinMocha
+        | ThemeKind::SolarizedDark
+        | ThemeKind::DeepOcean
+        | ThemeKind::Ember
+        | ThemeKind::MidnightOled => SYNTECT_GROKNIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme"))),
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
-        ThemeKind::GrokDay => SYNTECT_GROKDAY
+        // GrokDay + light Hyper presets share the day syntect palette.
+        ThemeKind::GrokDay
+        | ThemeKind::SolarizedLight
+        | ThemeKind::CatppuccinLatte
+        | ThemeKind::Paper => SYNTECT_GROKDAY
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-day.tmTheme"))),
     }
 }

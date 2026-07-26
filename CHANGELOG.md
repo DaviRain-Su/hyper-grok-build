@@ -4,6 +4,9 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **12 preset themes** — A curated collection layered on top of the original five, distinguished primarily by background color: nine dark (`everforest`, `nord`, `dracula`, `gruvbox`, `catppuccin-mocha`, `solarized-dark`, `deep-ocean`, `ember`, `midnight-oled`) and three light (`solarized-light`, `catppuccin-latte`, `paper`). Pick via `/theme <name>`, Settings → Appearance → Theme, or the `auto` dark/light pairings. All are truecolor (RGB) and fall back to Grok Night on 256/16-color terminals. Each preset is defined from a compact palette expanded through a shared builder so semantic roles (error=red, success=green, sunken code blocks, scrollbar contrast) stay consistent across the set.
+
 ## [0.2.113] — 2026-07-27
 
 ### Added
