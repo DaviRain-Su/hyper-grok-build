@@ -6,6 +6,11 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ### Added
 - **12 preset themes** — A curated collection layered on top of the original five, distinguished primarily by background color: nine dark (`everforest`, `nord`, `dracula`, `gruvbox`, `catppuccin-mocha`, `solarized-dark`, `deep-ocean`, `ember`, `midnight-oled`) and three light (`solarized-light`, `catppuccin-latte`, `paper`). Pick via `/theme <name>`, Settings → Appearance → Theme, or the `auto` dark/light pairings. All are truecolor (RGB) and fall back to Grok Night on 256/16-color terminals. Each preset is defined from a compact palette expanded through a shared builder so semantic roles (error=red, success=green, sunken code blocks, scrollbar contrast) stay consistent across the set.
+- **Translations for the 12 preset themes** — `settings.{theme,auto_dark_theme,auto_light_theme}.choice.*.description` for the nine dark + three light presets across all nine non-English locales (de, es, fr, ja, ko, pt-BR, ru, zh-CN, zh-TW); previously they fell back to English.
+
+### Fixed
+- **Theme switch appeared to need a restart** — On terminals that don't advertise truecolor, the Settings → Appearance theme picker still offered the truecolor-only presets. Selecting one clamped the live view to Grok Night (screen unchanged) yet persisted the choice, so it only "took effect" after a restart (the startup path applies the persisted theme un-clamped). The picker now hides themes the current terminal can't render (mirrors `/theme`'s `available()` gate), so `theme` / `auto_dark_theme` / `auto_light_theme` only list renderable options.
+- **Theme toasts bypassed i18n** — The `theme` / `auto_dark_theme` / `auto_light_theme` "✓ …" confirmation toasts were hardcoded English (label + format). They now route through the localized `toast.saved` bundle like every other setting.
 
 ## [0.2.113] — 2026-07-27
 

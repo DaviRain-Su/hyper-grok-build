@@ -1101,6 +1101,29 @@ pub(super) fn effective_enum_choices<'a>(
         .iter()
         .filter(|c| {
             !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate, kitty_releases)
+                && !theme_choice_unavailable(key, c.canonical)
         })
         .collect()
+}
+
+/// Whether a theme-family choice must be hidden because the current
+/// terminal can't render it. Mirrors [`ThemeKind::available()`] — the same
+/// truecolor gate that [`Theme::apply_kind`](crate::theme::Theme::apply_kind)
+/// clamps on — so the picker never offers a truecolor-only theme that a
+/// non-truecolor terminal would silently clamp to `GrokNight` on select.
+///
+/// That mismatch was user-visible: the live apply clamped (screen unchanged)
+/// while the startup path applied the persisted value un-clamped, so the theme
+/// only "took effect" after a restart. Hiding the unrenderable options at the
+/// source keeps the two paths consistent. `"auto"` is not a concrete theme
+/// (resolved at runtime), so it is always offerable.
+fn theme_choice_unavailable(key: SettingKey, canonical: &str) -> bool {
+    if !matches!(key, "theme" | "auto_dark_theme" | "auto_light_theme") {
+        return false;
+    }
+    match crate::theme::ThemeKind::from_name(canonical) {
+        Some(kind) if kind.is_auto() => false,
+        Some(kind) => !crate::theme::ThemeKind::available().contains(&kind),
+        None => false,
+    }
 }
