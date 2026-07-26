@@ -1017,6 +1017,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::SubagentModelsReloaded { agent_id, result } => {
+            if let Some(modal) = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.agents_modal.as_mut())
+            {
+                modal.finish_model_reload(result);
+            } else if let Err(error) = result {
+                app.show_toast(&format!(
+                    "Subagent model pin was saved, but live activation failed: {error}"
+                ));
+            }
+            vec![]
+        }
         TaskResult::MemoryNoteSaved { agent_id, result } => {
             handle_memory_note_saved(app, agent_id, result)
         }

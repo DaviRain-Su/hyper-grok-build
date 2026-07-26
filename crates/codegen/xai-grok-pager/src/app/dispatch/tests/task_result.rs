@@ -7,6 +7,82 @@ use super::super::task_result::{
 use super::*;
 use xai_grok_shell::session::unified_list::ListScope;
 
+#[test]
+fn subagent_model_reload_result_releases_origin_modal_only_after_ack() {
+    let mut app = two_agent_app_with_bg_task();
+    let id = AgentId(0);
+    let _ = dispatch(Action::OpenConfigAgentsModal(None), &mut app);
+    let modal = app.agents[&id]
+        .agents_modal
+        .as_mut()
+        .expect("agents modal opened");
+    modal.begin_model_reload("Activating model pin…");
+    assert!(modal.is_model_reload_pending());
+    app.active_view = ActiveView::Agent(AgentId(1));
+    let other = app.agents.get_mut(&AgentId(1)).unwrap();
+    other.set_active_pane(crate::app::agent_view::AgentPane::Prompt, true);
+    other.prompt.set_text("spawn immediately");
+    let blocked = app.handle_input(&crossterm::event::Event::Key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ));
+    assert!(matches!(
+        blocked,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert_eq!(app.agents[&AgentId(1)].prompt.text(), "spawn immediately");
+
+    dispatch_task_result(
+        TaskResult::SubagentModelsReloaded {
+            agent_id: id,
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    let modal = app.agents[&id].agents_modal.as_ref().unwrap();
+    assert!(!modal.is_model_reload_pending());
+    assert_eq!(
+        modal.message.as_ref().unwrap().kind,
+        crate::views::agents_modal::AgentsModalMessageKind::Success
+    );
+    let released = app.handle_input(&crossterm::event::Event::Key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ));
+    assert!(matches!(
+        released,
+        crate::app::app_view::InputOutcome::Action(Action::SendPrompt(ref text))
+            if text == "spawn immediately"
+    ));
+
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .agents_modal
+        .as_mut()
+        .unwrap()
+        .begin_model_reload("Activating another model pin…");
+    dispatch_task_result(
+        TaskResult::SubagentModelsReloaded {
+            agent_id: id,
+            result: Err("reload rejected".to_string()),
+        },
+        &mut app,
+    );
+    let modal = app.agents[&id].agents_modal.as_ref().unwrap();
+    assert!(!modal.is_model_reload_pending());
+    let message = modal.message.as_ref().unwrap();
+    assert_eq!(
+        message.kind,
+        crate::views::agents_modal::AgentsModalMessageKind::Error
+    );
+    assert!(message.text.contains("reload rejected"));
+}
+
 fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
     let agent = &app.agents[&id];
     crate::app::actions::DoctorFixTarget {

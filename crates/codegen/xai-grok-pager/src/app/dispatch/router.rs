@@ -735,6 +735,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_open_extensions_modal(app, tab, trigger)
         }
         Action::OpenConfigAgentsModal(tab) => dispatch_open_config_agents_modal(app, tab),
+        Action::ReloadSubagentModels { agent_id } => {
+            vec![Effect::ReloadSubagentModels { agent_id }]
+        }
         Action::McpAuthTrigger { server_name } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];

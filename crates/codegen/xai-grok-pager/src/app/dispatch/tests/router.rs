@@ -1,5 +1,44 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
+
+#[test]
+fn reload_subagent_models_action_preserves_origin_when_active_view_changes() {
+    let mut app = two_agent_app_with_bg_task();
+    app.active_view = ActiveView::Agent(AgentId(0));
+
+    let effects = dispatch(
+        Action::ReloadSubagentModels {
+            agent_id: AgentId(1),
+        },
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ReloadSubagentModels {
+            agent_id: AgentId(1)
+        }]
+    ));
+}
+
+#[test]
+fn reload_subagent_models_action_is_not_silently_dropped_after_origin_closes() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::ReloadSubagentModels {
+            agent_id: AgentId(99),
+        },
+        &mut app,
+    );
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::ReloadSubagentModels {
+            agent_id: AgentId(99)
+        }]
+    ));
+}
+
 #[test]
 fn auth_copy_dispatch_preserves_all_delivery_states() {
     for delivery in [

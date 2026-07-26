@@ -1595,6 +1595,32 @@ pub(crate) fn execute(
                 }
             });
         }
+        Effect::ReloadSubagentModels { agent_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({});
+                let req = acp::ExtRequest::new(
+                    "x.ai/internal/reload_subagent_models",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize reload_subagent_models params")
+                        .into(),
+                );
+                let result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    acp_send(req, &tx),
+                )
+                .await
+                {
+                    Ok(Ok(response)) => parse_subagent_models_reload_response(response.0.get())
+                        .map_err(|error| sanitize_user_error(&error)),
+                    Ok(Err(error)) => Err(sanitize_user_error(&format!(
+                        "couldn't activate subagent model pin: {error}"
+                    ))),
+                    Err(_) => Err("timed out activating the subagent model pin".to_string()),
+                };
+                TaskResult::SubagentModelsReloaded { agent_id, result }
+            });
+        }
         Effect::FetchPromptHistory { agent_id, cwd, session_id } => {
             let tx = acp_tx.clone();
             tasks
@@ -4704,5 +4730,33 @@ fn build_interject_params(
     }
     params
 }
+
+/// Validate the acknowledgement returned by
+/// `x.ai/internal/reload_subagent_models`. A transport-level success is not
+/// enough: the modal must remain blocked unless the shell confirms that it
+/// replaced its live pin map.
+fn parse_subagent_models_reload_response(raw: &str) -> Result<(), String> {
+    let envelope: ExtMethodResult<serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|_| "invalid subagent model reload response".to_string())?;
+    if let Some(error) = envelope.error {
+        return Err(error
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string()));
+    }
+    let result = envelope
+        .result
+        .ok_or_else(|| "subagent model reload response missing result".to_string())?;
+    if result
+        .get("reloaded")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        Ok(())
+    } else {
+        Err("shell did not acknowledge the subagent model reload".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests;

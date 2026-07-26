@@ -228,7 +228,7 @@ The `resume_from` parameter lets a new subagent continue where a completed subag
 1. Spawn a research subagent to investigate a problem.
 2. Spawn a second subagent with `resume_from` set to the first subagent's ID, so it picks up with the full research context.
 
-The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type.
+The new subagent inherits the source's transcript, tool state, and model; its system prompt and tools are re-rendered from the current agent definition. The source must be completed (not running), belong to the current session, and use the same agent type. If you changed that agent type's model pin and want the new model, start a fresh child without `resume_from` and hand over the needed context in its prompt.
 
 ### MCP inheritance
 
@@ -295,7 +295,7 @@ explore = "grok-build"               # route explore to a specific model
 
 Per-type model overrides apply for any parent. Without an override, a subagent inherits the parent's model.
 
-You can also manage model pins from the TUI: open `/agents`, select an agent, and press `m`. A model picker opens listing the models you have credentials for — type to filter, choose with `↑`/`↓`, and press Enter to pin. Pick **inherit** (the first row) to clear the pin and follow the session model again. Pinned agents show `→ <model>` in the list and a `pinned — [subagents.models]` note in the expanded detail. Pins are written to `~/.grok/config.toml` and apply to the next subagent spawn — no restart needed.
+You can also manage model pins from the TUI: open `/agents`, select an agent, and press `m`. A model picker opens listing the models you have credentials for — type to filter, choose with `↑`/`↓`, and press Enter to pin. Pick **inherit** (the first row) to clear the pin and follow the session model again. Pinned agents show `→ <model>` in the list and a `pinned — [subagents.models]` note in the expanded detail. The TUI writes the pin to `~/.grok/config.toml`, refreshes the live routing map, and waits for acknowledgement before releasing input. It then applies to the next **fresh** subagent spawn without a restart; a `resume_from` continuation intentionally keeps its source model.
 
 ### Per-Type Reasoning Effort
 

@@ -96,9 +96,11 @@ pub struct TaskToolInput {
     /// Optional model slug for this subagent.
     #[schemars(
         description = "Optional model slug for this agent. If provided, it must resolve to one \
-            of the available model slugs. If omitted, the subagent uses the same model as the \
-            parent agent. Do not pass if resume_from is set (prior model will be used). Only \
-            choose an explicit model when the user directly requests it."
+            of the available model slugs. If omitted, the runtime resolves the configured \
+            per-agent pin, then the agent definition, then the parent model. Do not pass if \
+            resume_from is set (the source model will be used). To apply a changed model pin, \
+            start a fresh child without resume_from and omit this field. Only choose an explicit \
+            model when the user directly requests it."
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1063,8 +1065,9 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - Brief the subagent like a colleague who just walked into the room: state the goal, what you've already tried, and hand over exact file paths and line numbers — don't delegate understanding. Once a subagent owns a scope, let it finish; don't redo its searches in parallel.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.{oracle_section}\n\n\
          Resuming a previous agent (resume_from):\n\
-         - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
-         - The resumed agent must use the same subagent_type as the source.\n\n\
+         - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript, tool state, and source model, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
+         - The resumed agent must use the same subagent_type as the source.\n\
+         - If the user changed that agent type's model configuration or asks for a fresh restart, do not use {resume_from_param}; start a new child and hand over the needed context in its prompt.\n\n\
          Isolation mode:\n\
          - Use {isolation_param} to control the child's execution environment. With \"worktree\", the child runs in an isolated git worktree whose edits don't affect the parent workspace; the worktree is preserved after completion and its path is returned in the output."
     );
@@ -1418,6 +1421,8 @@ mod tests {
         ));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains("Use resume_from to continue"));
+        assert!(desc.contains("changed that agent type's model configuration"));
+        assert!(desc.contains("do not use resume_from"));
     }
 
     #[test]

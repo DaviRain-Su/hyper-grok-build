@@ -1578,12 +1578,17 @@ mod tests {
             "should reference the resume_from parameter"
         );
         assert!(
-            desc.contains("keeps its full transcript and tool state"),
+            desc.contains("keeps its full transcript, tool state, and source model"),
             "should describe resume semantics"
         );
         assert!(
             desc.contains("same subagent_type"),
             "should state the resumed agent must match subagent_type"
+        );
+        assert!(
+            desc.contains("asks for a fresh restart, do not use")
+                && desc.contains("start a new child"),
+            "should distinguish a fresh restart from resume"
         );
     }
     async fn build_pager_agent(

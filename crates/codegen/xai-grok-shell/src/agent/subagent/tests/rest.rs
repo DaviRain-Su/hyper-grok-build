@@ -2221,6 +2221,46 @@ async fn resolve_subagent_config_override_wins_over_agent_definition() {
     assert_eq!(config.model, "config-pin");
     assert_eq!(model_id.0.as_ref(), "config-pin");
 }
+/// A live pin-map replacement is consulted on each fresh resolution without
+/// sleeping or rebuilding the parent. Resume's source-model re-pin remains
+/// independent of the newly configured pin.
+#[tokio::test]
+async fn refreshed_pin_applies_immediately_while_resume_keeps_source_model() {
+    use xai_grok_agent::config::ModelOverride;
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.sampling_config.model = "parent-model".to_string();
+    ctx.model_id = acp::ModelId::new("parent-model");
+    for model in ["parent-model", "old-pin", "new-pin"] {
+        ctx.available_models
+            .insert(model.to_string(), test_model_entry(model));
+    }
+    ctx.subagent_model_overrides
+        .insert("general-purpose".to_string(), "old-pin".to_string());
+
+    let (_, before_reload) = resolve_effective_model_config(
+        None,
+        "general-purpose",
+        &ModelOverride::Inherit,
+        &ctx,
+    )
+    .await;
+    assert_eq!(before_reload.0.as_ref(), "old-pin");
+
+    ctx.subagent_model_overrides
+        .insert("general-purpose".to_string(), "new-pin".to_string());
+    let (_, fresh_after_reload) = resolve_effective_model_config(
+        None,
+        "general-purpose",
+        &ModelOverride::Inherit,
+        &ctx,
+    )
+    .await;
+    assert_eq!(fresh_after_reload.0.as_ref(), "new-pin");
+
+    let (_, resumed) = resolve_model_override_to_config("old-pin", &ctx)
+        .expect("the source model remains available for resume");
+    assert_eq!(resumed.0.as_ref(), "old-pin");
+}
 /// An unresolvable `[subagents.models]` pin (model absent from
 /// `available_models`) falls through to inherit the parent model.
 #[tokio::test]

@@ -128,6 +128,9 @@ pub enum AgentsModalOutcome {
     Close,
     Changed,
     Unchanged,
+    /// An agent model pin was committed to disk and now needs an acknowledged
+    /// live reload before the modal can release subsequent user input.
+    ReloadSubagentModels,
     /// User pressed Enter/o — open the agent's full definition in the line viewer.
     /// Contains the source path (if file-based) or in-memory markdown content.
     ViewAgent {
@@ -298,6 +301,10 @@ pub struct AgentsModalState {
     available_models: Vec<ModelChoice>,
     /// Inline message shown briefly. Cleared on next action.
     pub message: Option<AgentsModalMessage>,
+    /// True after an agent model pin is committed to disk and until the shell
+    /// acknowledges that its live `[subagents.models]` map was refreshed.
+    /// While set, modal input is blocked so a prompt cannot race the reload.
+    model_reload_pending: bool,
     /// Working directory for rebuilding the agent list.
     pub cwd: PathBuf,
     /// Snapshot of bundle catalog used to merge persona lists.
@@ -370,6 +377,7 @@ impl AgentsModalState {
             persona_models,
             available_models,
             message: None,
+            model_reload_pending: false,
             cwd: cwd.to_path_buf(),
             bundle: bundle.clone(),
             default_agent,
@@ -399,6 +407,26 @@ impl AgentsModalState {
         if self.persona_selected >= self.personas.len() {
             self.persona_selected = self.personas.len().saturating_sub(1);
         }
+    }
+    /// Enter the acknowledged live-reload phase after a model pin was saved.
+    pub(crate) fn begin_model_reload(&mut self, message: impl Into<String>) {
+        self.model_reload_pending = true;
+        self.message = Some(AgentsModalMessage::info(message));
+    }
+    /// Complete the live-reload phase and release modal input.
+    pub(crate) fn finish_model_reload(&mut self, result: Result<(), String>) {
+        self.model_reload_pending = false;
+        self.message = Some(match result {
+            Ok(()) => AgentsModalMessage::success(
+                "Model pin activated — fresh spawns requested now use it; resumed agents keep their source model",
+            ),
+            Err(error) => AgentsModalMessage::error(format!(
+                "Model pin was saved, but live activation failed: {error}. Apply the pin again or restart Hyper."
+            )),
+        });
+    }
+    pub(crate) fn is_model_reload_pending(&self) -> bool {
+        self.model_reload_pending
     }
     /// Reload list data after an external editor session (e.g. `$EDITOR` on `i`).
     pub fn refresh_after_editor(&mut self, tab: AgentsTab) {
@@ -893,7 +921,9 @@ fn parse_subagent_string_table(root: &toml::Value, table: &str) -> HashMap<Strin
 /// Set or clear an agent's model pin via `[subagents.models]` in config.toml.
 ///
 /// Pass `Some(model_id)` to pin the agent to that catalog id, `None` to
-/// clear the pin so the agent inherits the session model again.
+/// clear the pin so the agent inherits the session model again. This only
+/// commits the disk state; the modal follows it with an acknowledged live
+/// reload before releasing input.
 pub fn set_agent_model_pin(name: &str, model_id: Option<&str>) -> Result<(), String> {
     let config_path = xai_grok_config::grok_home().join("config.toml");
     set_agent_model_pin_at(&config_path, name, model_id)
@@ -2538,6 +2568,9 @@ fn switch_agents_tab(state: &mut AgentsModalState, tab: AgentsTab) {
 }
 /// Handle a key event while the agents modal is open.
 pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
+    if state.is_model_reload_pending() {
+        return AgentsModalOutcome::Unchanged;
+    }
     state.message = None;
     if state.persona_input.is_some() && state.active_tab == AgentsTab::Personas {
         return handle_persona_create_form_key(state, key);
@@ -2608,6 +2641,9 @@ pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
     }
 }
 pub fn handle_agents_paste(state: &mut AgentsModalState, text: &str) -> AgentsModalOutcome {
+    if state.is_model_reload_pending() {
+        return AgentsModalOutcome::Unchanged;
+    }
     if let Some(input) = state.persona_input.as_mut() {
         let Some(editor) = input.active_editor_mut() else {
             return AgentsModalOutcome::Unchanged;
@@ -2662,10 +2698,7 @@ fn handle_model_input_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agent
             state.model_picker_selected = 0;
             AgentsModalOutcome::Changed
         }
-        KeyCode::Enter => {
-            submit_model_input(state);
-            AgentsModalOutcome::Changed
-        }
+        KeyCode::Enter => submit_model_input(state),
         KeyCode::Up if has_catalog => {
             state.model_picker_selected = state.model_picker_selected.saturating_sub(1);
             AgentsModalOutcome::Changed
@@ -2791,12 +2824,25 @@ fn resolve_picker_submit(query: &str, available: &[ModelChoice], selected: usize
 }
 /// Save the model picker. With a catalog, Enter applies the highlighted row
 /// (inherit or a model); without one, falls back to free-text resolution.
-/// Agent targets write a `[subagents.models]` pin (hot-reloaded, next spawn);
-/// persona targets write the definition's own `model` key into its file.
-fn submit_model_input(state: &mut AgentsModalState) {
+/// Agent targets write a `[subagents.models]` pin, enter a blocked pending
+/// state, and request an acknowledged live reload; persona targets write the
+/// definition's own `model` key into its file.
+fn submit_model_input(state: &mut AgentsModalState) -> AgentsModalOutcome {
+    submit_model_input_with_agent_pin_io(state, set_agent_model_pin, load_agent_model_pins)
+}
+
+fn submit_model_input_with_agent_pin_io<F, L>(
+    state: &mut AgentsModalState,
+    set_agent_pin: F,
+    load_agent_pins: L,
+) -> AgentsModalOutcome
+where
+    F: Fn(&str, Option<&str>) -> Result<(), String>,
+    L: Fn() -> HashMap<String, String>,
+{
     let Some(target) = state.model_edit_target.clone() else {
         state.model_input = None;
-        return;
+        return AgentsModalOutcome::Changed;
     };
     let raw = state
         .model_input
@@ -2808,7 +2854,7 @@ fn submit_model_input(state: &mut AgentsModalState) {
             edit @ (PinEdit::Clear | PinEdit::Set(_)) => edit,
             PinEdit::Invalid(msg) => {
                 state.message = Some(AgentsModalMessage::error(msg));
-                return;
+                return AgentsModalOutcome::Changed;
             }
         }
     } else {
@@ -2816,7 +2862,7 @@ fn submit_model_input(state: &mut AgentsModalState) {
             PickerSubmit::Apply(edit) => edit,
             PickerSubmit::NoMatch(msg) => {
                 state.message = Some(AgentsModalMessage::error(msg));
-                return;
+                return AgentsModalOutcome::Changed;
             }
         }
     };
@@ -2825,7 +2871,7 @@ fn submit_model_input(state: &mut AgentsModalState) {
         PinEdit::Set(model_id) => (Some(model_id.clone()), format!("\u{2192} {model_id}")),
         PinEdit::Invalid(msg) => {
             state.message = Some(AgentsModalMessage::error(msg));
-            return;
+            return AgentsModalOutcome::Changed;
         }
     };
     // Bundled personas are read-only: applying writes a customized copy
@@ -2851,13 +2897,14 @@ fn submit_model_input(state: &mut AgentsModalState) {
         state.model_input = None;
         state.model_edit_target = None;
         state.model_picker_selected = 0;
-        return;
+        return AgentsModalOutcome::Changed;
     }
+    let is_agent_pin = matches!(&target, ModelEditTarget::Agent(_));
     let (result, name, applies) = match &target {
         ModelEditTarget::Agent(name) => (
-            set_agent_model_pin(name, pin.as_deref()),
+            set_agent_pin(name, pin.as_deref()),
             name.clone(),
-            "applies to the next spawn",
+            "applies to the next fresh spawn",
         ),
         ModelEditTarget::Persona {
             name,
@@ -2879,7 +2926,7 @@ fn submit_model_input(state: &mut AgentsModalState) {
     match result {
         Ok(()) => {
             match &target {
-                ModelEditTarget::Agent(_) => state.model_pins = load_agent_model_pins(),
+                ModelEditTarget::Agent(_) => state.model_pins = load_agent_pins(),
                 ModelEditTarget::Persona { name, .. } => match pin.as_deref() {
                     Some(id) => {
                         state.persona_models.insert(name.clone(), id.to_string());
@@ -2892,15 +2939,24 @@ fn submit_model_input(state: &mut AgentsModalState) {
                     unreachable!("bundled targets return before the common write path")
                 }
             }
-            state.message = Some(AgentsModalMessage::success(format!(
-                "{name} {what} — {applies}"
-            )));
             state.model_input = None;
             state.model_edit_target = None;
             state.model_picker_selected = 0;
+            if is_agent_pin {
+                state.begin_model_reload(format!(
+                    "Saved {name} {what}; activating it for the next fresh spawn…"
+                ));
+                AgentsModalOutcome::ReloadSubagentModels
+            } else {
+                state.message = Some(AgentsModalMessage::success(format!(
+                    "{name} {what} — {applies}"
+                )));
+                AgentsModalOutcome::Changed
+            }
         }
         Err(e) => {
             state.message = Some(AgentsModalMessage::error(e));
+            AgentsModalOutcome::Changed
         }
     }
 }
@@ -3299,6 +3355,9 @@ fn handle_persona_confirm_key(state: &mut AgentsModalState, key: &KeyEvent) -> A
 }
 /// Handle a mouse event while the agents modal is open.
 pub fn handle_agents_mouse(state: &mut AgentsModalState, mouse: &MouseEvent) -> AgentsModalOutcome {
+    if state.is_model_reload_pending() {
+        return AgentsModalOutcome::Unchanged;
+    }
     let chrome =
         modal_window::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
     match chrome {
@@ -3673,6 +3732,7 @@ mod tests {
                 persona_models: HashMap::new(),
                 available_models: Vec::new(),
                 message: None,
+                model_reload_pending: false,
                 cwd: PathBuf::new(),
                 bundle: bundle.clone(),
                 default_agent: DEFAULT_AGENT_TYPE.to_string(),
@@ -3721,6 +3781,7 @@ mod tests {
             persona_models: HashMap::new(),
             available_models: Vec::new(),
             message: None,
+            model_reload_pending: false,
             cwd: PathBuf::new(),
             bundle: BundleState::default(),
             default_agent: DEFAULT_AGENT_TYPE.to_string(),
@@ -4275,6 +4336,119 @@ ignored = 42
         assert!(parse_model_pins(&empty).is_empty());
         let no_models: toml::Value = toml::from_str("[subagents]\nenabled = true").unwrap();
         assert!(parse_model_pins(&no_models).is_empty());
+    }
+    #[test]
+    fn model_reload_pending_blocks_input_until_acknowledged() {
+        let mut state = make_persona_state(three_personas(), "", 0);
+        state.begin_model_reload("Activating model pin…");
+        let pending_message = state.message.as_ref().unwrap().text.clone();
+
+        let outcome =
+            handle_agents_key(&mut state, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(outcome, AgentsModalOutcome::Unchanged));
+        assert!(state.is_model_reload_pending());
+        assert_eq!(state.message.as_ref().unwrap().text, pending_message);
+        assert!(matches!(
+            handle_agents_paste(&mut state, "must not reach the search editor"),
+            AgentsModalOutcome::Unchanged
+        ));
+
+        state.finish_model_reload(Ok(()));
+        assert!(!state.is_model_reload_pending());
+        let message = state.message.as_ref().unwrap();
+        assert_eq!(message.kind, AgentsModalMessageKind::Success);
+        assert!(message.text.contains("fresh spawns requested now"));
+        assert!(message.text.contains("resumed agents"));
+    }
+    #[test]
+    fn model_reload_failure_releases_input_without_claiming_activation() {
+        let mut state = make_persona_state(three_personas(), "", 0);
+        state.begin_model_reload("Activating model pin…");
+        state.finish_model_reload(Err("connection closed".to_string()));
+
+        assert!(!state.is_model_reload_pending());
+        let message = state.message.as_ref().unwrap();
+        assert_eq!(message.kind, AgentsModalMessageKind::Error);
+        assert!(message.text.contains("saved"));
+        assert!(message.text.contains("live activation failed"));
+        assert!(message.text.contains("connection closed"));
+        assert!(!message.text.contains("applies to the next"));
+    }
+    #[test]
+    fn successful_agent_pin_submit_requests_acknowledged_reload() {
+        let mut state = make_persona_state(three_personas(), "", 0);
+        state.active_tab = AgentsTab::Agents;
+        state.available_models = vec![choice("model-b", "Model B")];
+        state.model_input = Some(LineEditor::default());
+        state.model_edit_target = Some(ModelEditTarget::Agent("general-purpose".to_string()));
+        state.model_picker_selected = 1;
+        let observed = std::cell::RefCell::new(None);
+
+        let outcome = submit_model_input_with_agent_pin_io(
+            &mut state,
+            |name, model| {
+                *observed.borrow_mut() = Some((name.to_string(), model.map(str::to_owned)));
+                Ok(())
+            },
+            || HashMap::from([("general-purpose".to_string(), "model-b".to_string())]),
+        );
+
+        assert!(matches!(outcome, AgentsModalOutcome::ReloadSubagentModels));
+        assert_eq!(
+            observed.into_inner(),
+            Some(("general-purpose".to_string(), Some("model-b".to_string())))
+        );
+        assert!(state.is_model_reload_pending());
+        assert_eq!(
+            state.model_pins.get("general-purpose").map(String::as_str),
+            Some("model-b")
+        );
+        assert!(state.message.as_ref().unwrap().text.contains("activating"));
+    }
+    #[test]
+    fn clearing_agent_pin_also_waits_for_live_reload_ack() {
+        let mut state = make_persona_state(three_personas(), "", 0);
+        state.active_tab = AgentsTab::Agents;
+        state
+            .model_pins
+            .insert("general-purpose".to_string(), "model-a".to_string());
+        state.available_models = vec![choice("model-a", "Model A")];
+        state.model_input = Some(LineEditor::default());
+        state.model_edit_target = Some(ModelEditTarget::Agent("general-purpose".to_string()));
+        state.model_picker_selected = 0;
+        let observed = std::cell::RefCell::new(Some("not-called".to_string()));
+
+        let outcome = submit_model_input_with_agent_pin_io(
+            &mut state,
+            |_, model| {
+                *observed.borrow_mut() = model.map(str::to_owned);
+                Ok(())
+            },
+            HashMap::new,
+        );
+
+        assert!(matches!(outcome, AgentsModalOutcome::ReloadSubagentModels));
+        assert_eq!(observed.into_inner(), None);
+        assert!(state.is_model_reload_pending());
+        assert!(!state.model_pins.contains_key("general-purpose"));
+    }
+    #[test]
+    fn failed_agent_pin_write_does_not_enter_reload_phase() {
+        let mut state = make_persona_state(three_personas(), "", 0);
+        state.active_tab = AgentsTab::Agents;
+        state.model_input = Some(LineEditor::default());
+        state.model_edit_target = Some(ModelEditTarget::Agent("general-purpose".to_string()));
+
+        let outcome = submit_model_input_with_agent_pin_io(
+            &mut state,
+            |_, _| Err("disk full".to_string()),
+            || panic!("pins must not reload after a failed write"),
+        );
+
+        assert!(matches!(outcome, AgentsModalOutcome::Changed));
+        assert!(!state.is_model_reload_pending());
+        assert!(state.model_input.is_some(), "failed writes remain editable");
+        assert!(state.message.as_ref().unwrap().text.contains("disk full"));
     }
     #[test]
     fn set_agent_model_pin_at_roundtrip() {

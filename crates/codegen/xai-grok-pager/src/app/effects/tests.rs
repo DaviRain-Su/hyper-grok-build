@@ -1,6 +1,76 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
+
+#[tokio::test]
+async fn subagent_model_reload_effect_round_trips_ack_without_debounce() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+
+    execute(
+        Effect::ReloadSubagentModels {
+            agent_id: AgentId(7),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+
+    let message = rx.recv().await.expect("reload request must be sent");
+    let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = message else {
+        panic!("expected reload ext_method request");
+    };
+    assert_eq!(
+        args.request.method.as_ref(),
+        "x.ai/internal/reload_subagent_models"
+    );
+    assert_eq!(args.request.params.get(), "{}");
+    let raw = serde_json::value::RawValue::from_string(
+        r#"{"result":{"reloaded":true,"pins":1}}"#.to_string(),
+    )
+    .expect("valid acknowledgement");
+    args.response_tx
+        .send(Ok(acp::ExtResponse::new(std::sync::Arc::from(raw))))
+        .expect("reload task must still be waiting for acknowledgement");
+
+    let result = tasks
+        .join_next()
+        .await
+        .expect("reload task must complete")
+        .expect("reload task must not panic");
+    assert!(matches!(
+        result,
+        TaskResult::SubagentModelsReloaded {
+            agent_id: AgentId(7),
+            result: Ok(())
+        }
+    ));
+}
+
+#[test]
+fn subagent_model_reload_requires_positive_shell_acknowledgement() {
+    assert!(
+        parse_subagent_models_reload_response(r#"{"result":{"reloaded":true,"pins":3}}"#)
+            .is_ok()
+    );
+
+    let error = parse_subagent_models_reload_response(
+        r#"{"result":null,"error":"reload failed"}"#,
+    )
+    .unwrap_err();
+    assert_eq!(error, "reload failed");
+
+    let missing_ack =
+        parse_subagent_models_reload_response(r#"{"result":{"pins":3}}"#).unwrap_err();
+    assert!(missing_ack.contains("did not acknowledge"));
+
+    let malformed = parse_subagent_models_reload_response("not json").unwrap_err();
+    assert!(malformed.contains("invalid"));
+}
+
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
 #[test]

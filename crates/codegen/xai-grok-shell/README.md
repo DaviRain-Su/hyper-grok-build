@@ -1670,9 +1670,11 @@ per-agent pin overrides that: `[subagents.models].<agent>` (highest priority),
 then the agent definition's `model`. Both pins apply unconditionally,
 regardless of which model the parent is on.
 
-Pins can be edited from the TUI (`/agents` → select agent → `m`) and are
-hot-reloaded: the config watcher detects the `[subagents.models]` change and
-live sessions apply it to the next subagent spawn.
+Pins can be edited from the TUI (`/agents` → select agent → `m`). The TUI
+commits the pin, requests an acknowledged live reload, and only then releases
+input, so the next fresh subagent spawn uses it without racing the config
+watcher. External config edits still hot-reload through the watcher. A
+`resume_from` continuation intentionally keeps its source model.
 
 ### Roles and Personas
 

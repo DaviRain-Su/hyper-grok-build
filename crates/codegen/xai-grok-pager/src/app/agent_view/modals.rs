@@ -74,6 +74,11 @@ impl AgentView {
                     refresh_agents_modal: Some(tab),
                 })
             }
+            crate::views::agents_modal::AgentsModalOutcome::ReloadSubagentModels => {
+                InputOutcome::Action(Action::ReloadSubagentModels {
+                    agent_id: self.session.id,
+                })
+            }
             crate::views::agents_modal::AgentsModalOutcome::Changed => InputOutcome::Changed,
             crate::views::agents_modal::AgentsModalOutcome::Unchanged => InputOutcome::Unchanged,
         }
@@ -106,6 +111,11 @@ impl AgentView {
             | crate::views::agents_modal::AgentsModalOutcome::EditInEditor { .. } => {
                 // Mouse interactions don't trigger view/edit — ignore.
                 InputOutcome::Unchanged
+            }
+            crate::views::agents_modal::AgentsModalOutcome::ReloadSubagentModels => {
+                InputOutcome::Action(Action::ReloadSubagentModels {
+                    agent_id: self.session.id,
+                })
             }
             crate::views::agents_modal::AgentsModalOutcome::Changed => InputOutcome::Changed,
             crate::views::agents_modal::AgentsModalOutcome::Unchanged => InputOutcome::Unchanged,

@@ -2443,6 +2443,21 @@ impl AppView {
             matches!(ev, Event::Paste(_)) || paste_provenance == PasteProvenance::Terminal,
             "non-paste events cannot carry paste provenance"
         );
+        // A model-pin edit is not active until the shell acknowledges its
+        // direct reload. Gate input across every view, not just the modal's
+        // current agent: an asynchronous view switch must not let another
+        // prompt race the old live pin map. Resize events remain live while
+        // the short reload is pending.
+        if !matches!(ev, Event::Resize(_, _))
+            && self.agents.values().any(|agent| {
+                agent
+                    .agents_modal
+                    .as_ref()
+                    .is_some_and(|modal| modal.is_model_reload_pending())
+            })
+        {
+            return InputOutcome::Changed;
+        }
         let normalized = self.keyboard_normalizer.rescue(ev);
         let ev: &Event = &normalized;
         let key_event = match ev {
