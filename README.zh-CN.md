@@ -105,6 +105,36 @@ curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/in
 
 > 如需尚未发布的改动，可从下方源码构建；否则请安装上方的最新发布版。
 
+### 用 Nix 安装
+
+本项目提供 [Nix](https://nixos.org) flake(`flake.nix`)，在任意已启用
+Nix 的机器上可跳过安装脚本，直接构建/运行。flake 构建出的 `hyper`
+二进制与发布产物一致(Opus 与 jemalloc 均静态链接；`ldd` 仅依赖
+glibc)。
+
+```sh
+# 直接从已发布分支运行(无需 clone、无需安装):
+nix run github:DaviRain-Su/hyper-grok-build/feature/nix-package-support#hyper-grok-build -- --version
+
+# 或安装到你的 Nix profile(把 `hyper` 加入 PATH):
+nix profile install github:DaviRain-Su/hyper-grok-build/feature/nix-package-support#hyper-grok-build
+```
+
+从 clone 出来的仓库(例如要用未发布的改动或参与开发):
+
+```sh
+git clone https://github.com/DaviRain-Su/hyper-grok-build
+cd hyper-grok-build
+git checkout feature/nix-package-support
+nix run .#hyper-grok-build -- --version      # 运行
+nix build .#hyper-grok-build                 # 构建到 ./result
+nix develop                                   # 提供 rust + protoc + cmake + git 的 shell
+```
+
+> 首次运行会从源码编译(现代机器约 14 分钟)。目前没有二进制缓存，因此
+> 每个 Nix 用户暂时都要本地编译。支持 Linux(`x86_64`/`aarch64`)；
+> macOS/Windows 未在 flake 中接入(可通过上方的预编译二进制使用)。
+
 ---
 
 ## 供应商

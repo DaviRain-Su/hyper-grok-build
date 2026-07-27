@@ -107,6 +107,37 @@ Windows), and prints the PATH line to add when needed.
 
 > Need unreleased changes? Build from source below; otherwise install the latest release above.
 
+### Install with Nix
+
+A [Nix](https://nixos.org) flake is provided (`flake.nix`), so on any
+Nix-enabled machine you can skip the installer and build/run directly.
+The flake builds the same `hyper` binary as the release artifacts
+(statically links Opus and jemalloc; `ldd` shows only glibc).
+
+```sh
+# Run directly from the published branch (no clone, no install):
+nix run github:DaviRain-Su/hyper-grok-build/feature/nix-package-support#hyper-grok-build -- --version
+
+# Or install into your Nix profile (puts `hyper` on PATH):
+nix profile install github:DaviRain-Su/hyper-grok-build/feature/nix-package-support#hyper-grok-build
+```
+
+From a clone (e.g. for unreleased changes or to hack on it):
+
+```sh
+git clone https://github.com/DaviRain-Su/hyper-grok-build
+cd hyper-grok-build
+git checkout feature/nix-package-support
+nix run .#hyper-grok-build -- --version      # run
+nix build .#hyper-grok-build                 # build to ./result
+nix develop                                   # shell with rust + protoc + cmake + git
+```
+
+> First run compiles from source (~14 min on a modern machine). There is
+> no binary cache yet, so every Nix user builds locally for now. Linux
+> (`x86_64`/`aarch64`) is supported; macOS/Windows are not wired up in
+> the flake (they work via the prebuilt binaries above).
+
 ---
 
 ## Providers
