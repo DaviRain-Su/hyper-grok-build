@@ -150,7 +150,12 @@ pub fn mermaid_block_ranges(view: &MarkdownRenderView) -> Vec<Range<usize>> {
 /// always-compiled detection module stays independent of the optional
 /// `mermaid` feature.
 pub fn theme_is_dark(theme: ThemeKind) -> bool {
-    !matches!(theme, ThemeKind::GrokDay)
+    if theme == ThemeKind::GrokDay {
+        return false;
+    }
+    // Light-polarity Hyper presets (Solarized Light, Catppuccin Latte, Paper)
+    // must render mermaid diagrams on a light canvas like GrokDay does.
+    !crate::theme::LIGHT_PRESET_KINDS.contains(&theme)
 }
 
 /// Cache key for a rendered diagram: content hash + theme + quality tier +

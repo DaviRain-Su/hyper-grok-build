@@ -1332,12 +1332,6 @@ pub(in crate::app::dispatch) fn set_contextual_hint_ssh_wrap(
 // (rollback of corrupted config).
 // ---------------------------------------------------------------------------
 
-/// Format a "✓ <Label>: <value>" toast for theme-family settings.
-/// `value` is the user-friendly display name, not the canonical.
-fn save_theme_toast(label: &str, value: &str) -> String {
-    format!("\u{2713} {label}: {value}")
-}
-
 /// Apply a (non-auto) theme to the live display.
 ///
 /// Centralised so `set_theme_inner` and `preview_theme_inner` share the
@@ -1433,8 +1427,8 @@ pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
-        "Theme",
+    app.show_toast(&save_value_toast(
+        &setting_label_l10n("theme", "Theme"),
         crate::theme::display_name_for_canonical(new_canonical),
     ));
     vec![Effect::PersistSetting {
@@ -1537,8 +1531,8 @@ pub(in crate::app::dispatch) fn set_auto_dark_theme(app: &mut AppView, new: Stri
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
-        "Auto dark theme",
+    app.show_toast(&save_value_toast(
+        &setting_label_l10n("auto_dark_theme", "Auto dark theme"),
         crate::theme::display_name_for_canonical(new_canonical),
     ));
     vec![Effect::PersistSetting {
@@ -1650,8 +1644,8 @@ pub(in crate::app::dispatch) fn set_auto_light_theme(
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
-        "Auto light theme",
+    app.show_toast(&save_value_toast(
+        &setting_label_l10n("auto_light_theme", "Auto light theme"),
         crate::theme::display_name_for_canonical(new_canonical),
     ));
     vec![Effect::PersistSetting {
@@ -1746,7 +1740,7 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
     true
 }
 
-/// Toast format for `default_model`. Mirrors `save_theme_toast` —
+/// Toast format for `default_model`. Like the theme toasts, it
 /// renders the user-friendly model name (NOT the internal id) so the
 /// toast text matches what the user typed. Session-only providers
 /// (Codex subscription) drop the "Default" wording since nothing persists.

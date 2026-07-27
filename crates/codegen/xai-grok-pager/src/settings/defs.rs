@@ -70,6 +70,67 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
+    // --- Hyper preset collection (nine dark, three light) ---------------
+    EnumChoice {
+        canonical: "everforest",
+        display: "Everforest",
+        description: "Soft forest greens; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "nord",
+        display: "Nord",
+        description: "Cold arctic slate with frost accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "dracula",
+        display: "Dracula",
+        description: "Purple charcoal with pink/purple accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "gruvbox",
+        display: "Gruvbox Dark",
+        description: "Warm retro browns; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "catppuccin-mocha",
+        display: "Catppuccin Mocha",
+        description: "Muted pastel dark with mauve; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "solarized-dark",
+        display: "Solarized Dark",
+        description: "Precision teal base; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "deep-ocean",
+        display: "Deep Ocean",
+        description: "Near-black navy with luminous blues; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "ember",
+        display: "Ember",
+        description: "Dark maroon with warm rose/amber; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "midnight-oled",
+        display: "Midnight OLED",
+        description: "Pure black with amber accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "solarized-light",
+        display: "Solarized Light",
+        description: "Warm cream light canvas; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "catppuccin-latte",
+        display: "Catppuccin Latte",
+        description: "Cool light gray-blue; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "paper",
+        display: "Paper",
+        description: "Warm sepia paper light canvas; needs truecolor.",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -567,6 +628,67 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "oscura-midnight",
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
+    },
+    // --- Hyper preset collection (nine dark, three light) ---------------
+    EnumChoice {
+        canonical: "everforest",
+        display: "Everforest",
+        description: "Soft forest greens; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "nord",
+        display: "Nord",
+        description: "Cold arctic slate with frost accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "dracula",
+        display: "Dracula",
+        description: "Purple charcoal with pink/purple accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "gruvbox",
+        display: "Gruvbox Dark",
+        description: "Warm retro browns; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "catppuccin-mocha",
+        display: "Catppuccin Mocha",
+        description: "Muted pastel dark with mauve; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "solarized-dark",
+        display: "Solarized Dark",
+        description: "Precision teal base; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "deep-ocean",
+        display: "Deep Ocean",
+        description: "Near-black navy with luminous blues; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "ember",
+        display: "Ember",
+        description: "Dark maroon with warm rose/amber; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "midnight-oled",
+        display: "Midnight OLED",
+        description: "Pure black with amber accents; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "solarized-light",
+        display: "Solarized Light",
+        description: "Warm cream light canvas; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "catppuccin-latte",
+        display: "Catppuccin Latte",
+        description: "Cool light gray-blue; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "paper",
+        display: "Paper",
+        description: "Warm sepia paper light canvas; needs truecolor.",
     },
 ];
 

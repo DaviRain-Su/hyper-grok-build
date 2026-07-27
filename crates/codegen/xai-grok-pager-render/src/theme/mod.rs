@@ -17,6 +17,7 @@ mod groknight;
 pub mod md_style;
 pub mod osc11;
 mod oscura;
+mod presets;
 mod rosepine;
 pub mod system_appearance;
 mod terminal_default;
@@ -41,7 +42,48 @@ pub enum ThemeKind {
     /// only the resolved concrete kind lives in the cache.
     /// Excluded from [`ALL`] and [`available()`].
     Auto = 4,
+
+    // Hyper preset collection (truecolor). Discriminants 6..=17 are stable
+    // on-disk identifiers via `cache`'s u8 encoding — never renumber them.
+    Everforest = 6,
+    Nord = 7,
+    Dracula = 8,
+    Gruvbox = 9,
+    CatppuccinMocha = 10,
+    SolarizedDark = 11,
+    DeepOcean = 12,
+    Ember = 13,
+    MidnightOled = 14,
+    SolarizedLight = 15,
+    CatppuccinLatte = 16,
+    Paper = 17,
 }
+
+/// The twelve Hyper preset kinds, in catalog order (nine dark, three light).
+/// Shared by [`ThemeKind::ALL`], the `current()` dispatch, and tests so the
+/// list lives in exactly one place.
+const PRESET_KINDS: &[ThemeKind] = &[
+    ThemeKind::Everforest,
+    ThemeKind::Nord,
+    ThemeKind::Dracula,
+    ThemeKind::Gruvbox,
+    ThemeKind::CatppuccinMocha,
+    ThemeKind::SolarizedDark,
+    ThemeKind::DeepOcean,
+    ThemeKind::Ember,
+    ThemeKind::MidnightOled,
+    ThemeKind::SolarizedLight,
+    ThemeKind::CatppuccinLatte,
+    ThemeKind::Paper,
+];
+
+/// The three light-polarity preset kinds. Callers that need to know a theme's
+/// polarity from its [`ThemeKind`] alone (e.g. mermaid rendering) consult this.
+pub const LIGHT_PRESET_KINDS: &[ThemeKind] = &[
+    ThemeKind::SolarizedLight,
+    ThemeKind::CatppuccinLatte,
+    ThemeKind::Paper,
+];
 
 impl ThemeKind {
     /// All theme kinds (including those that may not work on the current terminal).
@@ -51,6 +93,19 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        // Hyper preset collection.
+        ThemeKind::Everforest,
+        ThemeKind::Nord,
+        ThemeKind::Dracula,
+        ThemeKind::Gruvbox,
+        ThemeKind::CatppuccinMocha,
+        ThemeKind::SolarizedDark,
+        ThemeKind::DeepOcean,
+        ThemeKind::Ember,
+        ThemeKind::MidnightOled,
+        ThemeKind::SolarizedLight,
+        ThemeKind::CatppuccinLatte,
+        ThemeKind::Paper,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -79,6 +134,18 @@ impl ThemeKind {
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
             Self::Auto => "auto",
+            Self::Everforest => "everforest",
+            Self::Nord => "nord",
+            Self::Dracula => "dracula",
+            Self::Gruvbox => "gruvbox",
+            Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::SolarizedDark => "solarized-dark",
+            Self::DeepOcean => "deep-ocean",
+            Self::Ember => "ember",
+            Self::MidnightOled => "midnight-oled",
+            Self::SolarizedLight => "solarized-light",
+            Self::CatppuccinLatte => "catppuccin-latte",
+            Self::Paper => "paper",
         }
     }
 
@@ -96,6 +163,20 @@ impl ThemeKind {
             Self::OscuraMidnight => true,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
+            // Every Hyper preset is authored in truecolor RGB and loses its
+            // background identity when quantized to 256/16 colors.
+            Self::Everforest
+            | Self::Nord
+            | Self::Dracula
+            | Self::Gruvbox
+            | Self::CatppuccinMocha
+            | Self::SolarizedDark
+            | Self::DeepOcean
+            | Self::Ember
+            | Self::MidnightOled
+            | Self::SolarizedLight
+            | Self::CatppuccinLatte
+            | Self::Paper => true,
         }
     }
 
@@ -112,6 +193,18 @@ impl ThemeKind {
                 Some(Self::RosePineMoon)
             }
             "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
+            "everforest" | "ever-forest" => Some(Self::Everforest),
+            "nord" => Some(Self::Nord),
+            "dracula" => Some(Self::Dracula),
+            "gruvbox" | "gruvbox-dark" => Some(Self::Gruvbox),
+            "catppuccin" | "catppuccin-mocha" | "mocha" => Some(Self::CatppuccinMocha),
+            "solarized" | "solarized-dark" => Some(Self::SolarizedDark),
+            "deep-ocean" | "deepocean" | "ocean" => Some(Self::DeepOcean),
+            "ember" => Some(Self::Ember),
+            "midnight-oled" | "oled" | "midnight" => Some(Self::MidnightOled),
+            "solarized-light" => Some(Self::SolarizedLight),
+            "catppuccin-latte" | "latte" => Some(Self::CatppuccinLatte),
+            "paper" | "sepia" => Some(Self::Paper),
             _ => None,
         }
     }
@@ -147,6 +240,19 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
+        "oscura-midnight" => "Oscura Midnight",
+        "everforest" => "Everforest",
+        "nord" => "Nord",
+        "dracula" => "Dracula",
+        "gruvbox" => "Gruvbox Dark",
+        "catppuccin-mocha" => "Catppuccin Mocha",
+        "solarized-dark" => "Solarized Dark",
+        "deep-ocean" => "Deep Ocean",
+        "ember" => "Ember",
+        "midnight-oled" => "Midnight OLED",
+        "solarized-light" => "Solarized Light",
+        "catppuccin-latte" => "Catppuccin Latte",
+        "paper" => "Paper",
         other => other,
     }
 }
@@ -278,6 +384,18 @@ impl Theme {
             // Auto is resolved to a concrete theme before being stored;
             // if reached, fall back to GrokNight.
             ThemeKind::Auto => Self::groknight(),
+            ThemeKind::Everforest => Self::everforest(),
+            ThemeKind::Nord => Self::nord(),
+            ThemeKind::Dracula => Self::dracula(),
+            ThemeKind::Gruvbox => Self::gruvbox(),
+            ThemeKind::CatppuccinMocha => Self::catppuccin_mocha(),
+            ThemeKind::SolarizedDark => Self::solarized_dark(),
+            ThemeKind::DeepOcean => Self::deep_ocean(),
+            ThemeKind::Ember => Self::ember(),
+            ThemeKind::MidnightOled => Self::midnight_oled(),
+            ThemeKind::SolarizedLight => Self::solarized_light(),
+            ThemeKind::CatppuccinLatte => Self::catppuccin_latte(),
+            ThemeKind::Paper => Self::paper(),
         };
         // Sample polarity pre-quantization — post-quantize `bg_base` may
         // land on a named/indexed entry whose luminance is host-palette-
@@ -985,6 +1103,18 @@ mod tests {
                 ThemeKind::TokyoNight => Theme::tokyonight(),
                 ThemeKind::RosePineMoon => Theme::rosepine_moon(),
                 ThemeKind::OscuraMidnight => Theme::oscura_midnight(),
+                ThemeKind::Everforest => Theme::everforest(),
+                ThemeKind::Nord => Theme::nord(),
+                ThemeKind::Dracula => Theme::dracula(),
+                ThemeKind::Gruvbox => Theme::gruvbox(),
+                ThemeKind::CatppuccinMocha => Theme::catppuccin_mocha(),
+                ThemeKind::SolarizedDark => Theme::solarized_dark(),
+                ThemeKind::DeepOcean => Theme::deep_ocean(),
+                ThemeKind::Ember => Theme::ember(),
+                ThemeKind::MidnightOled => Theme::midnight_oled(),
+                ThemeKind::SolarizedLight => Theme::solarized_light(),
+                ThemeKind::CatppuccinLatte => Theme::catppuccin_latte(),
+                ThemeKind::Paper => Theme::paper(),
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);
