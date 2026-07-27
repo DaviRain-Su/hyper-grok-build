@@ -407,13 +407,16 @@ Hyper **首次启动不会强制** Grok OAuth，需要时再 `/login`。详见 [
 
 ### `/providers`
 
-列出 / 设置 / 清除 BYOK 平台 API Key（OpenRouter、Anthropic、OpenAI API、Ollama 等）：
+列出 / 设置 / 清除平台 API Key（OpenRouter、OpenCode Go、Anthropic、OpenAI API、Ollama 等）：
 
 ```text
 /providers
 /providers openrouter sk-or-...
+/providers opencode-go <api_key>   # OpenCode Go 订阅 key
 /providers clear anthropic
 ```
+
+OpenCode Go 官方连接方式是 Console 签发的 API key，而不是可移植 OAuth。`/login opencode-go` 会引导到这里；模型前缀为 `opencode-go/*`。
 
 ### `/logout`
 

@@ -9,6 +9,7 @@ Hyper (and Grok Build) supports **multiple independent auth methods**. You are n
 | Kimi Code | `hyper login --kimi` / `/login kimi` | Kimi subscription |
 | OpenAI Codex (ChatGPT) | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro coding |
 | Anthropic Claude | `hyper login --claude` / `/login claude` | Claude Pro/Max coding |
+| OpenCode Go | `/providers opencode-go <key>` / `OPENCODE_API_KEY` | Go subscription models |
 | BYOK platforms | `/providers <platform> <key>` or env keys | OpenAI, Anthropic, OpenRouter, Ollama, … |
 | Customer OIDC / SSO | config / env | Enterprise |
 
@@ -27,6 +28,7 @@ Credentials live under `~/.grok/auth.json` in **separate scopes** so logging out
 /login kimi            # Kimi Code OAuth
 /login openai          # ChatGPT Codex OAuth
 /login claude          # Anthropic Claude Pro/Max OAuth
+/providers opencode-go <key>  # OpenCode Go subscription
 /providers openrouter <key>
 /providers anthropic <key>
 /model openrouter/...
@@ -106,6 +108,31 @@ grok
 ```
 
 Grok uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `hyper logout` (xAI session only) or delete the relevant scopes in `~/.grok/auth.json`.
+
+---
+
+## OpenCode Go subscription
+
+OpenCode Go is a subscription product, but its documented client connection uses a **Console-issued API key**, not a portable provider OAuth flow:
+
+1. Sign in and subscribe at <https://opencode.ai/go>.
+2. Copy the API key from the OpenCode Console.
+3. Save it in Hyper:
+
+```text
+/providers opencode-go <api_key>
+/model opencode-go/kimi-k3
+```
+
+Or provide it through the environment:
+
+```bash
+export OPENCODE_API_KEY="..."
+```
+
+Hyper stores a pasted key under `platform/opencode-go` in `~/.grok/auth.json`; clear it with `/providers clear opencode-go`. The bundled catalog follows the current non-deprecated OpenCode Go roster and routes each model through its documented OpenAI Chat Completions or Anthropic Messages endpoint.
+
+`/login opencode-go` intentionally shows these instructions instead of reusing OpenCode CLI's undocumented, CLI-specific device-client identity. This keeps the four interactive OAuth login families unchanged.
 
 ---
 

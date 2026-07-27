@@ -3,6 +3,8 @@
 //! Optional argument: `kimi` / `kimi-code` starts Kimi Code device OAuth;
 //! `openai` / `codex` starts the OpenAI Codex (ChatGPT) browser OAuth;
 //! `claude` / `anthropic` starts the Anthropic Claude subscription OAuth.
+//! OpenCode Go uses a Console-issued API key rather than a portable OAuth
+//! login, so `/login opencode-go` redirects to `/providers opencode-go`.
 //! With no argument, login always uses the default xAI flow.
 
 use crate::app::actions::Action;
@@ -16,11 +18,11 @@ impl SlashCommand for LoginCommand {
     }
 
     fn description(&self) -> &str {
-        "Log in or re-authenticate (optional: kimi | openai | claude)"
+        "Log in or show subscription setup (kimi | openai | claude | opencode-go)"
     }
 
     fn usage(&self) -> &str {
-        "/login [kimi|openai|claude]"
+        "/login [kimi|openai|claude|opencode-go]"
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -34,6 +36,13 @@ impl SlashCommand for LoginCommand {
             CommandResult::Action(Action::LoginOpenAiCodex)
         } else if matches!(arg.as_str(), "claude" | "anthropic" | "anthropic-claude") {
             CommandResult::Action(Action::LoginAnthropicClaude)
+        } else if matches!(arg.as_str(), "opencode-go" | "opencodego") {
+            CommandResult::Error(
+                "OpenCode Go subscriptions use a Console-issued API key, not portable OAuth. \
+                 Subscribe at https://opencode.ai/go, then run \
+                 `/providers opencode-go <api_key>` (or set OPENCODE_API_KEY)."
+                    .into(),
+            )
         } else if matches!(arg.as_str(), "nexus" | "providers" | "provider") {
             // Nexus is BYOK (API key), not OAuth — redirect instead of erroring.
             CommandResult::Error(
@@ -45,8 +54,8 @@ impl SlashCommand for LoginCommand {
             CommandResult::Action(Action::Login)
         } else {
             CommandResult::Error(format!(
-                "Unknown login target '{arg}'. Try `/login`, `/login kimi`, `/login openai` or `/login claude` \
-                 (for Nexus use `/nexus`)."
+                "Unknown login target '{arg}'. Try `/login`, `/login kimi`, `/login openai`, \
+                 `/login claude`, or `/login opencode-go` (API-key setup); for Nexus use `/nexus`."
             ))
         }
     }
@@ -86,6 +95,22 @@ mod tests {
         match LoginCommand.run(&mut ctx, "nexus") {
             CommandResult::Error(msg) => assert!(msg.contains("/nexus"), "msg: {msg}"),
             other => panic!("expected redirect Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_opencode_go_redirects_to_official_api_key_flow() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        assert!(LoginCommand.description().contains("opencode-go"));
+        assert!(LoginCommand.usage().contains("opencode-go"));
+        match LoginCommand.run(&mut ctx, "opencode-go") {
+            CommandResult::Error(message) => {
+                assert!(message.contains("/providers opencode-go <api_key>"));
+                assert!(message.contains("OPENCODE_API_KEY"));
+                assert!(message.contains("https://opencode.ai/go"));
+            }
+            other => panic!("expected API-key redirect, got {other:?}"),
         }
     }
 

@@ -16,7 +16,7 @@
 
 **Hyper** 是 [Grok Build](https://github.com/xai-org/grok-build) 的非官方多供应商社区构建版本 ——
 一个用 Rust 编写的终端 AI 编码代理,对多家 LLM 供应商提供一流支持:
-xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenAI、Anthropic、Z.AI、Ollama Cloud 等。
+xAI Grok、Kimi Code / Moonshot、ChatGPT Codex、OpenCode Go、OpenAI、Anthropic、Z.AI、Ollama Cloud 等。
 
 它以全屏 TUI 的形式运行,能够理解你的代码库、编辑文件、
 执行 shell 命令、搜索网页,并管理长时间运行的任务 ——
@@ -118,12 +118,13 @@ Hyper 保留了本代码树中的多供应商注册表(见 pager
 | Kimi Code | 设备 OAuth / 订阅 | `kimi-code/*` 目录 |
 | Moonshot CN / AI | API key | 开放平台 |
 | ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning，并支持实验性全双工 `/live` 语音 |
+| OpenCode Go | 订阅 API key | `opencode-go/*` 模型，兼容 Chat Completions + Messages |
 | OpenAI / Anthropic / DeepSeek 风格 | API keys | BYOK 目录 |
 | Z.AI Coding Plan | 平台 key | 国际版方案 |
 | Ollama Cloud | API key | 实时模型清单同步 |
 
 选择器中的模型 id 形如 `{platform}/{model}`(例如
-`kimi-code/k3`、`codex:gpt-5.5`)。各平台文档位于
+`kimi-code/k3`、`opencode-go/kimi-k3`、`openai-codex/gpt-5.6-sol`)。各平台文档位于
 `crates/codegen/xai-grok-pager/docs/user-guide-zh-CN/`(Moonshot、Kimi Code、
 OpenAI Codex 等)。
 

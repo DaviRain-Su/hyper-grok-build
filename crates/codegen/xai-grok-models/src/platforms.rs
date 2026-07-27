@@ -3,6 +3,7 @@
 //! Phase 1: Moonshot open platforms (API key).
 //! Phase 2: Kimi Code subscription (device OAuth).
 //! Phase 3: OpenAI + Anthropic (API key; catalog from Pi models.generated).
+//! Phase 4: OpenCode Go subscription (Console API key; mixed Chat/Messages catalog).
 
 use std::num::NonZeroU64;
 use std::sync::LazyLock;
@@ -35,6 +36,13 @@ pub const KIMI_CODE_OAUTH_HOST_ENV: &str = "GROK_KIMI_CODE_OAUTH_HOST";
 pub const OPENAI_CODEX_BASE_URL_ENV: &str = "GROK_OPENAI_CODEX_BASE_URL";
 /// Env override for the OpenAI Codex OAuth host.
 pub const OPENAI_CODEX_OAUTH_HOST_ENV: &str = "GROK_OPENAI_CODEX_OAUTH_HOST";
+
+/// OpenCode Go subscription API key (platform-scoped, wins over the official alias).
+pub const OPENCODE_GO_API_KEY_ENV: &str = "GROK_OPENCODE_GO_API_KEY";
+/// Official OpenCode Go / Zen API key alias.
+pub const OPENCODE_API_KEY_ENV: &str = "OPENCODE_API_KEY";
+/// OpenCode Go OpenAI/Anthropic-compatible gateway base.
+pub const OPENCODE_GO_BASE_URL_DEFAULT: &str = "https://opencode.ai/zen/go/v1";
 
 /// OpenAI API key (platform-scoped, wins over `OPENAI_API_KEY`).
 pub const OPENAI_API_KEY_ENV: &str = "GROK_OPENAI_API_KEY";
@@ -182,6 +190,9 @@ pub enum PlatformId {
     KimiCode,
     /// OpenAI Codex subscription via ChatGPT OAuth (`chatgpt.com/backend-api`).
     OpenAiCodex,
+    /// OpenCode Go subscription via a Console-issued API key. The gateway
+    /// exposes both OpenAI Chat Completions and Anthropic Messages models.
+    OpenCodeGo,
     MoonshotCn,
     MoonshotAi,
     OpenAi,
@@ -216,9 +227,10 @@ pub enum PlatformId {
 
 impl PlatformId {
     /// All platforms; subscription first.
-    pub const ALL: [PlatformId; 23] = [
+    pub const ALL: [PlatformId; 24] = [
         Self::KimiCode,
         Self::OpenAiCodex,
+        Self::OpenCodeGo,
         Self::MoonshotCn,
         Self::MoonshotAi,
         Self::OpenAi,
@@ -246,6 +258,7 @@ impl PlatformId {
         match self {
             Self::KimiCode => "kimi-code",
             Self::OpenAiCodex => "openai-codex",
+            Self::OpenCodeGo => "opencode-go",
             Self::MoonshotCn => "moonshot-cn",
             Self::MoonshotAi => "moonshot-ai",
             Self::OpenAi => "openai",
@@ -274,6 +287,7 @@ impl PlatformId {
         match s {
             "kimi-code" | "kimi-coding" => Some(Self::KimiCode),
             "openai-codex" | "chatgpt-codex" => Some(Self::OpenAiCodex),
+            "opencode-go" | "opencodego" => Some(Self::OpenCodeGo),
             "moonshot-cn" | "moonshotai-cn" => Some(Self::MoonshotCn),
             "moonshot-ai" | "moonshotai" => Some(Self::MoonshotAi),
             "openai" => Some(Self::OpenAi),
@@ -303,6 +317,7 @@ impl PlatformId {
         match self {
             Self::KimiCode => "Kimi For Coding",
             Self::OpenAiCodex => "OpenAI Codex (ChatGPT)",
+            Self::OpenCodeGo => "OpenCode Go",
             Self::MoonshotCn => "Moonshot AI (moonshot.cn)",
             Self::MoonshotAi => "Moonshot AI (moonshot.ai)",
             Self::OpenAi => "OpenAI",
@@ -333,6 +348,7 @@ impl PlatformId {
             // Kimi Code subscription: https://api.kimi.com/coding/v1.
             Self::KimiCode => KIMI_CODE_BASE_URL_DEFAULT,
             Self::OpenAiCodex => OPENAI_CODEX_BASE_URL_DEFAULT,
+            Self::OpenCodeGo => OPENCODE_GO_BASE_URL_DEFAULT,
             Self::MoonshotCn => MOONSHOT_CN_BASE_URL_DEFAULT,
             Self::MoonshotAi => MOONSHOT_AI_BASE_URL_DEFAULT,
             Self::OpenAi => OPENAI_BASE_URL_DEFAULT,
@@ -455,6 +471,7 @@ impl PlatformId {
     pub fn api_key_env_names(self) -> &'static [&'static str] {
         match self {
             Self::KimiCode | Self::OpenAiCodex | Self::AnthropicClaude => &[],
+            Self::OpenCodeGo => &[OPENCODE_GO_API_KEY_ENV, OPENCODE_API_KEY_ENV],
             Self::MoonshotCn => &[
                 MOONSHOT_CN_API_KEY_ENV,
                 MOONSHOT_API_KEY_ENV,
@@ -623,8 +640,8 @@ impl PlatformApiBackend {
 /// `kimi-k2.6`, `kimi-k2.5`. Deprecated `kimi-k2-*-preview` / thinking-turbo
 /// are kept only as last-resort aliases until live `/models` replaces them.
 ///
-/// OpenAI / Anthropic entries are loaded from [`PLATFORM_CATALOG_JSON`]
-/// (curated from Pi `models.generated.ts`).
+/// OpenAI / Anthropic / OpenCode Go entries are loaded from
+/// [`PLATFORM_CATALOG_JSON`] (curated from Pi and models.dev).
 #[derive(Debug, Clone)]
 pub struct BuiltinPlatformModel {
     pub platform: PlatformId,
@@ -685,8 +702,8 @@ const CTX_256K: u64 = 262_144;
 const CTX_1M: u64 = 1_048_576;
 const MAX_TOK_32K: Option<u32> = Some(32_768);
 
-/// Embedded Pi-curated OpenAI/Anthropic catalog (offline). See
-/// `platform_catalog.json` header for source.
+/// Embedded third-party platform catalog (offline). See
+/// `platform_catalog.json` header for upstream sources.
 pub const PLATFORM_CATALOG_JSON: &str = include_str!("../platform_catalog.json");
 
 #[derive(serde::Deserialize)]
@@ -711,7 +728,7 @@ struct CatalogModelRow {
     // entries start hidden until the shell stamps credentials.
 }
 
-fn load_pi_catalog_models() -> Vec<BuiltinPlatformModel> {
+fn load_platform_catalog_models() -> Vec<BuiltinPlatformModel> {
     let file: CatalogFile = serde_json::from_str(PLATFORM_CATALOG_JSON)
         .expect("platform_catalog.json must parse");
     file.models
@@ -742,12 +759,13 @@ fn load_pi_catalog_models() -> Vec<BuiltinPlatformModel> {
         .collect()
 }
 
-/// Offline catalog. Primary source: official Pi `packages/ai` generated data
-/// (`platform_catalog.json`). Hand-maintained Kimi/Moonshot rows fill gaps only
-/// when the Pi catalog lacks that catalog key.
+/// Offline catalog. Primary sources are official Pi `packages/ai` generated
+/// data and models.dev's OpenCode Go provider (`platform_catalog.json`).
+/// Hand-maintained Kimi/Moonshot rows fill gaps only when the imported catalog
+/// lacks that catalog key.
 pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
     static MODELS: LazyLock<Vec<BuiltinPlatformModel>> = LazyLock::new(|| {
-        let mut out: Vec<BuiltinPlatformModel> = load_pi_catalog_models();
+        let mut out: Vec<BuiltinPlatformModel> = load_platform_catalog_models();
         let mut existing: std::collections::HashMap<String, usize> = out
             .iter()
             .enumerate()
@@ -1384,6 +1402,88 @@ mod tests {
         assert_eq!(
             PlatformId::Nexus.api_key_env_names(),
             &["GROK_NEXUS_API_KEY", "NEXUS_API_KEY"]
+        );
+    }
+
+    #[test]
+    fn opencode_go_is_api_key_subscription_with_mixed_protocol_catalog() {
+        assert_eq!(
+            PlatformId::parse("opencode-go"),
+            Some(PlatformId::OpenCodeGo)
+        );
+        assert_eq!(
+            PlatformId::parse("opencodego"),
+            Some(PlatformId::OpenCodeGo)
+        );
+        assert_eq!(PlatformId::OpenCodeGo.display_name(), "OpenCode Go");
+        assert_eq!(
+            PlatformId::OpenCodeGo.base_url(),
+            OPENCODE_GO_BASE_URL_DEFAULT
+        );
+        assert_eq!(
+            PlatformId::OpenCodeGo.api_key_env_names(),
+            &[OPENCODE_GO_API_KEY_ENV, OPENCODE_API_KEY_ENV]
+        );
+        assert!(!PlatformId::OpenCodeGo.uses_oauth());
+        assert!(!PlatformId::OpenCodeGo.uses_x_api_key());
+        assert!(!PlatformId::OpenCodeGo.live_models_list_enabled());
+        assert!(
+            PlatformId::OpenCodeGo
+                .setup_hint()
+                .contains("/providers opencode-go <api_key>")
+        );
+
+        let models: Vec<_> = platform_builtin_models()
+            .iter()
+            .filter(|model| model.platform == PlatformId::OpenCodeGo)
+            .collect();
+        assert_eq!(models.len(), 16, "current non-deprecated Go catalog");
+        assert!(
+            models.iter().all(|model| !model.supports_reasoning_effort),
+            "Go docs do not define a portable reasoning-effort wire contract"
+        );
+        assert!(
+            models
+                .iter()
+                .all(|model| model.resolved_base_url() == OPENCODE_GO_BASE_URL_DEFAULT)
+        );
+
+        let chat: std::collections::HashSet<_> = models
+            .iter()
+            .filter(|model| model.api_backend == PlatformApiBackend::ChatCompletions)
+            .map(|model| model.model.as_str())
+            .collect();
+        assert_eq!(
+            chat,
+            std::collections::HashSet::from([
+                "deepseek-v4-flash",
+                "deepseek-v4-pro",
+                "glm-5.1",
+                "glm-5.2",
+                "grok-4.5",
+                "hy3",
+                "kimi-k2.6",
+                "kimi-k2.7-code",
+                "kimi-k3",
+                "mimo-v2.5",
+                "mimo-v2.5-pro",
+            ])
+        );
+
+        let messages: std::collections::HashSet<_> = models
+            .iter()
+            .filter(|model| model.api_backend == PlatformApiBackend::Messages)
+            .map(|model| model.model.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            std::collections::HashSet::from([
+                "minimax-m2.7",
+                "minimax-m3",
+                "qwen3.6-plus",
+                "qwen3.7-max",
+                "qwen3.7-plus",
+            ])
         );
     }
 

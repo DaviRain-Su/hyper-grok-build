@@ -417,13 +417,16 @@ On Hyper, first launch does **not** force Grok OAuth — use `/login` when you c
 
 ### `/providers`
 
-List, set, or clear BYOK platform API keys (OpenRouter, Anthropic, OpenAI API, Ollama, …):
+List, set, or clear platform API keys (OpenRouter, OpenCode Go, Anthropic, OpenAI API, Ollama, …):
 
 ```text
 /providers
 /providers openrouter sk-or-...
+/providers opencode-go <api_key>   # OpenCode Go subscription key
 /providers clear anthropic
 ```
+
+OpenCode Go's documented connection flow uses a Console-issued API key rather than portable OAuth. `/login opencode-go` redirects here with subscription instructions; models appear as `opencode-go/*`.
 
 ### `/logout`
 

@@ -17,8 +17,8 @@
 **Hyper** is an unofficial multi-provider community build of
 [Grok Build](https://github.com/xai-org/grok-build) — a terminal-based AI
 coding agent written in Rust, with first-class multi-provider LLM support:
-xAI Grok, Kimi Code / Moonshot, ChatGPT Codex, OpenAI, Anthropic, Z.AI,
-Ollama Cloud, and more.
+xAI Grok, Kimi Code / Moonshot, ChatGPT Codex, OpenCode Go, OpenAI,
+Anthropic, Z.AI, Ollama Cloud, and more.
 
 It runs as a full-screen TUI that understands your codebase, edits files,
 executes shell commands, searches the web, and manages long-running tasks —
@@ -120,12 +120,13 @@ Hyper keeps the multi-provider registry from this tree (see the pager
 | Kimi Code | device OAuth / subscription | `kimi-code/*` catalog |
 | Moonshot CN / AI | API key | open platform |
 | ChatGPT Codex | ChatGPT OAuth | GPT-5.x reasoning plus experimental full-duplex `/live` voice |
+| OpenCode Go | subscription API key | `opencode-go/*` models over Chat Completions + Messages |
 | OpenAI / Anthropic / DeepSeek-style | API keys | BYOK catalog |
 | Z.AI Coding Plan | platform key | international plan |
 | Ollama Cloud | API key | live roster sync |
 
 Model ids in the picker look like `{platform}/{model}` (e.g.
-`kimi-code/k3`, `codex:gpt-5.5`). Platform docs live under
+`kimi-code/k3`, `opencode-go/kimi-k3`, `openai-codex/gpt-5.6-sol`). Platform docs live under
 `crates/codegen/xai-grok-pager/docs/user-guide/` (Moonshot, Kimi Code,
 OpenAI Codex, …).
 

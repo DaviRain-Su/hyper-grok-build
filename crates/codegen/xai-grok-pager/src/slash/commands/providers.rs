@@ -1,4 +1,5 @@
-//! `/providers` — third-party platform (BYOK) status + API key setup / logout.
+//! `/providers` — third-party platform API-key status + setup / logout.
+//! Covers both BYOK providers and subscription products such as OpenCode Go.
 //!
 //! - Bare `/providers` opens an ArgPicker of platforms.
 //! - `/providers <platform> <api_key>` saves the key to `~/.grok/auth.json`.
@@ -309,7 +310,7 @@ fn build_platform_items(models: &ModelState) -> Vec<ArgItem> {
 fn render_providers(models: &ModelState) -> String {
     let mut out = String::new();
     out.push_str(
-        "Third-party platforms (BYOK).\n\
+        "Third-party platforms (BYOK and subscription API keys).\n\
          Set key:    /providers <platform> <api_key>\n\
          Clear key:  /providers clear <platform>   (alias: logout / remove)\n\n",
     );
@@ -470,6 +471,24 @@ mod tests {
                 assert_eq!(platform, "zai");
                 assert_eq!(api_key, "sk-test-key");
                 // Non-Nexus platforms never carry a base_url.
+                assert_eq!(base_url, None);
+            }
+            other => panic!("expected SetPlatformApiKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_opencode_go_emits_api_key_storage_action() {
+        let models = ModelState::default();
+        let mut ctx = dummy_exec_ctx(&models);
+        match ProvidersCommand.run(&mut ctx, "opencode-go oc-test-key") {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform,
+                api_key,
+                base_url,
+            }) => {
+                assert_eq!(platform, "opencode-go");
+                assert_eq!(api_key, "oc-test-key");
                 assert_eq!(base_url, None);
             }
             other => panic!("expected SetPlatformApiKey, got {other:?}"),

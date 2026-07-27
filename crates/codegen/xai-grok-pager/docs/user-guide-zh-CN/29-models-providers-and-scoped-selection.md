@@ -19,6 +19,7 @@ Hyper 如何列出模型、与 [Pi](https://github.com/earendil-works/pi) 的对
 | 硬允许列表 | `[models] allowed_models = […]`（不匹配则不可选） |
 | 自定义 / 本地 | `[model.<name>]` — 见 [自定义模型](11-custom-models.md) |
 | 平台 API Key | `/providers <platform> <key>` |
+| OpenCode Go | `/providers opencode-go <key>` 后 `/model opencode-go/…` |
 | ChatGPT Codex | `/login openai` 后 `/model openai-codex/…` — [Codex](28-openai-codex.md) |
 
 模型 id 多为 `platform/model`（例如 `openrouter/anthropic/claude-sonnet-4.5`）。
@@ -31,8 +32,8 @@ Hyper 的线协议只认真支持少数几种 HTTP API：
 
 | 后端 | 常见厂商 |
 |------|----------|
-| **Chat Completions** | openrouter、groq、together、fireworks、deepseek、ollama、moonshot 等 |
-| **Messages**（Anthropic 风格） | anthropic、kimi-code（默认）、部分 MiniMax / Fireworks Messages 行 |
+| **Chat Completions** | openrouter、groq、together、fireworks、deepseek、ollama、moonshot、OpenCode Go 的 chat 模型等 |
+| **Messages**（Anthropic 风格） | anthropic、kimi-code（默认）、OpenCode Go 的 MiniMax/Qwen 模型、部分 Fireworks 模型 |
 | **Responses** | openai（BYOK）、openai-codex（ChatGPT OAuth） |
 
 **社区版不打算做 Google AI Studio / Vertex、Amazon Bedrock、Azure 管理面、GitHub Copilot OAuth 的一等公民原生客户端**：它们需要不同的请求体、订阅产品接线，以及我们目前没有的 OAuth 体系。
@@ -49,7 +50,7 @@ Hyper 的线协议只认真支持少数几种 HTTP API：
 
 内嵌 **platform catalog**（约 460 行第三方，多数为 chat_completions），大量从 Pi 开源表同步；SpaceXAI 默认在 `default_models.json`。
 
-**注册平台**：openai、anthropic、kimi-code（OAuth）、moonshot-*、deepseek、groq、mistral、xai-direct、together、fireworks、openrouter、nvidia、ollama、cerebras、minimax-*、zai-*、openai-codex（OAuth）等。
+**注册平台**：openai、anthropic、kimi-code（OAuth）、openai-codex（OAuth）、opencode-go（订阅 API key）、moonshot-*、deepseek、groq、mistral、xai-direct、together、fireworks、openrouter、nvidia、ollama、cerebras、minimax-*、zai-* 等。
 
 只有**已注册且有凭据**的平台，模型才真正可用。
 
@@ -116,7 +117,7 @@ enabled_models = ["grok-*", "openai-codex/*", "openrouter/anthropic/*"]
 
 1. **一条 OpenRouter**：`/providers openrouter <key>`  
 2. **官方 API Key**：`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`  
-3. **订阅**：`/login openai`、`/login kimi`  
+3. **订阅**：`/login openai`、`/login kimi`；OpenCode Go 用 `/providers opencode-go <key>`
 4. **短名单**：`/scoped-models set …` 后日常 **Alt+]** / **Alt+[**  
 5. **本地 OpenAI 兼容**：`[model.*]` + `base_url`
 

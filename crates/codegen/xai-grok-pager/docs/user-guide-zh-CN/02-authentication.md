@@ -9,6 +9,7 @@ Hyper（以及 Grok Build）支持**多种互不绑定的认证方式**。不必
 | Kimi Code | `hyper login --kimi` / `/login kimi` | Kimi 订阅 |
 | OpenAI Codex（ChatGPT） | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro 编程 |
 | Anthropic Claude | `hyper login --claude` / `/login claude` | Claude Pro/Max 编程 |
+| OpenCode Go | `/providers opencode-go <key>` / `OPENCODE_API_KEY` | Go 订阅模型 |
 | BYOK 平台 | `/providers <platform> <key>` 或环境变量 | OpenAI、Anthropic、OpenRouter、Ollama 等 |
 | 企业 OIDC / SSO | 配置 / 环境变量 | 企业部署 |
 
@@ -27,6 +28,7 @@ Hyper（以及 Grok Build）支持**多种互不绑定的认证方式**。不必
 /login kimi            # Kimi Code OAuth
 /login openai          # ChatGPT Codex OAuth
 /login claude          # Anthropic Claude Pro/Max OAuth
+/providers opencode-go <key>  # OpenCode Go 订阅
 /providers openrouter <key>
 /providers anthropic <key>
 /model openrouter/...
@@ -103,6 +105,31 @@ grok
 ```
 
 无活动会话令牌时，Grok 会回退到 API Key。若已交互登录，存储的会话令牌优先。要回退到 API Key，运行 `hyper logout`（仅 xAI 会话）或删除 `~/.grok/auth.json` 中的相关范围。
+
+---
+
+## OpenCode Go 订阅
+
+OpenCode Go 虽然是订阅产品，但官方文档中的客户端连接方式是 **Console 签发的 API key**，不是可移植的供应商 OAuth：
+
+1. 在 <https://opencode.ai/go> 登录并订阅。
+2. 从 OpenCode Console 复制 API key。
+3. 保存到 Hyper：
+
+```text
+/providers opencode-go <api_key>
+/model opencode-go/kimi-k3
+```
+
+也可以通过环境变量提供：
+
+```bash
+export OPENCODE_API_KEY="..."
+```
+
+TUI 粘贴的 key 会保存在 `~/.grok/auth.json` 的 `platform/opencode-go` scope；用 `/providers clear opencode-go` 清除。内置目录跟随当前未废弃的 OpenCode Go 模型，并按官方元数据分别路由到 OpenAI Chat Completions 或 Anthropic Messages 端点。
+
+`/login opencode-go` 会明确显示上述引导，而不会复用 OpenCode CLI 尚未作为第三方契约公开的专用 device client 身份；现有四类交互式 OAuth 登录保持不变。
 
 ---
 

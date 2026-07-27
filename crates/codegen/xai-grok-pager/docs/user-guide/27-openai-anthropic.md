@@ -1,9 +1,10 @@
-# Multi-provider catalog (official Pi)
+# Multi-provider catalog (Pi + models.dev)
 
-Grok’s third-party model catalog is generated from the official
+Most of Grok’s third-party model catalog is generated from the official
 [earendil-works/pi](https://github.com/earendil-works/pi) package
 `@earendil-works/pi-ai` (`packages/ai/src/providers/data/*.json` after
-`npm run generate-models`).
+`npm run generate-models`). OpenCode Go rows come from the official
+[models.dev](https://models.dev) `opencode-go` provider metadata.
 
 **~400+ tool-capable models**, keys `{platform}/{model_id}`. No separate
 gateway process — each platform talks to the vendor API with Grok’s existing
@@ -16,6 +17,7 @@ gateway process — each platform talks to the vendor API with Grok’s existing
 | `openai` | `OPENAI_API_KEY` | `api.openai.com/v1` | Responses (most models) |
 | `anthropic` | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | `api.anthropic.com/v1` | Messages; Claude Code `ANTHROPIC_BASE_URL` gateways supported |
 | `kimi-code` | OAuth `login --kimi` | `api.kimi.com/coding/v1` | **Messages** + adaptive thinking (Pi official) |
+| `opencode-go` | `OPENCODE_API_KEY` | `opencode.ai/zen/go/v1` | Go subscription; per-model Chat Completions or Messages |
 | `moonshot-cn` / `moonshot-ai` | `GROK_MOONSHOT_*` | moonshot.cn / .ai | Chat Completions |
 | `deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com` | |
 | `groq` | `GROQ_API_KEY` | `api.groq.com/openai/v1` | |
@@ -42,11 +44,13 @@ Also see [25-moonshot-providers.md](25-moonshot-providers.md) and
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENROUTER_API_KEY=sk-or-...
+export OPENCODE_API_KEY=...   # OpenCode Go subscription
 
 ./target/debug/hyper models | head
 ./target/debug/hyper -m openai/gpt-5 -p "ping"
 ./target/debug/hyper -m anthropic/claude-sonnet-4-5 -p "ping"
 ./target/debug/hyper -m openrouter/openai/gpt-4o -p "ping"
+./target/debug/hyper -m opencode-go/kimi-k3 -p "ping"
 ```
 
 ```toml

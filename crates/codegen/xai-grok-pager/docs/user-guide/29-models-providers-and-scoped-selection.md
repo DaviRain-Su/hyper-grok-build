@@ -19,6 +19,7 @@ How Hyper lists models, how that compares to [Pi](https://github.com/earendil-wo
 | Hard allowlist | `[models] allowed_models = […]` (blocks non-matches) |
 | Custom / local | `[model.<name>]` sections — see [Custom Models](11-custom-models.md) |
 | Platform API key | `/providers <platform> <key>` |
+| OpenCode Go | `/providers opencode-go <key>` then `/model opencode-go/…` |
 | ChatGPT Codex models | `/login openai` then `/model openai-codex/…` — [Codex](28-openai-codex.md) |
 
 Model ids are usually `platform/model` (for example `openrouter/anthropic/claude-sonnet-4.5`, `openai/gpt-5`).
@@ -31,8 +32,8 @@ Hyper’s wire layer speaks a small set of HTTP APIs:
 
 | Backend | Typical providers |
 |---------|-------------------|
-| **Chat Completions** (`/v1/chat/completions`) | openrouter, groq, together, fireworks, deepseek, ollama, moonshot, … |
-| **Messages** (Anthropic-style `/v1/messages`) | anthropic, kimi-code (default), some MiniMax / Fireworks Messages rows |
+| **Chat Completions** (`/v1/chat/completions`) | openrouter, groq, together, fireworks, deepseek, ollama, moonshot, OpenCode Go chat rows, … |
+| **Messages** (Anthropic-style `/v1/messages`) | anthropic, kimi-code (default), OpenCode Go MiniMax/Qwen rows, some Fireworks rows |
 | **Responses** | openai (BYOK), openai-codex (ChatGPT OAuth) |
 
 **We do not plan first-class native clients for Google AI Studio / Vertex, Amazon Bedrock, Azure OpenAI admin APIs, or GitHub Copilot OAuth** in the community build: those need different request shapes, subscription product wiring, and/or OAuth stacks Hyper does not own today.
@@ -49,7 +50,7 @@ If a vendor only speaks a proprietary API with no OpenAI- or Messages-compatible
 
 Hyper embeds a **platform catalog** (`platform_catalog.json`, ~460 third-party rows, mostly chat_completions) largely synced from Pi’s open model data, plus SpaceXAI defaults in `default_models.json`.
 
-**Registry platforms** (API key or OAuth as noted): openai, anthropic, kimi-code (OAuth), moonshot-*, deepseek, groq, mistral, xai-direct, together, fireworks, openrouter, nvidia, ollama, cerebras, minimax-*, zai-*, openai-codex (OAuth).
+**Registry platforms** (API key or OAuth as noted): openai, anthropic, kimi-code (OAuth), openai-codex (OAuth), opencode-go (subscription API key), moonshot-*, deepseek, groq, mistral, xai-direct, together, fireworks, openrouter, nvidia, ollama, cerebras, minimax-*, zai-*.
 
 A model only shows as **usable** when the platform is registered and credentials exist (env, `/providers`, or `/login`).
 
@@ -126,8 +127,9 @@ enabled_models = ["grok-*", "openai-codex/*", "openrouter/anthropic/*"]
    ```
 3. **Subscriptions**  
    ```text
-   /login openai    # Codex
+   /login openai    # Codex OAuth
    /login kimi
+   /providers opencode-go <key>  # OpenCode Go uses a subscription API key
    ```
 4. **Scoped shortlist**  
    ```text

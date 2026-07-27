@@ -14096,6 +14096,150 @@ default = "grok-4.5"
 
     #[test]
     #[serial]
+    fn opencode_go_api_key_unlocks_chat_and_messages_models_with_correct_auth() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+        let _key = EnvGuard::set(xai_grok_models::OPENCODE_API_KEY_ENV, "oc-test-key");
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+
+        let opencode_go: Vec<_> = models
+            .iter()
+            .filter(|(id, _)| id.starts_with("opencode-go/"))
+            .collect();
+        assert_eq!(opencode_go.len(), 16);
+        let mut chat_count = 0;
+        let mut messages_count = 0;
+        for (id, model) in opencode_go {
+            assert!(model.info.supported_in_api, "{id} must be unlocked");
+            assert!(model.has_own_credentials(), "{id} must resolve the key");
+            assert!(
+                !model.info.supports_reasoning_effort,
+                "{id} must not expose an undocumented effort menu"
+            );
+            match &model.info.api_backend {
+                ApiBackend::ChatCompletions => {
+                    chat_count += 1;
+                    assert_eq!(model.info.auth_scheme, AuthScheme::Bearer, "{id}");
+                    assert!(
+                        !model
+                            .info
+                            .extra_headers
+                            .keys()
+                            .any(|name| name.eq_ignore_ascii_case("anthropic-version")),
+                        "{id} must not send an Anthropic version header"
+                    );
+                }
+                ApiBackend::Messages => {
+                    messages_count += 1;
+                    assert_eq!(model.info.auth_scheme, AuthScheme::XApiKey, "{id}");
+                    assert_eq!(
+                        model
+                            .info
+                            .extra_headers
+                            .get("anthropic-version")
+                            .map(String::as_str),
+                        Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE),
+                        "{id}"
+                    );
+                }
+                other => panic!("{id} has unexpected backend {other:?}"),
+            }
+        }
+        assert_eq!(chat_count, 11);
+        assert_eq!(messages_count, 5);
+
+        let chat = models
+            .get("opencode-go/deepseek-v4-flash")
+            .expect("OpenCode Go Chat Completions model");
+        assert!(chat.info.supported_in_api);
+        assert!(chat.has_own_credentials());
+        assert_eq!(chat.info.api_backend, ApiBackend::ChatCompletions);
+        assert_eq!(chat.info.auth_scheme, AuthScheme::Bearer);
+        assert!(!chat.info.supports_reasoning_effort);
+        let chat_config = sampling_config_for_model(
+            chat,
+            resolve_credentials(chat, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(chat_config.api_key.as_deref(), Some("oc-test-key"));
+        assert_eq!(
+            chat_config.base_url,
+            xai_grok_models::OPENCODE_GO_BASE_URL_DEFAULT
+        );
+        assert_eq!(chat_config.auth_scheme, AuthScheme::Bearer);
+        assert_eq!(
+            xai_grok_sampler::SamplingClient::new(chat_config)
+                .expect("OpenCode Go chat client")
+                .auth_info()
+                .auth_type,
+            "bearer"
+        );
+
+        let messages = models
+            .get("opencode-go/minimax-m3")
+            .expect("OpenCode Go Messages model");
+        assert!(messages.info.supported_in_api);
+        assert!(messages.has_own_credentials());
+        assert_eq!(messages.info.api_backend, ApiBackend::Messages);
+        assert_eq!(messages.info.auth_scheme, AuthScheme::XApiKey);
+        assert!(!messages.info.supports_reasoning_effort);
+        assert_eq!(
+            messages
+                .info
+                .extra_headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE)
+        );
+        let messages_config = sampling_config_for_model(
+            messages,
+            resolve_credentials(messages, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(messages_config.api_key.as_deref(), Some("oc-test-key"));
+        assert_eq!(
+            messages_config.base_url,
+            xai_grok_models::OPENCODE_GO_BASE_URL_DEFAULT
+        );
+        assert_eq!(messages_config.auth_scheme, AuthScheme::XApiKey);
+        assert_eq!(messages_config.api_backend, ApiBackend::Messages);
+        assert_eq!(
+            xai_grok_sampler::SamplingClient::new(messages_config)
+                .expect("OpenCode Go Messages client")
+                .auth_info()
+                .auth_type,
+            "x-api-key"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn opencode_go_models_remain_locked_without_api_key() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let models = resolve_model_list(&cfg, None);
+
+        let opencode_go: Vec<_> = models
+            .iter()
+            .filter(|(id, _)| id.starts_with("opencode-go/"))
+            .collect();
+        assert_eq!(opencode_go.len(), 16);
+        for (id, model) in opencode_go {
+            assert!(!model.info.supported_in_api, "{id} must stay locked");
+            assert!(!model.has_own_credentials(), "{id} must have no credential");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn apply_platform_credentials_reveals_with_bearer() {
         let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();

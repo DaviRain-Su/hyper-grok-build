@@ -1,9 +1,10 @@
-# 多提供方目录（官方 Pi）
+# 多提供方目录（Pi + models.dev）
 
-Grok 的第三方模型目录由官方
+Grok 的大部分第三方模型目录由官方
 [earendil-works/pi](https://github.com/earendil-works/pi) 包
 `@earendil-works/pi-ai` 生成（在 `npm run generate-models` 之后位于
-`packages/ai/src/providers/data/*.json`）。
+`packages/ai/src/providers/data/*.json`）。OpenCode Go 条目来自官方
+[models.dev](https://models.dev) 的 `opencode-go` provider 元数据。
 
 **约 400+ 个支持工具调用的模型**，键为 `{platform}/{model_id}`。无需单独的
 网关进程——各平台通过 Grok 现有的
@@ -16,6 +17,7 @@ Grok 的第三方模型目录由官方
 | `openai` | `OPENAI_API_KEY` | `api.openai.com/v1` | Responses（大多数模型） |
 | `anthropic` | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | `api.anthropic.com/v1` | Messages；支持 Claude Code `ANTHROPIC_BASE_URL` 网关 |
 | `kimi-code` | OAuth `login --kimi` | `api.kimi.com/coding/v1` | **Messages** + 自适应 thinking（Pi 官方） |
+| `opencode-go` | `OPENCODE_API_KEY` | `opencode.ai/zen/go/v1` | Go 订阅；按模型使用 Chat Completions 或 Messages |
 | `moonshot-cn` / `moonshot-ai` | `GROK_MOONSHOT_*` | moonshot.cn / .ai | Chat Completions |
 | `deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com` | |
 | `groq` | `GROQ_API_KEY` | `api.groq.com/openai/v1` | |
@@ -41,11 +43,13 @@ Grok 的第三方模型目录由官方
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENROUTER_API_KEY=sk-or-...
+export OPENCODE_API_KEY=...   # OpenCode Go 订阅
 
 ./target/debug/hyper models | head
 ./target/debug/hyper -m openai/gpt-5 -p "ping"
 ./target/debug/hyper -m anthropic/claude-sonnet-4-5 -p "ping"
 ./target/debug/hyper -m openrouter/openai/gpt-4o -p "ping"
+./target/debug/hyper -m opencode-go/kimi-k3 -p "ping"
 ```
 
 ```toml

@@ -36,6 +36,18 @@
       "live_models_list": true
     },
     {
+      "platform": "opencode-go",
+      "pi_id": "opencode-go",
+      "base_url": "https://opencode.ai/zen/go/v1",
+      "env_keys": [
+        "GROK_OPENCODE_GO_API_KEY",
+        "OPENCODE_API_KEY"
+      ],
+      "uses_x_api_key": false,
+      "uses_oauth": false,
+      "live_models_list": false
+    },
+    {
       "platform": "moonshot-ai",
       "pi_id": "moonshotai",
       "base_url": "https://api.moonshot.ai/v1",
