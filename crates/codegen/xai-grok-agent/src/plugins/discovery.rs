@@ -156,6 +156,8 @@ pub struct DiscoveredPlugin {
     pub mcp_config_path: Option<PathBuf>,
     /// Resolved LSP config file path.
     pub lsp_config_path: Option<PathBuf>,
+    /// Resolved WASM extension module path (`extension.wasm` / manifest runtime).
+    pub runtime_wasm: Option<PathBuf>,
     /// Warning message when this plugin won a name collision.
     pub conflict: Option<String>,
 }
@@ -672,6 +674,7 @@ fn collect_plugin(
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+            runtime: None,
             }
         }
         Err(e) => {
@@ -706,6 +709,7 @@ fn collect_plugin(
     let hooks_path = manifest.hooks_path(plugin_root);
     let mcp_config_path = manifest.mcp_config_path(plugin_root);
     let lsp_config_path = manifest.lsp_config_path(plugin_root);
+    let runtime_wasm = manifest.runtime_wasm_path(plugin_root);
 
     candidates.push(DiscoveredPlugin {
         manifest,
@@ -721,6 +725,7 @@ fn collect_plugin(
         hooks_path,
         mcp_config_path,
         lsp_config_path,
+        runtime_wasm,
         conflict: None,
     });
 }

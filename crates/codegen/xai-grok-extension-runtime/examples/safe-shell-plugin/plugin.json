@@ -1,0 +1,10 @@
+{
+  "name": "safe-shell-wasm",
+  "version": "0.1.0",
+  "description": "Phase 1 WASM example: deny tool inputs containing 'rm -rf' (core-wasm bootstrap ABI)",
+  "runtime": {
+    "wasm": "extension.wasm",
+    "wit": "hyper:extension@0.1.0",
+    "capabilities": ["pre_tool_gate"]
+  }
+}

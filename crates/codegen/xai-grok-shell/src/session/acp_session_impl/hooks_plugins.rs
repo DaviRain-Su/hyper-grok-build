@@ -844,6 +844,26 @@ impl SessionActor {
         // Update session's plugin registry snapshot
         *self.plugin_registry.borrow_mut() = new_registry_snapshot.clone();
 
+        // Rebuild WASM extension runtime from trusted/enabled plugins.
+        {
+            let mut rt = self.extension_runtime.borrow_mut();
+            let specs = new_registry_snapshot
+                .as_ref()
+                .map(|reg| {
+                    reg.active_plugins()
+                        .into_iter()
+                        .filter_map(|p| p.extension_spec())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            rt.rebuild_from_specs(specs);
+            tracing::info!(
+                session_id = %sid,
+                wasm_extensions = rt.len(),
+                "extension runtime rebuilt from plugin registry"
+            );
+        }
+
         // Reload hooks in the current session
         let t_hooks = std::time::Instant::now();
         let mut hooks_reloaded = 0usize;

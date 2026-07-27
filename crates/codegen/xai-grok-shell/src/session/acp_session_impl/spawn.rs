@@ -1731,6 +1731,17 @@ pub(crate) async fn spawn_session_actor(
         hook_load_errors: std::cell::RefCell::new(_hook_load_errors),
         plugin_registry: std::cell::RefCell::new(plugin_registry.clone()),
         plugin_registry_handle,
+        extension_runtime: std::cell::RefCell::new({
+            let mut rt = xai_grok_extension_runtime::ExtensionRuntime::new();
+            if let Some(ref reg) = plugin_registry {
+                let specs = reg
+                    .active_plugins()
+                    .into_iter()
+                    .filter_map(|p| p.extension_spec());
+                rt.rebuild_from_specs(specs);
+            }
+            rt
+        }),
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),

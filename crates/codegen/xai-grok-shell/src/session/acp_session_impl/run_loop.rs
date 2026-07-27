@@ -1822,6 +1822,26 @@ pub(super) async fn run_session(
                                 .await;
                                 session.send_hook_execution("session_start", None, None, &results).await;
                             }
+                            // WASM guests after shell hooks (observe / fail-open).
+                            let wasm_results = session
+                                .extension_runtime
+                                .borrow()
+                                .clone()
+                                .dispatch_session_start()
+                                .await;
+                            for r in &wasm_results {
+                                if let xai_grok_extension_runtime::GuestCallResult::Failed {
+                                    extension,
+                                    error,
+                                } = r
+                                {
+                                    tracing::warn!(
+                                        extension = %extension,
+                                        error = %error,
+                                        "wasm extension session_start failed (fail-open)"
+                                    );
+                                }
+                            }
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
                             let s = session.clone();

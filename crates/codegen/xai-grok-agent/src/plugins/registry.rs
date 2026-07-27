@@ -73,6 +73,12 @@ pub struct LoadedPlugin {
     pub inline_mcp_servers: Option<serde_json::Value>,
     /// Inline LSP servers JSON from manifest (when defined inline, not file-based).
     pub inline_lsp_servers: Option<serde_json::Value>,
+    /// Absolute path to the plugin's WASM extension module, if present.
+    pub runtime_wasm: Option<PathBuf>,
+    /// Capability strings from `plugin.json` `runtime.capabilities`.
+    pub runtime_capabilities: Vec<String>,
+    /// Whether a WASM runtime module was discovered.
+    pub has_runtime: bool,
     /// Warning if this plugin won a name collision with another plugin.
     pub conflict: Option<String>,
 }
@@ -93,6 +99,26 @@ impl LoadedPlugin {
     /// Plugin data dir path as a string (for env var substitution).
     pub fn data_dir_str(&self) -> String {
         self.data_dir().to_string_lossy().to_string()
+    }
+
+    /// Build an [`xai_grok_extension_api::ExtensionSpec`] when this plugin is
+    /// enabled, trusted, and has a wasm module.
+    pub fn extension_spec(&self) -> Option<xai_grok_extension_api::ExtensionSpec> {
+        if !self.enabled || !self.trusted {
+            return None;
+        }
+        let wasm_path = self.runtime_wasm.clone()?;
+        let capabilities = self
+            .runtime_capabilities
+            .iter()
+            .filter_map(|s| xai_grok_extension_api::Capability::parse(s))
+            .collect();
+        Some(xai_grok_extension_api::ExtensionSpec {
+            name: self.name.clone(),
+            wasm_path,
+            capabilities,
+            trusted: true,
+        })
     }
 }
 
@@ -172,6 +198,16 @@ impl PluginRegistry {
             let inline_hooks = dp.manifest.inline_hooks().cloned();
             let inline_mcp_servers = dp.manifest.inline_mcp_servers().cloned();
             let inline_lsp_servers = dp.manifest.inline_lsp_servers().cloned();
+            // Convention-only extension.wasm without a runtime block loads with
+            // no capabilities (observe-only until declared in plugin.json).
+            let runtime_capabilities = dp
+                .manifest
+                .runtime
+                .as_ref()
+                .map(|r| r.capabilities.clone())
+                .unwrap_or_default();
+            let runtime_wasm = dp.runtime_wasm.clone();
+            let has_runtime = runtime_wasm.is_some();
 
             // Determine enabled status.
             // Every plugin should be in either the `enabled` or `disabled` list
@@ -214,6 +250,9 @@ impl PluginRegistry {
                 inline_hooks,
                 inline_mcp_servers,
                 inline_lsp_servers,
+                runtime_wasm,
+                runtime_capabilities,
+                has_runtime,
                 conflict: dp.conflict,
             };
 
@@ -647,6 +686,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+            runtime: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),
@@ -665,6 +705,7 @@ mod tests {
             hooks_path: None,
             mcp_config_path: None,
             lsp_config_path: None,
+            runtime_wasm: None,
             conflict: None,
         }
     }

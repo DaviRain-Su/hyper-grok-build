@@ -938,6 +938,11 @@ pub(crate) struct SessionActor {
     /// Shared handle to the agent-level plugin registry.
     /// Used by `/plugins reload` to trigger a rebuild that new sessions see.
     pub(crate) plugin_registry_handle: Option<xai_grok_agent::plugins::SharedPluginRegistryHandle>,
+    /// WASM extension runtime rebuilt from trusted, enabled plugins that ship
+    /// `extension.wasm` (see `docs/design-wasm-extensions.md`). Single-threaded
+    /// session actor: `RefCell` is sufficient.
+    pub(crate) extension_runtime:
+        std::cell::RefCell<xai_grok_extension_runtime::ExtensionRuntime>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.
     pub(crate) events: crate::session::events::EventTracker,

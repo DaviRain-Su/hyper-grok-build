@@ -226,6 +226,9 @@ mod tests {
             inline_hooks: None,
             inline_mcp_servers: None,
             inline_lsp_servers: None,
+            runtime_wasm: None,
+            runtime_capabilities: vec![],
+            has_runtime: false,
             conflict: None,
         }
     }

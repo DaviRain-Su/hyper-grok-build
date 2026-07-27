@@ -1031,6 +1031,7 @@ enabled = false
                 "sentry": { "type": "http", "url": "https://mcp.sentry.dev/mcp" }
             }))),
             lsp_servers: None,
+        runtime: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
         let dp = DiscoveredPlugin {
@@ -1047,6 +1048,7 @@ enabled = false
             hooks_path: None,
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
+            runtime_wasm: None,
             conflict: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["sentry".to_string()]);
@@ -1099,6 +1101,7 @@ enabled = false
                 "sentry": { "type": "http", "url": "https://inline.example/mcp" }
             }))),
             lsp_servers: None,
+        runtime: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "sentry");
         let dp = DiscoveredPlugin {
@@ -1115,6 +1118,7 @@ enabled = false
             hooks_path: None,
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
+            runtime_wasm: None,
             conflict: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["sentry".to_string()]);
@@ -1173,6 +1177,7 @@ enabled = false
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+        runtime: None,
         };
         let id = PluginId::new(PluginScope::User, &plugin_root, "slack");
         let dp = DiscoveredPlugin {
@@ -1189,6 +1194,7 @@ enabled = false
             hooks_path: None,
             mcp_config_path: Some(mcp_json),
             lsp_config_path: None,
+            runtime_wasm: None,
             conflict: None,
         };
         let registry = PluginRegistry::from_discovered(vec![dp], &[], &["slack".to_string()]);
