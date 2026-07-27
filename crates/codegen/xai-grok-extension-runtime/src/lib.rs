@@ -8,6 +8,9 @@
 //! | `hyper_ext_on_session_start` | `() -> i32` | `0` = ok |
 //! | `hyper_ext_on_session_end` | `() -> i32` | optional |
 //! | `hyper_ext_on_pre_tool_use` | `() -> i32` | `0` allow, `1` deny |
+//! | `hyper_ext_on_before_agent_start` | `() -> i32` | optional; uses set_inject/set_append |
+//! | `hyper_ext_on_stop` | `() -> i32` | `0` allow stop, `1` block |
+//! | `hyper_ext_on_pre_compact` | `() -> i32` | optional observe |
 //!
 //! Host imports under module `hyper_host` (for gate handlers):
 //!
@@ -17,6 +20,10 @@
 //! | `tool_name_byte` | `(i32) -> i32` | byte at index, or `-1` |
 //! | `input_len` | `() -> i32` | UTF-8 length of tool input JSON |
 //! | `input_byte` | `(i32) -> i32` | byte at index, or `-1` |
+//! | `prompt_len` / `prompt_byte` | | user prompt for before_agent_start |
+//! | `set_inject_context` / `set_append_system` | `(ptr,len)` | guest memory UTF-8 |
+//! | `stop_hook_active` | `() -> i32` | 1 if stop gate already continued |
+//! | `compact_reason_len` / `compact_reason_byte` | | pre_compact reason |
 //!
 //! Component Model + WIT (`hyper:extension@0.1.0`) remains the long-term target.
 //! See `docs/design-wasm-extensions.md`.
@@ -27,8 +34,9 @@ use std::time::Duration;
 
 use xai_grok_extension_api::{
     timeouts, BeforeAgentStartIn, BeforeAgentStartOut, Capability, ContractError, ExtensionSpec,
-    PreToolIn, CORE_ABI_VERSION, EXPORT_ABI_VERSION, EXPORT_ON_BEFORE_AGENT_START,
-    EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START, MAX_INJECT_BYTES,
+    PreCompactIn, PreToolIn, StopIn, StopOut, CORE_ABI_VERSION, EXPORT_ABI_VERSION,
+    EXPORT_ON_BEFORE_AGENT_START, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
+    EXPORT_ON_SESSION_START, EXPORT_ON_STOP, MAX_INJECT_BYTES,
 };
 
 /// Errors from loading or calling a guest.
@@ -67,6 +75,8 @@ struct HostCtx {
     inject_context: String,
     /// Written by guest via `set_append_system`.
     append_system: String,
+    stop_hook_active: bool,
+    compact_reason: String,
 }
 
 /// Per-session registry of loaded extensions.
@@ -100,6 +110,11 @@ impl ExtensionRuntime {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.guests.iter().map(|g| g.name.as_str())
+    }
+
+    /// Whether any loaded guest has the given capability.
+    pub fn has_capability(&self, cap: Capability) -> bool {
+        self.guests.iter().any(|g| g.capabilities.contains(&cap))
     }
 
     /// Replace contents by loading every trusted spec (skips untrusted / load errors).
@@ -196,6 +211,83 @@ impl ExtensionRuntime {
             out: merged.truncated(),
             results,
         }
+    }
+
+    /// Stop gate: first block wins among guests with [`Capability::StopGate`].
+    pub async fn dispatch_stop(&self, input: &StopIn) -> StopDispatch {
+        let mut results = Vec::new();
+        #[cfg(feature = "wasm")]
+        for guest in &self.guests {
+            if !guest.capabilities.contains(&Capability::StopGate) {
+                results.push((
+                    guest.name.clone(),
+                    GuestCallResult::SkippedCapability {
+                        extension: guest.name.clone(),
+                        capability: Capability::StopGate,
+                    },
+                ));
+                continue;
+            }
+            let host = HostCtx {
+                stop_hook_active: input.stop_hook_active,
+                ..HostCtx::default()
+            };
+            let (r, _) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::Stop, timeouts::GATE, host)
+                .await;
+            let blocked = matches!(&r, GuestCallResult::Ok { code: 1, .. });
+            let name = guest.name.clone();
+            results.push((name.clone(), r));
+            if blocked {
+                return StopDispatch {
+                    decision: StopOut::Block {
+                        reason: format!("blocked by wasm extension `{name}`"),
+                    },
+                    results,
+                };
+            }
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = input;
+            let _ = &results;
+        }
+        StopDispatch {
+            decision: StopOut::Continue,
+            results,
+        }
+    }
+
+    /// Pre-compact observe (no rewrite in Phase 3).
+    pub async fn dispatch_pre_compact(&self, input: &PreCompactIn) -> Vec<GuestCallResult> {
+        let mut out = Vec::new();
+        #[cfg(feature = "wasm")]
+        for guest in &self.guests {
+            let host = HostCtx {
+                compact_reason: input.reason.clone(),
+                ..HostCtx::default()
+            };
+            let (r, _) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::PreCompact, timeouts::OBSERVE, host)
+                .await;
+            // Missing export is fine (optional handler).
+            if !matches!(
+                &r,
+                GuestCallResult::SkippedExport {
+                    export: EXPORT_ON_PRE_COMPACT,
+                    ..
+                }
+            ) {
+                out.push(r);
+            }
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = input;
+        }
+        out
     }
 
     /// Pre-tool gate: first deny wins among guests with [`Capability::PreToolGate`].
@@ -297,6 +389,8 @@ enum GuestCall {
     SessionEnd,
     PreToolUse,
     BeforeAgentStart,
+    Stop,
+    PreCompact,
 }
 
 /// Outcome of one guest invocation (for UI / scrollback).
@@ -335,6 +429,12 @@ impl BeforeAgentStartDispatch {
     pub fn has_injection(&self) -> bool {
         self.out.inject_context.is_some() || self.out.append_system.is_some()
     }
+}
+
+#[derive(Debug)]
+pub struct StopDispatch {
+    pub decision: StopOut,
+    pub results: Vec<(String, GuestCallResult)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +516,8 @@ impl WasmGuest {
             GuestCall::SessionEnd => EXPORT_ON_SESSION_END,
             GuestCall::PreToolUse => EXPORT_ON_PRE_TOOL_USE,
             GuestCall::BeforeAgentStart => EXPORT_ON_BEFORE_AGENT_START,
+            GuestCall::Stop => EXPORT_ON_STOP,
+            GuestCall::PreCompact => EXPORT_ON_PRE_COMPACT,
         };
 
         let join = tokio::task::spawn_blocking(move || {
@@ -579,6 +681,33 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
                 if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
                     caller.data_mut().append_system = s;
                 }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "stop_hook_active",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
+                i32::from(caller.data().stop_hook_active)
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "compact_reason_len",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
+                caller.data().compact_reason.len() as i32
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "compact_reason_byte",
+            |caller: wasmtime::Caller<'_, HostCtx>, idx: i32| -> i32 {
+                byte_at(&caller.data().compact_reason, idx)
             },
         )
         .map_err(|e| RuntimeError::Module(e.to_string()))?;
@@ -845,6 +974,33 @@ mod tests {
         assert!(inj.contains("[wasm:policy]"), "{inj}");
         let app = d.out.append_system.unwrap();
         assert!(app.contains("ext-system-note"), "{app}");
+    }
+
+    const STOP_BLOCK_GUEST: &str = r#"
+        (module
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_stop") (result i32)
+            i32.const 1)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn stop_gate_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "stop.wasm", STOP_BLOCK_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("stopper", path, vec![Capability::StopGate]))
+            .unwrap();
+        assert!(rt.has_capability(Capability::StopGate));
+        let d = rt
+            .dispatch_stop(&StopIn {
+                stop_hook_active: false,
+            })
+            .await;
+        assert!(matches!(d.decision, StopOut::Block { .. }));
     }
 
     #[test]

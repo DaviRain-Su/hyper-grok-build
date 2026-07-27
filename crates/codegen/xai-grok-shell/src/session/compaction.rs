@@ -939,6 +939,17 @@ impl SessionActor {
             None,
         )
         .await;
+        // WASM pre_compact observe (no rewrite in Phase 3).
+        {
+            let ext_rt = self.extension_runtime.borrow().clone();
+            if !ext_rt.is_empty() {
+                let _ = ext_rt
+                    .dispatch_pre_compact(&xai_grok_extension_api::PreCompactIn {
+                        reason: compact_source.to_string(),
+                    })
+                    .await;
+            }
+        }
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
         let (conv_len, system_message, full_conversation) = tokio::join!(

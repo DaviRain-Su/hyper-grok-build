@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **Phase 2 落地**（before_agent_start inject 经 system-reminder；Component Model 仍后续） |
+| 状态 | **Phase 3 落地**（stop/pre_compact/session_end + validate + user-guide；Component Model 仍后续） |
 | 日期 | 2026-07-28 |
 | 动机 | 让第三方/团队在**不重编 Hyper 核心**的前提下扩展 agent 行为；对齐 Pi 的 Extension 哲学，guest 格式用 WASM |
 | 对标 | [Pi Extensions](https://pi.dev/)（TS ExtensionAPI + lifecycle events）；本仓库 [competitive-analysis.md](docs/competitive-analysis.md) §3.4 / A13 |
@@ -365,7 +365,7 @@ world extension {
 - [x] **`pre_tool_use` deny**：shell hooks 之后跑 wasm（`tool_calls.rs`）；host imports 传 tool input  
 - [x] 示例：`xai-grok-extension-runtime/examples/safe-shell-plugin/`（`.wat` + `plugin.json`）  
 - [x] **验收：** unit 测 deny `rm -rf`；trap fail-open；未 trust 不加载  
-- [ ] session_end 尚未挂（可选）  
+- [x] session_end 已挂（channel close + shutdown）  
 - [ ] Component Model / wit-bindgen 仍为后续
 
 ### Phase 2 — 像 Pi 的注入
@@ -374,16 +374,17 @@ world extension {
 - [x] inject_context → `push_system_reminder`；append_system → `<system-extension>` tag  
 - [x] guest ABI：`hyper_ext_on_before_agent_start` + `set_inject_context` / `set_append_system`（guest memory）  
 - [x] capability `before_agent_inject`；多 guest 顺序拼接 + `[wasm:name]` 前缀  
-- [ ] `stop` gate 可选（未做）  
-- [ ] `pre_compact` observe（未做）  
-- [x] **验收：** unit 测 inject/append 回写；shell check 通过 
+- [x] `stop` gate（`stop_gate` + `run_stop_gate`）  
+- [x] `pre_compact` observe  
+- [x] **验收：** unit 测 inject/append/stop；shell check 通过  
 
 ### Phase 3 — 开发者体验
 
-- [ ] `hyper extension init` 模板（Rust guest）  
-- [ ] `plugin validate` 检查 wasm + wit 版本  
-- [ ] 文档：user-guide「写 WASM 扩展」+ 与 hooks/MCP 选型表  
-- [ ] 回写 competitive-analysis A13 → design/building  
+- [ ] `hyper extension init` 模板（Rust guest）— 暂缓；WAT 示例足够起步  
+- [x] `grok plugin validate` 检查 wasm 魔数、WIT、capabilities  
+- [x] 文档：user-guide `31-wasm-extensions.md` + plugins 交叉引用  
+- [x] 回写 competitive-analysis A13 → building（Phase 3）  
+
 
 ### Phase 4+（不在本设计强制范围）
 

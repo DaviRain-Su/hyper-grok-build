@@ -264,7 +264,11 @@ impl SessionActor {
             .as_ref()
             .is_some_and(|r| r.has_enabled_hooks_for_canonical(event));
         let has_client_hooks = self.client_hooks.borrow().contains_key(&event);
-        if !has_file_hooks && !has_client_hooks {
+        let has_wasm_stop = self
+            .extension_runtime
+            .borrow()
+            .has_capability(xai_grok_extension_api::Capability::StopGate);
+        if !has_file_hooks && !has_client_hooks && !has_wasm_stop {
             return StopGateDecision::AllowStop;
         }
         // At the cap no hook is consulted or notified for this forced stop,
@@ -323,15 +327,32 @@ impl SessionActor {
             return StopGateDecision::AllowStop;
         }
 
-        if !result.wants_continuation() {
-            return StopGateDecision::AllowStop;
+        if result.wants_continuation() {
+            self.announce_keep_working(&result.blocks, &result.additional_context)
+                .await;
+            return StopGateDecision::KeepWorking {
+                feedback: format_stop_feedback(&result.blocks, &result.additional_context),
+            };
         }
 
-        self.announce_keep_working(&result.blocks, &result.additional_context)
-            .await;
-        StopGateDecision::KeepWorking {
-            feedback: format_stop_feedback(&result.blocks, &result.additional_context),
+        // Shell/HTTP/client hooks allowed stop; wasm may still block.
+        let ext_rt = self.extension_runtime.borrow().clone();
+        if ext_rt.has_capability(xai_grok_extension_api::Capability::StopGate) {
+            let wasm = ext_rt
+                .dispatch_stop(&xai_grok_extension_api::StopIn {
+                    stop_hook_active: continuations_this_turn > 0,
+                })
+                .await;
+            if let xai_grok_extension_api::StopOut::Block { reason } = wasm.decision {
+                self.send_hook_annotation(&format!(
+                    "\u{21a9} Stop blocked by wasm extension, continuing: {reason}"
+                ))
+                .await;
+                return StopGateDecision::KeepWorking { feedback: reason };
+            }
         }
+
+        StopGateDecision::AllowStop
     }
 
     /// Annotate the scrollback when a stop gate keeps the agent working: one line

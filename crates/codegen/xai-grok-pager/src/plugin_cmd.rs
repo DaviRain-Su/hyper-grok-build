@@ -212,14 +212,16 @@ fn print_component_summary(manifest: &PluginManifest, root: &Path) {
         manifest.mcp_config_path(root).is_some() || manifest.inline_mcp_servers().is_some();
     let has_lsp =
         manifest.lsp_config_path(root).is_some() || manifest.inline_lsp_servers().is_some();
+    let has_runtime = manifest.runtime_wasm_path(root).is_some();
     println!(
-        "  components: {} skill dir(s), {} command dir(s), {} agent dir(s){}{}{}",
+        "  components: {} skill dir(s), {} command dir(s), {} agent dir(s){}{}{}{}",
         skills.len(),
         commands.len(),
         agents.len(),
         if has_hooks { ", hooks" } else { "" },
         if has_mcp { ", MCP servers" } else { "" },
         if has_lsp { ", LSP servers" } else { "" },
+        if has_runtime { ", wasm runtime" } else { "" },
     );
 }
 
@@ -699,18 +701,105 @@ fn cmd_validate(path: &str) -> Result<()> {
                 println!("  description: {d}");
             }
             print_component_summary(&manifest, &root);
+            validate_runtime_section(&manifest, &root)?;
             Ok(())
         }
         Ok(ManifestLoadResult::NotFound) => {
-            println!(
-                "No plugin.json found. Grok discovers skills, agents, and hooks \
-                 automatically from standard directories. A manifest is only needed \
-                 for custom paths or metadata."
-            );
-            Ok(())
+            // Convention-only plugins may still ship extension.wasm.
+            let convention_wasm = root.join("extension.wasm");
+            if convention_wasm.is_file() {
+                println!(
+                    "No plugin.json found. Found convention runtime at {}.",
+                    convention_wasm.display()
+                );
+                println!(
+                    "  tip: add a plugin.json with runtime.capabilities so gate/inject effects apply"
+                );
+                Ok(())
+            } else {
+                println!(
+                    "No plugin.json found. Grok discovers skills, agents, hooks, and optional \
+                     extension.wasm automatically from standard directories. A manifest is only \
+                     needed for custom paths, metadata, or WASM capabilities."
+                );
+                Ok(())
+            }
         }
         Err(e) => bail!("Failed to load manifest: {e}"),
     }
+}
+
+/// Validate optional WASM runtime block (file presence, WIT, capabilities).
+fn validate_runtime_section(manifest: &PluginManifest, root: &Path) -> Result<()> {
+    let Some(ref rt) = manifest.runtime else {
+        if let Some(path) = manifest.runtime_wasm_path(root) {
+            println!(
+                "  runtime: {} (convention; no capabilities — observe-only until declared)",
+                path.display()
+            );
+        }
+        return Ok(());
+    };
+
+    if !xai_grok_extension_api::wit_compatible(&rt.wit) {
+        bail!(
+            "runtime.wit `{}` is not compatible with host {} (expected hyper:extension@0.1.x)",
+            rt.wit,
+            xai_grok_extension_api::WIT_PACKAGE_FULL
+        );
+    }
+
+    let wasm_path = manifest.runtime_wasm_path(root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "runtime.wasm `{}` not found under plugin root (or path escapes the root)",
+            rt.wasm
+        )
+    })?;
+
+    // Magic: \0asm
+    let magic = std::fs::read(&wasm_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", wasm_path.display()))?;
+    if magic.len() < 4 || &magic[..4] != b"\0asm" {
+        bail!(
+            "{} is not a valid WebAssembly binary (missing \\0asm magic)",
+            wasm_path.display()
+        );
+    }
+
+    let caps: Vec<_> = rt
+        .capabilities
+        .iter()
+        .filter_map(|c| xai_grok_extension_api::Capability::parse(c).map(|p| (c.as_str(), p)))
+        .collect();
+    let unknown: Vec<_> = rt
+        .capabilities
+        .iter()
+        .filter(|c| xai_grok_extension_api::Capability::parse(c).is_none())
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        bail!(
+            "unknown runtime.capabilities: {}. Known: pre_tool_gate, before_agent_inject, stop_gate",
+            unknown.join(", ")
+        );
+    }
+
+    println!("  runtime:");
+    println!("    wasm: {}", wasm_path.display());
+    println!("    wit: {} (ok)", rt.wit);
+    if caps.is_empty() {
+        println!("    capabilities: (none — observe-only)");
+    } else {
+        println!(
+            "    capabilities: {}",
+            caps.iter()
+                .map(|(s, _)| *s)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("  runtime validation: ok");
+    Ok(())
 }
 
 fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {

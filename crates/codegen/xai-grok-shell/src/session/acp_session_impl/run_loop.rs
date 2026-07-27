@@ -483,6 +483,12 @@ pub(super) async fn run_session(
                             .await;
                             session.send_hook_execution("session_end", None, None, &results).await;
                         }
+                        let _ = session
+                            .extension_runtime
+                            .borrow()
+                            .clone()
+                            .dispatch_session_end()
+                            .await;
                         session.dispatch_session_end_stop("channel_closed").await;
                         // Channel closed -- run memory session-end hook.
                         let mut session_end_result = "disabled";
@@ -2158,6 +2164,12 @@ pub(super) async fn run_session(
                                 .await;
                                 session.send_hook_execution("session_end", None, None, &results).await;
                             }
+                            let _ = session
+                                .extension_runtime
+                                .borrow()
+                                .clone()
+                                .dispatch_session_end()
+                                .await;
                             session.dispatch_session_end_stop("shutdown").await;
                             // Memory: save session summary before shutdown
                             let mut session_end_result = "disabled";

@@ -37,6 +37,10 @@ pub const EXPORT_ON_PRE_TOOL_USE: &str = "hyper_ext_on_pre_tool_use";
 /// Guest may call `hyper_host.set_inject_context` / `set_append_system` with
 /// pointers into its exported `memory`.
 pub const EXPORT_ON_BEFORE_AGENT_START: &str = "hyper_ext_on_before_agent_start";
+/// Export name: turn stop gate; return `0` continue (allow stop), `1` block.
+pub const EXPORT_ON_STOP: &str = "hyper_ext_on_stop";
+/// Export name: pre-compaction observe; return `0` on success.
+pub const EXPORT_ON_PRE_COMPACT: &str = "hyper_ext_on_pre_compact";
 
 /// Default wall-clock timeouts (design §7.3).
 pub mod timeouts {

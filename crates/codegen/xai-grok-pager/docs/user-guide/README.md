@@ -31,6 +31,7 @@ Customize and extend Grok Build.
 | 8 | [Skills](08-skills.md) | Reusable prompt packages in the SKILL.md format |
 | 9 | [Plugins](09-plugins.md) | Bundle and share skills, commands, agents, hooks, and MCP servers; install from, author, and govern marketplaces (organization controls) |
 | 10 | [Hooks](10-hooks.md) | Lifecycle scripts and HTTP callbacks for pre- and post-tool-use events |
+| 31 | [WASM Extensions](31-wasm-extensions.md) | Pi-style in-process guests: tool gates, inject context, stop gates (wasmtime) |
 | 11 | [Custom Models](11-custom-models.md) | Bring-your-own-key, Ollama, and OpenAI-compatible endpoints |
 | 29 | [Models, Providers, Scoped Selection](29-models-providers-and-scoped-selection.md) | OpenAI-compat stance, catalog, `/scoped-models` + Alt+] cycle |
 | 30 | [OpenAI Prompt Caching](30-openai-prompt-caching.md) | `prompt_cache_key`, retention, `/usage` hit rate (OpenAI only) |
