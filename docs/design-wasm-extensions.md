@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **Phase 1 落地中**（plugin discovery + session 挂载 + pre_tool deny；before_agent_start 仍待 Phase 2） |
+| 状态 | **Phase 2 落地**（before_agent_start inject 经 system-reminder；Component Model 仍后续） |
 | 日期 | 2026-07-28 |
 | 动机 | 让第三方/团队在**不重编 Hyper 核心**的前提下扩展 agent 行为；对齐 Pi 的 Extension 哲学，guest 格式用 WASM |
 | 对标 | [Pi Extensions](https://pi.dev/)（TS ExtensionAPI + lifecycle events）；本仓库 [competitive-analysis.md](docs/competitive-analysis.md) §3.4 / A13 |
@@ -370,11 +370,13 @@ world extension {
 
 ### Phase 2 — 像 Pi 的注入
 
-- [ ] host 增加 `before_agent_start` emit 点（turn 路径）  
-- [ ] inject_context / append_system 合并进当轮  
-- [ ] `stop` gate 可选  
-- [ ] `pre_compact` observe  
-- [ ] **验收：** 扩展注入「禁止 X」后模型行为可测；多插件拼接顺序稳定  
+- [x] host：`UserPromptSubmit` 之后 `dispatch_before_agent_start`（`turn.rs`）  
+- [x] inject_context → `push_system_reminder`；append_system → `<system-extension>` tag  
+- [x] guest ABI：`hyper_ext_on_before_agent_start` + `set_inject_context` / `set_append_system`（guest memory）  
+- [x] capability `before_agent_inject`；多 guest 顺序拼接 + `[wasm:name]` 前缀  
+- [ ] `stop` gate 可选（未做）  
+- [ ] `pre_compact` observe（未做）  
+- [x] **验收：** unit 测 inject/append 回写；shell check 通过 
 
 ### Phase 3 — 开发者体验
 

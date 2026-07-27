@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use xai_grok_extension_api::{
-    timeouts, Capability, ContractError, ExtensionSpec, PreToolIn, CORE_ABI_VERSION,
-    EXPORT_ABI_VERSION, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START,
+    timeouts, BeforeAgentStartIn, BeforeAgentStartOut, Capability, ContractError, ExtensionSpec,
+    PreToolIn, CORE_ABI_VERSION, EXPORT_ABI_VERSION, EXPORT_ON_BEFORE_AGENT_START,
+    EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START, MAX_INJECT_BYTES,
 };
 
 /// Errors from loading or calling a guest.
@@ -60,6 +61,12 @@ pub enum RuntimeError {
 struct HostCtx {
     tool_name: String,
     tool_input: String,
+    /// User prompt for `before_agent_start`.
+    prompt: String,
+    /// Written by guest via `set_inject_context`.
+    inject_context: String,
+    /// Written by guest via `set_append_system`.
+    append_system: String,
 }
 
 /// Per-session registry of loaded extensions.
@@ -141,6 +148,56 @@ impl ExtensionRuntime {
             .await
     }
 
+    /// Before agent start: merge inject/append from guests with
+    /// [`Capability::BeforeAgentInject`]. Trap/timeout = fail-open (no inject).
+    pub async fn dispatch_before_agent_start(
+        &self,
+        input: &BeforeAgentStartIn,
+    ) -> BeforeAgentStartDispatch {
+        let mut merged = BeforeAgentStartOut::default();
+        let mut results = Vec::new();
+        #[cfg(feature = "wasm")]
+        for guest in &self.guests {
+            if !guest.capabilities.contains(&Capability::BeforeAgentInject) {
+                results.push((
+                    guest.name.clone(),
+                    GuestCallResult::SkippedCapability {
+                        extension: guest.name.clone(),
+                        capability: Capability::BeforeAgentInject,
+                    },
+                ));
+                continue;
+            }
+            let host = HostCtx {
+                prompt: input.prompt.clone(),
+                ..HostCtx::default()
+            };
+            let (r, host_out) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::BeforeAgentStart, timeouts::BEFORE_AGENT, host)
+                .await;
+            if matches!(&r, GuestCallResult::Ok { code: 0, .. }) {
+                let piece = BeforeAgentStartOut {
+                    inject_context: non_empty(host_out.inject_context),
+                    append_system: non_empty(host_out.append_system),
+                };
+                // Tag source extension for multi-plugin merge readability.
+                let piece = tag_extension_out(piece, &guest.name);
+                merged = merged.merge_append(piece);
+            }
+            results.push((guest.name.clone(), r));
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = input;
+            let _ = &results;
+        }
+        BeforeAgentStartDispatch {
+            out: merged.truncated(),
+            results,
+        }
+    }
+
     /// Pre-tool gate: first deny wins among guests with [`Capability::PreToolGate`].
     /// Trap/timeout/missing export = fail-open.
     pub async fn dispatch_pre_tool_use(&self, input: &PreToolIn) -> PreToolDispatch {
@@ -161,10 +218,11 @@ impl ExtensionRuntime {
             let host = HostCtx {
                 tool_name: input.tool_name.clone(),
                 tool_input: input.tool_input_json.clone(),
+                ..HostCtx::default()
             };
-            let r = guest
+            let (r, _) = guest
                 .inner
-                .call_with_timeout(GuestCall::PreToolUse, timeouts::GATE, host)
+                .call_with_timeout_host(GuestCall::PreToolUse, timeouts::GATE, host)
                 .await;
             let denied = matches!(&r, GuestCallResult::Ok { code: 1, .. });
             let name = guest.name.clone();
@@ -201,12 +259,11 @@ impl ExtensionRuntime {
         let mut out = Vec::with_capacity(self.guests.len());
         #[cfg(feature = "wasm")]
         for guest in &self.guests {
-            out.push(
-                guest
-                    .inner
-                    .call_with_timeout(call, timeout, HostCtx::default())
-                    .await,
-            );
+            let (r, _) = guest
+                .inner
+                .call_with_timeout_host(call, timeout, HostCtx::default())
+                .await;
+            out.push(r);
         }
         #[cfg(not(feature = "wasm"))]
         {
@@ -216,11 +273,30 @@ impl ExtensionRuntime {
     }
 }
 
+fn non_empty(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn tag_extension_out(mut out: BeforeAgentStartOut, name: &str) -> BeforeAgentStartOut {
+    if let Some(ref mut s) = out.inject_context {
+        *s = format!("[wasm:{name}] {s}");
+    }
+    if let Some(ref mut s) = out.append_system {
+        *s = format!("[wasm:{name}] {s}");
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy)]
 enum GuestCall {
     SessionStart,
     SessionEnd,
     PreToolUse,
+    BeforeAgentStart,
 }
 
 /// Outcome of one guest invocation (for UI / scrollback).
@@ -246,6 +322,19 @@ pub enum PreToolDecision {
 pub struct PreToolDispatch {
     pub decision: PreToolDecision,
     pub results: Vec<(String, GuestCallResult)>,
+}
+
+/// Aggregated inject/append from all capable guests.
+#[derive(Debug, Clone)]
+pub struct BeforeAgentStartDispatch {
+    pub out: BeforeAgentStartOut,
+    pub results: Vec<(String, GuestCallResult)>,
+}
+
+impl BeforeAgentStartDispatch {
+    pub fn has_injection(&self) -> bool {
+        self.out.inject_context.is_some() || self.out.append_system.is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -313,12 +402,12 @@ impl WasmGuest {
         })
     }
 
-    async fn call_with_timeout(
+    async fn call_with_timeout_host(
         &self,
         call: GuestCall,
         limit: Duration,
         host: HostCtx,
-    ) -> GuestCallResult {
+    ) -> (GuestCallResult, HostCtx) {
         let engine = self.engine.clone();
         let module = Arc::clone(&self.module);
         let name = self.name_for_logs.clone();
@@ -326,44 +415,61 @@ impl WasmGuest {
             GuestCall::SessionStart => EXPORT_ON_SESSION_START,
             GuestCall::SessionEnd => EXPORT_ON_SESSION_END,
             GuestCall::PreToolUse => EXPORT_ON_PRE_TOOL_USE,
+            GuestCall::BeforeAgentStart => EXPORT_ON_BEFORE_AGENT_START,
         };
 
         let join = tokio::task::spawn_blocking(move || {
             let mut store = wasmtime::Store::new(&engine, host);
             if let Err(e) = store.set_fuel(10_000_000) {
-                return GuestCallResult::Failed {
-                    extension: name,
-                    error: e.to_string(),
-                };
+                let host = store.into_data();
+                return (
+                    GuestCallResult::Failed {
+                        extension: name,
+                        error: e.to_string(),
+                    },
+                    host,
+                );
             }
             let linker = match build_linker(&engine) {
                 Ok(l) => l,
                 Err(e) => {
-                    return GuestCallResult::Failed {
-                        extension: name,
-                        error: e.to_string(),
-                    };
+                    let host = store.into_data();
+                    return (
+                        GuestCallResult::Failed {
+                            extension: name,
+                            error: e.to_string(),
+                        },
+                        host,
+                    );
                 }
             };
             let instance = match linker.instantiate(&mut store, &module) {
                 Ok(i) => i,
                 Err(e) => {
-                    return GuestCallResult::Failed {
-                        extension: name,
-                        error: e.to_string(),
-                    };
+                    let host = store.into_data();
+                    return (
+                        GuestCallResult::Failed {
+                            extension: name,
+                            error: e.to_string(),
+                        },
+                        host,
+                    );
                 }
             };
             let func = match instance.get_typed_func::<(), i32>(&mut store, export) {
                 Ok(f) => f,
                 Err(_) => {
-                    return GuestCallResult::SkippedExport {
-                        extension: name,
-                        export,
-                    };
+                    let host = store.into_data();
+                    return (
+                        GuestCallResult::SkippedExport {
+                            extension: name,
+                            export,
+                        },
+                        host,
+                    );
                 }
             };
-            match func.call(&mut store, ()) {
+            let result = match func.call(&mut store, ()) {
                 Ok(code) => GuestCallResult::Ok {
                     extension: name,
                     code,
@@ -372,19 +478,27 @@ impl WasmGuest {
                     extension: name,
                     error: e.to_string(),
                 },
-            }
+            };
+            let host = store.into_data();
+            (result, host)
         });
 
         match tokio::time::timeout(limit, join).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(join_err)) => GuestCallResult::Failed {
-                extension: self.name_for_logs.clone(),
-                error: join_err.to_string(),
-            },
-            Err(_) => GuestCallResult::Timeout {
-                extension: self.name_for_logs.clone(),
-                limit,
-            },
+            Ok(Ok(pair)) => pair,
+            Ok(Err(join_err)) => (
+                GuestCallResult::Failed {
+                    extension: self.name_for_logs.clone(),
+                    error: join_err.to_string(),
+                },
+                HostCtx::default(),
+            ),
+            Err(_) => (
+                GuestCallResult::Timeout {
+                    extension: self.name_for_logs.clone(),
+                    limit,
+                },
+                HostCtx::default(),
+            ),
         }
     }
 }
@@ -428,6 +542,46 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             },
         )
         .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "prompt_len",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
+                caller.data().prompt.len() as i32
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "prompt_byte",
+            |caller: wasmtime::Caller<'_, HostCtx>, idx: i32| -> i32 {
+                byte_at(&caller.data().prompt, idx)
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_inject_context",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().inject_context = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_append_system",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().append_system = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
     Ok(linker)
 }
 
@@ -440,6 +594,25 @@ fn byte_at(s: &str, idx: i32) -> i32 {
         .copied()
         .map(|b| b as i32)
         .unwrap_or(-1)
+}
+
+#[cfg(feature = "wasm")]
+fn read_guest_utf8(
+    caller: &mut wasmtime::Caller<'_, HostCtx>,
+    ptr: i32,
+    len: i32,
+) -> Option<String> {
+    if ptr < 0 || len < 0 {
+        return None;
+    }
+    let len = (len as usize).min(MAX_INJECT_BYTES);
+    let mem = caller.get_export("memory")?.into_memory()?;
+    let data = mem.data(caller);
+    let start = ptr as usize;
+    let end = start.checked_add(len)?;
+    let slice = data.get(start..end)?;
+    // Lossy so a bad guest cannot trap the host on invalid UTF-8.
+    Some(String::from_utf8_lossy(slice).into_owned())
 }
 
 #[cfg(test)]
@@ -629,6 +802,49 @@ mod tests {
             })
             .await;
         assert!(matches!(d.decision, PreToolDecision::Allow));
+    }
+
+    /// Static inject via guest memory + set_inject_context.
+    const INJECT_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "set_inject_context" (func $set_inject (param i32 i32)))
+          (import "hyper_host" "set_append_system" (func $set_append (param i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "policy: no secrets in logs")
+          (data (i32.const 32) "ext-system-note")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_before_agent_start") (result i32)
+            (call $set_inject (i32.const 0) (i32.const 26))
+            (call $set_append (i32.const 32) (i32.const 15))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn before_agent_start_injects_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "inject.wasm", INJECT_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "policy",
+            path,
+            vec![Capability::BeforeAgentInject],
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_before_agent_start(&BeforeAgentStartIn {
+                prompt: "hello".into(),
+            })
+            .await;
+        assert!(d.has_injection());
+        let inj = d.out.inject_context.unwrap();
+        assert!(inj.contains("policy: no secrets in logs"), "{inj}");
+        assert!(inj.contains("[wasm:policy]"), "{inj}");
+        let app = d.out.append_system.unwrap();
+        assert!(app.contains("ext-system-note"), "{app}");
     }
 
     #[test]
