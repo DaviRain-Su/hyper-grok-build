@@ -33,6 +33,11 @@ usage() {
     sed -n '2,20p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
 }
 
+is_semver() {
+    printf '%s\n' "$1" \
+        | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
 # ── Arguments ────────────────────────────────────────────────────────────────
 VERSION=""
 while [ $# -gt 0 ]; do
@@ -56,11 +61,8 @@ while [ $# -gt 0 ]; do
     shift
 done
 VERSION="${VERSION#v}"
-if [ -n "$VERSION" ]; then
-    case "$VERSION" in
-        [0-9]*.[0-9]*.[0-9]*) ;;
-        *) err "invalid version '$VERSION' (expected X.Y.Z or vX.Y.Z)" ;;
-    esac
+if [ -n "$VERSION" ] && ! is_semver "$VERSION"; then
+    err "invalid version '$VERSION' (expected X.Y.Z or vX.Y.Z)"
 fi
 
 # ── Platform detection ───────────────────────────────────────────────────────
@@ -101,30 +103,39 @@ case "$OS" in
 esac
 
 # ── Downloader ───────────────────────────────────────────────────────────────
-# Optional: set GITHUB_TOKEN to authenticate GitHub API + asset requests and
-# avoid the unauthenticated rate limit (60 req/hr per IP). A fine-grained PAT
-# with public-repo read access raises it to 5000 req/hr.
+# Optional: set GITHUB_TOKEN to authenticate the fixed GitHub API endpoint and
+# avoid the unauthenticated rate limit (60 req/hr per IP). Never forward the
+# token to release-asset hosts or a custom test endpoint.
 AUTH_HDR=""
 if [ -n "${GITHUB_TOKEN:-}" ]; then
     AUTH_HDR="Authorization: Bearer $GITHUB_TOKEN"
 fi
 
+is_fixed_github_api_url() {
+    case "$1" in
+        "https://api.github.com/repos/${REPO}/releases/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if command -v curl >/dev/null 2>&1; then
-    if [ -n "$AUTH_HDR" ]; then
-        fetch()        { curl -fsSL -H "$AUTH_HDR" -o "$2" "$1"; }
-        fetch_stdout() { curl -fsSL -H "$AUTH_HDR" "$1"; }
-    else
-        fetch()        { curl -fsSL -o "$2" "$1"; }
-        fetch_stdout() { curl -fsSL "$1"; }
-    fi
+    fetch() { curl -fsSL -o "$2" "$1"; }
+    fetch_stdout() {
+        if [ -n "$AUTH_HDR" ] && is_fixed_github_api_url "$1"; then
+            curl -fsSL -H "$AUTH_HDR" "$1"
+        else
+            curl -fsSL "$1"
+        fi
+    }
 elif command -v wget >/dev/null 2>&1; then
-    if [ -n "$AUTH_HDR" ]; then
-        fetch()        { wget -q --header="$AUTH_HDR" -O "$2" "$1"; }
-        fetch_stdout() { wget -q --header="$AUTH_HDR" -O - "$1"; }
-    else
-        fetch()        { wget -q -O "$2" "$1"; }
-        fetch_stdout() { wget -q -O - "$1"; }
-    fi
+    fetch() { wget -q -O "$2" "$1"; }
+    fetch_stdout() {
+        if [ -n "$AUTH_HDR" ] && is_fixed_github_api_url "$1"; then
+            wget -q --header="$AUTH_HDR" -O - "$1"
+        else
+            wget -q -O - "$1"
+        fi
+    }
 else
     err "either curl or wget is required"
 fi
@@ -139,7 +150,16 @@ else
 fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hyper-install.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+STAGED=""
+TMP_LINK=""
+STATE_TMP=""
+cleanup() {
+    rm -rf "$TMP_DIR"
+    [ -z "$STAGED" ] || rm -f "$STAGED"
+    [ -z "$TMP_LINK" ] || rm -f "$TMP_LINK"
+    [ -z "$STATE_TMP" ] || rm -f "$STATE_TMP"
+}
+trap cleanup EXIT HUP INT TERM
 
 # ── Resolve the release ──────────────────────────────────────────────────────
 if [ -n "$VERSION" ]; then
@@ -153,21 +173,45 @@ RELEASE_JSON="$(fetch_stdout "$RELEASE_URL")" \
          (GitHub may be rate-limiting this IP; set GITHUB_TOKEN to authenticate)"
 
 TAG="$(printf '%s' "$RELEASE_JSON" \
-    | tr ',' '\n' \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | sed 's/"tag_name"/\
+"tag_name"/g' \
+    | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)"
 [ -n "$TAG" ] || err "release metadata has no tag_name (endpoint: $RELEASE_URL)"
+case "$TAG" in
+    v*) ;;
+    *) err "release tag '$TAG' is invalid (expected vX.Y.Z)" ;;
+esac
 RESOLVED_VERSION="${TAG#v}"
+is_semver "$RESOLVED_VERSION" \
+    || err "release tag '$TAG' is invalid (expected semantic version vX.Y.Z)"
 if [ -n "$VERSION" ] && [ "$RESOLVED_VERSION" != "$VERSION" ]; then
     err "requested version $VERSION but release tag is $TAG"
 fi
 
-# Pull every browser_download_url out of the JSON, then select by asset name.
+# Pull every browser_download_url out of the JSON. Asset selection below uses
+# an exact URL suffix and rejects missing or duplicate names.
 URLS="$(printf '%s' "$RELEASE_JSON" \
-    | tr ',' '\n' \
-    | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-SUMS_URL="$(printf '%s\n' "$URLS" | grep -F "/SHA256SUMS" | head -n 1 || true)"
-[ -n "$SUMS_URL" ] || err "release $TAG has no SHA256SUMS asset; refusing to install unverified binaries"
+    | sed 's/"browser_download_url"/\
+"browser_download_url"/g' \
+    | sed -n 's/^[[:space:]]*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+find_asset_url() {
+    suffix="/$1"
+    printf '%s\n' "$URLS" | awk -v suffix="$suffix" '
+        length($0) >= length(suffix) &&
+        substr($0, length($0) - length(suffix) + 1) == suffix {
+            count++
+            found = $0
+        }
+        END {
+            if (count == 1) print found
+            else exit 1
+        }
+    '
+}
+if ! SUMS_URL="$(find_asset_url "SHA256SUMS")"; then
+    err "release $TAG must contain exactly one SHA256SUMS asset"
+fi
 
 # Resolve archive: preferred triple, then Linux gnu fallback when present.
 ASSET=""
@@ -175,8 +219,7 @@ ARCHIVE_URL=""
 for cand in "$TRIPLE" ${TRIPLE_FALLBACK:-}; do
     [ -n "$cand" ] || continue
     trial="hyper-${RESOLVED_VERSION}-${cand}.tar.gz"
-    found="$(printf '%s\n' "$URLS" | grep -F "/$trial" | head -n 1 || true)"
-    if [ -n "$found" ]; then
+    if found="$(find_asset_url "$trial")"; then
         ASSET="$trial"
         ARCHIVE_URL="$found"
         TRIPLE="$cand"
@@ -197,42 +240,105 @@ printf 'Downloading hyper v%s (%s)...\n' "$RESOLVED_VERSION" "$TRIPLE"
 fetch "$ARCHIVE_URL" "$TMP_DIR/$ASSET" || err "download failed: $ARCHIVE_URL"
 fetch "$SUMS_URL" "$TMP_DIR/SHA256SUMS" || err "download failed: $SUMS_URL"
 
+MANIFEST_SIZE="$(wc -c < "$TMP_DIR/SHA256SUMS" | tr -d '[:space:]')"
+ARCHIVE_SIZE="$(wc -c < "$TMP_DIR/$ASSET" | tr -d '[:space:]')"
+[ "$MANIFEST_SIZE" -le 1048576 ] || err "SHA256SUMS is unexpectedly large"
+[ "$ARCHIVE_SIZE" -le 1073741824 ] || err "$ASSET exceeds the 1 GiB safety limit"
+
 EXPECTED=""
+EXPECTED_COUNT=0
 while IFS=' ' read -r hash name; do
     name="${name#\*}"
     if [ "$name" = "$ASSET" ]; then
         EXPECTED="$hash"
+        EXPECTED_COUNT=$((EXPECTED_COUNT + 1))
     fi
 done < "$TMP_DIR/SHA256SUMS"
-[ -n "$EXPECTED" ] || err "SHA256SUMS has no entry for $ASSET"
-
-ACTUAL="$(sha256_of "$TMP_DIR/$ASSET")"
+[ "$EXPECTED_COUNT" -eq 1 ] \
+    || err "SHA256SUMS must contain exactly one entry for $ASSET"
+case "$EXPECTED" in
+    *[!0-9A-Fa-f]*|'') err "SHA256SUMS contains an invalid digest for $ASSET" ;;
+esac
+[ "${#EXPECTED}" -eq 64 ] || err "SHA256SUMS contains an invalid digest for $ASSET"
+EXPECTED="$(printf '%s' "$EXPECTED" | tr 'A-F' 'a-f')"
+ACTUAL="$(sha256_of "$TMP_DIR/$ASSET" | tr 'A-F' 'a-f')"
 if [ "$ACTUAL" != "$EXPECTED" ]; then
     err "SHA256 mismatch for $ASSET: expected $EXPECTED, got $ACTUAL"
 fi
 printf 'Checksum verified.\n'
 
 # ── Extract + install ────────────────────────────────────────────────────────
-tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" || err "failed to extract $ASSET"
-[ -f "$TMP_DIR/hyper" ] || err "archive $ASSET does not contain a 'hyper' binary"
+# Extract only the root-level binary to stdout. Other archive paths are never
+# materialized, so a malformed archive cannot traverse out of the temp dir.
+tar -tzf "$TMP_DIR/$ASSET" > "$TMP_DIR/archive.list" \
+    || err "failed to inspect $ASSET"
+if ! BINARY_MEMBER="$(awk '
+    $0 == "hyper" || $0 == "./hyper" { count++; member = $0 }
+    END { if (count == 1) print member; else exit 1 }
+' "$TMP_DIR/archive.list")"; then
+    err "archive $ASSET must contain exactly one root-level hyper binary"
+fi
+tar -xOzf "$TMP_DIR/$ASSET" "$BINARY_MEMBER" > "$TMP_DIR/hyper" \
+    || err "failed to extract hyper from $ASSET"
+[ -s "$TMP_DIR/hyper" ] || err "archive $ASSET contains an empty hyper binary"
+BINARY_SIZE="$(wc -c < "$TMP_DIR/hyper" | tr -d '[:space:]')"
+[ "$BINARY_SIZE" -le 1073741824 ] || err "extracted hyper exceeds the 1 GiB safety limit"
 chmod 0755 "$TMP_DIR/hyper"
 
+ensure_directory() {
+    path="$1"
+    label="$2"
+    [ ! -L "$path" ] || err "refusing to use symlinked $label: $path"
+    if [ -e "$path" ]; then
+        [ -d "$path" ] || err "$label is not a directory: $path"
+    else
+        mkdir -p "$path" || err "could not create $label: $path"
+    fi
+}
 DOWNLOADS_DIR="$HYPER_HOME/downloads"
 BIN_DIR="$HYPER_HOME/bin"
-mkdir -p "$DOWNLOADS_DIR" "$BIN_DIR"
+ensure_directory "$HYPER_HOME" "Hyper install root"
+ensure_directory "$DOWNLOADS_DIR" "Hyper downloads directory"
+ensure_directory "$BIN_DIR" "Hyper bin directory"
 
-# Versioned binary + smoke-test before touching the active link.
-VERSIONED="hyper-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}"
-mv -f "$TMP_DIR/hyper" "$DOWNLOADS_DIR/$VERSIONED"
-
-# Smoke-test the versioned download *before* swapping the managed symlink so a
-# bad binary (glibc / CPU incompatibility) never breaks a working install.
-"$DOWNLOADS_DIR/$VERSIONED" --version >/dev/null 2>&1 \
+# The archive digest is part of the deployment identity. A deliberately
+# republished tag therefore gets a new path and cannot overwrite the active
+# same-semver binary before its smoke test succeeds.
+VERSIONED="hyper-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}-sha256-${EXPECTED}"
+DEST="$DOWNLOADS_DIR/$VERSIONED"
+STAGED="$(mktemp "$DOWNLOADS_DIR/.hyper-stage.XXXXXX")" \
+    || err "could not create a staged binary under $DOWNLOADS_DIR"
+cp "$TMP_DIR/hyper" "$STAGED" || err "could not stage downloaded hyper"
+chmod 0755 "$STAGED"
+"$STAGED" --version >/dev/null 2>&1 \
     || err "downloaded binary failed smoke test; existing install left untouched"
+mv -f "$STAGED" "$DEST"
+STAGED=""
 
 TMP_LINK="$BIN_DIR/hyper.install.$$"
+[ ! -e "$TMP_LINK" ] && [ ! -L "$TMP_LINK" ] \
+    || err "temporary activation path already exists: $TMP_LINK"
 ln -s "../downloads/$VERSIONED" "$TMP_LINK"
 mv -f "$TMP_LINK" "$BIN_DIR/hyper"
+TMP_LINK=""
+
+# Record the exact release-archive identity used by the in-app community
+# updater. This lets Hyper detect a deliberately republished tag by checksum
+# without ever consulting the official Grok updater state under ~/.grok.
+STATE_FILE="$HYPER_HOME/update-state.json"
+STATE_TMP="$(mktemp "$HYPER_HOME/.update-state.XXXXXX")" \
+    || err "could not create temporary update state under $HYPER_HOME"
+CHECKED_AT="$(date -u +%s)"
+case "$CHECKED_AT" in
+    *[!0-9]*|'') err "could not determine the current Unix timestamp" ;;
+esac
+# These fields are safe to serialize directly: version/tag and asset names are
+# constrained above, the digest is exactly 64 hex characters, and the managed
+# filename is composed only from those validated values.
+printf '{\n  "installed_version": "%s",\n  "installed_asset": "%s",\n  "installed_sha256": "%s",\n  "installed_binary": "%s",\n  "checked_at_unix": %s\n}\n' \
+    "$RESOLVED_VERSION" "$ASSET" "$EXPECTED" "$VERSIONED" "$CHECKED_AT" > "$STATE_TMP"
+mv -f "$STATE_TMP" "$STATE_FILE"
+STATE_TMP=""
 
 printf '\nhyper v%s installed to %s\n' "$RESOLVED_VERSION" "$BIN_DIR/hyper"
 

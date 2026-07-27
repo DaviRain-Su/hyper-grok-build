@@ -59,24 +59,6 @@ pub enum ThemeKind {
     Paper = 17,
 }
 
-/// The twelve Hyper preset kinds, in catalog order (nine dark, three light).
-/// Shared by [`ThemeKind::ALL`], the `current()` dispatch, and tests so the
-/// list lives in exactly one place.
-const PRESET_KINDS: &[ThemeKind] = &[
-    ThemeKind::Everforest,
-    ThemeKind::Nord,
-    ThemeKind::Dracula,
-    ThemeKind::Gruvbox,
-    ThemeKind::CatppuccinMocha,
-    ThemeKind::SolarizedDark,
-    ThemeKind::DeepOcean,
-    ThemeKind::Ember,
-    ThemeKind::MidnightOled,
-    ThemeKind::SolarizedLight,
-    ThemeKind::CatppuccinLatte,
-    ThemeKind::Paper,
-];
-
 /// The three light-polarity preset kinds. Callers that need to know a theme's
 /// polarity from its [`ThemeKind`] alone (e.g. mermaid rendering) consult this.
 pub const LIGHT_PRESET_KINDS: &[ThemeKind] = &[
@@ -816,12 +798,32 @@ mod tests {
 
     #[test]
     fn is_dark_classifies_built_in_themes() {
-        // Sanity-check the polarity sampler against the theme catalog.
-        assert!(Theme::groknight().is_dark());
-        assert!(Theme::tokyonight().is_dark());
-        assert!(Theme::rosepine_moon().is_dark());
-        assert!(Theme::oscura_midnight().is_dark());
-        assert!(!Theme::grokday().is_dark());
+        // Sanity-check the polarity sampler against the complete theme catalog.
+        for theme in [
+            Theme::groknight(),
+            Theme::tokyonight(),
+            Theme::rosepine_moon(),
+            Theme::oscura_midnight(),
+            Theme::everforest(),
+            Theme::nord(),
+            Theme::dracula(),
+            Theme::gruvbox(),
+            Theme::catppuccin_mocha(),
+            Theme::solarized_dark(),
+            Theme::deep_ocean(),
+            Theme::ember(),
+            Theme::midnight_oled(),
+        ] {
+            assert!(theme.is_dark());
+        }
+        for theme in [
+            Theme::grokday(),
+            Theme::solarized_light(),
+            Theme::catppuccin_latte(),
+            Theme::paper(),
+        ] {
+            assert!(!theme.is_dark());
+        }
     }
 
     #[test]

@@ -1533,8 +1533,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "Auto-update",
-            description: "Automatically download and install pager updates on startup. \
-                          Restart required.",
+            description: "Automatically download and install application updates on startup. \
+                          Hyper builds use community releases only. Restart required.",
             keywords: &[
                 "auto", "update", "updates", "upgrade", "version", "install", "channel",
             ],

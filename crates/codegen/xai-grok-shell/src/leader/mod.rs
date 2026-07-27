@@ -1122,6 +1122,7 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
         let outcome = match conn
             .send_control(ControlCommand::RelaunchForUpdate {
                 to_version: CLIENT_LEADER_VERSION.to_string(),
+                allow_same_version: false,
             })
             .await
         {

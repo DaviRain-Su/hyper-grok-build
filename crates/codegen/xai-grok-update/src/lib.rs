@@ -1,4 +1,6 @@
 pub mod auto_update;
+#[cfg(feature = "community-build")]
+mod community;
 pub mod version;
 mod version_policy;
 

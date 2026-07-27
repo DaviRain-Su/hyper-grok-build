@@ -215,10 +215,15 @@ pub enum ControlCommand {
     /// exits with [`ShutdownReason::AutoUpdate`] so connected clients reconnect
     /// onto the new binary and restore their sessions via `session/load`.
     ///
-    /// `to_version` is the version `grok update` just installed; the leader uses
-    /// it to decline if it is already running that version or newer.
+    /// `to_version` is the version the updater just installed. Normally the
+    /// leader accepts only a strictly newer target. `allow_same_version` is a
+    /// backward-compatible escape hatch for checksum-identified community
+    /// releases whose assets were deliberately republished under the same tag;
+    /// it never permits a downgrade.
     RelaunchForUpdate {
         to_version: String,
+        #[serde(default)]
+        allow_same_version: bool,
     },
 }
 
@@ -454,6 +459,26 @@ mod tests {
                 },
             } if request_id == "req-1" && output == "/tmp/profile.folded"
         ));
+    }
+
+    #[test]
+    fn relaunch_command_defaults_same_version_permission_off() {
+        let old_json = r#"{"type":"relaunch_for_update","to_version":"0.2.113"}"#;
+        let command: ControlCommand = serde_json::from_str(old_json).unwrap();
+        assert!(matches!(
+            command,
+            ControlCommand::RelaunchForUpdate {
+                ref to_version,
+                allow_same_version: false,
+            } if to_version == "0.2.113"
+        ));
+
+        let new_command = ControlCommand::RelaunchForUpdate {
+            to_version: "0.2.113".to_string(),
+            allow_same_version: true,
+        };
+        let encoded = serde_json::to_value(new_command).unwrap();
+        assert_eq!(encoded["allow_same_version"], true);
     }
 
     #[tokio::test]

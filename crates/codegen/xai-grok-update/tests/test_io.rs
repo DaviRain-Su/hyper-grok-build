@@ -9,6 +9,8 @@
 //! The patterns here mirror the GROK_HOME isolation used in other
 //! integration tests.
 
+#![cfg(not(feature = "community-build"))]
+
 mod common;
 
 use std::path::PathBuf;

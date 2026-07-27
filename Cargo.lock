@@ -16017,6 +16017,8 @@ version = "0.1.220-alpha.4"
 dependencies = [
  "anyhow",
  "dunce",
+ "flate2",
+ "fs2",
  "futures",
  "indicatif",
  "reqwest 0.12.24",
@@ -16024,6 +16026,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.10.9",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -16033,6 +16037,7 @@ dependencies = [
  "xai-grok-shell",
  "xai-grok-tools",
  "xai-grok-version",
+ "zip",
 ]
 
 [[package]]

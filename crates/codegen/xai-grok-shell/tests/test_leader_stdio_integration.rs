@@ -2589,6 +2589,7 @@ async fn test_relaunch_for_update_accepts_and_shuts_down() {
     let payload = client
         .send_control(ControlCommand::RelaunchForUpdate {
             to_version: "999.0.0".to_string(),
+            allow_same_version: false,
         })
         .await
         .expect("control transport ok")
@@ -2637,6 +2638,7 @@ async fn test_relaunch_for_update_declines_when_not_newer() {
     let payload = client
         .send_control(ControlCommand::RelaunchForUpdate {
             to_version: "0.0.0".to_string(),
+            allow_same_version: false,
         })
         .await
         .expect("control transport ok")
@@ -2688,6 +2690,7 @@ async fn test_relaunch_for_update_waits_for_busy_then_exits() {
     let payload = client
         .send_control(ControlCommand::RelaunchForUpdate {
             to_version: "999.0.0".to_string(),
+            allow_same_version: false,
         })
         .await
         .expect("control transport ok")

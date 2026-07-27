@@ -11,6 +11,8 @@
 //! count small and let them run in parallel (wiremock binds random ports
 //! so there's no contention).
 
+#![cfg(not(feature = "community-build"))]
+
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 

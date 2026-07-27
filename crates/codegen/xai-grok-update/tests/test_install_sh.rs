@@ -14,7 +14,9 @@
 //! the test skips rather than fail — under the repo's `cargo nextest` workflow
 //! the path resolves and the installer is exercised end to end.
 
-#![cfg(unix)]
+// This exercises the upstream Grok installer under xai-grok-pager/scripts,
+// not the repository-root Hyper community installer.
+#![cfg(all(unix, not(feature = "community-build")))]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

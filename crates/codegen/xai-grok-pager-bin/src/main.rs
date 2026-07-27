@@ -1176,7 +1176,7 @@ async fn run_agent_command(
     tracing::info!(use_leader, ?policy_disable_reason, "leader mode resolved");
     let managed_install = is_managed_install(
         std::env::current_exe().ok(),
-        &xai_grok_shell::util::grok_home::grok_home(),
+        &auto_update::managed_application(),
     );
     if stdio_auto_update_enabled(
         is_stdio,
@@ -2235,10 +2235,15 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     match result {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
-            if finish_update_on_exit(adopted, &update_config).await {
-                eprintln!("Update installed. Run `grok` to start.");
+            let command = if cfg!(feature = "community-build") {
+                "hyper"
             } else {
-                eprintln!("Update did not complete. Run `grok update` to retry.");
+                "grok"
+            };
+            if finish_update_on_exit(adopted, &update_config).await {
+                eprintln!("Update installed. Run `{command}` to start.");
+            } else {
+                eprintln!("Update did not complete. Run `{command} update` to retry.");
             }
             Ok(())
         }
@@ -2322,18 +2327,16 @@ fn build_update_config() -> UpdateConfig {
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
-    // Community Hyper builds never touch the upstream Grok updater.
-    if cfg!(feature = "community-build") {
-        return false;
-    }
     if cfg!(debug_assertions) {
         return false;
     }
     if no_auto_update_flag {
         return false;
     }
-    !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
-        .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
+    let disabled =
+        |name: &str| std::env::var_os(name).is_some_and(|v| env_flag_enabled(&v.to_string_lossy()));
+    !disabled("GROK_DISABLE_AUTOUPDATER")
+        && !(cfg!(feature = "community-build") && disabled("HYPER_DISABLE_AUTOUPDATER"))
 }
 /// Gate for the stdio agent's background auto-update: only the direct stdio
 /// agent, from the managed install. Other modes update in `run_agent_command`.
@@ -2345,19 +2348,24 @@ fn stdio_auto_update_enabled(
 ) -> bool {
     is_stdio && !use_leader && updates_enabled && managed_install
 }
-/// True when `exe` is the binary `<grok_home>/bin/grok` resolves to, the
-/// install that adopts a staged update on respawn. Both sides are
-/// canonicalized; any failure reports unmanaged and skips the update. The
-/// npm shim hardcodes `~/.grok`, so a custom `GROK_HOME` skips here too.
-fn is_managed_install(exe: Option<std::path::PathBuf>, grok_home: &std::path::Path) -> bool {
-    if grok_home.as_os_str().is_empty() {
+/// True when `exe` is the binary the product's managed application resolves
+/// to (`~/.hyper/bin/hyper` for community builds, `~/.grok/bin/grok` for
+/// official builds). Both sides are canonicalized; any failure reports
+/// unmanaged and skips automatic updates.
+fn is_managed_install(
+    exe: Option<std::path::PathBuf>,
+    managed_application: &std::path::Path,
+) -> bool {
+    if managed_application.as_os_str().is_empty() {
         return false;
     }
     let Some(exe) = exe else {
         return false;
     };
-    let managed = xai_grok_config::grok_application_in(grok_home);
-    match (dunce::canonicalize(&exe), dunce::canonicalize(&managed)) {
+    match (
+        dunce::canonicalize(&exe),
+        dunce::canonicalize(managed_application),
+    ) {
         (Ok(exe), Ok(managed)) => exe == managed,
         _ => false,
     }
@@ -2384,15 +2392,10 @@ async fn run_update_command(
     channel_switch: Option<&str>,
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
-    if cfg!(feature = "community-build") {
-        // Upstream updater targets x.ai + ~/.grok/bin/grok — never run it for
-        // Hyper community builds. Users upgrade via install.sh / install.ps1.
-        eprintln!(
-            "Updates for Hyper are managed by the installer, not `hyper update`.\n\
-             Re-run install.sh (or install.ps1) to upgrade, e.g.:\n\
-               curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash"
-        );
-        return Ok(());
+    if cfg!(feature = "community-build")
+        && channel_switch.is_some_and(|channel| channel != "stable")
+    {
+        anyhow::bail!("Hyper community releases support only the stable channel");
     }
     if json && !check {
         anyhow::bail!("--json requires --check");
@@ -2423,18 +2426,21 @@ async fn run_update_command(
     )
     .await?;
     if let Some(installed_version) = installed {
-        signal_leaders_to_relaunch(&installed_version).await;
+        let allow_same_version =
+            cfg!(feature = "community-build") && auto_update::running_binary_differs_from_managed();
+        signal_leaders_to_relaunch(&installed_version, allow_same_version).await;
     }
     Ok(())
 }
-/// After a successful `grok update`, ask any running leader on this machine that
-/// is older than `installed_version` to relaunch onto the new binary (bounded
-/// grace; running sessions close and reconnect via `session/load`).
+/// After a successful product update, ask any stale running leader on this
+/// machine to relaunch onto the active binary (bounded grace; running sessions
+/// close and reconnect via `session/load`). Community checksum republishes may
+/// request a same-semver relaunch; downgrades remain forbidden server-side.
 ///
 /// Best-effort and non-fatal: discovery/connect/control failures are logged and
 /// skipped. The leader re-checks the directional version guard authoritatively;
 /// the pager-side `live_info` check just avoids connecting to newer leaders.
-async fn signal_leaders_to_relaunch(installed_version: &str) {
+async fn signal_leaders_to_relaunch(installed_version: &str, allow_same_version: bool) {
     for d in xai_grok_shell::leader::discover_leaders().await {
         if d.classification != xai_grok_shell::leader::LeaderDiscoveryState::Reachable {
             continue;
@@ -2442,10 +2448,18 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
         let Some(socket_path) = d.socket_path.clone() else {
             continue;
         };
-        if let Some(ref live) = d.live_info
-            && !leader_is_older_than(&live.leader_binary_version, installed_version)
-        {
-            continue;
+        if let Some(ref live) = d.live_info {
+            let older = leader_is_older_than(&live.leader_binary_version, installed_version);
+            let equal = matches!(
+                (
+                    semver::Version::parse(&live.leader_binary_version),
+                    semver::Version::parse(installed_version),
+                ),
+                (Ok(leader), Ok(installed)) if leader == installed
+            );
+            if !older && !(allow_same_version && equal) {
+                continue;
+            }
         }
         let client = match xai_grok_shell::leader::LeaderClient::connect(
             socket_path,
@@ -2468,6 +2482,7 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
         match client
             .send_control(ControlCommand::RelaunchForUpdate {
                 to_version: installed_version.to_string(),
+                allow_same_version,
             })
             .await
         {
@@ -2505,7 +2520,12 @@ mod tests {
             let mut output = Vec::new();
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
-            assert!(output.starts_with("grok "));
+            let product = if cfg!(feature = "community-build") {
+                "hyper "
+            } else {
+                "grok "
+            };
+            assert!(output.starts_with(product), "{output:?}");
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }
@@ -2672,32 +2692,27 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn is_managed_install_matches_only_the_bin_grok_target() {
+    fn is_managed_install_matches_only_the_active_application_target() {
         let home =
             std::env::temp_dir().join(format!("grok-pager-managed-install-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join("bin")).unwrap();
         std::fs::create_dir_all(home.join("downloads")).unwrap();
+        let managed = home.join("bin").join("hyper");
+        assert!(!is_managed_install(Some(managed.clone()), &managed));
+        assert!(!is_managed_install(None, &managed));
         assert!(!is_managed_install(
-            Some(home.join("bin").join("grok")),
-            &home
-        ));
-        assert!(!is_managed_install(None, &home));
-        assert!(!is_managed_install(
-            Some(home.join("bin").join("grok")),
+            Some(managed.clone()),
             std::path::Path::new("")
         ));
-        let target = home.join("downloads").join("grok-1.2.3");
+        let target = home.join("downloads").join("hyper-1.2.3");
         std::fs::write(&target, b"binary").unwrap();
-        std::os::unix::fs::symlink(&target, home.join("bin").join("grok")).unwrap();
-        assert!(is_managed_install(
-            Some(home.join("bin").join("grok")),
-            &home
-        ));
-        assert!(is_managed_install(Some(target.clone()), &home));
-        let pinned = home.join("bin").join("grok-9.9.9");
+        std::os::unix::fs::symlink(&target, &managed).unwrap();
+        assert!(is_managed_install(Some(managed.clone()), &managed));
+        assert!(is_managed_install(Some(target.clone()), &managed));
+        let pinned = home.join("bin").join("hyper-9.9.9");
         std::fs::write(&pinned, b"binary").unwrap();
-        assert!(!is_managed_install(Some(pinned), &home));
+        assert!(!is_managed_install(Some(pinned), &managed));
         let _ = std::fs::remove_dir_all(&home);
     }
     /// Pins the gate composition; a dropped conjunct fails its named case.

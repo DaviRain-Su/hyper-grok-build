@@ -20,6 +20,19 @@ xai-grok-shell = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
 
+# Community updater dependencies are optional so official/default builds keep
+# their existing updater graph and behavior unchanged.
+dunce = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+fs2 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+zip = { version = "3", default-features = false, features = ["deflate-flate2"], optional = true }
+
+[features]
+default = []
+community-build = ["dep:dunce", "dep:flate2", "dep:fs2", "dep:sha2", "dep:tar", "dep:zip"]
+
 [dev-dependencies]
 semver = { workspace = true }
 serde_json = { workspace = true }

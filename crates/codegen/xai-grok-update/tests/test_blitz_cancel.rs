@@ -14,7 +14,7 @@
 //! right-length-but-garbage body, or hang mid-transfer — for both the parallel
 //! byte-range path and the single-connection path.
 
-#![cfg(unix)]
+#![cfg(all(unix, not(feature = "community-build")))]
 
 mod common;
 

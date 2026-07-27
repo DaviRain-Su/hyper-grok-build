@@ -96,7 +96,7 @@ hyper                # 启动 TUI
 安装指定版本:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.110
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.113
 ```
 
 安装程序会根据发布版的 `SHA256SUMS` 校验每一次下载,
@@ -168,7 +168,7 @@ cargo build -p xai-grok-pager-bin --profile release-dist
 
 1. 将根目录的 [`VERSION`](VERSION) 文件设置为 **monorepo 锁步客户端版本**
    (与 `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version` 保持一致,当前为 `0.2.110`)。CI 会把它编译进
+   `xai-grok-version` 保持一致,当前为 `0.2.113`)。CI 会把它编译进
    `x-grok-client-version`;xAI 会拒绝低于 **0.1.202** 的客户端(HTTP 426)。
    **不要**自己编造一个较低的营销版本号(例如 `0.1.0`)。
 2. 在 `dev`(或你的发布分支)上提交;更新 `CHANGELOG.md`。
@@ -186,14 +186,14 @@ git push origin "v${VERSION}"
 
 | 产物 | 示例 |
 | ----- | ------- |
-| macOS arm64 | `hyper-0.2.110-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `hyper-0.2.110-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64(glibc) | `hyper-0.2.110-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64(glibc) | `hyper-0.2.110-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `hyper-0.2.110-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `hyper-0.2.113-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `hyper-0.2.113-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64(glibc) | `hyper-0.2.113-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64(glibc) | `hyper-0.2.113-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `hyper-0.2.113-x86_64-pc-windows-msvc.zip` |
 | 校验和 | `SHA256SUMS` |
 
-标签必须与 `VERSION` 完全一致(`v0.2.110` ↔ `0.2.110`),否则构建会失败。
+标签必须与 `VERSION` 完全一致(`v0.2.113` ↔ `0.2.113`),否则构建会失败。
 
 ---
 
@@ -212,7 +212,7 @@ Hyper 与 xAI / SpaceXAI **没有隶属关系**。在同一台机器上:
 
 - 会话、API key 和 OAuth 权限是共享的 —— 登录一次,两个 CLI 都能看到。
 - Leader 的 list/kill 可以同时看到两个产品的 leader。请只 kill 你自己启动的 leader。
-- 社区构建版禁用了上游的自更新功能,因此 `hyper update` 不会覆盖 `~/.grok/bin/grok`。升级 Hyper 请重新运行 `install.sh` / `install.ps1`。
+- 社区构建版使用完全隔离的更新器：`hyper update` 和启动时自动更新只读取本仓库的 GitHub Releases，Hyper 二进制及更新状态都保存在 `~/.hyper`（托管可执行文件为 `~/.hyper/bin/hyper`），绝不会覆盖 `~/.grok/bin/grok`。自动更新偏好仍属于 Hyper 与官方版共享的 `~/.grok` 配置。重新运行 `install.sh` / `install.ps1` 仍可用于修复安装。
 
 Hyper 的安装脚本不会改写官方安装程序的任何内容。
 
@@ -221,7 +221,7 @@ Hyper 的安装脚本不会改写官方安装程序的任何内容。
 ## 构建说明(本 fork)
 
 ```sh
-# 默认启用 community-build(Hyper 品牌 + 禁用上游更新器)。
+# 默认启用 community-build（Hyper 品牌 + 隔离的社区更新器）。
 cargo run -p xai-grok-pager-bin
 
 # 显式构建发布风格的本地二进制

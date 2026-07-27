@@ -98,7 +98,7 @@ hyper                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.110
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.113
 ```
 
 The installer verifies every download against the release’s `SHA256SUMS`,
@@ -171,7 +171,7 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for release notes. Known limitations:
 
 1. Set the root [`VERSION`](VERSION) file to the **monorepo lockstep client
    version** (same as `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version`, currently `0.2.110`). CI compiles this into
+   `xai-grok-version`, currently `0.2.113`). CI compiles this into
    `x-grok-client-version`; xAI rejects clients below **0.1.202** (HTTP 426).
    Do **not** invent a separate low marketing version (e.g. `0.1.0`).
 2. Commit on `dev` (or your release branch); update `CHANGELOG.md`.
@@ -189,14 +189,14 @@ Artifacts:
 
 | Asset | Example |
 | ----- | ------- |
-| macOS arm64 | `hyper-0.2.110-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `hyper-0.2.110-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 (glibc) | `hyper-0.2.110-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 (glibc) | `hyper-0.2.110-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `hyper-0.2.110-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `hyper-0.2.113-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `hyper-0.2.113-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `hyper-0.2.113-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 (glibc) | `hyper-0.2.113-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `hyper-0.2.113-x86_64-pc-windows-msvc.zip` |
 | Checksums | `SHA256SUMS` |
 
-The tag must match `VERSION` exactly (`v0.2.110` ↔ `0.2.110`) or the build fails.
+The tag must match `VERSION` exactly (`v0.2.113` ↔ `0.2.113`) or the build fails.
 
 ---
 
@@ -215,7 +215,7 @@ Implications:
 
 - Sessions, API keys, and OAuth scopes are shared — log in once, both CLIs can see them.
 - Leader list/kill can see both products’ leaders. Prefer killing only leaders you started.
-- Community builds disable the upstream self-updater so `hyper update` cannot overwrite `~/.grok/bin/grok`. Upgrade Hyper by re-running `install.sh` / `install.ps1`.
+- Community builds use an isolated updater: `hyper update` and startup auto-update read only this repository's GitHub Releases, while Hyper binaries and update state stay under `~/.hyper` (the managed executable is `~/.hyper/bin/hyper`). They never overwrite `~/.grok/bin/grok`. The auto-update preference remains part of Hyper's shared `~/.grok` configuration. Re-running `install.sh` / `install.ps1` remains a supported recovery path.
 
 Nothing in the official installer is rewritten by Hyper’s install script.
 
@@ -224,7 +224,7 @@ Nothing in the official installer is rewritten by Hyper’s install script.
 ## Building notes (this fork)
 
 ```sh
-# Defaults enable community-build (Hyper branding + no upstream updater).
+# Defaults enable community-build (Hyper branding + isolated community updater).
 cargo run -p xai-grok-pager-bin
 
 # Explicit release-style local binary

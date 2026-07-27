@@ -1354,23 +1354,42 @@ const RELAUNCH_GRACE_POLL: Duration = Duration::from_millis(100);
 /// the `Relaunching` ack BEFORE the leader begins shutting down; otherwise an
 /// idle leader can race the ack and the client sees a dropped control response).
 ///
-/// Declines unless the target is strictly newer (directional guard) and no
-/// relaunch is already in progress (idempotent across multiple clients). On
-/// accept it sets `relaunching` so duplicate requests are declined.
+/// Declines unless the target is strictly newer (directional guard), or the
+/// caller explicitly allows an equal-version checksum republish, and no
+/// relaunch is already in progress. Equal-version mode never permits a
+/// downgrade and remains idempotent across multiple clients.
 fn decide_relaunch_for_update(
     control_state: &LeaderServerControlState,
     to_version: String,
+    allow_same_version: bool,
     relaunching: &AtomicBool,
 ) -> Result<ControlPayload, ControlError> {
     let leader_version = control_state.metadata.leader_binary_version.clone();
-    if !super::leader_is_older_than(&leader_version, &to_version) {
+    let relation = match (
+        semver::Version::parse(&leader_version),
+        semver::Version::parse(&to_version),
+    ) {
+        (Ok(leader), Ok(target)) => Some(leader.cmp(&target)),
+        _ => None,
+    };
+    let allowed = matches!(relation, Some(std::cmp::Ordering::Less))
+        || (allow_same_version && matches!(relation, Some(std::cmp::Ordering::Equal)));
+    if !allowed {
         debug!(
             from_version = %leader_version,
             to_version = %to_version,
-            "RelaunchForUpdate declined: target is not strictly newer (or unparseable)"
+            allow_same_version,
+            "RelaunchForUpdate declined: target is not an allowed update"
         );
         return Ok(ControlPayload::RelaunchDeclined {
-            reason: format!("leader version {leader_version} is not older than {to_version}"),
+            reason: format!(
+                "leader version {leader_version} is not older than {to_version}{}",
+                if allow_same_version {
+                    " or equal to it"
+                } else {
+                    ""
+                }
+            ),
         });
     }
     if relaunching.swap(true, Ordering::SeqCst) {
@@ -1757,13 +1776,15 @@ pub async fn run_leader_server(
                                 ControlCommand::WorkspaceStatus => {
                                     handle_workspace_status(control_state).await
                                 }
-                                ControlCommand::RelaunchForUpdate { to_version } => {
-                                    decide_relaunch_for_update(
-                                        &control_state,
-                                        to_version,
-                                        &relaunching,
-                                    )
-                                }
+                                ControlCommand::RelaunchForUpdate {
+                                    to_version,
+                                    allow_same_version,
+                                } => decide_relaunch_for_update(
+                                    &control_state,
+                                    to_version,
+                                    allow_same_version,
+                                    &relaunching,
+                                ),
                                 other => handle_control_command(&control_state, other),
                             };
                             let arm_relaunch =
@@ -2768,28 +2789,52 @@ mod tests {
         });
         let relaunching = AtomicBool::new(false);
         assert!(matches!(
-            decide_relaunch_for_update(&control_state, "0.1.100".to_string(), &relaunching),
+            decide_relaunch_for_update(&control_state, "0.1.100".to_string(), false, &relaunching,),
             Ok(ControlPayload::RelaunchDeclined { .. })
         ));
         assert!(!relaunching.load(Ordering::SeqCst));
         assert!(matches!(
-            decide_relaunch_for_update(&control_state, "0.1.0".to_string(), &relaunching),
+            decide_relaunch_for_update(&control_state, "0.1.0".to_string(), false, &relaunching,),
             Ok(ControlPayload::RelaunchDeclined { .. })
         ));
         assert!(matches!(
-            decide_relaunch_for_update(&control_state, "unknown".to_string(), &relaunching),
+            decide_relaunch_for_update(&control_state, "unknown".to_string(), false, &relaunching,),
             Ok(ControlPayload::RelaunchDeclined { .. })
         ));
         assert!(!relaunching.load(Ordering::SeqCst));
         assert!(matches!(
-            decide_relaunch_for_update(&control_state, "0.2.0".to_string(), &relaunching),
+            decide_relaunch_for_update(&control_state, "0.2.0".to_string(), false, &relaunching,),
             Ok(ControlPayload::Relaunching { .. })
         ));
         assert!(relaunching.load(Ordering::SeqCst));
         assert!(matches!(
-            decide_relaunch_for_update(&control_state, "0.3.0".to_string(), &relaunching),
+            decide_relaunch_for_update(&control_state, "0.3.0".to_string(), false, &relaunching,),
             Ok(ControlPayload::RelaunchDeclined { .. })
         ));
+    }
+
+    #[test]
+    fn decide_relaunch_allows_explicit_equal_version_but_never_downgrade() {
+        let temp = TempDir::new().unwrap();
+        let sock = temp.path().join("leader.sock");
+        let control_state = LeaderServerControlState::new(LeaderServerMetadata {
+            pid: std::process::id(),
+            socket_path: sock.clone(),
+            lock_path: sock.with_extension("lock"),
+            ws_url_suffix: String::new(),
+            leader_binary_version: "0.2.113".to_string(),
+        });
+        let relaunching = AtomicBool::new(false);
+        assert!(matches!(
+            decide_relaunch_for_update(&control_state, "0.2.112".to_string(), true, &relaunching,),
+            Ok(ControlPayload::RelaunchDeclined { .. })
+        ));
+        assert!(!relaunching.load(Ordering::SeqCst));
+        assert!(matches!(
+            decide_relaunch_for_update(&control_state, "0.2.113".to_string(), true, &relaunching,),
+            Ok(ControlPayload::Relaunching { .. })
+        ));
+        assert!(relaunching.load(Ordering::SeqCst));
     }
     #[derive(Debug)]
     struct TestAuth;

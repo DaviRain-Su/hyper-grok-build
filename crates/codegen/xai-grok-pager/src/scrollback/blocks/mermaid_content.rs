@@ -830,16 +830,29 @@ mod tests {
     // -- theme mapping + cache filename --------------------------------------
 
     #[test]
-    fn theme_is_dark_maps_grokday_to_light_only() {
-        assert!(
-            !theme_is_dark(ThemeKind::GrokDay),
-            "GrokDay is the light theme"
-        );
+    fn theme_is_dark_covers_every_concrete_theme() {
+        for light in [
+            ThemeKind::GrokDay,
+            ThemeKind::SolarizedLight,
+            ThemeKind::CatppuccinLatte,
+            ThemeKind::Paper,
+        ] {
+            assert!(!theme_is_dark(light), "{light:?} should be light");
+        }
         for dark in [
             ThemeKind::GrokNight,
             ThemeKind::TokyoNight,
             ThemeKind::RosePineMoon,
             ThemeKind::OscuraMidnight,
+            ThemeKind::Everforest,
+            ThemeKind::Nord,
+            ThemeKind::Dracula,
+            ThemeKind::Gruvbox,
+            ThemeKind::CatppuccinMocha,
+            ThemeKind::SolarizedDark,
+            ThemeKind::DeepOcean,
+            ThemeKind::Ember,
+            ThemeKind::MidnightOled,
         ] {
             assert!(theme_is_dark(dark), "{dark:?} should be dark");
         }

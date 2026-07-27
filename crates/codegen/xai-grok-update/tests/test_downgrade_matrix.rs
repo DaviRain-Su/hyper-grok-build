@@ -11,7 +11,7 @@
 //! internal installer actually downloads and symlinks an older binary
 //! when the stable pointer is rolled back.
 
-#![cfg(unix)]
+#![cfg(all(unix, not(feature = "community-build")))]
 
 mod common;
 

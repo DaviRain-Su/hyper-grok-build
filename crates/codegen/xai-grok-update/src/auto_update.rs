@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "community-build", allow(unreachable_code))]
+
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -15,7 +17,9 @@ use crate::version::{
     is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
 };
 use xai_grok_shell::util::config;
-use xai_grok_shell::util::grok_home::{grok_application, grok_home};
+#[cfg(not(feature = "community-build"))]
+use xai_grok_shell::util::grok_home::grok_application;
+use xai_grok_shell::util::grok_home::grok_home;
 
 #[derive(Clone, Copy, Debug)]
 pub enum UpdateRunMode {
@@ -28,7 +32,13 @@ const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
 /// Manual-install one-liner for this platform's bootstrap installer.
 fn manual_install_cmd() -> &'static str {
-    if cfg!(windows) {
+    if cfg!(feature = "community-build") {
+        if cfg!(windows) {
+            "irm https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.ps1 | iex"
+        } else {
+            "curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash"
+        }
+    } else if cfg!(windows) {
         "irm https://x.ai/cli/install.ps1 | iex"
     } else {
         "curl -fsSL https://x.ai/cli/install.sh | bash"
@@ -37,6 +47,9 @@ fn manual_install_cmd() -> &'static str {
 
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str) -> String {
+    if cfg!(feature = "community-build") && installer == "community-github" {
+        return format!("Please reinstall Hyper via:\n  {}", manual_install_cmd());
+    }
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
         "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
@@ -64,10 +77,15 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
         return Ok(());
     }
 
+    let product = if cfg!(feature = "community-build") {
+        "Hyper"
+    } else {
+        "Grok Build"
+    };
     if let Some(error) = status.error.as_deref() {
         println!(
-            "Grok Build - v{} [{}]",
-            status.current_version, status.channel
+            "{} - v{} [{}]",
+            product, status.current_version, status.channel
         );
         println!("Update check failed: {error}");
         return Ok(());
@@ -78,28 +96,34 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     if status.update_available {
         if let Some(latest_version) = status.latest_version.as_deref() {
             println!(
-                "A new version of Grok Build is available: {} -> {}{}",
-                status.current_version, latest_version, channel_label
+                "A new version of {} is available: {} -> {}{}",
+                product, status.current_version, latest_version, channel_label
             );
         } else {
-            println!("A new version of Grok Build is available.");
+            println!("A new version of {product} is available.");
         }
         return Ok(());
     }
 
     if let Some(latest_version) = status.latest_version.as_deref() {
         println!(
-            "Grok Build - v{} (latest: {}){}",
-            status.current_version, latest_version, channel_label
+            "{} - v{} (latest: {}){}",
+            product, status.current_version, latest_version, channel_label
         );
         return Ok(());
     }
 
-    println!("Grok Build - v{}{}", status.current_version, channel_label);
+    println!("{} - v{}{}", product, status.current_version, channel_label);
     Ok(())
 }
 
 pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = update_config;
+        return crate::community::check_update_status().await;
+    }
+
     let installer = get_installer().await.map(|value| value.to_string());
     let current_version = get_installed_grok_version();
     let current_config = config::load_config().await;
@@ -229,6 +253,12 @@ async fn fetch_update_plan(
 /// on the installer (via `installer_allows_downgrade`) so npm is never
 /// downgraded — the decision depends on the installer, never the caller.
 pub async fn auto_update_target(update_config: &UpdateConfig) -> Option<(&'static str, String)> {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = update_config;
+        return crate::community::auto_update_target().await;
+    }
+
     let installer = get_installer().await?;
     let current = get_installed_grok_version();
     let policy = config::VersionPolicy::resolve();
@@ -277,6 +307,12 @@ pub struct EnsureLatestOutcome {
 /// re-download is NOT fixed there; only the symlink layout can prove the
 /// disk is current without exec'ing the binary.
 pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<EnsureLatestOutcome> {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = update_config;
+        return crate::community::ensure_latest_on_disk().await;
+    }
+
     let mut outcome = EnsureLatestOutcome {
         installed: None,
         relaunch_needed: false,
@@ -360,6 +396,11 @@ fn env_installer() -> Option<&'static str> {
 }
 
 pub async fn get_installer() -> Option<&'static str> {
+    #[cfg(feature = "community-build")]
+    {
+        return Some("community-github");
+    }
+
     if let Some(i) = env_installer() {
         return Some(i);
     }
@@ -454,6 +495,12 @@ impl BackgroundUpdateCheck {
 /// TUI, the leader's hourly checker) already put the target version on disk,
 /// no download is started — only the restart hint is surfaced.
 pub async fn check_update_background(update_config: &UpdateConfig) -> BackgroundUpdateCheck {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = update_config;
+        return crate::community::check_update_background().await;
+    }
+
     let Some(installer) = get_installer().await else {
         return BackgroundUpdateCheck::none();
     };
@@ -541,6 +588,12 @@ pub async fn run_update_if_available(
     interactive: bool,
     update_config: &UpdateConfig,
 ) -> Result<bool> {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = update_config;
+        return crate::community::run_update_if_available(run_mode, interactive).await;
+    }
+
     let Some(inst) = get_installer().await else {
         // Skip update check if no known installer.
         return Ok(false);
@@ -692,7 +745,12 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             // No detach: the child must stay in the foreground process group so Ctrl+C cancels it with the parent; the atomic install protocol makes mid-download kills safe.
             let status = cmd.status().await?;
             if !status.success() {
-                anyhow::bail!("grok update failed with {}", status);
+                let command = if cfg!(feature = "community-build") {
+                    "hyper update"
+                } else {
+                    "grok update"
+                };
+                anyhow::bail!("{} failed with {}", command, status);
             }
             Ok(None)
         }
@@ -709,13 +767,44 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
     }
 }
 
-/// Resolve the grok binary path for re-execution after an update.
+/// Canonical managed application for this build flavor.
 ///
-/// `current_exe()` resolves symlinks via `/proc/self/exe` (see proc(5)),
-/// so it returns the old versioned target after a symlink swap.
-/// Prefer `~/.grok/bin/grok` which always points to the latest version.
+/// Community builds return `~/.hyper/bin/hyper`; official builds retain the
+/// upstream `~/.grok/bin/grok` path. Callers use this for managed-install gates
+/// without duplicating product-specific path logic.
+pub fn managed_application() -> std::path::PathBuf {
+    #[cfg(feature = "community-build")]
+    {
+        crate::community::managed_application()
+    }
+    #[cfg(not(feature = "community-build"))]
+    {
+        grok_application()
+    }
+}
+
+/// Whether this running managed Hyper process is now behind the active link.
+///
+/// This also detects checksum-distinct republished assets whose semantic
+/// version is unchanged, allowing a same-version leader to relaunch promptly.
+pub fn running_binary_differs_from_managed() -> bool {
+    #[cfg(feature = "community-build")]
+    {
+        crate::community::running_differs_from_active()
+    }
+    #[cfg(not(feature = "community-build"))]
+    {
+        false
+    }
+}
+
+/// Resolve the active binary path for re-execution after an update.
+///
+/// `current_exe()` resolves symlinks via `/proc/self/exe`, so it returns the
+/// old versioned target after a managed-link swap. Prefer the canonical managed
+/// application, which always points to the newly activated version.
 fn resolve_restart_exe() -> Result<std::path::PathBuf> {
-    let canonical = grok_application();
+    let canonical = managed_application();
     if canonical.exists() {
         return Ok(canonical);
     }
@@ -731,7 +820,14 @@ pub fn restart_grok() -> Result<()> {
     }
     cmd.env_clear();
     cmd.envs(std::env::vars_os().filter(|(k, _)| k != "GROK_AUTO_UPDATE"));
-    eprintln!("Restarting Grok...");
+    eprintln!(
+        "Restarting {}...",
+        if cfg!(feature = "community-build") {
+            "Hyper"
+        } else {
+            "Grok"
+        }
+    );
 
     // Use exec on Unix to replace the current process, avoiding stdio issues
     // when the parent exits. On Windows, fall back to spawn + exit.
@@ -763,6 +859,12 @@ pub async fn run_install_script(
     target: Option<&str>,
     update_config: &UpdateConfig,
 ) -> Result<()> {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = (installer, update_config);
+        return crate::community::run_install_target(target).await;
+    }
+
     let result = match installer {
         "npm" => install_npm(
             target,
@@ -2309,6 +2411,14 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
 }
 
 pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
+    #[cfg(feature = "community-build")]
+    {
+        // Community releases have one stable lane. Validation with a useful
+        // error happens in `run_update`; status checks simply remain stable.
+        let _ = (channel_switch, update_config);
+        return;
+    }
+
     if let Some(ch) = channel_switch
         && update_config.channel != ch
     {
@@ -2335,6 +2445,12 @@ pub async fn run_update(
     channel_switch: Option<&str>,
     update_config: &mut UpdateConfig,
 ) -> Result<Option<String>> {
+    #[cfg(feature = "community-build")]
+    {
+        let _ = update_config;
+        return crate::community::run_update(force, pinned_version, channel_switch).await;
+    }
+
     apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
         Some(i) => i,

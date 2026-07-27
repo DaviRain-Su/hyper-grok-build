@@ -28,7 +28,7 @@
 //!   (`with_extension("tmp")` eats everything after the last dot), so racer
 //!   A could atomically rename racer B's half-written file into place.
 
-#![cfg(unix)]
+#![cfg(all(unix, not(feature = "community-build")))]
 
 mod common;
 

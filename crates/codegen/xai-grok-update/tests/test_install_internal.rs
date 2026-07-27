@@ -10,7 +10,7 @@
 //! tests in this binary share a single `GROK_HOME` and run serially via
 //! `#[serial]`.
 
-#![cfg(unix)]
+#![cfg(all(unix, not(feature = "community-build")))]
 
 mod common;
 

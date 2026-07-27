@@ -316,6 +316,7 @@ async fn relaunch_for_update_drives_real_old_leader_to_exit() {
                     let ack = control
                         .send_control(ControlCommand::RelaunchForUpdate {
                             to_version: "999.0.0".to_string(),
+                            allow_same_version: false,
                         })
                         .await;
                     control.cancel();

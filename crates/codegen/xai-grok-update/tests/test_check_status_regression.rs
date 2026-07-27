@@ -26,7 +26,7 @@
 //! These tests verify the JSON contract so any refactor to `UpdateStatus`,
 //! `check_update_status`, or the npm dispatch path will surface a diff.
 
-#![cfg(unix)]
+#![cfg(all(unix, not(feature = "community-build")))]
 
 mod common;
 

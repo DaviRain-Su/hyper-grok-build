@@ -100,11 +100,13 @@ default-bazel = [
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 release-dist = ["xai-grok-pager/release-dist"]
-# Community Hyper builds: disable the upstream Grok updater (x.ai / ~/.grok/bin/grok)
-# so `hyper update` cannot overwrite a co-installed official grok binary.
-# Users upgrade by re-running install.sh. Also brands `--version` / completions
-# as `hyper` and is forwarded into the pager library.
-community-build = ["xai-grok-pager/community-build"]
+# Community Hyper builds: use Hyper branding and the isolated community updater.
+# The updater reads only this fork's GitHub Releases, keeps managed payloads and
+# update state under ~/.hyper, and never invokes or overwrites ~/.grok/bin/grok.
+community-build = [
+    "xai-grok-pager/community-build",
+    "xai-grok-update/community-build",
+]
 # Codex Live (`/live`): forwarded into the pager library. Omitted from
 # `default-bazel` (no audio device / live internals in the test sandbox).
 codex-live = ["xai-grok-pager/codex-live"]
