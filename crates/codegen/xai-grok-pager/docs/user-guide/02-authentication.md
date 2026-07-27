@@ -6,12 +6,13 @@ Hyper (and Grok Build) supports **multiple independent auth methods**. You are n
 |--------|-----|-------------|
 | SpaceXAI / Grok OAuth | `hyper login` or `l` on welcome | Grok-hosted models |
 | xAI API key | `export XAI_API_KEY=…` | CI / no browser |
-| OpenAI Codex (ChatGPT) | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro coding |
 | Kimi Code | `hyper login --kimi` / `/login kimi` | Kimi subscription |
+| OpenAI Codex (ChatGPT) | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro coding |
+| Anthropic Claude | `hyper login --claude` / `/login claude` | Claude Pro/Max coding |
 | BYOK platforms | `/providers <platform> <key>` or env keys | OpenAI, Anthropic, OpenRouter, Ollama, … |
 | Customer OIDC / SSO | config / env | Enterprise |
 
-Credentials live under `~/.grok/auth.json` in **separate scopes** so logging out of xAI does not wipe Codex or Kimi unless you ask.
+Credentials live under `~/.grok/auth.json` in **separate scopes** so logging out of xAI does not wipe Kimi, Codex, or Claude unless you ask.
 
 ---
 
@@ -19,12 +20,13 @@ Credentials live under `~/.grok/auth.json` in **separate scopes** so logging out
 
 **Hyper does not auto-open the Grok browser login.** You land on the welcome splash:
 
-1. Press **`l`** when you want the default interactive login (usually grok.com).
+1. Press **`l`** when you want the default xAI interactive login (`grok.com` or configured enterprise OIDC).
 2. Or enter a session after any credential is already configured, then use slash commands:
 
 ```text
-/login openai          # ChatGPT Codex OAuth
 /login kimi            # Kimi Code OAuth
+/login openai          # ChatGPT Codex OAuth
+/login claude          # Anthropic Claude Pro/Max OAuth
 /providers openrouter <key>
 /providers anthropic <key>
 /model openrouter/...
@@ -69,20 +71,24 @@ Running `grok login` starts the sign-in flow again, replacing your cached sessio
 | Flag | Description |
 |------|-------------|
 | `--oauth` | Sign in through SpaceXAI OAuth at `auth.x.ai`. This is the default, so the flag is optional. |
-| `--device-auth` (alias `--device-code`) | Sign in with the device-code flow for headless or remote environments. |
+| `--device-auth` (alias `--device-code`) | Sign in with the xAI device-code flow for headless or remote environments. |
+| `--kimi` | Sign in with a Kimi Code subscription. |
+| `--openai` | Sign in with a ChatGPT Plus/Pro subscription for OpenAI Codex. |
+| `--claude` | Sign in with an Anthropic Claude Pro/Max subscription. |
 
 To sign out of the **xAI** session, run `hyper logout` (or `grok logout` on
-the official binary). That clears the primary xAI session scope only; if Kimi
-or Codex sessions remain, the CLI prints how to clear them.
+the official binary). That clears the primary xAI session scope only; Kimi,
+Codex, and Claude sessions remain until explicitly cleared.
 
 Third-party subscriptions and BYOK keys are separate:
 
 | Command | Clears |
 |---------|--------|
-| `hyper logout` | xAI session (interactive OAuth / cached session); hints if Kimi/Codex remain |
+| `hyper logout` | xAI session (interactive OAuth / cached session); third-party subscriptions remain |
 | `hyper logout --kimi` | Kimi Code OAuth only |
 | `hyper logout --openai` | OpenAI Codex (ChatGPT) OAuth only |
-| `hyper logout --all` | xAI + Kimi + Codex OAuth (not BYOK platform keys) |
+| `hyper logout --claude` | Anthropic Claude OAuth only |
+| `hyper logout --all` | xAI + Kimi + Codex + Claude OAuth (not BYOK platform keys) |
 | `/logout provider <platform>` | A stored BYOK API key for that platform (same as `/providers clear`) |
 
 `XAI_API_KEY` and other env-based keys are never removed by logout — unset the

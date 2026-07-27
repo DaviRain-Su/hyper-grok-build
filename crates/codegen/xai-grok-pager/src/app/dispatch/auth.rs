@@ -58,6 +58,16 @@ fn no_login_method_error(app: &AppView) -> String {
     }
 }
 
+fn no_xai_login_method_error(app: &AppView) -> String {
+    if app.auth_methods.is_empty() {
+        xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string()
+    } else {
+        "No xAI Grok login method is available. Use `/login kimi`, `/login openai`, or \
+         `/login claude` explicitly for a third-party subscription."
+            .to_string()
+    }
+}
+
 /// Abort any in-flight Authenticate/SwitchAccount task *and* its URL poll so a
 /// new login cannot stack device-code mints or have a stale poll steal the
 /// successor's URL (single-flight). No-op when not authenticating or when the
@@ -201,21 +211,33 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
     }
 }
 
-/// Start an interactive login flow. Triggered by pressing 'l' on the
-/// welcome screen or by the `/login` slash command.
+/// Start the default xAI interactive login flow. Triggered by pressing 'l' on
+/// the welcome screen or by the bare `/login` slash command.
+///
+/// Explicit `/login kimi`, `/login openai`, and `/login claude` actions use
+/// their dedicated dispatchers below. Re-resolve xAI here on every invocation
+/// so an earlier explicit third-party login cannot silently change bare
+/// `/login` into a different provider.
 ///
 /// When invoked mid-session (the active view is an agent/dashboard rather
 /// than the welcome screen), the auth UI — including the external auth
 /// provider's sign-in URL and status — is only rendered by the welcome
 /// view. We therefore stash the caller's view in `auth_return_view` and
 /// switch to `Welcome` so the flow is actually visible; the prior view is
-/// restored once auth completes or is cancelled. Without this, `/login`
-/// with an external auth provider configured appeared to do nothing.
+/// restored once auth completes or is cancelled.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
-    ensure_login_method(app);
+    let (label, method_id, start_mode) =
+        crate::acp::find_xai_interactive_login_method(&app.auth_methods);
+    app.login_label = label;
+    app.login_method_id = method_id;
+    app.auth_start_mode = match start_mode {
+        crate::acp::AuthStartMode::Pending => AuthMode::Pending,
+        crate::acp::AuthStartMode::Command => AuthMode::Command,
+    };
+
     let Some(method_id) = app.login_method_id.clone() else {
         app.auth_state = AuthState::Pending {
-            error: Some(no_login_method_error(app)),
+            error: Some(no_xai_login_method_error(app)),
         };
         return vec![];
     };

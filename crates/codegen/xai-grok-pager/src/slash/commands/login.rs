@@ -1,8 +1,9 @@
 //! `/login` -- log in or re-authenticate with your account.
 //!
 //! Optional argument: `kimi` / `kimi-code` starts Kimi Code device OAuth;
-//! `openai` / `codex` starts the OpenAI Codex (ChatGPT) browser OAuth
-//! instead of the default xAI login.
+//! `openai` / `codex` starts the OpenAI Codex (ChatGPT) browser OAuth;
+//! `claude` / `anthropic` starts the Anthropic Claude subscription OAuth.
+//! With no argument, login always uses the default xAI flow.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -89,9 +90,22 @@ mod tests {
     }
 
     #[test]
-    fn login_claude_still_logs_in() {
+    fn login_routes_all_four_interactive_families() {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
+
+        assert!(matches!(
+            LoginCommand.run(&mut ctx, ""),
+            CommandResult::Action(Action::Login)
+        ));
+        assert!(matches!(
+            LoginCommand.run(&mut ctx, "kimi"),
+            CommandResult::Action(Action::LoginKimi)
+        ));
+        assert!(matches!(
+            LoginCommand.run(&mut ctx, "openai"),
+            CommandResult::Action(Action::LoginOpenAiCodex)
+        ));
         assert!(matches!(
             LoginCommand.run(&mut ctx, "claude"),
             CommandResult::Action(Action::LoginAnthropicClaude)

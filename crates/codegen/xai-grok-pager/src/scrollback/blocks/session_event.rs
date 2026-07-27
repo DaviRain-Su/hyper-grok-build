@@ -215,8 +215,9 @@ impl SessionEvent {
             }
             SessionEvent::ReAuthRequired => {
                 "Authentication required \u{2014} your session has expired or your \
-                 credentials were rejected. Run /login (xAI), /login kimi (Kimi Code) \
-                 or /login openai (OpenAI Codex), then resend your message."
+                 credentials were rejected. Run /login (xAI), /login kimi (Kimi Code), \
+                 /login openai (OpenAI Codex), or /login claude (Claude), then resend \
+                 your message."
                     .to_string()
             }
             SessionEvent::ContextTooLarge => {
@@ -758,9 +759,19 @@ mod tests {
     }
 
     #[test]
-    fn reauth_required_message_points_at_login() {
+    fn reauth_required_message_points_at_all_login_families() {
         let msg = SessionEvent::ReAuthRequired.message();
-        assert!(msg.contains("/login"), "must tell the user to run /login");
+        for command in [
+            "/login (xAI)",
+            "/login kimi",
+            "/login openai",
+            "/login claude",
+        ] {
+            assert!(
+                msg.contains(command),
+                "must mention the {command} recovery path: {msg}"
+            );
+        }
         assert!(
             msg.to_lowercase().contains("authentication")
                 || msg.to_lowercase().contains("credentials"),

@@ -6,12 +6,13 @@ Hyper（以及 Grok Build）支持**多种互不绑定的认证方式**。不必
 |------|--------|----------|
 | SpaceXAI / Grok OAuth | `hyper login` 或欢迎页按 `l` | Grok 托管模型 |
 | xAI API Key | `export XAI_API_KEY=…` | CI / 无浏览器 |
-| OpenAI Codex（ChatGPT） | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro 编程 |
 | Kimi Code | `hyper login --kimi` / `/login kimi` | Kimi 订阅 |
+| OpenAI Codex（ChatGPT） | `hyper login --openai` / `/login openai` | ChatGPT Plus/Pro 编程 |
+| Anthropic Claude | `hyper login --claude` / `/login claude` | Claude Pro/Max 编程 |
 | BYOK 平台 | `/providers <platform> <key>` 或环境变量 | OpenAI、Anthropic、OpenRouter、Ollama 等 |
 | 企业 OIDC / SSO | 配置 / 环境变量 | 企业部署 |
 
-凭据按**不同 scope** 写在 `~/.grok/auth.json`，退出 xAI 不会自动清掉 Codex / Kimi（除非你显式清除）。
+凭据按**不同 scope** 写在 `~/.grok/auth.json`，退出 xAI 不会自动清掉 Kimi、Codex 或 Claude（除非你显式清除）。
 
 ---
 
@@ -19,12 +20,13 @@ Hyper（以及 Grok Build）支持**多种互不绑定的认证方式**。不必
 
 **Hyper 不会一打开就强制跳 Grok 浏览器登录。** 你会先到欢迎页：
 
-1. 需要默认交互登录时按 **`l`**（通常是 grok.com）。
+1. 需要默认 xAI 交互登录时按 **`l`**（`grok.com` 或已配置的企业 OIDC）。
 2. 也可在已有凭据时直接进会话，再用斜杠命令：
 
 ```text
-/login openai          # ChatGPT Codex OAuth
 /login kimi            # Kimi Code OAuth
+/login openai          # ChatGPT Codex OAuth
+/login claude          # Anthropic Claude Pro/Max OAuth
 /providers openrouter <key>
 /providers anthropic <key>
 /model openrouter/...
@@ -69,18 +71,22 @@ grok login
 | 标志 | 说明 |
 |------|------|
 | `--oauth` | 通过 `auth.x.ai` 的 SpaceXAI OAuth 登录。此为默认，标志可选。 |
-| `--device-auth`（别名 `--device-code`） | 设备码流程，适合无头或远程环境。 |
+| `--device-auth`（别名 `--device-code`） | xAI 设备码流程，适合无头或远程环境。 |
+| `--kimi` | 使用 Kimi Code 订阅登录。 |
+| `--openai` | 使用 ChatGPT Plus/Pro 订阅登录 OpenAI Codex。 |
+| `--claude` | 使用 Anthropic Claude Pro/Max 订阅登录。 |
 
-要退出 **xAI** 会话，运行 `hyper logout`（官方二进制则为 `grok logout`）。这只清除主 xAI 会话范围；若仍有 Kimi 或 Codex 会话，CLI 会提示如何清除。
+要退出 **xAI** 会话，运行 `hyper logout`（官方二进制则为 `grok logout`）。这只清除主 xAI 会话范围；Kimi、Codex 与 Claude 会话会保留，直到显式清除。
 
 第三方订阅与 BYOK 密钥是分开的：
 
 | 命令 | 清除内容 |
 |------|----------|
-| `hyper logout` | xAI 会话（交互 OAuth / 缓存会话）；若仍有 Kimi/Codex 会给出提示 |
+| `hyper logout` | xAI 会话（交互 OAuth / 缓存会话）；第三方订阅会话会保留 |
 | `hyper logout --kimi` | 仅 Kimi Code OAuth |
 | `hyper logout --openai` | 仅 OpenAI Codex（ChatGPT）OAuth |
-| `hyper logout --all` | xAI + Kimi + Codex OAuth（不含 BYOK 平台密钥） |
+| `hyper logout --claude` | 仅 Anthropic Claude OAuth |
+| `hyper logout --all` | xAI + Kimi + Codex + Claude OAuth（不含 BYOK 平台密钥） |
 | `/logout provider <platform>` | 该平台已存储的 BYOK API Key（等同 `/providers clear`） |
 
 `XAI_API_KEY` 等基于环境变量的密钥不会被 logout 移除 —— 请自行取消设置。

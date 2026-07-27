@@ -1,6 +1,17 @@
 //! Tests for login, logout, account switching, and auth-code dispatchers.
 
 use super::*;
+use xai_grok_shell::agent::auth_method::{
+    ANTHROPIC_CLAUDE_METHOD_ID, GROK_COM_METHOD_ID, KIMI_CODE_METHOD_ID, OIDC_METHOD_ID,
+    OPENAI_CODEX_METHOD_ID,
+};
+
+fn advertised_auth_method(id: &str, name: &str) -> acp::AuthMethod {
+    acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
+        acp::AuthMethodId::new(id),
+        name.to_string(),
+    ))
+}
 
 #[test]
 fn cta_mcps_loaded_needs_auth_opens_modal_and_seeds() {
@@ -301,6 +312,127 @@ fn login_from_welcome_does_not_stash_return_view() {
 
     assert_eq!(app.active_view, ActiveView::Welcome);
     assert_eq!(app.auth_return_view, None);
+}
+
+#[test]
+fn bare_login_overrides_stale_third_party_selection_with_xai() {
+    for stale_method_id in [
+        KIMI_CODE_METHOD_ID,
+        OPENAI_CODEX_METHOD_ID,
+        ANTHROPIC_CLAUDE_METHOD_ID,
+    ] {
+        let mut app = test_app();
+        app.auth_methods = vec![
+            advertised_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code"),
+            advertised_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex"),
+            advertised_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Anthropic Claude"),
+            advertised_auth_method(GROK_COM_METHOD_ID, "Grok"),
+        ];
+        app.login_method_id = Some(acp::AuthMethodId::new(stale_method_id));
+        app.login_label = Some("Stale third-party login".to_string());
+        app.auth_start_mode = AuthMode::Command;
+
+        let effects = dispatch(Action::Login, &mut app);
+        let selected_method = effects.iter().find_map(|effect| match effect {
+            Effect::Authenticate { method_id, .. } => Some(method_id.0.as_ref()),
+            _ => None,
+        });
+
+        assert_eq!(
+            selected_method,
+            Some(GROK_COM_METHOD_ID),
+            "bare login reused stale method {stale_method_id}"
+        );
+        assert_eq!(
+            app.login_method_id.as_ref().map(|id| id.0.as_ref()),
+            Some(GROK_COM_METHOD_ID)
+        );
+        assert_eq!(app.login_label.as_deref(), Some("Grok"));
+        assert_eq!(app.auth_start_mode, AuthMode::Pending);
+    }
+}
+
+#[test]
+fn bare_login_dispatches_enterprise_oidc_over_stale_openai_selection() {
+    let mut app = test_app();
+    app.auth_methods = vec![
+        advertised_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex"),
+        advertised_auth_method(OIDC_METHOD_ID, "Enterprise xAI"),
+    ];
+    app.login_method_id = Some(acp::AuthMethodId::new(OPENAI_CODEX_METHOD_ID));
+
+    let effects = dispatch(Action::Login, &mut app);
+    let selected_method = effects.iter().find_map(|effect| match effect {
+        Effect::Authenticate { method_id, .. } => Some(method_id.0.as_ref()),
+        _ => None,
+    });
+
+    assert_eq!(selected_method, Some(OIDC_METHOD_ID));
+    assert_eq!(app.login_label.as_deref(), Some("Enterprise xAI"));
+    assert_eq!(app.auth_start_mode, AuthMode::Pending);
+}
+
+#[test]
+fn bare_login_with_only_third_party_methods_fails_closed() {
+    let mut app = test_app_with_agent();
+    app.auth_methods = vec![
+        advertised_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code"),
+        advertised_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex"),
+        advertised_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Anthropic Claude"),
+    ];
+    app.login_method_id = Some(acp::AuthMethodId::new(KIMI_CODE_METHOD_ID));
+
+    let effects = dispatch(Action::Login, &mut app);
+
+    assert!(effects.is_empty());
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+    assert!(app.login_method_id.is_none());
+    assert!(matches!(
+        &app.auth_state,
+        AuthState::Pending { error: Some(message) }
+            if message.contains("No xAI Grok login method")
+                && message.contains("/login kimi")
+                && message.contains("/login openai")
+                && message.contains("/login claude")
+    ));
+}
+
+#[test]
+fn explicit_third_party_login_actions_keep_their_provider() {
+    for (action, expected_method_id) in [
+        (Action::LoginKimi, KIMI_CODE_METHOD_ID),
+        (Action::LoginOpenAiCodex, OPENAI_CODEX_METHOD_ID),
+        (Action::LoginAnthropicClaude, ANTHROPIC_CLAUDE_METHOD_ID),
+    ] {
+        let mut app = test_app();
+        let effects = dispatch(action, &mut app);
+        let selected_method = effects.iter().find_map(|effect| match effect {
+            Effect::Authenticate { method_id, .. } => Some(method_id.0.as_ref()),
+            _ => None,
+        });
+
+        assert_eq!(selected_method, Some(expected_method_id));
+    }
+}
+
+#[test]
+fn switch_account_preserves_current_third_party_provider() {
+    for expected_method_id in [
+        KIMI_CODE_METHOD_ID,
+        OPENAI_CODEX_METHOD_ID,
+        ANTHROPIC_CLAUDE_METHOD_ID,
+    ] {
+        let mut app = test_app();
+        app.login_method_id = Some(acp::AuthMethodId::new(expected_method_id));
+
+        let effects = dispatch(Action::SwitchAccount, &mut app);
+        let selected_method = effects.iter().find_map(|effect| match effect {
+            Effect::SwitchAccount { method_id, .. } => Some(method_id.0.as_ref()),
+            _ => None,
+        });
+
+        assert_eq!(selected_method, Some(expected_method_id));
+    }
 }
 
 /// Compact-auth recovery: hold prompt across auto-compact 401, stash on

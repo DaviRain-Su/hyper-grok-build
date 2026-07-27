@@ -932,36 +932,21 @@ pub(crate) async fn run(
                 crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
             };
         } else {
-            // --force-login: find the grok.com method from the advertised list
-            let grok_com = connection
-                .auth_methods
-                .iter()
-                .find(|m| m.id().0.as_ref() == "grok.com");
-            if let Some(method) = grok_com {
-                app.login_label = Some(method.name().to_string());
-                app.login_method_id = Some(method.id().clone());
-                let is_provider = method
-                    .meta()
-                    .as_ref()
-                    .and_then(|v| v.get("external_provider"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                app.auth_start_mode = if is_provider {
-                    super::app_view::AuthMode::Command
-                } else {
-                    super::app_view::AuthMode::Pending
-                };
-            } else {
-                // No grok.com method available, use the first method as fallback
-                let first = &connection.auth_methods[0];
-                app.login_label = Some(first.name().to_string());
-                app.login_method_id = Some(first.id().clone());
-                app.auth_start_mode = super::app_view::AuthMode::Pending;
-            }
+            // --force-login seeds the same xAI-only default used by the welcome
+            // Login action. Do not display a third-party method as the default;
+            // dispatch_login re-resolves this method and fails closed if absent.
+            let (label, method_id, start_mode) =
+                crate::acp::find_xai_interactive_login_method(&connection.auth_methods);
+            app.login_label = label;
+            app.login_method_id = method_id;
+            app.auth_start_mode = match start_mode {
+                crate::acp::AuthStartMode::Pending => super::app_view::AuthMode::Pending,
+                crate::acp::AuthStartMode::Command => super::app_view::AuthMode::Command,
+            };
         }
 
         // Skip the login splash screen — auto-trigger login immediately
-        // by reusing dispatch_login. Effects are stashed and drained after
+        // by reusing the xAI-only dispatch_login. Effects are stashed and drained after
         // the initial render so the user sees the auth UI right away.
         // Empty auth_methods (preferred_method pin with no credentials) is
         // fail-closed: do not invent grok.com / auto-start OIDC.

@@ -397,9 +397,10 @@ shell 还支持子命令（`/plugins list`、`/plugins install <source>`、`/plu
 登录或重新认证（可在会话内执行）：
 
 ```text
-/login                 # 默认交互方式（多为 Grok / SpaceXAI）
-/login openai          # ChatGPT Codex OAuth（也可用 codex / openai-codex / chatgpt）
+/login                 # xAI Grok / 已配置的企业 OIDC（始终为默认）
 /login kimi            # Kimi Code 设备 OAuth
+/login openai          # ChatGPT Codex OAuth（也可用 codex / openai-codex / chatgpt）
+/login claude          # Anthropic Claude Pro/Max OAuth（也可用 anthropic）
 ```
 
 Hyper **首次启动不会强制** Grok OAuth，需要时再 `/login`。详见 [认证](02-authentication.md) 与 [OpenAI Codex](28-openai-codex.md)。
@@ -416,7 +417,7 @@ Hyper **首次启动不会强制** Grok OAuth，需要时再 `/login`。详见 [
 
 ### `/logout`
 
-登出并返回登录屏。可用标志 / 子命令清除第三方 scope（`--openai`、`--kimi`、`--all`，或 `/logout provider <platform>`）。
+登出并返回登录屏。可用标志 / 子命令清除第三方 scope（`--kimi`、`--openai`、`--claude`、`--all`，或 `/logout provider <platform>`）。
 
 ### `/usage`
 

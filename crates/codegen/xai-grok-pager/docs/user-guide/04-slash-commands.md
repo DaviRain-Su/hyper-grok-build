@@ -407,9 +407,10 @@ Create, edit, and delete personas. A subagent can apply a persona to shape how i
 Log in or re-authenticate without leaving the session.
 
 ```text
-/login                 # default interactive method (often Grok / SpaceXAI)
-/login openai          # ChatGPT Codex OAuth (also: codex, openai-codex, chatgpt)
+/login                 # xAI Grok / configured enterprise OIDC (always the default)
 /login kimi            # Kimi Code device OAuth
+/login openai          # ChatGPT Codex OAuth (also: codex, openai-codex, chatgpt)
+/login claude          # Anthropic Claude Pro/Max OAuth (also: anthropic)
 ```
 
 On Hyper, first launch does **not** force Grok OAuth — use `/login` when you choose. See [Authentication](02-authentication.md) and [OpenAI Codex](28-openai-codex.md).
@@ -426,7 +427,7 @@ List, set, or clear BYOK platform API keys (OpenRouter, Anthropic, OpenAI API, O
 
 ### `/logout`
 
-Log out and return to the login screen. Use flags / subcommands for third-party scopes (`--openai`, `--kimi`, `--all`, or `/logout provider <platform>`).
+Log out and return to the login screen. Use flags / subcommands for third-party scopes (`--kimi`, `--openai`, `--claude`, `--all`, or `/logout provider <platform>`).
 
 ### `/usage`
 
