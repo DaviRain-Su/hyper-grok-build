@@ -657,54 +657,71 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     }
 
     let req: SetPlatformApiKeyRequest = parse_params(args)?;
-    let platform_id = xai_grok_models::PlatformId::parse(req.platform.trim()).ok_or_else(|| {
+    let provider = xai_grok_models::provider_spec(req.platform.trim()).ok_or_else(|| {
         acp::Error::invalid_params().data(format!(
-            "unknown platform '{}'; run /providers for the list",
+            "unknown provider '{}'; run /providers for the list",
             req.platform.trim()
         ))
     })?;
-    if platform_id.uses_oauth() {
-        let login = match platform_id {
-            xai_grok_models::PlatformId::KimiCode => "/login kimi",
-            xai_grok_models::PlatformId::OpenAiCodex => "/login openai",
-            xai_grok_models::PlatformId::AnthropicClaude => "/login claude",
-            _ => "/login kimi",
+    if !provider.accepts_api_key() {
+        let login = match provider.legacy_platform() {
+            Some(xai_grok_models::PlatformId::KimiCode) => "/login kimi",
+            Some(xai_grok_models::PlatformId::OpenAiCodex) => "/login openai",
+            Some(xai_grok_models::PlatformId::AnthropicClaude) => "/login claude",
+            _ => "/login",
         };
         return Err(acp::Error::invalid_params().data(format!(
             "{} uses OAuth — run {login} instead of pasting an API key",
-            platform_id.display_name()
+            provider.display_name
         )));
     }
 
     let home = xai_grok_config::grok_home();
-    crate::auth::store_platform_api_key(
-        &home,
-        platform_id.as_str(),
-        &req.api_key,
-        req.base_url.as_deref(),
-    )
-    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    let storage_ids = crate::agent::config::provider_credential_storage_ids(provider);
+    let cleared = req.api_key.trim().is_empty();
+    if cleared {
+        // Clear the canonical family scope plus legacy member scopes in one
+        // auth.json transaction so an old OpenCode Go login cannot survive.
+        crate::auth::clear_platform_api_keys(&home, &storage_ids)
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    } else {
+        crate::auth::store_platform_api_key(
+            &home,
+            storage_ids
+                .first()
+                .expect("provider credential storage ids are non-empty"),
+            &req.api_key,
+            req.base_url.as_deref(),
+        )
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    }
 
     // Re-stamp catalog + live-fetch so models unlock immediately.
     agent.models_manager.restamp_platform_credentials();
     agent.sync_process_static_api_key(None);
 
-    let prefix = format!("{}/", platform_id.as_str());
+    let prefixes: Vec<String> = storage_ids.iter().map(|id| format!("{id}/")).collect();
     let unlocked = agent
         .models_manager
         .models()
         .iter()
         .filter(|(id, entry)| {
-            id.starts_with(&prefix) && entry.info.supported_in_api && entry.has_own_credentials()
+            prefixes.iter().any(|prefix| id.starts_with(prefix))
+                && entry.info.supported_in_api
+                && entry.has_own_credentials()
         })
         .count();
-    let cleared = req.api_key.trim().is_empty();
     // Env vars still win over auth.json — surface names (never values) so the
-    // TUI can warn after a "logout" that models may stay unlocked.
-    let env_still_active: Vec<&str> = platform_id
-        .api_key_env_names()
-        .iter()
-        .copied()
+    // TUI can warn after a "logout" that models may stay unlocked. Include the
+    // complete credential family, deduplicating the shared official alias.
+    let mut env_names = std::collections::BTreeSet::new();
+    for storage_id in &storage_ids {
+        if let Some(member) = xai_grok_models::provider_spec(storage_id) {
+            env_names.extend(member.credentials.env_keys.iter().map(String::as_str));
+        }
+    }
+    let env_still_active: Vec<&str> = env_names
+        .into_iter()
         .filter(|name| {
             std::env::var(name)
                 .map(|v| !v.trim().is_empty())
@@ -712,15 +729,15 @@ fn handle_set_platform_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         })
         .collect();
     tracing::info!(
-        platform = platform_id.as_str(),
+        provider = provider.id.as_str(),
         unlocked,
         cleared,
         env_still_active = ?env_still_active,
-        "platform API key updated via /providers"
+        "provider API key updated via /providers"
     );
     ExtMethodResult::success(serde_json::json!({
-        "platform": platform_id.as_str(),
-        "displayName": platform_id.display_name(),
+        "platform": provider.id.as_str(),
+        "displayName": provider.display_name,
         "cleared": cleared,
         "modelsUnlocked": unlocked,
         "envStillActive": env_still_active,

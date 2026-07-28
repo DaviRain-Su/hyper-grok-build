@@ -1,0 +1,11 @@
+{
+  "exclusions": [],
+  "pi_commit": "a597371bda2af70372d1323d550483b5f4a0ae36",
+  "provider_id_map": {
+    "kimi-coding": "kimi-code",
+    "moonshotai": "moonshot-ai",
+    "moonshotai-cn": "moonshot-cn",
+    "xai": "xai-direct"
+  },
+  "schema_version": 1
+}

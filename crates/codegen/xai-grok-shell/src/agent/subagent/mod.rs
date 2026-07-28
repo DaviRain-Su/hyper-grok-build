@@ -770,6 +770,9 @@ async fn read_parent_sampling_config(
                         || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url),
                 ),
             };
+            let kimi_oauth_active = parent_model
+                .map(crate::agent::config::model_uses_kimi_code_oauth)
+                .unwrap_or(oauth_platform == Some(xai_grok_models::PlatformId::KimiCode));
             let auth_scheme = parent_model
                 .map(|model| model.info().auth_scheme)
                 .or_else(|| {
@@ -788,14 +791,29 @@ async fn read_parent_sampling_config(
                 oauth_platform,
                 &cfg.base_url,
             );
+            if oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) && !kimi_oauth_active {
+                crate::agent::config::remove_kimi_device_headers(&mut extra_headers);
+            }
+            let fail_closed_ambiguous_oauth =
+                parent_model.is_none() && oauth_origin && oauth_platform.is_none();
             let inherited = xai_grok_sampler::SamplerConfig {
-                api_key: if oauth_origin { None } else { creds.api_key },
+                api_key: if kimi_oauth_active
+                    || responses_codex_dialect
+                    || fail_closed_ambiguous_oauth
+                {
+                    None
+                } else {
+                    creds.api_key
+                },
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
                 max_completion_tokens: cfg.max_completion_tokens,
                 temperature: cfg.temperature,
                 top_p: cfg.top_p,
                 api_backend: cfg.api_backend,
+                adapter_kind: cfg.adapter_kind,
+                request_compat: cfg.request_compat,
+                endpoint_path: cfg.endpoint_path,
                 auth_scheme,
                 extra_headers,
                 query_params: cfg.query_params.clone(),
@@ -825,6 +843,9 @@ async fn read_parent_sampling_config(
                 doom_loop_recovery: ctx.sampling_config.doom_loop_recovery,
                 header_injector: ctx.sampling_config.header_injector.clone(),
                 responses_codex_dialect,
+                bedrock_request_metadata: ctx.sampling_config.bedrock_request_metadata.clone(),
+                bedrock_headers: ctx.sampling_config.bedrock_headers.clone(),
+                bedrock_profile: ctx.sampling_config.bedrock_profile.clone(),
                 kimi_dialect,
             };
             let model_id = ctx.model_id.clone();

@@ -7,24 +7,35 @@
 //!   CLI flag > ENV var > config.toml > remote settings > these defaults
 
 mod platforms;
+mod provider_compat;
 
 pub use platforms::{
     ANTHROPIC_API_KEY_ALIAS_ENV, ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV,
     ANTHROPIC_BASE_URL_ALIAS_ENV, ANTHROPIC_BASE_URL_ENV, ANTHROPIC_VERSION_HEADER_VALUE,
-    BuiltinPlatformModel,
-    KIMI_CODE_API_BACKEND_ENV, KIMI_CODE_BASE_URL_ENV, KIMI_CODE_OAUTH_HOST_ENV,
-    KIMI_DEFAULT_MAX_TOKENS, KimiRequestProfile,
-    MOONSHOT_AI_API_KEY_ENV, MOONSHOT_AI_BASE_URL_ENV, MOONSHOT_API_KEY_ALIAS_ENV,
-    MOONSHOT_API_KEY_ENV, MOONSHOT_CN_API_KEY_ENV, MOONSHOT_CN_BASE_URL_ENV, ModelCapability,
-    NEXUS_BASE_URL_DEFAULT,
+    AdapterKind, BuiltinPlatformModel, KIMI_API_KEY_ALIAS_ENV, KIMI_API_KEY_ENV,
+    KIMI_CODE_API_BACKEND_ENV, KIMI_CODE_API_KEY_ENV, KIMI_CODE_BASE_URL_ENV,
+    KIMI_CODE_OAUTH_HOST_ENV, KIMI_DEFAULT_MAX_TOKENS, KimiRequestProfile, MOONSHOT_AI_API_KEY_ENV,
+    MOONSHOT_AI_BASE_URL_ENV, MOONSHOT_API_KEY_ALIAS_ENV, MOONSHOT_API_KEY_ENV,
+    MOONSHOT_CN_API_KEY_ENV, MOONSHOT_CN_BASE_URL_ENV, ModelCapability, NEXUS_BASE_URL_DEFAULT,
     OPENAI_API_KEY_ALIAS_ENV, OPENAI_API_KEY_ENV, OPENAI_BASE_URL_ENV, OPENCODE_API_KEY_ENV,
     OPENCODE_GO_API_KEY_ENV, OPENCODE_GO_BASE_URL_DEFAULT, PLATFORM_CATALOG_JSON,
-    PlatformApiBackend, PlatformId, WireModel, WireModelsResponse, WireThinkEfforts,
-    derive_capabilities, filter_allowed_models, kimi_allow_empty_thinking_signature,
-    kimi_force_adaptive_thinking, kimi_request_profile, kimi_sampling_is_fixed,
-    moonshot_builtin_models, nexus_chat_base, nexus_messages_base, nexus_normalize_root,
-    nexus_responses_base, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
-    parse_managed_model_key, platform_builtin_models,
+    PLATFORM_REGISTRY_JSON, PlatformApiBackend, PlatformId, ProviderAssetError,
+    ProviderAuthPlacement, ProviderBaseUrlNormalization, ProviderCatalogSource,
+    ProviderCredentialKind, ProviderCredentialPolicy, ProviderDiscovery, ProviderDiscoveryMode,
+    ProviderId, ProviderRegistry, ProviderRuntimeSpec, ProviderSpec, ProviderStatus,
+    ResolvedProviderRuntime, WireModel, WireModelsResponse, WireThinkEfforts, derive_capabilities,
+    filter_allowed_models, kimi_allow_empty_thinking_signature, kimi_force_adaptive_thinking,
+    kimi_request_profile, kimi_sampling_is_fixed, moonshot_builtin_models, nexus_chat_base,
+    nexus_messages_base, nexus_normalize_root, nexus_responses_base,
+    normalize_azure_openai_base_url, normalize_kimi_code_base_url, normalize_messages_sdk_base_url,
+    parse_managed_model_key, platform_builtin_models, provider_registry, provider_spec,
+    validate_provider_assets,
+};
+pub use provider_compat::{
+    AnthropicMessagesCompat, BedrockConverseStreamCompat, CacheControlFormat, DeferredToolsMode,
+    GoogleGenerateContentCompat, MaxTokensField, OpenAiCompletionsCompat, OpenAiResponsesCompat,
+    PiMessagesCompat, ProviderRouteSpec, RequestCompat, RouteAuth, SessionAffinityFormat,
+    ThinkingFormat,
 };
 
 use std::sync::LazyLock;

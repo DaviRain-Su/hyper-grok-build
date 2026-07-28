@@ -3696,8 +3696,8 @@ pub fn resolve_model_list(
     resolved
 }
 
-/// `[platforms.<id>]` — API keys for the built-in platform registry
-/// ([`xai_grok_models::PlatformId`]).
+/// `[platforms.<id>]` — API keys for the data-driven provider registry
+/// ([`xai_grok_models::ProviderSpec`]).
 ///
 /// ```toml
 /// [platforms.moonshot-cn]
@@ -3720,28 +3720,47 @@ pub struct PlatformsConfig {
 }
 
 impl PlatformsConfig {
-    /// Config-file API key for `platform`, blank-as-unset. Unknown
-    /// `[platforms.*]` ids are warned about at load and never resolve.
+    /// Config-file API key for a canonical provider id, blank-as-unset.
+    pub fn config_api_key_for_provider(&self, provider: &str) -> Option<String> {
+        let spec = xai_grok_models::provider_spec(provider)?;
+        for storage_id in provider_credential_storage_ids(spec) {
+            let Some(storage_provider) = xai_grok_models::provider_spec(&storage_id) else {
+                continue;
+            };
+            let entry = self.entries.get(storage_provider.id.as_str()).or_else(|| {
+                storage_provider
+                    .aliases
+                    .iter()
+                    .find_map(|alias| self.entries.get(alias))
+            });
+            if let Some(key) = entry
+                .and_then(|entry| entry.api_key.as_deref())
+                .filter(|key| !key.trim().is_empty())
+            {
+                return Some(key.to_owned());
+            }
+        }
+        None
+    }
+
+    /// Compatibility wrapper for bespoke typed platforms.
     pub fn config_api_key(&self, platform: xai_grok_models::PlatformId) -> Option<String> {
-        self.entries
-            .get(platform.as_str())
-            .and_then(|e| e.api_key.as_deref())
-            .filter(|k| !k.trim().is_empty())
-            .map(str::to_owned)
+        self.config_api_key_for_provider(platform.as_str())
     }
 
     /// Warn about `[platforms.<id>]` tables that don't name a registry
-    /// platform (e.g. typo `moonshot_cn`). Key values are not logged.
+    /// provider (e.g. typo `moonshot_cn`). Key values are not logged.
     pub fn warn_unknown_platforms(&self) {
         for id in self.entries.keys() {
-            if xai_grok_models::PlatformId::parse(id).is_none() {
+            if xai_grok_models::provider_spec(id).is_none() {
                 tracing::warn!(
                     platform = %id,
-                    known = ?xai_grok_models::PlatformId::ALL
+                    known = ?xai_grok_models::provider_registry()
+                        .providers()
                         .iter()
-                        .map(|p| p.as_str())
+                        .map(|provider| provider.id.as_str())
                         .collect::<Vec<_>>(),
-                    "[platforms.{id}] does not match any registry platform; its api_key is ignored"
+                    "[platforms.{id}] does not match any registry provider; its api_key is ignored"
                 );
             }
         }
@@ -3757,6 +3776,19 @@ pub struct PlatformCredentialConfig {
     pub api_key: Option<String>,
 }
 
+/// Canonical auth.json/config lookup order for a provider credential family.
+/// The storage-group id wins, followed by legacy member ids for migration.
+pub fn provider_credential_storage_ids(provider: &xai_grok_models::ProviderSpec) -> Vec<String> {
+    let group = provider.credential_storage_group();
+    let mut ids = vec![group.to_string()];
+    for candidate in xai_grok_models::provider_registry().providers() {
+        if candidate.credential_storage_group() == group && candidate.id.as_str() != group {
+            ids.push(candidate.id.as_str().to_string());
+        }
+    }
+    ids
+}
+
 /// Resolve the API key for an open-platform registry entry:
 /// platform-scoped env > generic env aliases > auth.json (`platform/<id>`,
 /// set via `/providers`) > config.toml `[platforms.<id>] api_key`.
@@ -3765,16 +3797,37 @@ pub fn resolve_platform_api_key(
     platform: xai_grok_models::PlatformId,
     platforms: &PlatformsConfig,
 ) -> Option<String> {
-    resolve_platform_api_key_with(platform, platforms, |name| std::env::var(name).ok())
+    let spec = xai_grok_models::provider_spec(platform.as_str())
+        .expect("every PlatformId has a validated provider registry row");
+    resolve_provider_api_key(spec, platforms)
 }
 
 /// Testable core of [`resolve_platform_api_key`] with an injected getenv.
 pub fn resolve_platform_api_key_with(
     platform: xai_grok_models::PlatformId,
     platforms: &PlatformsConfig,
+    getenv: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    let spec = xai_grok_models::provider_spec(platform.as_str())
+        .expect("every PlatformId has a validated provider registry row");
+    resolve_provider_api_key_with(spec, platforms, getenv)
+}
+
+/// Resolve a static API key for any data-driven provider registry row.
+pub fn resolve_provider_api_key(
+    provider: &xai_grok_models::ProviderSpec,
+    platforms: &PlatformsConfig,
+) -> Option<String> {
+    resolve_provider_api_key_with(provider, platforms, |name| std::env::var(name).ok())
+}
+
+/// Testable core of [`resolve_provider_api_key`] with an injected getenv.
+pub fn resolve_provider_api_key_with(
+    provider: &xai_grok_models::ProviderSpec,
+    platforms: &PlatformsConfig,
     mut getenv: impl FnMut(&str) -> Option<String>,
 ) -> Option<String> {
-    for name in platform.api_key_env_names() {
+    for name in &provider.credentials.env_keys {
         if let Some(value) = getenv(name)
             && !value.trim().is_empty()
         {
@@ -3782,12 +3835,97 @@ pub fn resolve_platform_api_key_with(
         }
     }
     // UI-pasted keys live under `platform/<id>` in auth.json (env wins).
-    if let Some(key) =
-        crate::auth::read_platform_api_key(&xai_grok_config::grok_home(), platform.as_str())
-    {
-        return Some(key);
+    // Shared provider families consult the canonical group first, then legacy
+    // member scopes so existing OpenCode Go logins continue to work.
+    let home = xai_grok_config::grok_home();
+    for storage_id in provider_credential_storage_ids(provider) {
+        if let Some(key) = crate::auth::read_platform_api_key(&home, &storage_id) {
+            return Some(key);
+        }
     }
-    platforms.config_api_key(platform)
+    platforms.config_api_key_for_provider(provider.id.as_str())
+}
+
+fn env_trimmed(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn google_vertex_external_readiness(provider: &xai_grok_models::ProviderSpec) -> bool {
+    let project_ready = provider
+        .runtime
+        .project_env_keys
+        .iter()
+        .any(|name| env_trimmed(name).is_some());
+    let location_ready = provider
+        .runtime
+        .location_env_keys
+        .iter()
+        .any(|name| env_trimmed(name).is_some());
+    if !project_ready || !location_ready {
+        return false;
+    }
+    provider
+        .runtime
+        .external_readiness_env_keys
+        .iter()
+        .any(|name| {
+            env_trimmed(name)
+                .map(|path| std::path::Path::new(&path).exists())
+                .unwrap_or(false)
+        })
+        || std::env::var("HOME")
+            .map(|home| {
+                std::path::Path::new(&home)
+                    .join(".config/gcloud/application_default_credentials.json")
+                    .exists()
+            })
+            .unwrap_or(false)
+}
+
+fn amazon_bedrock_external_readiness() -> bool {
+    if env_trimmed("AWS_BEDROCK_SKIP_AUTH").as_deref() == Some("1") {
+        return true;
+    }
+    if env_trimmed("AWS_ACCESS_KEY_ID").is_some() && env_trimmed("AWS_SECRET_ACCESS_KEY").is_some()
+    {
+        return true;
+    }
+    if env_trimmed("AWS_PROFILE").is_some() {
+        return true;
+    }
+    if env_trimmed("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_some()
+        || env_trimmed("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
+    {
+        return true;
+    }
+    if let Some(path) = env_trimmed("AWS_WEB_IDENTITY_TOKEN_FILE")
+        && std::path::Path::new(&path).exists()
+    {
+        return true;
+    }
+    crate::auth::read_bedrock_auth_marker(&xai_grok_config::grok_home()).is_some()
+}
+
+fn provider_external_readiness(provider: &xai_grok_models::ProviderSpec) -> bool {
+    if provider.runtime.external_readiness_env_keys.is_empty() {
+        return false;
+    }
+    match provider.id.as_str() {
+        "google-vertex" => google_vertex_external_readiness(provider),
+        "amazon-bedrock" => amazon_bedrock_external_readiness(),
+        _ => provider
+            .runtime
+            .external_readiness_env_keys
+            .iter()
+            .any(|name| {
+                env_trimmed(name)
+                    .map(|value| std::path::Path::new(&value).exists())
+                    .unwrap_or(false)
+            }),
+    }
 }
 
 /// Build a selectable effort row for a platform catalog entry.
@@ -3867,12 +4005,12 @@ fn openai_codex_catalog_efforts(
 ///
 /// Kimi K3: Pi `KIMI_K3_THINKING_LEVEL_MAP` → low / high / max only.
 fn platform_builtin_reasoning_efforts(
-    platform: xai_grok_models::PlatformId,
+    platform: Option<xai_grok_models::PlatformId>,
     model: &str,
 ) -> (bool, Option<ReasoningEffort>, Vec<ReasoningEffortOption>) {
     use ReasoningEffort as E;
     match platform {
-        xai_grok_models::PlatformId::OpenAiCodex => {
+        Some(xai_grok_models::PlatformId::OpenAiCodex) => {
             let Some((default, rows)) = openai_codex_catalog_efforts(model) else {
                 return (
                     true,
@@ -3907,7 +4045,9 @@ fn platform_builtin_reasoning_efforts(
                 .collect();
             (true, Some(default), opts)
         }
-        xai_grok_models::PlatformId::KimiCode if model == "k3" || model.starts_with("kimi-k3") => {
+        Some(xai_grok_models::PlatformId::KimiCode)
+            if model == "k3" || model.starts_with("kimi-k3") =>
+        {
             // Pi KIMI_K3_THINKING_LEVEL_MAP: off/minimal/medium/xhigh null;
             // low/high/max only.
             let opts = vec![
@@ -3929,19 +4069,32 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         if resolved.contains_key(&key) {
             continue;
         }
-        let env_key = if builtin.platform.api_key_env_names().is_empty() {
+        let provider = builtin.provider_spec();
+        let legacy_platform = builtin.legacy_platform();
+        let resolved_runtime = builtin.resolved_runtime();
+        // A credential alone is insufficient for templated routes: keep the
+        // model locked until account/resource placeholders produce a valid URL.
+        // Google Vertex is the exception: Pi supports API-key Express Mode,
+        // whose collection route does not require project/location expansion.
+        let vertex_express_ready = provider.id.as_str() == "google-vertex"
+            && provider.credentials.env_keys.iter().any(|key| {
+                std::env::var(key)
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+            });
+        let env_key = if provider.credentials.env_keys.is_empty()
+            || (!resolved_runtime.ready && !vertex_express_ready)
+        {
             None
         } else {
-            Some(EnvKeys::new(
-                builtin.platform.api_key_env_names().iter().copied(),
-            ))
+            Some(EnvKeys::new(provider.credentials.env_keys.iter().cloned()))
         };
         let catalog_backend = builtin.api_backend;
         // Kimi For Coding gray-release switch: default Anthropic Messages,
         // `GROK_KIMI_CODE_API_BACKEND=chat_completions` routes the same
         // models over the OpenAI-compatible endpoint while we validate
         // parity. Unset / unrecognized values keep the catalog backend.
-        let effective_backend = if builtin.platform == xai_grok_models::PlatformId::KimiCode {
+        let effective_backend = if legacy_platform == Some(xai_grok_models::PlatformId::KimiCode) {
             std::env::var(xai_grok_models::KIMI_CODE_API_BACKEND_ENV)
                 .ok()
                 .and_then(|v| xai_grok_models::PlatformApiBackend::parse(v.trim()))
@@ -3953,14 +4106,29 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             xai_grok_models::PlatformApiBackend::ChatCompletions => ApiBackend::ChatCompletions,
             xai_grok_models::PlatformApiBackend::Responses => ApiBackend::Responses,
             xai_grok_models::PlatformApiBackend::Messages => ApiBackend::Messages,
+            xai_grok_models::PlatformApiBackend::GoogleGenerateContent => {
+                ApiBackend::GoogleGenerateContent
+            }
+            xai_grok_models::PlatformApiBackend::BedrockConverseStream => {
+                ApiBackend::BedrockConverseStream
+            }
+            xai_grok_models::PlatformApiBackend::PiMessages => ApiBackend::PiMessages,
         };
-        // Anthropic Messages API-key platforms (Anthropic direct, MiniMax
-        // `/anthropic`, etc.) expect `x-api-key`. OAuth platforms (Kimi Code)
-        // also use the Messages backend but send Bearer tokens — leave those
-        // on the default Bearer scheme.
-        let auth_scheme = if builtin.platform.uses_oauth() {
+        // Schema-v3 catalog routes are authoritative. The Kimi gray switch can
+        // select a different protocol at runtime; only that compatibility path
+        // falls back to the legacy backend-derived auth/header defaults.
+        let uses_catalog_route = effective_backend == catalog_backend;
+        let auth_scheme = if uses_catalog_route {
+            Some(match builtin.route.auth {
+                xai_grok_models::RouteAuth::Bearer => AuthScheme::Bearer,
+                xai_grok_models::RouteAuth::XApiKey => AuthScheme::XApiKey,
+                xai_grok_models::RouteAuth::ApiKey => AuthScheme::ApiKey,
+                xai_grok_models::RouteAuth::CfAigAuthorization => AuthScheme::CfAigAuthorization,
+                xai_grok_models::RouteAuth::XGoogApiKey => AuthScheme::XGoogApiKey,
+            })
+        } else if provider.uses_oauth() {
             None
-        } else if builtin.platform.uses_x_api_key()
+        } else if provider.uses_x_api_key()
             || matches!(
                 effective_backend,
                 xai_grok_models::PlatformApiBackend::Messages
@@ -3970,12 +4138,21 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         } else {
             None
         };
-        let mut extra_headers = IndexMap::new();
-        if builtin.platform == xai_grok_models::PlatformId::Anthropic
+        let mut extra_headers: IndexMap<String, String> = if uses_catalog_route {
+            builtin
+                .route
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect()
+        } else {
+            IndexMap::new()
+        };
+        if legacy_platform == Some(xai_grok_models::PlatformId::Anthropic)
             || (matches!(
                 effective_backend,
                 xai_grok_models::PlatformApiBackend::Messages
-            ) && !builtin.platform.uses_oauth())
+            ) && !provider.uses_oauth())
         {
             extra_headers.insert(
                 "anthropic-version".into(),
@@ -3986,7 +4163,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         // (Messages API). Device identity headers are injected per-request.
         // The anthropic-version header only applies on the Messages backend;
         // the chat_completions gray switch must not send it.
-        if builtin.platform == xai_grok_models::PlatformId::KimiCode {
+        if legacy_platform == Some(xai_grok_models::PlatformId::KimiCode) {
             extra_headers
                 .entry("User-Agent".into())
                 .or_insert_with(|| "KimiCLI/1.5".into());
@@ -4003,7 +4180,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         // Anthropic Claude subscription (OAuth Bearer + Messages) needs
         // `anthropic-version`; the `anthropic-beta: oauth-2025-04-20` header is
         // stamped per-request by `AnthropicClaudeBearerResolver`.
-        if builtin.platform == xai_grok_models::PlatformId::AnthropicClaude {
+        if legacy_platform == Some(xai_grok_models::PlatformId::AnthropicClaude) {
             extra_headers.insert(
                 "anthropic-version".into(),
                 xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.into(),
@@ -4012,7 +4189,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         // Prefer an explicit per-platform effort menu over the legacy
         // low/medium/high/xhigh fallback so GPT-5 / Kimi show their real tiers.
         let (menu_supports, menu_default, menu_opts) =
-            platform_builtin_reasoning_efforts(builtin.platform, &builtin.model);
+            platform_builtin_reasoning_efforts(legacy_platform, &builtin.model);
         let supports_reasoning_effort = builtin.supports_reasoning_effort || menu_supports;
         let reasoning_effort = if supports_reasoning_effort {
             menu_default
@@ -4026,8 +4203,8 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         };
         let config = ModelEntryConfig {
             id: Some(key.clone()),
-            model: builtin.model.clone(),
-            base_url: builtin.resolved_base_url(),
+            model: resolved_runtime.wire_model_id.clone(),
+            base_url: resolved_runtime.base_url.clone(),
             api_base_url: None,
             name: Some(builtin.name.clone()),
             description: Some(builtin.description.clone()),
@@ -4040,6 +4217,8 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             top_p: None,
             max_completion_tokens: builtin.max_completion_tokens,
             api_backend,
+            request_compat: uses_catalog_route.then(|| builtin.request_compat.clone()),
+            endpoint_path: uses_catalog_route.then(|| builtin.route.path.clone()),
             auth_scheme,
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
@@ -4047,6 +4226,15 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             api_key: None,
             env_key,
             extra_headers,
+            query_params: if uses_catalog_route {
+                resolved_runtime
+                    .query_params
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            } else {
+                IndexMap::new()
+            },
             use_concise: false,
             hidden: false,
             supported_in_api: builtin.supported_in_api,
@@ -4062,8 +4250,8 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
         };
         tracing::debug!(
             model_key = %key,
-            platform = builtin.platform.as_str(),
-            "injected built-in platform catalog entry"
+            provider = builtin.provider.as_str(),
+            "injected built-in provider catalog entry"
         );
         resolved.insert(key.clone(), ModelEntry::from_config_entry(&config));
     }
@@ -4092,12 +4280,19 @@ fn apply_platform_credentials(
     let codex_bearer = crate::auth::openai_codex::openai_codex_catalog_access_token_cached();
     let claude_bearer =
         crate::auth::anthropic_claude::anthropic_claude_catalog_access_token_cached();
+    let github_bearer = crate::auth::github_copilot::github_copilot_catalog_access_token_cached();
+    let radius_bearer = crate::auth::radius::radius_catalog_access_token_cached();
+    let github_available_models =
+        crate::auth::github_copilot::github_copilot_available_models_cached();
     apply_platform_credentials_with_bearer(
         resolved,
         platforms,
         kimi_bearer,
         codex_bearer,
         claude_bearer,
+        github_bearer,
+        radius_bearer,
+        github_available_models,
     );
 }
 
@@ -4108,60 +4303,131 @@ fn apply_platform_credentials_with_bearer(
     kimi_bearer: Option<String>,
     codex_bearer: Option<String>,
     claude_bearer: Option<String>,
+    github_bearer: Option<String>,
+    radius_bearer: Option<String>,
+    github_available_models: Option<Vec<String>>,
 ) {
     for (key, entry) in resolved.iter_mut() {
         let id = entry.info.id.as_deref().unwrap_or(key.as_str());
-        let Some((platform, _)) = xai_grok_models::parse_managed_model_key(id) else {
+        let Some((provider_id, catalog_model_id)) = xai_grok_models::parse_managed_model_key(id)
+        else {
             continue;
         };
+        let Some(provider) = xai_grok_models::provider_spec(provider_id.as_str()) else {
+            continue;
+        };
+        let catalog_model_id = catalog_model_id.to_string();
 
-        if platform.uses_oauth() {
-            let bearer = match platform {
-                xai_grok_models::PlatformId::KimiCode => kimi_bearer.as_ref(),
-                xai_grok_models::PlatformId::OpenAiCodex => codex_bearer.as_ref(),
-                xai_grok_models::PlatformId::AnthropicClaude => claude_bearer.as_ref(),
-                _ => None,
+        if entry.platform_oauth_active {
+            // Drop a previous catalog-only OAuth marker before re-resolving;
+            // it must never masquerade as a static key on a restamp.
+            entry.api_key = None;
+        }
+        entry.platform_oauth_active = false;
+
+        let route_query: std::collections::BTreeMap<String, String> = entry
+            .info
+            .query_params
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let runtime =
+            provider.resolve_runtime(&entry.info.base_url, &catalog_model_id, &route_query);
+        entry.info.base_url = runtime.base_url;
+        if !runtime.ready {
+            // Fail closed before credential stamping. Otherwise a Cloudflare
+            // API key without account/gateway identity would appear selectable
+            // and only fail after a request was sent.
+            entry.api_key = None;
+            entry.env_key = None;
+            entry.auth_provider = None;
+            entry.info.supported_in_api = false;
+            continue;
+        }
+        // A user-defined managed row can occupy the catalog key and skip the
+        // builtin injection path. Complete any missing runtime materialization
+        // here while preserving an explicit wire model/query override.
+        if entry.info.model == catalog_model_id {
+            entry.info.model = runtime.wire_model_id;
+        }
+        for (name, value) in runtime.query_params {
+            entry.info.query_params.entry(name).or_insert(value);
+        }
+        if provider.id.as_str() == "github-copilot"
+            && let Some(base_url) =
+                crate::auth::github_copilot::github_copilot_catalog_base_url_cached()
+        {
+            entry.info.base_url = base_url;
+        }
+
+        if provider.accepts_api_key() {
+            if entry.env_key.is_none() {
+                entry.env_key = Some(EnvKeys::new(provider.credentials.env_keys.iter().cloned()));
+            }
+            let env_resolves = entry
+                .env_key
+                .as_ref()
+                .is_some_and(|keys| keys.resolve_value().is_some());
+            let provider_key = if provider.id.as_str() == "github-copilot" {
+                crate::auth::github_copilot::copilot_github_token_env()
+                    .or_else(|| resolve_provider_api_key(provider, platforms))
+            } else {
+                resolve_provider_api_key(provider, platforms)
             };
             if entry.api_key.is_none()
+                && !env_resolves
+                && let Some(config_key) = provider_key
+            {
+                tracing::debug!(
+                    model_key = %key,
+                    provider = provider.id.as_str(),
+                    "stamped provider api_key onto catalog entry"
+                );
+                entry.api_key = Some(config_key);
+            }
+            if entry.has_own_credentials() {
+                entry.info.supported_in_api = true;
+                // A static key is authoritative for hybrid providers. Never
+                // install an OAuth resolver that could strip it on request.
+                if provider.uses_oauth() {
+                    continue;
+                }
+            }
+        }
+
+        if provider_external_readiness(provider) {
+            entry.info.supported_in_api = true;
+        }
+
+        if provider.uses_oauth() {
+            let is_github_copilot = provider.id.as_str() == "github-copilot";
+            let is_radius = provider.id.as_str() == "radius";
+            let bearer = match provider.legacy_platform() {
+                Some(xai_grok_models::PlatformId::KimiCode) => kimi_bearer.as_ref(),
+                Some(xai_grok_models::PlatformId::OpenAiCodex) => codex_bearer.as_ref(),
+                Some(xai_grok_models::PlatformId::AnthropicClaude) => claude_bearer.as_ref(),
+                _ if is_github_copilot => github_bearer.as_ref(),
+                _ if is_radius => radius_bearer.as_ref(),
+                _ => None,
+            };
+            let github_available = !is_github_copilot
+                || github_available_models
+                    .as_ref()
+                    .is_none_or(|ids| ids.iter().any(|id| id == &catalog_model_id));
+            if github_available
+                && entry.api_key.is_none()
                 && let Some(bearer) = bearer
             {
                 tracing::debug!(
                     model_key = %key,
-                    platform = platform.as_str(),
+                    provider = provider.id.as_str(),
                     "stamped OAuth bearer onto subscription entry"
                 );
                 entry.api_key = Some(bearer.clone());
+                entry.platform_oauth_active = true;
                 // OAuth-gated models become selectable once a token is present.
                 entry.info.supported_in_api = true;
             }
-            continue;
-        }
-
-        if entry.env_key.is_none() {
-            entry.env_key = Some(EnvKeys::new(platform.api_key_env_names().iter().copied()));
-        }
-        let env_resolves = entry
-            .env_key
-            .as_ref()
-            .is_some_and(|k| k.resolve_value().is_some());
-        if entry.api_key.is_none() && !env_resolves {
-            // Prefer UI-pasted auth.json keys, then config.toml.
-            let stamped = crate::auth::read_platform_api_key(
-                &xai_grok_config::grok_home(),
-                platform.as_str(),
-            )
-            .or_else(|| platforms.config_api_key(platform));
-            if let Some(config_key) = stamped {
-                tracing::debug!(
-                    model_key = %key,
-                    platform = platform.as_str(),
-                    "stamped platform api_key onto open-platform entry"
-                );
-                entry.api_key = Some(config_key);
-            }
-        }
-        if entry.has_own_credentials() {
-            entry.info.supported_in_api = true;
         }
     }
 }
@@ -4331,6 +4597,8 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 top_p: m.top_p,
                 max_completion_tokens: m.max_completion_tokens,
                 api_backend: m.api_backend,
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: None,
                 agent_type: m.agent_type,
                 inference_idle_timeout_secs: m.inference_idle_timeout_secs,
@@ -4338,6 +4606,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 api_key: None,
                 env_key: None,
                 extra_headers: IndexMap::new(),
+                query_params: IndexMap::new(),
                 use_concise: false,
                 hidden: m.hidden,
                 supported_in_api: m.supported_in_api,
@@ -4390,6 +4659,10 @@ pub struct ModelEntryConfig {
     #[serde(default)]
     pub api_backend: ApiBackend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_compat: Option<xai_grok_models::RequestCompat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_scheme: Option<AuthScheme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -4404,6 +4677,9 @@ pub struct ModelEntryConfig {
     /// Example: { "x-anthropic-api-key" = "sk-ant-..." }
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub extra_headers: IndexMap<String, String>,
+    /// Query parameters attached to the explicit model route.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub query_params: IndexMap<String, String>,
     /// The total context window size in tokens for this model.
     /// Used for auto-compact threshold calculations.
     /// Required — BYOK users must explicitly set this in config.toml.
@@ -4509,6 +4785,8 @@ pub struct ConfigModelOverride {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    pub request_compat: Option<xai_grok_models::RequestCompat>,
+    pub endpoint_path: Option<String>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     #[serde(default)]
@@ -4575,6 +4853,12 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.api_backend {
             entry.info.api_backend = v.clone();
+        }
+        if self.request_compat.is_some() {
+            entry.info.request_compat.clone_from(&self.request_compat);
+        }
+        if self.endpoint_path.is_some() {
+            entry.info.endpoint_path.clone_from(&self.endpoint_path);
         }
         if !self.extra_headers.is_empty() {
             entry.info.extra_headers = self.extra_headers.clone();
@@ -4674,6 +4958,10 @@ pub struct ModelInfo {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: ApiBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_compat: Option<xai_grok_models::RequestCompat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_path: Option<String>,
     pub auth_scheme: AuthScheme,
     pub extra_headers: IndexMap<String, String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
@@ -4743,6 +5031,8 @@ impl ModelInfo {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: IndexMap::new(),
             query_params: IndexMap::new(),
@@ -4780,9 +5070,11 @@ impl ModelInfo {
             temperature: entry.temperature,
             top_p: entry.top_p,
             api_backend: entry.api_backend.clone(),
+            request_compat: entry.request_compat.clone(),
+            endpoint_path: entry.endpoint_path.clone(),
             auth_scheme: entry.auth_scheme.unwrap_or_default(),
             extra_headers: entry.extra_headers.clone(),
-            query_params: IndexMap::new(),
+            query_params: entry.query_params.clone(),
             env_http_headers: IndexMap::new(),
             context_window: entry.context_window,
             auto_compact_threshold_percent: entry.auto_compact_threshold_percent,
@@ -4853,6 +5145,10 @@ pub struct ModelEntry {
     /// Config-file models only: the built-in catalog never carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_provider: Option<crate::auth::AuthProviderRef>,
+    /// True only when a managed hybrid provider selected its OAuth credential.
+    /// Static API-key mode must not install an authoritative OAuth resolver.
+    #[serde(default)]
+    pub platform_oauth_active: bool,
     /// When set, `base_url` is used for session auth, `api_base_url` for API-key auth.
     pub api_base_url: Option<String>,
 }
@@ -4866,6 +5162,7 @@ impl ModelEntry {
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         }
     }
@@ -4878,6 +5175,7 @@ impl ModelEntry {
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: entry.api_base_url.clone(),
         }
     }
@@ -4892,11 +5190,16 @@ impl ModelEntry {
     /// an xAI login session (which would otherwise unlock
     /// `supported_in_api: false` first-party models).
     pub fn is_managed_platform_model(&self) -> bool {
-        self.managed_platform().is_some()
+        self.managed_provider().is_some()
     }
-    /// The registry platform this entry belongs to (`{platform}/{model}` ids).
+    /// The registry provider this entry belongs to (`{provider}/{model}` ids).
+    pub fn managed_provider(&self) -> Option<xai_grok_models::ProviderId> {
+        xai_grok_models::parse_managed_model_key(self.catalog_id()).map(|(provider, _)| provider)
+    }
+    /// Bespoke typed platform, when this provider needs legacy runtime behavior.
     pub fn managed_platform(&self) -> Option<xai_grok_models::PlatformId> {
-        xai_grok_models::parse_managed_model_key(self.catalog_id()).map(|(p, _)| p)
+        self.managed_provider()
+            .and_then(|provider| provider.platform_id())
     }
     /// Whether this model appears in the picker for the given auth mode.
     ///
@@ -5485,8 +5788,10 @@ pub fn try_resolve_model_credentials(
 pub struct ModelAuthFacts {
     pub byok: ModelByok,
     pub auth_scheme: AuthScheme,
-    /// Stable catalog platform for OAuth resolver/header/recovery selection.
+    /// Stable catalog route identity for OAuth-capable providers.
     pub oauth_platform: Option<xai_grok_models::PlatformId>,
+    /// Whether a hybrid provider selected OAuth rather than its static key.
+    pub platform_oauth_active: bool,
 }
 /// Resolve `model_id` to its auth facts and auth-provider reference from one
 /// effective-config load; both ride the same memo (see
@@ -5503,6 +5808,7 @@ pub fn resolve_model_auth_facts_and_provider(
                 byok: ModelByok::Unknown,
                 auth_scheme: AuthScheme::default(),
                 oauth_platform: None,
+                platform_oauth_active: false,
             },
             None,
         );
@@ -5517,6 +5823,10 @@ pub fn resolve_model_auth_facts_and_provider(
             oauth_platform: match lookup {
                 ModelLookup::Loaded(Some(e)) => oauth_platform_for_model(e),
                 _ => None,
+            },
+            platform_oauth_active: match lookup {
+                ModelLookup::Loaded(Some(e)) => e.platform_oauth_active,
+                _ => false,
             },
         };
         let provider = match lookup {
@@ -5639,6 +5949,8 @@ pub fn resolve_aux_model_sampling_config(
                 temperature: None,
                 top_p: None,
                 api_backend: ApiBackend::Responses,
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: IndexMap::new(),
                 query_params: IndexMap::new(),
@@ -5665,6 +5977,7 @@ pub fn resolve_aux_model_sampling_config(
             api_key: Some(bearer),
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
@@ -5748,6 +6061,26 @@ pub fn resolve_chat_state_auth_type(
         .map(|r| r.auth_type)
         .unwrap_or(fallback)
 }
+/// Resolve provider adapter metadata from a stable managed catalog id.
+/// User-defined and remote models fall back to the standard wire adapter.
+pub fn adapter_kind_for_model(model: &ModelEntry) -> xai_grok_models::AdapterKind {
+    let catalog_id = model
+        .info
+        .id
+        .as_deref()
+        .unwrap_or(model.info.model.as_str());
+    let Some((provider, model_id)) = catalog_id.split_once('/') else {
+        return xai_grok_models::AdapterKind::Standard;
+    };
+    if model_id.is_empty() {
+        return xai_grok_models::AdapterKind::Standard;
+    }
+    xai_grok_models::provider_spec(provider)
+        .filter(|spec| spec.id.as_str() == provider)
+        .map(|spec| spec.adapter)
+        .unwrap_or_default()
+}
+
 pub fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -5767,19 +6100,39 @@ pub fn sampling_config_for_model(
         alpha_test_key.as_deref(),
         &credentials.base_url,
     );
+    let route_oauth_platform = oauth_platform_for_model(model);
     align_oauth_headers_with_platform(
         &mut extra_headers,
-        oauth_platform_for_model(model),
+        route_oauth_platform,
         &credentials.base_url,
     );
+    if route_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+        && !model_uses_kimi_code_oauth(model)
+    {
+        remove_kimi_device_headers(&mut extra_headers);
+    }
     let api_backend = info.api_backend.clone();
+    let adapter_kind = adapter_kind_for_model(model);
     // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
     // so a catalog stamp from login is never sent after expiry.
     let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
         .or_else(|| openai_codex_bearer_resolver_for_model(model))
-        .or_else(|| anthropic_claude_bearer_resolver_for_model(model));
+        .or_else(|| anthropic_claude_bearer_resolver_for_model(model))
+        .or_else(|| radius_bearer_resolver_for_model(model))
+        .or_else(|| {
+            (model_uses_github_copilot_oauth(model)
+                && (model.platform_oauth_active || credentials.api_key.is_none()))
+            .then(|| {
+                Arc::new(crate::auth::github_copilot::GitHubCopilotBearerResolver)
+                    as SharedBearerResolver
+            })
+        });
     let responses_codex_dialect = model_uses_openai_codex_oauth(model);
     let kimi_dialect = model_uses_kimi_request_dialect(model);
+    let bedrock_profile = (adapter_kind == xai_grok_models::AdapterKind::BedrockConverseStream
+        && credentials.api_key.is_none())
+    .then(|| crate::auth::read_bedrock_profile(&xai_grok_config::grok_home()))
+    .flatten();
     // The Codex bearer resolver returns `chatgpt-account-id` from the same
     // live credential resolution; no second per-request header lookup is needed.
     SamplerConfig {
@@ -5790,6 +6143,9 @@ pub fn sampling_config_for_model(
         temperature,
         top_p,
         api_backend,
+        adapter_kind,
+        request_compat: info.request_compat.clone(),
+        endpoint_path: info.endpoint_path.clone(),
         auth_scheme: credentials.auth_scheme,
         extra_headers,
         query_params: info.query_params.clone(),
@@ -5813,6 +6169,9 @@ pub fn sampling_config_for_model(
         doom_loop_recovery: None,
         header_injector: None,
         responses_codex_dialect,
+        bedrock_request_metadata: Default::default(),
+        bedrock_headers: Default::default(),
+        bedrock_profile,
         kimi_dialect,
     }
 }
@@ -5827,7 +6186,9 @@ pub(crate) fn oauth_platform_for_model(model: &ModelEntry) -> Option<xai_grok_mo
         .id
         .as_deref()
         .unwrap_or(model.info.model.as_str());
-    if let Some((platform, _)) = xai_grok_models::parse_managed_model_key(catalog_id) {
+    if let Some((provider, _)) = xai_grok_models::parse_managed_model_key(catalog_id)
+        && let Some(platform) = provider.platform_id()
+    {
         return platform.uses_oauth().then_some(platform);
     }
 
@@ -5860,10 +6221,9 @@ pub fn model_uses_anthropic_claude_oauth(model: &ModelEntry) -> bool {
         .id
         .as_deref()
         .unwrap_or(model.info.model.as_str());
-    matches!(
-        xai_grok_models::parse_managed_model_key(catalog_id),
-        Some((xai_grok_models::PlatformId::AnthropicClaude, _))
-    )
+    xai_grok_models::parse_managed_model_key(catalog_id).is_some_and(|(provider, _)| {
+        provider.platform_id() == Some(xai_grok_models::PlatformId::AnthropicClaude)
+    })
 }
 
 /// Per-request bearer for Anthropic Claude models; `None` for everything else.
@@ -5880,9 +6240,40 @@ pub fn anthropic_claude_bearer_resolver_for_model(
     )
 }
 
+/// Whether this catalog entry routes through Radius OAuth.
+pub fn model_uses_radius_oauth(model: &ModelEntry) -> bool {
+    let catalog_id = model
+        .info
+        .id
+        .as_deref()
+        .unwrap_or(model.info.model.as_str());
+    xai_grok_models::parse_managed_model_key(catalog_id)
+        .is_some_and(|(provider, _)| provider.as_str() == "radius")
+}
+
+/// Per-request bearer for Radius models; only installed for OAuth catalog markers.
+pub fn radius_bearer_resolver_for_model(model: &ModelEntry) -> Option<SharedBearerResolver> {
+    if !model_uses_radius_oauth(model) || !model.platform_oauth_active {
+        return None;
+    }
+    Some(Arc::new(crate::auth::radius::RadiusBearerResolver) as SharedBearerResolver)
+}
+
+/// Whether this catalog entry routes through GitHub Copilot OAuth.
+pub fn model_uses_github_copilot_oauth(model: &ModelEntry) -> bool {
+    let catalog_id = model
+        .info
+        .id
+        .as_deref()
+        .unwrap_or(model.info.model.as_str());
+    xai_grok_models::parse_managed_model_key(catalog_id)
+        .is_some_and(|(provider, _)| provider.as_str() == "github-copilot")
+}
+
 /// Whether this catalog entry routes through Kimi Code OAuth (subscription).
 pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
-    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::KimiCode)
+    model.platform_oauth_active
+        && oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::KimiCode)
 }
 
 /// Whether request bodies should use Moonshot/Kimi-specific shaping
@@ -5898,10 +6289,10 @@ pub fn model_uses_kimi_request_dialect(model: &ModelEntry) -> bool {
         .id
         .as_deref()
         .unwrap_or(model.info.model.as_str());
-    if let Some((platform, _)) = xai_grok_models::parse_managed_model_key(catalog_id) {
+    if let Some((provider, _)) = xai_grok_models::parse_managed_model_key(catalog_id) {
         return matches!(
-            platform,
-            PlatformId::KimiCode | PlatformId::MoonshotCn | PlatformId::MoonshotAi
+            provider.platform_id(),
+            Some(PlatformId::KimiCode | PlatformId::MoonshotCn | PlatformId::MoonshotAi)
         );
     }
     PlatformId::KimiCode.base_url_matches(&model.info.base_url)
@@ -5958,12 +6349,40 @@ pub fn openai_codex_bearer_resolver_for_base_url(base_url: &str) -> Option<Share
 /// so it misclassifies as `NotByok` and the session gate would otherwise sign
 /// the request with the xAI session JWT → third-party 401 → a false
 /// "auth recovery succeeded" loop refreshing the wrong credential.
-pub fn open_platform_endpoint(base_url: &str) -> Option<xai_grok_models::PlatformId> {
-    xai_grok_models::PlatformId::ALL.into_iter().find(|p| {
-        *p != xai_grok_models::PlatformId::XaiDirect
-            && !p.uses_oauth()
-            && p.base_url_matches(base_url)
-    })
+pub fn open_platform_endpoint(base_url: &str) -> Option<&'static xai_grok_models::ProviderSpec> {
+    fn prefix_score(provider_base: &str, request_base: &str) -> usize {
+        let provider_base = provider_base
+            .trim()
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        let request_base = request_base
+            .trim()
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        if request_base == provider_base
+            || request_base
+                .strip_prefix(&provider_base)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            provider_base.len()
+        } else {
+            0
+        }
+    }
+
+    xai_grok_models::provider_registry()
+        .providers()
+        .iter()
+        .filter(|provider| {
+            provider.id.as_str() != xai_grok_models::PlatformId::XaiDirect.as_str()
+                && provider.status == xai_grok_models::ProviderStatus::Active
+                && provider.accepts_api_key()
+                && provider.base_url_matches(base_url)
+        })
+        // Multiple products may share a host (OpenCode Zen and Go). Prefer the
+        // most specific configured path while retaining host-only fallback for
+        // custom reverse proxies so the xAI session bearer remains fail-closed.
+        .max_by_key(|provider| prefix_score(&provider.base_url(), base_url))
 }
 /// Fold URL-derived headers into `extra_headers`.
 ///
@@ -6034,6 +6453,18 @@ pub fn inject_url_derived_headers(
         headers.shift_remove("chatgpt-account-id");
     }
     let _ = (alpha_test_key, base_url);
+}
+
+/// Remove Kimi OAuth device identity while retaining protocol headers needed
+/// by Kimi's API-key Messages route.
+pub(crate) fn remove_kimi_device_headers(headers: &mut IndexMap<String, String>) {
+    const DEVICE_HEADERS: [&str; 3] =
+        ["x-msh-device-name", "x-msh-device-model", "x-msh-device-id"];
+    headers.retain(|name, _| {
+        !DEVICE_HEADERS
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    });
 }
 
 /// Remove OAuth-provider headers that do not belong to the selected catalog
@@ -6116,6 +6547,8 @@ fn resolve_hidden_default_web_search_sampling_config(
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::Responses,
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: IndexMap::new(),
             query_params: IndexMap::new(),
@@ -6143,6 +6576,7 @@ fn resolve_hidden_default_web_search_sampling_config(
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
@@ -6314,18 +6748,118 @@ mod tests {
     /// Point `GROK_AUTH_PATH` at a scratch `auth.json` and clear platform
     /// API-key env vars so platform credential tests don't depend on a dev
     /// box's real `~/.grok/auth.json` or exported keys.
-    fn isolated_auth_home() -> (tempfile::TempDir, [EnvGuard; 6]) {
+    fn isolated_auth_home() -> (tempfile::TempDir, Vec<EnvGuard>) {
         let dir = tempfile::tempdir().unwrap();
         let auth = dir.path().join("auth.json");
-        let guards = [
-            EnvGuard::set("GROK_AUTH_PATH", auth.to_str().unwrap()),
-            EnvGuard::unset(xai_grok_models::MOONSHOT_CN_API_KEY_ENV),
-            EnvGuard::unset(xai_grok_models::MOONSHOT_API_KEY_ENV),
-            EnvGuard::unset(xai_grok_models::MOONSHOT_API_KEY_ALIAS_ENV),
-            EnvGuard::unset(xai_grok_models::MOONSHOT_AI_API_KEY_ENV),
-            EnvGuard::unset(xai_grok_models::OPENAI_API_KEY_ALIAS_ENV),
-        ];
+        let mut guards = vec![EnvGuard::set("GROK_AUTH_PATH", auth.to_str().unwrap())];
+        guards.extend(xai_grok_test_support::unset_all_byok_platform_api_key_envs());
         (dir, guards)
+    }
+
+    fn unset_bedrock_env() -> Vec<EnvGuard> {
+        [
+            "AWS_BEDROCK_SKIP_AUTH",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_PROFILE",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GCLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ]
+        .into_iter()
+        .map(EnvGuard::unset)
+        .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn bedrock_readiness_uses_aws_typed_sources_not_google_adc() {
+        let (_home, mut guards) = isolated_auth_home();
+        guards.extend(unset_bedrock_env());
+        let adc_home = tempfile::tempdir().unwrap();
+        let adc_dir = adc_home.path().join(".config/gcloud");
+        std::fs::create_dir_all(&adc_dir).unwrap();
+        std::fs::write(adc_dir.join("application_default_credentials.json"), "{}").unwrap();
+        guards.push(EnvGuard::set("HOME", adc_home.path().to_str().unwrap()));
+        let bedrock = xai_grok_models::provider_spec("amazon-bedrock").unwrap();
+        assert!(!provider_external_readiness(bedrock));
+
+        let _skip = EnvGuard::set("AWS_BEDROCK_SKIP_AUTH", "1");
+        assert!(provider_external_readiness(bedrock));
+    }
+
+    #[test]
+    #[serial]
+    fn bedrock_readiness_accepts_profile_chain_pair_web_identity_and_marker() {
+        let (home, mut guards) = isolated_auth_home();
+        guards.extend(unset_bedrock_env());
+        let bedrock = xai_grok_models::provider_spec("amazon-bedrock").unwrap();
+        assert!(!provider_external_readiness(bedrock));
+
+        let access = EnvGuard::set("AWS_ACCESS_KEY_ID", "akid");
+        assert!(!provider_external_readiness(bedrock));
+        let secret = EnvGuard::set("AWS_SECRET_ACCESS_KEY", "secret");
+        assert!(provider_external_readiness(bedrock));
+        drop((access, secret));
+
+        let profile = EnvGuard::set("AWS_PROFILE", "dev");
+        assert!(provider_external_readiness(bedrock));
+        drop(profile);
+
+        let ecs = EnvGuard::set("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/creds");
+        assert!(provider_external_readiness(bedrock));
+        drop(ecs);
+
+        let token = home.path().join("token.jwt");
+        std::fs::write(&token, "token").unwrap();
+        let web = EnvGuard::set("AWS_WEB_IDENTITY_TOKEN_FILE", token.to_str().unwrap());
+        assert!(provider_external_readiness(bedrock));
+        drop(web);
+
+        crate::auth::store_bedrock_credential_chain(home.path()).unwrap();
+        assert!(provider_external_readiness(bedrock));
+    }
+
+    #[test]
+    #[serial]
+    fn bedrock_stored_profile_reaches_sampler_and_bearer_wins() {
+        let (home, mut guards) = isolated_auth_home();
+        guards.extend(unset_bedrock_env());
+        crate::auth::store_bedrock_profile(home.path(), "dev-profile").unwrap();
+        let model = resolve_model_list(&Config::default(), None)
+            .get("amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0")
+            .cloned()
+            .expect("bedrock model");
+        let cfg = sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.bedrock_profile.as_deref(), Some("dev-profile"));
+
+        crate::auth::store_platform_api_key(home.path(), "amazon-bedrock", "bearer", None).unwrap();
+        let model = resolve_model_list(&Config::default(), None)
+            .get("amazon-bedrock/anthropic.claude-haiku-4-5-20251001-v1:0")
+            .cloned()
+            .expect("bedrock model");
+        let cfg = sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(cfg.api_key.as_deref(), Some("bearer"));
+        assert_eq!(cfg.bedrock_profile, None);
     }
 
     #[test]
@@ -7391,6 +7925,8 @@ reasoning_effort = "low"
                 temperature: None,
                 top_p: None,
                 api_backend: ApiBackend::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: IndexMap::new(),
                 query_params: IndexMap::new(),
@@ -7417,6 +7953,7 @@ reasoning_effort = "low"
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: api_base_url.map(|s| s.to_string()),
         }
     }
@@ -7441,6 +7978,7 @@ reasoning_effort = "low"
         );
         kimi.info.id = Some("kimi-code/kimi-for-coding".into());
         kimi.info.base_url = proxy.to_string();
+        kimi.platform_oauth_active = true;
 
         let mut codex = test_model_entry(
             "gpt-5.1-codex",
@@ -7501,6 +8039,107 @@ reasoning_effort = "low"
         assert!(codex_headers.contains_key("OpenAI-Beta"));
         assert!(codex_headers.contains_key("originator"));
         assert!(codex_headers.contains_key("chatgpt-account-id"));
+    }
+
+    #[test]
+    #[serial]
+    fn radius_hybrid_prefers_static_api_key_over_oauth_marker() {
+        fn radius_catalog() -> IndexMap<String, ModelEntry> {
+            let mut radius = test_model_entry(
+                "dynamic-model",
+                "https://inference.radius.test/v1",
+                None,
+                None,
+                None,
+            );
+            radius.info.id = Some("radius/dynamic-model".into());
+            radius.info.api_backend = ApiBackend::PiMessages;
+            IndexMap::from([("radius/dynamic-model".to_string(), radius)])
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let _auth = EnvGuard::set(
+            "GROK_AUTH_PATH",
+            dir.path().join("auth.json").to_str().unwrap(),
+        );
+        let cfg = PlatformsConfig::default();
+        {
+            let _key = EnvGuard::set("GROK_RADIUS_API_KEY", "static-radius-key");
+            let mut models = radius_catalog();
+            apply_platform_credentials_with_bearer(
+                &mut models,
+                &cfg,
+                None,
+                None,
+                None,
+                None,
+                Some("oauth-marker".into()),
+                None,
+            );
+            let entry = &models["radius/dynamic-model"];
+            assert!(entry.has_own_credentials());
+            assert_eq!(
+                resolve_credentials(entry, None).api_key.as_deref(),
+                Some("static-radius-key")
+            );
+            assert!(!entry.platform_oauth_active);
+        }
+        {
+            let _key = EnvGuard::unset("GROK_RADIUS_API_KEY");
+            let _legacy_key = EnvGuard::unset("RADIUS_API_KEY");
+            let mut models = radius_catalog();
+            apply_platform_credentials_with_bearer(
+                &mut models,
+                &cfg,
+                None,
+                None,
+                None,
+                None,
+                Some("oauth-marker".into()),
+                None,
+            );
+            let entry = &models["radius/dynamic-model"];
+            assert_eq!(entry.api_key.as_deref(), Some("oauth-marker"));
+            assert!(entry.platform_oauth_active);
+        }
+    }
+
+    #[test]
+    fn radius_resolver_requires_catalog_oauth_marker_not_static_key() {
+        let mut radius = test_model_entry(
+            "dynamic-model",
+            "https://inference.radius.test/v1",
+            Some("static-radius-key"),
+            None,
+            None,
+        );
+        radius.info.id = Some("radius/dynamic-model".into());
+        radius.info.api_backend = ApiBackend::PiMessages;
+
+        assert!(model_uses_radius_oauth(&radius));
+        assert!(radius_bearer_resolver_for_model(&radius).is_none());
+        let static_sampler = sampling_config_for_model(
+            &radius,
+            resolve_credentials(&radius, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(static_sampler.bearer_resolver.is_none());
+        assert_eq!(static_sampler.api_key.as_deref(), Some("static-radius-key"));
+
+        radius.platform_oauth_active = true;
+        assert!(radius_bearer_resolver_for_model(&radius).is_some());
+        let oauth_sampler = sampling_config_for_model(
+            &radius,
+            resolve_credentials(&radius, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(oauth_sampler.bearer_resolver.is_some());
     }
 
     /// Pi stores Anthropic's SDK root (`api.anthropic.com`) on every catalog
@@ -8761,8 +9400,11 @@ default = 42
             api_key: None,
             env_key: None,
             api_backend: ApiBackend::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: None,
             extra_headers: IndexMap::new(),
+            query_params: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -8920,8 +9562,11 @@ default = 42
             api_key: None,
             env_key: None,
             api_backend: ApiBackend::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: None,
             extra_headers: IndexMap::new(),
+            query_params: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -9371,8 +10016,11 @@ default = 42
             api_key: None,
             env_key: None,
             api_backend: ApiBackend::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: None,
             extra_headers: IndexMap::new(),
+            query_params: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
@@ -13148,6 +13796,8 @@ default = "grok-4.5"
                 temperature: None,
                 top_p: None,
                 api_backend,
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: IndexMap::new(),
                 query_params: IndexMap::new(),
@@ -13174,6 +13824,7 @@ default = "grok-4.5"
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         }
     }
@@ -14221,6 +14872,132 @@ default = "grok-4.5"
 
     #[test]
     #[serial]
+    fn wave1_registry_only_keys_unlock_mixed_protocol_catalogs() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+        let raw: toml::Value = toml::from_str(
+            r#"
+[platforms.opencodego]
+api_key = "opencode-test-key"
+
+[platforms.vercel-ai-gateway]
+api_key = "vercel-test-key"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        for provider_id in ["opencode", "opencode-go"] {
+            assert_eq!(
+                provider_credential_storage_ids(
+                    xai_grok_models::provider_spec(provider_id).unwrap()
+                ),
+                ["opencode".to_string(), "opencode-go".to_string()]
+            );
+        }
+        assert_eq!(
+            cfg.platforms
+                .config_api_key_for_provider("opencode")
+                .as_deref(),
+            Some("opencode-test-key")
+        );
+        let models = resolve_model_list(&cfg, None);
+
+        let opencode_go: Vec<_> = models
+            .iter()
+            .filter(|(id, _)| id.starts_with("opencode-go/"))
+            .collect();
+        assert_eq!(opencode_go.len(), 16);
+        assert!(opencode_go.iter().all(|(_, model)| {
+            model.info.supported_in_api
+                && model.has_own_credentials()
+                && model.api_key.as_deref() == Some("opencode-test-key")
+        }));
+
+        let opencode: Vec<_> = models
+            .iter()
+            .filter(|(id, _)| id.starts_with("opencode/"))
+            .collect();
+        assert_eq!(opencode.len(), 58);
+        assert!(
+            opencode
+                .iter()
+                .all(|(_, model)| { model.info.supported_in_api && model.has_own_credentials() })
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|(_, model)| model.info.api_backend == ApiBackend::ChatCompletions)
+                .count(),
+            19
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|(_, model)| model.info.api_backend == ApiBackend::Responses)
+                .count(),
+            20
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|(_, model)| model.info.api_backend == ApiBackend::Messages)
+                .count(),
+            14
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|(_, model)| model.info.api_backend == ApiBackend::GoogleGenerateContent)
+                .count(),
+            5
+        );
+        let chat = models.get("opencode/big-pickle").unwrap();
+        assert_eq!(chat.info.auth_scheme, AuthScheme::Bearer);
+        let responses = models.get("opencode/gpt-5.6-sol").unwrap();
+        assert_eq!(responses.info.auth_scheme, AuthScheme::Bearer);
+        let messages = models.get("opencode/claude-opus-4-8").unwrap();
+        assert_eq!(messages.info.auth_scheme, AuthScheme::XApiKey);
+        assert_eq!(
+            messages.info.base_url, "https://opencode.ai/zen/v1",
+            "Messages SDK root must normalize before the sampler appends /messages"
+        );
+
+        let vercel: Vec<_> = models
+            .iter()
+            .filter(|(id, _)| id.starts_with("vercel-ai-gateway/"))
+            .collect();
+        assert_eq!(vercel.len(), 192);
+        assert!(vercel.iter().all(|(_, model)| {
+            model.info.supported_in_api
+                && model.has_own_credentials()
+                && model.info.api_backend == ApiBackend::Messages
+                && model.info.auth_scheme == AuthScheme::XApiKey
+                && model
+                    .info
+                    .extra_headers
+                    .get("anthropic-version")
+                    .map(String::as_str)
+                    == Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE)
+        }));
+    }
+
+    #[test]
+    #[serial]
+    fn opencode_zen_reads_legacy_go_auth_scope() {
+        let (dir, _guards) = isolated_auth_home();
+        let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+        crate::auth::store_platform_api_key(dir.path(), "opencode-go", "legacy-go-test-key", None)
+            .unwrap();
+        let key = resolve_provider_api_key_with(
+            xai_grok_models::provider_spec("opencode").unwrap(),
+            &PlatformsConfig::default(),
+            |_| None,
+        );
+        assert_eq!(key.as_deref(), Some("legacy-go-test-key"));
+    }
+
+    #[test]
+    #[serial]
     fn opencode_go_models_remain_locked_without_api_key() {
         let (_dir, _guards) = isolated_auth_home();
         let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
@@ -14250,6 +15027,9 @@ default = "grok-4.5"
             Some("fake-kimi-token".into()),
             Some("fake-codex-token".into()),
             None,
+            None,
+            None,
+            None,
         );
         let entry = models.get("kimi-code/k2p7").expect("kimi-code entry");
         assert!(
@@ -14257,6 +15037,20 @@ default = "grok-4.5"
             "bearer makes Kimi entry visible"
         );
         assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
+        assert!(entry.platform_oauth_active);
+        let kimi_sampler = sampling_config_for_model(
+            entry,
+            resolve_credentials(entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(kimi_sampler.bearer_resolver.is_some());
+        assert!(kimi_sampler.extra_headers.keys().any(|name| {
+            name.eq_ignore_ascii_case("x-msh-device-id")
+                || name.eq_ignore_ascii_case("x-msh-device-name")
+        }));
 
         // Codex bearer stamps only openai-codex/* entries.
         let codex_entry = models
@@ -14269,6 +15063,233 @@ default = "grok-4.5"
         assert_eq!(codex_entry.api_key.as_deref(), Some("fake-codex-token"));
         // …and never leaks onto the Kimi entry.
         assert_eq!(entry.api_key.as_deref(), Some("fake-kimi-token"));
+    }
+
+    #[test]
+    #[serial]
+    fn wave_two_models_stay_locked_when_endpoint_templates_are_unresolved() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _azure_base = EnvGuard::unset("GROK_AZURE_OPENAI_BASE_URL");
+        let _azure_base_alias = EnvGuard::unset("AZURE_OPENAI_BASE_URL");
+        let _azure_resource = EnvGuard::unset("AZURE_OPENAI_RESOURCE_NAME");
+        let _cf_gateway_base = EnvGuard::unset("GROK_CLOUDFLARE_AI_GATEWAY_BASE_URL");
+        let _cf_workers_base = EnvGuard::unset("GROK_CLOUDFLARE_WORKERS_AI_BASE_URL");
+        let _cf_account = EnvGuard::unset("CLOUDFLARE_ACCOUNT_ID");
+        let _cf_gateway = EnvGuard::unset("CLOUDFLARE_GATEWAY_ID");
+        let raw: toml::Value = toml::from_str(
+            r#"
+[platforms.azure-openai-responses]
+api_key = "azure-test-key"
+[platforms.cloudflare-ai-gateway]
+api_key = "cloudflare-gateway-test-key"
+[platforms.cloudflare-workers-ai]
+api_key = "cloudflare-workers-test-key"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        for model_id in [
+            "azure-openai-responses/gpt-4",
+            "cloudflare-ai-gateway/claude-3-5-haiku",
+            "cloudflare-workers-ai/@cf/google/gemma-4-26b-a4b-it",
+        ] {
+            let entry = models.get(model_id).expect("Wave 2 catalog entry");
+            assert!(!entry.info.supported_in_api, "{model_id} must stay locked");
+            assert!(
+                !entry.has_own_credentials(),
+                "{model_id} leaked a credential"
+            );
+            assert!(!entry.visible_for_auth(false));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn wave_two_runtime_materializes_urls_query_and_deployment() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _azure_base = EnvGuard::unset("GROK_AZURE_OPENAI_BASE_URL");
+        let _azure_base_alias = EnvGuard::unset("AZURE_OPENAI_BASE_URL");
+        let _azure_resource = EnvGuard::set("AZURE_OPENAI_RESOURCE_NAME", "unit-resource");
+        let _azure_version = EnvGuard::set("AZURE_OPENAI_API_VERSION", "2026-07-01-preview");
+        let _azure_deployments = EnvGuard::set(
+            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+            "gpt-4=unit-gpt4-deployment",
+        );
+        let _cf_gateway_base = EnvGuard::unset("GROK_CLOUDFLARE_AI_GATEWAY_BASE_URL");
+        let _cf_workers_base = EnvGuard::unset("GROK_CLOUDFLARE_WORKERS_AI_BASE_URL");
+        let _cf_account = EnvGuard::set("CLOUDFLARE_ACCOUNT_ID", "account-123");
+        let _cf_gateway = EnvGuard::set("CLOUDFLARE_GATEWAY_ID", "gateway-456");
+        let raw: toml::Value = toml::from_str(
+            r#"
+[platforms.azure-openai-responses]
+api_key = "azure-test-key"
+[platforms.cloudflare-ai-gateway]
+api_key = "cloudflare-gateway-test-key"
+[platforms.cloudflare-workers-ai]
+api_key = "cloudflare-workers-test-key"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models = resolve_model_list(&cfg, None);
+
+        let azure = models
+            .get("azure-openai-responses/gpt-4")
+            .expect("Azure entry");
+        assert!(azure.visible_for_auth(false));
+        assert_eq!(azure.info.model, "unit-gpt4-deployment");
+        assert_eq!(
+            azure.info.base_url,
+            "https://unit-resource.openai.azure.com/openai/v1"
+        );
+        assert_eq!(
+            azure
+                .info
+                .query_params
+                .get("api-version")
+                .map(String::as_str),
+            Some("2026-07-01-preview")
+        );
+        assert_eq!(azure.info.auth_scheme, AuthScheme::ApiKey);
+
+        let gateway = models
+            .get("cloudflare-ai-gateway/claude-3-5-haiku")
+            .expect("Cloudflare gateway entry");
+        assert!(gateway.visible_for_auth(false));
+        assert_eq!(
+            gateway.info.base_url,
+            "https://gateway.ai.cloudflare.com/v1/account-123/gateway-456/anthropic/v1"
+        );
+        assert_eq!(gateway.info.auth_scheme, AuthScheme::CfAigAuthorization);
+        assert_eq!(gateway.info.api_backend, ApiBackend::Messages);
+
+        let workers = models
+            .get("cloudflare-workers-ai/@cf/google/gemma-4-26b-a4b-it")
+            .expect("Cloudflare Workers entry");
+        assert!(workers.visible_for_auth(false));
+        assert_eq!(
+            workers.info.base_url,
+            "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1"
+        );
+        assert_eq!(workers.info.auth_scheme, AuthScheme::Bearer);
+    }
+
+    #[test]
+    #[serial]
+    fn managed_azure_override_gets_runtime_mapping_once_without_losing_custom_query() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _azure_version = EnvGuard::set("AZURE_OPENAI_API_VERSION", "2026-08-01-preview");
+        let _azure_deployments = EnvGuard::set(
+            "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+            "gpt-4=managed-gpt4-deployment",
+        );
+        let raw: toml::Value = toml::from_str(
+            r#"
+[platforms.azure-openai-responses]
+api_key = "azure-test-key"
+
+[model."azure-openai-responses/gpt-4"]
+model = "gpt-4"
+base_url = "https://override.openai.azure.com"
+query_params = { custom = "preserved" }
+"#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let mut models = resolve_model_list(&cfg, None);
+        let entry = models
+            .get("azure-openai-responses/gpt-4")
+            .expect("managed Azure entry");
+        assert_eq!(entry.info.model, "managed-gpt4-deployment");
+        assert_eq!(
+            entry.info.base_url,
+            "https://override.openai.azure.com/openai/v1"
+        );
+        assert_eq!(
+            entry
+                .info
+                .query_params
+                .get("api-version")
+                .map(String::as_str),
+            Some("2026-08-01-preview")
+        );
+        assert_eq!(
+            entry.info.query_params.get("custom").map(String::as_str),
+            Some("preserved")
+        );
+
+        apply_platform_credentials_with_bearer(
+            &mut models,
+            &cfg.platforms,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let restamped = models
+            .get("azure-openai-responses/gpt-4")
+            .expect("restamped Azure entry");
+        assert_eq!(restamped.info.model, "managed-gpt4-deployment");
+        assert_eq!(
+            restamped
+                .info
+                .query_params
+                .get("api-version")
+                .map(String::as_str),
+            Some("2026-08-01-preview")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn kimi_static_api_key_wins_over_oauth_marker_without_device_identity() {
+        let (_dir, _guards) = isolated_auth_home();
+        let _static_key = EnvGuard::set(
+            xai_grok_models::KIMI_CODE_API_KEY_ENV,
+            "static-kimi-test-key",
+        );
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let mut models = resolve_model_list(&cfg, None);
+        apply_platform_credentials_with_bearer(
+            &mut models,
+            &cfg.platforms,
+            Some("oauth-marker-must-lose".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let entry = models.get("kimi-code/k2p7").expect("kimi-code entry");
+        assert!(!entry.platform_oauth_active);
+        assert!(entry.has_own_credentials());
+        assert!(kimi_code_bearer_resolver_for_model(entry).is_none());
+
+        let sampler = sampling_config_for_model(
+            entry,
+            resolve_credentials(entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampler.api_key.as_deref(), Some("static-kimi-test-key"));
+        assert!(sampler.bearer_resolver.is_none());
+        assert!(sampler.extra_headers.keys().all(|name| {
+            !name.eq_ignore_ascii_case("x-msh-device-id")
+                && !name.eq_ignore_ascii_case("x-msh-device-name")
+                && !name.eq_ignore_ascii_case("x-msh-device-model")
+        }));
+        assert_eq!(
+            sampler
+                .extra_headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE)
+        );
     }
 
     #[test]
@@ -14314,6 +15335,10 @@ default = "grok-4.5"
             sampler.bearer_resolver.is_some(),
             "the expired catalog marker must be replaced by the live Kimi resolver"
         );
+        assert_eq!(
+            sampler.adapter_kind,
+            xai_grok_models::AdapterKind::KimiCoding
+        );
     }
 
     #[test]
@@ -14354,6 +15379,10 @@ default = "grok-4.5"
         );
         assert!(sampler.bearer_resolver.is_some());
         assert!(sampler.responses_codex_dialect);
+        assert_eq!(
+            sampler.adapter_kind,
+            xai_grok_models::AdapterKind::OpenAiCodex
+        );
     }
 
     #[test]
@@ -14362,7 +15391,16 @@ default = "grok-4.5"
         let (_dir, _guards) = isolated_auth_home();
         let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
         let mut models = resolve_model_list(&cfg, None);
-        apply_platform_credentials_with_bearer(&mut models, &cfg.platforms, None, None, None);
+        apply_platform_credentials_with_bearer(
+            &mut models,
+            &cfg.platforms,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let codex_entry = models
             .get("openai-codex/gpt-5.6-sol")
             .expect("openai-codex entry");
@@ -14371,6 +15409,90 @@ default = "grok-4.5"
             "no credential → Codex entry stays locked"
         );
         assert!(codex_entry.api_key.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn github_copilot_oauth_stamping_honors_availability_list() {
+        let (_dir, _guards) = isolated_auth_home();
+        let cfg = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        let github_ids: Vec<_> = xai_grok_models::platform_builtin_models()
+            .iter()
+            .filter(|model| model.provider.as_str() == "github-copilot")
+            .take(2)
+            .map(|model| model.model.clone())
+            .collect();
+        assert!(
+            github_ids.len() >= 2,
+            "github-copilot catalog must have at least two models"
+        );
+
+        let first_key = format!("github-copilot/{}", github_ids[0]);
+        let second_key = format!("github-copilot/{}", github_ids[1]);
+        let mut models = resolve_model_list(&cfg, None);
+        apply_platform_credentials_with_bearer(
+            &mut models,
+            &cfg.platforms,
+            None,
+            None,
+            None,
+            Some("oauth-copilot-token".into()),
+            None,
+            Some(vec![github_ids[0].clone()]),
+        );
+        let first = models.get(&first_key).expect("first copilot entry");
+        assert_eq!(first.api_key.as_deref(), Some("oauth-copilot-token"));
+        assert!(first.platform_oauth_active);
+        assert!(first.info.supported_in_api);
+        let second = models.get(&second_key).expect("second copilot entry");
+        assert!(
+            second.api_key.is_none(),
+            "unavailable Copilot model stays locked"
+        );
+        assert!(!second.platform_oauth_active);
+
+        let mut compat_models = resolve_model_list(&cfg, None);
+        apply_platform_credentials_with_bearer(
+            &mut compat_models,
+            &cfg.platforms,
+            None,
+            None,
+            None,
+            Some("oauth-copilot-token".into()),
+            None,
+            None,
+        );
+        assert_eq!(
+            compat_models
+                .get(&second_key)
+                .and_then(|entry| entry.api_key.as_deref()),
+            Some("oauth-copilot-token"),
+            "old credentials without availability remain backward-compatible"
+        );
+
+        let _static_token = EnvGuard::set(
+            crate::auth::github_copilot::COPILOT_GITHUB_TOKEN_ENV,
+            "static-copilot-token",
+        );
+        let mut static_models = resolve_model_list(&cfg, None);
+        apply_platform_credentials_with_bearer(
+            &mut static_models,
+            &cfg.platforms,
+            None,
+            None,
+            None,
+            Some("oauth-copilot-token".into()),
+            None,
+            Some(Vec::new()),
+        );
+        let static_second = static_models
+            .get(&second_key)
+            .expect("static copilot entry");
+        assert!(
+            static_second.info.supported_in_api,
+            "static COPILOT_GITHUB_TOKEN is authoritative and ignores OAuth availability"
+        );
+        assert!(!static_second.platform_oauth_active);
     }
 
     #[test]

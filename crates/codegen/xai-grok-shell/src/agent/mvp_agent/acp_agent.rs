@@ -567,6 +567,8 @@ impl acp::Agent for MvpAgent {
                 auth_method::AuthMethodKind::KimiCode
                     | auth_method::AuthMethodKind::OpenAiCodex
                     | auth_method::AuthMethodKind::AnthropicClaude
+                    | auth_method::AuthMethodKind::GitHubCopilot
+                    | auth_method::AuthMethodKind::Radius
             ) || match preferred {
                     crate::auth::PreferredAuthMethod::ApiKey => kind.is_api_key(),
                     crate::auth::PreferredAuthMethod::Oidc => kind.is_session_based(),
@@ -957,6 +959,131 @@ impl acp::Agent for MvpAgent {
                 emit_login_span(true, "anthropic-claude", None, None);
                 log_event(xai_grok_telemetry::events::Login {
                     auth_method: "anthropic-claude".to_string(),
+                    user_id: None,
+                });
+                let _ = auth;
+                Ok(Default::default())
+            }
+            auth_method::RADIUS_METHOD_ID => {
+                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
+                let client_seq = auth_meta.request_seq;
+                let mut cancelled = false;
+                let auth_result = if !auth_meta.headless {
+                    let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+                    let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+                    let (cancel, _guard) = self.interactive_auth.begin(
+                        Some(crate::auth::single_flight::AttemptChannels::new(
+                            code_tx, url_rx,
+                        )),
+                        client_seq,
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        result = crate::auth::radius::run_radius_login_with_channels(
+                            None,
+                            crate::auth::radius::RadiusLoginMethod::Browser,
+                            Some(crate::auth::AuthChannels {
+                                url_tx: Some(url_tx),
+                                code_rx,
+                            }),
+                        ) => result,
+                    }
+                } else {
+                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        result = crate::auth::radius::run_radius_login(
+                            None,
+                            crate::auth::radius::RadiusLoginMethod::DeviceCode,
+                        ) => result,
+                    }
+                };
+                let auth = auth_result.map_err(|error| {
+                    emit_login_span(
+                        false,
+                        "radius",
+                        None,
+                        Some(if cancelled {
+                            "login_cancelled"
+                        } else {
+                            "login_flow_failed"
+                        }),
+                    );
+                    let mut error_response = acp::Error::auth_required();
+                    error_response.message = format!("Radius login failed: {error}");
+                    error_response
+                })?;
+                self.models_manager.restamp_platform_credentials();
+                // Radius is an independent provider credential; do not replace
+                // the primary xAI auth method used by existing sessions.
+                emit_login_span(true, "radius", Some(&auth.user_id), None);
+                Ok(Default::default())
+            }
+            auth_method::GITHUB_COPILOT_METHOD_ID => {
+                let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
+                let client_seq = auth_meta.request_seq;
+                let mut cancelled = false;
+                let auth_result = if !auth_meta.headless {
+                    let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+                    let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+                    let (cancel, _guard) = self.interactive_auth.begin(
+                        Some(crate::auth::single_flight::AttemptChannels::new(
+                            code_tx, url_rx,
+                        )),
+                        client_seq,
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::github_copilot::run_github_copilot_login_with_channels(
+                            None,
+                            Some(crate::auth::AuthChannels {
+                                url_tx: Some(url_tx),
+                                code_rx,
+                            }),
+                        ) => r,
+                    }
+                } else {
+                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::github_copilot::run_github_copilot_login(None) => r,
+                    }
+                };
+                let auth = auth_result.map_err(|e| {
+                    emit_login_span(
+                        false,
+                        "github-copilot",
+                        None,
+                        Some(if cancelled {
+                            "login_cancelled"
+                        } else {
+                            "login_flow_failed"
+                        }),
+                    );
+                    let mut err = acp::Error::auth_required();
+                    err.message = e.to_string();
+                    err
+                })?;
+                self.models_manager.restamp_platform_credentials();
+                emit_login_span(true, "github-copilot", None, None);
+                log_event(xai_grok_telemetry::events::Login {
+                    auth_method: "github-copilot".to_string(),
                     user_id: None,
                 });
                 let _ = auth;
@@ -3564,12 +3691,13 @@ impl acp::Agent for MvpAgent {
         // too (not just client-side) so a third-party base URL can never be
         // reached with the xAI session token via a crafted set_model call.
         if model.is_managed_platform_model() && !model.has_own_credentials() {
-            let (platform, hint) = model
-                .managed_platform()
-                .map(|p| (p.display_name(), p.setup_hint()))
-                .unwrap_or(("this platform", String::new()));
+            let (provider_name, hint) = model
+                .managed_provider()
+                .and_then(|id| xai_grok_models::provider_spec(id.as_str()))
+                .map(|provider| (provider.display_name.as_str(), provider.setup_hint()))
+                .unwrap_or(("this provider", String::new()));
             return Err(acp::Error::invalid_params().data(format!(
-                "Provider '{platform}' is not configured. To enable it: {hint}"
+                "Provider '{provider_name}' is not configured. To enable it: {hint}"
             )));
         }
         let session_id = args.session_id.clone();

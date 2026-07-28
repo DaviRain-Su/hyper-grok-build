@@ -399,7 +399,7 @@ async fn prompt_and_poll(
 /// would stall the single-threaded TUI loop. Returns `true` on success so the
 /// caller can decide how to notify the user (eprintln on CLI, nothing on TUI
 /// where the URL is already rendered in the widget).
-async fn open_browser_detached(url: &str) -> bool {
+pub(crate) async fn open_browser_detached(url: &str) -> bool {
     let url = url.to_owned();
     match tokio::task::spawn_blocking(move || webbrowser::open(&url)).await {
         Ok(Ok(())) => true,
@@ -490,6 +490,11 @@ async fn build_auth(
         oidc_client_id: Some(client_id.to_owned()),
         account_id: None,
         platform_base_url: None,
+        github_domain: None,
+        github_copilot_base_url: None,
+        github_copilot_available_models: None,
+        aws_profile: None,
+        aws_credential_chain: false,
     };
 
     auth_manager.enrich_auth_inline(&mut auth).await;

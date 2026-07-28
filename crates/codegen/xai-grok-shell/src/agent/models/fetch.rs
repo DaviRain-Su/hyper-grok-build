@@ -16,6 +16,7 @@ pub(crate) fn build_prefetched_map(
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: m.api_base_url.clone().or(api_base_url_override.clone()),
         };
         map.insert(key, entry);
@@ -190,9 +191,13 @@ fn has_any_platform_credentials() -> bool {
         return true;
     }
     let platforms = crate::agent::platform_models_fetch::load_platforms_config();
-    xai_grok_models::PlatformId::ALL.iter().any(|p| {
-        !p.uses_oauth() && crate::agent::config::resolve_platform_api_key(*p, &platforms).is_some()
-    })
+    xai_grok_models::provider_registry()
+        .providers()
+        .iter()
+        .any(|provider| {
+            provider.accepts_api_key()
+                && crate::agent::config::resolve_provider_api_key(provider, &platforms).is_some()
+        })
 }
 
 /// Start model + settings prefetch on a background thread using pre-resolved auth.

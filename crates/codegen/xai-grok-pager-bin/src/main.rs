@@ -1694,6 +1694,48 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+
+fn run_bedrock_cli_login(profile: Option<&str>, chain: bool) -> anyhow::Result<()> {
+    let home = xai_grok_config::grok_home();
+    if let Some(profile) = profile.map(str::trim).filter(|p| !p.is_empty()) {
+        xai_grok_shell::auth::store_bedrock_profile(&home, profile)
+            .map_err(|e| anyhow::anyhow!("Failed to save Amazon Bedrock profile: {e}"))?;
+        println!("✓ Amazon Bedrock will use AWS profile '{profile}'");
+        return Ok(());
+    }
+    if chain {
+        xai_grok_shell::auth::store_bedrock_credential_chain(&home).map_err(|e| {
+            anyhow::anyhow!("Failed to save Amazon Bedrock credential-chain marker: {e}")
+        })?;
+        println!("✓ Amazon Bedrock will use the existing AWS SDK credential chain");
+        return Ok(());
+    }
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!(
+            "Amazon Bedrock login needs an interactive terminal for bearer-token entry. \
+             For AWS credentials run `grok login --bedrock --profile <name>` or \
+             `grok login --bedrock --chain`."
+        );
+    }
+    println!("Amazon Bedrock login:");
+    println!("  1) paste a Bedrock bearer token (stored securely as a platform key), or");
+    println!(
+        "  2) submit an empty token and rerun with --profile <name> or --chain for AWS credentials."
+    );
+    let token = rpassword::prompt_password("Bearer token: ")?;
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!(
+            "No token entered. Use `grok login --bedrock --profile <name>` or `grok login --bedrock --chain`."
+        );
+    }
+    xai_grok_shell::auth::store_platform_api_key(&home, "amazon-bedrock", token, None)
+        .map_err(|e| anyhow::anyhow!("Failed to save Amazon Bedrock bearer token: {e}"))?;
+    println!("✓ Amazon Bedrock bearer token saved to ~/.grok/auth.json");
+    Ok(())
+}
+
 fn main() {
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
@@ -2023,6 +2065,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 kimi,
                 openai,
                 claude,
+                github,
+                radius,
+                bedrock,
+                profile,
+                chain,
                 devbox,
             } => {
                 init_tracing_simple("cli");
@@ -2040,6 +2087,17 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 } else if claude {
                     xai_grok_shell::auth::anthropic_claude::run_anthropic_claude_login(None)
                         .await?;
+                } else if github {
+                    xai_grok_shell::auth::github_copilot::run_github_copilot_login(None).await?;
+                } else if radius {
+                    let method = if device_auth {
+                        xai_grok_shell::auth::radius::RadiusLoginMethod::DeviceCode
+                    } else {
+                        xai_grok_shell::auth::radius::RadiusLoginMethod::Browser
+                    };
+                    xai_grok_shell::auth::radius::run_radius_login(None, method).await?;
+                } else if bedrock {
+                    run_bedrock_cli_login(profile.as_deref(), chain)?;
                 } else {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
                         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
@@ -2055,6 +2113,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 kimi,
                 openai,
                 claude,
+                github,
+                radius,
+                bedrock,
                 all,
             } => {
                 init_tracing_simple("cli");
@@ -2070,6 +2131,15 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                     xai_grok_shell::auth::run_cli_logout_openai_codex()?;
                 } else if claude {
                     xai_grok_shell::auth::run_cli_logout_anthropic_claude()?;
+                } else if github {
+                    xai_grok_shell::auth::run_cli_logout_github_copilot()?;
+                } else if radius {
+                    xai_grok_shell::auth::run_cli_logout_radius()?;
+                } else if bedrock {
+                    let home = xai_grok_config::grok_home();
+                    xai_grok_shell::auth::clear_bedrock_auth(&home)
+                        .map_err(|e| anyhow::anyhow!("Failed to clear Amazon Bedrock auth: {e}"))?;
+                    println!("✓ Amazon Bedrock auth removed from ~/.grok/auth.json");
                 } else {
                     let config = xai_grok_shell::config::load_effective_config_disk_only()
                         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;

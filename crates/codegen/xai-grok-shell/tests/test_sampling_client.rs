@@ -1427,8 +1427,14 @@ async fn test_responses_backend_hits_responses_endpoint_not_chat_completions() {
         ApiBackend::ChatCompletions => {
             panic!("Expected Responses backend but got ChatCompletions");
         }
-        ApiBackend::Messages => {
-            panic!("Expected Responses backend but got Messages");
+        ApiBackend::Messages
+        | ApiBackend::GoogleGenerateContent
+        | ApiBackend::BedrockConverseStream
+        | ApiBackend::PiMessages => {
+            panic!(
+                "Expected Responses backend but got {:?}",
+                client.api_backend()
+            );
         }
     }
 
@@ -1465,8 +1471,14 @@ async fn test_chat_completions_backend_hits_chat_endpoint_not_responses() {
         ApiBackend::Responses => {
             panic!("Expected ChatCompletions backend but got Responses");
         }
-        ApiBackend::Messages => {
-            panic!("Expected ChatCompletions backend but got Messages");
+        ApiBackend::Messages
+        | ApiBackend::GoogleGenerateContent
+        | ApiBackend::BedrockConverseStream
+        | ApiBackend::PiMessages => {
+            panic!(
+                "Expected ChatCompletions backend but got {:?}",
+                client.api_backend()
+            );
         }
     }
 

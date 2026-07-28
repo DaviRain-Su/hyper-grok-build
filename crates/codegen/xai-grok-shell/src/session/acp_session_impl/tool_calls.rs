@@ -317,7 +317,7 @@ impl SessionActor {
                     }
                 };
                 self.chat_state_handle
-                    .push_tool_result(ConversationItem::tool_result(call.id.clone(), message));
+                    .push_tool_result(ConversationItem::tool_error(call.id.clone(), message));
                 continue;
             }
             self.emit_event(crate::session::events::Event::ToolStarted {
@@ -1956,7 +1956,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_error(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
@@ -2397,7 +2397,7 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let tool_chat = ConversationItem::tool_error(call_id.to_string(), message);
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
     }
@@ -2708,7 +2708,7 @@ impl SessionActor {
         );
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
             .await;
-        let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
+        let tool_chat = ConversationItem::tool_error(model_call_id.to_owned(), reason);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }

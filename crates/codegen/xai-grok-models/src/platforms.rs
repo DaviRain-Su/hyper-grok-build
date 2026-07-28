@@ -5,8 +5,15 @@
 //! Phase 3: OpenAI + Anthropic (API key; catalog from Pi models.generated).
 //! Phase 4: OpenCode Go subscription (Console API key; mixed Chat/Messages catalog).
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::LazyLock;
+
+use crate::provider_compat::{
+    AnthropicMessagesCompat, MaxTokensField, OpenAiCompletionsCompat, OpenAiResponsesCompat,
+    ProviderRouteSpec, RequestCompat, RouteAuth, ThinkingFormat,
+};
 
 /// Env var for the moonshot.cn API key (wins over the generic name).
 pub const MOONSHOT_CN_API_KEY_ENV: &str = "GROK_MOONSHOT_CN_API_KEY";
@@ -25,6 +32,12 @@ pub const MOONSHOT_AI_BASE_URL_ENV: &str = "GROK_MOONSHOT_AI_BASE_URL";
 
 /// Env override for the Kimi Code subscription inference base.
 pub const KIMI_CODE_BASE_URL_ENV: &str = "GROK_KIMI_CODE_BASE_URL";
+/// Kimi Code API key (provider-scoped, highest static credential precedence).
+pub const KIMI_CODE_API_KEY_ENV: &str = "GROK_KIMI_CODE_API_KEY";
+/// Shared Grok-prefixed Kimi API-key alias.
+pub const KIMI_API_KEY_ENV: &str = "GROK_KIMI_API_KEY";
+/// Official Pi/Kimi API-key alias.
+pub const KIMI_API_KEY_ALIAS_ENV: &str = "KIMI_API_KEY";
 /// Env override for the Kimi Code wire backend (`messages` default;
 /// `chat_completions` opts into the OpenAI-compatible endpoint while we
 /// validate parity — gray-release switch).
@@ -183,6 +196,556 @@ pub fn normalize_messages_sdk_base_url(url: &str) -> String {
     }
 }
 
+/// Normalize Pi-supported Azure endpoint shapes to the Responses SDK base.
+pub fn normalize_azure_openai_base_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let mut parsed = url::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let is_azure_host = host.ends_with(".openai.azure.com")
+        || host.ends_with(".cognitiveservices.azure.com")
+        || host.ends_with(".ai.azure.com");
+    let normalized_path = parsed.path().trim_end_matches('/');
+    if is_azure_host && matches!(normalized_path, "" | "/openai" | "/openai/v1/responses") {
+        parsed.set_path("/openai/v1");
+        parsed.set_query(None);
+    }
+    Some(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn normalize_runtime_base_url(
+    url: &str,
+    normalization: ProviderBaseUrlNormalization,
+) -> Option<String> {
+    if matches!(normalization, ProviderBaseUrlNormalization::AzureOpenAi) {
+        return normalize_azure_openai_base_url(url);
+    }
+    let trimmed = url.trim().trim_end_matches('/');
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn expand_base_url_placeholders(
+    value: &str,
+    allowed_env_keys: &[String],
+    getenv: &mut impl FnMut(&str) -> Option<String>,
+) -> (String, bool) {
+    let Ok(names) = base_url_template_env_names(value) else {
+        return (value.to_string(), false);
+    };
+    let allowed: std::collections::BTreeSet<&str> =
+        allowed_env_keys.iter().map(String::as_str).collect();
+    let mut output = value.to_string();
+    for name in names {
+        if !allowed.contains(name.as_str()) {
+            return (output, false);
+        }
+        let Some(raw) = getenv(&name) else {
+            return (output, false);
+        };
+        let replacement = raw.trim();
+        if replacement.is_empty()
+            || !replacement
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return (output, false);
+        }
+        output = output.replace(&format!("{{{name}}}"), replacement);
+    }
+    let ready = !output.contains(['{', '}']);
+    (output, ready)
+}
+
+fn base_url_template_env_names(value: &str) -> Result<Vec<String>, ()> {
+    let bytes = value.as_bytes();
+    let mut names = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'}' => return Err(()),
+            b'{' => {
+                let relative_end = bytes[cursor + 1..]
+                    .iter()
+                    .position(|byte| *byte == b'}')
+                    .ok_or(())?;
+                let end = cursor + 1 + relative_end;
+                let name = &value[cursor + 1..end];
+                if !valid_env_key(name) || name.contains('{') {
+                    return Err(());
+                }
+                names.push(name.to_string());
+                cursor = end + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    Ok(names)
+}
+
+fn valid_env_key(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn deployment_name_from_pi_map(value: &str, model_id: &str) -> Option<String> {
+    let mut resolved = None;
+    for entry in value.split(',') {
+        let Some((candidate, deployment)) = entry.trim().split_once('=') else {
+            continue;
+        };
+        let candidate = candidate.trim();
+        let deployment = deployment.trim();
+        if candidate == model_id && !deployment.is_empty() {
+            resolved = Some(deployment.to_string());
+        }
+    }
+    resolved
+}
+
+/// Embedded provider registry. The registry is parsed and cross-validated with
+/// [`PLATFORM_CATALOG_JSON`] before either asset is exposed to callers.
+pub const PLATFORM_REGISTRY_JSON: &str = include_str!("../platform_registry.json");
+
+const PLATFORM_REGISTRY_VERSION: u32 = 2;
+const PLATFORM_CATALOG_VERSION: u32 = 3;
+
+/// Canonical, data-driven provider identifier.
+///
+/// [`PlatformId`] remains the compatibility enum for provider-specific runtime
+/// behavior. New generated providers should enter through this string-backed
+/// identifier and [`ProviderSpec`] rather than growing that enum indefinitely.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct ProviderId(String);
+
+impl ProviderId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Resolve a canonical id or registered alias to its canonical id.
+    pub fn registered(value: &str) -> Option<Self> {
+        provider_spec(value).map(|spec| spec.id.clone())
+    }
+
+    /// Return the legacy typed platform when this provider needs the existing
+    /// compatibility path.
+    pub fn platform_id(&self) -> Option<PlatformId> {
+        PlatformId::parse(self.as_str()).filter(|platform| platform.as_str() == self.as_str())
+    }
+}
+
+impl fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for ProviderId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Upstream source responsible for a provider's generated catalog metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCatalogSource {
+    Pi,
+    ModelsDev,
+    Hyper,
+}
+
+/// Whether a provider is ready for users or reserved for a later native
+/// adapter wave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStatus {
+    Active,
+    Planned,
+}
+
+/// Provider-level adapter selection. `Standard` dispatches from each catalog
+/// row's wire protocol; the remaining variants preserve provider-specific
+/// behavior behind a small typed boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterKind {
+    #[default]
+    Standard,
+    KimiCoding,
+    #[serde(rename = "openai_codex")]
+    OpenAiCodex,
+    MistralConversations,
+    Nexus,
+    AnthropicClaude,
+    #[serde(rename = "github_copilot")]
+    GitHubCopilot,
+    GoogleGenerateContent,
+    BedrockConverseStream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCredentialKind {
+    ApiKey,
+    Oauth,
+    Hybrid,
+}
+
+/// Default credential placement. `ProtocolDefault` means Bearer for OpenAI
+/// Chat/Responses and `x-api-key` for Anthropic Messages; a route may override
+/// this in later adapter metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthPlacement {
+    ProtocolDefault,
+    Bearer,
+    XApiKey,
+    /// Azure OpenAI's raw `api-key` header.
+    ApiKey,
+    /// Cloudflare AI Gateway's `cf-aig-authorization: Bearer …` header.
+    CfAigAuthorization,
+    XGoogApiKey,
+}
+
+/// Provider-specific runtime materialization layered on a standard wire API.
+///
+/// This metadata contains environment variable *names* only. Secret values are
+/// resolved by the shell/sampler credential path and are never stored here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderRuntimeSpec {
+    /// Environment names allowed in `{ENV_NAME}` base-URL placeholders.
+    pub base_url_template_env_keys: Vec<String>,
+    /// Static route query key -> environment override name.
+    pub query_params_from_env: BTreeMap<String, String>,
+    /// Pi-compatible `model=deployment,...` mapping for the wire model id.
+    pub model_id_map_env_key: Option<String>,
+    /// Optional normalization applied after URL placeholders are expanded.
+    pub base_url_normalization: ProviderBaseUrlNormalization,
+    /// Environment names whose presence can make this provider usable without a static API key.
+    pub external_readiness_env_keys: Vec<String>,
+    /// Required project environment names for native Google Vertex routes.
+    pub project_env_keys: Vec<String>,
+    /// Required location environment names for native Google Vertex routes.
+    pub location_env_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderBaseUrlNormalization {
+    #[default]
+    None,
+    AzureOpenAi,
+}
+
+/// Fully materialized non-secret runtime route for one catalog model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProviderRuntime {
+    pub base_url: String,
+    pub query_params: BTreeMap<String, String>,
+    pub wire_model_id: String,
+    /// False when a URL placeholder is unresolved/unsafe or the final URL is
+    /// not an absolute HTTP(S) base. Callers must keep the model locked.
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCredentialPolicy {
+    pub kind: ProviderCredentialKind,
+    pub env_keys: Vec<String>,
+    pub auth: ProviderAuthPlacement,
+    /// Canonical persisted/config credential family. Providers in the same
+    /// family may expose different routes while accepting one official key.
+    #[serde(default)]
+    pub storage_group: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDiscoveryMode {
+    Disabled,
+    ModelsEndpoint,
+    Adapter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDiscovery {
+    pub mode: ProviderDiscoveryMode,
+    pub models_path: Option<String>,
+    #[serde(default)]
+    pub model_prefixes: Vec<String>,
+}
+
+/// One provider registry row. No secret values are stored in this structure;
+/// `env_keys` contains names only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSpec {
+    pub id: ProviderId,
+    pub pi_id: Option<String>,
+    pub catalog_source: ProviderCatalogSource,
+    pub display_name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub status: ProviderStatus,
+    pub adapter: AdapterKind,
+    pub default_base_url: String,
+    #[serde(default)]
+    pub base_url_env_keys: Vec<String>,
+    pub credentials: ProviderCredentialPolicy,
+    #[serde(default)]
+    pub runtime: ProviderRuntimeSpec,
+    pub discovery: ProviderDiscovery,
+}
+
+impl ProviderSpec {
+    pub fn matches(&self, value: &str) -> bool {
+        self.id.as_str() == value || self.aliases.iter().any(|alias| alias == value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.id.as_str()
+    }
+
+    pub fn legacy_platform(&self) -> Option<PlatformId> {
+        self.id.platform_id()
+    }
+
+    pub fn uses_oauth(&self) -> bool {
+        matches!(
+            self.credentials.kind,
+            ProviderCredentialKind::Oauth | ProviderCredentialKind::Hybrid
+        )
+    }
+
+    pub fn accepts_api_key(&self) -> bool {
+        matches!(
+            self.credentials.kind,
+            ProviderCredentialKind::ApiKey | ProviderCredentialKind::Hybrid
+        )
+    }
+
+    pub fn uses_x_api_key(&self) -> bool {
+        self.credentials.auth == ProviderAuthPlacement::XApiKey
+    }
+
+    pub fn credential_storage_group(&self) -> &str {
+        self.credentials
+            .storage_group
+            .as_deref()
+            .unwrap_or_else(|| self.id.as_str())
+    }
+
+    /// Resolve this provider's base URL without ever reading credential values.
+    pub fn base_url(&self) -> String {
+        if let Some(platform) = self.legacy_platform() {
+            return platform.base_url();
+        }
+        for name in &self.base_url_env_keys {
+            if let Ok(value) = std::env::var(name)
+                && !value.trim().is_empty()
+            {
+                return value;
+            }
+        }
+        self.default_base_url.clone()
+    }
+
+    /// Resolve URL placeholders, environment-backed query overrides, Azure
+    /// normalization, and an optional Pi deployment map for one model route.
+    pub fn resolve_runtime(
+        &self,
+        base_url: &str,
+        model_id: &str,
+        query_params: &BTreeMap<String, String>,
+    ) -> ResolvedProviderRuntime {
+        self.resolve_runtime_with(base_url, model_id, query_params, |name| {
+            std::env::var(name).ok()
+        })
+    }
+
+    /// Testable core of [`Self::resolve_runtime`] with an injected environment.
+    pub fn resolve_runtime_with(
+        &self,
+        base_url: &str,
+        model_id: &str,
+        query_params: &BTreeMap<String, String>,
+        mut getenv: impl FnMut(&str) -> Option<String>,
+    ) -> ResolvedProviderRuntime {
+        let (expanded_base_url, placeholders_ready) = expand_base_url_placeholders(
+            base_url,
+            &self.runtime.base_url_template_env_keys,
+            &mut getenv,
+        );
+        let normalized_base_url =
+            normalize_runtime_base_url(&expanded_base_url, self.runtime.base_url_normalization);
+        let mut ready = placeholders_ready && normalized_base_url.is_some();
+
+        let mut resolved_query = query_params.clone();
+        for (query_key, env_key) in &self.runtime.query_params_from_env {
+            let Some(value) = getenv(env_key) else {
+                continue;
+            };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if value.contains(['\r', '\n']) {
+                ready = false;
+                continue;
+            }
+            resolved_query.insert(query_key.clone(), value.to_string());
+        }
+
+        let wire_model_id = self
+            .runtime
+            .model_id_map_env_key
+            .as_deref()
+            .and_then(&mut getenv)
+            .and_then(|mapping| deployment_name_from_pi_map(&mapping, model_id))
+            .unwrap_or_else(|| model_id.to_string());
+
+        ResolvedProviderRuntime {
+            base_url: normalized_base_url.unwrap_or(expanded_base_url),
+            query_params: resolved_query,
+            wire_model_id,
+            ready,
+        }
+    }
+
+    pub fn base_url_matches(&self, url: &str) -> bool {
+        urls_same_origin(&self.base_url(), url)
+    }
+
+    pub fn managed_model_key(&self, model_id: &str) -> String {
+        format!("{}/{model_id}", self.id)
+    }
+
+    /// Human setup instructions that contain names only, never secret values.
+    pub fn setup_hint(&self) -> String {
+        if let Some(platform) = self.legacy_platform() {
+            return platform.setup_hint();
+        }
+        if self.uses_oauth() {
+            return format!(
+                "Sign in with your {} subscription: run /login",
+                self.display_name
+            );
+        }
+        let env_part = match self.credentials.env_keys.as_slice() {
+            [] => String::new(),
+            [one] => format!("export {one}=<key>"),
+            [first, rest @ ..] => {
+                format!("export {first}=<key> (or {})", rest.join(" / "))
+            }
+        };
+        let ui_part = format!("run /providers {} <api_key>", self.id);
+        let config_part = format!(
+            "add `api_key = \"<key>\"` under `[platforms.{}]` in ~/.grok/config.toml",
+            self.id
+        );
+        let mut hint = if env_part.is_empty() {
+            format!("{ui_part}, or {config_part}")
+        } else {
+            format!("{ui_part}, or {env_part}, or {config_part}")
+        };
+        if !self.runtime.base_url_template_env_keys.is_empty() {
+            hint.push_str(&format!(
+                "; also set {} for the endpoint template, or set one of {} to a complete base URL",
+                self.runtime.base_url_template_env_keys.join(" and "),
+                self.base_url_env_keys.join(" / ")
+            ));
+        }
+        hint
+    }
+}
+
+/// Parsed provider registry. Access it through [`provider_registry`] so the
+/// embedded catalog and compatibility enum are validated first.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRegistry {
+    version: u32,
+    source: String,
+    providers: Vec<ProviderSpec>,
+}
+
+impl ProviderRegistry {
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn providers(&self) -> &[ProviderSpec] {
+        &self.providers
+    }
+
+    pub fn find(&self, id_or_alias: &str) -> Option<&ProviderSpec> {
+        self.providers.iter().find(|spec| spec.matches(id_or_alias))
+    }
+}
+
+/// All validation failures found in an embedded or generated provider asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAssetError {
+    issues: Vec<String>,
+}
+
+impl ProviderAssetError {
+    fn new(issues: Vec<String>) -> Self {
+        debug_assert!(!issues.is_empty());
+        Self { issues }
+    }
+
+    pub fn issues(&self) -> &[String] {
+        &self.issues
+    }
+}
+
+impl fmt::Display for ProviderAssetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{} provider asset validation error(s):",
+            self.issues.len()
+        )?;
+        for issue in &self.issues {
+            writeln!(f, "- {issue}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ProviderAssetError {}
+
 /// Built-in inference platforms (aligned with official Pi `@earendil-works/pi-ai`
 /// provider ids where applicable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -199,7 +762,7 @@ pub enum PlatformId {
     Anthropic,
     DeepSeek,
     Groq,
-    /// Reserved; Pi Mistral uses a proprietary API we do not speak yet.
+    /// Mistral API key provider using Pi's Mistral Chat Completions dialect.
     Mistral,
     XaiDirect,
     Together,
@@ -284,33 +847,30 @@ impl PlatformId {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "kimi-code" | "kimi-coding" => Some(Self::KimiCode),
-            "openai-codex" | "chatgpt-codex" => Some(Self::OpenAiCodex),
-            "opencode-go" | "opencodego" => Some(Self::OpenCodeGo),
-            "moonshot-cn" | "moonshotai-cn" => Some(Self::MoonshotCn),
-            "moonshot-ai" | "moonshotai" => Some(Self::MoonshotAi),
-            "openai" => Some(Self::OpenAi),
-            "anthropic" => Some(Self::Anthropic),
-            "deepseek" => Some(Self::DeepSeek),
-            "groq" => Some(Self::Groq),
-            "mistral" => Some(Self::Mistral),
-            "xai-direct" | "xai" => Some(Self::XaiDirect),
-            "together" => Some(Self::Together),
-            "fireworks" => Some(Self::Fireworks),
-            "cerebras" => Some(Self::Cerebras),
-            "nvidia" => Some(Self::Nvidia),
-            "openrouter" => Some(Self::OpenRouter),
-            "minimax" => Some(Self::MiniMax),
-            "minimax-cn" => Some(Self::MiniMaxCn),
-            "zai" => Some(Self::Zai),
-            "zai-coding" | "zai-code-plan" => Some(Self::ZaiCoding),
-            "zai-coding-cn" => Some(Self::ZaiCodingCn),
-            "ollama" => Some(Self::Ollama),
-            "nexus" => Some(Self::Nexus),
-            "anthropic-claude" | "claude" | "claude-code" => Some(Self::AnthropicClaude),
-            _ => None,
+        Self::ALL
+            .into_iter()
+            .find(|platform| platform.as_str() == s || platform.aliases().contains(&s))
+    }
+
+    /// Accepted non-canonical spellings. Kept explicit while special-provider
+    /// runtime branches still use this enum; generated providers use
+    /// [`ProviderSpec::aliases`] instead.
+    pub fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::KimiCode => &["kimi-coding"],
+            Self::OpenAiCodex => &["chatgpt-codex"],
+            Self::OpenCodeGo => &["opencodego"],
+            Self::MoonshotCn => &["moonshotai-cn"],
+            Self::MoonshotAi => &["moonshotai"],
+            Self::XaiDirect => &["xai"],
+            Self::ZaiCoding => &["zai-code-plan"],
+            Self::AnthropicClaude => &["claude", "claude-code"],
+            _ => &[],
         }
+    }
+
+    pub fn provider_id(self) -> ProviderId {
+        ProviderId(self.as_str().to_string())
     }
 
     pub fn display_name(self) -> &'static str {
@@ -432,7 +992,10 @@ impl PlatformId {
     /// OAuth host for the subscription channel only.
     pub fn oauth_host(self) -> Option<String> {
         match self {
-            Self::KimiCode => Some(env_or(KIMI_CODE_OAUTH_HOST_ENV, KIMI_CODE_OAUTH_HOST_DEFAULT)),
+            Self::KimiCode => Some(env_or(
+                KIMI_CODE_OAUTH_HOST_ENV,
+                KIMI_CODE_OAUTH_HOST_DEFAULT,
+            )),
             Self::OpenAiCodex => Some(env_or(
                 OPENAI_CODEX_OAUTH_HOST_ENV,
                 OPENAI_CODEX_OAUTH_HOST_DEFAULT,
@@ -470,7 +1033,12 @@ impl PlatformId {
     /// SECURITY: the *values* behind these names must never be logged.
     pub fn api_key_env_names(self) -> &'static [&'static str] {
         match self {
-            Self::KimiCode | Self::OpenAiCodex | Self::AnthropicClaude => &[],
+            Self::KimiCode => &[
+                KIMI_CODE_API_KEY_ENV,
+                KIMI_API_KEY_ENV,
+                KIMI_API_KEY_ALIAS_ENV,
+            ],
+            Self::OpenAiCodex | Self::AnthropicClaude => &[],
             Self::OpenCodeGo => &[OPENCODE_GO_API_KEY_ENV, OPENCODE_API_KEY_ENV],
             Self::MoonshotCn => &[
                 MOONSHOT_CN_API_KEY_ENV,
@@ -521,17 +1089,6 @@ impl PlatformId {
     /// the model picker description, `set_session_model` rejections, and
     /// the pager's `/providers` overview.
     pub fn setup_hint(self) -> String {
-        if self.uses_oauth() {
-            let login_target = match self {
-                Self::OpenAiCodex => "/login openai",
-                Self::AnthropicClaude => "/login claude",
-                _ => "/login kimi",
-            };
-            return format!(
-                "Sign in with your {} subscription: run {login_target}",
-                self.display_name()
-            );
-        }
         let envs = self.api_key_env_names();
         let env_part = match envs {
             [] => String::new(),
@@ -543,11 +1100,29 @@ impl PlatformId {
             "add `api_key = \"<key>\"` under `[platforms.{}]` in ~/.grok/config.toml",
             self.as_str()
         );
-        if env_part.is_empty() {
+        let api_key_hint = if env_part.is_empty() {
             format!("{ui_part}, or {config_part}")
         } else {
             format!("{ui_part}, or {env_part}, or {config_part}")
+        };
+
+        if self.uses_oauth() {
+            let login_target = match self {
+                Self::OpenAiCodex => "/login openai",
+                Self::AnthropicClaude => "/login claude",
+                _ => "/login kimi",
+            };
+            let oauth_hint = format!(
+                "Sign in with your {} subscription: run {login_target}",
+                self.display_name()
+            );
+            return if self == Self::KimiCode {
+                format!("{oauth_hint}, or use an API key: {api_key_hint}")
+            } else {
+                oauth_hint
+            };
         }
+        api_key_hint
     }
 
     /// Whether to auto-fetch live `GET /models` for this platform.
@@ -557,11 +1132,7 @@ impl PlatformId {
     pub fn live_models_list_enabled(self) -> bool {
         matches!(
             self,
-            Self::KimiCode
-                | Self::MoonshotCn
-                | Self::MoonshotAi
-                | Self::Ollama
-                | Self::Nexus
+            Self::KimiCode | Self::MoonshotCn | Self::MoonshotAi | Self::Ollama | Self::Nexus
         )
     }
 
@@ -574,6 +1145,12 @@ impl PlatformId {
     pub fn base_url_matches(self, url: &str) -> bool {
         let base = self.base_url();
         urls_same_origin(&base, url)
+    }
+}
+
+impl From<PlatformId> for ProviderId {
+    fn from(platform: PlatformId) -> Self {
+        platform.provider_id()
     }
 }
 
@@ -596,14 +1173,17 @@ fn urls_same_origin(a: &str, b: &str) -> bool {
     }
 }
 
-/// Split `{platform_id}/{model_id}` back into platform + bare model id.
-pub fn parse_managed_model_key(key: &str) -> Option<(PlatformId, &str)> {
-    let (platform, model_id) = key.split_once('/')?;
-    let platform = PlatformId::parse(platform)?;
+/// Split `{provider_id}/{model_id}` back into a canonical provider + bare model id.
+///
+/// Unlike the legacy enum-only parser, this recognizes every validated registry
+/// provider, including generated providers that do not need bespoke runtime code.
+pub fn parse_managed_model_key(key: &str) -> Option<(ProviderId, &str)> {
+    let (provider, model_id) = key.split_once('/')?;
     if model_id.is_empty() {
         return None;
     }
-    Some((platform, model_id))
+    let spec = provider_spec(provider)?;
+    Some((spec.id.clone(), model_id))
 }
 
 /// Wire API backend for a built-in catalog entry (maps to shell `ApiBackend`).
@@ -612,6 +1192,9 @@ pub enum PlatformApiBackend {
     ChatCompletions,
     Responses,
     Messages,
+    GoogleGenerateContent,
+    BedrockConverseStream,
+    PiMessages,
 }
 
 impl PlatformApiBackend {
@@ -620,6 +1203,9 @@ impl PlatformApiBackend {
             Self::ChatCompletions => "chat_completions",
             Self::Responses => "responses",
             Self::Messages => "messages",
+            Self::GoogleGenerateContent => "google_generate_content",
+            Self::BedrockConverseStream => "bedrock_converse_stream",
+            Self::PiMessages => "pi_messages",
         }
     }
 
@@ -628,7 +1214,25 @@ impl PlatformApiBackend {
             "chat_completions" | "chat-completions" => Some(Self::ChatCompletions),
             "responses" => Some(Self::Responses),
             "messages" => Some(Self::Messages),
+            "google_generate_content" | "google-generate-content" => {
+                Some(Self::GoogleGenerateContent)
+            }
+            "bedrock_converse_stream" | "bedrock-converse-stream" => {
+                Some(Self::BedrockConverseStream)
+            }
+            "pi_messages" | "pi-messages" => Some(Self::PiMessages),
             _ => None,
+        }
+    }
+
+    pub fn endpoint_path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+            Self::Messages => "messages",
+            Self::GoogleGenerateContent => "models/{model}:generateContent",
+            Self::BedrockConverseStream => "model/{model}/converse-stream",
+            Self::PiMessages => "messages",
         }
     }
 }
@@ -644,7 +1248,7 @@ impl PlatformApiBackend {
 /// [`PLATFORM_CATALOG_JSON`] (curated from Pi and models.dev).
 #[derive(Debug, Clone)]
 pub struct BuiltinPlatformModel {
-    pub platform: PlatformId,
+    pub provider: ProviderId,
     pub model: String,
     pub name: String,
     pub description: String,
@@ -659,38 +1263,79 @@ pub struct BuiltinPlatformModel {
     /// Per-row base URL from the catalog JSON (e.g. MiniMax Messages uses
     /// `https://api.minimax.io/anthropic` rather than the platform default
     /// `/v1` OpenAI-compatible root). When `None`, callers use
-    /// [`PlatformId::base_url`].
+    /// the provider registry's environment-aware base URL.
     pub base_url_override: Option<String>,
+    /// Fully resolved, protocol-specific request behavior imported from Pi.
+    pub request_compat: RequestCompat,
+    /// Explicit endpoint, authentication placement, static headers, and query
+    /// parameters for this model route.
+    pub route: ProviderRouteSpec,
 }
 
 impl BuiltinPlatformModel {
     pub fn catalog_key(&self) -> String {
-        self.platform.managed_model_key(&self.model)
+        format!("{}/{}", self.provider, self.model)
+    }
+
+    pub fn provider_spec(&self) -> &'static ProviderSpec {
+        provider_spec(self.provider.as_str())
+            .expect("validated built-in model references a registered provider")
+    }
+
+    pub fn legacy_platform(&self) -> Option<PlatformId> {
+        self.provider.platform_id()
     }
 
     /// Base URL in Grok's `{base}/{backend-endpoint}` convention.
     ///
     /// The sampler joins `{base}/messages` (not `/v1/messages`). Anthropic-SDK
     /// style roots therefore need a trailing `/v1`:
-    /// - Anthropic platform rows go through [`PlatformId::base_url`] so env
-    ///   overrides (`GROK_ANTHROPIC_BASE_URL` / `ANTHROPIC_BASE_URL`) apply.
+    /// - Anthropic platform rows use the registry's environment-aware base URL,
+    ///   preserving `GROK_ANTHROPIC_BASE_URL` / `ANTHROPIC_BASE_URL` handling.
     /// - Other **Messages** backends with a catalog `base_url_override`
     ///   (MiniMax `/anthropic`, Fireworks `/inference`, …) are normalized the
     ///   same way via [`normalize_messages_sdk_base_url`].
     /// - Chat Completions / Responses overrides are returned as-is.
-    pub fn resolved_base_url(&self) -> String {
-        if self.platform == PlatformId::Anthropic {
-            return self.platform.base_url();
-        }
-        let raw = self
-            .base_url_override
-            .clone()
-            .unwrap_or_else(|| self.platform.base_url());
-        if self.api_backend == PlatformApiBackend::Messages {
+    fn raw_resolved_base_url(&self) -> String {
+        let spec = self.provider_spec();
+        let has_env_override = spec.base_url_env_keys.iter().any(|name| {
+            std::env::var(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        });
+        let raw = if has_env_override {
+            // A user/provider override must win over Pi's per-row route base.
+            spec.base_url()
+        } else {
+            self.base_url_override
+                .clone()
+                .unwrap_or_else(|| spec.base_url())
+        };
+        let grok_anthropic_override_is_already_versioned = self.legacy_platform()
+            == Some(PlatformId::Anthropic)
+            && std::env::var(ANTHROPIC_BASE_URL_ENV)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+        if self.api_backend == PlatformApiBackend::Messages
+            && !grok_anthropic_override_is_already_versioned
+        {
             normalize_messages_sdk_base_url(&raw)
         } else {
             raw
         }
+    }
+
+    /// Materialize all non-secret runtime route metadata for this model.
+    pub fn resolved_runtime(&self) -> ResolvedProviderRuntime {
+        self.provider_spec().resolve_runtime(
+            &self.raw_resolved_base_url(),
+            &self.model,
+            &self.route.query_params,
+        )
+    }
+
+    pub fn resolved_base_url(&self) -> String {
+        self.resolved_runtime().base_url
     }
 
     pub fn context_window_nonzero(&self) -> NonZeroU64 {
@@ -707,11 +1352,15 @@ const MAX_TOK_32K: Option<u32> = Some(32_768);
 pub const PLATFORM_CATALOG_JSON: &str = include_str!("../platform_catalog.json");
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogFile {
+    version: u32,
+    source: String,
     models: Vec<CatalogModelRow>,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogModelRow {
     platform: String,
     model: String,
@@ -724,20 +1373,746 @@ struct CatalogModelRow {
     /// Optional per-model base URL (e.g. MiniMax Anthropic-compatible path).
     #[serde(default)]
     base_url_override: Option<String>,
-    // `supported_in_api` is intentionally ignored: all built-in platform
+    request_compat: RequestCompat,
+    route: ProviderRouteSpec,
+    // Catalog availability is intentionally ignored at runtime: all built-in
     // entries start hidden until the shell stamps credentials.
+    #[serde(rename = "supported_in_api")]
+    _supported_in_api: bool,
+    source: String,
 }
 
-fn load_platform_catalog_models() -> Vec<BuiltinPlatformModel> {
-    let file: CatalogFile = serde_json::from_str(PLATFORM_CATALOG_JSON)
-        .expect("platform_catalog.json must parse");
-    file.models
-        .into_iter()
-        .filter_map(|row| {
-            let platform = PlatformId::parse(&row.platform)?;
-            let api_backend = PlatformApiBackend::parse(&row.api_backend)?;
-            Some(BuiltinPlatformModel {
-                platform,
+struct EmbeddedProviderAssets {
+    registry: ProviderRegistry,
+    catalog_models: Vec<BuiltinPlatformModel>,
+}
+
+static EMBEDDED_PROVIDER_ASSETS: LazyLock<EmbeddedProviderAssets> = LazyLock::new(|| {
+    load_provider_assets(PLATFORM_REGISTRY_JSON, PLATFORM_CATALOG_JSON)
+        .unwrap_or_else(|error| panic!("embedded provider registry/catalog is invalid:\n{error}"))
+});
+
+/// Validated runtime provider metadata.
+pub fn provider_registry() -> &'static ProviderRegistry {
+    &EMBEDDED_PROVIDER_ASSETS.registry
+}
+
+/// Find a provider by canonical id or alias.
+pub fn provider_spec(id_or_alias: &str) -> Option<&'static ProviderSpec> {
+    provider_registry().find(id_or_alias)
+}
+
+/// Validate generated provider assets without installing them. Sync tooling and
+/// tests use this entry point to reject partial, stale, or unknown rows.
+pub fn validate_provider_assets(
+    registry_json: &str,
+    catalog_json: &str,
+) -> Result<(), ProviderAssetError> {
+    load_provider_assets(registry_json, catalog_json).map(|_| ())
+}
+
+fn load_provider_assets(
+    registry_json: &str,
+    catalog_json: &str,
+) -> Result<EmbeddedProviderAssets, ProviderAssetError> {
+    let registry = parse_provider_registry(registry_json)?;
+    let catalog_models = parse_platform_catalog(catalog_json, &registry)?;
+    Ok(EmbeddedProviderAssets {
+        registry,
+        catalog_models,
+    })
+}
+
+fn parse_provider_registry(json: &str) -> Result<ProviderRegistry, ProviderAssetError> {
+    let registry: ProviderRegistry = serde_json::from_str(json).map_err(|error| {
+        ProviderAssetError::new(vec![format!(
+            "platform_registry.json is not valid JSON: {error}"
+        )])
+    })?;
+    let issues = validate_provider_registry(&registry);
+    if issues.is_empty() {
+        Ok(registry)
+    } else {
+        Err(ProviderAssetError::new(issues))
+    }
+}
+
+fn validate_provider_registry(registry: &ProviderRegistry) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut issues = Vec::new();
+    if registry.version != PLATFORM_REGISTRY_VERSION {
+        issues.push(format!(
+            "platform_registry.json version {} is unsupported; expected {PLATFORM_REGISTRY_VERSION}",
+            registry.version
+        ));
+    }
+    if registry.source.trim().is_empty() {
+        issues.push("platform_registry.json source must not be blank".into());
+    }
+    if registry.providers.is_empty() {
+        issues.push("platform_registry.json providers must not be empty".into());
+    }
+
+    let mut canonical_ids = BTreeMap::<String, usize>::new();
+    let mut all_names = BTreeMap::<String, String>::new();
+    for (index, spec) in registry.providers.iter().enumerate() {
+        let id = spec.id.as_str();
+        let label = format!("providers[{index}] ({id})");
+        if !valid_provider_token(id) {
+            issues.push(format!(
+                "{label}: id must be a lowercase kebab-case provider token"
+            ));
+        }
+        if let Some(previous) = canonical_ids.insert(id.to_string(), index) {
+            issues.push(format!(
+                "{label}: duplicate canonical id (already used by providers[{previous}])"
+            ));
+        }
+        if let Some(owner) = all_names.insert(id.to_string(), id.to_string()) {
+            issues.push(format!("{label}: id collides with name owned by {owner}"));
+        }
+        if spec.display_name.trim().is_empty() || spec.display_name.trim() != spec.display_name {
+            issues.push(format!(
+                "{label}: display_name must be non-blank without surrounding whitespace"
+            ));
+        }
+        if let Some(pi_id) = &spec.pi_id
+            && !valid_provider_token(pi_id)
+        {
+            issues.push(format!(
+                "{label}: pi_id `{pi_id}` is not a valid provider token"
+            ));
+        }
+        if !valid_http_base_url(&spec.default_base_url) {
+            issues.push(format!(
+                "{label}: default_base_url must be an absolute http(s) URL without whitespace or a trailing slash"
+            ));
+        }
+
+        let mut aliases = BTreeSet::new();
+        for alias in &spec.aliases {
+            if !valid_provider_token(alias) {
+                issues.push(format!(
+                    "{label}: alias `{alias}` is not a valid provider token"
+                ));
+            }
+            if !aliases.insert(alias.as_str()) {
+                issues.push(format!("{label}: duplicate alias `{alias}`"));
+            }
+            if alias == id {
+                issues.push(format!("{label}: alias `{alias}` repeats the canonical id"));
+            }
+            if let Some(owner) = all_names.insert(alias.clone(), id.to_string()) {
+                issues.push(format!(
+                    "{label}: alias `{alias}` collides with a canonical id or alias owned by {owner}"
+                ));
+            }
+        }
+
+        validate_env_keys(
+            &label,
+            "base_url_env_keys",
+            &spec.base_url_env_keys,
+            &mut issues,
+        );
+        if spec.base_url_env_keys.is_empty() {
+            issues.push(format!("{label}: base_url_env_keys must not be empty"));
+        }
+        validate_env_keys(
+            &label,
+            "runtime.base_url_template_env_keys",
+            &spec.runtime.base_url_template_env_keys,
+            &mut issues,
+        );
+        validate_base_url_template(
+            &label,
+            "default_base_url",
+            &spec.default_base_url,
+            &spec.runtime.base_url_template_env_keys,
+            &mut issues,
+        );
+        for (query_key, env_key) in &spec.runtime.query_params_from_env {
+            if query_key.trim().is_empty() || query_key.trim() != query_key {
+                issues.push(format!(
+                    "{label}: runtime query parameter keys must not be blank or padded"
+                ));
+            }
+            validate_env_keys(
+                &label,
+                &format!("runtime.query_params_from_env[{query_key}]"),
+                std::slice::from_ref(env_key),
+                &mut issues,
+            );
+        }
+        if let Some(env_key) = &spec.runtime.model_id_map_env_key {
+            validate_env_keys(
+                &label,
+                "runtime.model_id_map_env_key",
+                std::slice::from_ref(env_key),
+                &mut issues,
+            );
+        }
+        validate_env_keys(
+            &label,
+            "credentials.env_keys",
+            &spec.credentials.env_keys,
+            &mut issues,
+        );
+        match spec.credentials.kind {
+            ProviderCredentialKind::Oauth if !spec.credentials.env_keys.is_empty() => {
+                issues.push(format!(
+                    "{label}: OAuth providers must not declare API-key env names"
+                ));
+            }
+            ProviderCredentialKind::ApiKey | ProviderCredentialKind::Hybrid
+                if spec.credentials.env_keys.is_empty() =>
+            {
+                issues.push(format!(
+                    "{label}: API-key and hybrid providers must declare at least one env name"
+                ));
+            }
+            _ => {}
+        }
+        if let Some(group) = &spec.credentials.storage_group
+            && !valid_provider_token(group)
+        {
+            issues.push(format!(
+                "{label}: credentials.storage_group `{group}` is not a valid provider token"
+            ));
+        }
+
+        match spec.discovery.mode {
+            ProviderDiscoveryMode::ModelsEndpoint => {
+                if !matches!(spec.discovery.models_path.as_deref(), Some(path) if path.starts_with('/') && path.len() > 1)
+                {
+                    issues.push(format!(
+                        "{label}: models_endpoint discovery requires an absolute models_path"
+                    ));
+                }
+            }
+            ProviderDiscoveryMode::Disabled | ProviderDiscoveryMode::Adapter => {
+                if spec.discovery.models_path.is_some() {
+                    issues.push(format!(
+                        "{label}: disabled/adapter discovery must not declare models_path"
+                    ));
+                }
+            }
+        }
+        let mut prefixes = BTreeSet::new();
+        for prefix in &spec.discovery.model_prefixes {
+            if prefix.trim().is_empty() || prefix.trim() != prefix {
+                issues.push(format!(
+                    "{label}: model prefixes must be non-blank without surrounding whitespace"
+                ));
+            }
+            if !prefixes.insert(prefix.as_str()) {
+                issues.push(format!("{label}: duplicate model prefix `{prefix}`"));
+            }
+        }
+    }
+
+    for spec in &registry.providers {
+        let Some(group) = spec.credentials.storage_group.as_deref() else {
+            continue;
+        };
+        let Some(owner) = registry
+            .providers
+            .iter()
+            .find(|candidate| candidate.id.as_str() == group)
+        else {
+            issues.push(format!(
+                "provider `{}` credential storage group `{group}` is not a canonical provider id",
+                spec.id
+            ));
+            continue;
+        };
+        if owner.credentials.kind != spec.credentials.kind
+            || owner.credentials.auth != spec.credentials.auth
+        {
+            issues.push(format!(
+                "provider `{}` credential storage group `{group}` must use the same credential kind and auth placement",
+                spec.id
+            ));
+        }
+    }
+
+    // Compatibility gate: every bespoke typed platform must retain exactly one
+    // registry row. Additional data-driven providers intentionally do not need
+    // a `PlatformId` variant.
+    for platform in PlatformId::ALL {
+        let Some(spec) = registry
+            .providers
+            .iter()
+            .find(|spec| spec.id.as_str() == platform.as_str())
+        else {
+            issues.push(format!(
+                "registry is missing PlatformId `{}`",
+                platform.as_str()
+            ));
+            continue;
+        };
+        validate_platform_compatibility(platform, spec, &mut issues);
+    }
+
+    issues
+}
+
+fn validate_platform_compatibility(
+    platform: PlatformId,
+    spec: &ProviderSpec,
+    issues: &mut Vec<String>,
+) {
+    let id = platform.as_str();
+    let expected_aliases: Vec<String> = platform
+        .aliases()
+        .iter()
+        .map(|alias| (*alias).to_string())
+        .collect();
+    if spec.aliases != expected_aliases {
+        issues.push(format!(
+            "provider `{id}` aliases {:?} do not match PlatformId aliases {:?}",
+            spec.aliases, expected_aliases
+        ));
+    }
+    if spec.display_name != platform.display_name() {
+        issues.push(format!(
+            "provider `{id}` display_name {:?} does not match {:?}",
+            spec.display_name,
+            platform.display_name()
+        ));
+    }
+    if spec.default_base_url != platform.default_base_url() {
+        issues.push(format!(
+            "provider `{id}` default_base_url {:?} does not match {:?}",
+            spec.default_base_url,
+            platform.default_base_url()
+        ));
+    }
+    let expected_env_keys: Vec<String> = platform
+        .api_key_env_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    if spec.credentials.env_keys != expected_env_keys {
+        issues.push(format!(
+            "provider `{id}` credential env-key order {:?} does not match PlatformId {:?}",
+            spec.credentials.env_keys, expected_env_keys
+        ));
+    }
+    let expected_base_env_keys = expected_base_url_env_keys(platform);
+    if spec.base_url_env_keys != expected_base_env_keys {
+        issues.push(format!(
+            "provider `{id}` base URL env-key order {:?} does not match {:?}",
+            spec.base_url_env_keys, expected_base_env_keys
+        ));
+    }
+
+    let expected_kind = if platform == PlatformId::KimiCode {
+        ProviderCredentialKind::Hybrid
+    } else if platform.uses_oauth() {
+        ProviderCredentialKind::Oauth
+    } else {
+        ProviderCredentialKind::ApiKey
+    };
+    if spec.credentials.kind != expected_kind {
+        issues.push(format!(
+            "provider `{id}` credential kind {:?} does not match {:?}",
+            spec.credentials.kind, expected_kind
+        ));
+    }
+    let expected_auth = match platform {
+        PlatformId::Anthropic => ProviderAuthPlacement::XApiKey,
+        PlatformId::Mistral | PlatformId::Nexus => ProviderAuthPlacement::Bearer,
+        _ if platform.uses_oauth() => ProviderAuthPlacement::Bearer,
+        _ => ProviderAuthPlacement::ProtocolDefault,
+    };
+    if spec.credentials.auth != expected_auth {
+        issues.push(format!(
+            "provider `{id}` auth placement {:?} does not match {:?}",
+            spec.credentials.auth, expected_auth
+        ));
+    }
+    let expected_storage_group = (platform == PlatformId::OpenCodeGo).then_some("opencode");
+    if spec.credentials.storage_group.as_deref() != expected_storage_group {
+        issues.push(format!(
+            "provider `{id}` credential storage group {:?} does not match {:?}",
+            spec.credentials.storage_group, expected_storage_group
+        ));
+    }
+
+    let expected_adapter = match platform {
+        PlatformId::KimiCode => AdapterKind::KimiCoding,
+        PlatformId::OpenAiCodex => AdapterKind::OpenAiCodex,
+        PlatformId::Mistral => AdapterKind::MistralConversations,
+        PlatformId::Nexus => AdapterKind::Nexus,
+        PlatformId::AnthropicClaude => AdapterKind::AnthropicClaude,
+        _ => AdapterKind::Standard,
+    };
+    if spec.adapter != expected_adapter {
+        issues.push(format!(
+            "provider `{id}` adapter {:?} does not match {:?}",
+            spec.adapter, expected_adapter
+        ));
+    }
+    let expected_status = ProviderStatus::Active;
+    if spec.status != expected_status {
+        issues.push(format!(
+            "provider `{id}` status {:?} does not match {:?}",
+            spec.status, expected_status
+        ));
+    }
+
+    let expected_discovery = if platform == PlatformId::Nexus {
+        ProviderDiscoveryMode::Adapter
+    } else if platform.live_models_list_enabled() {
+        ProviderDiscoveryMode::ModelsEndpoint
+    } else {
+        ProviderDiscoveryMode::Disabled
+    };
+    if spec.discovery.mode != expected_discovery {
+        issues.push(format!(
+            "provider `{id}` discovery {:?} does not match {:?}",
+            spec.discovery.mode, expected_discovery
+        ));
+    }
+    let expected_path =
+        (expected_discovery == ProviderDiscoveryMode::ModelsEndpoint).then_some("/models");
+    if spec.discovery.models_path.as_deref() != expected_path {
+        issues.push(format!(
+            "provider `{id}` models_path {:?} does not match {:?}",
+            spec.discovery.models_path, expected_path
+        ));
+    }
+    let expected_prefixes: Vec<String> = platform
+        .allowed_model_prefixes()
+        .unwrap_or_default()
+        .iter()
+        .map(|prefix| (*prefix).to_string())
+        .collect();
+    if spec.discovery.model_prefixes != expected_prefixes {
+        issues.push(format!(
+            "provider `{id}` model prefixes {:?} do not match {:?}",
+            spec.discovery.model_prefixes, expected_prefixes
+        ));
+    }
+}
+
+fn expected_base_url_env_keys(platform: PlatformId) -> Vec<String> {
+    let names: &[&str] = match platform {
+        PlatformId::KimiCode => &[KIMI_CODE_BASE_URL_ENV],
+        PlatformId::OpenAiCodex => &[OPENAI_CODEX_BASE_URL_ENV],
+        PlatformId::MoonshotCn => &[MOONSHOT_CN_BASE_URL_ENV],
+        PlatformId::MoonshotAi => &[MOONSHOT_AI_BASE_URL_ENV],
+        PlatformId::OpenAi => &[OPENAI_BASE_URL_ENV],
+        PlatformId::Anthropic => &[ANTHROPIC_BASE_URL_ENV, ANTHROPIC_BASE_URL_ALIAS_ENV],
+        _ => &[],
+    };
+    if !names.is_empty() {
+        return names.iter().map(|name| (*name).to_string()).collect();
+    }
+    vec![format!(
+        "GROK_{}_BASE_URL",
+        platform.as_str().replace('-', "_").to_ascii_uppercase()
+    )]
+}
+
+fn validate_env_keys(label: &str, field: &str, keys: &[String], issues: &mut Vec<String>) {
+    let mut seen = std::collections::BTreeSet::new();
+    for key in keys {
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            issues.push(format!(
+                "{label}: {field} contains invalid env name `{key}`"
+            ));
+        }
+        if !seen.insert(key) {
+            issues.push(format!("{label}: {field} contains duplicate `{key}`"));
+        }
+    }
+}
+
+fn valid_provider_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !value.contains("--")
+}
+
+fn valid_http_base_url(value: &str) -> bool {
+    value.trim() == value
+        && !value.ends_with('/')
+        && !value.chars().any(char::is_whitespace)
+        && value
+            .strip_prefix("https://")
+            .or_else(|| value.strip_prefix("http://"))
+            .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+}
+
+fn validate_base_url_template(
+    label: &str,
+    field: &str,
+    value: &str,
+    allowed_env_keys: &[String],
+    issues: &mut Vec<String>,
+) {
+    let names = match base_url_template_env_names(value) {
+        Ok(names) => names,
+        Err(()) => {
+            issues.push(format!(
+                "{label}: {field} contains a malformed environment placeholder"
+            ));
+            return;
+        }
+    };
+    let allowed: std::collections::BTreeSet<&str> =
+        allowed_env_keys.iter().map(String::as_str).collect();
+    let mut materialized = value.to_string();
+    for name in names {
+        if !allowed.contains(name.as_str()) {
+            issues.push(format!(
+                "{label}: {field} placeholder `{{{name}}}` is not declared in runtime.base_url_template_env_keys"
+            ));
+        }
+        materialized = materialized.replace(&format!("{{{name}}}"), "placeholder");
+    }
+    if normalize_runtime_base_url(&materialized, ProviderBaseUrlNormalization::None).is_none() {
+        issues.push(format!(
+            "{label}: {field} must materialize to an absolute HTTP(S) URL without userinfo or fragment"
+        ));
+    }
+}
+
+fn validate_route_spec(label: &str, route: &ProviderRouteSpec, issues: &mut Vec<String>) {
+    if route.path.is_empty()
+        || route.path.starts_with('/')
+        || route.path.ends_with('/')
+        || route.path.contains("..")
+        || route.path.contains('?')
+        || route.path.contains('#')
+        || route.path.chars().any(char::is_whitespace)
+    {
+        issues.push(format!(
+            "{label}: route.path must be a non-empty relative endpoint path without query/fragment/whitespace"
+        ));
+    }
+    let mut normalized_header_names = std::collections::BTreeSet::new();
+    for (name, value) in &route.headers {
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            issues.push(format!("{label}: route header name `{name}` is invalid"));
+        }
+        let normalized_name = name.to_ascii_lowercase();
+        if !normalized_header_names.insert(normalized_name.clone()) {
+            issues.push(format!(
+                "{label}: route headers contain a case-insensitive duplicate `{name}`"
+            ));
+        }
+        if matches!(
+            normalized_name.as_str(),
+            "authorization" | "x-api-key" | "api-key" | "cf-aig-authorization"
+        ) {
+            issues.push(format!(
+                "{label}: route header `{name}` conflicts with typed authentication metadata"
+            ));
+        }
+        if value.contains(['\r', '\n']) {
+            issues.push(format!("{label}: route header `{name}` contains a newline"));
+        }
+    }
+    for (name, value) in &route.query_params {
+        if name.trim().is_empty() || name.trim() != name {
+            issues.push(format!(
+                "{label}: route query key must not be blank or padded"
+            ));
+        }
+        if value.contains(['\r', '\n']) {
+            issues.push(format!(
+                "{label}: route query value for `{name}` contains a newline"
+            ));
+        }
+    }
+}
+
+fn parse_platform_catalog(
+    json: &str,
+    registry: &ProviderRegistry,
+) -> Result<Vec<BuiltinPlatformModel>, ProviderAssetError> {
+    use std::collections::BTreeMap;
+
+    let file: CatalogFile = serde_json::from_str(json).map_err(|error| {
+        ProviderAssetError::new(vec![format!(
+            "platform_catalog.json is not valid JSON: {error}"
+        )])
+    })?;
+    let mut issues = Vec::new();
+    if file.version != PLATFORM_CATALOG_VERSION {
+        issues.push(format!(
+            "platform_catalog.json version {} is unsupported; expected {PLATFORM_CATALOG_VERSION}",
+            file.version
+        ));
+    }
+    if file.source.trim().is_empty() {
+        issues.push("platform_catalog.json source must not be blank".into());
+    }
+    if file.models.is_empty() {
+        issues.push("platform_catalog.json models must not be empty".into());
+    }
+
+    let mut keys = BTreeMap::<String, usize>::new();
+    let mut models = Vec::with_capacity(file.models.len());
+    for (index, row) in file.models.into_iter().enumerate() {
+        let key = format!("{}/{}", row.platform, row.model);
+        let label = format!("models[{index}] ({key})");
+        if row.platform.trim() != row.platform || row.platform.is_empty() {
+            issues.push(format!("{label}: platform must not be blank or padded"));
+        }
+        let provider = match registry.find(&row.platform) {
+            Some(spec) if spec.id.as_str() == row.platform => {
+                if spec.status != ProviderStatus::Active {
+                    issues.push(format!("{label}: provider `{}` is not active", spec.id));
+                }
+                Some(spec)
+            }
+            Some(spec) => {
+                issues.push(format!(
+                    "{label}: catalog must use canonical provider id `{}` instead of alias `{}`",
+                    spec.id, row.platform
+                ));
+                None
+            }
+            None => {
+                issues.push(format!(
+                    "{label}: unknown provider `{}` (missing from platform_registry.json)",
+                    row.platform
+                ));
+                None
+            }
+        };
+        let api_backend = match PlatformApiBackend::parse(&row.api_backend) {
+            Some(backend) => Some(backend),
+            None => {
+                issues.push(format!(
+                    "{label}: unknown api_backend `{}`",
+                    row.api_backend
+                ));
+                None
+            }
+        };
+        if let Some(backend) = api_backend {
+            let compat_matches = matches!(
+                (backend, &row.request_compat),
+                (
+                    PlatformApiBackend::ChatCompletions,
+                    RequestCompat::ChatCompletions(_)
+                ) | (PlatformApiBackend::Responses, RequestCompat::Responses(_))
+                    | (PlatformApiBackend::Messages, RequestCompat::Messages(_))
+                    | (
+                        PlatformApiBackend::GoogleGenerateContent,
+                        RequestCompat::GoogleGenerateContent(_),
+                    )
+                    | (
+                        PlatformApiBackend::BedrockConverseStream,
+                        RequestCompat::BedrockConverseStream(_),
+                    )
+                    | (PlatformApiBackend::PiMessages, RequestCompat::PiMessages(_))
+            );
+            if !compat_matches {
+                issues.push(format!(
+                    "{label}: request_compat protocol does not match api_backend `{}`",
+                    row.api_backend
+                ));
+            }
+            if let Some(spec) = provider {
+                let expected_auth = match spec.credentials.auth {
+                    ProviderAuthPlacement::Bearer => RouteAuth::Bearer,
+                    ProviderAuthPlacement::XApiKey => RouteAuth::XApiKey,
+                    ProviderAuthPlacement::ApiKey => RouteAuth::ApiKey,
+                    ProviderAuthPlacement::CfAigAuthorization => RouteAuth::CfAigAuthorization,
+                    ProviderAuthPlacement::XGoogApiKey => RouteAuth::XGoogApiKey,
+                    ProviderAuthPlacement::ProtocolDefault
+                        if backend == PlatformApiBackend::Messages =>
+                    {
+                        RouteAuth::XApiKey
+                    }
+                    ProviderAuthPlacement::ProtocolDefault
+                        if backend == PlatformApiBackend::GoogleGenerateContent =>
+                    {
+                        RouteAuth::XGoogApiKey
+                    }
+                    ProviderAuthPlacement::ProtocolDefault => RouteAuth::Bearer,
+                };
+                if row.route.auth != expected_auth {
+                    issues.push(format!(
+                        "{label}: route auth {:?} does not match expected {:?}",
+                        row.route.auth, expected_auth
+                    ));
+                }
+                for query_key in spec.runtime.query_params_from_env.keys() {
+                    if !row.route.query_params.contains_key(query_key) {
+                        issues.push(format!(
+                            "{label}: runtime query override `{query_key}` has no static route default"
+                        ));
+                    }
+                }
+            }
+        }
+        validate_route_spec(&label, &row.route, &mut issues);
+        if let Some(previous) = keys.insert(key.clone(), index) {
+            issues.push(format!(
+                "{label}: duplicate catalog key (already used by models[{previous}])"
+            ));
+        }
+        for (field, value) in [
+            ("model", row.model.as_str()),
+            ("name", row.name.as_str()),
+            ("description", row.description.as_str()),
+            ("source", row.source.as_str()),
+        ] {
+            if value.trim().is_empty() || value.trim() != value {
+                issues.push(format!(
+                    "{label}: {field} must be non-blank without surrounding whitespace"
+                ));
+            }
+        }
+        if row.context_window == 0 {
+            issues.push(format!("{label}: context_window must be greater than zero"));
+        }
+        if row.max_completion_tokens == Some(0) {
+            issues.push(format!(
+                "{label}: max_completion_tokens must be greater than zero when present"
+            ));
+        }
+        if let Some(base_url) = &row.base_url_override {
+            if !valid_http_base_url(base_url) {
+                issues.push(format!(
+                    "{label}: base_url_override must be an absolute http(s) URL without whitespace or a trailing slash"
+                ));
+            }
+            if let Some(provider) = provider {
+                validate_base_url_template(
+                    &label,
+                    "base_url_override",
+                    base_url,
+                    &provider.runtime.base_url_template_env_keys,
+                    &mut issues,
+                );
+            }
+        }
+
+        if let (Some(provider), Some(api_backend)) = (provider, api_backend) {
+            models.push(BuiltinPlatformModel {
+                provider: provider.id.clone(),
                 model: row.model,
                 name: row.name,
                 description: row.description,
@@ -751,12 +2126,22 @@ fn load_platform_catalog_models() -> Vec<BuiltinPlatformModel> {
                 supported_in_api: false,
                 max_completion_tokens: row.max_completion_tokens,
                 api_backend,
-                base_url_override: row
-                    .base_url_override
-                    .filter(|u| !u.trim().is_empty()),
-            })
-        })
-        .collect()
+                base_url_override: row.base_url_override,
+                request_compat: row.request_compat,
+                route: row.route,
+            });
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(models)
+    } else {
+        Err(ProviderAssetError::new(issues))
+    }
+}
+
+fn load_platform_catalog_models() -> Vec<BuiltinPlatformModel> {
+    EMBEDDED_PROVIDER_ASSETS.catalog_models.clone()
 }
 
 /// Offline catalog. Primary sources are official Pi `packages/ai` generated
@@ -806,6 +2191,105 @@ pub fn platform_builtin_models() -> &'static [BuiltinPlatformModel] {
     &MODELS
 }
 
+fn fallback_route(platform: PlatformId, backend: PlatformApiBackend) -> ProviderRouteSpec {
+    let auth = if backend == PlatformApiBackend::GoogleGenerateContent {
+        RouteAuth::XGoogApiKey
+    } else if platform.uses_oauth() || platform == PlatformId::Nexus {
+        RouteAuth::Bearer
+    } else if backend == PlatformApiBackend::Messages || platform.uses_x_api_key() {
+        RouteAuth::XApiKey
+    } else {
+        RouteAuth::Bearer
+    };
+    let mut headers = std::collections::BTreeMap::new();
+    if backend == PlatformApiBackend::Messages {
+        headers.insert(
+            "anthropic-version".into(),
+            ANTHROPIC_VERSION_HEADER_VALUE.into(),
+        );
+    }
+    if platform == PlatformId::KimiCode {
+        headers.insert("User-Agent".into(), "KimiCLI/1.5".into());
+    }
+    ProviderRouteSpec {
+        path: backend.endpoint_path().into(),
+        auth,
+        headers,
+        query_params: std::collections::BTreeMap::new(),
+    }
+}
+
+fn fallback_request_compat(
+    platform: PlatformId,
+    backend: PlatformApiBackend,
+    model_id: &str,
+) -> RequestCompat {
+    match backend {
+        PlatformApiBackend::ChatCompletions => {
+            let mut compat = OpenAiCompletionsCompat::default();
+            if matches!(platform, PlatformId::MoonshotCn | PlatformId::MoonshotAi) {
+                compat.supports_store = false;
+                compat.supports_developer_role = false;
+                compat.supports_reasoning_effort = false;
+                compat.max_tokens_field = MaxTokensField::MaxTokens;
+                compat.supports_strict_mode = false;
+                compat.supports_long_cache_retention = false;
+            }
+            if platform == PlatformId::DeepSeek {
+                compat.supports_store = false;
+                compat.supports_developer_role = false;
+                compat.requires_reasoning_content_on_assistant_messages = true;
+                compat.thinking_format = ThinkingFormat::DeepSeek;
+            }
+            RequestCompat::ChatCompletions(compat)
+        }
+        PlatformApiBackend::Responses => {
+            let mut compat = OpenAiResponsesCompat::default();
+            if platform == PlatformId::OpenAiCodex {
+                compat.supports_openai_grammar_tools = true;
+                compat.supports_tool_search = !model_id.contains("spark");
+            }
+            RequestCompat::Responses(compat)
+        }
+        PlatformApiBackend::Messages => {
+            let mut compat = AnthropicMessagesCompat::default();
+            if platform == PlatformId::KimiCode {
+                compat.force_adaptive_thinking = true;
+                compat.allow_empty_signature =
+                    kimi_request_profile(model_id).is_some_and(kimi_allow_empty_thinking_signature);
+            }
+            if matches!(
+                platform,
+                PlatformId::Anthropic | PlatformId::AnthropicClaude
+            ) {
+                compat.supports_strict_tools = true;
+                compat.supports_tool_references = !model_id.contains("haiku");
+                if model_id.contains("opus-4-7") || model_id.contains("opus-4-8") {
+                    compat.supports_temperature = false;
+                }
+            }
+            RequestCompat::Messages(compat)
+        }
+        PlatformApiBackend::GoogleGenerateContent => {
+            RequestCompat::GoogleGenerateContent(crate::GoogleGenerateContentCompat {
+                supports_strict_tool_sampling: model_id.starts_with("gemini-3")
+                    || model_id.starts_with("gemma-4")
+                    || model_id == "gemini-flash-latest"
+                    || model_id == "gemini-flash-lite-latest",
+                thinking_level_map: BTreeMap::new(),
+                thinking_budgets: BTreeMap::new(),
+            })
+        }
+        PlatformApiBackend::BedrockConverseStream => {
+            RequestCompat::BedrockConverseStream(crate::BedrockConverseStreamCompat {
+                supports_strict_mode: false,
+                thinking_level_map: BTreeMap::new(),
+            })
+        }
+        PlatformApiBackend::PiMessages => RequestCompat::PiMessages(crate::PiMessagesCompat {}),
+    }
+}
+
 /// Anthropic Claude subscription models (`api.anthropic.com/v1/messages` via
 /// OAuth bearer + `anthropic-beta: oauth-2025-04-20`).
 ///
@@ -816,7 +2300,7 @@ fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     macro_rules! claude {
         ($id:literal, $name:literal, $desc:literal, $ctx:expr) => {
             BuiltinPlatformModel {
-                platform: PlatformId::AnthropicClaude,
+                provider: PlatformId::AnthropicClaude.provider_id(),
                 model: $id.into(),
                 name: $name.into(),
                 description: $desc.into(),
@@ -826,6 +2310,12 @@ fn anthropic_claude_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
+                request_compat: fallback_request_compat(
+                    PlatformId::AnthropicClaude,
+                    PlatformApiBackend::Messages,
+                    $id,
+                ),
+                route: fallback_route(PlatformId::AnthropicClaude, PlatformApiBackend::Messages),
             }
         };
     }
@@ -865,7 +2355,7 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     macro_rules! codex {
         ($id:literal, $name:literal, $desc:literal) => {
             BuiltinPlatformModel {
-                platform: PlatformId::OpenAiCodex,
+                provider: PlatformId::OpenAiCodex.provider_id(),
                 model: $id.into(),
                 name: $name.into(),
                 description: $desc.into(),
@@ -875,6 +2365,12 @@ fn openai_codex_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 max_completion_tokens: None,
                 api_backend: PlatformApiBackend::Responses,
                 base_url_override: None,
+                request_compat: fallback_request_compat(
+                    PlatformId::OpenAiCodex,
+                    PlatformApiBackend::Responses,
+                    $id,
+                ),
+                route: fallback_route(PlatformId::OpenAiCodex, PlatformApiBackend::Responses),
             }
         };
     }
@@ -925,7 +2421,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     macro_rules! kimi {
         ($id:literal, $name:literal, $desc:literal, $ctx:expr, $effort:expr, $max_tok:expr) => {
             BuiltinPlatformModel {
-                platform: PlatformId::KimiCode,
+                provider: PlatformId::KimiCode.provider_id(),
                 model: $id.into(),
                 name: $name.into(),
                 description: $desc.into(),
@@ -935,6 +2431,12 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 max_completion_tokens: $max_tok,
                 api_backend: PlatformApiBackend::Messages,
                 base_url_override: None,
+                request_compat: fallback_request_compat(
+                    PlatformId::KimiCode,
+                    PlatformApiBackend::Messages,
+                    $id,
+                ),
+                route: fallback_route(PlatformId::KimiCode, PlatformApiBackend::Messages),
             }
         };
     }
@@ -980,7 +2482,7 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
     macro_rules! open {
         ($plat:ident, $id:literal, $name:literal, $desc:literal, $ctx:expr, $effort:expr) => {
             BuiltinPlatformModel {
-                platform: PlatformId::$plat,
+                provider: PlatformId::$plat.provider_id(),
                 model: $id.into(),
                 name: $name.into(),
                 description: $desc.into(),
@@ -990,6 +2492,12 @@ fn kimi_moonshot_offline_fallbacks() -> Vec<BuiltinPlatformModel> {
                 max_completion_tokens: MAX_TOK_32K,
                 api_backend: PlatformApiBackend::ChatCompletions,
                 base_url_override: None,
+                request_compat: fallback_request_compat(
+                    PlatformId::$plat,
+                    PlatformApiBackend::ChatCompletions,
+                    $id,
+                ),
+                route: fallback_route(PlatformId::$plat, PlatformApiBackend::ChatCompletions),
             }
         };
     }
@@ -1173,10 +2681,9 @@ pub fn kimi_request_profile(model_id: &str) -> Option<KimiRequestProfile> {
     match id.as_str() {
         "k3" | "kimi-k3" => Some(KimiRequestProfile::K3),
         // Official Pi subscription ids + open-platform aliases.
-        "k2p7"
-        | "kimi-k2.7-code"
-        | "kimi-k2.7-code-highspeed"
-        | "kimi-for-coding-highspeed" => Some(KimiRequestProfile::K27Code),
+        "k2p7" | "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" | "kimi-for-coding-highspeed" => {
+            Some(KimiRequestProfile::K27Code)
+        }
         "kimi-k2.6" => Some(KimiRequestProfile::K26),
         "kimi-k2.5" => Some(KimiRequestProfile::K25),
         "kimi-for-coding"
@@ -1227,11 +2734,7 @@ pub struct WireModel {
     pub context_length: u64,
     /// Nexus reports max output via `max_completion_tokens` (OpenAI list) or
     /// `max_output_tokens` (Anthropic list). None for platforms that omit it.
-    #[serde(
-        default,
-        alias = "max_completion_tokens",
-        alias = "max_output_tokens"
-    )]
+    #[serde(default, alias = "max_completion_tokens", alias = "max_output_tokens")]
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub supports_reasoning: bool,
@@ -1353,6 +2856,356 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_registry_covers_platform_enum_and_aliases() {
+        let registry = provider_registry();
+        assert_eq!(registry.version(), PLATFORM_REGISTRY_VERSION);
+        assert!(registry.providers().len() >= PlatformId::ALL.len());
+        assert!(!registry.source().is_empty());
+
+        for platform in PlatformId::ALL {
+            let spec = provider_spec(platform.as_str()).unwrap_or_else(|| {
+                panic!("missing provider registry row for {}", platform.as_str())
+            });
+            assert_eq!(spec.id.as_str(), platform.as_str());
+            assert_eq!(ProviderId::from(platform), spec.id);
+            assert_eq!(spec.id.platform_id(), Some(platform));
+            for alias in platform.aliases() {
+                let alias_spec = provider_spec(alias)
+                    .unwrap_or_else(|| panic!("missing alias {alias} for {}", platform.as_str()));
+                assert_eq!(alias_spec.id, spec.id);
+                assert_eq!(ProviderId::registered(alias), Some(spec.id.clone()));
+            }
+        }
+
+        // These special providers were previously absent from the JSON file.
+        for id in ["openai-codex", "nexus", "anthropic-claude"] {
+            assert!(provider_spec(id).is_some(), "missing {id}");
+        }
+    }
+
+    #[test]
+    fn wave1_registry_only_providers_have_complete_runtime_catalogs() {
+        let expected = [
+            ("ant-ling", 3usize),
+            ("huggingface", 50),
+            ("opencode", 58),
+            ("qwen-token-plan", 15),
+            ("qwen-token-plan-cn", 15),
+            ("vercel-ai-gateway", 192),
+            ("xiaomi", 6),
+            ("xiaomi-token-plan-ams", 3),
+            ("xiaomi-token-plan-cn", 3),
+            ("xiaomi-token-plan-sgp", 3),
+        ];
+        for (provider_id, expected_count) in expected {
+            let spec = provider_spec(provider_id).expect("Wave 1 provider is registered");
+            assert_eq!(spec.status, ProviderStatus::Active);
+            assert_eq!(spec.credentials.kind, ProviderCredentialKind::ApiKey);
+            assert_eq!(spec.legacy_platform(), None);
+            let rows: Vec<_> = platform_builtin_models()
+                .iter()
+                .filter(|model| model.provider.as_str() == provider_id)
+                .collect();
+            assert_eq!(rows.len(), expected_count, "{provider_id}");
+            assert!(rows.iter().all(|model| !model.supported_in_api));
+        }
+
+        assert_eq!(
+            parse_managed_model_key("ant-ling/Ling-2.6-flash"),
+            Some((
+                ProviderId::registered("ant-ling").unwrap(),
+                "Ling-2.6-flash"
+            ))
+        );
+
+        let opencode: Vec<_> = platform_builtin_models()
+            .iter()
+            .filter(|model| model.provider.as_str() == "opencode")
+            .collect();
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::ChatCompletions)
+                .count(),
+            19
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::Responses)
+                .count(),
+            20
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::Messages)
+                .count(),
+            14
+        );
+        assert_eq!(
+            opencode
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::GoogleGenerateContent)
+                .count(),
+            5
+        );
+
+        let bedrock: Vec<_> = platform_builtin_models()
+            .iter()
+            .filter(|model| model.provider.as_str() == "amazon-bedrock")
+            .collect();
+        assert_eq!(bedrock.len(), 114);
+        assert!(bedrock.iter().all(|model| {
+            model.api_backend == PlatformApiBackend::BedrockConverseStream
+                && model.route.path == "model/{model}/converse-stream"
+                && matches!(
+                    model.request_compat,
+                    RequestCompat::BedrockConverseStream(_)
+                )
+        }));
+        let bedrock_spec = provider_spec("amazon-bedrock").expect("Bedrock registry row");
+        assert_eq!(bedrock_spec.status, ProviderStatus::Active);
+        assert_eq!(bedrock_spec.adapter, AdapterKind::BedrockConverseStream);
+        let parity: serde_json::Value =
+            serde_json::from_str(include_str!("../pi_provider_parity.json")).expect("parity json");
+        let bedrock_parity = parity["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["pi_provider"] == "amazon-bedrock")
+            .expect("bedrock parity row");
+        assert_eq!(bedrock_parity["status"], "supported");
+        assert_eq!(bedrock_parity["shared_model_count"], 114);
+        assert_eq!(bedrock_parity["missing_from_hyper_count"], 0);
+        let fable = bedrock
+            .iter()
+            .find(|model| model.model == "anthropic.claude-fable-5")
+            .expect("Fable 5 Bedrock row");
+        let RequestCompat::BedrockConverseStream(compat) = &fable.request_compat else {
+            panic!("Fable 5 uses Bedrock compat")
+        };
+        assert_eq!(
+            compat.thinking_level_map.get("xhigh"),
+            Some(&Some("xhigh".into()))
+        );
+
+        let vercel: Vec<_> = platform_builtin_models()
+            .iter()
+            .filter(|model| model.provider.as_str() == "vercel-ai-gateway")
+            .collect();
+        assert!(vercel.iter().all(|model| {
+            model.api_backend == PlatformApiBackend::Messages
+                && model.route.auth == RouteAuth::XApiKey
+                && model
+                    .route
+                    .headers
+                    .get("anthropic-version")
+                    .map(String::as_str)
+                    == Some(ANTHROPIC_VERSION_HEADER_VALUE)
+        }));
+
+        let ant_ling = platform_builtin_models()
+            .iter()
+            .find(|model| model.provider.as_str() == "ant-ling")
+            .expect("Ant Ling model");
+        assert!(matches!(
+            &ant_ling.request_compat,
+            RequestCompat::ChatCompletions(compat)
+                if compat.thinking_format == ThinkingFormat::AntLing
+        ));
+    }
+
+    #[test]
+    fn strict_catalog_validation_preserves_every_embedded_row() {
+        let raw: CatalogFile =
+            serde_json::from_str(PLATFORM_CATALOG_JSON).expect("embedded catalog parses");
+        let parsed = parse_platform_catalog(PLATFORM_CATALOG_JSON, provider_registry())
+            .expect("embedded catalog validates");
+        assert_eq!(parsed.len(), raw.models.len());
+    }
+
+    #[test]
+    fn catalog_v3_carries_protocol_compat_and_explicit_routes() {
+        let models = platform_builtin_models();
+        let openai = models
+            .iter()
+            .find(|model| model.catalog_key() == "openai/gpt-5")
+            .expect("openai/gpt-5");
+        assert!(matches!(openai.request_compat, RequestCompat::Responses(_)));
+        assert_eq!(openai.route.path, "responses");
+        assert_eq!(openai.route.auth, RouteAuth::Bearer);
+
+        let deepseek = models
+            .iter()
+            .find(|model| model.catalog_key() == "deepseek/deepseek-v4-pro")
+            .expect("deepseek/deepseek-v4-pro");
+        let RequestCompat::ChatCompletions(compat) = &deepseek.request_compat else {
+            panic!("DeepSeek must use Chat Completions compat")
+        };
+        assert_eq!(compat.thinking_format, ThinkingFormat::DeepSeek);
+        assert_eq!(compat.max_tokens_field, MaxTokensField::MaxCompletionTokens);
+        assert!(compat.requires_reasoning_content_on_assistant_messages);
+        assert_eq!(deepseek.route.path, "chat/completions");
+        assert_eq!(deepseek.route.auth, RouteAuth::Bearer);
+
+        let mistral: Vec<_> = models
+            .iter()
+            .filter(|model| model.legacy_platform() == Some(PlatformId::Mistral))
+            .collect();
+        assert_eq!(mistral.len(), 30, "Pi Mistral catalog count");
+        assert!(mistral.iter().all(|model| {
+            model.api_backend == PlatformApiBackend::ChatCompletions
+                && model.route.path == "chat/completions"
+                && model.route.auth == RouteAuth::Bearer
+                && model.resolved_base_url() == "https://api.mistral.ai/v1"
+        }));
+        assert!(mistral
+            .iter()
+            .any(|model| model.model == "mistral-small-2603" && model.supports_reasoning_effort));
+
+        let minimax = models
+            .iter()
+            .find(|model| model.catalog_key() == "minimax/MiniMax-M2.7")
+            .expect("minimax/MiniMax-M2.7");
+        assert!(matches!(minimax.request_compat, RequestCompat::Messages(_)));
+        assert_eq!(minimax.route.auth, RouteAuth::XApiKey);
+        assert_eq!(
+            minimax
+                .route
+                .headers
+                .get("anthropic-version")
+                .map(String::as_str),
+            Some(ANTHROPIC_VERSION_HEADER_VALUE)
+        );
+    }
+
+    #[test]
+    fn strict_catalog_validation_rejects_unknown_provider_and_backend() {
+        let mut unknown_provider: serde_json::Value =
+            serde_json::from_str(PLATFORM_CATALOG_JSON).unwrap();
+        unknown_provider["models"][0]["platform"] = serde_json::json!("not-a-provider");
+        let error = validate_provider_assets(
+            PLATFORM_REGISTRY_JSON,
+            &serde_json::to_string(&unknown_provider).unwrap(),
+        )
+        .expect_err("unknown provider must fail");
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("unknown provider `not-a-provider`")),
+            "{error}"
+        );
+
+        let mut unknown_backend: serde_json::Value =
+            serde_json::from_str(PLATFORM_CATALOG_JSON).unwrap();
+        unknown_backend["models"][0]["api_backend"] = serde_json::json!("magic-stream");
+        let error = validate_provider_assets(
+            PLATFORM_REGISTRY_JSON,
+            &serde_json::to_string(&unknown_backend).unwrap(),
+        )
+        .expect_err("unknown backend must fail");
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("unknown api_backend `magic-stream`")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn strict_registry_validation_collects_metadata_errors() {
+        let mut registry: serde_json::Value = serde_json::from_str(PLATFORM_REGISTRY_JSON).unwrap();
+        registry["providers"][0]["display_name"] = serde_json::json!(" ");
+        registry["providers"][0]["aliases"] = serde_json::json!(["kimi-coding", "kimi-coding"]);
+        let error = validate_provider_assets(
+            &serde_json::to_string(&registry).unwrap(),
+            PLATFORM_CATALOG_JSON,
+        )
+        .expect_err("invalid registry metadata must fail");
+        assert!(error.issues().len() >= 2, "{error}");
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("display_name")),
+            "{error}"
+        );
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("duplicate alias")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn strict_registry_json_rejects_unknown_fields() {
+        let mut registry: serde_json::Value = serde_json::from_str(PLATFORM_REGISTRY_JSON).unwrap();
+        registry["providers"][0]["credential_typo"] = serde_json::json!(true);
+        let error = validate_provider_assets(
+            &serde_json::to_string(&registry).unwrap(),
+            PLATFORM_CATALOG_JSON,
+        )
+        .expect_err("unknown registry fields must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `credential_typo`")
+        );
+    }
+
+    #[test]
+    fn registry_only_provider_loads_without_platform_enum_variant() {
+        let mut registry: serde_json::Value = serde_json::from_str(PLATFORM_REGISTRY_JSON).unwrap();
+        let providers = registry["providers"].as_array_mut().unwrap();
+        let mut provider = providers
+            .iter()
+            .find(|row| row["id"] == "deepseek")
+            .cloned()
+            .expect("deepseek registry template");
+        provider["id"] = serde_json::json!("test-provider");
+        provider["pi_id"] = serde_json::json!("test-provider");
+        provider["display_name"] = serde_json::json!("Test Provider");
+        provider["aliases"] = serde_json::json!([]);
+        provider["default_base_url"] = serde_json::json!("https://api.test-provider.invalid/v1");
+        provider["base_url_env_keys"] = serde_json::json!(["GROK_TEST_PROVIDER_BASE_URL"]);
+        provider["credentials"]["env_keys"] = serde_json::json!(["GROK_TEST_PROVIDER_API_KEY"]);
+        providers.push(provider);
+
+        let mut catalog: serde_json::Value = serde_json::from_str(PLATFORM_CATALOG_JSON).unwrap();
+        let models = catalog["models"].as_array_mut().unwrap();
+        let mut model = models
+            .iter()
+            .find(|row| row["platform"] == "deepseek")
+            .cloned()
+            .expect("deepseek catalog template");
+        model["platform"] = serde_json::json!("test-provider");
+        model["model"] = serde_json::json!("test-model");
+        model["name"] = serde_json::json!("Test Model");
+        model["description"] = serde_json::json!("Synthetic registry-only model");
+        models.push(model);
+
+        let assets = load_provider_assets(
+            &serde_json::to_string(&registry).unwrap(),
+            &serde_json::to_string(&catalog).unwrap(),
+        )
+        .expect("registry-only provider must validate");
+        let spec = assets.registry.find("test-provider").unwrap();
+        assert_eq!(spec.legacy_platform(), None);
+        let model = assets
+            .catalog_models
+            .iter()
+            .find(|model| model.catalog_key() == "test-provider/test-model")
+            .expect("registry-only catalog row must be retained");
+        assert_eq!(model.provider, spec.id);
+        assert_eq!(model.legacy_platform(), None);
+    }
+
+    #[test]
     fn platform_roundtrip() {
         for p in PlatformId::ALL {
             assert_eq!(PlatformId::parse(p.as_str()), Some(p));
@@ -1361,7 +3214,14 @@ mod tests {
         assert!(PlatformId::KimiCode.uses_oauth());
         assert!(PlatformId::OpenAiCodex.uses_oauth());
         assert!(!PlatformId::MoonshotCn.uses_oauth());
-        assert!(PlatformId::KimiCode.api_key_env_names().is_empty());
+        assert_eq!(
+            PlatformId::KimiCode.api_key_env_names(),
+            &[
+                KIMI_CODE_API_KEY_ENV,
+                KIMI_API_KEY_ENV,
+                KIMI_API_KEY_ALIAS_ENV,
+            ]
+        );
         assert!(PlatformId::OpenAiCodex.api_key_env_names().is_empty());
         assert!(!PlatformId::MoonshotCn.api_key_env_names().is_empty());
         assert_eq!(
@@ -1376,8 +3236,10 @@ mod tests {
             PlatformId::OpenAiCodex.models_list_url(),
             "https://chatgpt.com/backend-api/codex/models"
         );
-        assert!(PlatformId::OpenAiCodex
-            .base_url_matches("https://chatgpt.com/backend-api/codex/responses"));
+        assert!(
+            PlatformId::OpenAiCodex
+                .base_url_matches("https://chatgpt.com/backend-api/codex/responses")
+        );
         assert!(!PlatformId::OpenAiCodex.base_url_matches("https://api.openai.com/v1"));
         assert_eq!(PlatformId::parse("openai"), Some(PlatformId::OpenAi));
         assert_eq!(PlatformId::parse("anthropic"), Some(PlatformId::Anthropic));
@@ -1426,6 +3288,18 @@ mod tests {
         );
         assert!(!PlatformId::OpenCodeGo.uses_oauth());
         assert!(!PlatformId::OpenCodeGo.uses_x_api_key());
+        assert_eq!(
+            provider_spec("opencode-go")
+                .unwrap()
+                .credential_storage_group(),
+            "opencode"
+        );
+        assert_eq!(
+            provider_spec("opencode")
+                .unwrap()
+                .credential_storage_group(),
+            "opencode"
+        );
         assert!(!PlatformId::OpenCodeGo.live_models_list_enabled());
         assert!(
             PlatformId::OpenCodeGo
@@ -1435,7 +3309,7 @@ mod tests {
 
         let models: Vec<_> = platform_builtin_models()
             .iter()
-            .filter(|model| model.platform == PlatformId::OpenCodeGo)
+            .filter(|model| model.legacy_platform() == Some(PlatformId::OpenCodeGo))
             .collect();
         assert_eq!(models.len(), 16, "current non-deprecated Go catalog");
         assert!(
@@ -1529,12 +3403,213 @@ mod tests {
     }
 
     #[test]
+    fn azure_runtime_resolves_resource_version_and_pi_deployment_map() {
+        let provider = provider_spec("azure-openai-responses").expect("Azure provider");
+        let static_query = BTreeMap::from([("api-version".to_string(), "v1".to_string())]);
+        let runtime = provider.resolve_runtime_with(
+            &provider.default_base_url,
+            "gpt-5",
+            &static_query,
+            |name| match name {
+                "AZURE_OPENAI_RESOURCE_NAME" => Some("my-resource".into()),
+                "AZURE_OPENAI_API_VERSION" => Some("2026-07-01-preview".into()),
+                "AZURE_OPENAI_DEPLOYMENT_NAME_MAP" => {
+                    Some("gpt-4=legacy, gpt-5=my-gpt5-prod, malformed".into())
+                }
+                _ => None,
+            },
+        );
+        assert!(runtime.ready);
+        assert_eq!(
+            runtime.base_url,
+            "https://my-resource.openai.azure.com/openai/v1"
+        );
+        assert_eq!(
+            runtime.query_params.get("api-version").map(String::as_str),
+            Some("2026-07-01-preview")
+        );
+        assert_eq!(runtime.wire_model_id, "my-gpt5-prod");
+    }
+
+    #[test]
+    fn azure_base_normalization_matches_locked_pi_rules() {
+        for (raw, expected) in [
+            (
+                "https://demo.openai.azure.com",
+                "https://demo.openai.azure.com/openai/v1",
+            ),
+            (
+                "https://demo.openai.azure.com/openai",
+                "https://demo.openai.azure.com/openai/v1",
+            ),
+            (
+                "https://demo.openai.azure.com/openai/v1/responses",
+                "https://demo.openai.azure.com/openai/v1",
+            ),
+            (
+                "https://demo.cognitiveservices.azure.com/",
+                "https://demo.cognitiveservices.azure.com/openai/v1",
+            ),
+            (
+                "https://demo.ai.azure.com",
+                "https://demo.ai.azure.com/openai/v1",
+            ),
+        ] {
+            assert_eq!(
+                normalize_azure_openai_base_url(raw).as_deref(),
+                Some(expected),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            normalize_azure_openai_base_url("https://proxy.example.com/custom").as_deref(),
+            Some("https://proxy.example.com/custom")
+        );
+        assert!(normalize_azure_openai_base_url("not-a-url").is_none());
+    }
+
+    #[test]
+    fn cloudflare_template_is_locked_until_safe_ids_resolve() {
+        let provider = provider_spec("cloudflare-ai-gateway").expect("Cloudflare provider");
+        let base = "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai";
+        let missing = provider.resolve_runtime_with(base, "gpt-5", &BTreeMap::new(), |_| None);
+        assert!(!missing.ready);
+
+        let unsafe_value =
+            provider.resolve_runtime_with(base, "gpt-5", &BTreeMap::new(), |name| match name {
+                "CLOUDFLARE_ACCOUNT_ID" => Some("account/escape".into()),
+                "CLOUDFLARE_GATEWAY_ID" => Some("gateway".into()),
+                _ => None,
+            });
+        assert!(!unsafe_value.ready);
+
+        let ready =
+            provider.resolve_runtime_with(base, "gpt-5", &BTreeMap::new(), |name| match name {
+                "CLOUDFLARE_ACCOUNT_ID" => Some("account-123".into()),
+                "CLOUDFLARE_GATEWAY_ID" => Some("gateway_456".into()),
+                _ => None,
+            });
+        assert!(ready.ready);
+        assert_eq!(
+            ready.base_url,
+            "https://gateway.ai.cloudflare.com/v1/account-123/gateway_456/openai"
+        );
+    }
+
+    #[test]
+    fn wave_two_catalog_has_all_azure_and_cloudflare_routes() {
+        let models = platform_builtin_models();
+        let azure: Vec<_> = models
+            .iter()
+            .filter(|model| model.provider.as_str() == "azure-openai-responses")
+            .collect();
+        assert_eq!(azure.len(), 38);
+        assert!(azure.iter().all(|model| {
+            model.api_backend == PlatformApiBackend::Responses
+                && model.route.auth == RouteAuth::ApiKey
+                && model
+                    .route
+                    .query_params
+                    .get("api-version")
+                    .map(String::as_str)
+                    == Some("v1")
+        }));
+
+        let gateway: Vec<_> = models
+            .iter()
+            .filter(|model| model.provider.as_str() == "cloudflare-ai-gateway")
+            .collect();
+        assert_eq!(gateway.len(), 42);
+        assert!(
+            gateway
+                .iter()
+                .all(|model| model.route.auth == RouteAuth::CfAigAuthorization)
+        );
+        assert_eq!(
+            gateway
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::Messages)
+                .count(),
+            18
+        );
+        assert_eq!(
+            gateway
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::Responses)
+                .count(),
+            19
+        );
+        assert_eq!(
+            gateway
+                .iter()
+                .filter(|model| model.api_backend == PlatformApiBackend::ChatCompletions)
+                .count(),
+            5
+        );
+
+        let workers: Vec<_> = models
+            .iter()
+            .filter(|model| model.provider.as_str() == "cloudflare-workers-ai")
+            .collect();
+        assert_eq!(workers.len(), 13);
+        assert!(workers.iter().all(|model| {
+            model.api_backend == PlatformApiBackend::ChatCompletions
+                && model.route.auth == RouteAuth::Bearer
+        }));
+    }
+
+    #[test]
+    fn strict_catalog_rejects_auth_header_conflicts_and_unknown_templates() {
+        let mut catalog: serde_json::Value = serde_json::from_str(PLATFORM_CATALOG_JSON).unwrap();
+        let rows = catalog["models"].as_array_mut().unwrap();
+        let gateway = rows
+            .iter_mut()
+            .find(|row| row["platform"] == "cloudflare-ai-gateway")
+            .unwrap();
+        gateway["route"]["headers"]["Authorization"] = serde_json::json!("Bearer static");
+        let error = validate_provider_assets(
+            PLATFORM_REGISTRY_JSON,
+            &serde_json::to_string(&catalog).unwrap(),
+        )
+        .expect_err("static auth headers must fail validation");
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("typed authentication metadata")),
+            "{error}"
+        );
+
+        let mut registry: serde_json::Value = serde_json::from_str(PLATFORM_REGISTRY_JSON).unwrap();
+        let azure = registry["providers"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row["id"] == "azure-openai-responses")
+            .unwrap();
+        azure["default_base_url"] =
+            serde_json::json!("https://{UNDECLARED_RESOURCE}.openai.azure.com/openai/v1");
+        let error = validate_provider_assets(
+            &serde_json::to_string(&registry).unwrap(),
+            PLATFORM_CATALOG_JSON,
+        )
+        .expect_err("undeclared URL placeholders must fail validation");
+        assert!(
+            error
+                .issues()
+                .iter()
+                .any(|issue| issue.contains("UNDECLARED_RESOURCE")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn managed_key_roundtrip() {
         let key = PlatformId::KimiCode.managed_model_key("kimi-for-coding");
         assert_eq!(key, "kimi-code/kimi-for-coding");
         assert_eq!(
             parse_managed_model_key(&key),
-            Some((PlatformId::KimiCode, "kimi-for-coding"))
+            Some((PlatformId::KimiCode.provider_id(), "kimi-for-coding"))
         );
     }
 
@@ -1596,9 +3671,7 @@ mod tests {
 
         let grok_override = PlatformId::Anthropic.base_url_with(|name| match name {
             ANTHROPIC_BASE_URL_ENV => Some("https://grok.example.com/custom/v1".to_string()),
-            ANTHROPIC_BASE_URL_ALIAS_ENV => {
-                Some("https://ignored.example.com/coding".to_string())
-            }
+            ANTHROPIC_BASE_URL_ALIAS_ENV => Some("https://ignored.example.com/coding".to_string()),
             _ => None,
         });
         assert_eq!(grok_override, "https://grok.example.com/custom/v1");
@@ -1624,7 +3697,11 @@ mod tests {
     fn builtins_have_unique_catalog_keys() {
         let mut keys = std::collections::HashSet::new();
         for m in platform_builtin_models() {
-            assert!(keys.insert(m.catalog_key()), "duplicate {}", m.catalog_key());
+            assert!(
+                keys.insert(m.catalog_key()),
+                "duplicate {}",
+                m.catalog_key()
+            );
         }
     }
 
@@ -1651,7 +3728,7 @@ mod tests {
         );
         let zai_coding: Vec<_> = platform_builtin_models()
             .iter()
-            .filter(|m| m.platform == PlatformId::ZaiCoding)
+            .filter(|m| m.legacy_platform() == Some(PlatformId::ZaiCoding))
             .map(|m| m.model.as_str())
             .collect();
         assert!(zai_coding.contains(&"glm-5.2"));
@@ -1778,10 +3855,7 @@ mod tests {
         );
         assert_eq!(m.api_backend, PlatformApiBackend::Messages);
         // Grok joins `{base}/messages`; SDK-style `/anthropic` roots need `/v1`.
-        assert_eq!(
-            m.resolved_base_url(),
-            "https://api.minimax.io/anthropic/v1"
-        );
+        assert_eq!(m.resolved_base_url(), "https://api.minimax.io/anthropic/v1");
         let cn = models
             .iter()
             .find(|m| m.catalog_key() == "minimax-cn/MiniMax-M2.7")
@@ -1802,7 +3876,7 @@ mod tests {
         let m = models
             .iter()
             .find(|m| {
-                m.platform == PlatformId::Fireworks
+                m.legacy_platform() == Some(PlatformId::Fireworks)
                     && m.api_backend == PlatformApiBackend::Messages
             })
             .expect("at least one Fireworks Messages catalog row");
@@ -1896,10 +3970,7 @@ mod tests {
                 PlatformApiBackend::Messages,
                 "{key}: official Pi kimi-coding uses anthropic-messages"
             );
-            assert!(
-                !m.supported_in_api,
-                "{key} starts hidden until OAuth"
-            );
+            assert!(!m.supported_in_api, "{key} starts hidden until OAuth");
             assert!(
                 m.supports_reasoning_effort,
                 "{key} supports adaptive effort"
@@ -1909,7 +3980,10 @@ mod tests {
 
     #[test]
     fn request_profiles_cover_official_ids() {
-        assert_eq!(kimi_request_profile("kimi-k3"), Some(KimiRequestProfile::K3));
+        assert_eq!(
+            kimi_request_profile("kimi-k3"),
+            Some(KimiRequestProfile::K3)
+        );
         assert_eq!(kimi_request_profile("k3"), Some(KimiRequestProfile::K3));
         assert_eq!(
             kimi_request_profile("kimi-code/k3"),

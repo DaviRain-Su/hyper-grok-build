@@ -218,6 +218,9 @@ impl ShellToolsetConfig {
             temperature: None,
             top_p: None,
             api_backend: Default::default(),
+            adapter_kind: Default::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: indexmap::IndexMap::new(),
             query_params: indexmap::IndexMap::new(),
@@ -249,6 +252,9 @@ impl ShellToolsetConfig {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            bedrock_request_metadata: Default::default(),
+            bedrock_headers: Default::default(),
+            bedrock_profile: None,
             kimi_dialect: false,
         };
         let mut toolset = base.unwrap_or_else(|| Self {

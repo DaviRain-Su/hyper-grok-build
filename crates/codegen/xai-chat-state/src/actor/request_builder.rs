@@ -157,6 +157,9 @@ impl ChatStateActor {
             json_schema: None,
             // Set by SamplingClient from SamplerConfig.kimi_dialect before wire.
             kimi_dialect: None,
+            request_compat: self.state.sampling_config.request_compat.clone(),
+            bedrock_request_metadata: Default::default(),
+            bedrock_headers: Default::default(),
         }
     }
 }

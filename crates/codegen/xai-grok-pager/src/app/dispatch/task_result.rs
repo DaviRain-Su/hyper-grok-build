@@ -994,8 +994,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             env_still_active,
             error,
         } => {
-            let label = xai_grok_models::PlatformId::parse(&platform)
-                .map(|p| p.display_name().to_string())
+            let label = xai_grok_models::provider_spec(&platform)
+                .map(|provider| provider.display_name.clone())
                 .unwrap_or_else(|| platform.clone());
             if let Some(err) = error {
                 app.show_toast(&format!("✗ Couldn't save {label} key: {err}"));
@@ -1282,6 +1282,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 session_id,
                 post_action: true,
             }]
+        }
+        TaskResult::LogoutKimiComplete { message }
+        | TaskResult::LogoutOpenAiCodexComplete { message }
+        | TaskResult::LogoutAnthropicClaudeComplete { message }
+        | TaskResult::LogoutGitHubCopilotComplete { message }
+        | TaskResult::LogoutRadiusComplete { message } => {
+            app.show_toast(&message);
+            vec![]
         }
         TaskResult::LogoutComplete => {
             app.auth_state = AuthState::Pending { error: None };

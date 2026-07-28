@@ -65,6 +65,9 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
                 query_params: Default::default(),
@@ -88,6 +91,9 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                bedrock_request_metadata: Default::default(),
+                bedrock_headers: Default::default(),
+                bedrock_profile: None,
                 kimi_dialect: false,
             })
             .expect("sampling client should build for persistence actor");
@@ -116,6 +122,9 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                     temperature: None,
                     top_p: None,
                     api_backend: Default::default(),
+                    adapter_kind: Default::default(),
+                    request_compat: None,
+                    endpoint_path: None,
                     extra_headers: Default::default(),
                     query_params: Default::default(),
                     env_http_headers: Default::default(),
@@ -380,6 +389,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 context_window: 100_000,
                 client_version: None,
@@ -400,6 +412,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                bedrock_request_metadata: Default::default(),
+                bedrock_headers: Default::default(),
+                bedrock_profile: None,
                 kimi_dialect: false,
             })
             .expect("sampling client should build for persistence actor");
@@ -432,6 +447,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     temperature: None,
                     top_p: None,
                     api_backend: Default::default(),
+                    adapter_kind: Default::default(),
+                    request_compat: None,
+                    endpoint_path: None,
                     extra_headers: Default::default(),
                     query_params: Default::default(),
                     env_http_headers: Default::default(),
@@ -517,6 +535,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 context_window: 100_000,
                 client_version: None,
@@ -537,6 +558,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                bedrock_request_metadata: Default::default(),
+                bedrock_headers: Default::default(),
+                bedrock_profile: None,
                 kimi_dialect: false,
             })
             .expect("sampling client should build for persistence actor");
@@ -570,6 +594,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     temperature: None,
                     top_p: None,
                     api_backend: Default::default(),
+                    adapter_kind: Default::default(),
+                    request_compat: None,
+                    endpoint_path: None,
                     extra_headers: Default::default(),
                     query_params: Default::default(),
                     env_http_headers: Default::default(),
@@ -791,9 +818,13 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
                 trace_config_template: std::cell::RefCell::new(None),
             });
-            let _ = actor
-                .process_conversation_turn_with_recovery("disabled-memory", None, None, None)
-                .await;
+            let _ = Box::pin(actor.process_conversation_turn_with_recovery(
+                "disabled-memory",
+                None,
+                None,
+                None,
+            ))
+            .await;
             let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
             persistence
                 .tx
@@ -2056,6 +2087,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 temperature: None,
                 top_p: None,
                 api_backend: xai_grok_sampler::ApiBackend::Responses,
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
                 query_params: Default::default(),
@@ -2079,6 +2113,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                bedrock_request_metadata: Default::default(),
+                bedrock_headers: Default::default(),
+                bedrock_profile: None,
                 kimi_dialect: false,
         };
             let (sampler_event_tx, _sampler_event_rx) = tokio::sync::mpsc::unbounded_channel::<

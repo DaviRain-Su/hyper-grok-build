@@ -100,6 +100,52 @@ pub(crate) fn execute(
                     TaskResult::LogoutComplete
                 });
         }
+        Effect::LogoutKimi => {
+            tasks.spawn(async move {
+                let message = match xai_grok_shell::auth::run_cli_logout_kimi() {
+                    Ok(()) => "Logged out of Kimi Code OAuth. Static API keys were unchanged."
+                        .to_string(),
+                    Err(e) => format!("Failed to log out of Kimi Code: {e}"),
+                };
+                TaskResult::LogoutKimiComplete { message }
+            });
+        }
+        Effect::LogoutOpenAiCodex => {
+            tasks.spawn(async move {
+                let message = match xai_grok_shell::auth::run_cli_logout_openai_codex() {
+                    Ok(()) => "Logged out of OpenAI Codex.".to_string(),
+                    Err(e) => format!("Failed to log out of OpenAI Codex: {e}"),
+                };
+                TaskResult::LogoutOpenAiCodexComplete { message }
+            });
+        }
+        Effect::LogoutAnthropicClaude => {
+            tasks.spawn(async move {
+                let message = match xai_grok_shell::auth::run_cli_logout_anthropic_claude() {
+                    Ok(()) => "Logged out of Anthropic Claude.".to_string(),
+                    Err(e) => format!("Failed to log out of Anthropic Claude: {e}"),
+                };
+                TaskResult::LogoutAnthropicClaudeComplete { message }
+            });
+        }
+        Effect::LogoutGitHubCopilot => {
+            tasks.spawn(async move {
+                let message = match xai_grok_shell::auth::run_cli_logout_github_copilot() {
+                    Ok(()) => "Logged out of GitHub Copilot.".to_string(),
+                    Err(e) => format!("Failed to log out of GitHub Copilot: {e}"),
+                };
+                TaskResult::LogoutGitHubCopilotComplete { message }
+            });
+        }
+        Effect::LogoutRadius => {
+            tasks.spawn(async move {
+                let message = match xai_grok_shell::auth::run_cli_logout_radius() {
+                    Ok(()) => "Logged out of Radius OAuth. Static API keys were unchanged.".to_string(),
+                    Err(e) => format!("Failed to log out of Radius: {e}"),
+                };
+                TaskResult::LogoutRadiusComplete { message }
+            });
+        }
         Effect::CancelAuth { request_seq } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move { send_auth_cancel(&tx, request_seq).await });

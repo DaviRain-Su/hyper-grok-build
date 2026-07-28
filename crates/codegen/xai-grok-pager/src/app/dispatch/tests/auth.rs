@@ -2,8 +2,8 @@
 
 use super::*;
 use xai_grok_shell::agent::auth_method::{
-    ANTHROPIC_CLAUDE_METHOD_ID, GROK_COM_METHOD_ID, KIMI_CODE_METHOD_ID, OIDC_METHOD_ID,
-    OPENAI_CODEX_METHOD_ID,
+    ANTHROPIC_CLAUDE_METHOD_ID, GITHUB_COPILOT_METHOD_ID, GROK_COM_METHOD_ID, KIMI_CODE_METHOD_ID,
+    OIDC_METHOD_ID, OPENAI_CODEX_METHOD_ID,
 };
 
 fn advertised_auth_method(id: &str, name: &str) -> acp::AuthMethod {
@@ -320,6 +320,7 @@ fn bare_login_overrides_stale_third_party_selection_with_xai() {
         KIMI_CODE_METHOD_ID,
         OPENAI_CODEX_METHOD_ID,
         ANTHROPIC_CLAUDE_METHOD_ID,
+        GITHUB_COPILOT_METHOD_ID,
     ] {
         let mut app = test_app();
         app.auth_methods = vec![

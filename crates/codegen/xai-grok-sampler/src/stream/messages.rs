@@ -489,6 +489,7 @@ pub fn stream_messages<'a>(
 
         let assistant_item = ConversationItem::Assistant(AssistantItem {
             content: std::sync::Arc::<str>::from(assistant_text),
+            provider_native_state: None,
             tool_calls: assistant_tool_calls,
             model_id: Some(model_id),
             reasoning_model_identity: None,

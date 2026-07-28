@@ -330,6 +330,9 @@ pub fn test_sampler_config(
         temperature: Some(0.7),
         top_p: None,
         api_backend,
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         auth_scheme: Default::default(),
         extra_headers: extra_headers
             .iter()
@@ -356,6 +359,9 @@ pub fn test_sampler_config(
         doom_loop_recovery: None,
         header_injector: None,
         responses_codex_dialect: false,
+        bedrock_request_metadata: Default::default(),
+        bedrock_headers: Default::default(),
+        bedrock_profile: None,
         kimi_dialect: false,
     }
 }

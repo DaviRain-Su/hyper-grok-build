@@ -1035,8 +1035,8 @@ pub fn perform_logout(
 }
 
 /// `grok logout` / `hyper logout` CLI handler. Clears the **xAI** session only
-/// and formats the result to stderr. Third-party OAuth scopes (Kimi / Codex)
-/// are reported when still present so users know how to clear them.
+/// and formats the result to stderr. Third-party OAuth scopes are reported when
+/// still present so users know how to clear them.
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     clear_xai_session_cli(config)?;
     print_remaining_third_party_scopes_hint();
@@ -1068,13 +1068,13 @@ fn clear_xai_session_cli(config: &crate::agent::config::Config) -> anyhow::Resul
     Ok(())
 }
 
-/// Clear xAI session **and** Kimi Code + OpenAI Codex OAuth scopes.
+/// Clear the xAI session and all supported third-party OAuth scopes.
 ///
 /// Does **not** remove BYOK platform API keys stored under `platform/*` scopes
 /// or environment variables — those use `/logout provider <id>` / unset env.
 ///
-/// Attempts both third-party clears even if one fails; returns an aggregated
-/// error if either fails so the caller does not claim a full wipe on I/O error.
+/// Attempts every third-party clear even if one fails; returns an aggregated
+/// error so the caller does not claim a full wipe on I/O error.
 pub fn run_cli_logout_all(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     // Do not call `run_cli_logout` here: it prints the "run logout --all" hint
     // while third-party scopes are still present, which confuses users already
@@ -1090,6 +1090,12 @@ pub fn run_cli_logout_all(config: &crate::agent::config::Config) -> anyhow::Resu
     if let Err(e) = run_cli_logout_anthropic_claude() {
         errors.push(format!("Anthropic Claude: {e}"));
     }
+    if let Err(e) = run_cli_logout_github_copilot() {
+        errors.push(format!("GitHub Copilot: {e}"));
+    }
+    if let Err(e) = run_cli_logout_radius() {
+        errors.push(format!("Radius: {e}"));
+    }
     eprintln!(
         "Note: BYOK platform API keys (if any) were not removed. \
          Use `/logout provider <platform>` or `/providers clear` in the TUI."
@@ -1103,25 +1109,37 @@ pub fn run_cli_logout_all(config: &crate::agent::config::Config) -> anyhow::Resu
     Ok(())
 }
 
-/// When Kimi/Codex scopes remain after a bare xAI logout, tell the user how
-/// to clear them (avoids the false impression that "logout" wiped everything).
+/// When third-party OAuth scopes remain after a bare xAI logout, tell the user
+/// how to clear them (avoids the false impression that "logout" wiped everything).
 fn print_remaining_third_party_scopes_hint() {
     let auth_path = crate::auth::auth_json_path();
     let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
     let kimi = crate::auth::read_kimi_code_auth(home).is_some();
     let codex = crate::auth::read_openai_codex_auth(home).is_some();
-    if !kimi && !codex {
+    let claude = crate::auth::read_anthropic_claude_auth(home).is_some();
+    let github = crate::auth::read_github_copilot_auth(home).is_some();
+    let radius = crate::auth::read_radius_auth(home).is_some();
+    if !kimi && !codex && !claude && !github && !radius {
         return;
     }
     eprintln!();
     eprintln!("Still signed in to third-party subscriptions:");
     if kimi {
-        eprintln!("  • Kimi Code  — run: hyper logout --kimi");
+        eprintln!("  • Kimi Code — run: hyper logout --kimi");
     }
     if codex {
         eprintln!("  • OpenAI Codex — run: hyper logout --openai");
     }
-    eprintln!("  Or clear both (plus xAI): hyper logout --all");
+    if claude {
+        eprintln!("  • Anthropic Claude — run: hyper logout --claude");
+    }
+    if github {
+        eprintln!("  • GitHub Copilot — run: hyper logout --github");
+    }
+    if radius {
+        eprintln!("  • Radius — run: hyper logout --radius");
+    }
+    eprintln!("  Or clear them (plus xAI): hyper logout --all");
 }
 
 /// Clear only the Kimi Code subscription credential (`oauth/kimi-code`).
@@ -1177,6 +1195,36 @@ pub fn run_cli_logout_anthropic_claude() -> anyhow::Result<()> {
         eprintln!("Logged out of Anthropic Claude (xAI session unchanged).");
     } else {
         eprintln!("No Anthropic Claude session to log out of.");
+    }
+    Ok(())
+}
+
+/// `hyper logout --github`: clear only the GitHub Copilot OAuth scope.
+pub fn run_cli_logout_github_copilot() -> anyhow::Result<()> {
+    let auth_path = crate::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    let had = crate::auth::read_github_copilot_auth(home).is_some();
+    crate::auth::clear_github_copilot_auth(home)
+        .map_err(|e| anyhow::anyhow!("Failed to clear GitHub Copilot auth: {e}"))?;
+    if had {
+        eprintln!("Logged out of GitHub Copilot (xAI session unchanged).");
+    } else {
+        eprintln!("No GitHub Copilot session to log out of.");
+    }
+    Ok(())
+}
+
+/// `hyper logout --radius`: clear only the Radius OAuth scope.
+pub fn run_cli_logout_radius() -> anyhow::Result<()> {
+    let auth_path = crate::auth::auth_json_path();
+    let home = auth_path.parent().unwrap_or(std::path::Path::new("."));
+    let had = crate::auth::read_radius_auth(home).is_some();
+    crate::auth::clear_radius_auth(home)
+        .map_err(|e| anyhow::anyhow!("Failed to clear Radius auth: {e}"))?;
+    if had {
+        eprintln!("Logged out of Radius (xAI session unchanged).");
+    } else {
+        eprintln!("No Radius session to log out of.");
     }
     Ok(())
 }
@@ -1720,6 +1768,11 @@ mod tests {
             oidc_client_id: None,
             account_id: None,
             platform_base_url: None,
+            github_domain: None,
+            github_copilot_base_url: None,
+            github_copilot_available_models: None,
+            aws_profile: None,
+            aws_credential_chain: false,
         }
     }
 

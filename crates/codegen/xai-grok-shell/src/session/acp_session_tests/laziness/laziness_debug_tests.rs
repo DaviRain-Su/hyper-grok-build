@@ -27,6 +27,7 @@ fn user_text(text: &str) -> ConversationItem {
 fn assistant_text(text: &str) -> ConversationItem {
     ConversationItem::Assistant(AssistantItem {
         content: text.into(),
+        provider_native_state: None,
         tool_calls: vec![],
         model_id: None,
         reasoning_model_identity: None,
@@ -38,6 +39,7 @@ fn assistant_text(text: &str) -> ConversationItem {
 fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationItem {
     ConversationItem::Assistant(AssistantItem {
         content: text.into(),
+        provider_native_state: None,
         tool_calls: vec![ToolCall {
             id: "call-1".into(),
             name: name.to_string(),
@@ -84,6 +86,7 @@ fn assistant_with_reasoning_items(
     }
     out.push(ConversationItem::Assistant(AssistantItem {
         content: content.into(),
+        provider_native_state: None,
         tool_calls,
         model_id: None,
         reasoning_model_identity: None,
@@ -138,6 +141,7 @@ fn flatten_truncates_long_fields() {
     let items = vec![ConversationItem::ToolResult(ToolResultItem {
         tool_call_id: "call-1".to_string(),
         content: long.into(),
+        is_error: false,
         images: vec![],
     })];
     let out = flatten_transcript_for_classifier(&items, true);
@@ -204,6 +208,7 @@ fn flatten_skips_reasoning_when_encrypted_only() {
         }),
         ConversationItem::Assistant(AssistantItem {
             content: "ok".into(),
+            provider_native_state: None,
             tool_calls: vec![],
             model_id: None,
             reasoning_model_identity: None,
@@ -237,6 +242,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
         }),
         ConversationItem::Assistant(AssistantItem {
             content: "ok".into(),
+            provider_native_state: None,
             tool_calls: vec![],
             model_id: None,
             reasoning_model_identity: None,
@@ -539,6 +545,7 @@ fn window_assistant_text_pin_skips_empty_assistant_turns() {
     // — they have no prose for the classifier to interpret.
     let empty_asst = ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
         content: String::new().into(),
+        provider_native_state: None,
         tool_calls: vec![xai_grok_sampling_types::ToolCall {
             id: "c".into(),
             name: "read_file".into(),

@@ -778,6 +778,7 @@ mod tests {
                 ],
                 model_id: None,
                 reasoning_model_identity: None,
+                provider_native_state: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),

@@ -92,13 +92,7 @@ fn ensure_local_grok_binary(binary: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(workspace_root())
-        .args([
-            "build",
-            "-p",
-            "xai-grok-pager-bin",
-            "--bin",
-            "hyper",
-        ])
+        .args(["build", "-p", "xai-grok-pager-bin", "--bin", "hyper"])
         .stdin(std::process::Stdio::null())
         .envs(xai_tty_utils::pager_env());
     xai_tty_utils::detach_std_command(&mut cmd);
@@ -154,16 +148,17 @@ pub fn grok_binary() -> PathBuf {
 /// `[model.*]` BYOK entry. Callers MUST be `#[serial]` (the underlying
 /// [`EnvGuard`] mutates the process-global environment).
 ///
-/// Note: KimiCode / OpenAiCodex use OAuth and expose no API-key env names,
-/// so they contribute nothing here — that's intentional.
+/// OAuth providers expose no API-key env names, so they contribute nothing
+/// here — that's intentional.
 pub fn unset_all_byok_platform_api_key_envs() -> Vec<EnvGuard> {
     let mut guards = Vec::new();
     // Collect first to deduplicate (MOONSHOT_API_KEY / ZAI_API_KEY / MINIMAX_API_KEY
     // are shared across platforms) so we don't double-unset and clobber the
     // restored value mid-iteration.
     let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
-    for platform in xai_grok_models::PlatformId::ALL {
-        for &name in platform.api_key_env_names() {
+    for provider in xai_grok_models::provider_registry().providers() {
+        for name in &provider.credentials.env_keys {
+            let name: &'static str = name.as_str();
             if seen.insert(name) {
                 guards.push(EnvGuard::unset(name));
             }

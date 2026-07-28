@@ -1,6 +1,7 @@
 //! `/logout` — remove auth credentials.
 //!
 //! - bare `/logout` — full xAI logout (return to login screen)
+//! - `/logout kimi|openai|claude|github|radius` — clear only that provider's OAuth scope
 //! - `/logout provider <platform>` — clear a third-party API key stored via
 //!   `/providers` (alias of `/providers clear <platform>`)
 
@@ -15,11 +16,11 @@ impl SlashCommand for LogoutCommand {
     }
 
     fn description(&self) -> &str {
-        "Log out (xAI session, or a platform API key)"
+        "Log out (xAI, provider OAuth, or a platform API key)"
     }
 
     fn usage(&self) -> &str {
-        "/logout [provider <platform>]"
+        "/logout [kimi|openai|claude|github|radius|provider <platform>]"
     }
 
     fn takes_args(&self) -> bool {
@@ -31,30 +32,63 @@ impl SlashCommand for LogoutCommand {
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("[provider <platform>]")
+        Some("[kimi|openai|claude|github|radius|provider <platform>]")
     }
 
     fn suggest_args(&self, _ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
         let trimmed = args_query.trim_start();
         if trimmed.is_empty() {
-            return Some(vec![ArgItem::new(
-                "provider  (clear a /providers API key)",
-                "provider platform byok",
-                "provider ",
-                "Then pick a platform id, e.g. zai-coding",
-            )]);
+            return Some(vec![
+                ArgItem::new(
+                    "kimi  (clear Kimi Code OAuth)",
+                    "kimi kimi-code oauth",
+                    "kimi",
+                    "Keep any static Kimi API key",
+                ),
+                ArgItem::new(
+                    "openai  (clear OpenAI Codex OAuth)",
+                    "openai codex chatgpt oauth",
+                    "openai",
+                    "Keep the xAI session",
+                ),
+                ArgItem::new(
+                    "claude  (clear Anthropic Claude OAuth)",
+                    "claude anthropic oauth",
+                    "claude",
+                    "Keep the xAI session",
+                ),
+                ArgItem::new(
+                    "github  (clear GitHub Copilot OAuth)",
+                    "github copilot oauth",
+                    "github",
+                    "Keep any static Copilot token",
+                ),
+                ArgItem::new(
+                    "radius  (clear Radius OAuth)",
+                    "radius oauth",
+                    "radius",
+                    "Keep any static Radius API key",
+                ),
+                ArgItem::new(
+                    "provider  (clear a /providers API key)",
+                    "provider platform byok",
+                    "provider ",
+                    "Then pick a platform id, e.g. zai-coding",
+                ),
+            ]);
         }
         let (first, rest) = split_first(trimmed);
         if matches!(first, "provider" | "platform" | "byok") && rest.is_empty() {
             // List API-key platforms for second token.
-            let items = xai_grok_models::PlatformId::ALL
-                .into_iter()
-                .filter(|p| !p.uses_oauth())
-                .map(|p| {
+            let items = xai_grok_models::provider_registry()
+                .providers()
+                .iter()
+                .filter(|provider| provider.accepts_api_key())
+                .map(|provider| {
                     ArgItem::new(
-                        format!("{}  {}", p.as_str(), p.display_name()),
-                        p.as_str(),
-                        p.as_str(),
+                        format!("{}  {}", provider.id, provider.display_name),
+                        provider.id.as_str(),
+                        provider.id.as_str(),
                         "Clear stored API key from auth.json",
                     )
                 })
@@ -73,6 +107,43 @@ impl SlashCommand for LogoutCommand {
         let (first, rest) = split_first(trimmed);
         if matches!(
             first.to_ascii_lowercase().as_str(),
+            "kimi" | "kimi-code" | "kimi-coding"
+        ) {
+            return CommandResult::Action(Action::LogoutKimi);
+        }
+        if matches!(
+            first.to_ascii_lowercase().as_str(),
+            "openai" | "openai-codex" | "codex" | "chatgpt"
+        ) {
+            return CommandResult::Action(Action::LogoutOpenAiCodex);
+        }
+        if matches!(
+            first.to_ascii_lowercase().as_str(),
+            "claude" | "anthropic" | "anthropic-claude"
+        ) {
+            return CommandResult::Action(Action::LogoutAnthropicClaude);
+        }
+        if matches!(
+            first.to_ascii_lowercase().as_str(),
+            "github" | "github-copilot" | "copilot"
+        ) {
+            return CommandResult::Action(Action::LogoutGitHubCopilot);
+        }
+        if first.eq_ignore_ascii_case("radius") {
+            return CommandResult::Action(Action::LogoutRadius);
+        }
+        if matches!(
+            first.to_ascii_lowercase().as_str(),
+            "amazon-bedrock" | "bedrock"
+        ) {
+            return CommandResult::Action(Action::SetPlatformApiKey {
+                platform: "amazon-bedrock".to_string(),
+                api_key: String::new(),
+                base_url: None,
+            });
+        }
+        if matches!(
+            first.to_ascii_lowercase().as_str(),
             "provider" | "platform" | "byok"
         ) {
             let platform_tok = rest.trim();
@@ -85,20 +156,24 @@ impl SlashCommand for LogoutCommand {
                 );
             }
             let (plat, _) = split_first(platform_tok);
-            let Some(platform) = xai_grok_models::PlatformId::parse(plat) else {
+            let Some(provider) = xai_grok_models::provider_spec(plat) else {
                 return CommandResult::Error(format!(
-                    "Unknown platform '{plat}'. Try /providers clear and pick one."
+                    "Unknown provider '{plat}'. Try /providers clear and pick one."
                 ));
             };
-            if platform.uses_oauth() {
-                let (_, logout) = super::oauth_login_logout_hint(platform);
+            if !provider.accepts_api_key() {
+                let logout = provider
+                    .legacy_platform()
+                    .map(super::oauth_login_logout_hint)
+                    .map(|(_, logout)| logout)
+                    .unwrap_or("/logout");
                 return CommandResult::Error(format!(
                     "{} uses OAuth — run `{logout}` instead.",
-                    platform.display_name()
+                    provider.display_name
                 ));
             }
             return CommandResult::Action(Action::SetPlatformApiKey {
-                platform: platform.as_str().to_owned(),
+                platform: provider.id.as_str().to_owned(),
                 api_key: String::new(),
                 base_url: None,
             });
@@ -107,6 +182,11 @@ impl SlashCommand for LogoutCommand {
         CommandResult::Error(format!(
             "Unknown /logout args '{trimmed}'.\n\
              /logout                  — sign out of xAI\n\
+             /logout kimi             — clear Kimi Code OAuth only\n\
+             /logout openai           — clear OpenAI Codex OAuth only\n\
+             /logout claude           — clear Anthropic Claude OAuth only\n\
+             /logout github           — clear GitHub Copilot OAuth only\n\
+             /logout radius           — clear Radius OAuth only\n\
              /logout provider <id>    — clear a platform API key"
         ))
     }
@@ -160,6 +240,32 @@ mod tests {
     }
 
     #[test]
+    fn logout_routes_all_subscription_oauth_scopes() {
+        let models = ModelState::default();
+        let mut c = ctx(&models);
+        assert!(matches!(
+            LogoutCommand.run(&mut c, "kimi"),
+            CommandResult::Action(Action::LogoutKimi)
+        ));
+        assert!(matches!(
+            LogoutCommand.run(&mut c, "codex"),
+            CommandResult::Action(Action::LogoutOpenAiCodex)
+        ));
+        assert!(matches!(
+            LogoutCommand.run(&mut c, "anthropic"),
+            CommandResult::Action(Action::LogoutAnthropicClaude)
+        ));
+        assert!(matches!(
+            LogoutCommand.run(&mut c, "copilot"),
+            CommandResult::Action(Action::LogoutGitHubCopilot)
+        ));
+        assert!(matches!(
+            LogoutCommand.run(&mut c, "radius"),
+            CommandResult::Action(Action::LogoutRadius)
+        ));
+    }
+
+    #[test]
     fn logout_provider_clears_platform_key() {
         let models = ModelState::default();
         let mut c = ctx(&models);
@@ -209,21 +315,17 @@ mod tests {
     }
 
     #[test]
-    fn logout_provider_kimi_code_shows_kimi_hint() {
+    fn logout_provider_kimi_code_clears_only_static_key_for_hybrid_provider() {
         let models = ModelState::default();
         let mut c = ctx(&models);
         match LogoutCommand.run(&mut c, "provider kimi-code") {
-            CommandResult::Error(msg) => {
-                assert!(
-                    msg.contains("grok logout --kimi"),
-                    "Kimi logout hint must point at --kimi, got: {msg}"
-                );
-                assert!(
-                    !msg.contains("--openai"),
-                    "Kimi logout hint must not mention --openai, got: {msg}"
-                );
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform, api_key, ..
+            }) => {
+                assert_eq!(platform, "kimi-code");
+                assert!(api_key.is_empty());
             }
-            other => panic!("expected Error for OAuth platform, got {other:?}"),
+            other => panic!("expected static API-key clear for hybrid Kimi, got {other:?}"),
         }
     }
 }

@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fs2::FileExt;
 
 use super::model::{
-    ANTHROPIC_CLAUDE_OAUTH_SCOPE, API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth,
-    KIMI_CODE_OAUTH_SCOPE, OPENAI_CODEX_OAUTH_SCOPE, lookup_auth, platform_api_key_scope,
+    AMAZON_BEDROCK_AUTH_SCOPE, ANTHROPIC_CLAUDE_OAUTH_SCOPE, API_KEY_SCOPE, AuthMode, AuthStore,
+    GITHUB_COPILOT_OAUTH_SCOPE, GrokAuth, KIMI_CODE_OAUTH_SCOPE, OPENAI_CODEX_OAUTH_SCOPE,
+    RADIUS_OAUTH_SCOPE, lookup_auth, platform_api_key_scope,
 };
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
@@ -470,15 +471,20 @@ pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     with_auth_json_scope_lock(&path, || clear_scope_from_auth_json(&path, API_KEY_SCOPE))
 }
 
-/// Remove one scope under lock. Missing file is success; other read/write
+/// Remove scopes under one lock. Missing file is success; other read/write
 /// errors propagate (unlike the old `if let Ok` swallow).
-fn clear_scope_from_auth_json(path: &Path, scope: &str) -> std::io::Result<()> {
+fn clear_scopes_from_auth_json<'a>(
+    path: &Path,
+    scopes: impl IntoIterator<Item = &'a str>,
+) -> std::io::Result<()> {
     let mut map = match read_auth_json(path) {
         Ok(map) => map,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    map.remove(scope);
+    for scope in scopes {
+        map.remove(scope);
+    }
     if map.is_empty() {
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -488,6 +494,10 @@ fn clear_scope_from_auth_json(path: &Path, scope: &str) -> std::io::Result<()> {
     } else {
         write_auth_json(path, &map)
     }
+}
+
+fn clear_scope_from_auth_json(path: &Path, scope: &str) -> std::io::Result<()> {
+    clear_scopes_from_auth_json(path, std::iter::once(scope))
 }
 
 /// Read the Kimi Code OAuth credential from `auth.json` (scope
@@ -692,6 +702,126 @@ pub fn clear_anthropic_claude_auth(grok_home: &Path) -> std::io::Result<()> {
     })
 }
 
+/// Read the GitHub Copilot OAuth credential, if present and scoped.
+pub fn read_github_copilot_auth(grok_home: &Path) -> Option<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(GITHUB_COPILOT_OAUTH_SCOPE)?.clone();
+    (auth.auth_mode == AuthMode::GitHubCopilot).then_some(auth)
+}
+
+/// Persist a GitHub Copilot OAuth credential under [`GITHUB_COPILOT_OAUTH_SCOPE`].
+/// Merges with existing scopes so xAI / other third-party sessions are preserved.
+pub fn store_github_copilot_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        let mut stored = auth.clone();
+        stored.auth_mode = AuthMode::GitHubCopilot;
+        map.insert(GITHUB_COPILOT_OAUTH_SCOPE.to_owned(), stored);
+        write_auth_json(&path, &map)
+    })
+}
+
+/// Like [`store_github_copilot_auth`], but if a sibling already changed the
+/// durable GitHub token family, adopt its on-disk entry instead of overwriting.
+pub(crate) fn store_github_copilot_auth_after_refresh_locked(
+    grok_home: &Path,
+    candidate: &GrokAuth,
+    spent_github_token: &str,
+    file_lock: &AuthFileLock,
+) -> std::io::Result<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    ensure_live_auth_file_lock(file_lock, &path)?;
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    if let Some(existing) = map.get(GITHUB_COPILOT_OAUTH_SCOPE).cloned()
+        && existing.auth_mode == AuthMode::GitHubCopilot
+        && !super::model::is_expired(&existing)
+    {
+        let existing_refresh = existing.refresh_token.as_deref().unwrap_or("");
+        if existing_refresh != spent_github_token {
+            return Ok(existing);
+        }
+        if existing.key == candidate.key {
+            return Ok(existing);
+        }
+    }
+    let mut stored = candidate.clone();
+    stored.auth_mode = AuthMode::GitHubCopilot;
+    map.insert(GITHUB_COPILOT_OAUTH_SCOPE.to_owned(), stored.clone());
+    write_auth_json(&path, &map)?;
+    Ok(stored)
+}
+
+/// Remove the GitHub Copilot OAuth scope from auth.json.
+pub fn clear_github_copilot_auth(grok_home: &Path) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        clear_scope_from_auth_json(&path, GITHUB_COPILOT_OAUTH_SCOPE)
+    })
+}
+
+/// Read the Radius OAuth credential, if present and scoped.
+pub fn read_radius_auth(grok_home: &Path) -> Option<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(RADIUS_OAUTH_SCOPE)?.clone();
+    (auth.auth_mode == AuthMode::Radius).then_some(auth)
+}
+
+/// Store Radius OAuth credentials under their independent scope.
+pub fn store_radius_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        let mut stored = auth.clone();
+        stored.auth_mode = AuthMode::Radius;
+        map.insert(RADIUS_OAUTH_SCOPE.to_string(), stored);
+        write_auth_json(&path, &map)
+    })
+}
+
+/// Persist a refreshed Radius credential while reusing the caller's live
+/// `auth.json.lock` guard. If a sibling already rotated away from
+/// `spent_refresh`, adopt that newer on-disk credential instead of clobbering
+/// its token family.
+pub(crate) fn store_radius_auth_after_refresh_locked(
+    grok_home: &Path,
+    candidate: &GrokAuth,
+    spent_refresh: &str,
+    file_lock: &AuthFileLock,
+) -> std::io::Result<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    ensure_live_auth_file_lock(file_lock, &path)?;
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    if let Some(existing) = map.get(RADIUS_OAUTH_SCOPE).cloned()
+        && existing.auth_mode == AuthMode::Radius
+    {
+        let existing_refresh = existing.refresh_token.as_deref().unwrap_or("");
+        if existing_refresh != spent_refresh
+            && (!super::radius::is_radius_auth_expired(&existing) || !existing_refresh.is_empty())
+        {
+            return Ok(existing);
+        }
+        if !super::radius::is_radius_auth_expired(&existing) && existing.key == candidate.key {
+            return Ok(existing);
+        }
+    }
+    let mut stored = candidate.clone();
+    stored.auth_mode = AuthMode::Radius;
+    map.insert(RADIUS_OAUTH_SCOPE.to_owned(), stored.clone());
+    write_auth_json(&path, &map)?;
+    Ok(stored)
+}
+
+/// Remove the Radius OAuth scope from auth.json.
+pub fn clear_radius_auth(grok_home: &Path) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        clear_scope_from_auth_json(&path, RADIUS_OAUTH_SCOPE)
+    })
+}
+
 fn ensure_live_auth_file_lock(
     file_lock: &AuthFileLock,
     auth_json_path: &Path,
@@ -858,6 +988,87 @@ pub fn clear_platform_api_key(grok_home: &Path, platform: &str) -> std::io::Resu
     with_auth_json_scope_lock(&path, || clear_scope_from_auth_json(&path, &scope))
 }
 
+pub fn read_bedrock_auth_marker(grok_home: &Path) -> Option<GrokAuth> {
+    let path = resolve_auth_json_path(grok_home);
+    let map = read_auth_json(&path).ok()?;
+    let auth = map.get(AMAZON_BEDROCK_AUTH_SCOPE)?.clone();
+    let has_bearer = !auth.key.trim().is_empty();
+    let has_profile = auth
+        .aws_profile
+        .as_deref()
+        .is_some_and(|p| !p.trim().is_empty());
+    (has_bearer || has_profile || auth.aws_credential_chain).then_some(auth)
+}
+
+pub fn read_bedrock_profile(grok_home: &Path) -> Option<String> {
+    read_bedrock_auth_marker(grok_home).and_then(|auth| {
+        auth.aws_profile
+            .map(|profile| profile.trim().to_string())
+            .filter(|profile| !profile.is_empty())
+    })
+}
+
+pub fn store_bedrock_profile(grok_home: &Path, profile: &str) -> std::io::Result<()> {
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AWS profile cannot be empty",
+        ));
+    }
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        map.insert(
+            AMAZON_BEDROCK_AUTH_SCOPE.to_string(),
+            GrokAuth {
+                key: String::new(),
+                auth_mode: AuthMode::ApiKey,
+                aws_profile: Some(profile.to_string()),
+                aws_credential_chain: false,
+                ..Default::default()
+            },
+        );
+        write_auth_json(&path, &map)
+    })
+}
+
+pub fn store_bedrock_credential_chain(grok_home: &Path) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+        map.insert(
+            AMAZON_BEDROCK_AUTH_SCOPE.to_string(),
+            GrokAuth {
+                key: String::new(),
+                auth_mode: AuthMode::ApiKey,
+                aws_credential_chain: true,
+                ..Default::default()
+            },
+        );
+        write_auth_json(&path, &map)
+    })
+}
+
+pub fn clear_bedrock_auth(grok_home: &Path) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    with_auth_json_scope_lock(&path, || {
+        clear_scope_from_auth_json(&path, AMAZON_BEDROCK_AUTH_SCOPE)
+    })
+}
+
+/// Atomically remove every persisted member of one provider credential family.
+pub fn clear_platform_api_keys(grok_home: &Path, platforms: &[String]) -> std::io::Result<()> {
+    let path = resolve_auth_json_path(grok_home);
+    let scopes: Vec<String> = platforms
+        .iter()
+        .map(|platform| platform_api_key_scope(platform))
+        .collect();
+    with_auth_json_scope_lock(&path, || {
+        clear_scopes_from_auth_json(&path, scopes.iter().map(String::as_str))
+    })
+}
+
 #[cfg(test)]
 mod scope_lock_tests {
     use super::*;
@@ -994,6 +1205,59 @@ mod scope_lock_tests {
 
     #[test]
     #[serial]
+    fn radius_refresh_persist_reuses_lock_and_adopts_rotated_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock { _file: file };
+
+        let sibling = GrokAuth {
+            key: "sibling-radius-access".to_string(),
+            auth_mode: AuthMode::Radius,
+            refresh_token: Some("rotated-radius-refresh".to_string()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            platform_base_url: Some("https://radius.example".to_string()),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(RADIUS_OAUTH_SCOPE.to_string(), sibling);
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "candidate-radius-access".to_string(),
+            auth_mode: AuthMode::Radius,
+            refresh_token: Some("candidate-radius-refresh".to_string()),
+            ..Default::default()
+        };
+        let stored = store_radius_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "spent-radius-refresh",
+            &file_lock,
+        )
+        .unwrap();
+
+        assert_eq!(stored.key, "sibling-radius-access");
+        assert_eq!(
+            read_radius_auth(dir.path())
+                .unwrap()
+                .refresh_token
+                .as_deref(),
+            Some("rotated-radius-refresh")
+        );
+    }
+
+    #[test]
+    #[serial]
     fn claude_refresh_persist_adopts_rotated_sibling() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::unset("GROK_AUTH_PATH");
@@ -1042,6 +1306,74 @@ mod scope_lock_tests {
                 .as_deref(),
             Some("rotated-refresh")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn github_copilot_store_preserves_sibling_scopes_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        store_api_key(dir.path(), "xai-key").unwrap();
+        let auth = GrokAuth {
+            key: "copilot-access".to_string(),
+            auth_mode: AuthMode::GitHubCopilot,
+            refresh_token: Some("github-durable".to_string()),
+            oidc_issuer: Some("ghe.example.com".to_string()),
+            ..Default::default()
+        };
+        store_github_copilot_auth(dir.path(), &auth).unwrap();
+        assert_eq!(read_api_key(dir.path()).as_deref(), Some("xai-key"));
+        let loaded = read_github_copilot_auth(dir.path()).unwrap();
+        assert_eq!(loaded.key, "copilot-access");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("github-durable"));
+        assert_eq!(loaded.oidc_issuer.as_deref(), Some("ghe.example.com"));
+        clear_github_copilot_auth(dir.path()).unwrap();
+        assert!(read_github_copilot_auth(dir.path()).is_none());
+        assert_eq!(read_api_key(dir.path()).as_deref(), Some("xai-key"));
+    }
+
+    #[test]
+    #[serial]
+    fn github_copilot_after_refresh_adopts_rotated_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock { _file: file };
+
+        let existing = GrokAuth {
+            key: "sibling-copilot-access".to_string(),
+            auth_mode: AuthMode::GitHubCopilot,
+            refresh_token: Some("rotated-github-token".to_string()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(GITHUB_COPILOT_OAUTH_SCOPE.to_string(), existing.clone());
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "candidate-copilot-access".to_string(),
+            auth_mode: AuthMode::GitHubCopilot,
+            refresh_token: Some("spent-github-token".to_string()),
+            ..Default::default()
+        };
+        let stored = store_github_copilot_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "spent-github-token",
+            &file_lock,
+        )
+        .unwrap();
+        assert_eq!(stored.key, "sibling-copilot-access");
     }
 
     #[cfg(unix)]
@@ -1119,6 +1451,26 @@ mod platform_api_key_tests {
 
     #[test]
     #[serial]
+    fn platform_credential_family_clears_all_members_and_preserves_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_platform_api_key(home, "opencode", "group-key", None).unwrap();
+        store_platform_api_key(home, "opencode-go", "legacy-key", None).unwrap();
+        store_platform_api_key(home, "zai", "sibling-key", None).unwrap();
+
+        clear_platform_api_keys(home, &["opencode".to_string(), "opencode-go".to_string()])
+            .unwrap();
+
+        assert!(read_platform_api_key(home, "opencode").is_none());
+        assert!(read_platform_api_key(home, "opencode-go").is_none());
+        assert_eq!(
+            read_platform_api_key(home, "zai").as_deref(),
+            Some("sibling-key")
+        );
+    }
+
+    #[test]
+    #[serial]
     fn platform_base_url_roundtrips_and_clears() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
@@ -1136,6 +1488,33 @@ mod platform_api_key_tests {
         store_platform_api_key(home, "nexus", "", None).unwrap();
         assert!(read_platform_base_url(home, "nexus").is_none());
         assert!(read_platform_api_key(home, "nexus").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn bedrock_profile_chain_and_logout_are_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        store_api_key(home, "xai-key").unwrap();
+        store_platform_api_key(home, "zai", "zai-key", None).unwrap();
+
+        store_bedrock_profile(home, " dev ").unwrap();
+        assert_eq!(read_bedrock_profile(home).as_deref(), Some("dev"));
+        assert!(read_bedrock_auth_marker(home).is_some());
+
+        store_bedrock_credential_chain(home).unwrap();
+        let marker = read_bedrock_auth_marker(home).unwrap();
+        assert!(marker.aws_credential_chain);
+        assert_eq!(marker.aws_profile, None);
+        assert_eq!(marker.key, "");
+
+        clear_bedrock_auth(home).unwrap();
+        assert!(read_bedrock_auth_marker(home).is_none());
+        assert_eq!(read_api_key(home).as_deref(), Some("xai-key"));
+        assert_eq!(
+            read_platform_api_key(home, "zai").as_deref(),
+            Some("zai-key")
+        );
     }
 }
 

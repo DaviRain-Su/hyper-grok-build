@@ -364,11 +364,7 @@ fn isolate_platform_credentials() -> (tempfile::TempDir, Vec<xai_grok_test_suppo
         "GROK_AUTH_PATH",
         dir.path().join("auth.json").to_str().unwrap(),
     )];
-    for platform in xai_grok_models::PlatformId::ALL {
-        for name in platform.api_key_env_names() {
-            guards.push(xai_grok_test_support::EnvGuard::unset(name));
-        }
-    }
+    guards.extend(xai_grok_test_support::unset_all_byok_platform_api_key_envs());
     (dir, guards)
 }
 
@@ -381,6 +377,7 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     flagged.info.show_model_fingerprint = true;
@@ -393,6 +390,7 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         },
     );
@@ -402,6 +400,7 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     custom.info.show_model_fingerprint = true;
@@ -445,7 +444,8 @@ fn default_model_honors_allowlist_when_no_default_set() {
 #[test]
 fn available_models_projects_locked_platform_models_with_setup_meta() {
     use xai_grok_sampling_types::{
-        API_KEY_ENV_META_KEY, PLATFORM_ID_META_KEY, REQUIRES_API_KEY_META_KEY, SETUP_HINT_META_KEY,
+        API_KEY_ENV_META_KEY, PLATFORM_ID_META_KEY, PLATFORM_NAME_META_KEY,
+        REQUIRES_API_KEY_META_KEY, SETUP_HINT_META_KEY,
     };
     let mut catalog: IndexMap<String, ModelEntry> = IndexMap::new();
     let platform_entry = |slug: &str, key: Option<&str>, hidden: bool| {
@@ -456,12 +456,17 @@ fn available_models_projects_locked_platform_models_with_setup_meta() {
             api_key: key.map(str::to_owned),
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         }
     };
     catalog.insert(
         "deepseek/deepseek-v4-flash".to_string(),
         platform_entry("deepseek/deepseek-v4-flash", None, false),
+    );
+    catalog.insert(
+        "ant-ling/Ling-2.6-flash".to_string(),
+        platform_entry("ant-ling/Ling-2.6-flash", None, false),
     );
     catalog.insert(
         "openai/gpt-5".to_string(),
@@ -500,6 +505,30 @@ fn available_models_projects_locked_platform_models_with_setup_meta() {
             .is_some_and(|h| h.contains("[platforms.deepseek]"))
     );
 
+    let registry_only = out
+        .get(&acp::ModelId::new("ant-ling/Ling-2.6-flash"))
+        .expect("registry-only provider model must be projected");
+    let registry_only_meta = registry_only.meta.as_ref().expect("lock meta present");
+    assert_eq!(
+        registry_only_meta
+            .get(PLATFORM_ID_META_KEY)
+            .and_then(|value| value.as_str()),
+        Some("ant-ling")
+    );
+    assert_eq!(
+        registry_only_meta
+            .get(PLATFORM_NAME_META_KEY)
+            .and_then(|value| value.as_str()),
+        Some("Ant Ling")
+    );
+    assert_eq!(
+        registry_only_meta
+            .get(API_KEY_ENV_META_KEY)
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(2)
+    );
+
     let usable = out
         .get(&acp::ModelId::new("openai/gpt-5"))
         .expect("credentialed entry stays visible");
@@ -517,7 +546,14 @@ fn available_models_projects_locked_platform_models_with_setup_meta() {
     );
 
     let keys: Vec<_> = out.keys().map(|k| k.0.as_ref().to_string()).collect();
-    assert_eq!(keys, ["openai/gpt-5", "deepseek/deepseek-v4-flash"]);
+    assert_eq!(
+        keys,
+        [
+            "openai/gpt-5",
+            "deepseek/deepseek-v4-flash",
+            "ant-ling/Ling-2.6-flash",
+        ]
+    );
 }
 
 #[test]
@@ -680,6 +716,7 @@ fn rebuild_updates_models_and_available() {
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         },
     );
@@ -734,6 +771,7 @@ fn default_reasoning_effort_only_stamps_supporting_model() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     reasoning_entry.info.supports_reasoning_effort = true;
@@ -756,6 +794,7 @@ fn default_reasoning_effort_only_stamps_supporting_model() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     prefetched.insert("plain-model".to_string(), plain_entry);
@@ -783,6 +822,7 @@ fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     no_none.info.supports_reasoning_effort = true;
@@ -801,6 +841,7 @@ fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     with_none.info.supports_reasoning_effort = true;
@@ -902,6 +943,7 @@ fn cli_reasoning_effort_override_only_stamps_supporting_models() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     reasoning_entry.info.supports_reasoning_effort = true;
@@ -912,6 +954,7 @@ fn cli_reasoning_effort_override_only_stamps_supporting_models() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     prefetched.insert("plain-model".to_string(), plain_entry);
@@ -955,6 +998,7 @@ fn make_model_entry(model_id: &str) -> ModelEntry {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     }
 }
@@ -1697,6 +1741,7 @@ async fn fetch_and_apply_degrades_offline_when_remote_fetch_disabled() {
             api_key: None,
             env_key: None,
             auth_provider: None,
+            platform_oauth_active: false,
             api_base_url: None,
         },
     );
@@ -1725,6 +1770,7 @@ fn default_model_skips_oauth_only_for_api_key_users() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     oauth_only.info.supported_in_api = false;
@@ -1735,6 +1781,7 @@ fn default_model_skips_oauth_only_for_api_key_users() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     catalog.insert("public-model".to_string(), public);
@@ -1777,6 +1824,7 @@ fn managed_platform_models_hidden_without_credentials_even_for_session() {
         api_key: None,
         env_key: Some(config::EnvKeys::new(["OPENAI_API_KEY_MUST_NOT_EXIST_XYZ"])),
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     entry.info.id = Some("openai/gpt-5".into());
@@ -1819,10 +1867,13 @@ fn make_entry_config_with_id(
         api_key: None,
         env_key: None,
         api_backend: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         context_window: std::num::NonZeroU64::new(200_000).unwrap(),
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
         extra_headers: IndexMap::new(),
+        query_params: IndexMap::new(),
         api_base_url: None,
         use_concise: false,
         agent_type: config::default_agent_type(),

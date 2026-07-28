@@ -64,6 +64,11 @@ fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::GrokAu
         oidc_client_id: None,
         account_id: None,
         platform_base_url: None,
+        github_domain: None,
+        github_copilot_base_url: None,
+        github_copilot_available_models: None,
+        aws_profile: None,
+        aws_credential_chain: false,
     }
 }
 #[test]
@@ -2203,6 +2208,8 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             temperature: None,
             top_p: None,
             api_backend: crate::sampling::ApiBackend::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: IndexMap::new(),
             query_params: IndexMap::new(),
@@ -2229,6 +2236,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     };
     let mut models = indexmap::IndexMap::new();

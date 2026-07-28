@@ -22,9 +22,18 @@ pub const OPENAI_CODEX_OAUTH_SCOPE: &str = "oauth/openai-codex";
 /// auth.json scope key for the Anthropic Claude (Pro/Max) subscription OAuth session.
 pub const ANTHROPIC_CLAUDE_OAUTH_SCOPE: &str = "oauth/anthropic-claude";
 
+/// auth.json scope key for the GitHub Copilot subscription OAuth session.
+pub const GITHUB_COPILOT_OAUTH_SCOPE: &str = "oauth/github-copilot";
+
+/// auth.json scope key for the Radius gateway OAuth session.
+pub const RADIUS_OAUTH_SCOPE: &str = "oauth/radius";
+
 /// Prefix for third-party platform API keys stored via `/providers` (e.g.
 /// `platform/zai`, `platform/openai`). One scope per platform id.
 pub const PLATFORM_API_KEY_SCOPE_PREFIX: &str = "platform/";
+
+/// Canonical auth.json scope for Amazon Bedrock bearer/profile/chain state.
+pub const AMAZON_BEDROCK_AUTH_SCOPE: &str = "platform/amazon-bedrock";
 
 /// Scope key for a registry platform's UI-pasted API key.
 pub fn platform_api_key_scope(platform: &str) -> String {
@@ -65,6 +74,13 @@ pub enum AuthMode {
     /// [`ANTHROPIC_CLAUDE_OAUTH_SCOPE`]; not an xAI session. Inference uses a
     /// Bearer token + `anthropic-beta: oauth-2025-04-20` against Anthropic Messages.
     AnthropicClaude,
+    /// GitHub Copilot subscription OAuth. Stored under
+    /// [`GITHUB_COPILOT_OAUTH_SCOPE`]; not an xAI session. `key` is a short
+    /// Copilot inference token; `refresh_token` is the durable GitHub token.
+    GitHubCopilot,
+    /// Radius gateway OAuth. Stored under [`RADIUS_OAUTH_SCOPE`]; not an xAI session.
+    /// `platform_base_url` stores the normalized gateway origin/root for refresh and catalog discovery.
+    Radius,
 }
 
 /// Wire value of `principal_type` for team OAuth principals (capitalized by
@@ -144,6 +160,34 @@ pub struct GrokAuth {
     /// The bare gateway root; per-backend bases are derived at request time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_base_url: Option<String>,
+
+    /// GitHub domain for Copilot OAuth credentials (e.g. `github.com` or a GHE host).
+    /// Kept separate from `oidc_issuer`; old auth.json files may still carry this
+    /// value in `oidc_issuer`, so Copilot readers derive from either field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_domain: Option<String>,
+
+    /// Copilot inference base URL derived from the short Copilot token's safe
+    /// `proxy-ep` claim, or from the GitHub domain fallback. Never user-supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_copilot_base_url: Option<String>,
+
+    /// GitHub Copilot model ids that `/models` reports as available after the
+    /// policy-enable pass. `None` means an older credential that predates this
+    /// field (compat: do not lock previously selectable models); `Some([])` is
+    /// an authoritative empty availability list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_copilot_available_models: Option<Vec<String>>,
+
+    /// Amazon Bedrock AWS profile marker. Stored only for the Bedrock platform
+    /// scope; never contains AWS access keys or secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_profile: Option<String>,
+
+    /// Amazon Bedrock marker meaning "use the SDK default credential chain".
+    /// Stored only for the Bedrock platform scope.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aws_credential_chain: bool,
 }
 
 impl std::fmt::Debug for GrokAuth {
@@ -190,7 +234,9 @@ impl GrokAuth {
             | AuthMode::WebLogin
             | AuthMode::KimiCode
             | AuthMode::OpenAiCodex
-            | AuthMode::AnthropicClaude => false,
+            | AuthMode::AnthropicClaude
+            | AuthMode::GitHubCopilot
+            | AuthMode::Radius => false,
         }
     }
 
@@ -215,7 +261,9 @@ impl GrokAuth {
             AuthMode::ApiKey
             | AuthMode::KimiCode
             | AuthMode::OpenAiCodex
-            | AuthMode::AnthropicClaude => false,
+            | AuthMode::AnthropicClaude
+            | AuthMode::GitHubCopilot
+            | AuthMode::Radius => false,
         }
     }
 
@@ -286,6 +334,11 @@ impl Default for GrokAuth {
             oidc_client_id: None,
             account_id: None,
             platform_base_url: None,
+            github_domain: None,
+            github_copilot_base_url: None,
+            github_copilot_available_models: None,
+            aws_profile: None,
+            aws_credential_chain: false,
         }
     }
 }
@@ -413,6 +466,22 @@ pub(crate) fn is_expired_with_buffer(auth: &GrokAuth, buffer: Duration) -> bool 
 mod tests {
     use super::*;
 
+    #[test]
+    fn grok_auth_serde_defaults_bedrock_fields_for_old_auth_json() {
+        let auth: GrokAuth = serde_json::from_str(
+            r#"{
+                "key":"k",
+                "auth_mode":"api_key",
+                "create_time":"2026-01-01T00:00:00Z",
+                "user_id":"u",
+                "coding_data_retention_opt_out":true
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(auth.aws_profile, None);
+        assert!(!auth.aws_credential_chain);
+    }
+
     fn make_auth(mode: AuthMode) -> GrokAuth {
         GrokAuth {
             key: "k".into(),
@@ -441,6 +510,11 @@ mod tests {
             oidc_client_id: None,
             account_id: None,
             platform_base_url: None,
+            github_domain: None,
+            github_copilot_base_url: None,
+            github_copilot_available_models: None,
+            aws_profile: None,
+            aws_credential_chain: false,
         }
     }
 

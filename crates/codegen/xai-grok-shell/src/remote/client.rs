@@ -889,6 +889,8 @@ pub fn parse_remote_model_value(
         api_key: get_string(obj, "apiKey").or_else(|| get_string(obj, "api_key")),
         env_key: get_env_keys(obj, "envKey").or_else(|| get_env_keys(obj, "env_key")),
         api_backend,
+        request_compat: None,
+        endpoint_path: None,
         context_window,
         auto_compact_threshold_percent: get_u64(obj, "autoCompactThresholdPercent")
             .or_else(|| get_u64(obj, "auto_compact_threshold_percent"))
@@ -897,6 +899,7 @@ pub fn parse_remote_model_value(
             .or_else(|| get_string(obj, "system_prompt_label"))
             .filter(|s| !s.trim().is_empty()),
         extra_headers: get_string_map(obj, "extraHeaders"),
+        query_params: get_string_map(obj, "queryParams"),
         api_base_url: get_string(obj, "apiBaseUrl")
             .or_else(|| get_string(obj, "api_base_url")),
         use_concise: obj
@@ -1405,6 +1408,11 @@ mod tests {
             oidc_client_id: None,
             account_id: None,
             platform_base_url: None,
+            github_domain: None,
+            github_copilot_base_url: None,
+            github_copilot_available_models: None,
+            aws_profile: None,
+            aws_credential_chain: false,
         }
     }
     fn test_auth_manager() -> Arc<crate::auth::AuthManager> {

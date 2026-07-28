@@ -723,6 +723,34 @@ pub(crate) async fn generate_session_compact(
                 itl_max_ms: timing.itl_max_ms(),
             }
         }
+        ApiBackend::GoogleGenerateContent | ApiBackend::BedrockConverseStream | ApiBackend::PiMessages => {
+            let request = ConversationRequest {
+                items: chat_history,
+                tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),
+                tools,
+                hosted_tools,
+                model: Some(sampling_config.model.to_owned()),
+                temperature: Some(1.0),
+                x_grok_conv_id: Some(session_id.to_string()),
+                x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
+                x_grok_session_id: Some(session_id.to_string()),
+                x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                ..Default::default()
+            };
+            let response = client
+                .conversation_collect(request)
+                .await
+                .map_err(classify_sampling_error)?;
+            CompactOutput {
+                content: response.assistant_text(),
+                stop_reason: response.stop_reason.map(|reason| format!("{reason:?}")),
+                truncated: false,
+                ttft_ms: None,
+                stream_ms: None,
+                delta_count: response.message_chunks_emitted,
+                itl_max_ms: None,
+            }
+        }
     };
     if output.content.is_empty() {
         Err(CompactFailure::Transient(
@@ -978,7 +1006,8 @@ mod compacted_history_shape_tests {
             ConversationItem::assistant("Let me look at the file."),
             ConversationItem::Assistant(AssistantItem {
                 content: "I'll read the file now.".into(),
-                tool_calls: vec![ToolCall {
+                provider_native_state: None,
+            tool_calls: vec![ToolCall {
                     id: "tc1".into(),
                     name: "read_file".into(),
                     arguments: r#"{"target_file": "src/auth.rs"}"#.into(),
@@ -991,7 +1020,8 @@ mod compacted_history_shape_tests {
             ConversationItem::tool_result("tc1", "fn login() { /* buggy code */ }"),
             ConversationItem::Assistant(AssistantItem {
                 content: "Found the bug, applying fix.".into(),
-                tool_calls: vec![ToolCall {
+                provider_native_state: None,
+            tool_calls: vec![ToolCall {
                     id: "tc2".into(),
                     name: "search_replace".into(),
                     arguments: r#"{"file_path": "src/auth.rs", "old_string": "buggy", "new_string": "fixed"}"#.into(),
@@ -1157,6 +1187,7 @@ mod compacted_history_shape_tests {
             ),
             ConversationItem::Assistant(AssistantItem {
                 content: "reading the file".into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "tc1".into(),
                     name: "read_file".into(),
@@ -1634,6 +1665,9 @@ mod reasoning_compaction_regression_tests {
             temperature: Some(0.7),
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,
+            adapter_kind: Default::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
             query_params: Default::default(),
@@ -1657,6 +1691,9 @@ mod reasoning_compaction_regression_tests {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            bedrock_request_metadata: Default::default(),
+            bedrock_headers: Default::default(),
+            bedrock_profile: None,
             kimi_dialect: false,
         }
     }

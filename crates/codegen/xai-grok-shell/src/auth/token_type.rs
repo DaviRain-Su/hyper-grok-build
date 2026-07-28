@@ -34,7 +34,9 @@ impl TokenType {
                 AuthMode::ApiKey
                 | AuthMode::KimiCode
                 | AuthMode::OpenAiCodex
-                | AuthMode::AnthropicClaude => Self::ApiKey,
+                | AuthMode::AnthropicClaude
+                | AuthMode::GitHubCopilot
+                | AuthMode::Radius => Self::ApiKey,
             },
         }
     }

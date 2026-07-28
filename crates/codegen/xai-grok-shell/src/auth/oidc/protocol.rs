@@ -258,6 +258,11 @@ pub(super) fn build_grok_auth(
         oidc_client_id: Some(client_id.to_owned()),
         account_id: None,
         platform_base_url: None,
+        github_domain: None,
+        github_copilot_base_url: None,
+        github_copilot_available_models: None,
+        aws_profile: None,
+        aws_credential_chain: false,
     }
 }
 #[derive(Debug, Clone, Deserialize)]

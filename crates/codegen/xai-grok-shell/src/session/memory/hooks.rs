@@ -225,6 +225,7 @@ mod tests {
     fn make_assistant(text: &str) -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: text.into(),
+            provider_native_state: None,
             tool_calls: vec![],
             model_id: None,
             reasoning_model_identity: None,
@@ -332,6 +333,7 @@ mod tests {
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "tc_1".to_string(),
                 content: "file written".into(),
+                is_error: false,
                 images: Vec::new(),
             }),
         ];

@@ -130,7 +130,7 @@ fn print_status() {
     println!("Available models:");
     for model in xai_grok_models::platform_builtin_models()
         .iter()
-        .filter(|m| m.platform == xai_grok_models::PlatformId::OpenAiCodex)
+        .filter(|m| m.legacy_platform() == Some(xai_grok_models::PlatformId::OpenAiCodex))
     {
         println!("  openai-codex/{}", model.model);
     }

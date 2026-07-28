@@ -561,6 +561,78 @@ async fn run_one_attempt(
             )
             .await
         }
+        ApiBackend::GoogleGenerateContent => {
+            let (raw, identity) = match client.conversation_stream_google(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = crate::google::stream_google_generate_content(
+                teed,
+                request_id.clone(),
+                identity,
+                idle_timeout,
+            );
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                reasoning_model_identity,
+                None,
+                output_observed,
+            )
+            .await
+        }
+        ApiBackend::BedrockConverseStream => {
+            let (raw, identity) = match client.conversation_stream_bedrock(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = crate::bedrock::stream_bedrock_converse(
+                teed,
+                request_id.clone(),
+                identity,
+                idle_timeout,
+            );
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                reasoning_model_identity,
+                None,
+                output_observed,
+            )
+            .await
+        }
+        ApiBackend::PiMessages => {
+            let (raw, identity) = match client.conversation_stream_pi_messages(request).await {
+                Ok(pair) => pair,
+                Err(e) => return AttemptOutcome::InitFailed { error: e },
+            };
+            let (teed, captured) = tee_errors(raw);
+            let l2 = crate::pi_messages::stream_pi_messages(
+                teed,
+                request_id.clone(),
+                identity,
+                idle_timeout,
+            );
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                reasoning_model_identity,
+                None,
+                output_observed,
+            )
+            .await
+        }
         ApiBackend::Messages => {
             let (raw, metadata) = match client.conversation_stream_messages(request).await {
                 Ok(pair) => pair,

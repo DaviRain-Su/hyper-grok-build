@@ -1,0 +1,662 @@
+{
+  "providers": [
+    {
+      "apis": [
+        "bedrock-converse-stream"
+      ],
+      "hyper_catalog_model_count": 114,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "amazon-bedrock",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 114,
+      "pi_provider": "amazon-bedrock",
+      "reason_code": null,
+      "shared_model_count": 114,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "ant-ling",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "ant-ling",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages"
+      ],
+      "hyper_catalog_model_count": 15,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "anthropic",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 15,
+      "pi_provider": "anthropic",
+      "reason_code": null,
+      "shared_model_count": 15,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "azure-openai-responses"
+      ],
+      "hyper_catalog_model_count": 38,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "azure-openai-responses",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 38,
+      "pi_provider": "azure-openai-responses",
+      "reason_code": null,
+      "shared_model_count": 38,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "cerebras",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "cerebras",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages",
+        "openai-completions",
+        "openai-responses"
+      ],
+      "hyper_catalog_model_count": 42,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "cloudflare-ai-gateway",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 42,
+      "pi_provider": "cloudflare-ai-gateway",
+      "reason_code": null,
+      "shared_model_count": 42,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 13,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "cloudflare-workers-ai",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 13,
+      "pi_provider": "cloudflare-workers-ai",
+      "reason_code": null,
+      "shared_model_count": 13,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 2,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "deepseek",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 2,
+      "pi_provider": "deepseek",
+      "reason_code": null,
+      "shared_model_count": 2,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages",
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 16,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "fireworks",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 16,
+      "pi_provider": "fireworks",
+      "reason_code": null,
+      "shared_model_count": 16,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages",
+        "openai-completions",
+        "openai-responses"
+      ],
+      "hyper_catalog_model_count": 29,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "github-copilot",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 29,
+      "pi_provider": "github-copilot",
+      "reason_code": null,
+      "shared_model_count": 29,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "google-generative-ai"
+      ],
+      "hyper_catalog_model_count": 24,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "google",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 24,
+      "pi_provider": "google",
+      "reason_code": null,
+      "shared_model_count": 24,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "google-vertex"
+      ],
+      "hyper_catalog_model_count": 12,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "google-vertex",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 12,
+      "pi_provider": "google-vertex",
+      "reason_code": null,
+      "shared_model_count": 12,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 7,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "groq",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 7,
+      "pi_provider": "groq",
+      "reason_code": null,
+      "shared_model_count": 7,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 50,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "huggingface",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 50,
+      "pi_provider": "huggingface",
+      "reason_code": null,
+      "shared_model_count": 50,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages"
+      ],
+      "hyper_catalog_model_count": 5,
+      "hyper_extra_model_count": 1,
+      "hyper_provider": "kimi-code",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 4,
+      "pi_provider": "kimi-coding",
+      "reason_code": null,
+      "shared_model_count": 4,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "minimax",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "minimax",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "minimax-cn",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "minimax-cn",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "mistral-conversations"
+      ],
+      "hyper_catalog_model_count": 30,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "mistral",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 30,
+      "pi_provider": "mistral",
+      "reason_code": null,
+      "shared_model_count": 30,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 10,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "moonshot-ai",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 10,
+      "pi_provider": "moonshotai",
+      "reason_code": null,
+      "shared_model_count": 10,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 10,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "moonshot-cn",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 10,
+      "pi_provider": "moonshotai-cn",
+      "reason_code": null,
+      "shared_model_count": 10,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 19,
+      "hyper_extra_model_count": 1,
+      "hyper_provider": "nvidia",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 18,
+      "pi_provider": "nvidia",
+      "reason_code": null,
+      "shared_model_count": 18,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-responses"
+      ],
+      "hyper_catalog_model_count": 46,
+      "hyper_extra_model_count": 8,
+      "hyper_provider": "openai",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 38,
+      "pi_provider": "openai",
+      "reason_code": null,
+      "shared_model_count": 38,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-codex-responses"
+      ],
+      "hyper_catalog_model_count": 7,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "openai-codex",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 7,
+      "pi_provider": "openai-codex",
+      "reason_code": null,
+      "shared_model_count": 7,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages",
+        "google-generative-ai",
+        "openai-completions",
+        "openai-responses"
+      ],
+      "hyper_catalog_model_count": 58,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "opencode",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 58,
+      "pi_provider": "opencode",
+      "reason_code": null,
+      "shared_model_count": 58,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages",
+        "openai-completions",
+        "openai-responses"
+      ],
+      "hyper_catalog_model_count": 16,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "opencode-go",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 16,
+      "pi_provider": "opencode-go",
+      "reason_code": null,
+      "shared_model_count": 16,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 277,
+      "hyper_extra_model_count": 1,
+      "hyper_provider": "openrouter",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 276,
+      "pi_provider": "openrouter",
+      "reason_code": null,
+      "shared_model_count": 276,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 15,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "qwen-token-plan",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 15,
+      "pi_provider": "qwen-token-plan",
+      "reason_code": null,
+      "shared_model_count": 15,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 15,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "qwen-token-plan-cn",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 15,
+      "pi_provider": "qwen-token-plan-cn",
+      "reason_code": null,
+      "shared_model_count": 15,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "pi-messages"
+      ],
+      "hyper_catalog_model_count": 0,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "radius",
+      "kind": "dynamic",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 0,
+      "pi_provider": "radius",
+      "reason_code": null,
+      "shared_model_count": 0,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 16,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "together",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 16,
+      "pi_provider": "together",
+      "reason_code": null,
+      "shared_model_count": 16,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "anthropic-messages"
+      ],
+      "hyper_catalog_model_count": 192,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "vercel-ai-gateway",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 192,
+      "pi_provider": "vercel-ai-gateway",
+      "reason_code": null,
+      "shared_model_count": 192,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions",
+        "openai-responses"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "xai-direct",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "xai",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 6,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "xiaomi",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 6,
+      "pi_provider": "xiaomi",
+      "reason_code": null,
+      "shared_model_count": 6,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "xiaomi-token-plan-ams",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "xiaomi-token-plan-ams",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "xiaomi-token-plan-cn",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "xiaomi-token-plan-cn",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 3,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "xiaomi-token-plan-sgp",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 3,
+      "pi_provider": "xiaomi-token-plan-sgp",
+      "reason_code": null,
+      "shared_model_count": 3,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 6,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "zai",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 6,
+      "pi_provider": "zai",
+      "reason_code": null,
+      "shared_model_count": 6,
+      "status": "supported",
+      "target_wave": null
+    },
+    {
+      "apis": [
+        "openai-completions"
+      ],
+      "hyper_catalog_model_count": 6,
+      "hyper_extra_model_count": 0,
+      "hyper_provider": "zai-coding-cn",
+      "kind": "static",
+      "missing_from_hyper_count": 0,
+      "pi_model_count": 6,
+      "pi_provider": "zai-coding-cn",
+      "reason_code": null,
+      "shared_model_count": 6,
+      "status": "supported",
+      "target_wave": null
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "model_data_generated_at": "2026-07-25T12:44:19.521Z",
+    "model_data_structure_hash": "1a3c7cf59ada71c94abe4540976960524ee933034491c75d6418e2abc1b42535",
+    "package": "@earendil-works/pi-ai",
+    "package_version": "0.82.1",
+    "pi_commit": "a597371bda2af70372d1323d550483b5f4a0ae36"
+  },
+  "summary": {
+    "api_model_counts": {
+      "anthropic-messages": 276,
+      "azure-openai-responses": 38,
+      "bedrock-converse-stream": 114,
+      "google-generative-ai": 29,
+      "google-vertex": 12,
+      "mistral-conversations": 30,
+      "openai-codex-responses": 7,
+      "openai-completions": 512,
+      "openai-responses": 91
+    },
+    "dynamic_provider_count": 1,
+    "hyper_only_registry_providers": [
+      "anthropic-claude",
+      "nexus",
+      "ollama",
+      "zai-coding"
+    ],
+    "model_drift_providers": [
+      "kimi-coding",
+      "nvidia",
+      "openai",
+      "openrouter"
+    ],
+    "pi_model_count": 1109,
+    "planned_provider_count": 0,
+    "static_provider_count": 37,
+    "supported_provider_count": 38,
+    "total_provider_count": 38
+  }
+}

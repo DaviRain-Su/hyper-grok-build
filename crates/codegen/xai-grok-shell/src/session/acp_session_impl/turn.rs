@@ -1,6 +1,7 @@
 //! Turn-execution concern for `SessionActor` (`handle_prompt`, turn-end,
 //! sampling loop).
 use super::*;
+use tracing::Instrument as _;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
@@ -236,9 +237,9 @@ impl SessionActor {
             command_source = tracing::field::Empty,
         )
     )]
-    pub(super) async fn handle_prompt(
-        self: &Arc<Self>,
-        prompt_id: &str,
+    pub(super) fn handle_prompt<'a>(
+        self: &'a Arc<Self>,
+        prompt_id: &'a str,
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_mode: PromptMode,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
@@ -249,991 +250,1042 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         persist_ack: Option<oneshot::Sender<()>>,
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
-    ) -> PromptTurnResult {
-        let handle_prompt_start = std::time::Instant::now();
-        let prompt_length: usize = prompt_blocks
-            .iter()
-            .map(|b| match b {
-                acp::ContentBlock::Text(t) => t.text.len(),
-                _ => 0,
-            })
-            .sum();
-        tracing::Span::current().record("prompt_length", prompt_length as i64);
-        *self.active_skill.lock() = None;
-        xai_grok_telemetry::unified_log::info(
-            "shell.handle_prompt.start",
-            Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!({
-                "prompt_id": prompt_id,
-                "block_count": prompt_blocks.len(),
-            })),
-        );
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-        if let Some(completion_id) = origin.completion_id() {
-            self.mark_completions_reported(&[completion_id]).await;
-            if let Some(reservations) = &self.tool_context.task_completion_reservations {
-                reservations.release(completion_id);
-            }
-        }
-        if !origin.is_synthetic() {
-            self.cancel_pending_recap_for_new_prompt();
-        }
-        *self.turn_start_prompt_mode.lock() = prompt_mode;
-        *self.turn_prompt_mode.lock() = prompt_mode;
-        self.signals_handle().increment_turn();
-        self.reconcile_plan_mode_with_prompt(prompt_mode);
-        let _turn_active_guard =
-            TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
-        let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
-        let turn_start_input = xai_agent_lifecycle::TurnStartInput::new(
-            super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
-        );
-        for contributor in self.extension_registry.turn_lifecycle_contributors() {
-            contributor.on_turn_start(&turn_start_input).await;
-        }
-        if let Ok(mut pending) = self.rewind_pending_prompt.lock()
-            && let Some(prev_text) = pending.take()
-        {
-            let new_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
-                if let acp::ContentBlock::Text(t) = b {
-                    acc.push_str(&t.text);
-                }
-                acc
-            });
-            if new_text.trim() == prev_text.trim() {
-                self.signals_handle().record_regeneration();
-            } else {
-                self.signals_handle().record_edit_and_retry();
-            }
-        }
-        if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
-            return self
-                .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
-                .await;
-        }
-        let slash_skills = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .clone()
-            .slash_skills()
-            .await;
-        let skill_rewrite = if crate::session::is_cursor_user_template(
-            &self.agent.borrow().definition().user_message_template,
-        ) {
-            slash_commands::SkillSlashRewrite::Passthrough
-        } else {
-            slash_commands::SkillSlashRewrite::RewriteToRun
-        };
-        let availability = self.command_availability().await;
-        let mut pending_skill_information: Option<String> = None;
-        let (workflow_registry, named_workflows) = self.named_workflow_snapshot();
-        let original_prompt_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
-            if let acp::ContentBlock::Text(t) = b {
-                acc.push_str(&t.text);
-            }
-            acc
-        });
-        let prompt_blocks = match slash_commands::resolve(
-            prompt_blocks,
-            &slash_skills,
-            availability,
-            skill_rewrite,
-            &named_workflows,
-        ) {
-            Ok(blocks) => blocks,
-            Err(SlashCommandOutcome::Builtin(action)) => {
-                let text_block =
-                    |text: String| acp::ContentBlock::Text(acp::TextContent::new(text));
-                let slash_used = xai_grok_telemetry::events::SlashCommandUsed {
-                    command: action.command_name().to_string(),
-                    args_provided: action.args_provided(),
-                };
-                {
-                    let span = tracing::Span::current();
-                    span.record("command_name", action.command_name());
-                    span.record("command_source", "builtin");
-                }
-                match action {
-                    BuiltinAction::GoalSet {
-                        objective,
-                        token_budget,
-                    } => {
-                        xai_grok_telemetry::session_ctx::log_event(slash_used);
-                        let reminder = self.setup_goal(&objective, token_budget).await;
-                        vec![text_block(reminder)]
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PromptTurnResult> + 'a>> {
+        let span = tracing::Span::current();
+        Box::pin(
+            async move {
+                let handle_prompt_start = std::time::Instant::now();
+                let prompt_length: usize = prompt_blocks
+                    .iter()
+                    .map(|b| match b {
+                        acp::ContentBlock::Text(t) => t.text.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                tracing::Span::current().record("prompt_length", prompt_length as i64);
+                *self.active_skill.lock() = None;
+                xai_grok_telemetry::unified_log::info(
+                    "shell.handle_prompt.start",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "prompt_id": prompt_id,
+                        "block_count": prompt_blocks.len(),
+                    })),
+                );
+                let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+                if let Some(completion_id) = origin.completion_id() {
+                    self.mark_completions_reported(&[completion_id]).await;
+                    if let Some(reservations) = &self.tool_context.task_completion_reservations {
+                        reservations.release(completion_id);
                     }
-                    BuiltinAction::GoalResume => {
-                        xai_grok_telemetry::session_ctx::log_event(slash_used);
-                        match self.resume_goal().await {
-                            GoalResumeOutcome::Inference { reminder, user_msg } => {
-                                self.send_slash_command_output(&user_msg).await;
+                }
+                if !origin.is_synthetic() {
+                    self.cancel_pending_recap_for_new_prompt();
+                }
+                *self.turn_start_prompt_mode.lock() = prompt_mode;
+                *self.turn_prompt_mode.lock() = prompt_mode;
+                self.signals_handle().increment_turn();
+                self.reconcile_plan_mode_with_prompt(prompt_mode);
+                let _turn_active_guard =
+                    TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
+                let _session_turn_active_guard =
+                    TurnActiveGuard::activate(Some(&self.session_turn_active));
+                let turn_start_input = xai_agent_lifecycle::TurnStartInput::new(
+                    super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
+                );
+                for contributor in self.extension_registry.turn_lifecycle_contributors() {
+                    contributor.on_turn_start(&turn_start_input).await;
+                }
+                if let Ok(mut pending) = self.rewind_pending_prompt.lock()
+                    && let Some(prev_text) = pending.take()
+                {
+                    let new_text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+                        if let acp::ContentBlock::Text(t) = b {
+                            acc.push_str(&t.text);
+                        }
+                        acc
+                    });
+                    if new_text.trim() == prev_text.trim() {
+                        self.signals_handle().record_regeneration();
+                    } else {
+                        self.signals_handle().record_edit_and_retry();
+                    }
+                }
+                if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
+                    return self
+                        .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
+                        .await;
+                }
+                let slash_skills = self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .clone()
+                    .slash_skills()
+                    .await;
+                let skill_rewrite = if crate::session::is_cursor_user_template(
+                    &self.agent.borrow().definition().user_message_template,
+                ) {
+                    slash_commands::SkillSlashRewrite::Passthrough
+                } else {
+                    slash_commands::SkillSlashRewrite::RewriteToRun
+                };
+                let availability = self.command_availability().await;
+                let mut pending_skill_information: Option<String> = None;
+                let (workflow_registry, named_workflows) = self.named_workflow_snapshot();
+                let original_prompt_text =
+                    prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+                        if let acp::ContentBlock::Text(t) = b {
+                            acc.push_str(&t.text);
+                        }
+                        acc
+                    });
+                let prompt_blocks = match slash_commands::resolve(
+                    prompt_blocks,
+                    &slash_skills,
+                    availability,
+                    skill_rewrite,
+                    &named_workflows,
+                ) {
+                    Ok(blocks) => blocks,
+                    Err(SlashCommandOutcome::Builtin(action)) => {
+                        let text_block =
+                            |text: String| acp::ContentBlock::Text(acp::TextContent::new(text));
+                        let slash_used = xai_grok_telemetry::events::SlashCommandUsed {
+                            command: action.command_name().to_string(),
+                            args_provided: action.args_provided(),
+                        };
+                        {
+                            let span = tracing::Span::current();
+                            span.record("command_name", action.command_name());
+                            span.record("command_source", "builtin");
+                        }
+                        match action {
+                            BuiltinAction::GoalSet {
+                                objective,
+                                token_budget,
+                            } => {
+                                xai_grok_telemetry::session_ctx::log_event(slash_used);
+                                let reminder = self.setup_goal(&objective, token_budget).await;
                                 vec![text_block(reminder)]
                             }
-                            GoalResumeOutcome::Message(msg) => {
+                            BuiltinAction::GoalResume => {
+                                xai_grok_telemetry::session_ctx::log_event(slash_used);
+                                match self.resume_goal().await {
+                                    GoalResumeOutcome::Inference { reminder, user_msg } => {
+                                        self.send_slash_command_output(&user_msg).await;
+                                        vec![text_block(reminder)]
+                                    }
+                                    GoalResumeOutcome::Message(msg) => {
+                                        self.persist_host_turn_user_echo(
+                                            &original_prompt_text,
+                                            prompt_id,
+                                        );
+                                        self.send_host_turn_slash_command_output(&msg).await;
+                                        return ok_end_turn(0, None);
+                                    }
+                                }
+                            }
+                            BuiltinAction::WorkflowLaunch { name, input } => {
                                 self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                                let msg = self
+                                    .launch_named_workflow(&workflow_registry, &name, &input)
+                                    .await;
                                 self.send_host_turn_slash_command_output(&msg).await;
                                 return ok_end_turn(0, None);
                             }
+                            _ => {
+                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                                return self.execute_builtin_slash_command(action).await;
+                            }
                         }
                     }
-                    BuiltinAction::WorkflowLaunch { name, input } => {
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        let msg = self
-                            .launch_named_workflow(&workflow_registry, &name, &input)
+                    Err(SlashCommandOutcome::InvokeSkill {
+                        blocks: original_blocks,
+                        skills: parsed_skills,
+                    }) => {
+                        if let Some(first) = parsed_skills.first() {
+                            *self.active_skill.lock() = Some(first.name.clone());
+                            let span = tracing::Span::current();
+                            span.record("command_name", first.name.as_str());
+                            span.record(
+                                "command_source",
+                                if first.plugin_name.is_some() {
+                                    "plugin"
+                                } else {
+                                    "skill"
+                                },
+                            );
+                        }
+                        for sk in &parsed_skills {
+                            xai_grok_telemetry::session_ctx::log_event(
+                                xai_grok_telemetry::events::SlashCommandUsed {
+                                    command: sk.name.clone(),
+                                    args_provided: !sk.args.is_empty(),
+                                },
+                            );
+                            xai_grok_telemetry::session_ctx::log_event(
+                                xai_grok_telemetry::events::SkillDispatched {
+                                    skill_name: sk.name.clone(),
+                                    plugin_source: sk.plugin_name.clone(),
+                                },
+                            );
+                            let skill_source = if sk.plugin_name.is_some() {
+                                "plugin"
+                            } else {
+                                crate::session::telemetry::skill_source_label(
+                                    &sk.skill_path,
+                                    self.session_info.cwd.as_str(),
+                                )
+                            };
+                            tracing::info_span!(
+                                "skill.activated",
+                                skill_name = %sk.name,
+                                invocation_trigger = "slash_command",
+                                skill_source = skill_source,
+                            )
+                            .in_scope(|| {});
+                            if let Some(ref pname) = sk.plugin_name {
+                                xai_grok_telemetry::session_ctx::log_event(
+                                    xai_grok_telemetry::events::PluginUsed {
+                                        plugin_id: pname.clone(),
+                                        plugin_name: pname.clone(),
+                                        skill_name: Some(sk.name.clone()),
+                                        hook_event: None,
+                                        success: true,
+                                    },
+                                );
+                                tracing::info_span!(
+                                    "plugin.used",
+                                    plugin_name = %pname,
+                                    skill_name = %sk.name,
+                                )
+                                .in_scope(|| {});
+                            }
+                        }
+                        pending_skill_information =
+                            slash_commands::build_skill_information_for_refs(
+                                &parsed_skills,
+                                &slash_skills,
+                                &self.session_id_string(),
+                            )
                             .await;
-                        self.send_host_turn_slash_command_output(&msg).await;
-                        return ok_end_turn(0, None);
+                        original_blocks
                     }
-                    _ => {
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
-                        return self.execute_builtin_slash_command(action).await;
-                    }
-                }
-            }
-            Err(SlashCommandOutcome::InvokeSkill {
-                blocks: original_blocks,
-                skills: parsed_skills,
-            }) => {
-                if let Some(first) = parsed_skills.first() {
-                    *self.active_skill.lock() = Some(first.name.clone());
-                    let span = tracing::Span::current();
-                    span.record("command_name", first.name.as_str());
-                    span.record(
-                        "command_source",
-                        if first.plugin_name.is_some() {
-                            "plugin"
-                        } else {
-                            "skill"
-                        },
-                    );
-                }
-                for sk in &parsed_skills {
-                    xai_grok_telemetry::session_ctx::log_event(
-                        xai_grok_telemetry::events::SlashCommandUsed {
-                            command: sk.name.clone(),
-                            args_provided: !sk.args.is_empty(),
-                        },
-                    );
-                    xai_grok_telemetry::session_ctx::log_event(
-                        xai_grok_telemetry::events::SkillDispatched {
-                            skill_name: sk.name.clone(),
-                            plugin_source: sk.plugin_name.clone(),
-                        },
-                    );
-                    let skill_source = if sk.plugin_name.is_some() {
-                        "plugin"
-                    } else {
-                        crate::session::telemetry::skill_source_label(
-                            &sk.skill_path,
-                            self.session_info.cwd.as_str(),
-                        )
-                    };
-                    tracing::info_span!(
-                        "skill.activated",
-                        skill_name = %sk.name,
-                        invocation_trigger = "slash_command",
-                        skill_source = skill_source,
-                    )
-                    .in_scope(|| {});
-                    if let Some(ref pname) = sk.plugin_name {
-                        xai_grok_telemetry::session_ctx::log_event(
-                            xai_grok_telemetry::events::PluginUsed {
-                                plugin_id: pname.clone(),
-                                plugin_name: pname.clone(),
-                                skill_name: Some(sk.name.clone()),
-                                hook_event: None,
-                                success: true,
-                            },
-                        );
-                        tracing::info_span!(
-                            "plugin.used",
-                            plugin_name = %pname,
-                            skill_name = %sk.name,
-                        )
-                        .in_scope(|| {});
-                    }
-                }
-                pending_skill_information = slash_commands::build_skill_information_for_refs(
-                    &parsed_skills,
-                    &slash_skills,
-                    &self.session_id_string(),
-                )
-                .await;
-                original_blocks
-            }
-        };
-        self.events.begin_turn();
-        let model_id = self.current_model_id().await;
-        let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
-        self.current_turn_number.set(turn_number);
-        let yolo_mode = self.permissions.is_yolo_mode();
-        let msg_count = self.chat_state_handle.get_conversation_len().await;
-        let redirect_kind = if matches!(
-            super::super::PromptOrigin::from_prompt_id(prompt_id),
-            super::super::PromptOrigin::User
-        ) {
-            self.events.take_prior_redirect_kind()
-        } else {
-            None
-        };
-        self.emit_event(crate::session::events::Event::TurnStarted {
-            session_id: self.session_id_string(),
-            turn_number,
-            model_id: model_id.clone(),
-            yolo_mode,
-            conversation_message_count: msg_count,
-            session_relationship: crate::session::events::SessionRelationship::Primary,
-            schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
-            redirect_kind,
-        });
-        self.observability_bridge
-            .emit(
-                xai_tool_protocol::session_event::SessionEvent::TurnStarted {
+                };
+                self.events.begin_turn();
+                let model_id = self.current_model_id().await;
+                let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
+                self.current_turn_number.set(turn_number);
+                let yolo_mode = self.permissions.is_yolo_mode();
+                let msg_count = self.chat_state_handle.get_conversation_len().await;
+                let redirect_kind = if matches!(
+                    super::super::PromptOrigin::from_prompt_id(prompt_id),
+                    super::super::PromptOrigin::User
+                ) {
+                    self.events.take_prior_redirect_kind()
+                } else {
+                    None
+                };
+                self.emit_event(crate::session::events::Event::TurnStarted {
+                    session_id: self.session_id_string(),
                     turn_number,
                     model_id: model_id.clone(),
                     yolo_mode,
-                },
-            )
-            .await;
-        self.send_before_turn_event(xai_tool_protocol::turn_hook::BeforeTurnPayload {
-            turn_number: self.chat_state_handle.get_prompt_index().await as u64,
-            model_id: model_id.clone(),
-            yolo_mode: self.permissions.is_yolo_mode(),
-            conversation_message_count: msg_count,
-            session_relationship: xai_tool_protocol::turn_hook::DEFAULT_SESSION_RELATIONSHIP
-                .to_string(),
-            schema_version: crate::session::events::EVENT_SCHEMA_VERSION.to_string(),
-        })
-        .await;
-        let turn_idx = self.chat_state_handle.get_prompt_index().await as u64;
-        xai_grok_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::Turn {
-            session_id: self.session_info.id.0.to_string(),
-            turn_number: turn_idx,
-        });
-        let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
-        xai_grok_telemetry::session_ctx::begin_prompt_id();
-        let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-        let mut chunk_meta = serde_json::Map::new();
-        chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
-        chunk_meta.insert(
-            "promptIndex".into(),
-            serde_json::json!(current_prompt_index),
-        );
-        if origin.hide_user_echo_from_scrollback() {
-            chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
-        }
-        let user_chunk_meta = Some(chunk_meta);
-        self.chat_state_handle.increment_prompt_index();
-        let text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
-            if let acp::ContentBlock::Text(t) = b {
-                acc.push_str(&t.text);
-            }
-            acc
-        });
-        let trimmed = text.trim().to_string();
-        if !trimmed.is_empty() {
-            self.chat_state_handle.cache_prompt_text(trimmed);
-        }
-        *self.tool_context.prompt_index.lock().await = current_prompt_index;
-        self.file_state_tracker
-            .begin_prompt(current_prompt_index)
-            .await;
-        let echo_mode = user_echo_mode(prompt_id);
-        for block in prompt_blocks.iter() {
-            let update = acp::SessionUpdate::UserMessageChunk(
-                acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
-            );
-            let notification_meta = self.build_notification_meta();
-            let notification = acp::SessionNotification::new(self.session_info.id.clone(), update)
-                .meta(notification_meta.as_object().cloned());
-            if echo_mode == UserEchoMode::PersistOnly {
+                    conversation_message_count: msg_count,
+                    session_relationship: crate::session::events::SessionRelationship::Primary,
+                    schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
+                    redirect_kind,
+                });
+                self.observability_bridge
+                    .emit(
+                        xai_tool_protocol::session_event::SessionEvent::TurnStarted {
+                            turn_number,
+                            model_id: model_id.clone(),
+                            yolo_mode,
+                        },
+                    )
+                    .await;
+                self.send_before_turn_event(xai_tool_protocol::turn_hook::BeforeTurnPayload {
+                    turn_number: self.chat_state_handle.get_prompt_index().await as u64,
+                    model_id: model_id.clone(),
+                    yolo_mode: self.permissions.is_yolo_mode(),
+                    conversation_message_count: msg_count,
+                    session_relationship:
+                        xai_tool_protocol::turn_hook::DEFAULT_SESSION_RELATIONSHIP.to_string(),
+                    schema_version: crate::session::events::EVENT_SCHEMA_VERSION.to_string(),
+                })
+                .await;
+                let turn_idx = self.chat_state_handle.get_prompt_index().await as u64;
+                xai_grok_telemetry::session_ctx::log_session_event(
+                    crate::agent::session_metrics::Turn {
+                        session_id: self.session_info.id.0.to_string(),
+                        turn_number: turn_idx,
+                    },
+                );
+                let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
+                xai_grok_telemetry::session_ctx::begin_prompt_id();
+                let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+                let mut chunk_meta = serde_json::Map::new();
+                chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
+                chunk_meta.insert(
+                    "promptIndex".into(),
+                    serde_json::json!(current_prompt_index),
+                );
+                if origin.hide_user_echo_from_scrollback() {
+                    chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
+                }
+                let user_chunk_meta = Some(chunk_meta);
+                self.chat_state_handle.increment_prompt_index();
+                let text = prompt_blocks.iter().fold(String::new(), |mut acc, b| {
+                    if let acp::ContentBlock::Text(t) = b {
+                        acc.push_str(&t.text);
+                    }
+                    acc
+                });
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    self.chat_state_handle.cache_prompt_text(trimmed);
+                }
+                *self.tool_context.prompt_index.lock().await = current_prompt_index;
+                self.file_state_tracker
+                    .begin_prompt(current_prompt_index)
+                    .await;
+                let echo_mode = user_echo_mode(prompt_id);
+                for block in prompt_blocks.iter() {
+                    let update = acp::SessionUpdate::UserMessageChunk(
+                        acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
+                    );
+                    let notification_meta = self.build_notification_meta();
+                    let notification =
+                        acp::SessionNotification::new(self.session_info.id.clone(), update)
+                            .meta(notification_meta.as_object().cloned());
+                    if echo_mode == UserEchoMode::PersistOnly {
+                        let _ = self
+                            .notifications
+                            .persistence_tx
+                            .send(PersistenceMsg::Update(
+                                crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
+                            ));
+                    } else {
+                        self.emit_notification_direct(notification).await;
+                    }
+                }
+                let crate::session::prompt_parser::ParsedPrompt {
+                    mut context,
+                    query,
+                    skill_information: skill_info,
+                    images: mut raw_images,
+                    is_cursor,
+                } = match parse_prompt_with_skills(
+                    &prompt_blocks,
+                    self.tool_context.cwd.to_path_buf(),
+                    &self.session_info,
+                    verbatim,
+                    self.is_cursor_harness(),
+                    pending_skill_information.take().unwrap_or_default(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!("Invalid prompt: {}", err.message);
+                        return Err(err);
+                    }
+                };
+                let recovered = crate::session::placeholder_images::recover_orphan_placeholders(
+                    &query,
+                    &mut raw_images,
+                    std::path::Path::new(&self.session_info.cwd),
+                );
+                if recovered > 0 {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        recovered,
+                        "server-side placeholder fallback: loaded orphan image(s) from disk",
+                    );
+                }
+                let query =
+                    crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
+                let user_images = self
+                    .normalize_images_with_notices(&mut context, raw_images, is_cursor)
+                    .await;
+                let (query, extra_images) = if !self.is_cursor_harness() {
+                    let extraction =
+                        xai_grok_tools::util::base64_images::extract_base64_images(query);
+                    if extraction.images.is_empty() {
+                        (extraction.text, Vec::new())
+                    } else {
+                        let cleaned_text = extraction.text;
+                        let count = extraction.images.len();
+                        tracing::info!(
+                            session_id = %self.session_info.id,
+                            count,
+                            "base64 images extracted from user query",
+                        );
+                        let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
+                            .images
+                            .into_iter()
+                            .map(|img| {
+                                agent_client_protocol::ImageContent::new(img.data, img.mime_type)
+                            })
+                            .collect();
+                        let nr = crate::session::image_normalize::normalize_images(acp_imgs, false)
+                            .await;
+                        if !nr.re_encode_fallbacks.is_empty() {
+                            tracing::warn!(
+                                session_id = %self.session_info.id,
+                                notes = %nr.re_encode_fallbacks.join(" "),
+                                "Extracted user query image kept original after re-encode failure",
+                            );
+                        }
+                        (cleaned_text, nr.images)
+                    }
+                } else {
+                    (query, Vec::new())
+                };
+                let assembled =
+                    crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
+                        &context,
+                        &query,
+                        &skill_info,
+                        is_cursor,
+                    );
+                let pre_truncation_text = assembled.clone();
+                let (user_message, truncated_local_path) = if verbatim {
+                    (assembled, None)
+                } else {
+                    self.maybe_truncate_large_prompt_with_skills(
+                        context,
+                        query,
+                        skill_info,
+                        is_cursor,
+                        current_prompt_index,
+                    )
+                    .await
+                };
+                let was_truncated = truncated_local_path.is_some();
+                if let Some(tx) = parsed_prompt_tx {
+                    let _ = tx.send(ParsedPromptInfo {
+                        text: user_message.clone(),
+                        full_text: if was_truncated {
+                            Some(pre_truncation_text)
+                        } else {
+                            None
+                        },
+                        local_path: truncated_local_path,
+                    });
+                }
                 let _ = self
                     .notifications
                     .persistence_tx
-                    .send(PersistenceMsg::Update(
-                        crate::session::storage::SessionUpdate::Acp(Box::new(notification)),
-                    ));
-            } else {
-                self.emit_notification_direct(notification).await;
-            }
-        }
-        let crate::session::prompt_parser::ParsedPrompt {
-            mut context,
-            query,
-            skill_information: skill_info,
-            images: mut raw_images,
-            is_cursor,
-        } = match parse_prompt_with_skills(
-            &prompt_blocks,
-            self.tool_context.cwd.to_path_buf(),
-            &self.session_info,
-            verbatim,
-            self.is_cursor_harness(),
-            pending_skill_information.take().unwrap_or_default(),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!("Invalid prompt: {}", err.message);
-                return Err(err);
-            }
-        };
-        let recovered = crate::session::placeholder_images::recover_orphan_placeholders(
-            &query,
-            &mut raw_images,
-            std::path::Path::new(&self.session_info.cwd),
-        );
-        if recovered > 0 {
-            tracing::info!(
-                session_id = %self.session_info.id,
-                recovered,
-                "server-side placeholder fallback: loaded orphan image(s) from disk",
-            );
-        }
-        let query = crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
-        let user_images = self
-            .normalize_images_with_notices(&mut context, raw_images, is_cursor)
-            .await;
-        let (query, extra_images) = if !self.is_cursor_harness() {
-            let extraction = xai_grok_tools::util::base64_images::extract_base64_images(query);
-            if extraction.images.is_empty() {
-                (extraction.text, Vec::new())
-            } else {
-                let cleaned_text = extraction.text;
-                let count = extraction.images.len();
-                tracing::info!(
-                    session_id = %self.session_info.id,
-                    count,
-                    "base64 images extracted from user query",
-                );
-                let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
-                    .images
-                    .into_iter()
-                    .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))
-                    .collect();
-                let nr = crate::session::image_normalize::normalize_images(acp_imgs, false).await;
-                if !nr.re_encode_fallbacks.is_empty() {
-                    tracing::warn!(
-                        session_id = %self.session_info.id,
-                        notes = %nr.re_encode_fallbacks.join(" "),
-                        "Extracted user query image kept original after re-encode failure",
-                    );
-                }
-                (cleaned_text, nr.images)
-            }
-        } else {
-            (query, Vec::new())
-        };
-        let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
-            &context,
-            &query,
-            &skill_info,
-            is_cursor,
-        );
-        let pre_truncation_text = assembled.clone();
-        let (user_message, truncated_local_path) = if verbatim {
-            (assembled, None)
-        } else {
-            self.maybe_truncate_large_prompt_with_skills(
-                context,
-                query,
-                skill_info,
-                is_cursor,
-                current_prompt_index,
-            )
-            .await
-        };
-        let was_truncated = truncated_local_path.is_some();
-        if let Some(tx) = parsed_prompt_tx {
-            let _ = tx.send(ParsedPromptInfo {
-                text: user_message.clone(),
-                full_text: if was_truncated {
-                    Some(pre_truncation_text)
-                } else {
-                    None
-                },
-                local_path: truncated_local_path,
-            });
-        }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
-                prompt_blocks.to_vec(),
-            )));
-        let model_id = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
-        if self.telemetry_enabled || xai_grok_telemetry::external::is_active() {
-            let effective_client_identifier =
-                prompt_client_identifier.or_else(|| self.client_identifier.clone());
-            let ev = xai_grok_telemetry::events::PromptSubmitted {
-                prompt_length: user_message.len(),
-                model_id,
-                client_identifier: effective_client_identifier,
-                screen_mode: prompt_screen_mode,
-                prompt_text: None,
-            };
-            xai_grok_telemetry::session_ctx::log_event_dual(self.telemetry_enabled, ev);
-        }
-        self.maybe_inject_mcp_reminder().await;
-        self.maybe_inject_mcp_connecting_reminder().await;
-        self.maybe_inject_date_rollover_reminder().await;
-        self.inject_plan_mode_reminders().await;
-        self.inject_resumed_tasks_reminder();
-        if matches!(&origin, super::super::PromptOrigin::User) {
-            if let Some(gate) = &self.tool_context.task_wake_suppressed {
-                gate.set(false);
-            }
-            xai_grok_telemetry::unified_log::info(
-                "shell.task_wake.gate_cleared",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
-            );
-            self.consume_deferred_completions_for_user_turn().await;
-        }
-        self.drain_between_turn_completions().await;
-        self.inject_workflow_status_reminder().await;
-        let user_message = if user_images.is_empty() {
-            user_message
-        } else if self.is_cursor_harness() {
-            self.transcribe_user_images(user_message, &user_images)
-                .await?
-        } else {
-            let session_dir =
-                crate::session::persistence::session_dir(&crate::session::info::Info {
-                    id: self.session_info.id.clone(),
-                    cwd: self.session_info.cwd.clone(),
-                });
-            crate::session::image_describe::persist_and_prepend_image_files(
-                &session_dir,
-                &user_images,
-                &user_message,
-            )
-            .map_err(|e| {
-                acp::Error::internal_error()
-                    .data(format!("failed to save user images to assets dir: {e}"))
-            })?
-        };
-        let attached_image_refs = if self.is_cursor_harness() {
-            Vec::new()
-        } else {
-            crate::session::placeholder_images::attached_image_references(&user_images)
-        };
-        self.tool_bridge_handle()
-            .update_resource(xai_grok_tools::types::resources::AttachedImages(
-                attached_image_refs,
-            ))
-            .await;
-        let prompt_text_for_hook = user_message.clone();
-        {
-            if trace_gcs_config.is_some() {
-                self.chat_state_handle.begin_turn_capture();
-            }
-            let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
-            if matches!(origin, super::super::PromptOrigin::User) {
-                self.maybe_inject_interrupt_reminder().await;
-            }
-            let mut user_chat = match &origin {
-                super::super::PromptOrigin::TaskCompleted { .. } => {
-                    ConversationItem::task_completed(user_message)
-                }
-                super::super::PromptOrigin::SubagentCompleted { .. } => {
-                    ConversationItem::subagent_completed(user_message)
-                }
-                super::super::PromptOrigin::WorkflowCompleted { .. } => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::NotificationDrain => {
-                    ConversationItem::notification_drain(user_message)
-                }
-                super::super::PromptOrigin::GoalSummary => {
-                    ConversationItem::goal_summary(user_message)
-                }
-                super::super::PromptOrigin::GoalClassifierNudge => {
-                    ConversationItem::goal_classifier_nudge(user_message)
-                }
-                super::super::PromptOrigin::SchedulerFired => {
-                    ConversationItem::scheduler_fired(user_message)
-                }
-                super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
-                super::super::PromptOrigin::User => {
-                    let mut item = ConversationItem::user(user_message);
-                    if let Some(interrupt) = self
-                        .events
-                        .take_prior_interrupt_category()
-                        .and_then(crate::session::events::prior_turn_interrupt_from_cancellation)
-                    {
-                        item.set_prior_turn_interrupt(interrupt);
-                    }
-                    item
-                }
-            };
-            user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
-                for image in &user_images {
-                    user_chat.add_image(pick_user_image_url(image));
-                }
-                for image in &extra_images {
-                    user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
-                }
-            }
-            if let Some(ack) = persist_ack {
-                if self
+                    .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
+                        prompt_blocks.to_vec(),
+                    )));
+                let model_id = self
                     .chat_state_handle
-                    .push_user_message_and_ack(user_chat)
+                    .get_sampling_config()
                     .await
-                    .is_some()
-                {
-                    let (flush_tx, flush_rx) = oneshot::channel();
-                    if self
-                        .notifications
-                        .persistence_tx
-                        .send(PersistenceMsg::FlushAndAck {
-                            respond_to: flush_tx,
-                        })
-                        .is_ok()
-                        && flush_rx.await.is_ok()
-                    {
-                        let _ = ack.send(());
-                    } else {
-                        tracing::error!(
-                            session_id = %self.session_info.id.0,
-                            prompt_id = %prompt_id,
-                            "persist_ack flush barrier failed"
-                        );
-                    }
-                } else {
-                    tracing::error!(
-                        session_id = %self.session_info.id.0,
-                        prompt_id = %prompt_id,
-                        "persist_ack skipped: chat-state actor unavailable"
-                    );
-                }
-            } else {
-                self.chat_state_handle.push_user_message(user_chat);
-            }
-        }
-        self.dispatch_hook(
-            xai_grok_hooks::event::HookEventName::UserPromptSubmit,
-            xai_grok_hooks::event::HookPayload::UserPromptSubmit {
-                prompt: Some(prompt_text_for_hook),
-            },
-            Some(prompt_id),
-            None,
-        )
-        .await;
-        let turn_scope_guard =
-            TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
-        let turn_model_id = self.current_model_id().await;
-        let doom_event_model = turn_model_id.clone();
-        let turn_timer = std::time::Instant::now();
-        let result = {
-            let mut round_trace = trace_gcs_config;
-            let mut round_artifact = artifact_tracker;
-            let mut stop_continuations_this_turn: u32 = 0;
-            loop {
-                if self.goal_harness_enabled() {
-                    let goal_loop_active = self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active);
-                    self.set_goal_loop_active_resource(goal_loop_active).await;
-                }
-                let round = self
-                    .process_conversation_turn_with_recovery(
-                        prompt_id,
-                        round_trace.take(),
-                        round_artifact.take(),
-                        json_schema.clone(),
-                    )
-                    .await;
-                if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                    break round;
-                }
-                if matches!(
-                    round,
-                    Ok(TurnOutcome::Completed {
-                        refusal: Some(_),
-                        ..
-                    })
-                ) {
-                    self.auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Infra,
-                        "The model provider refused this goal round. Use /goal resume to retry."
-                            .to_string(),
-                    )
-                    .await;
-                    break round;
-                }
-                let goal_active = laziness_injection_active(
-                    self.goal_harness_enabled(),
-                    self.goal_tracker.lock().status(),
-                );
-                if goal_active {
-                    let decision = if self.goal_runs_on_workflow_engine() {
-                        self.run_goal_round_end().await
-                    } else {
-                        self.run_goal_round_end_legacy().await
+                    .map(|c| c.model)
+                    .unwrap_or_default();
+                if self.telemetry_enabled || xai_grok_telemetry::external::is_active() {
+                    let effective_client_identifier =
+                        prompt_client_identifier.or_else(|| self.client_identifier.clone());
+                    let ev = xai_grok_telemetry::events::PromptSubmitted {
+                        prompt_length: user_message.len(),
+                        model_id,
+                        client_identifier: effective_client_identifier,
+                        screen_mode: prompt_screen_mode,
+                        prompt_text: None,
                     };
-                    if let GoalRoundDecision::Continue(directive) = decision {
-                        self.inject_goal_continuation_message(directive).await;
-                        continue;
-                    }
+                    xai_grok_telemetry::session_ctx::log_event_dual(self.telemetry_enabled, ev);
                 }
-                match self
-                    .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                    .await
-                {
-                    StopGateDecision::AllowStop => break round,
-                    StopGateDecision::KeepWorking { feedback } => {
-                        stop_continuations_this_turn += 1;
-                        self.chat_state_handle
-                            .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                self.maybe_inject_mcp_reminder().await;
+                self.maybe_inject_mcp_connecting_reminder().await;
+                self.maybe_inject_date_rollover_reminder().await;
+                self.inject_plan_mode_reminders().await;
+                self.inject_resumed_tasks_reminder();
+                if matches!(&origin, super::super::PromptOrigin::User) {
+                    if let Some(gate) = &self.tool_context.task_wake_suppressed {
+                        gate.set(false);
                     }
+                    xai_grok_telemetry::unified_log::info(
+                        "shell.task_wake.gate_cleared",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({ "reason": "handle_prompt_user_start" })),
+                    );
+                    self.consume_deferred_completions_for_user_turn().await;
                 }
-            }
-        };
-        let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
-        let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
-        xai_grok_telemetry::unified_log::info(
-            "shell.handle_prompt.done",
-            Some(self.session_info.id.0.as_ref()),
-            Some(serde_json::json!({
-                "prompt_id": prompt_id,
-                "total_elapsed_ms": handle_prompt_elapsed_ms,
-                "turn_elapsed_ms": turn_duration_ms,
-                "pre_turn_ms": handle_prompt_elapsed_ms.saturating_sub(turn_duration_ms),
-                "ok": result.is_ok(),
-            })),
-        );
-        let turn_tool_count = self.events.tool_count_this_turn();
-        let bridge_outcome = turn_result_to_hook_outcome(&result);
-        self.observability_bridge
-            .emit(xai_tool_protocol::session_event::SessionEvent::TurnEnded {
-                turn_number: current_prompt_index as u64,
-                outcome: bridge_outcome,
-                duration_ms: turn_duration_ms,
-                tool_call_count: turn_tool_count,
-                model_id: turn_model_id.clone(),
-            })
-            .await;
-        match &result {
-            Ok(TurnOutcome::Completed { refusal, .. }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Completed,
-                    None,
-                    None,
-                );
-                if let Some(explanation) = refusal {
-                    let details = (!explanation.is_empty()).then(|| explanation.clone());
-                    self.dispatch_hook(
-                        xai_grok_hooks::event::HookEventName::StopFailure,
-                        xai_grok_hooks::event::HookPayload::StopFailure {
-                            error: xai_grok_hooks::event::StopFailureKind::InvalidRequest,
-                            error_details: details.clone(),
-                            last_assistant_message: details,
-                        },
-                        Some(prompt_id),
-                        None,
+                self.drain_between_turn_completions().await;
+                self.inject_workflow_status_reminder().await;
+                let user_message = if user_images.is_empty() {
+                    user_message
+                } else if self.is_cursor_harness() {
+                    self.transcribe_user_images(user_message, &user_images)
+                        .await?
+                } else {
+                    let session_dir =
+                        crate::session::persistence::session_dir(&crate::session::info::Info {
+                            id: self.session_info.id.clone(),
+                            cwd: self.session_info.cwd.clone(),
+                        });
+                    crate::session::image_describe::persist_and_prepend_image_files(
+                        &session_dir,
+                        &user_images,
+                        &user_message,
                     )
+                    .map_err(|e| {
+                        acp::Error::internal_error()
+                            .data(format!("failed to save user images to assets dir: {e}"))
+                    })?
+                };
+                let attached_image_refs = if self.is_cursor_harness() {
+                    Vec::new()
+                } else {
+                    crate::session::placeholder_images::attached_image_references(&user_images)
+                };
+                self.tool_bridge_handle()
+                    .update_resource(xai_grok_tools::types::resources::AttachedImages(
+                        attached_image_refs,
+                    ))
                     .await;
+                let prompt_text_for_hook = user_message.clone();
+                {
+                    if trace_gcs_config.is_some() {
+                        self.chat_state_handle.begin_turn_capture();
+                    }
+                    let origin = super::super::PromptOrigin::from_prompt_id(prompt_id);
+                    if matches!(origin, super::super::PromptOrigin::User) {
+                        self.maybe_inject_interrupt_reminder().await;
+                    }
+                    let mut user_chat = match &origin {
+                        super::super::PromptOrigin::TaskCompleted { .. } => {
+                            ConversationItem::task_completed(user_message)
+                        }
+                        super::super::PromptOrigin::SubagentCompleted { .. } => {
+                            ConversationItem::subagent_completed(user_message)
+                        }
+                        super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                            ConversationItem::notification_drain(user_message)
+                        }
+                        super::super::PromptOrigin::NotificationDrain => {
+                            ConversationItem::notification_drain(user_message)
+                        }
+                        super::super::PromptOrigin::GoalSummary => {
+                            ConversationItem::goal_summary(user_message)
+                        }
+                        super::super::PromptOrigin::GoalClassifierNudge => {
+                            ConversationItem::goal_classifier_nudge(user_message)
+                        }
+                        super::super::PromptOrigin::SchedulerFired => {
+                            ConversationItem::scheduler_fired(user_message)
+                        }
+                        super::super::PromptOrigin::PlanResume => {
+                            ConversationItem::user(user_message)
+                        }
+                        super::super::PromptOrigin::User => {
+                            let mut item = ConversationItem::user(user_message);
+                            if let Some(interrupt) =
+                                self.events.take_prior_interrupt_category().and_then(
+                                    crate::session::events::prior_turn_interrupt_from_cancellation,
+                                )
+                            {
+                                item.set_prior_turn_interrupt(interrupt);
+                            }
+                            item
+                        }
+                    };
+                    user_chat.set_prompt_index(current_prompt_index);
+                    if !self.is_cursor_harness() {
+                        for image in &user_images {
+                            user_chat.add_image(pick_user_image_url(image));
+                        }
+                        for image in &extra_images {
+                            user_chat.add_image(format!(
+                                "data:{};base64,{}",
+                                image.mime_type, image.data
+                            ));
+                        }
+                    }
+                    if let Some(ack) = persist_ack {
+                        if self
+                            .chat_state_handle
+                            .push_user_message_and_ack(user_chat)
+                            .await
+                            .is_some()
+                        {
+                            let (flush_tx, flush_rx) = oneshot::channel();
+                            if self
+                                .notifications
+                                .persistence_tx
+                                .send(PersistenceMsg::FlushAndAck {
+                                    respond_to: flush_tx,
+                                })
+                                .is_ok()
+                                && flush_rx.await.is_ok()
+                            {
+                                let _ = ack.send(());
+                            } else {
+                                tracing::error!(
+                                    session_id = %self.session_info.id.0,
+                                    prompt_id = %prompt_id,
+                                    "persist_ack flush barrier failed"
+                                );
+                            }
+                        } else {
+                            tracing::error!(
+                                session_id = %self.session_info.id.0,
+                                prompt_id = %prompt_id,
+                                "persist_ack skipped: chat-state actor unavailable"
+                            );
+                        }
+                    } else {
+                        self.chat_state_handle.push_user_message(user_chat);
+                    }
                 }
-                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
-                    turn_number: current_prompt_index as u64,
-                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Completed,
-                    duration_ms: turn_duration_ms,
-                    tool_call_count: turn_tool_count,
-                    model_id: turn_model_id.clone(),
-                    written_repo_paths: Vec::new(),
-                    cancellation_category: None,
-                    cancellation_context: None,
-                })
-                .await;
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::TurnCompleted {
-                        outcome: xai_grok_telemetry::events::Outcome::Completed,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: None,
-                        error_category: None,
-                    },
-                );
-            }
-            Ok(TurnOutcome::StationarityEnded { .. }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Completed,
-                    None,
-                    None,
-                );
-                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
-                    turn_number: current_prompt_index as u64,
-                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Completed,
-                    duration_ms: turn_duration_ms,
-                    tool_call_count: turn_tool_count,
-                    model_id: turn_model_id.clone(),
-                    written_repo_paths: Vec::new(),
-                    cancellation_category: Some("action_stationarity".to_string()),
-                    cancellation_context: None,
-                })
-                .await;
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::TurnCompleted {
-                        outcome: xai_grok_telemetry::events::Outcome::Completed,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: Some("action_stationarity".to_string()),
-                        error_category: None,
-                    },
-                );
-            }
-            Ok(TurnOutcome::Cancelled { category, context }) => {
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Cancelled,
-                    *category,
-                    context.clone(),
-                );
-                if let Some(cause) = category {
-                    self.events.set_prior_interrupt_category(*cause);
-                }
-                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
-                    turn_number: current_prompt_index as u64,
-                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Cancelled,
-                    duration_ms: turn_duration_ms,
-                    tool_call_count: turn_tool_count,
-                    model_id: turn_model_id.clone(),
-                    written_repo_paths: Vec::new(),
-                    cancellation_category: cancellation_category_to_wire_string(*category),
-                    cancellation_context: context.clone(),
-                })
-                .await;
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::TurnCompleted {
-                        outcome: xai_grok_telemetry::events::Outcome::Cancelled,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: category.map(|c| format!("{c:?}")),
-                        error_category: None,
-                    },
-                );
-            }
-            Ok(TurnOutcome::MaxTurnsReached { limit }) => {
-                tracing::info!(limit, "turn ended: max_turns reached");
-                self.emit_turn_ended(
-                    crate::session::events::TurnOutcomeLabel::Cancelled,
-                    None,
-                    Some(serde_json::json!({
-                        "reason": "max_turns_reached",
-                        "limit": limit,
-                    })),
-                );
-                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
-                    turn_number: current_prompt_index as u64,
-                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Cancelled,
-                    duration_ms: turn_duration_ms,
-                    tool_call_count: turn_tool_count,
-                    model_id: turn_model_id.clone(),
-                    written_repo_paths: Vec::new(),
-                    cancellation_category: None,
-                    cancellation_context: Some(serde_json::json!({
-                        "reason": "max_turns_reached",
-                        "limit": limit,
-                    })),
-                })
-                .await;
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::TurnCompleted {
-                        outcome: xai_grok_telemetry::events::Outcome::Cancelled,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: Some("max_turns_reached".to_string()),
-                        error_category: None,
-                    },
-                );
-            }
-            Err(err) => {
-                self.emit_turn_ended(crate::session::events::TurnOutcomeLabel::Error, None, None);
-                self.send_after_turn_event(xai_tool_protocol::turn_hook::AfterTurnPayload {
-                    turn_number: current_prompt_index as u64,
-                    outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Error,
-                    duration_ms: turn_duration_ms,
-                    tool_call_count: turn_tool_count,
-                    model_id: turn_model_id.clone(),
-                    written_repo_paths: Vec::new(),
-                    cancellation_category: None,
-                    cancellation_context: None,
-                })
-                .await;
-                let error_category = Self::classify_turn_error(err);
-                xai_grok_telemetry::session_ctx::log_session_event(
-                    xai_grok_telemetry::events::ApiError {
-                        error_category: error_category.clone(),
-                        model_id: turn_model_id.clone(),
-                        status_code: None,
-                        duration_ms: Some(turn_duration_ms),
-                    },
-                );
-                xai_grok_telemetry::session_ctx::log_event(
-                    xai_grok_telemetry::events::TurnCompleted {
-                        outcome: xai_grok_telemetry::events::Outcome::Error,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: None,
-                        error_category: Some(error_category),
-                    },
-                );
                 self.dispatch_hook(
-                    xai_grok_hooks::event::HookEventName::StopFailure,
-                    xai_grok_hooks::event::HookPayload::StopFailure {
-                        error: Self::stop_failure_error_type(err),
-                        error_details: Self::turn_error_detail(err),
-                        last_assistant_message: Some(Self::format_turn_error_message(err)),
+                    xai_grok_hooks::event::HookEventName::UserPromptSubmit,
+                    xai_grok_hooks::event::HookPayload::UserPromptSubmit {
+                        prompt: Some(prompt_text_for_hook),
                     },
                     Some(prompt_id),
                     None,
                 )
                 .await;
-            }
-        }
-        xai_grok_telemetry::session_ctx::log_session_event(
-            crate::agent::session_metrics::TurnCompletedLifecycle {
-                session_id: self.session_info.id.0.to_string(),
-                turn_number: current_prompt_index as u64,
-            },
-        );
-        let doom_tally = std::mem::take(&mut *self.doom_loop_turn_tally.lock());
-        if doom_tally.fired() {
-            xai_grok_telemetry::session_ctx::log_session_event(
-                crate::agent::session_metrics::DoomLoopRecovery {
-                    session_id: self.session_info.id.0.to_string(),
-                    turn_number: current_prompt_index as u64,
-                    attempts: doom_tally.attempts,
-                    accepted_after_budget: doom_tally.accepted_after_budget,
-                    top_trigger: doom_tally.top_trigger,
-                    model: doom_event_model,
-                },
-            );
-        }
-        match &result {
-            Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => {
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor
-                        .on_turn_done(&xai_agent_lifecycle::TurnDoneInput)
-                        .await;
-                }
-            }
-            Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. }) => {
-                let input = xai_agent_lifecycle::TurnAbortInput::new(
-                    xai_agent_lifecycle::TurnAbortReason::Interrupted,
+                let turn_scope_guard = TurnSubagentScopeGuard::new(
+                    self.current_prompt_id.clone(),
+                    prompt_id.to_string(),
                 );
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor.on_turn_abort(&input).await;
-                }
-            }
-            Err(err) => {
-                let message = err.to_string();
-                let input = xai_agent_lifecycle::TurnErrorInput { message: &message };
-                for contributor in self.extension_registry.turn_lifecycle_contributors() {
-                    contributor.on_turn_error(&input).await;
-                }
-            }
-        }
-        if matches!(
-            result,
-            Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. })
-        ) {
-            self.cancel_running_turn_subagents();
-        }
-        self.flush_to_disk().await;
-        self.file_state_tracker
-            .end_prompt(&self.tool_context.fs, current_prompt_index)
-            .await;
-        if let Some(mut rewind_point) = self
-            .file_state_tracker
-            .get_rewind_point(current_prompt_index)
-            .await
-        {
-            rewind_point.normalize_to_relative(self.tool_context.cwd.as_ref());
-            let _ = self
-                .notifications
-                .persistence_tx
-                .send(PersistenceMsg::RewindPoint(rewind_point));
-        }
-        match result {
-            Ok(outcome) => {
-                let usage = self.freeze_prompt_usage(prompt_id).await;
-                drop(turn_scope_guard);
-                self.chat_state_handle.flush();
-                let total_tokens = self.chat_state_handle.get_total_tokens().await;
-                let (stop_reason, mut snapshot, completion_kind, structured_output) = match outcome
-                {
-                    TurnOutcome::Completed {
-                        snapshot,
-                        structured_output,
-                        refusal,
-                        ..
-                    } => (
-                        if refusal.is_some() {
-                            acp::StopReason::Refusal
-                        } else {
-                            acp::StopReason::EndTurn
-                        },
-                        *snapshot,
-                        PromptCompletionKind::Completed,
-                        structured_output,
-                    ),
-                    TurnOutcome::StationarityEnded { snapshot, .. } => (
-                        acp::StopReason::EndTurn,
-                        *snapshot,
-                        PromptCompletionKind::StationarityEnded,
-                        None,
-                    ),
-                    TurnOutcome::Cancelled { category, context } => {
-                        let cancellation_ctx = context.and_then(|v| serde_json::from_value(v).ok());
-                        (
-                            acp::StopReason::Cancelled,
+                let turn_model_id = self.current_model_id().await;
+                let doom_event_model = turn_model_id.clone();
+                let turn_timer = std::time::Instant::now();
+                let result = {
+                    let mut round_trace = trace_gcs_config;
+                    let mut round_artifact = artifact_tracker;
+                    let mut stop_continuations_this_turn: u32 = 0;
+                    loop {
+                        if self.goal_harness_enabled() {
+                            let goal_loop_active = self.goal_tracker.lock().status()
+                                == Some(crate::session::goal_tracker::GoalStatus::Active);
+                            self.set_goal_loop_active_resource(goal_loop_active).await;
+                        }
+                        // Keep the very large recovery/model future behind a heap
+                        // boundary. Native provider adapters (notably Bedrock) make
+                        // this child future large enough that inlining it into
+                        // `handle_prompt` can exhaust a default 2 MiB worker stack in
+                        // debug builds before the first model event is produced.
+                        let round = Box::pin(self.process_conversation_turn_with_recovery(
+                            prompt_id,
+                            round_trace.take(),
+                            round_artifact.take(),
+                            json_schema.clone(),
+                        ))
+                        .await;
+                        if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+                            break round;
+                        }
+                        if matches!(
+                            round,
+                            Ok(TurnOutcome::Completed {
+                                refusal: Some(_),
+                                ..
+                            })
+                        ) {
+                            self.auto_pause_goal_if_active_with_message(
+                        crate::session::goal_tracker::GoalPauseReason::Infra,
+                        "The model provider refused this goal round. Use /goal resume to retry."
+                            .to_string(),
+                    )
+                    .await;
+                            break round;
+                        }
+                        let goal_active = laziness_injection_active(
+                            self.goal_harness_enabled(),
+                            self.goal_tracker.lock().status(),
+                        );
+                        if goal_active {
+                            let decision = if self.goal_runs_on_workflow_engine() {
+                                self.run_goal_round_end().await
+                            } else {
+                                self.run_goal_round_end_legacy().await
+                            };
+                            if let GoalRoundDecision::Continue(directive) = decision {
+                                self.inject_goal_continuation_message(directive).await;
+                                continue;
+                            }
+                        }
+                        match self
+                            .run_stop_gate(prompt_id, stop_continuations_this_turn)
+                            .await
+                        {
+                            StopGateDecision::AllowStop => break round,
+                            StopGateDecision::KeepWorking { feedback } => {
+                                stop_continuations_this_turn += 1;
+                                self.chat_state_handle.push_user_message(
+                                    ConversationItem::stop_hook_feedback(feedback),
+                                );
+                            }
+                        }
+                    }
+                };
+                let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
+                let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
+                xai_grok_telemetry::unified_log::info(
+                    "shell.handle_prompt.done",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "prompt_id": prompt_id,
+                        "total_elapsed_ms": handle_prompt_elapsed_ms,
+                        "turn_elapsed_ms": turn_duration_ms,
+                        "pre_turn_ms": handle_prompt_elapsed_ms.saturating_sub(turn_duration_ms),
+                        "ok": result.is_ok(),
+                    })),
+                );
+                let turn_tool_count = self.events.tool_count_this_turn();
+                let bridge_outcome = turn_result_to_hook_outcome(&result);
+                self.observability_bridge
+                    .emit(xai_tool_protocol::session_event::SessionEvent::TurnEnded {
+                        turn_number: current_prompt_index as u64,
+                        outcome: bridge_outcome,
+                        duration_ms: turn_duration_ms,
+                        tool_call_count: turn_tool_count,
+                        model_id: turn_model_id.clone(),
+                    })
+                    .await;
+                match &result {
+                    Ok(TurnOutcome::Completed { refusal, .. }) => {
+                        self.emit_turn_ended(
+                            crate::session::events::TurnOutcomeLabel::Completed,
                             None,
-                            PromptCompletionKind::Cancelled {
-                                category,
-                                context: cancellation_ctx,
+                            None,
+                        );
+                        if let Some(explanation) = refusal {
+                            let details = (!explanation.is_empty()).then(|| explanation.clone());
+                            self.dispatch_hook(
+                                xai_grok_hooks::event::HookEventName::StopFailure,
+                                xai_grok_hooks::event::HookPayload::StopFailure {
+                                    error: xai_grok_hooks::event::StopFailureKind::InvalidRequest,
+                                    error_details: details.clone(),
+                                    last_assistant_message: details,
+                                },
+                                Some(prompt_id),
+                                None,
+                            )
+                            .await;
+                        }
+                        self.send_after_turn_event(
+                            xai_tool_protocol::turn_hook::AfterTurnPayload {
+                                turn_number: current_prompt_index as u64,
+                                outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Completed,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id.clone(),
+                                written_repo_paths: Vec::new(),
+                                cancellation_category: None,
+                                cancellation_context: None,
                             },
+                        )
+                        .await;
+                        xai_grok_telemetry::session_ctx::log_event(
+                            xai_grok_telemetry::events::TurnCompleted {
+                                outcome: xai_grok_telemetry::events::Outcome::Completed,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id,
+                                cancellation_category: None,
+                                error_category: None,
+                            },
+                        );
+                    }
+                    Ok(TurnOutcome::StationarityEnded { .. }) => {
+                        self.emit_turn_ended(
+                            crate::session::events::TurnOutcomeLabel::Completed,
+                            None,
+                            None,
+                        );
+                        self.send_after_turn_event(
+                            xai_tool_protocol::turn_hook::AfterTurnPayload {
+                                turn_number: current_prompt_index as u64,
+                                outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Completed,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id.clone(),
+                                written_repo_paths: Vec::new(),
+                                cancellation_category: Some("action_stationarity".to_string()),
+                                cancellation_context: None,
+                            },
+                        )
+                        .await;
+                        xai_grok_telemetry::session_ctx::log_event(
+                            xai_grok_telemetry::events::TurnCompleted {
+                                outcome: xai_grok_telemetry::events::Outcome::Completed,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id,
+                                cancellation_category: Some("action_stationarity".to_string()),
+                                error_category: None,
+                            },
+                        );
+                    }
+                    Ok(TurnOutcome::Cancelled { category, context }) => {
+                        self.emit_turn_ended(
+                            crate::session::events::TurnOutcomeLabel::Cancelled,
+                            *category,
+                            context.clone(),
+                        );
+                        if let Some(cause) = category {
+                            self.events.set_prior_interrupt_category(*cause);
+                        }
+                        self.send_after_turn_event(
+                            xai_tool_protocol::turn_hook::AfterTurnPayload {
+                                turn_number: current_prompt_index as u64,
+                                outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Cancelled,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id.clone(),
+                                written_repo_paths: Vec::new(),
+                                cancellation_category: cancellation_category_to_wire_string(
+                                    *category,
+                                ),
+                                cancellation_context: context.clone(),
+                            },
+                        )
+                        .await;
+                        xai_grok_telemetry::session_ctx::log_event(
+                            xai_grok_telemetry::events::TurnCompleted {
+                                outcome: xai_grok_telemetry::events::Outcome::Cancelled,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id,
+                                cancellation_category: category.map(|c| format!("{c:?}")),
+                                error_category: None,
+                            },
+                        );
+                    }
+                    Ok(TurnOutcome::MaxTurnsReached { limit }) => {
+                        tracing::info!(limit, "turn ended: max_turns reached");
+                        self.emit_turn_ended(
+                            crate::session::events::TurnOutcomeLabel::Cancelled,
+                            None,
+                            Some(serde_json::json!({
+                                "reason": "max_turns_reached",
+                                "limit": limit,
+                            })),
+                        );
+                        self.send_after_turn_event(
+                            xai_tool_protocol::turn_hook::AfterTurnPayload {
+                                turn_number: current_prompt_index as u64,
+                                outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Cancelled,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id.clone(),
+                                written_repo_paths: Vec::new(),
+                                cancellation_category: None,
+                                cancellation_context: Some(serde_json::json!({
+                                    "reason": "max_turns_reached",
+                                    "limit": limit,
+                                })),
+                            },
+                        )
+                        .await;
+                        xai_grok_telemetry::session_ctx::log_event(
+                            xai_grok_telemetry::events::TurnCompleted {
+                                outcome: xai_grok_telemetry::events::Outcome::Cancelled,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id,
+                                cancellation_category: Some("max_turns_reached".to_string()),
+                                error_category: None,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        self.emit_turn_ended(
+                            crate::session::events::TurnOutcomeLabel::Error,
+                            None,
+                            None,
+                        );
+                        self.send_after_turn_event(
+                            xai_tool_protocol::turn_hook::AfterTurnPayload {
+                                turn_number: current_prompt_index as u64,
+                                outcome: xai_tool_protocol::turn_hook::TurnHookOutcome::Error,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id.clone(),
+                                written_repo_paths: Vec::new(),
+                                cancellation_category: None,
+                                cancellation_context: None,
+                            },
+                        )
+                        .await;
+                        let error_category = Self::classify_turn_error(err);
+                        xai_grok_telemetry::session_ctx::log_session_event(
+                            xai_grok_telemetry::events::ApiError {
+                                error_category: error_category.clone(),
+                                model_id: turn_model_id.clone(),
+                                status_code: None,
+                                duration_ms: Some(turn_duration_ms),
+                            },
+                        );
+                        xai_grok_telemetry::session_ctx::log_event(
+                            xai_grok_telemetry::events::TurnCompleted {
+                                outcome: xai_grok_telemetry::events::Outcome::Error,
+                                duration_ms: turn_duration_ms,
+                                tool_call_count: turn_tool_count,
+                                model_id: turn_model_id,
+                                cancellation_category: None,
+                                error_category: Some(error_category),
+                            },
+                        );
+                        self.dispatch_hook(
+                            xai_grok_hooks::event::HookEventName::StopFailure,
+                            xai_grok_hooks::event::HookPayload::StopFailure {
+                                error: Self::stop_failure_error_type(err),
+                                error_details: Self::turn_error_detail(err),
+                                last_assistant_message: Some(Self::format_turn_error_message(err)),
+                            },
+                            Some(prompt_id),
                             None,
                         )
+                        .await;
                     }
-                    TurnOutcome::MaxTurnsReached { limit } => (
-                        acp::StopReason::Cancelled,
-                        None,
-                        PromptCompletionKind::MaxTurnsReached { limit },
-                        None,
-                    ),
-                };
-                if let Some(snapshot) = snapshot.as_mut() {
-                    self.apply_prompt_modes_to_snapshot(snapshot);
                 }
-                Ok(crate::session::commands::PromptTurnOk {
-                    stop_reason,
-                    total_tokens,
-                    turn_snapshot: snapshot,
-                    completion_kind,
-                    structured_output,
-                    usage,
-                    tool_overrides: None,
-                })
+                xai_grok_telemetry::session_ctx::log_session_event(
+                    crate::agent::session_metrics::TurnCompletedLifecycle {
+                        session_id: self.session_info.id.0.to_string(),
+                        turn_number: current_prompt_index as u64,
+                    },
+                );
+                let doom_tally = std::mem::take(&mut *self.doom_loop_turn_tally.lock());
+                if doom_tally.fired() {
+                    xai_grok_telemetry::session_ctx::log_session_event(
+                        crate::agent::session_metrics::DoomLoopRecovery {
+                            session_id: self.session_info.id.0.to_string(),
+                            turn_number: current_prompt_index as u64,
+                            attempts: doom_tally.attempts,
+                            accepted_after_budget: doom_tally.accepted_after_budget,
+                            top_trigger: doom_tally.top_trigger,
+                            model: doom_event_model,
+                        },
+                    );
+                }
+                match &result {
+                    Ok(TurnOutcome::Completed { .. })
+                    | Ok(TurnOutcome::StationarityEnded { .. }) => {
+                        for contributor in self.extension_registry.turn_lifecycle_contributors() {
+                            contributor
+                                .on_turn_done(&xai_agent_lifecycle::TurnDoneInput)
+                                .await;
+                        }
+                    }
+                    Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. }) => {
+                        let input = xai_agent_lifecycle::TurnAbortInput::new(
+                            xai_agent_lifecycle::TurnAbortReason::Interrupted,
+                        );
+                        for contributor in self.extension_registry.turn_lifecycle_contributors() {
+                            contributor.on_turn_abort(&input).await;
+                        }
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        let input = xai_agent_lifecycle::TurnErrorInput { message: &message };
+                        for contributor in self.extension_registry.turn_lifecycle_contributors() {
+                            contributor.on_turn_error(&input).await;
+                        }
+                    }
+                }
+                if matches!(
+                    result,
+                    Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. })
+                ) {
+                    self.cancel_running_turn_subagents();
+                }
+                self.flush_to_disk().await;
+                self.file_state_tracker
+                    .end_prompt(&self.tool_context.fs, current_prompt_index)
+                    .await;
+                if let Some(mut rewind_point) = self
+                    .file_state_tracker
+                    .get_rewind_point(current_prompt_index)
+                    .await
+                {
+                    rewind_point.normalize_to_relative(self.tool_context.cwd.as_ref());
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::RewindPoint(rewind_point));
+                }
+                match result {
+                    Ok(outcome) => {
+                        let usage = self.freeze_prompt_usage(prompt_id).await;
+                        drop(turn_scope_guard);
+                        self.chat_state_handle.flush();
+                        let total_tokens = self.chat_state_handle.get_total_tokens().await;
+                        let (stop_reason, mut snapshot, completion_kind, structured_output) =
+                            match outcome {
+                                TurnOutcome::Completed {
+                                    snapshot,
+                                    structured_output,
+                                    refusal,
+                                    ..
+                                } => (
+                                    if refusal.is_some() {
+                                        acp::StopReason::Refusal
+                                    } else {
+                                        acp::StopReason::EndTurn
+                                    },
+                                    *snapshot,
+                                    PromptCompletionKind::Completed,
+                                    structured_output,
+                                ),
+                                TurnOutcome::StationarityEnded { snapshot, .. } => (
+                                    acp::StopReason::EndTurn,
+                                    *snapshot,
+                                    PromptCompletionKind::StationarityEnded,
+                                    None,
+                                ),
+                                TurnOutcome::Cancelled { category, context } => {
+                                    let cancellation_ctx =
+                                        context.and_then(|v| serde_json::from_value(v).ok());
+                                    (
+                                        acp::StopReason::Cancelled,
+                                        None,
+                                        PromptCompletionKind::Cancelled {
+                                            category,
+                                            context: cancellation_ctx,
+                                        },
+                                        None,
+                                    )
+                                }
+                                TurnOutcome::MaxTurnsReached { limit } => (
+                                    acp::StopReason::Cancelled,
+                                    None,
+                                    PromptCompletionKind::MaxTurnsReached { limit },
+                                    None,
+                                ),
+                            };
+                        if let Some(snapshot) = snapshot.as_mut() {
+                            self.apply_prompt_modes_to_snapshot(snapshot);
+                        }
+                        Ok(crate::session::commands::PromptTurnOk {
+                            stop_reason,
+                            total_tokens,
+                            turn_snapshot: snapshot,
+                            completion_kind,
+                            structured_output,
+                            usage,
+                            tool_overrides: None,
+                        })
+                    }
+                    Err(e) => {
+                        let usage = self.freeze_prompt_usage(prompt_id).await;
+                        drop(turn_scope_guard);
+                        Err(crate::sampling::error::attach_prompt_usage(e, usage))
+                    }
+                }
             }
-            Err(e) => {
-                let usage = self.freeze_prompt_usage(prompt_id).await;
-                drop(turn_scope_guard);
-                Err(crate::sampling::error::attach_prompt_usage(e, usage))
-            }
-        }
+            .instrument(span),
+        )
     }
     /// Wait for turn-blocking subagents (up to 120s on the turn task),
     /// snapshot, clear sticky. Background children never gate the drain: the
@@ -1751,7 +1803,7 @@ impl SessionActor {
                 .filter(|tc| tc.name == STRUCTURED_OUTPUT_TOOL)
             {
                 self.chat_state_handle
-                    .push_tool_result(ConversationItem::tool_result(
+                    .push_tool_result(ConversationItem::tool_error(
                         tc.id.as_ref().to_owned(),
                         "Call StructuredOutput alone, exactly once, after all other tools finish.",
                     ));
@@ -1766,20 +1818,17 @@ impl SessionActor {
         {
             *retries += 1;
             self.chat_state_handle
-                .push_tool_result(ConversationItem::tool_result(
+                .push_tool_result(ConversationItem::tool_error(
                     call_id,
                     format!("{err}\nFix the arguments and call StructuredOutput again."),
                 ));
             return StructuredOutputStep::Retry;
         }
-        self.chat_state_handle
-            .push_tool_result(ConversationItem::tool_result(
-                call_id,
-                match &validated {
-                    Ok(_) => "Structured output accepted.".to_string(),
-                    Err(err) => err.clone(),
-                },
-            ));
+        let tool_result = match &validated {
+            Ok(_) => ConversationItem::tool_result(call_id, "Structured output accepted."),
+            Err(err) => ConversationItem::tool_error(call_id, err.clone()),
+        };
+        self.chat_state_handle.push_tool_result(tool_result);
         StructuredOutputStep::Complete(validated)
     }
     /// Single shell tool call whose parsed command is `true` (via ToolBridge).
@@ -2122,9 +2171,8 @@ impl SessionActor {
             // OpenAI-compatible prompt cache affinity (Responses + Chat Completions).
             // Always pin to the session so successive turns hit the same KV prefix
             // bucket. Codex dialect also sets this; harmless if already present.
-            request.prompt_cache_key = Some(xai_grok_sampling_types::clamp_prompt_cache_key(
-                &session_id,
-            ));
+            request.prompt_cache_key =
+                Some(xai_grok_sampling_types::clamp_prompt_cache_key(&session_id));
             // Optional extended retention for OpenAI Responses only
             // (`24h` / `long`). Codex strips this field; Anthropic Messages
             // does not use it (no Claude cache_control expansion).

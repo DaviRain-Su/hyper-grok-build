@@ -840,8 +840,8 @@ pub fn select_eager_auth_method(
 mod tests {
     use super::*;
     use xai_grok_shell::agent::auth_method::{
-        ANTHROPIC_CLAUDE_METHOD_ID, GROK_COM_METHOD_ID, KIMI_CODE_METHOD_ID, OIDC_METHOD_ID,
-        OPENAI_CODEX_METHOD_ID,
+        ANTHROPIC_CLAUDE_METHOD_ID, GITHUB_COPILOT_METHOD_ID, GROK_COM_METHOD_ID,
+        KIMI_CODE_METHOD_ID, OIDC_METHOD_ID, OPENAI_CODEX_METHOD_ID,
     };
 
     #[test]
@@ -1092,6 +1092,7 @@ mod tests {
             make_auth_method(KIMI_CODE_METHOD_ID, "Kimi Code", None),
             make_auth_method(OPENAI_CODEX_METHOD_ID, "OpenAI Codex", None),
             make_auth_method(ANTHROPIC_CLAUDE_METHOD_ID, "Claude", None),
+            make_auth_method(GITHUB_COPILOT_METHOD_ID, "GitHub Copilot", None),
         ];
 
         let (label, method_id, mode) = find_xai_interactive_login_method(&methods);

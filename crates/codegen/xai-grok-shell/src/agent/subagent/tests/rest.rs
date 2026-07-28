@@ -1821,12 +1821,14 @@ async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only()
 #[tokio::test]
 #[serial_test::serial]
 async fn read_parent_sampling_config_wires_kimi_code_bearer_resolver() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
     let _base_guard = xai_grok_test_support::EnvGuard::unset(
         xai_grok_models::KIMI_CODE_BASE_URL_ENV,
     );
     let mut models = indexmap::IndexMap::new();
     let mut kimi = test_model_entry("kimi-for-coding");
     kimi.info.id = Some("kimi-code/kimi-for-coding".to_string());
+    kimi.platform_oauth_active = true;
     models.insert("auto".to_string(), kimi);
     let mut ctx = ctx_with_parent_chat_state("auto", "kimi-for-coding", "auto", models);
     ctx.parent_chat_state = Some(spawn_test_parent_chat_state_at(

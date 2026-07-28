@@ -410,6 +410,7 @@ mod tests {
         ConversationItem::ToolResult(ToolResultItem {
             tool_call_id: "tc-1".to_string(),
             content: content.into(),
+            is_error: false,
             images: Vec::new(),
         })
     }

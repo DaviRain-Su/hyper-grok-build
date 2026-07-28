@@ -1203,6 +1203,12 @@ pub enum ApiBackend {
     Responses,
     /// Use the Anthropic Messages API (/v1/messages)
     Messages,
+    /// Use Google Gemini GenerateContent native REST API.
+    GoogleGenerateContent,
+    /// Use Amazon Bedrock ConverseStream native SDK API.
+    BedrockConverseStream,
+    /// Use Pi's native messages protocol (/messages).
+    PiMessages,
 }
 
 impl ApiBackend {
@@ -1222,9 +1228,19 @@ pub struct SamplingConfig {
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
-    /// Which API backend to use for this model
+    /// Which API backend to use for this model.
     #[serde(default)]
     pub api_backend: ApiBackend,
+    /// Provider-specific adapter layered on the wire backend.
+    #[serde(default)]
+    pub adapter_kind: crate::AdapterKind,
+    /// Fully resolved per-model request compatibility. `None` preserves the
+    /// generic protocol defaults for user-defined/legacy models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_compat: Option<crate::RequestCompat>,
+    /// Explicit relative endpoint path. `None` uses the backend default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_path: Option<String>,
     /// Extra headers to send with requests (e.g., for BYOK scenarios).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub extra_headers: indexmap::IndexMap<String, String>,

@@ -216,6 +216,28 @@ impl SessionActor {
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
         self.model_auth_state(model_id).0
     }
+    /// Radius has no legacy `PlatformId`, so recover its route from managed
+    /// catalog identity plus the dynamic inference base URL. The return value
+    /// is `Some(true)` for OAuth, `Some(false)` for a static API key, and
+    /// `None` for a non-Radius/unknown route. Scanning all matching entries
+    /// avoids choosing an unrelated provider when two catalogs share one wire
+    /// model slug.
+    fn radius_route_oauth_state(&self, model_id: &str, base_url: &str) -> Option<bool> {
+        if model_id.is_empty() {
+            return None;
+        }
+        let models = self.models_manager.models();
+        let matches = |entry: &&crate::agent::config::ModelEntry| {
+            crate::agent::config::model_uses_radius_oauth(entry)
+                && entry.info().model == model_id
+                && (base_url.is_empty() || entry.info().base_url == base_url)
+        };
+        models
+            .get(model_id)
+            .filter(|entry| crate::agent::config::model_uses_radius_oauth(entry))
+            .or_else(|| models.values().find(matches))
+            .map(|entry| entry.platform_oauth_active)
+    }
     pub(super) fn model_auth_provider(
         &self,
         model_id: &str,
@@ -259,6 +281,7 @@ impl SessionActor {
             },
             auth_scheme: entry.info().auth_scheme,
             oauth_platform: crate::agent::config::oauth_platform_for_model(entry),
+            platform_oauth_active: entry.platform_oauth_active,
         };
         let provider = entry.effective_auth_provider().cloned();
         Some((facts, provider))
@@ -468,6 +491,9 @@ impl SessionActor {
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 extra_headers: Default::default(),
                 query_params: Default::default(),
                 env_http_headers: Default::default(),
@@ -477,9 +503,19 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
+        let radius_route_oauth = self.radius_route_oauth_state(cfg.model.as_str(), &cfg.base_url);
+        let radius_oauth_active = radius_route_oauth == Some(true);
         let oauth_platform = model_facts
             .oauth_platform
             .or_else(|| crate::agent::config::oauth_platform_for_base_url(&cfg.base_url));
+        let kimi_oauth_active =
+            if model_facts.oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) {
+                model_facts.platform_oauth_active
+            } else {
+                // Preserve the legacy URL-only OAuth fallback only when catalog
+                // identity was unavailable.
+                oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+            };
         let oauth_origin = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
         let auth_method = self.auth_method_id.load();
@@ -502,7 +538,7 @@ impl SessionActor {
         // Capture before `cfg` fields are moved into `SamplingConfig`. Catalog
         // identity wins; URL fallback above is accepted only when unambiguous.
         let kimi_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
-            (oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)).then(|| {
+            kimi_oauth_active.then(|| {
                 std::sync::Arc::new(crate::auth::kimi::KimiCodeBearerResolver)
                     as xai_grok_sampler::SharedBearerResolver
             });
@@ -516,6 +552,19 @@ impl SessionActor {
                 std::sync::Arc::new(crate::auth::anthropic_claude::AnthropicClaudeBearerResolver)
                     as xai_grok_sampler::SharedBearerResolver
             });
+        let radius_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
+            radius_oauth_active.then(|| {
+                std::sync::Arc::new(crate::auth::radius::RadiusBearerResolver)
+                    as xai_grok_sampler::SharedBearerResolver
+            });
+        let github_copilot_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
+            (cfg.adapter_kind == xai_grok_models::AdapterKind::GitHubCopilot).then(|| {
+                std::sync::Arc::new(crate::auth::github_copilot::GitHubCopilotBearerResolver)
+                    as xai_grok_sampler::SharedBearerResolver
+            });
+        let github_copilot_oauth_active = cfg.adapter_kind
+            == xai_grok_models::AdapterKind::GitHubCopilot
+            && model_facts.platform_oauth_active;
         let responses_codex_dialect =
             oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
         let kimi_dialect = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
@@ -532,6 +581,9 @@ impl SessionActor {
             oauth_platform,
             &cfg.base_url,
         );
+        if oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) && !kimi_oauth_active {
+            crate::agent::config::remove_kimi_device_headers(&mut extra_headers);
+        }
         let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
         if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
@@ -575,10 +627,33 @@ impl SessionActor {
             // Anthropic Claude subscription bearer + `anthropic-beta` header are
             // resolved per request (token TTL ~ short); never send xAI auth.
             (None, Some(claude))
-        } else if oauth_origin {
+        } else if let Some(radius) = radius_bearer_resolver {
+            // Radius inference URLs come from the dynamic gateway config and
+            // cannot be recognized by origin. Catalog identity makes its OAuth
+            // resolver authoritative and prevents an xAI session JWT leak.
+            (None, Some(radius))
+        } else if radius_route_oauth == Some(false) {
+            // Hybrid-provider static mode is equally authoritative: retain its
+            // API key and never let the xAI session resolver replace it.
+            (creds.api_key, None)
+        } else if let Some(copilot) = github_copilot_bearer_resolver {
+            // GitHub Copilot catalog identity is adapter-driven, never inferred
+            // from URL. A static COPILOT_GITHUB_TOKEN or `/providers` key is
+            // authoritative. An OAuth catalog token is only a visibility marker:
+            // discard that snapshot and resolve the live short token per request.
+            if github_copilot_oauth_active || creds.api_key.is_none() {
+                (None, Some(copilot))
+            } else {
+                (creds.api_key, None)
+            }
+        } else if oauth_origin
+            && !(oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+                && !kimi_oauth_active)
+        {
             // Both OAuth providers may share one user proxy. Without catalog
             // identity, fail closed rather than send Kimi, Codex, or xAI auth
-            // to a route whose credential family is ambiguous.
+            // to a route whose credential family is ambiguous. A managed Kimi
+            // API-key route is the explicit non-OAuth exception.
             (None, None)
         } else if use_bearer_resolver {
             (
@@ -592,6 +667,11 @@ impl SessionActor {
         } else {
             (creds.api_key, None)
         };
+        let bedrock_profile = (cfg.adapter_kind
+            == xai_grok_models::AdapterKind::BedrockConverseStream
+            && api_key.is_none())
+        .then(|| crate::auth::read_bedrock_profile(&xai_grok_config::grok_home()))
+        .flatten();
         SamplingConfig {
             api_key,
             base_url: cfg.base_url,
@@ -600,6 +680,9 @@ impl SessionActor {
             temperature: cfg.temperature,
             top_p: cfg.top_p,
             api_backend: cfg.api_backend,
+            adapter_kind: cfg.adapter_kind,
+            request_compat: cfg.request_compat,
+            endpoint_path: cfg.endpoint_path,
             auth_scheme,
             extra_headers,
             query_params: cfg.query_params.clone(),
@@ -630,6 +713,9 @@ impl SessionActor {
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(SessionHeaderInjector)),
             responses_codex_dialect,
+            bedrock_request_metadata: Default::default(),
+            bedrock_headers: Default::default(),
+            bedrock_profile,
             kimi_dialect,
         }
     }
@@ -972,12 +1058,18 @@ impl SessionActor {
             .data(detailed_message);
             return Err(acp_err);
         }
-        let (failed_model_id, failed_base_url) = self
+        let (failed_model_id, failed_base_url, failed_adapter_kind) = self
             .chat_state_handle
             .get_sampling_config()
             .await
-            .map(|c| (c.model, c.base_url))
+            .map(|c| (c.model, c.base_url, c.adapter_kind))
             .unwrap_or_default();
+        let failed_model_facts = self.model_auth_facts(&failed_model_id);
+        let failed_github_copilot_oauth = failed_adapter_kind
+            == xai_grok_models::AdapterKind::GitHubCopilot
+            && failed_model_facts.platform_oauth_active;
+        let failed_radius_route = self.radius_route_oauth_state(&failed_model_id, &failed_base_url);
+        let failed_radius_oauth = failed_radius_route == Some(true);
         let auth_provider =
             if matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401) {
                 self.model_auth_provider(&failed_model_id)
@@ -988,7 +1080,11 @@ impl SessionActor {
             let gate = self.auth_gate(&failed_model_id, &failed_base_url);
             let eligible = gate.active();
             self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
-            if !eligible && auth_provider.is_none() {
+            if !eligible
+                && auth_provider.is_none()
+                && !failed_github_copilot_oauth
+                && !failed_radius_oauth
+            {
                 tracing::warn!(
                     session_id = %self.session_info.id.0,
                     is_session_based = gate.is_session_based,
@@ -1030,8 +1126,7 @@ impl SessionActor {
         // Third-party OAuth platforms must never recover via xAI AuthManager —
         // that refreshes the wrong credential and reports "recovery succeeded"
         // while chatgpt.com/kimi still 401.
-        let failed_oauth_platform = self
-            .model_auth_facts(&failed_model_id)
+        let failed_oauth_platform = failed_model_facts
             .oauth_platform
             .or_else(|| crate::agent::config::oauth_platform_for_base_url(&failed_base_url));
         let is_openai_codex =
@@ -1039,6 +1134,7 @@ impl SessionActor {
         let is_kimi_code = failed_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode);
         let is_anthropic_claude =
             failed_oauth_platform == Some(xai_grok_models::PlatformId::AnthropicClaude);
+        let is_github_copilot_oauth = failed_github_copilot_oauth;
         let ambiguous_oauth_origin = failed_oauth_platform.is_none()
             && (xai_grok_models::PlatformId::KimiCode.base_url_matches(&failed_base_url)
                 || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&failed_base_url));
@@ -1136,6 +1232,86 @@ impl SessionActor {
                 }
             }
         } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && is_github_copilot_oauth
+        {
+            // The short Copilot inference token may be rejected before its
+            // local expiry. Only an OAuth-stamped catalog entry may exchange
+            // the durable GitHub token and retry; static Copilot tokens remain
+            // authoritative and must never silently fall back to OAuth.
+            match crate::auth::github_copilot::force_refresh_github_copilot_auth().await {
+                Some(_) => {
+                    tracing::info!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, github-copilot re-mint, retrying"
+                    );
+                    xai_grok_telemetry::unified_log::info(
+                        "auth recovery: sampler 401, github-copilot re-mint, retrying",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                    self.prepare_sampler_for_turn().await;
+                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = % self.session_info.id.0,
+                        "auth recovery: sampler 401, github-copilot re-mint failed"
+                    );
+                    xai_grok_telemetry::unified_log::warn(
+                        "auth recovery: sampler 401, github-copilot re-mint failed",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                }
+            }
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && failed_radius_oauth
+        {
+            // Radius' short access token belongs to the gateway recorded in
+            // oauth/radius. Never route this failure through the xAI
+            // AuthManager or a static Radius API-key path.
+            match crate::auth::radius::force_refresh_radius_auth().await {
+                Some(_) => {
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        "auth recovery: sampler 401, radius re-mint, retrying"
+                    );
+                    xai_grok_telemetry::unified_log::info(
+                        "auth recovery: sampler 401, radius re-mint, retrying",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                    self.prepare_sampler_for_turn().await;
+                    return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        "auth recovery: sampler 401, radius re-mint failed"
+                    );
+                    xai_grok_telemetry::unified_log::warn(
+                        "auth recovery: sampler 401, radius re-mint failed",
+                        Some(self.session_info.id.0.as_ref()),
+                        None,
+                    );
+                }
+            }
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && failed_radius_route == Some(false)
+        {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                "auth recovery: static Radius API key rejected; refusing xAI credential refresh"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth recovery: static Radius API key rejected",
+                Some(self.session_info.id.0.as_ref()),
+                None,
+            );
+            detailed_message = format!(
+                "{detailed_message}\n\nThe Radius gateway rejected its static API key. Check GROK_RADIUS_API_KEY / RADIUS_API_KEY or `/providers radius`."
+            );
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && ambiguous_oauth_origin
         {
             tracing::warn!(
@@ -1173,7 +1349,7 @@ impl SessionActor {
             detailed_message = format!(
                 "{detailed_message}\n\n\
                  The request was rejected by {} — check the platform API key: {}.",
-                platform.display_name(),
+                platform.display_name,
                 platform.setup_hint()
             );
         } else if auth_recovery_eligible

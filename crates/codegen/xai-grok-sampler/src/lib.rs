@@ -17,14 +17,18 @@
 //! and the actor with its per-request task tie these layers together.
 
 pub mod actor;
+pub mod adapter;
 pub mod attribution;
+pub mod bedrock;
 pub mod client;
 pub mod commands;
 pub mod config;
 pub mod doom_loop;
 pub mod events;
+pub mod google;
 pub mod handle;
 pub mod metrics;
+pub mod pi_messages;
 pub mod retry;
 pub mod sampling_log;
 mod shared_http;
@@ -33,6 +37,7 @@ pub mod types;
 
 // Public re-exports — the API surface consumers see.
 pub use actor::SamplerActor;
+pub use adapter::BackendAdapter;
 pub use attribution::{
     Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SamplingConsumer, SharedAttributionCallback,
 };

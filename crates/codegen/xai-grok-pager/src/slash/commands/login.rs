@@ -2,7 +2,10 @@
 //!
 //! Optional argument: `kimi` / `kimi-code` starts Kimi Code device OAuth;
 //! `openai` / `codex` starts the OpenAI Codex (ChatGPT) browser OAuth;
-//! `claude` / `anthropic` starts the Anthropic Claude subscription OAuth.
+//! `claude` / `anthropic` starts the Anthropic Claude subscription OAuth;
+//! `github` / `copilot` starts the GitHub Copilot device OAuth;
+//! `radius` starts Radius browser PKCE OAuth.
+//! `amazon-bedrock` / `bedrock` prints the safe CLI setup commands.
 //! OpenCode Go uses a Console-issued API key rather than a portable OAuth
 //! login, so `/login opencode-go` redirects to `/providers opencode-go`.
 //! With no argument, login always uses the default xAI flow.
@@ -18,11 +21,11 @@ impl SlashCommand for LoginCommand {
     }
 
     fn description(&self) -> &str {
-        "Log in or show subscription setup (kimi | openai | claude | opencode-go)"
+        "Log in or show subscription setup (kimi | openai | claude | github | radius | bedrock | opencode-go)"
     }
 
     fn usage(&self) -> &str {
-        "/login [kimi|openai|claude|opencode-go]"
+        "/login [kimi|openai|claude|github|radius|bedrock|opencode-go]"
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -36,6 +39,20 @@ impl SlashCommand for LoginCommand {
             CommandResult::Action(Action::LoginOpenAiCodex)
         } else if matches!(arg.as_str(), "claude" | "anthropic" | "anthropic-claude") {
             CommandResult::Action(Action::LoginAnthropicClaude)
+        } else if matches!(arg.as_str(), "github" | "github-copilot" | "copilot") {
+            CommandResult::Action(Action::LoginGitHubCopilot)
+        } else if matches!(arg.as_str(), "radius") {
+            CommandResult::Action(Action::LoginRadius)
+        } else if matches!(arg.as_str(), "amazon-bedrock" | "bedrock") {
+            CommandResult::Error(
+                "Amazon Bedrock supports three auth modes:\n  \
+                 • Bearer token: run `grok login --bedrock` in an interactive terminal.\n  \
+                 • AWS profile: run `grok login --bedrock --profile <name>`.\n  \
+                 • Existing AWS credential chain: run `grok login --bedrock --chain`.\n\
+                 Amazon Bedrock 支持 Bearer token、AWS profile 或现有 AWS 凭证链；\
+                 请用以上命令安全写入 Bedrock scope，不会复制 AWS access/secret key。"
+                    .into(),
+            )
         } else if matches!(arg.as_str(), "opencode-go" | "opencodego") {
             CommandResult::Error(
                 "OpenCode Go subscriptions use a Console-issued API key, not portable OAuth. \
@@ -55,7 +72,8 @@ impl SlashCommand for LoginCommand {
         } else {
             CommandResult::Error(format!(
                 "Unknown login target '{arg}'. Try `/login`, `/login kimi`, `/login openai`, \
-                 `/login claude`, or `/login opencode-go` (API-key setup); for Nexus use `/nexus`."
+                 `/login claude`, `/login github`, `/login radius`, `/login bedrock`, or \
+                 `/login opencode-go` (API-key setup); for Nexus use `/nexus`."
             ))
         }
     }
@@ -115,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn login_routes_all_four_interactive_families() {
+    fn login_routes_all_six_interactive_families() {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
 
@@ -134,6 +152,14 @@ mod tests {
         assert!(matches!(
             LoginCommand.run(&mut ctx, "claude"),
             CommandResult::Action(Action::LoginAnthropicClaude)
+        ));
+        assert!(matches!(
+            LoginCommand.run(&mut ctx, "copilot"),
+            CommandResult::Action(Action::LoginGitHubCopilot)
+        ));
+        assert!(matches!(
+            LoginCommand.run(&mut ctx, "radius"),
+            CommandResult::Action(Action::LoginRadius)
         ));
     }
 }

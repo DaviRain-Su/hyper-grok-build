@@ -10,15 +10,16 @@
 //! blocking is not allowed").
 
 use indexmap::IndexMap;
+use std::sync::{LazyLock, Mutex};
 use xai_grok_models::{
-    NEXUS_BASE_URL_DEFAULT, PlatformId, WireModel, WireModelsResponse, WireThinkEfforts,
-    nexus_chat_base, nexus_messages_base, nexus_normalize_root,
+    NEXUS_BASE_URL_DEFAULT, PlatformId, ProviderDiscoveryMode, WireModel, WireModelsResponse,
+    WireThinkEfforts, nexus_chat_base, nexus_messages_base, nexus_normalize_root,
 };
 use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
 
 use crate::agent::config::{
     EnvKeys, ModelEntry, ModelEntryConfig, PlatformsConfig, default_agent_type,
-    resolve_platform_api_key,
+    resolve_platform_api_key, resolve_provider_api_key,
 };
 use crate::sampling::ApiBackend;
 
@@ -69,7 +70,7 @@ pub(crate) fn load_platforms_config() -> PlatformsConfig {
 }
 
 /// Platforms with usable credentials, registry order (subscription first).
-fn enabled_platforms(has_kimi_oauth: bool, platforms: &PlatformsConfig) -> Vec<PlatformId> {
+fn enabled_platforms(has_kimi_credential: bool, platforms: &PlatformsConfig) -> Vec<PlatformId> {
     PlatformId::ALL
         .into_iter()
         .filter(|p| {
@@ -77,7 +78,7 @@ fn enabled_platforms(has_kimi_oauth: bool, platforms: &PlatformsConfig) -> Vec<P
                 return false;
             }
             if *p == PlatformId::KimiCode {
-                has_kimi_oauth
+                has_kimi_credential
             } else {
                 resolve_platform_api_key(*p, platforms).is_some()
             }
@@ -101,25 +102,45 @@ pub(crate) fn fetch_enabled_platform_models_blocking(
 fn fetch_enabled_platform_models_inner(
     platforms: &PlatformsConfig,
 ) -> Option<IndexMap<String, ModelEntry>> {
-    let kimi_bearer = crate::auth::kimi::kimi_code_access_token_cached();
-    let enabled = enabled_platforms(kimi_bearer.is_some(), platforms);
-    if enabled.is_empty() {
+    let kimi_api_key = xai_grok_models::provider_spec(PlatformId::KimiCode.as_str())
+        .and_then(|provider| resolve_provider_api_key(provider, platforms));
+    let kimi_oauth_bearer = if kimi_api_key.is_none() {
+        crate::auth::kimi::kimi_code_access_token_cached()
+    } else {
+        None
+    };
+    let radius = fetch_radius_models_if_enabled(platforms);
+    let enabled = enabled_platforms(
+        kimi_api_key.is_some() || kimi_oauth_bearer.is_some(),
+        platforms,
+    );
+    if enabled.is_empty() && radius.is_none() {
         tracing::debug!("platform models fetch skipped: no platform credentials");
         return None;
     }
 
-    let mut map = IndexMap::new();
-    let mut successes = 0usize;
+    let mut map = radius.unwrap_or_default();
+    let mut successes = usize::from(!map.is_empty());
     for platform in enabled {
-        let bearer = if platform == PlatformId::KimiCode {
-            kimi_bearer
-                .clone()
-                .expect("enabled_platforms gated on Kimi OAuth presence")
+        let (bearer, attach_kimi_device_headers) = if platform == PlatformId::KimiCode {
+            if let Some(api_key) = kimi_api_key.clone() {
+                (api_key, false)
+            } else {
+                (
+                    kimi_oauth_bearer
+                        .clone()
+                        .expect("enabled_platforms gated on Kimi credential presence"),
+                    true,
+                )
+            }
         } else {
-            resolve_platform_api_key(platform, platforms)
-                .expect("enabled_platforms gated on key presence")
+            (
+                resolve_platform_api_key(platform, platforms)
+                    .expect("enabled_platforms gated on key presence"),
+                false,
+            )
         };
-        match fetch_one_platform_models(platform, &bearer) {
+        match fetch_one_platform_models(platform, &bearer, attach_kimi_device_headers) {
             Ok(entries) => {
                 tracing::info!(
                     platform = platform.as_str(),
@@ -147,27 +168,20 @@ fn fetch_enabled_platform_models_inner(
     Some(map)
 }
 
-/// `GET {platform.base}/models` with Bearer auth; map through the F4 wire
-/// contract and the platform prefix filter.
-fn fetch_one_platform_models(
+fn platform_models_request(
+    client: &reqwest::blocking::Client,
     platform: PlatformId,
     bearer: &str,
-) -> Result<Vec<ModelEntryConfig>, PlatformModelsError> {
-    // Nexus exposes two model catalogs on different bases (OpenAI-style
-    // `{R}/openai/v1/models` for chat/completions + Anthropic-style
-    // `{R}/v1/models` for native Claude Messages). Discover both.
-    if platform == PlatformId::Nexus {
-        return fetch_nexus_models(bearer);
-    }
-    let client = crate::http::shared_startup_blocking_client();
+    attach_kimi_device_headers: bool,
+) -> reqwest::blocking::RequestBuilder {
     let url = platform.models_list_url();
     tracing::info!(platform = platform.as_str(), %url, "fetching platform models");
     let mut request = client
         .get(&url)
         .header("Authorization", format!("Bearer {bearer}"));
-    // Kimi Code subscription expects the same device-identity headers as
-    // OAuth / inference; open platforms do not.
-    if platform == PlatformId::KimiCode {
+    // Kimi OAuth expects device identity; static API-key mode deliberately
+    // omits those OAuth-device headers.
+    if platform == PlatformId::KimiCode && attach_kimi_device_headers {
         match crate::auth::kimi::device_headers() {
             Ok(headers) => {
                 for (name, value) in headers {
@@ -182,6 +196,24 @@ fn fetch_one_platform_models(
             }
         }
     }
+    request
+}
+
+/// `GET {platform.base}/models` with Bearer auth; map through the F4 wire
+/// contract and the platform prefix filter.
+fn fetch_one_platform_models(
+    platform: PlatformId,
+    bearer: &str,
+    attach_kimi_device_headers: bool,
+) -> Result<Vec<ModelEntryConfig>, PlatformModelsError> {
+    // Nexus exposes two model catalogs on different bases (OpenAI-style
+    // `{R}/openai/v1/models` for chat/completions + Anthropic-style
+    // `{R}/v1/models` for native Claude Messages). Discover both.
+    if platform == PlatformId::Nexus {
+        return fetch_nexus_models(bearer);
+    }
+    let client = crate::http::shared_startup_blocking_client();
+    let request = platform_models_request(&client, platform, bearer, attach_kimi_device_headers);
     let response = request.send()?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -352,6 +384,8 @@ fn nexus_wire_to_entry(
         api_key: None,
         env_key: Some(EnvKeys::new(platform.api_key_env_names().iter().copied())),
         api_backend,
+        request_compat: None,
+        endpoint_path: None,
         auth_scheme: None,
         reasoning_effort: think_efforts
             .and_then(|t| t.default_effort.as_deref())
@@ -359,6 +393,7 @@ fn nexus_wire_to_entry(
         supports_reasoning_effort: think_efforts.is_some() || supports_reasoning,
         reasoning_efforts,
         extra_headers,
+        query_params: IndexMap::new(),
         context_window,
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
@@ -461,6 +496,8 @@ pub(crate) fn platform_wire_model_to_entry(
         } else {
             ApiBackend::ChatCompletions
         },
+        request_compat: None,
+        endpoint_path: None,
         auth_scheme: None,
         reasoning_effort: think_efforts
             .and_then(|t| t.default_effort.as_deref())
@@ -479,6 +516,7 @@ pub(crate) fn platform_wire_model_to_entry(
             }
             headers
         },
+        query_params: IndexMap::new(),
         context_window,
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
@@ -511,6 +549,571 @@ pub(crate) fn merge_platform_models(
         );
         map.insert(key, entry);
     }
+}
+
+const RADIUS_CACHE_TTL_SECS: i64 = 6 * 60 * 60;
+const RADIUS_CACHE_MAX_STALE_SECS: i64 = 7 * 24 * 60 * 60;
+const RADIUS_CONFIG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const RADIUS_CACHE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const RADIUS_CONFIG_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const RADIUS_MAX_MODELS: usize = 10_000;
+static RADIUS_FETCH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RadiusConfigResponse {
+    base_url: String,
+    models: Vec<RadiusWireModel>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RadiusWireModel {
+    id: String,
+    name: String,
+    reasoning: bool,
+    #[serde(default)]
+    thinking_level_map: std::collections::BTreeMap<String, Option<String>>,
+    input: Vec<String>,
+    cost: RadiusWireCost,
+    context_window: u64,
+    max_tokens: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RadiusWireCost {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tiers: Vec<RadiusWireCostTier>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RadiusWireCostTier {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    input_tokens_above: u64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RadiusCacheFile {
+    version: u32,
+    gateway: String,
+    credential_scope: String,
+    fetched_at: chrono::DateTime<chrono::Utc>,
+    base_url: String,
+    models: Vec<RadiusWireModel>,
+}
+
+fn radius_cache_path() -> std::path::PathBuf {
+    std::env::var("GROK_RADIUS_MODELS_CACHE_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| xai_grok_config::grok_home().join("radius_models_cache.json"))
+}
+
+fn radius_credential_scope(kind: &str, bearer: &str) -> String {
+    use sha2::Digest as _;
+
+    let mut digest = sha2::Sha256::new();
+    digest.update(kind.as_bytes());
+    digest.update([0]);
+    digest.update(bearer.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn lock_radius_cache() -> Option<std::fs::File> {
+    use fs2::FileExt as _;
+
+    let cache_path = radius_cache_path();
+    let lock_path = cache_path.with_extension("lock");
+    if let Some(parent) = lock_path.parent()
+        && !parent.as_os_str().is_empty()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return None;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .ok()?;
+    let deadline = std::time::Instant::now() + RADIUS_CACHE_LOCK_TIMEOUT;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Some(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn radius_cache_age_seconds(fetched_at: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    let age = chrono::Utc::now()
+        .signed_duration_since(fetched_at)
+        .num_seconds();
+    // A small amount of clock skew is harmless; a cache timestamp far in the
+    // future must not stay fresh indefinitely.
+    (age >= -5 * 60).then_some(age.max(0))
+}
+
+fn load_radius_cache(
+    gateway: &str,
+    credential_scope: &str,
+    fresh_only: bool,
+) -> Option<IndexMap<String, ModelEntry>> {
+    let raw = std::fs::read_to_string(radius_cache_path()).ok()?;
+    let cache: RadiusCacheFile = serde_json::from_str(&raw).ok()?;
+    if cache.version != 2 || cache.gateway != gateway || cache.credential_scope != credential_scope
+    {
+        return None;
+    }
+    let age = radius_cache_age_seconds(cache.fetched_at)?;
+    let max_age = if fresh_only {
+        RADIUS_CACHE_TTL_SECS
+    } else {
+        RADIUS_CACHE_MAX_STALE_SECS
+    };
+    if age > max_age {
+        return None;
+    }
+    validate_radius_config(&cache.base_url, &cache.models).ok()?;
+    Some(radius_models_to_entries(&cache.base_url, cache.models))
+}
+
+fn store_radius_cache(
+    gateway: &str,
+    credential_scope: &str,
+    base_url: &str,
+    models: Vec<RadiusWireModel>,
+) {
+    use std::io::Write as _;
+
+    let path = radius_cache_path();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        tracing::warn!(%error, "radius cache directory creation failed");
+        return;
+    }
+    let cache = RadiusCacheFile {
+        version: 2,
+        gateway: gateway.to_string(),
+        credential_scope: credential_scope.to_string(),
+        fetched_at: chrono::Utc::now(),
+        base_url: base_url.to_string(),
+        models,
+    };
+    let Ok(bytes) = serde_json::to_vec_pretty(&cache) else {
+        return;
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("radius_models_cache.json");
+    let tmp = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)?;
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!(%error, "radius cache atomic write failed");
+    }
+}
+
+fn validate_radius_config(base_url: &str, models: &[RadiusWireModel]) -> anyhow::Result<()> {
+    let normalized_base = crate::auth::radius::normalize_gateway_root(base_url)?;
+    if normalized_base != base_url {
+        anyhow::bail!("Radius config baseUrl is not normalized");
+    }
+    if models.len() > RADIUS_MAX_MODELS {
+        anyhow::bail!("Radius config has too many models");
+    }
+    let mut ids = std::collections::HashSet::with_capacity(models.len());
+    for model in models {
+        validate_radius_wire_model(model)?;
+        if !ids.insert(model.id.as_str()) {
+            anyhow::bail!("Radius config contains duplicate model id `{}`", model.id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_radius_wire_model(wire: &RadiusWireModel) -> anyhow::Result<()> {
+    let id = wire.id.trim();
+    let name = wire.name.trim();
+    if id.is_empty()
+        || id != wire.id
+        || id.len() > 512
+        || id.chars().any(|c| c.is_ascii_control())
+        || name.is_empty()
+        || name != wire.name
+        || name.len() > 512
+        || name.chars().any(|c| c.is_ascii_control())
+    {
+        anyhow::bail!("Radius model has an invalid id or name");
+    }
+    if wire.context_window == 0
+        || wire.max_tokens == 0
+        || wire.max_tokens > u32::MAX as u64
+        || wire.max_tokens > wire.context_window
+    {
+        anyhow::bail!("Radius model `{id}` has invalid token limits");
+    }
+    let mut inputs = std::collections::HashSet::new();
+    if wire.input.is_empty()
+        || !wire.input.iter().all(|value| {
+            matches!(value.as_str(), "text" | "image") && inputs.insert(value.as_str())
+        })
+        || !inputs.contains("text")
+    {
+        anyhow::bail!("Radius model `{id}` has invalid input capabilities");
+    }
+    if !radius_cost_valid(&wire.cost) {
+        anyhow::bail!("Radius model `{id}` has invalid cost rates");
+    }
+    for (level, mapped) in &wire.thinking_level_map {
+        if !matches!(
+            level.as_str(),
+            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        ) || mapped.as_deref().is_some_and(|value| {
+            value.trim().is_empty() || value.chars().any(|c| c.is_ascii_control())
+        }) {
+            anyhow::bail!("Radius model `{id}` has an invalid thinkingLevelMap");
+        }
+    }
+    Ok(())
+}
+
+fn radius_models_to_entries(
+    base_url: &str,
+    models: Vec<RadiusWireModel>,
+) -> IndexMap<String, ModelEntry> {
+    let mut map = IndexMap::new();
+    for model in models {
+        if let Some(entry) = radius_wire_model_to_entry(base_url, model) {
+            let key = entry.id.clone().unwrap_or_else(|| entry.model.clone());
+            map.insert(key, ModelEntry::from_config_entry(&entry));
+        }
+    }
+    map
+}
+
+fn radius_wire_model_to_entry(base_url: &str, wire: RadiusWireModel) -> Option<ModelEntryConfig> {
+    validate_radius_wire_model(&wire).ok()?;
+    let reasoning_efforts = if wire.reasoning {
+        radius_thinking_options(&wire.thinking_level_map)
+    } else {
+        Vec::new()
+    };
+    Some(ModelEntryConfig {
+        id: Some(format!("radius/{}", wire.id)),
+        name: Some(wire.name),
+        model: wire.id,
+        base_url: base_url.to_string(),
+        description: None,
+        max_completion_tokens: Some(wire.max_tokens as u32),
+        temperature: None,
+        top_p: None,
+        api_key: None,
+        env_key: Some(EnvKeys::new(["GROK_RADIUS_API_KEY", "RADIUS_API_KEY"])),
+        api_backend: ApiBackend::PiMessages,
+        request_compat: None,
+        endpoint_path: None,
+        auth_scheme: Some(xai_grok_sampler::AuthScheme::Bearer),
+        reasoning_effort: reasoning_efforts
+            .iter()
+            .find(|option| option.default)
+            .map(|option| option.value),
+        supports_reasoning_effort: wire.reasoning && !reasoning_efforts.is_empty(),
+        reasoning_efforts,
+        extra_headers: IndexMap::new(),
+        query_params: IndexMap::new(),
+        context_window: std::num::NonZeroU64::new(wire.context_window)?,
+        auto_compact_threshold_percent: None,
+        system_prompt_label: None,
+        api_base_url: None,
+        use_concise: false,
+        agent_type: default_agent_type(),
+        inference_idle_timeout_secs: None,
+        max_retries: None,
+        hidden: false,
+        supported_in_api: true,
+        supports_backend_search: false,
+        compactions_remaining: None,
+        compaction_at_tokens: None,
+        show_model_fingerprint: false,
+        stream_tool_calls: None,
+        laziness_detector: Default::default(),
+    })
+}
+
+fn radius_cost_valid(cost: &RadiusWireCost) -> bool {
+    fn rates_valid(rates: [f64; 4]) -> bool {
+        rates
+            .into_iter()
+            .all(|value| value.is_finite() && value >= 0.0)
+    }
+
+    if !rates_valid([cost.input, cost.output, cost.cache_read, cost.cache_write]) {
+        return false;
+    }
+    let mut previous_threshold = 0;
+    cost.tiers.iter().all(|tier| {
+        let threshold_valid = tier.input_tokens_above > previous_threshold;
+        previous_threshold = tier.input_tokens_above;
+        threshold_valid && rates_valid([tier.input, tier.output, tier.cache_read, tier.cache_write])
+    })
+}
+
+fn radius_thinking_options(
+    map: &std::collections::BTreeMap<String, Option<String>>,
+) -> Vec<ReasoningEffortOption> {
+    let mut out = Vec::new();
+    for (level, gateway_value) in map {
+        if gateway_value.is_none() {
+            continue;
+        }
+        let value = match level.as_str() {
+            "off" => ReasoningEffort::None,
+            "minimal" => ReasoningEffort::Minimal,
+            "low" => ReasoningEffort::Low,
+            "medium" => ReasoningEffort::Medium,
+            "high" => ReasoningEffort::High,
+            "xhigh" => ReasoningEffort::Xhigh,
+            "max" => ReasoningEffort::Max,
+            _ => continue,
+        };
+        let mut label = level.clone();
+        if let Some(first) = label.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        out.push(ReasoningEffortOption {
+            id: level.clone(),
+            value,
+            label,
+            description: None,
+            default: level == "medium",
+        });
+    }
+    out
+}
+
+enum RadiusDiscoveryCredential {
+    ApiKey { bearer: String, gateway: String },
+    OAuth { marker: String, gateway: String },
+}
+
+fn radius_api_key_gateway() -> Option<String> {
+    let env_gateway = std::env::var("GROK_RADIUS_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("RADIUS_GATEWAY_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    if let Some(value) = env_gateway {
+        return match crate::auth::radius::normalize_gateway_root(&value) {
+            Ok(gateway) => Some(gateway),
+            Err(error) => {
+                tracing::warn!(%error, "invalid Radius gateway environment");
+                None
+            }
+        };
+    }
+    if let Some(value) =
+        crate::auth::read_platform_base_url(&xai_grok_config::grok_home(), "radius")
+    {
+        return match crate::auth::radius::normalize_gateway_root(&value) {
+            Ok(gateway) => Some(gateway),
+            Err(error) => {
+                tracing::warn!(%error, "invalid stored Radius API-key gateway");
+                None
+            }
+        };
+    }
+    Some(crate::auth::radius::DEFAULT_RADIUS_GATEWAY.to_string())
+}
+
+fn read_radius_config_response(
+    response: reqwest::blocking::Response,
+) -> anyhow::Result<RadiusConfigResponse> {
+    use std::io::Read as _;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > RADIUS_CONFIG_MAX_BYTES)
+    {
+        anyhow::bail!("Radius config response exceeds size limit");
+    }
+    let mut body = Vec::new();
+    response
+        .take(RADIUS_CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut body)?;
+    if body.len() as u64 > RADIUS_CONFIG_MAX_BYTES {
+        anyhow::bail!("Radius config response exceeds size limit");
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+fn oauth_gateway_for_auth(auth: &crate::auth::GrokAuth) -> Option<String> {
+    match auth.platform_base_url.as_deref() {
+        Some(value) => crate::auth::radius::normalize_gateway_root(value).ok(),
+        None => crate::auth::radius::try_gateway_from_env_or_default().ok(),
+    }
+}
+
+fn fetch_radius_models_if_enabled(
+    platforms: &PlatformsConfig,
+) -> Option<IndexMap<String, ModelEntry>> {
+    let provider = xai_grok_models::provider_spec("radius")?;
+    if provider.discovery.mode != ProviderDiscoveryMode::Adapter {
+        return None;
+    }
+
+    // Static API keys are authoritative for this hybrid provider. Their
+    // gateway comes from the API-key platform scope; OAuth uses the gateway
+    // persisted inside oauth/radius so token and issuer cannot be mixed.
+    let credential = if let Some(bearer) = resolve_provider_api_key(provider, platforms) {
+        RadiusDiscoveryCredential::ApiKey {
+            bearer,
+            gateway: radius_api_key_gateway()?,
+        }
+    } else {
+        let (marker, gateway) = crate::auth::radius::radius_catalog_oauth_cached()?;
+        RadiusDiscoveryCredential::OAuth { marker, gateway }
+    };
+    let (gateway, initial_scope) = match &credential {
+        RadiusDiscoveryCredential::ApiKey { bearer, gateway } => {
+            (gateway.clone(), radius_credential_scope("api-key", bearer))
+        }
+        RadiusDiscoveryCredential::OAuth { marker, gateway } => {
+            (gateway.clone(), radius_credential_scope("oauth", marker))
+        }
+    };
+
+    if let Some(fresh) = load_radius_cache(&gateway, &initial_scope, true) {
+        return Some(fresh);
+    }
+    let _process_guard = RADIUS_FETCH_LOCK.lock().ok()?;
+    if let Some(fresh) = load_radius_cache(&gateway, &initial_scope, true) {
+        return Some(fresh);
+    }
+    let Some(_file_guard) = lock_radius_cache() else {
+        tracing::warn!("radius config cache lock unavailable; trying stale cache");
+        return load_radius_cache(&gateway, &initial_scope, false);
+    };
+    if let Some(fresh) = load_radius_cache(&gateway, &initial_scope, true) {
+        return Some(fresh);
+    }
+
+    let (bearer, active_scope) = match credential {
+        RadiusDiscoveryCredential::ApiKey { bearer, .. } => (bearer, initial_scope.clone()),
+        RadiusDiscoveryCredential::OAuth { gateway, .. } => {
+            let Some(auth) = crate::auth::radius::ensure_radius_auth_blocking() else {
+                tracing::warn!("radius OAuth refresh unavailable; trying stale cache");
+                return load_radius_cache(&gateway, &initial_scope, false);
+            };
+            if oauth_gateway_for_auth(&auth).as_deref() != Some(gateway.as_str()) {
+                tracing::warn!(
+                    "radius OAuth gateway changed during discovery; refusing to mix token and gateway"
+                );
+                return load_radius_cache(&gateway, &initial_scope, false);
+            }
+            let active_scope = radius_credential_scope("oauth", &auth.key);
+            if active_scope != initial_scope
+                && let Some(fresh) = load_radius_cache(&gateway, &active_scope, true)
+            {
+                return Some(fresh);
+            }
+            (auth.key, active_scope)
+        }
+    };
+
+    let url = match crate::auth::radius::config_url(&gateway) {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!(%error, "radius config URL invalid; trying stale cache");
+            return load_radius_cache(&gateway, &initial_scope, false);
+        }
+    };
+    let client = crate::http::shared_startup_blocking_client();
+    let response = match client
+        .get(url)
+        .timeout(RADIUS_CONFIG_REQUEST_TIMEOUT)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header("Authorization", format!("Bearer {bearer}"))
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "radius config fetch failed; trying stale cache");
+            return load_radius_cache(&gateway, &initial_scope, false);
+        }
+    };
+    if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            "radius config fetch failed; trying stale cache"
+        );
+        return load_radius_cache(&gateway, &initial_scope, false);
+    }
+    let parsed = match read_radius_config_response(response) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            tracing::warn!(%error, "radius config parse failed; trying stale cache");
+            return load_radius_cache(&gateway, &initial_scope, false);
+        }
+    };
+    let base_url = match crate::auth::radius::normalize_gateway_root(&parsed.base_url) {
+        Ok(base_url) => base_url,
+        Err(error) => {
+            tracing::warn!(%error, "radius config baseUrl invalid; trying stale cache");
+            return load_radius_cache(&gateway, &initial_scope, false);
+        }
+    };
+    if let Err(error) = validate_radius_config(&base_url, &parsed.models) {
+        tracing::warn!(%error, "radius config validation failed; trying stale cache");
+        return load_radius_cache(&gateway, &initial_scope, false);
+    }
+
+    let entries = radius_models_to_entries(&base_url, parsed.models.clone());
+    store_radius_cache(&gateway, &active_scope, &base_url, parsed.models);
+    Some(entries)
 }
 
 /// Fetch + merge helper used by startup prefetch and post-login restamp.
@@ -547,6 +1150,36 @@ mod tests {
             !enabled.contains(&PlatformId::OpenAiCodex),
             "Codex live discovery must not be gated by or receive a Kimi token"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn kimi_static_live_discovery_uses_bearer_without_oauth_device_headers() {
+        let _base = xai_grok_test_support::EnvGuard::set(
+            xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+            "https://unit.kimi.invalid/coding/v1",
+        );
+        let client = reqwest::blocking::Client::new();
+        let request =
+            platform_models_request(&client, PlatformId::KimiCode, "static-kimi-test-key", false)
+                .build()
+                .expect("request should build");
+        assert_eq!(
+            request.url().as_str(),
+            "https://unit.kimi.invalid/coding/v1/models"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer static-kimi-test-key")
+        );
+        assert!(request.headers().keys().all(|name| {
+            !name.as_str().eq_ignore_ascii_case("x-msh-device-id")
+                && !name.as_str().eq_ignore_ascii_case("x-msh-device-name")
+                && !name.as_str().eq_ignore_ascii_case("x-msh-device-model")
+        }));
     }
 
     #[test]
@@ -746,5 +1379,254 @@ mod tests {
                 .map(String::as_str),
             Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE)
         );
+    }
+
+    fn radius_wire(id: &str) -> RadiusWireModel {
+        RadiusWireModel {
+            id: id.to_string(),
+            name: format!("Radius {id}"),
+            reasoning: true,
+            thinking_level_map: std::collections::BTreeMap::from([
+                ("off".to_string(), Some("disabled".to_string())),
+                ("medium".to_string(), Some("medium".to_string())),
+            ]),
+            input: vec!["text".to_string(), "image".to_string()],
+            cost: RadiusWireCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.1,
+                cache_write: 0.2,
+                tiers: Vec::new(),
+            },
+            context_window: 128_000,
+            max_tokens: 16_000,
+        }
+    }
+
+    #[test]
+    fn radius_config_is_validated_atomically_and_maps_pi_messages() {
+        let models = vec![radius_wire("model-a")];
+        validate_radius_config("https://inference.radius.test/v1", &models).unwrap();
+        let entries = radius_models_to_entries("https://inference.radius.test/v1", models);
+        let entry = entries.get("radius/model-a").unwrap();
+        assert_eq!(entry.info.api_backend, ApiBackend::PiMessages);
+        assert_eq!(entry.info.base_url, "https://inference.radius.test/v1");
+        assert_eq!(entry.info.context_window.get(), 128_000);
+        assert_eq!(entry.info.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert!(entry.info.supports_reasoning_effort);
+        assert!(entry.api_key.is_none());
+    }
+
+    #[test]
+    fn radius_config_rejects_duplicates_invalid_cost_and_unknown_inputs() {
+        let duplicate = radius_wire("same");
+        assert!(
+            validate_radius_config(
+                "https://inference.radius.test/v1",
+                &[duplicate.clone(), duplicate]
+            )
+            .is_err()
+        );
+
+        let mut invalid_cost = radius_wire("bad-cost");
+        invalid_cost.cost.output = -1.0;
+        assert!(
+            validate_radius_config("https://inference.radius.test/v1", &[invalid_cost]).is_err()
+        );
+
+        let mut tiered = radius_wire("tiered");
+        tiered.cost.tiers = vec![RadiusWireCostTier {
+            input: 2.0,
+            output: 4.0,
+            cache_read: 0.2,
+            cache_write: 0.4,
+            input_tokens_above: 200_000,
+        }];
+        validate_radius_config("https://inference.radius.test/v1", &[tiered.clone()]).unwrap();
+        tiered.cost.tiers.push(RadiusWireCostTier {
+            input_tokens_above: 100_000,
+            ..tiered.cost.tiers[0].clone()
+        });
+        assert!(validate_radius_config("https://inference.radius.test/v1", &[tiered]).is_err());
+
+        let mut invalid_input = radius_wire("bad-input");
+        invalid_input.input.push("audio".into());
+        assert!(
+            validate_radius_config("https://inference.radius.test/v1", &[invalid_input]).is_err()
+        );
+
+        let invalid_json = serde_json::json!({
+            "baseUrl": "https://inference.radius.test/v1",
+            "models": [{
+                "id": "bad-json",
+                "name": "Bad JSON",
+                "reasoning": false,
+                "thinkingLevelMap": {},
+                "input": ["text"],
+                "cost": null,
+                "contextWindow": 128000,
+                "maxTokens": 16000
+            }]
+        });
+        assert!(serde_json::from_value::<RadiusConfigResponse>(invalid_json).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn radius_cache_is_gateway_scoped_atomic_and_stale_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("radius-cache.json");
+        let _cache = xai_grok_test_support::EnvGuard::set(
+            "GROK_RADIUS_MODELS_CACHE_PATH",
+            cache_path.to_str().unwrap(),
+        );
+        let gateway = "https://gateway.radius.test";
+        let base = "https://inference.radius.test/v1";
+        let scope = radius_credential_scope("api-key", "test-key");
+        store_radius_cache(gateway, &scope, base, vec![radius_wire("cached")]);
+
+        assert!(load_radius_cache(gateway, &scope, true).is_some());
+        assert!(
+            load_radius_cache(
+                gateway,
+                &radius_credential_scope("api-key", "different-key"),
+                false
+            )
+            .is_none()
+        );
+        assert!(load_radius_cache("https://other.radius.test", &scope, false).is_none());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-"))
+        );
+
+        let stale = RadiusCacheFile {
+            version: 2,
+            gateway: gateway.into(),
+            credential_scope: scope.clone(),
+            fetched_at: chrono::Utc::now() - chrono::Duration::seconds(RADIUS_CACHE_TTL_SECS + 1),
+            base_url: base.into(),
+            models: vec![radius_wire("stale")],
+        };
+        std::fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(load_radius_cache(gateway, &scope, true).is_none());
+        assert!(load_radius_cache(gateway, &scope, false).is_some());
+
+        let expired = RadiusCacheFile {
+            fetched_at: chrono::Utc::now()
+                - chrono::Duration::seconds(RADIUS_CACHE_MAX_STALE_SECS + 1),
+            ..stale
+        };
+        std::fs::write(&cache_path, serde_json::to_vec(&expired).unwrap()).unwrap();
+        assert!(load_radius_cache(gateway, &scope, false).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn radius_live_discovery_uses_root_config_endpoint_and_fresh_cache() {
+        use std::io::{Read as _, Write as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let cache_path = dir.path().join("radius-cache.json");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let gateway = format!("http://{address}/ignored-prefix");
+        let inference_base = format!("http://{address}/inference/v1");
+        let response_body = serde_json::json!({
+            "baseUrl": inference_base.clone(),
+            "models": [{
+                "id": "live-model",
+                "name": "Live Radius Model",
+                "reasoning": true,
+                "thinkingLevelMap": {"medium": "medium"},
+                "input": ["text", "image"],
+                "cost": {
+                    "input": 1.0,
+                    "output": 2.0,
+                    "cacheRead": 0.1,
+                    "cacheWrite": 0.2
+                },
+                "contextWindow": 128000,
+                "maxTokens": 16000
+            }]
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                let read = socket.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            let lower = request.to_ascii_lowercase();
+            assert!(request.starts_with("GET /v1/config HTTP/1.1\r\n"));
+            assert!(lower.contains("authorization: bearer live-static-key\r\n"));
+            assert!(lower.contains("accept: application/json\r\n"));
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+            socket.flush().unwrap();
+        });
+
+        let _auth =
+            xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+        let _cache = xai_grok_test_support::EnvGuard::set(
+            "GROK_RADIUS_MODELS_CACHE_PATH",
+            cache_path.to_str().unwrap(),
+        );
+        let _key = xai_grok_test_support::EnvGuard::set("GROK_RADIUS_API_KEY", "live-static-key");
+        let _legacy_key = xai_grok_test_support::EnvGuard::unset("RADIUS_API_KEY");
+        let _gateway = xai_grok_test_support::EnvGuard::set("GROK_RADIUS_BASE_URL", &gateway);
+        let _legacy_gateway = xai_grok_test_support::EnvGuard::unset("RADIUS_GATEWAY_URL");
+
+        let first = fetch_radius_models_if_enabled(&PlatformsConfig::default()).unwrap();
+        server.join().unwrap();
+        let entry = first.get("radius/live-model").unwrap();
+        assert_eq!(entry.info.api_backend, ApiBackend::PiMessages);
+        assert_eq!(entry.info.base_url, inference_base);
+
+        // The listener has been dropped. A second successful result therefore
+        // proves the fresh, credential-scoped cache avoided another request.
+        let second = fetch_radius_models_if_enabled(&PlatformsConfig::default()).unwrap();
+        assert!(second.contains_key("radius/live-model"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn radius_without_credentials_does_not_attempt_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let cache_path = dir.path().join("radius-cache.json");
+        let _auth =
+            xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+        let _cache = xai_grok_test_support::EnvGuard::set(
+            "GROK_RADIUS_MODELS_CACHE_PATH",
+            cache_path.to_str().unwrap(),
+        );
+        let _api_key = xai_grok_test_support::EnvGuard::unset("GROK_RADIUS_API_KEY");
+        let _legacy_key = xai_grok_test_support::EnvGuard::unset("RADIUS_API_KEY");
+        let _gateway =
+            xai_grok_test_support::EnvGuard::set("GROK_RADIUS_BASE_URL", "http://127.0.0.1:9");
+
+        assert!(fetch_radius_models_if_enabled(&PlatformsConfig::default()).is_none());
+        assert!(!cache_path.exists());
     }
 }

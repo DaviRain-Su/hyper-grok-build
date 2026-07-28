@@ -28,6 +28,11 @@ pub use self::tool_overrides::{
     WebSearchOptions, XSearchOptions,
 };
 pub use self::types::*;
+pub use xai_grok_models::{
+    AdapterKind, AnthropicMessagesCompat, BedrockConverseStreamCompat, GoogleGenerateContentCompat,
+    MaxTokensField, OpenAiCompletionsCompat, OpenAiResponsesCompat, PiMessagesCompat,
+    RequestCompat, SessionAffinityFormat, ThinkingFormat,
+};
 
 // Re-export async-openai crate Responses API types under `rs` namespace
 pub use async_openai::types::responses as rs;

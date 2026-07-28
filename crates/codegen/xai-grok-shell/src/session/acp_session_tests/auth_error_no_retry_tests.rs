@@ -1012,6 +1012,7 @@ async fn reconstruct_full_config_uses_catalog_platform_on_shared_oauth_proxy() {
                             byok: crate::agent::auth_method::ModelByok::NotByok,
                             auth_scheme: Default::default(),
                             oauth_platform: Some(platform),
+                            platform_oauth_active: true,
                         },
                         provider: None,
                     }));
@@ -1039,6 +1040,63 @@ async fn reconstruct_full_config_uses_catalog_platform_on_shared_oauth_proxy() {
                     assert!(config.extra_headers.contains_key("originator"));
                     assert!(!config.extra_headers.contains_key("anthropic-version"));
                     assert!(!config.extra_headers.contains_key("X-Msh-Device-Id"));
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_distinguishes_copilot_oauth_marker_from_static_token() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for (platform_oauth_active, expected_resolver) in [(true, true), (false, false)] {
+                let model = if platform_oauth_active {
+                    "copilot-oauth-model"
+                } else {
+                    "copilot-static-model"
+                };
+                let credential = if platform_oauth_active {
+                    "stale-catalog-marker"
+                } else {
+                    "static-copilot-token"
+                };
+                let (actor, _rx) = make_actor_with_method_and_credentials(
+                    None,
+                    "cached_token",
+                    xai_chat_state::AuthType::ApiKey,
+                    credential.to_string(),
+                )
+                .await;
+                if let Some(mut sampling) = actor.chat_state_handle.get_sampling_config().await {
+                    sampling.model = model.to_string();
+                    sampling.adapter_kind = xai_grok_models::AdapterKind::GitHubCopilot;
+                    actor.chat_state_handle.update_sampling_config(sampling);
+                }
+                actor
+                    .model_auth_memo
+                    .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                        model_id: model.to_string(),
+                        facts: crate::agent::config::ModelAuthFacts {
+                            byok: crate::agent::auth_method::ModelByok::Byok,
+                            auth_scheme: Default::default(),
+                            oauth_platform: None,
+                            platform_oauth_active,
+                        },
+                        provider: None,
+                    }));
+
+                let config = actor.reconstruct_full_config().await;
+                assert_eq!(config.bearer_resolver.is_some(), expected_resolver);
+                if expected_resolver {
+                    assert!(config.api_key.is_none());
+                    assert!(
+                        format!("{:?}", config.bearer_resolver.as_ref().unwrap())
+                            .contains("GitHubCopilotBearerResolver")
+                    );
+                } else {
+                    assert_eq!(config.api_key.as_deref(), Some("static-copilot-token"));
                 }
             }
         })
@@ -1324,6 +1382,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
                         oauth_platform: None,
+                        platform_oauth_active: false,
                     },
                     provider: None,
                 }));
@@ -1369,6 +1428,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                         byok: ModelByok::Byok,
                         auth_scheme: Default::default(),
                         oauth_platform: None,
+                        platform_oauth_active: false,
                     },
                     provider: None,
                 }));
@@ -1418,6 +1478,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                         byok: ModelByok::NotByok,
                         auth_scheme: Default::default(),
                         oauth_platform: None,
+                        platform_oauth_active: false,
                     },
                     provider: None,
                 }));
@@ -1432,6 +1493,9 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 temperature: None,
                 top_p: None,
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
                 query_params: Default::default(),
@@ -1455,6 +1519,9 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                bedrock_request_metadata: Default::default(),
+                bedrock_headers: Default::default(),
+                bedrock_profile: None,
                 kimi_dialect: false,
             };
             let _ = actor
@@ -1489,6 +1556,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
                 byok: crate::agent::auth_method::ModelByok::Byok,
                 auth_scheme: Default::default(),
                 oauth_platform: None,
+                platform_oauth_active: false,
             },
             provider: Some(provider),
         }));
@@ -1528,6 +1596,9 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 temperature: None,
                 top_p: None,
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                adapter_kind: Default::default(),
+                request_compat: None,
+                endpoint_path: None,
                 auth_scheme: Default::default(),
                 extra_headers: Default::default(),
                 query_params: Default::default(),
@@ -1551,6 +1622,9 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 doom_loop_recovery: None,
                 header_injector: None,
                 responses_codex_dialect: false,
+                bedrock_request_metadata: Default::default(),
+                bedrock_headers: Default::default(),
+                bedrock_profile: None,
                 kimi_dialect: false,
             };
             let _ = actor

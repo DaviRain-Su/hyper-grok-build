@@ -262,6 +262,10 @@ fn build_unpinned(
     methods.push(openai_codex_auth_method());
     // Same for the Anthropic Claude (Pro/Max) subscription OAuth login.
     methods.push(anthropic_claude_auth_method());
+    // Same for GitHub Copilot subscription OAuth login.
+    methods.push(github_copilot_auth_method());
+    // Same for Radius gateway OAuth login.
+    methods.push(radius_auth_method());
 
     BuiltAuthMethods {
         methods,
@@ -304,6 +308,10 @@ pub enum AuthMethodKind {
     OpenAiCodex,
     /// Anthropic Claude subscription OAuth (third-party; not xAI session).
     AnthropicClaude,
+    /// GitHub Copilot subscription OAuth (third-party; not xAI session).
+    GitHubCopilot,
+    /// Radius gateway OAuth (third-party; not xAI session).
+    Radius,
     Unknown,
 }
 
@@ -317,6 +325,8 @@ impl AuthMethodKind {
             KIMI_CODE_METHOD_ID => Self::KimiCode,
             OPENAI_CODEX_METHOD_ID => Self::OpenAiCodex,
             ANTHROPIC_CLAUDE_METHOD_ID => Self::AnthropicClaude,
+            GITHUB_COPILOT_METHOD_ID => Self::GitHubCopilot,
+            RADIUS_METHOD_ID => Self::Radius,
             _ => Self::Unknown,
         }
     }
@@ -337,7 +347,13 @@ impl AuthMethodKind {
     pub fn needs_interactive_login(self) -> bool {
         matches!(
             self,
-            Self::GrokCom | Self::Oidc | Self::KimiCode | Self::OpenAiCodex | Self::AnthropicClaude
+            Self::GrokCom
+                | Self::Oidc
+                | Self::KimiCode
+                | Self::OpenAiCodex
+                | Self::AnthropicClaude
+                | Self::GitHubCopilot
+                | Self::Radius
         )
     }
 
@@ -545,6 +561,34 @@ pub fn anthropic_claude_auth_method() -> acp::AuthMethod {
     )
 }
 
+/// ACP method id for GitHub Copilot subscription OAuth login.
+pub const GITHUB_COPILOT_METHOD_ID: &str = "github-copilot";
+
+pub fn github_copilot_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(GITHUB_COPILOT_METHOD_ID),
+            "GitHub Copilot".to_string(),
+        )
+        .description(Some(
+            "Sign in with a GitHub Copilot subscription (device OAuth)".to_string(),
+        )),
+    )
+}
+
+/// ACP method id for Radius gateway OAuth login.
+pub const RADIUS_METHOD_ID: &str = "radius";
+
+pub fn radius_auth_method() -> acp::AuthMethod {
+    acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            acp::AuthMethodId::new(RADIUS_METHOD_ID),
+            "Radius".to_string(),
+        )
+        .description(Some("Sign in with Radius gateway OAuth".to_string())),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,8 +793,9 @@ mod tests {
 
     /// Brand-new user (no API key, no cached token): `grok.com` leads so the
     /// pager shows the login screen with the primary xAI method, with
-    /// Kimi Code / OpenAI Codex / Anthropic Claude OAuth always advertised as
-    /// alternative interactive methods. `default_auth_method_id` is None so the
+    /// Kimi Code / OpenAI Codex / Anthropic Claude / GitHub Copilot / Radius
+    /// OAuth always advertised as alternative interactive methods.
+    /// `default_auth_method_id` is None so the
     /// pager falls back to the advertised login method.
     #[test]
     fn fresh_user_requires_login_grok_com_first_subscription_methods_advertised() {
@@ -769,6 +814,8 @@ mod tests {
                 AuthMethodKind::KimiCode,
                 AuthMethodKind::OpenAiCodex,
                 AuthMethodKind::AnthropicClaude,
+                AuthMethodKind::GitHubCopilot,
+                AuthMethodKind::Radius,
             ],
         );
     }

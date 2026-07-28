@@ -24,6 +24,9 @@ fn test_config_with_window(context_window: u64) -> SamplingConfig {
         temperature: None,
         top_p: None,
         api_backend: Default::default(),
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),
@@ -1171,6 +1174,9 @@ async fn update_sampling_config_is_queryable() {
         temperature: Some(0.5),
         top_p: None,
         api_backend: Default::default(),
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),
@@ -1567,6 +1573,11 @@ async fn build_request_uses_sampling_config() {
         temperature: Some(0.7),
         top_p: Some(0.9),
         api_backend: Default::default(),
+        adapter_kind: Default::default(),
+        request_compat: Some(xai_grok_sampling_types::RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat::default(),
+        )),
+        endpoint_path: Some("custom/chat/completions".into()),
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),
@@ -1574,6 +1585,7 @@ async fn build_request_uses_sampling_config() {
         reasoning_effort: None,
         stream_tool_calls: None,
     };
+    let expected_compat = config.request_compat.clone();
     let h = TestHarness::with_config(vec![ConversationItem::user("hi")], config);
 
     let request = h
@@ -1586,6 +1598,7 @@ async fn build_request_uses_sampling_config() {
     assert_eq!(request.temperature, Some(0.7));
     assert_eq!(request.max_output_tokens, Some(8192));
     assert_eq!(request.top_p, Some(0.9));
+    assert_eq!(request.request_compat, expected_compat);
 }
 
 #[tokio::test]
@@ -1758,6 +1771,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
             ],
             model_id: Some("grok-3".to_string()),
             reasoning_model_identity: None,
+            provider_native_state: None,
             model_fingerprint: None,
             reasoning_effort: None,
         });
@@ -2045,6 +2059,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
             ],
             model_id: Some("grok-3".to_string()),
             reasoning_model_identity: None,
+            provider_native_state: None,
             model_fingerprint: None,
             reasoning_effort: None,
         }),
@@ -3678,6 +3693,7 @@ async fn get_last_model_metadata_returns_both_fields() {
             tool_calls: vec![],
             model_id: Some("grok-4.5".into()),
             reasoning_model_identity: None,
+            provider_native_state: None,
             model_fingerprint: Some("fp_abc123".into()),
             reasoning_effort: None,
         }),
@@ -3713,6 +3729,9 @@ async fn sampling_config_survives_compaction_replacement() {
         temperature: Some(0.7),
         top_p: Some(0.95),
         api_backend: ApiBackend::Responses,
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),
@@ -3730,6 +3749,7 @@ async fn sampling_config_survives_compaction_replacement() {
                 tool_calls: vec![],
                 model_id: Some("grok-4.5".into()),
                 reasoning_model_identity: None,
+                provider_native_state: None,
                 model_fingerprint: Some("fp_abc123".into()),
                 reasoning_effort: None,
             }),
@@ -3799,6 +3819,9 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
         temperature: Some(0.7),
         top_p: Some(0.95),
         api_backend: Default::default(),
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),
@@ -3816,6 +3839,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 tool_calls: vec![],
                 model_id: Some("grok-4.5".into()),
                 reasoning_model_identity: None,
+                provider_native_state: None,
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
             }),
@@ -3852,6 +3876,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 tool_calls: vec![],
                 model_id: Some("grok-4.5".into()),
                 reasoning_model_identity: None,
+                provider_native_state: None,
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
             },
@@ -3891,6 +3916,9 @@ async fn context_window_downgrade_triggers_auto_compact() {
         temperature: Some(0.7),
         top_p: Some(0.95),
         api_backend: ApiBackend::Responses,
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),

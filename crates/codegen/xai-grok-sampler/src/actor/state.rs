@@ -88,6 +88,9 @@ mod tests {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,
+            adapter_kind: Default::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: IndexMap::new(),
             query_params: IndexMap::new(),
@@ -111,6 +114,9 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            bedrock_request_metadata: IndexMap::new(),
+            bedrock_headers: IndexMap::new(),
+            bedrock_profile: None,
             kimi_dialect: false,
         }
     }

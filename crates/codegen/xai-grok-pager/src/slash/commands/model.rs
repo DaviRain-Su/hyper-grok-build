@@ -162,7 +162,9 @@ fn provider_label(id: &acp::ModelId, info: &acp::ModelInfo) -> Option<String> {
         };
         return Some(name);
     }
-    parse_managed_model_key(id.0.as_ref()).map(|(platform, _)| platform.display_name().to_string())
+    parse_managed_model_key(id.0.as_ref()).and_then(|(provider, _)| {
+        xai_grok_models::provider_spec(provider.as_str()).map(|spec| spec.display_name.clone())
+    })
 }
 
 /// Whether `description` is the generic Pi catalog source stamp (not useful in

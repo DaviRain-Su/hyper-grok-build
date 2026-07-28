@@ -270,6 +270,7 @@ pub fn stream_chat_completions<'a>(
             }
             items.push(ConversationItem::Assistant(AssistantItem {
                 content: std::sync::Arc::<str>::from(content_acc),
+                provider_native_state: None,
                 tool_calls,
                 model_id: Some(model),
                 reasoning_model_identity: None,

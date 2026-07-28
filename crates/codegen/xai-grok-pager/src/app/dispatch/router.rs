@@ -1,7 +1,8 @@
 //! Top-level action router: maps actions and action results to handlers.
 use super::auth::{
-    dispatch_cancel_login, dispatch_login, dispatch_login_anthropic_claude, dispatch_login_kimi,
-    dispatch_login_openai_codex, dispatch_logout, dispatch_set_platform_api_key,
+    dispatch_cancel_login, dispatch_login, dispatch_login_anthropic_claude,
+    dispatch_login_github_copilot, dispatch_login_kimi, dispatch_login_openai_codex,
+    dispatch_login_radius, dispatch_logout, dispatch_set_platform_api_key,
     dispatch_submit_auth_code, dispatch_switch_account,
 };
 use super::billing::dispatch_open_supergrok_url;
@@ -1139,6 +1140,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PermissionFollowup(text) => dispatch_permission_followup(app, text),
         Action::PermissionCancel => dispatch_permission_cancel(app),
         Action::Logout => dispatch_logout(app),
+        Action::LogoutKimi => vec![Effect::LogoutKimi],
+        Action::LogoutOpenAiCodex => vec![Effect::LogoutOpenAiCodex],
+        Action::LogoutAnthropicClaude => vec![Effect::LogoutAnthropicClaude],
+        Action::LogoutGitHubCopilot => vec![Effect::LogoutGitHubCopilot],
+        Action::LogoutRadius => vec![Effect::LogoutRadius],
         Action::SwitchAccount => dispatch_switch_account(app),
         Action::CheckSubscription => vec![Effect::CheckSubscription { verify: None }],
         Action::OpenSupergrokUrl => dispatch_open_supergrok_url(app),
@@ -1193,6 +1199,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::LoginKimi => dispatch_login_kimi(app),
         Action::LoginOpenAiCodex => dispatch_login_openai_codex(app),
         Action::LoginAnthropicClaude => dispatch_login_anthropic_claude(app),
+        Action::LoginGitHubCopilot => dispatch_login_github_copilot(app),
+        Action::LoginRadius => dispatch_login_radius(app),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {

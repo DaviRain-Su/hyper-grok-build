@@ -9,7 +9,8 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampling_types::{
-    ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy, ReasoningEffort,
+    AdapterKind, ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy,
+    ReasoningEffort, RequestCompat,
 };
 
 use crate::attribution::SharedAttributionCallback;
@@ -21,6 +22,12 @@ pub enum AuthScheme {
     #[default]
     Bearer,
     XApiKey,
+    /// Azure OpenAI's raw `api-key` header.
+    ApiKey,
+    /// Cloudflare AI Gateway's `cf-aig-authorization: Bearer …` header.
+    CfAigAuthorization,
+    /// Google REST `x-goog-api-key` request header.
+    XGoogApiKey,
 }
 
 /// All knobs that control a single sampling request.
@@ -54,6 +61,15 @@ pub struct SamplerConfig {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: ApiBackend,
+    /// Provider-specific adapter layered on the wire backend.
+    #[serde(default)]
+    pub adapter_kind: AdapterKind,
+    /// Fully resolved Pi-derived compatibility for this concrete model route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_compat: Option<RequestCompat>,
+    /// Relative endpoint path; backend defaults remain the legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_path: Option<String>,
     #[serde(default)]
     pub auth_scheme: AuthScheme,
     /// Extra request headers applied verbatim. The sampler never inspects
@@ -142,6 +158,17 @@ pub struct SamplerConfig {
     #[serde(default)]
     pub responses_codex_dialect: bool,
 
+    /// Bedrock request metadata for AWS cost allocation tagging.
+    #[serde(default)]
+    pub bedrock_request_metadata: IndexMap<String, String>,
+    /// Bedrock custom headers injected before SDK signing; reserved auth/SigV4 headers are blocked.
+    #[serde(default)]
+    pub bedrock_headers: IndexMap<String, String>,
+    /// Optional AWS profile selected by `/login amazon-bedrock --profile`.
+    /// Empty/None leaves the SDK default chain (including ambient AWS_PROFILE) untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bedrock_profile: Option<String>,
+
     /// When true, apply Moonshot/Kimi request shaping (`thinking` object,
     /// fixed-sampling strip, etc.). Must only be set for direct Moonshot /
     /// Kimi Code platforms — not for Ollama/OpenRouter/Together/Fireworks
@@ -162,6 +189,9 @@ impl Default for SamplerConfig {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::default(),
+            adapter_kind: AdapterKind::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: AuthScheme::default(),
             extra_headers: IndexMap::new(),
             query_params: IndexMap::new(),
@@ -185,6 +215,9 @@ impl Default for SamplerConfig {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            bedrock_request_metadata: IndexMap::new(),
+            bedrock_headers: IndexMap::new(),
+            bedrock_profile: None,
             kimi_dialect: false,
         }
     }

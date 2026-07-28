@@ -1,257 +1,1189 @@
 {
-  "version": 1,
-  "platforms": [
+  "providers": [
     {
-      "platform": "openai",
-      "pi_id": "openai",
-      "base_url": "https://api.openai.com/v1",
-      "env_keys": [
-        "GROK_OPENAI_API_KEY",
-        "OPENAI_API_KEY"
+      "adapter": "bedrock_converse_stream",
+      "aliases": [
+        "bedrock"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "base_url_env_keys": [
+        "GROK_AMAZON_BEDROCK_BASE_URL",
+        "AWS_ENDPOINT_URL_BEDROCK",
+        "AWS_BEDROCK_ENDPOINT_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "GROK_AMAZON_BEDROCK_API_KEY",
+          "AWS_BEARER_TOKEN_BEDROCK"
+        ],
+        "kind": "hybrid",
+        "storage_group": "amazon-bedrock"
+      },
+      "default_base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "runtime": {
+        "external_readiness_env_keys": [
+          "AWS_BEDROCK_SKIP_AUTH",
+          "AWS_ACCESS_KEY_ID",
+          "AWS_PROFILE",
+          "AWS_WEB_IDENTITY_TOKEN_FILE",
+          "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+          "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+        ]
+      },
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Amazon Bedrock",
+      "id": "amazon-bedrock",
+      "pi_id": "amazon-bedrock",
+      "status": "active"
     },
     {
-      "platform": "anthropic",
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_ANT_LING_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_ANT_LING_API_KEY",
+          "ANT_LING_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.ant-ling.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Ant Ling",
+      "id": "ant-ling",
+      "pi_id": "ant-ling",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "x_api_key",
+        "env_keys": [
+          "GROK_ANTHROPIC_API_KEY",
+          "ANTHROPIC_AUTH_TOKEN",
+          "ANTHROPIC_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.anthropic.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Anthropic",
+      "id": "anthropic",
       "pi_id": "anthropic",
-      "base_url": "https://api.anthropic.com/v1",
-      "env_keys": [
-        "GROK_ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN"
+      "status": "active"
+    },
+    {
+      "adapter": "anthropic_claude",
+      "aliases": [
+        "claude",
+        "claude-code"
       ],
-      "uses_x_api_key": true,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "kimi-code",
-      "pi_id": "kimi-coding",
-      "base_url": "https://api.kimi.com/coding",
-      "env_keys": [],
-      "uses_x_api_key": false,
-      "uses_oauth": true,
-      "live_models_list": true
-    },
-    {
-      "platform": "opencode-go",
-      "pi_id": "opencode-go",
-      "base_url": "https://opencode.ai/zen/go/v1",
-      "env_keys": [
-        "GROK_OPENCODE_GO_API_KEY",
-        "OPENCODE_API_KEY"
+      "base_url_env_keys": [
+        "GROK_ANTHROPIC_CLAUDE_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "catalog_source": "hyper",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [],
+        "kind": "oauth"
+      },
+      "default_base_url": "https://api.anthropic.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Anthropic Claude (Pro/Max)",
+      "id": "anthropic-claude",
+      "pi_id": null,
+      "status": "active"
     },
     {
-      "platform": "moonshot-ai",
-      "pi_id": "moonshotai",
-      "base_url": "https://api.moonshot.ai/v1",
-      "env_keys": [
-        "GROK_MOONSHOT_AI_API_KEY",
-        "GROK_MOONSHOT_API_KEY",
-        "MOONSHOT_API_KEY"
+      "adapter": "standard",
+      "aliases": [
+        "azure-openai"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": true
-    },
-    {
-      "platform": "moonshot-cn",
-      "pi_id": "moonshotai-cn",
-      "base_url": "https://api.moonshot.cn/v1",
-      "env_keys": [
-        "GROK_MOONSHOT_CN_API_KEY",
-        "GROK_MOONSHOT_API_KEY",
-        "MOONSHOT_API_KEY"
+      "base_url_env_keys": [
+        "GROK_AZURE_OPENAI_BASE_URL",
+        "AZURE_OPENAI_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": true
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "api_key",
+        "env_keys": [
+          "GROK_AZURE_OPENAI_API_KEY",
+          "AZURE_OPENAI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://{AZURE_OPENAI_RESOURCE_NAME}.openai.azure.com/openai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Azure OpenAI",
+      "id": "azure-openai-responses",
+      "pi_id": "azure-openai-responses",
+      "runtime": {
+        "base_url_normalization": "azure_open_ai",
+        "base_url_template_env_keys": [
+          "AZURE_OPENAI_RESOURCE_NAME"
+        ],
+        "model_id_map_env_key": "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+        "query_params_from_env": {
+          "api-version": "AZURE_OPENAI_API_VERSION"
+        }
+      },
+      "status": "active"
     },
     {
-      "platform": "deepseek",
-      "pi_id": "deepseek",
-      "base_url": "https://api.deepseek.com",
-      "env_keys": [
-        "GROK_DEEPSEEK_API_KEY",
-        "DEEPSEEK_API_KEY"
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_CEREBRAS_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "groq",
-      "pi_id": "groq",
-      "base_url": "https://api.groq.com/openai/v1",
-      "env_keys": [
-        "GROK_GROQ_API_KEY",
-        "GROQ_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "mistral",
-      "pi_id": "mistral",
-      "base_url": "https://api.mistral.ai/v1",
-      "env_keys": [
-        "GROK_MISTRAL_API_KEY",
-        "MISTRAL_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "xai-direct",
-      "pi_id": "xai",
-      "base_url": "https://api.x.ai/v1",
-      "env_keys": [
-        "GROK_XAI_DIRECT_API_KEY",
-        "XAI_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "together",
-      "pi_id": "together",
-      "base_url": "https://api.together.xyz/v1",
-      "env_keys": [
-        "GROK_TOGETHER_API_KEY",
-        "TOGETHER_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "fireworks",
-      "pi_id": "fireworks",
-      "base_url": "https://api.fireworks.ai/inference/v1",
-      "env_keys": [
-        "GROK_FIREWORKS_API_KEY",
-        "FIREWORKS_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
-    },
-    {
-      "platform": "cerebras",
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_CEREBRAS_API_KEY",
+          "CEREBRAS_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.cerebras.ai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Cerebras",
+      "id": "cerebras",
       "pi_id": "cerebras",
-      "base_url": "https://api.cerebras.ai/v1",
-      "env_keys": [
-        "GROK_CEREBRAS_API_KEY",
-        "CEREBRAS_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "status": "active"
     },
     {
-      "platform": "nvidia",
-      "pi_id": "nvidia",
-      "base_url": "https://integrate.api.nvidia.com/v1",
-      "env_keys": [
-        "GROK_NVIDIA_API_KEY",
-        "NVIDIA_API_KEY"
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_CLOUDFLARE_AI_GATEWAY_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "cf_aig_authorization",
+        "env_keys": [
+          "GROK_CLOUDFLARE_API_KEY",
+          "CLOUDFLARE_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Cloudflare AI Gateway",
+      "id": "cloudflare-ai-gateway",
+      "pi_id": "cloudflare-ai-gateway",
+      "runtime": {
+        "base_url_template_env_keys": [
+          "CLOUDFLARE_ACCOUNT_ID",
+          "CLOUDFLARE_GATEWAY_ID"
+        ]
+      },
+      "status": "active"
     },
     {
-      "platform": "openrouter",
-      "pi_id": "openrouter",
-      "base_url": "https://openrouter.ai/api/v1",
-      "env_keys": [
-        "GROK_OPENROUTER_API_KEY",
-        "OPENROUTER_API_KEY"
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_CLOUDFLARE_WORKERS_AI_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "GROK_CLOUDFLARE_API_KEY",
+          "CLOUDFLARE_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Cloudflare Workers AI",
+      "id": "cloudflare-workers-ai",
+      "pi_id": "cloudflare-workers-ai",
+      "runtime": {
+        "base_url_template_env_keys": [
+          "CLOUDFLARE_ACCOUNT_ID"
+        ]
+      },
+      "status": "active"
     },
     {
-      "platform": "minimax",
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_DEEPSEEK_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_DEEPSEEK_API_KEY",
+          "DEEPSEEK_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.deepseek.com",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "DeepSeek",
+      "id": "deepseek",
+      "pi_id": "deepseek",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_FIREWORKS_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_FIREWORKS_API_KEY",
+          "FIREWORKS_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.fireworks.ai/inference/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Fireworks",
+      "id": "fireworks",
+      "pi_id": "fireworks",
+      "status": "active"
+    },
+    {
+      "adapter": "github_copilot",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_GITHUB_COPILOT_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "COPILOT_GITHUB_TOKEN"
+        ],
+        "kind": "hybrid"
+      },
+      "default_base_url": "https://api.individual.githubcopilot.com",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "GitHub Copilot",
+      "id": "github-copilot",
+      "pi_id": "github-copilot",
+      "status": "active"
+    },
+    {
+      "id": "google",
+      "pi_id": "google",
+      "catalog_source": "pi",
+      "display_name": "Google",
+      "aliases": [
+        "gemini"
+      ],
+      "status": "active",
+      "adapter": "google_generate_content",
+      "default_base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "base_url_env_keys": [
+        "GROK_GEMINI_BASE_URL",
+        "GEMINI_BASE_URL"
+      ],
+      "credentials": {
+        "kind": "api_key",
+        "env_keys": [
+          "GROK_GEMINI_API_KEY",
+          "GEMINI_API_KEY"
+        ],
+        "auth": "x_goog_api_key",
+        "storage_group": "google"
+      },
+      "discovery": {
+        "mode": "disabled",
+        "models_path": null,
+        "model_prefixes": []
+      }
+    },
+    {
+      "id": "google-vertex",
+      "pi_id": "google-vertex",
+      "catalog_source": "pi",
+      "display_name": "Google Vertex AI",
+      "aliases": [
+        "vertex"
+      ],
+      "status": "active",
+      "adapter": "google_generate_content",
+      "default_base_url": "https://{GOOGLE_CLOUD_LOCATION}-aiplatform.googleapis.com",
+      "base_url_env_keys": [
+        "GROK_GOOGLE_VERTEX_BASE_URL"
+      ],
+      "credentials": {
+        "kind": "hybrid",
+        "env_keys": [
+          "GROK_GOOGLE_VERTEX_API_KEY",
+          "GOOGLE_CLOUD_API_KEY"
+        ],
+        "auth": "x_goog_api_key",
+        "storage_group": "google-vertex"
+      },
+      "runtime": {
+        "base_url_template_env_keys": [
+          "GOOGLE_CLOUD_LOCATION"
+        ],
+        "external_readiness_env_keys": [
+          "GOOGLE_APPLICATION_CREDENTIALS"
+        ],
+        "project_env_keys": [
+          "GOOGLE_CLOUD_PROJECT",
+          "GCLOUD_PROJECT"
+        ],
+        "location_env_keys": [
+          "GOOGLE_CLOUD_LOCATION"
+        ]
+      },
+      "discovery": {
+        "mode": "disabled",
+        "models_path": null,
+        "model_prefixes": []
+      }
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_GROQ_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_GROQ_API_KEY",
+          "GROQ_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.groq.com/openai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Groq",
+      "id": "groq",
+      "pi_id": "groq",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_HUGGINGFACE_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_HUGGINGFACE_API_KEY",
+          "HF_TOKEN",
+          "HUGGINGFACE_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://router.huggingface.co/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Hugging Face",
+      "id": "huggingface",
+      "pi_id": "huggingface",
+      "status": "active"
+    },
+    {
+      "adapter": "kimi_coding",
+      "aliases": [
+        "kimi-coding"
+      ],
+      "base_url_env_keys": [
+        "GROK_KIMI_CODE_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "GROK_KIMI_CODE_API_KEY",
+          "GROK_KIMI_API_KEY",
+          "KIMI_API_KEY"
+        ],
+        "kind": "hybrid"
+      },
+      "default_base_url": "https://api.kimi.com/coding/v1",
+      "discovery": {
+        "mode": "models_endpoint",
+        "model_prefixes": [],
+        "models_path": "/models"
+      },
+      "display_name": "Kimi For Coding",
+      "id": "kimi-code",
+      "pi_id": "kimi-coding",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_MINIMAX_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_MINIMAX_API_KEY",
+          "MINIMAX_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.minimax.io/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "MiniMax",
+      "id": "minimax",
       "pi_id": "minimax",
-      "base_url": "https://api.minimax.io/v1",
-      "env_keys": [
-        "GROK_MINIMAX_API_KEY",
-        "MINIMAX_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "status": "active"
     },
     {
-      "platform": "minimax-cn",
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_MINIMAX_CN_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_MINIMAX_CN_API_KEY",
+          "MINIMAX_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.minimaxi.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "MiniMax (China)",
+      "id": "minimax-cn",
       "pi_id": "minimax-cn",
-      "base_url": "https://api.minimaxi.com/v1",
-      "env_keys": [
-        "GROK_MINIMAX_CN_API_KEY",
-        "MINIMAX_API_KEY"
-      ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "status": "active"
     },
     {
-      "platform": "zai",
-      "pi_id": "zai",
-      "base_url": "https://api.z.ai/api/paas/v4",
-      "env_keys": [
-        "GROK_ZAI_API_KEY",
-        "ZAI_API_KEY"
+      "adapter": "mistral_conversations",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_MISTRAL_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "GROK_MISTRAL_API_KEY",
+          "MISTRAL_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.mistral.ai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Mistral",
+      "id": "mistral",
+      "pi_id": "mistral",
+      "status": "active"
     },
     {
-      "platform": "zai-coding",
-      "pi_id": "zai-coding",
-      "base_url": "https://api.z.ai/api/coding/paas/v4",
-      "env_keys": [
-        "GROK_ZAI_CODING_API_KEY",
-        "ZAI_API_KEY"
+      "adapter": "standard",
+      "aliases": [
+        "moonshotai"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "base_url_env_keys": [
+        "GROK_MOONSHOT_AI_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_MOONSHOT_AI_API_KEY",
+          "GROK_MOONSHOT_API_KEY",
+          "MOONSHOT_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.moonshot.ai/v1",
+      "discovery": {
+        "mode": "models_endpoint",
+        "model_prefixes": [
+          "kimi-k",
+          "kimi-k3",
+          "k3",
+          "k2p7"
+        ],
+        "models_path": "/models"
+      },
+      "display_name": "Moonshot AI (moonshot.ai)",
+      "id": "moonshot-ai",
+      "pi_id": "moonshotai",
+      "status": "active"
     },
     {
-      "platform": "zai-coding-cn",
-      "pi_id": "zai-coding-cn",
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "env_keys": [
-        "GROK_ZAI_CODING_CN_API_KEY",
-        "ZAI_API_KEY"
+      "adapter": "standard",
+      "aliases": [
+        "moonshotai-cn"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": false
+      "base_url_env_keys": [
+        "GROK_MOONSHOT_CN_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_MOONSHOT_CN_API_KEY",
+          "GROK_MOONSHOT_API_KEY",
+          "MOONSHOT_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.moonshot.cn/v1",
+      "discovery": {
+        "mode": "models_endpoint",
+        "model_prefixes": [
+          "kimi-k",
+          "kimi-k3",
+          "k3",
+          "k2p7"
+        ],
+        "models_path": "/models"
+      },
+      "display_name": "Moonshot AI (moonshot.cn)",
+      "id": "moonshot-cn",
+      "pi_id": "moonshotai-cn",
+      "status": "active"
     },
     {
-      "platform": "ollama",
+      "adapter": "nexus",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_NEXUS_BASE_URL"
+      ],
+      "catalog_source": "hyper",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "GROK_NEXUS_API_KEY",
+          "NEXUS_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://nexuscore.now",
+      "discovery": {
+        "mode": "adapter",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Nexus",
+      "id": "nexus",
+      "pi_id": null,
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_NVIDIA_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_NVIDIA_API_KEY",
+          "NVIDIA_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://integrate.api.nvidia.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "NVIDIA NIM",
+      "id": "nvidia",
+      "pi_id": "nvidia",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_OLLAMA_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_OLLAMA_API_KEY",
+          "OLLAMA_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://ollama.com/v1",
+      "discovery": {
+        "mode": "models_endpoint",
+        "model_prefixes": [],
+        "models_path": "/models"
+      },
+      "display_name": "Ollama Cloud",
+      "id": "ollama",
       "pi_id": "ollama",
-      "base_url": "https://ollama.com/v1",
-      "env_keys": [
-        "GROK_OLLAMA_API_KEY",
-        "OLLAMA_API_KEY"
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_OPENAI_BASE_URL"
       ],
-      "uses_x_api_key": false,
-      "uses_oauth": false,
-      "live_models_list": true
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_OPENAI_API_KEY",
+          "OPENAI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.openai.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "OpenAI",
+      "id": "openai",
+      "pi_id": "openai",
+      "status": "active"
+    },
+    {
+      "adapter": "openai_codex",
+      "aliases": [
+        "chatgpt-codex"
+      ],
+      "base_url_env_keys": [
+        "GROK_OPENAI_CODEX_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [],
+        "kind": "oauth"
+      },
+      "default_base_url": "https://chatgpt.com/backend-api/codex",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "OpenAI Codex (ChatGPT)",
+      "id": "openai-codex",
+      "pi_id": "openai-codex",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_OPENCODE_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_OPENCODE_API_KEY",
+          "OPENCODE_API_KEY"
+        ],
+        "kind": "api_key",
+        "storage_group": "opencode"
+      },
+      "default_base_url": "https://opencode.ai/zen/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "OpenCode Zen",
+      "id": "opencode",
+      "pi_id": "opencode",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [
+        "opencodego"
+      ],
+      "base_url_env_keys": [
+        "GROK_OPENCODE_GO_BASE_URL"
+      ],
+      "catalog_source": "models_dev",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_OPENCODE_GO_API_KEY",
+          "OPENCODE_API_KEY"
+        ],
+        "kind": "api_key",
+        "storage_group": "opencode"
+      },
+      "default_base_url": "https://opencode.ai/zen/go/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "OpenCode Go",
+      "id": "opencode-go",
+      "pi_id": null,
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_OPENROUTER_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_OPENROUTER_API_KEY",
+          "OPENROUTER_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://openrouter.ai/api/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "OpenRouter",
+      "id": "openrouter",
+      "pi_id": "openrouter",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_QWEN_TOKEN_PLAN_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_QWEN_TOKEN_PLAN_API_KEY",
+          "QWEN_TOKEN_PLAN_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Qwen Token Plan",
+      "id": "qwen-token-plan",
+      "pi_id": "qwen-token-plan",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_QWEN_TOKEN_PLAN_CN_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_QWEN_TOKEN_PLAN_CN_API_KEY",
+          "QWEN_TOKEN_PLAN_CN_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Qwen Token Plan (China)",
+      "id": "qwen-token-plan-cn",
+      "pi_id": "qwen-token-plan-cn",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_RADIUS_BASE_URL",
+        "RADIUS_GATEWAY_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "bearer",
+        "env_keys": [
+          "GROK_RADIUS_API_KEY",
+          "RADIUS_API_KEY"
+        ],
+        "kind": "hybrid"
+      },
+      "default_base_url": "https://radius.pi.dev",
+      "discovery": {
+        "mode": "adapter",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Radius",
+      "id": "radius",
+      "pi_id": "radius",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_TOGETHER_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_TOGETHER_API_KEY",
+          "TOGETHER_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.together.xyz/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Together AI",
+      "id": "together",
+      "pi_id": "together",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_VERCEL_AI_GATEWAY_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_VERCEL_AI_GATEWAY_API_KEY",
+          "AI_GATEWAY_API_KEY",
+          "VERCEL_AI_GATEWAY_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://ai-gateway.vercel.sh",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Vercel AI Gateway",
+      "id": "vercel-ai-gateway",
+      "pi_id": "vercel-ai-gateway",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [
+        "xai"
+      ],
+      "base_url_env_keys": [
+        "GROK_XAI_DIRECT_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_XAI_DIRECT_API_KEY",
+          "XAI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.x.ai/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "xAI (direct API key)",
+      "id": "xai-direct",
+      "pi_id": "xai",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_XIAOMI_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_XIAOMI_API_KEY",
+          "XIAOMI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.xiaomimimo.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Xiaomi MiMo",
+      "id": "xiaomi",
+      "pi_id": "xiaomi",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_XIAOMI_TOKEN_PLAN_AMS_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+          "XIAOMI_TOKEN_PLAN_AMS_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://token-plan-ams.xiaomimimo.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Xiaomi Token Plan (AMS)",
+      "id": "xiaomi-token-plan-ams",
+      "pi_id": "xiaomi-token-plan-ams",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_XIAOMI_TOKEN_PLAN_CN_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_XIAOMI_TOKEN_PLAN_CN_API_KEY",
+          "XIAOMI_TOKEN_PLAN_CN_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Xiaomi Token Plan (China)",
+      "id": "xiaomi-token-plan-cn",
+      "pi_id": "xiaomi-token-plan-cn",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_XIAOMI_TOKEN_PLAN_SGP_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+          "XIAOMI_TOKEN_PLAN_SGP_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Xiaomi Token Plan (SGP)",
+      "id": "xiaomi-token-plan-sgp",
+      "pi_id": "xiaomi-token-plan-sgp",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_ZAI_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_ZAI_API_KEY",
+          "ZAI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.z.ai/api/paas/v4",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Z.AI",
+      "id": "zai",
+      "pi_id": "zai",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [
+        "zai-code-plan"
+      ],
+      "base_url_env_keys": [
+        "GROK_ZAI_CODING_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_ZAI_CODING_API_KEY",
+          "ZAI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://api.z.ai/api/coding/paas/v4",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Z.AI Coding Plan",
+      "id": "zai-coding",
+      "pi_id": "zai-coding",
+      "status": "active"
+    },
+    {
+      "adapter": "standard",
+      "aliases": [],
+      "base_url_env_keys": [
+        "GROK_ZAI_CODING_CN_BASE_URL"
+      ],
+      "catalog_source": "pi",
+      "credentials": {
+        "auth": "protocol_default",
+        "env_keys": [
+          "GROK_ZAI_CODING_CN_API_KEY",
+          "ZAI_API_KEY"
+        ],
+        "kind": "api_key"
+      },
+      "default_base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "discovery": {
+        "mode": "disabled",
+        "model_prefixes": [],
+        "models_path": null
+      },
+      "display_name": "Z.AI Coding Plan (CN)",
+      "id": "zai-coding-cn",
+      "pi_id": "zai-coding-cn",
+      "status": "active"
     }
-  ]
+  ],
+  "source": "Hyper provider registry aligned with earendil-works/pi packages/ai",
+  "version": 2
 }

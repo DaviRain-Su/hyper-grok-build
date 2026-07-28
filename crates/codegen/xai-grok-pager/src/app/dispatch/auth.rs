@@ -251,8 +251,8 @@ pub(super) fn dispatch_set_platform_api_key(
     api_key: String,
     base_url: Option<String>,
 ) -> Vec<Effect> {
-    let label = xai_grok_models::PlatformId::parse(&platform)
-        .map(|p| p.display_name().to_string())
+    let label = xai_grok_models::provider_spec(&platform)
+        .map(|provider| provider.display_name.clone())
         .unwrap_or_else(|| platform.clone());
     if api_key.is_empty() {
         app.show_toast(&format!("Clearing API key for {label}…"));
@@ -312,6 +312,41 @@ pub(super) fn dispatch_login_anthropic_claude(app: &mut AppView) -> Vec<Effect> 
         app.login_label = Some(m.name().to_string());
     } else {
         app.login_label = Some("Anthropic Claude".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login radius` — Radius gateway OAuth.
+pub(super) fn dispatch_login_radius(app: &mut AppView) -> Vec<Effect> {
+    let method_id = acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::RADIUS_METHOD_ID);
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::RADIUS_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("Radius".to_string());
+    }
+    app.login_method_id = Some(method_id.clone());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login_with_method(app, method_id, AuthMode::Pending, false)
+}
+
+/// `/login github` — GitHub Copilot subscription device OAuth.
+pub(super) fn dispatch_login_github_copilot(app: &mut AppView) -> Vec<Effect> {
+    let method_id =
+        acp::AuthMethodId::new(xai_grok_shell::agent::auth_method::GITHUB_COPILOT_METHOD_ID);
+    if let Some(m) = app
+        .auth_methods
+        .iter()
+        .find(|m| m.id().0.as_ref() == xai_grok_shell::agent::auth_method::GITHUB_COPILOT_METHOD_ID)
+    {
+        app.login_label = Some(m.name().to_string());
+    } else {
+        app.login_label = Some("GitHub Copilot".to_string());
     }
     app.login_method_id = Some(method_id.clone());
     app.auth_start_mode = AuthMode::Pending;

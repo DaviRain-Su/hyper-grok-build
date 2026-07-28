@@ -1091,6 +1091,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
         ConversationItem::user("q2"),
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls: vec![ToolCall {
                 id: "tc1".into(),
                 name: "bash".into(),
@@ -1892,6 +1893,8 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             temperature: None,
             top_p: None,
             api_backend: Default::default(),
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: Default::default(),
             extra_headers: Default::default(),
             query_params: Default::default(),
@@ -1918,6 +1921,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
         api_key: None,
         env_key: None,
         auth_provider: None,
+        platform_oauth_active: false,
         api_base_url: None,
     }
 }
@@ -2191,6 +2195,9 @@ fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingCo
         temperature: None,
         top_p: None,
         api_backend: Default::default(),
+        adapter_kind: Default::default(),
+        request_compat: None,
+        endpoint_path: None,
         extra_headers: Default::default(),
         query_params: Default::default(),
         env_http_headers: Default::default(),

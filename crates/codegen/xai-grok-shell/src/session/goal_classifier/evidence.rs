@@ -1132,6 +1132,7 @@ mod tests {
     fn assistant(text: &str) -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: text.into(),
+            provider_native_state: None,
             tool_calls: Vec::new(),
             model_id: None,
             reasoning_model_identity: None,
@@ -1143,6 +1144,7 @@ mod tests {
     fn assistant_tool_call_only() -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: "".into(),
+            provider_native_state: None,
             tool_calls: vec![xai_grok_sampling_types::ToolCall {
                 id: "call_1".into(),
                 name: "read_file".to_string(),

@@ -1367,6 +1367,7 @@ mod tests {
     fn assistant_with_tool_calls(tool_calls: Vec<ToolCall>) -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls,
             model_id: None,
             reasoning_model_identity: None,
@@ -1577,11 +1578,13 @@ mod tests {
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "s1".into(),
                 content: "done".into(),
+                is_error: false,
                 images: vec![],
             }),
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "b1".into(),
                 content: "done".into(),
+                is_error: false,
                 images: vec![],
             }),
         ];
@@ -1601,6 +1604,7 @@ mod tests {
             ConversationItem::ToolResult(ToolResultItem {
                 tool_call_id: "later".into(),
                 content: "preemptive".into(),
+                is_error: false,
                 images: vec![],
             }),
             assistant_with_tool_calls(vec![tc("later", "spawn_subagent", "{}")]),
@@ -1932,6 +1936,7 @@ mod tests {
             }));
             hist.push(ConversationItem::Assistant(AssistantItem {
                 content: format!("a{i}").into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: None,
                 reasoning_model_identity: None,
@@ -2530,6 +2535,7 @@ mod tests {
             }));
             hist.push(ConversationItem::Assistant(AssistantItem {
                 content: format!("a{i}").into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: None,
                 reasoning_model_identity: None,

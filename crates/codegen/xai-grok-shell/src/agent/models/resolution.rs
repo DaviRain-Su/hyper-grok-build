@@ -203,32 +203,37 @@ fn locked_platform_acp_infos(
     use xai_grok_sampling_types as meta_keys;
     let mut infos = config::to_acp_model_info(locked);
     for (key, info) in infos.iter_mut() {
-        let Some((platform, _)) = xai_grok_models::parse_managed_model_key(key.0.as_ref()) else {
+        let Some((provider_id, _)) = xai_grok_models::parse_managed_model_key(key.0.as_ref())
+        else {
+            continue;
+        };
+        let Some(provider) = xai_grok_models::provider_spec(provider_id.as_str()) else {
             continue;
         };
         let mut map = info.meta.clone().unwrap_or_default();
         map.insert(
             meta_keys::PLATFORM_ID_META_KEY.to_string(),
-            platform.as_str().into(),
+            provider.id.as_str().into(),
         );
         map.insert(
             meta_keys::PLATFORM_NAME_META_KEY.to_string(),
-            platform.display_name().into(),
+            provider.display_name.clone().into(),
         );
         map.insert(
             meta_keys::SETUP_HINT_META_KEY.to_string(),
-            platform.setup_hint().into(),
+            provider.setup_hint().into(),
         );
-        if platform.uses_oauth() {
+        if provider.uses_oauth() {
             map.insert(meta_keys::REQUIRES_OAUTH_META_KEY.to_string(), true.into());
-        } else {
+        }
+        if provider.accepts_api_key() {
             map.insert(
                 meta_keys::REQUIRES_API_KEY_META_KEY.to_string(),
                 true.into(),
             );
             map.insert(
                 meta_keys::API_KEY_ENV_META_KEY.to_string(),
-                serde_json::json!(platform.api_key_env_names()),
+                serde_json::json!(provider.credentials.env_keys),
             );
         }
         info.meta = Some(map);

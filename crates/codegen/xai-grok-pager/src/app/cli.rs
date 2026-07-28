@@ -30,12 +30,21 @@ pub enum Command {
         #[arg(long = "openai", conflicts_with_all = ["kimi", "all"])]
         openai: bool,
         /// Clear only the Anthropic Claude (Pro/Max) subscription credential.
-        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["kimi", "openai", "all"])]
+        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["kimi", "openai", "github", "all"])]
         claude: bool,
-        /// Clear xAI session **and** Kimi / Codex / Claude OAuth scopes.
+        /// Clear only the GitHub Copilot subscription credential.
+        #[arg(long = "github", visible_alias = "copilot", conflicts_with_all = ["kimi", "openai", "claude", "bedrock", "all"])]
+        github: bool,
+        /// Clear only the Radius OAuth credential.
+        #[arg(long = "radius", conflicts_with_all = ["kimi", "openai", "claude", "github", "bedrock", "all"])]
+        radius: bool,
+        /// Clear only the Amazon Bedrock bearer/profile/chain marker.
+        #[arg(long = "bedrock", visible_alias = "amazon-bedrock", conflicts_with_all = ["kimi", "openai", "claude", "github", "radius", "all"])]
+        bedrock: bool,
+        /// Clear xAI session **and** Kimi / Codex / Claude / GitHub Copilot / Radius OAuth scopes.
         /// Does not remove BYOK platform API keys or env vars (use
         /// `/logout provider <id>` / unset env for those).
-        #[arg(long = "all", conflicts_with_all = ["kimi", "openai", "claude"])]
+        #[arg(long = "all", conflicts_with_all = ["kimi", "openai", "claude", "github", "bedrock"])]
         all: bool,
     },
     /// Configure the Nexus relay key without signing in (writes ~/.grok/auth.json)
@@ -60,20 +69,20 @@ pub enum Command {
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "kimi", "openai"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "kimi", "openai", "github", "bedrock"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
             long = "device-auth",
             visible_alias = "device-code",
-            conflicts_with_all = ["oauth", "kimi"]
+            conflicts_with_all = ["oauth", "kimi", "github", "bedrock"]
         )]
         device_auth: bool,
         /// Sign in with a Kimi Code subscription (device OAuth).
         ///
         /// Stores credentials under the `oauth/kimi-code` scope and unlocks
         /// `kimi-code/*` models. Independent of xAI login.
-        #[arg(long = "kimi", conflicts_with_all = ["oauth", "device_auth", "openai"])]
+        #[arg(long = "kimi", conflicts_with_all = ["oauth", "device_auth", "openai", "github", "bedrock"])]
         kimi: bool,
         /// Sign in with an OpenAI Codex (ChatGPT Plus/Pro) subscription.
         ///
@@ -81,15 +90,34 @@ pub enum Command {
         /// supported); combine with `--device-auth` for headless environments.
         /// Stores credentials under the `oauth/openai-codex` scope and unlocks
         /// `openai-codex/*` models. Independent of xAI login.
-        #[arg(long = "openai", alias = "chatgpt", conflicts_with_all = ["oauth", "kimi"])]
+        #[arg(long = "openai", alias = "chatgpt", conflicts_with_all = ["oauth", "kimi", "github", "bedrock"])]
         openai: bool,
         /// Sign in with an Anthropic Claude (Pro/Max) subscription.
         ///
         /// Browser OAuth (PKCE + loopback callback, manual paste supported).
         /// Stores credentials under the `oauth/anthropic-claude` scope and
         /// unlocks `anthropic-claude/*` models. Independent of xAI login.
-        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["oauth", "kimi", "openai"])]
+        #[arg(long = "claude", alias = "anthropic", conflicts_with_all = ["oauth", "kimi", "openai", "github", "bedrock"])]
         claude: bool,
+        /// Sign in with a GitHub Copilot subscription.
+        ///
+        /// Device OAuth against GitHub. Stores credentials under the
+        /// `oauth/github-copilot` scope and unlocks `github-copilot/*` models.
+        /// Independent of xAI login.
+        #[arg(long = "github", visible_alias = "copilot", conflicts_with_all = ["oauth", "device_auth", "kimi", "openai", "claude", "bedrock"])]
+        github: bool,
+        /// Sign in with Radius gateway OAuth (browser PKCE by default; add --device-auth for remote/headless use).
+        #[arg(long = "radius", conflicts_with_all = ["oauth", "kimi", "openai", "claude", "github", "bedrock"])]
+        radius: bool,
+        /// Configure Amazon Bedrock auth. Use --profile NAME, --chain, or enter a bearer token interactively.
+        #[arg(long = "bedrock", visible_alias = "amazon-bedrock", conflicts_with_all = ["oauth", "device_auth", "kimi", "openai", "claude", "github", "radius"])]
+        bedrock: bool,
+        /// Persist an AWS profile for Amazon Bedrock without copying AWS keys.
+        #[arg(long = "profile", requires = "bedrock", conflicts_with = "chain")]
+        profile: Option<String>,
+        /// Persist a marker to use the existing AWS SDK credential chain for Amazon Bedrock.
+        #[arg(long = "chain", requires = "bedrock", conflicts_with = "profile")]
+        chain: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -1436,6 +1464,9 @@ mod tests {
                 kimi: false,
                 openai: false,
                 claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
                 all: false,
             })
         ));
@@ -1446,6 +1477,9 @@ mod tests {
                 kimi: true,
                 openai: false,
                 claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
                 all: false,
             })
         ));
@@ -1456,6 +1490,9 @@ mod tests {
                 kimi: false,
                 openai: false,
                 claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
                 all: true,
             })
         ));
@@ -1468,6 +1505,10 @@ mod tests {
             "--all conflicts with --openai"
         );
         assert!(
+            PagerArgs::try_parse_from(["grok", "logout", "--all", "--radius"]).is_err(),
+            "--all conflicts with --radius"
+        );
+        assert!(
             PagerArgs::try_parse_from(["grok", "logout", "--kimi", "--openai"]).is_err(),
             "--kimi conflicts with --openai"
         );
@@ -1478,8 +1519,16 @@ mod tests {
                 kimi: false,
                 openai: true,
                 claude: false,
+                github: false,
+                radius: false,
+                bedrock: false,
                 all: false,
             })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--radius"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { radius: true, .. })
         ));
         assert!(args.prompt.is_none());
     }
@@ -1505,6 +1554,74 @@ mod tests {
         // …but conflicts with --kimi and --oauth.
         assert!(PagerArgs::try_parse_from(["grok", "login", "--openai", "--kimi"]).is_err());
         assert!(PagerArgs::try_parse_from(["grok", "login", "--openai", "--oauth"]).is_err());
+    }
+
+    #[test]
+    fn login_radius_flag_parses_device_auth_and_conflicts() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--radius"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                radius: true,
+                device_auth: false,
+                ..
+            })
+        ));
+        let args = PagerArgs::try_parse_from(["grok", "login", "--radius", "--device-auth"])
+            .expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                radius: true,
+                device_auth: true,
+                ..
+            })
+        ));
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--radius", "--openai"]).is_err());
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--radius", "--oauth"]).is_err());
+        assert!(PagerArgs::try_parse_from(["grok", "login", "--radius", "--bedrock"]).is_err());
+    }
+
+    #[test]
+    fn login_bedrock_profile_chain_and_logout_parse() {
+        let args = PagerArgs::try_parse_from(["grok", "login", "--bedrock", "--profile", "dev"])
+            .expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                bedrock: true,
+                profile: Some(ref p),
+                chain: false,
+                ..
+            }) if p == "dev"
+        ));
+        let args =
+            PagerArgs::try_parse_from(["grok", "login", "--bedrock", "--chain"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Login {
+                bedrock: true,
+                profile: None,
+                chain: true,
+                ..
+            })
+        ));
+        assert!(
+            PagerArgs::try_parse_from([
+                "grok",
+                "login",
+                "--bedrock",
+                "--profile",
+                "dev",
+                "--chain"
+            ])
+            .is_err()
+        );
+        let args = PagerArgs::try_parse_from(["grok", "logout", "--bedrock"]).expect("parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { bedrock: true, .. })
+        ));
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

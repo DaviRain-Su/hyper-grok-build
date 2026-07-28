@@ -258,6 +258,10 @@ impl ReasoningModelIdentity {
             endpoint_sha256,
         }
     }
+
+    pub fn model_id(&self) -> &str {
+        &self.model
+    }
 }
 
 /// Treat malformed or future-version provenance as absent so a downgrade can
@@ -285,6 +289,12 @@ where
 pub struct AssistantItem {
     /// Text content of the response
     pub content: Arc<str>,
+    /// Provider-native assistant output state. Opaque, model-bound payloads
+    /// used by native adapters (Google GenerateContent, Bedrock ConverseStream,
+    /// and Pi Messages) to replay exact block order and thought signatures only when the route
+    /// identity matches. Portable readers may ignore this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_native_state: Option<ProviderNativeAssistantState>,
     /// Tool calls made by the assistant (client must execute these locally)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
@@ -315,6 +325,101 @@ pub struct AssistantItem {
     pub reasoning_effort: Option<crate::ReasoningEffort>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ProviderNativeAssistantState {
+    GoogleGenerateContent { parts: Vec<GoogleNativePart> },
+    BedrockConverseStream { blocks: Vec<BedrockNativeBlock> },
+    PiMessages { blocks: Vec<PiMessagesNativeBlock> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GoogleNativePart {
+    Text {
+        text: Arc<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+    },
+    Thinking {
+        text: Arc<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+    },
+    ToolCall {
+        id: Arc<str>,
+        name: String,
+        arguments: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PiMessagesNativeBlock {
+    Text {
+        text: Arc<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_signature: Option<String>,
+    },
+    Thinking {
+        text: Arc<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redacted: Option<bool>,
+    },
+    ToolCall {
+        id: Arc<str>,
+        name: String,
+        arguments: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BedrockNativeBlock {
+    Text {
+        text: Arc<str>,
+    },
+    Reasoning {
+        text: Arc<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    ToolUse {
+        id: Arc<str>,
+        name: String,
+        input: serde_json::Value,
+    },
+}
+
+impl ProviderNativeAssistantState {
+    pub fn google_parts(&self) -> Option<&[GoogleNativePart]> {
+        match self {
+            Self::GoogleGenerateContent { parts } => Some(parts),
+            _ => None,
+        }
+    }
+
+    pub fn bedrock_blocks(&self) -> Option<&[BedrockNativeBlock]> {
+        match self {
+            Self::BedrockConverseStream { blocks } => Some(blocks),
+            _ => None,
+        }
+    }
+
+    pub fn pi_messages_blocks(&self) -> Option<&[PiMessagesNativeBlock]> {
+        match self {
+            Self::PiMessages { blocks } => Some(blocks),
+            _ => None,
+        }
+    }
+}
+
 /// Tool result message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultItem {
@@ -322,6 +427,10 @@ pub struct ToolResultItem {
     pub tool_call_id: String,
     /// The result content
     pub content: Arc<str>,
+    /// Whether tool execution failed. Defaults to false for persisted sessions
+    /// written before structured tool-result status was introduced.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
     /// Inline images associated with this tool result (e.g. from `read_file`
     /// on an image/PDF). When non-empty, the API conversion layers embed
     /// these directly in the tool result message instead of requiring a
@@ -638,14 +747,20 @@ pub struct ConversationRequest {
     /// tests of Kimi shaping keep working without a dialect flag.
     /// Production sets this from [`SamplerConfig::kimi_dialect`].
     pub kimi_dialect: Option<bool>,
+    /// Fully resolved per-model request compatibility. Conversion layers use
+    /// this instead of inferring provider behavior from model names or URLs.
+    pub request_compat: Option<crate::RequestCompat>,
     /// Sticky routing key for prompt-cache reuse (OpenAI Responses + Chat
     /// Completions `prompt_cache_key`). Prefer session id; clamped to 64 chars
     /// on the wire.
     pub prompt_cache_key: Option<String>,
     /// OpenAI Responses only: `"24h"` / `"long"` or `"in_memory"` / `"short"`.
-    /// Never sent on Codex dialect (rejected by ChatGPT backend). Not used for
-    /// Anthropic Messages — Hyper does not extend Claude-style `cache_control`.
+    /// Bedrock accepts `"none"`, `"short"`, or `"long"` for cachePoint retention.
     pub prompt_cache_retention: Option<String>,
+    /// Bedrock request metadata for cost allocation tagging. Keys/values are validated by the adapter.
+    pub bedrock_request_metadata: indexmap::IndexMap<String, String>,
+    /// Bedrock-only custom headers injected before signing; reserved auth/SigV4 headers are rejected.
+    pub bedrock_headers: indexmap::IndexMap<String, String>,
 }
 
 /// OpenAI caps prompt-cache keys at 64 characters (Pi `clampOpenAIPromptCacheKey`).
@@ -710,7 +825,15 @@ impl ConversationRequest {
                 ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
             )
         });
-        before.saturating_sub(self.items.len())
+        let mut stripped = before.saturating_sub(self.items.len());
+        for item in &mut self.items {
+            if let ConversationItem::Assistant(assistant) = item
+                && assistant.provider_native_state.take().is_some()
+            {
+                stripped += 1;
+            }
+        }
+        stripped
     }
 }
 
@@ -1240,6 +1363,7 @@ impl ConversationItem {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::Assistant(AssistantItem {
             content: Arc::<str>::from(content.into()),
+            provider_native_state: None,
             tool_calls: Vec::new(),
             model_id: None,
             reasoning_model_identity: None,
@@ -1256,6 +1380,7 @@ impl ConversationItem {
     pub fn assistant_with_model(content: impl Into<String>, model_id: impl Into<String>) -> Self {
         Self::Assistant(AssistantItem {
             content: Arc::<str>::from(content.into()),
+            provider_native_state: None,
             tool_calls: Vec::new(),
             model_id: Some(model_id.into()),
             reasoning_model_identity: None,
@@ -1268,6 +1393,7 @@ impl ConversationItem {
     pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
         Self::Assistant(AssistantItem {
             content: Arc::<str>::from(""),
+            provider_native_state: None,
             tool_calls,
             model_id: None,
             reasoning_model_identity: None,
@@ -1281,6 +1407,17 @@ impl ConversationItem {
         Self::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
+            is_error: false,
+            images: Vec::new(),
+        })
+    }
+
+    /// Create a failed tool result message.
+    pub fn tool_error(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.into(),
+            content: Arc::<str>::from(content.into()),
+            is_error: true,
             images: Vec::new(),
         })
     }
@@ -1297,6 +1434,7 @@ impl ConversationItem {
         Self::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.into(),
             content: Arc::<str>::from(content.into()),
+            is_error: false,
             images,
         })
     }
@@ -1797,6 +1935,7 @@ impl From<ChatRequestMessage> for ConversationItem {
 
                 ConversationItem::Assistant(AssistantItem {
                     content: Arc::<str>::from(content),
+                    provider_native_state: None,
                     tool_calls,
                     model_id,
                     reasoning_model_identity: None,
@@ -1809,6 +1948,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                 ConversationItem::ToolResult(ToolResultItem {
                     tool_call_id: msg.tool_call_id.unwrap_or_default(),
                     content: Arc::<str>::from(content),
+                    is_error: false,
                     images: Vec::new(),
                 })
             }
@@ -2126,6 +2266,7 @@ impl From<ChatResponseMessage> for ConversationItem {
 
         ConversationItem::Assistant(AssistantItem {
             content: Arc::<str>::from(content),
+            provider_native_state: None,
             tool_calls,
             model_id: None,
             reasoning_model_identity: None,
@@ -2242,6 +2383,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
     tracing::info!(model_id = %model_id, ?model_fingerprint, ?reasoning_effort, "response_to_conversation_items setting model metadata on AssistantItem");
     items.push(ConversationItem::Assistant(AssistantItem {
         content: Arc::<str>::from(content),
+        provider_native_state: None,
         tool_calls,
         model_id: Some(model_id),
         reasoning_model_identity: None,
@@ -3659,10 +3801,16 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                 }
                 let signature = r.encrypted_content.as_deref().unwrap_or_default();
                 let allows_empty_signature = req
-                    .model
-                    .as_deref()
-                    .and_then(xai_grok_models::kimi_request_profile)
-                    .is_some_and(xai_grok_models::kimi_allow_empty_thinking_signature);
+                    .request_compat
+                    .as_ref()
+                    .and_then(crate::RequestCompat::messages)
+                    .map(|compat| compat.allow_empty_signature)
+                    .unwrap_or_else(|| {
+                        req.model
+                            .as_deref()
+                            .and_then(xai_grok_models::kimi_request_profile)
+                            .is_some_and(xai_grok_models::kimi_allow_empty_thinking_signature)
+                    });
                 if signature.is_empty() && !allows_empty_signature {
                     continue;
                 }
@@ -3939,6 +4087,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
 
         ConversationItem::Assistant(AssistantItem {
             content: Arc::<str>::from(content),
+            provider_native_state: None,
             tool_calls,
             model_id: Some(resp.model),
             reasoning_model_identity: None,
@@ -4881,6 +5030,7 @@ mod tests {
         // Assistant can have both text content and tool calls
         let assistant = AssistantItem {
             content: "Let me help you with that.".into(),
+            provider_native_state: None,
             tool_calls: vec![ToolCall {
                 id: "call_1".into(),
                 name: "read_file".to_string(),
@@ -5341,6 +5491,7 @@ mod tests {
         });
         let assistant_item = ConversationItem::Assistant(AssistantItem {
             content: "The answer is 42.".into(),
+            provider_native_state: None,
             tool_calls: vec![],
             model_id: Some("grok-3".to_string()),
             reasoning_model_identity: None,
@@ -5374,6 +5525,7 @@ mod tests {
             }),
             ConversationItem::Assistant(AssistantItem {
                 content: "The answer is 4.".into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: Some("grok-3".to_string()),
                 reasoning_model_identity: None,
@@ -5436,6 +5588,7 @@ mod tests {
             }),
             ConversationItem::Assistant(AssistantItem {
                 content: "Hi!".into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: None,
                 reasoning_model_identity: None,
@@ -6954,6 +7107,7 @@ mod tests {
         // Simulate a conversation where the model responded with thinking.
         let with_reasoning = ConversationItem::Assistant(AssistantItem {
             content: "Here is the answer.".into(),
+            provider_native_state: None,
             tool_calls: vec![],
             model_id: Some("messages-compatible-model".into()),
             reasoning_model_identity: None,
@@ -7151,6 +7305,7 @@ mod tests {
             // Completed turn with thinking
             ConversationItem::Assistant(AssistantItem {
                 content: "I'll look at the code.".into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: Some("messages-compatible-model".into()),
                 reasoning_model_identity: None,
@@ -7160,6 +7315,7 @@ mod tests {
             // Completed tool pair
             ConversationItem::Assistant(AssistantItem {
                 content: String::new().into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "read_file".to_string(),
@@ -7173,6 +7329,7 @@ mod tests {
             ConversationItem::tool_result("call_1", "fn main() {}"),
             ConversationItem::Assistant(AssistantItem {
                 content: "I see the issue.".into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: Some("messages-compatible-model".into()),
                 reasoning_model_identity: None,
@@ -7182,6 +7339,7 @@ mod tests {
             // Mid-turn: orphaned tool_use (no result yet)
             ConversationItem::Assistant(AssistantItem {
                 content: String::new().into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "call_2".into(),
                     name: "search_replace".to_string(),
@@ -7902,6 +8060,7 @@ mod tests {
 
         let mut items = vec![ConversationItem::Assistant(AssistantItem {
             content: format!("I'll read the file at {worktree}/src/main.rs").into(),
+            provider_native_state: None,
             tool_calls: vec![
                 ToolCall {
                     id: "call_1".into(),
@@ -7989,6 +8148,7 @@ mod tests {
             }),
             ConversationItem::Assistant(AssistantItem {
                 content: format!("I edited {worktree}/src/main.rs").into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: Some("grok-3".to_string()),
                 reasoning_model_identity: None,
@@ -8041,6 +8201,7 @@ mod tests {
             // Assistant with tool calls for the fix
             ConversationItem::Assistant(AssistantItem {
                 content: format!("I'll fix the bug in {worktree}/src/main.rs").into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "call_2".into(),
                     name: "search_replace".to_string(),
@@ -8095,6 +8256,7 @@ mod tests {
             ConversationItem::system(format!("Working in {root}.")),
             ConversationItem::Assistant(AssistantItem {
                 content: format!("I previously edited {root}/src/main.rs").into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "read_file".to_string(),
@@ -8204,6 +8366,7 @@ mod tests {
         // Tool calls that don't contain any paths should be unaffected
         let mut items = vec![ConversationItem::Assistant(AssistantItem {
             content: "Running a command".into(),
+            provider_native_state: None,
             tool_calls: vec![ToolCall {
                 id: "call_1".into(),
                 name: "run_terminal_cmd".to_string(),
@@ -8324,6 +8487,7 @@ mod tests {
         let response = ConversationResponse {
             items: vec![ConversationItem::Assistant(AssistantItem {
                 content: String::new().into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: Some("test-model".to_string()),
                 reasoning_model_identity: None,
@@ -8346,6 +8510,7 @@ mod tests {
         let response = ConversationResponse {
             items: vec![ConversationItem::Assistant(AssistantItem {
                 content: "Here is my answer.".into(),
+                provider_native_state: None,
                 tool_calls: vec![],
                 model_id: None,
                 reasoning_model_identity: None,
@@ -8368,6 +8533,7 @@ mod tests {
         let response = ConversationResponse {
             items: vec![ConversationItem::Assistant(AssistantItem {
                 content: String::new().into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "read_file".to_string(),
@@ -8570,6 +8736,7 @@ mod tests {
     fn test_assistant_item_with_model_id() {
         let item = AssistantItem {
             content: "Hello".into(),
+            provider_native_state: None,
             tool_calls: vec![],
             model_id: None,
             reasoning_model_identity: None,
@@ -8653,6 +8820,7 @@ mod tests {
     fn assistant_with_calls(calls: &[(&str, &str)]) -> ConversationItem {
         ConversationItem::Assistant(AssistantItem {
             content: String::new().into(),
+            provider_native_state: None,
             tool_calls: calls
                 .iter()
                 .map(|(id, name)| ToolCall {
@@ -9359,6 +9527,7 @@ mod tests {
             ConversationItem::user("Read this"),
             ConversationItem::Assistant(AssistantItem {
                 content: String::new().into(),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "read_file".to_string(),
@@ -9898,6 +10067,7 @@ mod tests {
                 }),
                 ConversationItem::Assistant(AssistantItem {
                     content: String::new().into(),
+                    provider_native_state: None,
                     tool_calls: Vec::new(),
                     model_id: None,
                     reasoning_model_identity: None,
@@ -11128,6 +11298,7 @@ mod tests {
             reasoning_sibling("r1", "must call a tool", Some("enc_pre_tool")),
             ConversationItem::Assistant(AssistantItem {
                 content: Arc::<str>::from(""),
+                provider_native_state: None,
                 tool_calls: vec![ToolCall {
                     id: Arc::<str>::from("call_1"),
                     name: "read_file".to_string(),

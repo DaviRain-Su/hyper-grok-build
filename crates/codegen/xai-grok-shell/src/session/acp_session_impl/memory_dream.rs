@@ -748,6 +748,45 @@ impl SessionActor {
                 let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
                 xai_grok_sampler::collect_response(events).await
             }
+            crate::sampling::ApiBackend::GoogleGenerateContent => {
+                let (raw, identity) = sampling_client
+                    .conversation_stream_google(request)
+                    .await
+                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
+                let events = xai_grok_sampler::google::stream_google_generate_content(
+                    raw,
+                    request_id,
+                    identity,
+                    idle_timeout,
+                );
+                xai_grok_sampler::collect_response(events).await
+            }
+            crate::sampling::ApiBackend::BedrockConverseStream => {
+                let (raw, identity) = sampling_client
+                    .conversation_stream_bedrock(request)
+                    .await
+                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
+                let events = xai_grok_sampler::bedrock::stream_bedrock_converse(
+                    raw,
+                    request_id,
+                    identity,
+                    idle_timeout,
+                );
+                xai_grok_sampler::collect_response(events).await
+            }
+            crate::sampling::ApiBackend::PiMessages => {
+                let (raw, identity) = sampling_client
+                    .conversation_stream_pi_messages(request)
+                    .await
+                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
+                let events = xai_grok_sampler::pi_messages::stream_pi_messages(
+                    raw,
+                    request_id,
+                    identity,
+                    idle_timeout,
+                );
+                xai_grok_sampler::collect_response(events).await
+            }
         };
 
         match result {

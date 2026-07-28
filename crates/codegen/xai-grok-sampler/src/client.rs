@@ -20,15 +20,20 @@ use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
+use std::sync::Arc;
 
+use crate::pi_messages::PiMessagesEvent;
 use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ReasoningModelIdentity, ResponseModelMetadata, Result, SamplingError, build_messages_request,
-    is_check_event, messages, rs,
+    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MaxTokensField,
+    MessagesRequestWrapper, ReasoningModelIdentity, RequestCompat, ResponseModelMetadata, Result,
+    SamplingError, SessionAffinityFormat, ThinkingFormat, build_messages_request, is_check_event,
+    messages, rs,
 };
 
+use crate::adapter::BackendAdapter;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 use crate::types::ResponsesStreamItem;
 
@@ -110,6 +115,85 @@ impl GrokRequestHeaders<'_> {
         }
         b
     }
+}
+
+fn infer_copilot_initiator(body: &serde_json::Value) -> &'static str {
+    if let Some(messages) = body.get("messages").and_then(serde_json::Value::as_array)
+        && let Some(last) = messages.last()
+    {
+        let role = last.get("role").and_then(serde_json::Value::as_str);
+        if role != Some("user") {
+            return "agent";
+        }
+
+        // Anthropic Messages represents an internal `toolResult` as a user
+        // message containing only `tool_result` blocks. Pi decides from the
+        // pre-conversion role, where that item is not a user turn, so retain
+        // `agent` here instead of mistaking the wire role for a human prompt.
+        let only_tool_results = last
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|content| {
+                !content.is_empty()
+                    && content.iter().all(|block| {
+                        block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                    })
+            });
+        return if only_tool_results { "agent" } else { "user" };
+    }
+    if let Some(input) = body.get("input").and_then(serde_json::Value::as_array)
+        && let Some(last) = input.last()
+    {
+        // Responses serializes local tool results as output items without a
+        // role. In Pi the source message role is `toolResult`, hence agent-
+        // initiated. Handle it before walking back to the preceding message.
+        if last
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind.ends_with("_call_output"))
+        {
+            return "agent";
+        }
+        if let Some(last_message) = input.iter().rev().find(|item| {
+            item.get("role")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                || item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+        }) {
+            return if last_message.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                "user"
+            } else {
+                "agent"
+            };
+        }
+    }
+    "user"
+}
+
+fn value_has_copilot_image(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            matches!(
+                map.get("type").and_then(serde_json::Value::as_str),
+                Some("image" | "image_url" | "input_image")
+            ) || map.values().any(value_has_copilot_image)
+        }
+        serde_json::Value::Array(items) => items.iter().any(value_has_copilot_image),
+        _ => false,
+    }
+}
+
+fn apply_copilot_dynamic_headers(
+    builder: reqwest::RequestBuilder,
+    body: &serde_json::Value,
+) -> reqwest::RequestBuilder {
+    let mut builder = builder
+        .header("X-Initiator", infer_copilot_initiator(body))
+        .header("Openai-Intent", "conversation-edits");
+    if value_has_copilot_image(body) {
+        builder = builder.header("Copilot-Vision-Request", "true");
+    }
+    builder
 }
 
 /// Parse the `Retry-After` response header as delta-seconds.
@@ -344,12 +428,12 @@ fn decode_messages_sse_frame(data: &str) -> Result<messages::MessageStreamEvent>
             true
         } else {
             match event_type {
-                "content_block_start" => value
-                    .get("content_block")
-                    .is_some_and(|b| serde_json::from_value::<messages::ContentBlock>(b.clone()).is_err()),
-                "content_block_delta" => value
-                    .get("delta")
-                    .is_some_and(|d| serde_json::from_value::<messages::StreamDelta>(d.clone()).is_err()),
+                "content_block_start" => value.get("content_block").is_some_and(|b| {
+                    serde_json::from_value::<messages::ContentBlock>(b.clone()).is_err()
+                }),
+                "content_block_delta" => value.get("delta").is_some_and(|d| {
+                    serde_json::from_value::<messages::StreamDelta>(d.clone()).is_err()
+                }),
                 _ => false,
             }
         };
@@ -432,15 +516,9 @@ fn stamp_responses_prompt_cache_key(request: &mut CreateResponseWrapper) {
         .x_grok_session_id
         .as_deref()
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            request
-                .x_grok_conv_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-        });
+        .or_else(|| request.x_grok_conv_id.as_deref().filter(|s| !s.is_empty()));
     if let Some(key) = key {
-        request.inner.prompt_cache_key =
-            Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
+        request.inner.prompt_cache_key = Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
     }
 }
 
@@ -584,6 +662,66 @@ fn patch_codex_reasoning_effort_wire(
     }
 }
 
+const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
+const MISTRAL_REASONING_EFFORT_MODELS: [&str; 3] = [
+    "mistral-small-2603",
+    "mistral-small-latest",
+    "mistral-medium-3.5",
+];
+
+fn mistral_uses_reasoning_effort(model: &str) -> bool {
+    MISTRAL_REASONING_EFFORT_MODELS.contains(&model)
+}
+
+fn derive_mistral_tool_call_id(id: &str, attempt: u32) -> String {
+    let normalized: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if attempt == 0 && normalized.len() == MISTRAL_TOOL_CALL_ID_LENGTH {
+        return normalized;
+    }
+    let seed = if attempt == 0 {
+        if normalized.is_empty() {
+            id.to_string()
+        } else {
+            normalized
+        }
+    } else {
+        format!(
+            "{}:{attempt}",
+            if normalized.is_empty() {
+                id
+            } else {
+                &normalized
+            }
+        )
+    };
+    let digest = Sha256::digest(seed.as_bytes());
+    let hex = format!("{digest:x}");
+    hex.chars().take(MISTRAL_TOOL_CALL_ID_LENGTH).collect()
+}
+
+fn normalize_mistral_tool_call_id(
+    id: &str,
+    id_map: &mut std::collections::BTreeMap<String, String>,
+    reverse_map: &mut std::collections::BTreeMap<String, String>,
+) -> String {
+    if let Some(existing) = id_map.get(id) {
+        return existing.clone();
+    }
+    let mut attempt = 0;
+    loop {
+        let candidate = derive_mistral_tool_call_id(id, attempt);
+        match reverse_map.get(&candidate) {
+            None => {
+                id_map.insert(id.to_string(), candidate.clone());
+                reverse_map.insert(candidate.clone(), id.to_string());
+                return candidate;
+            }
+            Some(owner) if owner == id => return candidate,
+            Some(_) => attempt += 1,
+        }
+    }
+}
+
 /// Metadata key for cost ticks past typed Response events.
 pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "xai.cost_usd_ticks";
 
@@ -705,6 +843,45 @@ fn apply_env_http_headers(
     }
 }
 
+fn auth_header_name(auth_scheme: AuthScheme) -> HeaderName {
+    match auth_scheme {
+        AuthScheme::Bearer => AUTHORIZATION,
+        AuthScheme::XApiKey => HeaderName::from_static("x-api-key"),
+        AuthScheme::ApiKey => HeaderName::from_static("api-key"),
+        AuthScheme::CfAigAuthorization => HeaderName::from_static("cf-aig-authorization"),
+        AuthScheme::XGoogApiKey => HeaderName::from_static("x-goog-api-key"),
+    }
+}
+
+fn auth_header_value(auth_scheme: AuthScheme, api_key: &str) -> Option<HeaderValue> {
+    let value = match auth_scheme {
+        AuthScheme::Bearer | AuthScheme::CfAigAuthorization => format!("Bearer {api_key}"),
+        AuthScheme::XApiKey | AuthScheme::ApiKey | AuthScheme::XGoogApiKey => api_key.to_string(),
+    };
+    HeaderValue::from_str(&value).ok()
+}
+
+fn remove_known_auth_headers(headers: &mut HeaderMap) {
+    headers.remove(AUTHORIZATION);
+    headers.remove(HeaderName::from_static("x-api-key"));
+    headers.remove(HeaderName::from_static("api-key"));
+    headers.remove(HeaderName::from_static("cf-aig-authorization"));
+    headers.remove(HeaderName::from_static("x-goog-api-key"));
+}
+
+/// Keep exactly the typed auth header. This runs after every other header
+/// source so Cloudflare Gateway can never inherit an upstream provider key.
+fn normalize_auth_headers(
+    headers: &mut HeaderMap,
+    auth_scheme: AuthScheme,
+    desired: Option<HeaderValue>,
+) {
+    remove_known_auth_headers(headers);
+    if let Some(value) = desired {
+        headers.insert(auth_header_name(auth_scheme), value);
+    }
+}
+
 /// HTTP client for sampling. Cheap to clone; carries an `Arc`-backed
 /// `reqwest::Client` and the default headers/request-defaults computed from a
 /// [`SamplerConfig`] at construction time.
@@ -725,6 +902,7 @@ pub struct SamplingClient {
     header_injector: Option<crate::config::SharedHeaderInjector>,
     /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
     endpoint: EndpointTemplate,
+    google_adc: Arc<crate::google::VertexAdcTokenProvider>,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -747,15 +925,38 @@ struct ClientDefaults {
     max_completion_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
-    api_backend: ApiBackend,
+    adapter: BackendAdapter,
+    request_compat: Option<RequestCompat>,
+    endpoint_path: Option<String>,
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
-    responses_codex_dialect: bool,
-    kimi_dialect: bool,
     /// Session reasoning effort. Needed for Codex wire rewrite: async-openai
     /// only types through `xhigh`, so Max/Ultra must be restored post-serialize.
     reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+    bedrock_request_metadata: IndexMap<String, String>,
+    bedrock_headers: IndexMap<String, String>,
+    bedrock_profile: Option<String>,
+}
+
+impl ClientDefaults {
+    fn chat_compat(&self) -> Option<&xai_grok_sampling_types::OpenAiCompletionsCompat> {
+        self.request_compat
+            .as_ref()
+            .and_then(RequestCompat::chat_completions)
+    }
+
+    fn responses_compat(&self) -> Option<&xai_grok_sampling_types::OpenAiResponsesCompat> {
+        self.request_compat
+            .as_ref()
+            .and_then(RequestCompat::responses)
+    }
+
+    fn messages_compat(&self) -> Option<&xai_grok_sampling_types::AnthropicMessagesCompat> {
+        self.request_compat
+            .as_ref()
+            .and_then(RequestCompat::messages)
+    }
 }
 
 /// Endpoint URL builder, resolved once at client construction so each request
@@ -909,38 +1110,6 @@ impl SamplingClient {
     pub fn new(config: SamplerConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if let Some(ref api_key) = config.api_key {
-            match config.auth_scheme {
-                AuthScheme::XApiKey => {
-                    let header_value = HeaderValue::from_str(api_key).map_err(|_| {
-                        tracing::debug!(
-                            api_key = %api_key,
-                            "Invalid api_key: cannot be converted to a valid HTTP header"
-                        );
-                        SamplingError::Auth(
-                            "Invalid api_key: cannot be converted to a valid HTTP header"
-                                .to_string(),
-                        )
-                    })?;
-                    headers.insert(HeaderName::from_static("x-api-key"), header_value);
-                }
-                AuthScheme::Bearer => {
-                    let bearer = format!("Bearer {}", api_key);
-                    let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
-                        tracing::debug!(
-                            api_key = %api_key,
-                            "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
-                        );
-                        SamplingError::Auth(
-                            "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
-                                .to_string(),
-                        )
-                    })?;
-                    headers.insert(AUTHORIZATION, header_value);
-                }
-            }
-        }
-
         // Apply all extra headers verbatim. This is the single
         // injection point for proxy-auth headers and any other URL- or
         // environment-specific headers the session decides to set.
@@ -959,6 +1128,24 @@ impl SamplingClient {
             |var| std::env::var(var).ok(),
             &mut headers,
         );
+
+        // Typed credentials are authoritative over static/env headers. When no
+        // `api_key` is present, preserve an explicitly injected target header
+        // but still remove conflicting authentication placements.
+        let desired_auth = if let Some(api_key) = config.api_key.as_deref() {
+            Some(
+                auth_header_value(config.auth_scheme, api_key).ok_or_else(|| {
+                    tracing::debug!("api_key could not be converted to a valid HTTP auth header");
+                    SamplingError::Auth(
+                        "Invalid api_key: cannot be converted to a valid HTTP auth header"
+                            .to_string(),
+                    )
+                })?,
+            )
+        } else {
+            headers.get(auth_header_name(config.auth_scheme)).cloned()
+        };
+        normalize_auth_headers(&mut headers, config.auth_scheme, desired_auth);
 
         // Add x-grok-client-version header for version gating at the proxy.
         if let Some(client_version) = config.client_version.as_ref()
@@ -998,8 +1185,10 @@ impl SamplingClient {
             }
         }
 
-        // Always set User-Agent: per-session origin if available, else fallback.
-        {
+        // Set User-Agent only when the concrete catalog route did not provide
+        // one. Provider catalog identity (e.g. GitHub Copilot's Pi-pinned UA)
+        // wins over Grok's generic client UA.
+        if !headers.contains_key(USER_AGENT) {
             let ua_string = match config.origin_client.as_ref() {
                 Some(origin) => user_agent_string_for(origin),
                 None => user_agent_string_for(&OriginClientInfo {
@@ -1035,18 +1224,37 @@ impl SamplingClient {
             has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
         );
 
+        // Preserve the two legacy dialect booleans while model/session plumbing
+        // migrates to the registry's typed adapter metadata. An explicit
+        // adapter_kind always wins.
+        let adapter_kind = if config.adapter_kind != xai_grok_sampling_types::AdapterKind::Standard
+        {
+            config.adapter_kind
+        } else if config.responses_codex_dialect {
+            xai_grok_sampling_types::AdapterKind::OpenAiCodex
+        } else if config.kimi_dialect {
+            xai_grok_sampling_types::AdapterKind::KimiCoding
+        } else {
+            xai_grok_sampling_types::AdapterKind::Standard
+        };
+        let adapter = BackendAdapter::from_route(adapter_kind, config.api_backend.clone())?;
+        adapter.ensure_implemented()?;
+
         let defaults = ClientDefaults {
             model: config.model,
             max_completion_tokens: config.max_completion_tokens,
             temperature: config.temperature,
             top_p: config.top_p,
-            api_backend: config.api_backend,
+            adapter,
+            request_compat: config.request_compat,
+            endpoint_path: config.endpoint_path,
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
-            responses_codex_dialect: config.responses_codex_dialect,
-            kimi_dialect: config.kimi_dialect,
             reasoning_effort: config.reasoning_effort,
+            bedrock_request_metadata: config.bedrock_request_metadata,
+            bedrock_headers: config.bedrock_headers,
+            bedrock_profile: config.bedrock_profile,
         };
 
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
@@ -1060,12 +1268,22 @@ impl SamplingClient {
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
             endpoint,
+            google_adc: Arc::new(crate::google::VertexAdcTokenProvider::new()),
         })
     }
 
-    /// The configured API backend for this client.
+    /// Resolved provider adapter for this client.
+    pub fn backend_adapter(&self) -> &BackendAdapter {
+        &self.defaults.adapter
+    }
+
+    /// Existing wire backend used by the resolved adapter.
     pub fn api_backend(&self) -> ApiBackend {
-        self.defaults.api_backend.clone()
+        self.defaults
+            .adapter
+            .wire_backend()
+            .expect("SamplingClient rejects unimplemented native adapters")
+            .clone()
     }
 
     /// POST with default headers. A live resolver is evaluated exactly once;
@@ -1080,54 +1298,43 @@ impl SamplingClient {
             // A resolver is authoritative. Remove construction-time auth even
             // when refresh returns `None`; otherwise an expired catalog stamp
             // is silently sent after a failed refresh.
-            headers.remove(AUTHORIZATION);
-            headers.remove(HeaderName::from_static("x-api-key"));
+            remove_known_auth_headers(&mut headers);
             let resolution = resolver.resolve_bearer();
-            if let Some(fresh) = resolution.bearer {
-                match self.defaults.auth_scheme {
-                    AuthScheme::XApiKey => {
-                        if let Ok(v) = HeaderValue::from_str(&fresh) {
-                            headers.insert(HeaderName::from_static("x-api-key"), v);
-                        }
-                    }
-                    AuthScheme::Bearer => {
-                        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {fresh}")) {
-                            headers.insert(AUTHORIZATION, v);
-                        }
-                    }
-                }
+            if let Some(fresh) = resolution.bearer
+                && let Some(value) = auth_header_value(self.defaults.auth_scheme, &fresh)
+            {
+                headers.insert(auth_header_name(self.defaults.auth_scheme), value);
             }
             for name in resolution.remove_headers {
                 headers.remove(name);
             }
             headers.extend(resolution.headers);
         }
-        {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
-            tracing::info!(
-                target: crate::sampling_log::TARGET,
-                event = "client_post",
-                base_url = %self.base_url,
-                model = %self.defaults.model,
-                api_backend = ?self.defaults.api_backend,
-                auth_scheme = ?self.defaults.auth_scheme,
-                has_bearer_resolver = self.bearer_resolver.is_some(),
-                has_authorization_header = headers.get(AUTHORIZATION).is_some(),
-                has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
-            );
-        }
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            event = "client_post",
+            base_url = %self.base_url,
+            model = %self.defaults.model,
+            api_backend = ?self.api_backend(),
+            auth_scheme = ?self.defaults.auth_scheme,
+            has_bearer_resolver = self.bearer_resolver.is_some(),
+            has_authorization_header = headers.get(AUTHORIZATION).is_some(),
+            has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
+            has_api_key_header = headers.get(HeaderName::from_static("api-key")).is_some(),
+            has_cf_aig_authorization_header = headers
+                .get(HeaderName::from_static("cf-aig-authorization"))
+                .is_some(),
+        );
+        // Preserve the resolved typed credential across late header injection.
+        // Header injectors may add tracing metadata but may not change provider
+        // authentication or reintroduce a conflicting standard auth header.
+        let authoritative_auth = headers
+            .get(auth_header_name(self.defaults.auth_scheme))
+            .cloned();
         if let Some(injector) = &self.header_injector {
             injector.inject(&mut headers);
         }
+        normalize_auth_headers(&mut headers, self.defaults.auth_scheme, authoritative_auth);
         let sent_bearer_prefix = self.extract_sent_bearer_from(&headers);
         (self.http.post(url).headers(headers), sent_bearer_prefix)
     }
@@ -1167,8 +1374,18 @@ impl SamplingClient {
             AuthScheme::XApiKey => headers
                 .get(HeaderName::from_static("x-api-key"))
                 .and_then(|v| v.to_str().ok()),
+            AuthScheme::ApiKey => headers
+                .get(HeaderName::from_static("api-key"))
+                .and_then(|v| v.to_str().ok()),
             AuthScheme::Bearer => headers
                 .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer ")),
+            AuthScheme::XGoogApiKey => headers
+                .get(HeaderName::from_static("x-goog-api-key"))
+                .and_then(|v| v.to_str().ok()),
+            AuthScheme::CfAigAuthorization => headers
+                .get(HeaderName::from_static("cf-aig-authorization"))
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ")),
         };
@@ -1198,7 +1415,10 @@ impl SamplingClient {
         let auth_type = if has_auth {
             match self.defaults.auth_scheme {
                 AuthScheme::XApiKey => "x-api-key",
+                AuthScheme::ApiKey => "api-key",
                 AuthScheme::Bearer => "bearer",
+                AuthScheme::CfAigAuthorization => "cf-aig-authorization",
+                AuthScheme::XGoogApiKey => "x-goog-api-key",
             }
         } else {
             "none"
@@ -1241,8 +1461,313 @@ impl SamplingClient {
         }
     }
 
-    fn endpoint(&self, path: &str) -> String {
+    fn endpoint(&self, backend_default_path: &str) -> String {
+        let path = self
+            .defaults
+            .endpoint_path
+            .as_deref()
+            .or_else(|| self.defaults.adapter.endpoint_path())
+            .unwrap_or(backend_default_path);
         self.endpoint.url_for_path(path)
+    }
+
+    fn strip_strict_tool_fields(body: &mut serde_json::Value) {
+        let Some(tools) = body
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return;
+        };
+        for tool in tools {
+            if let Some(function) = tool
+                .get_mut("function")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                function.remove("strict");
+            }
+        }
+    }
+
+    fn normalize_mistral_tool_call_ids(body: &mut serde_json::Value) {
+        let Some(messages) = body
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return;
+        };
+        let mut id_map = std::collections::BTreeMap::new();
+        let mut reverse_map = std::collections::BTreeMap::new();
+        for message in messages {
+            if let Some(tool_calls) = message
+                .get_mut("tool_calls")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for tool_call in tool_calls {
+                    if let Some(id_value) = tool_call.get_mut("id")
+                        && let Some(id) = id_value.as_str()
+                    {
+                        *id_value = serde_json::Value::String(normalize_mistral_tool_call_id(
+                            id,
+                            &mut id_map,
+                            &mut reverse_map,
+                        ));
+                    }
+                }
+            }
+            if let Some(tool_call_id) = message.get_mut("tool_call_id")
+                && let Some(id) = tool_call_id.as_str()
+            {
+                *tool_call_id = serde_json::Value::String(normalize_mistral_tool_call_id(
+                    id,
+                    &mut id_map,
+                    &mut reverse_map,
+                ));
+            }
+        }
+    }
+
+    fn patch_mistral_request_body(&self, body: &mut serde_json::Value) {
+        Self::normalize_mistral_tool_call_ids(body);
+        let Some(object) = body.as_object_mut() else {
+            return;
+        };
+        let effort = object.remove("reasoning_effort");
+        let Some(effort) = effort else {
+            return;
+        };
+        if effort.as_str() == Some("none") || effort.as_str() == Some("minimal") {
+            return;
+        }
+        if mistral_uses_reasoning_effort(&self.defaults.model) {
+            object.insert("reasoning_effort".into(), effort);
+        } else {
+            object.insert(
+                "prompt_mode".into(),
+                serde_json::Value::String("reasoning".into()),
+            );
+        }
+    }
+
+    /// Apply fully resolved Pi Chat Completions compatibility after typed
+    /// serialization. Several gateway fields are not represented by the
+    /// shared request type, so one post-serialize boundary is both safer and
+    /// easier to audit than provider-specific request structs.
+    fn patch_chat_request_body(&self, body: &mut serde_json::Value, streaming: bool) {
+        if self.defaults.adapter.uses_mistral_conversations_dialect() {
+            self.patch_mistral_request_body(body);
+        }
+        let Some(compat) = self.defaults.chat_compat() else {
+            return;
+        };
+        let Some(object) = body.as_object_mut() else {
+            return;
+        };
+
+        if compat.max_tokens_field == MaxTokensField::MaxCompletionTokens
+            && let Some(value) = object.remove("max_tokens")
+        {
+            object.insert("max_completion_tokens".into(), value);
+        }
+        if compat.supports_store {
+            object
+                .entry("store")
+                .or_insert(serde_json::Value::Bool(false));
+        } else {
+            object.remove("store");
+        }
+        if streaming && !compat.supports_usage_in_streaming {
+            object.remove("stream_options");
+        }
+        if !compat.supports_strict_mode {
+            Self::strip_strict_tool_fields(body);
+        }
+        if compat.zai_tool_stream && body.get("tools").is_some() {
+            body["tool_stream"] = serde_json::Value::Bool(true);
+        }
+        if !compat.openrouter_routing.is_empty() {
+            body["provider"] =
+                serde_json::to_value(&compat.openrouter_routing).unwrap_or(serde_json::Value::Null);
+        }
+        if !compat.vercel_gateway_routing.is_empty() {
+            body["providerOptions"] = serde_json::json!({
+                "gateway": compat.vercel_gateway_routing,
+            });
+        }
+
+        let effort = body
+            .as_object_mut()
+            .and_then(|object| object.remove("reasoning_effort"));
+        let effort_string = effort.as_ref().and_then(serde_json::Value::as_str);
+        match compat.thinking_format {
+            ThinkingFormat::OpenAi => {
+                if compat.supports_reasoning_effort
+                    && let Some(effort) = effort
+                {
+                    body["reasoning_effort"] = effort;
+                }
+            }
+            ThinkingFormat::OpenRouter => {
+                if let Some(effort) = effort_string {
+                    body["reasoning"] = serde_json::json!({ "effort": effort });
+                }
+            }
+            ThinkingFormat::DeepSeek => {
+                if effort_string.is_some() {
+                    body["thinking"] = serde_json::json!({ "type": "enabled" });
+                }
+                if compat.supports_reasoning_effort
+                    && let Some(effort) = effort
+                {
+                    body["reasoning_effort"] = effort;
+                }
+            }
+            ThinkingFormat::Together => {
+                body["reasoning"] = serde_json::json!({ "enabled": effort_string.is_some() });
+                if compat.supports_reasoning_effort
+                    && let Some(effort) = effort
+                {
+                    body["reasoning_effort"] = effort;
+                }
+            }
+            ThinkingFormat::Zai => {
+                body["thinking"] = if effort_string.is_some() {
+                    serde_json::json!({ "type": "enabled", "clear_thinking": false })
+                } else {
+                    serde_json::json!({ "type": "disabled" })
+                };
+                if compat.supports_reasoning_effort
+                    && let Some(effort) = effort
+                {
+                    body["reasoning_effort"] = effort;
+                }
+            }
+            ThinkingFormat::Qwen => {
+                body["enable_thinking"] = serde_json::Value::Bool(effort_string.is_some());
+            }
+            ThinkingFormat::QwenChatTemplate => {
+                body["chat_template_kwargs"] = serde_json::json!({
+                    "enable_thinking": effort_string.is_some(),
+                    "preserve_thinking": true,
+                });
+            }
+            ThinkingFormat::StringThinking => {
+                if let Some(effort) = effort_string {
+                    body["thinking"] = serde_json::Value::String(effort.to_string());
+                }
+            }
+            ThinkingFormat::AntLing => {
+                if let Some(effort) = effort_string {
+                    body["reasoning"] = serde_json::json!({ "effort": effort });
+                }
+            }
+            ThinkingFormat::ChatTemplate => {
+                let mut kwargs = serde_json::Map::new();
+                for (key, value) in &compat.chat_template_kwargs {
+                    let resolved = match value.pointer("/$var").and_then(serde_json::Value::as_str)
+                    {
+                        Some("thinking.enabled") => {
+                            serde_json::Value::Bool(effort_string.is_some())
+                        }
+                        Some("thinking.effort") => {
+                            effort.clone().unwrap_or(serde_json::Value::Null)
+                        }
+                        _ => value.clone(),
+                    };
+                    kwargs.insert(key.clone(), resolved);
+                }
+                if !kwargs.is_empty() {
+                    body["chat_template_kwargs"] = serde_json::Value::Object(kwargs);
+                }
+            }
+        }
+
+        if compat.requires_reasoning_content_on_assistant_messages
+            && let Some(messages) = body
+                .get_mut("messages")
+                .and_then(serde_json::Value::as_array_mut)
+        {
+            for message in messages {
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                    && let Some(object) = message.as_object_mut()
+                {
+                    object
+                        .entry("reasoning_content")
+                        .or_insert_with(|| serde_json::Value::String(String::new()));
+                }
+            }
+        }
+    }
+
+    fn apply_chat_session_affinity(
+        &self,
+        mut builder: reqwest::RequestBuilder,
+        session_id: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let Some(session_id) = session_id.filter(|value| !value.is_empty()) else {
+            return builder;
+        };
+        if self.defaults.adapter.uses_mistral_conversations_dialect() {
+            builder = builder.header("x-affinity", session_id);
+        }
+        let Some(compat) = self.defaults.chat_compat() else {
+            return builder;
+        };
+        if !compat.send_session_affinity_headers {
+            return builder;
+        }
+        match compat.session_affinity_format {
+            SessionAffinityFormat::OpenRouter => builder.header("x-session-id", session_id),
+            SessionAffinityFormat::OpenAi => {
+                builder = builder.header("session_id", session_id);
+                builder = builder.header("x-client-request-id", session_id);
+                builder.header("x-session-affinity", session_id)
+            }
+            SessionAffinityFormat::OpenAiNoSession => {
+                builder = builder.header("x-client-request-id", session_id);
+                builder.header("x-session-affinity", session_id)
+            }
+        }
+    }
+
+    fn apply_responses_session_affinity(
+        &self,
+        mut builder: reqwest::RequestBuilder,
+        session_id: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let Some(compat) = self.defaults.responses_compat() else {
+            return builder;
+        };
+        let Some(session_id) = session_id.filter(|value| !value.is_empty()) else {
+            return builder;
+        };
+        match compat.session_affinity_format {
+            SessionAffinityFormat::OpenRouter => builder.header("x-session-id", session_id),
+            SessionAffinityFormat::OpenAi => {
+                builder = builder.header("session_id", session_id);
+                builder.header("x-client-request-id", session_id)
+            }
+            SessionAffinityFormat::OpenAiNoSession => {
+                builder.header("x-client-request-id", session_id)
+            }
+        }
+    }
+
+    fn apply_messages_session_affinity(
+        &self,
+        builder: reqwest::RequestBuilder,
+        session_id: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let Some(compat) = self.defaults.messages_compat() else {
+            return builder;
+        };
+        let Some(session_id) = session_id.filter(|value| !value.is_empty()) else {
+            return builder;
+        };
+        if compat.send_session_affinity_headers {
+            builder.header("x-session-affinity", session_id)
+        } else {
+            builder
+        }
     }
 
     fn apply_defaults(&self, mut request: ChatCompletionRequest) -> Result<ChatCompletionRequest> {
@@ -1269,12 +1794,7 @@ impl SamplingClient {
                 .x_grok_session_id
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    request
-                        .x_grok_conv_id
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                });
+                .or_else(|| request.x_grok_conv_id.as_deref().filter(|s| !s.is_empty()));
             if let Some(key) = key {
                 request.prompt_cache_key =
                     Some(xai_grok_sampling_types::clamp_prompt_cache_key(key));
@@ -1357,8 +1877,20 @@ impl SamplingClient {
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
         };
+        let mut request_body = serde_json::to_value(&payload).map_err(|error| {
+            tracing::error!(%error, "failed to serialize chat/completions request");
+            SamplingError::Serialization(error)
+        })?;
+        self.patch_chat_request_body(&mut request_body, false);
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("chat/completions"));
-        let http_request = grok_headers.apply(http_request).json(&payload);
+        let mut http_request = self.apply_chat_session_affinity(
+            grok_headers.apply(http_request),
+            payload.x_grok_session_id.as_deref(),
+        );
+        if self.defaults.adapter.uses_github_copilot_dialect() {
+            http_request = apply_copilot_dynamic_headers(http_request, &request_body);
+        }
+        let http_request = http_request.json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -1404,6 +1936,11 @@ impl SamplingClient {
                 include_usage: true,
             },
         };
+        let mut request_body = serde_json::to_value(&streaming_request).map_err(|error| {
+            tracing::error!(%error, "failed to serialize streaming chat/completions request");
+            SamplingError::Serialization(error)
+        })?;
+        self.patch_chat_request_body(&mut request_body, true);
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1416,10 +1953,16 @@ impl SamplingClient {
             user_id: payload.x_grok_user_id.as_deref(),
         };
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("chat/completions"));
-        let http_request = grok_headers
-            .apply(http_request)
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&streaming_request);
+        let mut http_request = self
+            .apply_chat_session_affinity(
+                grok_headers.apply(http_request),
+                payload.x_grok_session_id.as_deref(),
+            )
+            .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        if self.defaults.adapter.uses_github_copilot_dialect() {
+            http_request = apply_copilot_dynamic_headers(http_request, &request_body);
+        }
+        let http_request = http_request.json(&request_body);
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1590,8 +2133,15 @@ impl SamplingClient {
         // session-affinity routing (automatic prefix cache). Codex dialect
         // does additional instruction reshaping below.
         stamp_responses_prompt_cache_key(request);
+        if self
+            .defaults
+            .responses_compat()
+            .is_some_and(|compat| !compat.supports_long_cache_retention)
+        {
+            request.inner.prompt_cache_retention = None;
+        }
 
-        if self.defaults.responses_codex_dialect {
+        if self.defaults.adapter.uses_openai_codex_dialect() {
             apply_codex_dialect(request);
         }
 
@@ -1639,18 +2189,29 @@ impl SamplingClient {
         // it in post-serialize. This is the last surviving piece of the
         // old raw_output machinery.
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
-        if self.defaults.responses_codex_dialect {
+        if self
+            .defaults
+            .responses_compat()
+            .is_some_and(|compat| !compat.supports_strict_mode)
+        {
+            Self::strip_strict_tool_fields(&mut request_body);
+        }
+        if self.defaults.adapter.uses_openai_codex_dialect() {
             // ChatGPT Codex backend rejects non-stream requests:
             // `{"detail":"Stream must be set to true"}`.
             request_body["stream"] = serde_json::json!(true);
             strip_codex_unsupported_body_fields(&mut request_body);
-            patch_codex_reasoning_effort_wire(
-                &mut request_body,
-                self.defaults.reasoning_effort,
-            );
+            patch_codex_reasoning_effort_wire(&mut request_body, self.defaults.reasoning_effort);
         }
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("responses"));
-        let http_request = grok_headers.apply(http_request).json(&request_body);
+        let mut http_request = self.apply_responses_session_affinity(
+            grok_headers.apply(http_request),
+            request.x_grok_session_id.as_deref(),
+        );
+        if self.defaults.adapter.uses_github_copilot_dialect() {
+            http_request = apply_copilot_dynamic_headers(http_request, &request_body);
+        }
+        let http_request = http_request.json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1787,17 +2348,21 @@ impl SamplingClient {
             }
         }
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        if self
+            .defaults
+            .responses_compat()
+            .is_some_and(|compat| !compat.supports_strict_mode)
+        {
+            Self::strip_strict_tool_fields(&mut request_body);
+        }
         // Always force stream on the wire for Responses streaming calls.
         // ChatGPT Codex (`chatgpt.com/backend-api/codex/responses`) hard-requires
         // `stream: true` and returns FastAPI `{"detail":"Stream must be set to true"}`
         // otherwise — which our error parser used to collapse to a generic 400.
         request_body["stream"] = serde_json::json!(true);
-        if self.defaults.responses_codex_dialect {
+        if self.defaults.adapter.uses_openai_codex_dialect() {
             strip_codex_unsupported_body_fields(&mut request_body);
-            patch_codex_reasoning_effort_wire(
-                &mut request_body,
-                self.defaults.reasoning_effort,
-            );
+            patch_codex_reasoning_effort_wire(&mut request_body, self.defaults.reasoning_effort);
         }
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
@@ -1806,12 +2371,18 @@ impl SamplingClient {
             .doom_loop_recovery
             .map(crate::doom_loop::DoomLoopSignalCollector::new);
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("responses"));
-        let mut http_request = grok_headers
-            .apply(http_request)
+        let mut http_request = self
+            .apply_responses_session_affinity(
+                grok_headers.apply(http_request),
+                request.x_grok_session_id.as_deref(),
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
             http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+        }
+        if self.defaults.adapter.uses_github_copilot_dialect() {
+            http_request = apply_copilot_dynamic_headers(http_request, &request_body);
         }
         let http_request = http_request.json(&request_body);
 
@@ -1964,8 +2535,14 @@ impl SamplingClient {
                 .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
         }
 
-        // Apply temperature default if not specified
-        if request.inner.temperature.is_none() {
+        // Apply temperature only when the concrete Messages route accepts it.
+        if self
+            .defaults
+            .messages_compat()
+            .is_some_and(|compat| !compat.supports_temperature)
+        {
+            request.inner.temperature = None;
+        } else if request.inner.temperature.is_none() {
             request.inner.temperature = self.defaults.temperature;
         }
 
@@ -2005,7 +2582,16 @@ impl SamplingClient {
             user_id: request.x_grok_user_id.as_deref(),
         };
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("messages"));
-        let http_request = grok_headers.apply(http_request).json(&request.inner);
+        let mut http_request = self.apply_messages_session_affinity(
+            grok_headers.apply(http_request),
+            request.x_grok_session_id.as_deref(),
+        );
+        if self.defaults.adapter.uses_github_copilot_dialect() {
+            let request_body =
+                serde_json::to_value(&request.inner).map_err(SamplingError::Serialization)?;
+            http_request = apply_copilot_dynamic_headers(http_request, &request_body);
+        }
+        let http_request = http_request.json(&request.inner);
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -2114,10 +2700,18 @@ impl SamplingClient {
             user_id: request.x_grok_user_id.as_deref(),
         };
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("messages"));
-        let http_request = grok_headers
-            .apply(http_request)
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&request.inner);
+        let mut http_request = self
+            .apply_messages_session_affinity(
+                grok_headers.apply(http_request),
+                request.x_grok_session_id.as_deref(),
+            )
+            .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        if self.defaults.adapter.uses_github_copilot_dialect() {
+            let request_body =
+                serde_json::to_value(&request.inner).map_err(SamplingError::Serialization)?;
+            http_request = apply_copilot_dynamic_headers(http_request, &request_body);
+        }
+        let http_request = http_request.json(&request.inner);
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -2271,15 +2865,191 @@ impl SamplingClient {
         // endpoint/backend switch merely because they reused the same slug.
         request.reasoning_model_identity = Some(ReasoningModelIdentity::new(
             request.model.clone().unwrap_or_default(),
-            self.defaults.api_backend.clone(),
+            self.api_backend(),
             &self.base_url,
         ));
 
-        // Production always stamps dialect from SamplerConfig so bare
-        // model-name matching cannot reshape Ollama/OpenRouter payloads.
-        request.kimi_dialect = Some(self.defaults.kimi_dialect);
+        // Production always stamps route metadata from SamplerConfig so bare
+        // model-name/URL matching cannot reshape third-party payloads.
+        request.kimi_dialect = Some(self.defaults.adapter.uses_kimi_dialect());
+        request.request_compat = self.defaults.request_compat.clone();
+        if request.bedrock_request_metadata.is_empty() {
+            request.bedrock_request_metadata = self.defaults.bedrock_request_metadata.clone();
+        }
+        if request.bedrock_headers.is_empty() {
+            request.bedrock_headers = self.defaults.bedrock_headers.clone();
+        }
 
         Ok(())
+    }
+
+    /// Send a conversation request using Google GenerateContent (streaming).
+    pub async fn conversation_stream_google(
+        &self,
+        mut request: ConversationRequest,
+    ) -> Result<(
+        BoxStream<'static, Result<crate::google::GenerateContentResponse>>,
+        ReasoningModelIdentity,
+    )> {
+        self.apply_conversation_defaults(&mut request)?;
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.defaults.model.clone());
+        let endpoint = crate::google::GoogleEndpoint::from_config(&self.base_url, &model);
+        let body =
+            crate::google::build_request(&request, &model, self.defaults.request_compat.as_ref());
+        let mut headers = self.default_headers.clone();
+        remove_known_auth_headers(&mut headers);
+        let api_key = self
+            .default_headers
+            .get(HeaderName::from_static("x-goog-api-key"))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let vertex_express =
+            api_key.is_some() && matches!(endpoint.kind, crate::google::GoogleEndpointKind::Vertex);
+        let url = endpoint.url(true, vertex_express)?;
+        let bearer = if api_key.is_none()
+            && matches!(endpoint.kind, crate::google::GoogleEndpointKind::Vertex)
+        {
+            Some(self.google_adc.token().await?)
+        } else {
+            None
+        };
+        crate::google::apply_google_auth_headers(
+            &mut headers,
+            api_key.as_deref(),
+            bearer.as_deref(),
+        );
+        let response = self
+            .http
+            .post(url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await.unwrap_or_default();
+            return Err(SamplingError::Api {
+                status,
+                message: user_facing_api_error_message(status, bytes.as_ref()),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+            });
+        }
+        let identity =
+            ReasoningModelIdentity::new(model, ApiBackend::GoogleGenerateContent, &self.base_url);
+        Ok((crate::google::sse_stream(response), identity))
+    }
+
+    /// Send a conversation request using Amazon Bedrock ConverseStream (streaming).
+    pub async fn conversation_stream_bedrock(
+        &self,
+        mut request: ConversationRequest,
+    ) -> Result<(
+        BoxStream<'static, Result<aws_sdk_bedrockruntime::types::ConverseStreamOutput>>,
+        ReasoningModelIdentity,
+    )> {
+        self.apply_conversation_defaults(&mut request)?;
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.defaults.model.clone());
+        let bearer = self
+            .default_headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer ").or(Some(v)))
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        let cfg = crate::bedrock::resolve_endpoint_config(
+            &model,
+            &self.base_url,
+            bearer.as_deref(),
+            self.defaults.bedrock_profile.as_deref(),
+            |name| std::env::var(name).ok(),
+        );
+        let client = crate::bedrock::client_from_config(&cfg).await;
+        let identity = ReasoningModelIdentity::new(
+            model.clone(),
+            ApiBackend::BedrockConverseStream,
+            cfg.endpoint_url.as_deref().unwrap_or(&self.base_url),
+        );
+        let stream = crate::bedrock::converse_stream(client, model, request).await?;
+        Ok((stream, identity))
+    }
+
+    /// Send a conversation request using Pi Messages (streaming).
+    pub async fn conversation_stream_pi_messages(
+        &self,
+        mut request: ConversationRequest,
+    ) -> Result<(
+        BoxStream<'static, Result<PiMessagesEvent>>,
+        ReasoningModelIdentity,
+    )> {
+        self.apply_conversation_defaults(&mut request)?;
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.defaults.model.clone());
+        let body = crate::pi_messages::build_request(&request, &model)?;
+        tracing::debug!(base_url = %self.base_url, model_id = %model, "Sending Pi Messages stream request");
+        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("messages"));
+        let http_request = http_request
+            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .json(&body);
+        let response = http_request.send().await.map_err(|e| {
+            tracing::debug!("HTTP request failed: {}", e);
+            record_stream_request_failure(&e);
+            e
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.record_401_attribution(
+                    crate::attribution::SamplingConsumer::MessagesStream,
+                    sent_bearer_prefix.as_deref(),
+                );
+                let endpoint = self.endpoint("messages");
+                let body = response.bytes().await.unwrap_or_default();
+                let server_message = user_facing_api_error_message(status, body.as_ref());
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (401) from {endpoint}: {server_message}"
+                )));
+            }
+            let model_metadata = extract_model_metadata(response.headers());
+            let retry_after_secs = extract_retry_after(response.headers());
+            let should_retry = extract_should_retry(response.headers());
+            let bytes = response.bytes().await?;
+            let message = user_facing_api_error_message(status, bytes.as_ref());
+            tracing::error!(status = %status, error_message = %message, body_preview = %Self::body_preview(bytes.as_ref()), model_id = %model, "pi-messages API error");
+            return Err(SamplingError::Api {
+                status,
+                message,
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            });
+        }
+        let events = response
+            .bytes_stream()
+            .eventsource()
+            .filter_map(|event_res| async move {
+                match event_res {
+                    Ok(event) => match crate::pi_messages::decode_event_data(&event.data) {
+                        Ok(Some(event)) => Some(Ok(event)),
+                        Ok(None) => None,
+                        Err(e) => Some(Err(e)),
+                    },
+                    Err(e) => Some(Err(SamplingError::EventStreamError(e.to_string()))),
+                }
+            })
+            .boxed();
+        let identity = ReasoningModelIdentity::new(model, ApiBackend::PiMessages, &self.base_url);
+        Ok((events, identity))
     }
 
     /// Send a conversation request using the Chat Completions API (streaming).
@@ -2493,6 +3263,32 @@ impl SamplingClient {
                 let events = crate::stream::stream_messages(raw, meta, request_id, idle_timeout);
                 crate::stream::collect_response(events).await
             }
+            ApiBackend::GoogleGenerateContent => {
+                let (raw, identity) = self.conversation_stream_google(request).await?;
+                let events = crate::google::stream_google_generate_content(
+                    raw,
+                    request_id,
+                    identity,
+                    idle_timeout,
+                );
+                crate::stream::collect_response(events).await
+            }
+            ApiBackend::BedrockConverseStream => {
+                let (raw, identity) = self.conversation_stream_bedrock(request).await?;
+                let events = crate::bedrock::stream_bedrock_converse(
+                    raw,
+                    request_id,
+                    identity,
+                    idle_timeout,
+                );
+                crate::stream::collect_response(events).await
+            }
+            ApiBackend::PiMessages => {
+                let (raw, identity) = self.conversation_stream_pi_messages(request).await?;
+                let events =
+                    crate::pi_messages::stream_pi_messages(raw, request_id, identity, idle_timeout);
+                crate::stream::collect_response(events).await
+            }
         };
         result
             .map(|(mut response, _metrics)| {
@@ -2531,6 +3327,9 @@ mod tests {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,
+            adapter_kind: xai_grok_sampling_types::AdapterKind::Standard,
+            request_compat: None,
+            endpoint_path: None,
             auth_scheme: AuthScheme::Bearer,
             extra_headers: IndexMap::new(),
             query_params: IndexMap::new(),
@@ -2554,8 +3353,95 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
             responses_codex_dialect: false,
+            bedrock_request_metadata: IndexMap::new(),
+            bedrock_headers: IndexMap::new(),
+            bedrock_profile: None,
             kimi_dialect: false,
         }
+    }
+
+    fn mistral_client(model: &str) -> SamplingClient {
+        SamplingClient::new(SamplerConfig {
+            model: model.to_string(),
+            adapter_kind: xai_grok_sampling_types::AdapterKind::MistralConversations,
+            endpoint_path: Some("chat/completions".into()),
+            reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::High),
+            ..minimal_config()
+        })
+        .expect("mistral client")
+    }
+
+    #[test]
+    fn mistral_request_uses_chat_endpoint_and_affinity_header() {
+        let client = mistral_client("magistral-small");
+        assert_eq!(client.api_backend(), ApiBackend::ChatCompletions);
+        assert_eq!(
+            client.endpoint("responses"),
+            "https://example.test/chat/completions"
+        );
+
+        let builder = client.http.post("https://example.test/chat/completions");
+        let request = client
+            .apply_chat_session_affinity(builder, Some("session-123"))
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            request
+                .headers()
+                .get("x-affinity")
+                .and_then(|v| v.to_str().ok()),
+            Some("session-123")
+        );
+    }
+
+    #[test]
+    fn mistral_prompt_mode_reasoning_and_tool_ids_are_patched() {
+        let client = mistral_client("magistral-small");
+        let mut body = serde_json::json!({
+            "model": "magistral-small",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1234567890abcdef",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1234567890abcdef",
+                    "content": "ok"
+                }
+            ],
+            "reasoning_effort": "high"
+        });
+
+        client.patch_chat_request_body(&mut body, true);
+
+        assert_eq!(body["prompt_mode"], "reasoning");
+        assert!(body.get("reasoning_effort").is_none());
+        let assistant_id = body["messages"][0]["tool_calls"][0]["id"].as_str().unwrap();
+        let tool_result_id = body["messages"][1]["tool_call_id"].as_str().unwrap();
+        assert_eq!(assistant_id, tool_result_id);
+        assert_eq!(assistant_id.len(), MISTRAL_TOOL_CALL_ID_LENGTH);
+        assert!(assistant_id.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn mistral_reasoning_effort_models_keep_reasoning_effort() {
+        let client = mistral_client("mistral-small-2603");
+        let mut body = serde_json::json!({
+            "model": "mistral-small-2603",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        });
+
+        client.patch_chat_request_body(&mut body, true);
+
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("prompt_mode").is_none());
     }
 
     #[test]
@@ -2720,9 +3606,10 @@ mod tests {
     fn responses_prompt_cache_key_from_conversation_request() {
         use xai_grok_sampling_types::ConversationRequest;
 
-        let mut req = ConversationRequest::from_items(vec![
-            xai_grok_sampling_types::ConversationItem::user("hi"),
-        ]);
+        let mut req =
+            ConversationRequest::from_items(vec![xai_grok_sampling_types::ConversationItem::user(
+                "hi",
+            )]);
         req.prompt_cache_key = Some("explicit-key".into());
         req.prompt_cache_retention = Some("24h".into());
         let body: rs::CreateResponse = (&req).into();
@@ -2821,6 +3708,79 @@ mod tests {
     }
 
     #[test]
+    fn catalog_user_agent_is_not_overwritten_by_generic_user_agent() {
+        let mut cfg = minimal_config();
+        cfg.extra_headers.insert(
+            "User-Agent".to_string(),
+            "GitHubCopilotChat/0.35.0".to_string(),
+        );
+        let client = SamplingClient::new(cfg).expect("client with catalog UA");
+        assert_eq!(
+            client
+                .default_headers
+                .get(USER_AGENT)
+                .and_then(|v| v.to_str().ok()),
+            Some("GitHubCopilotChat/0.35.0")
+        );
+    }
+
+    #[test]
+    fn github_copilot_dynamic_headers_follow_pi_rules() {
+        let assistant = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"}
+            ]
+        });
+        assert_eq!(infer_copilot_initiator(&assistant), "agent");
+        assert!(!value_has_copilot_image(&assistant));
+
+        let chat_tool_result = serde_json::json!({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call_1"}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+            ]
+        });
+        assert_eq!(infer_copilot_initiator(&chat_tool_result), "agent");
+
+        let responses_tool_result = serde_json::json!({
+            "input": [
+                {"type": "message", "role": "assistant", "content": []},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+            ]
+        });
+        assert_eq!(infer_copilot_initiator(&responses_tool_result), "agent");
+
+        let messages_tool_result = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]
+            }]
+        });
+        assert_eq!(infer_copilot_initiator(&messages_tool_result), "agent");
+
+        let user_image = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]
+            }]
+        });
+        assert_eq!(infer_copilot_initiator(&user_image), "user");
+        assert!(value_has_copilot_image(&user_image));
+    }
+
+    #[test]
+    fn github_copilot_adapter_preserves_wire_backend() {
+        let client = SamplingClient::new(SamplerConfig {
+            adapter_kind: xai_grok_sampling_types::AdapterKind::GitHubCopilot,
+            ..minimal_config()
+        })
+        .expect("github copilot client");
+        assert_eq!(client.api_backend(), ApiBackend::ChatCompletions);
+        assert!(client.backend_adapter().uses_github_copilot_dialect());
+    }
+
+    #[test]
     fn apply_env_http_headers_resolves_trims_skips_and_overrides() {
         let mut map = IndexMap::new();
         map.insert("x-tenant-token".to_string(), "TENANT".to_string());
@@ -2871,6 +3831,143 @@ mod tests {
     }
 
     #[test]
+    fn chat_compat_rewrites_max_tokens_field() {
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                supports_store: false,
+                max_tokens_field: MaxTokensField::MaxCompletionTokens,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut body = serde_json::json!({ "max_tokens": 321 });
+
+        client.patch_chat_request_body(&mut body, false);
+
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 321);
+    }
+
+    #[test]
+    fn chat_compat_removes_unsupported_stream_usage() {
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                supports_store: false,
+                supports_usage_in_streaming: false,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut body = serde_json::json!({
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
+
+        client.patch_chat_request_body(&mut body, true);
+
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn chat_compat_rewrites_deepseek_and_openrouter_thinking() {
+        for (format, expected_field) in [
+            (ThinkingFormat::DeepSeek, "thinking"),
+            (ThinkingFormat::OpenRouter, "reasoning"),
+        ] {
+            let mut cfg = minimal_config();
+            cfg.request_compat = Some(RequestCompat::ChatCompletions(
+                xai_grok_sampling_types::OpenAiCompletionsCompat {
+                    supports_store: false,
+                    thinking_format: format,
+                    ..Default::default()
+                },
+            ));
+            let client = SamplingClient::new(cfg).expect("client should build");
+            let mut body = serde_json::json!({ "reasoning_effort": "high" });
+
+            client.patch_chat_request_body(&mut body, false);
+
+            assert!(body.get(expected_field).is_some(), "body: {body}");
+            if format == ThinkingFormat::OpenRouter {
+                assert!(body.get("reasoning_effort").is_none());
+                assert_eq!(body["reasoning"]["effort"], "high");
+            } else {
+                assert_eq!(body["thinking"]["type"], "enabled");
+                assert_eq!(body["reasoning_effort"], "high");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_endpoint_path_overrides_backend_default() {
+        let mut cfg = minimal_config();
+        cfg.base_url = "https://azure.example/openai".into();
+        cfg.endpoint_path = Some("deployments/demo/responses".into());
+        cfg.query_params
+            .insert("api-version".into(), "2025-04-01-preview".into());
+        let client = SamplingClient::new(cfg).expect("client should build");
+
+        assert_eq!(
+            client.endpoint("chat/completions"),
+            "https://azure.example/openai/deployments/demo/responses?api-version=2025-04-01-preview"
+        );
+    }
+
+    #[test]
+    fn messages_compat_suppresses_unsupported_temperature() {
+        let mut cfg = minimal_config();
+        cfg.api_backend = ApiBackend::Messages;
+        cfg.temperature = Some(0.7);
+        cfg.request_compat = Some(RequestCompat::Messages(
+            xai_grok_sampling_types::AnthropicMessagesCompat {
+                supports_temperature: false,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let mut request = MessagesRequestWrapper::new(messages::MessagesRequest {
+            temperature: Some(0.3),
+            ..Default::default()
+        });
+
+        client
+            .apply_message_defaults(&mut request)
+            .expect("defaults should apply");
+
+        assert!(request.inner.temperature.is_none());
+    }
+
+    #[test]
+    fn chat_session_affinity_respects_no_session_format() {
+        let mut cfg = minimal_config();
+        cfg.request_compat = Some(RequestCompat::ChatCompletions(
+            xai_grok_sampling_types::OpenAiCompletionsCompat {
+                send_session_affinity_headers: true,
+                session_affinity_format: SessionAffinityFormat::OpenAiNoSession,
+                ..Default::default()
+            },
+        ));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let (builder, _) = client.post("https://example.test/v1/chat/completions");
+        let request = client
+            .apply_chat_session_affinity(builder, Some("session-123"))
+            .build()
+            .expect("request should build");
+
+        assert_eq!(
+            request.headers().get("x-client-request-id").unwrap(),
+            "session-123"
+        );
+        assert_eq!(
+            request.headers().get("x-session-affinity").unwrap(),
+            "session-123"
+        );
+        assert!(request.headers().get("session_id").is_none());
+    }
+
+    #[test]
     fn messages_plus_anthropic_api_key_uses_x_api_key_and_not_authorization() {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
@@ -2904,6 +4001,80 @@ mod tests {
                 .get(HeaderName::from_static("x-api-key"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn azure_api_key_uses_raw_api_key_header_exclusively() {
+        let mut cfg = minimal_config();
+        cfg.api_key = Some("azure-test-key".into());
+        cfg.auth_scheme = AuthScheme::ApiKey;
+        cfg.extra_headers
+            .insert("Authorization".into(), "Bearer must-not-survive".into());
+        cfg.extra_headers
+            .insert("x-api-key".into(), "must-not-survive".into());
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert_eq!(
+            client
+                .default_headers
+                .get(HeaderName::from_static("api-key"))
+                .and_then(|value| value.to_str().ok()),
+            Some("azure-test-key")
+        );
+        assert!(client.default_headers.get(AUTHORIZATION).is_none());
+        assert!(client.default_headers.get("x-api-key").is_none());
+        assert!(client.default_headers.get("cf-aig-authorization").is_none());
+    }
+
+    #[test]
+    fn cloudflare_gateway_auth_survives_resolver_and_rejects_late_conflicts() {
+        #[derive(Debug)]
+        struct Resolver;
+        impl crate::config::BearerResolver for Resolver {
+            fn current_bearer(&self) -> Option<String> {
+                Some("fresh-cloudflare-key".into())
+            }
+        }
+        #[derive(Debug)]
+        struct ConflictingInjector;
+        impl crate::config::HeaderInjector for ConflictingInjector {
+            fn inject(&self, headers: &mut HeaderMap) {
+                headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer wrong"));
+                headers.insert(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_static("wrong"),
+                );
+                headers.insert(
+                    HeaderName::from_static("api-key"),
+                    HeaderValue::from_static("wrong"),
+                );
+                headers.insert(
+                    HeaderName::from_static("cf-aig-authorization"),
+                    HeaderValue::from_static("Bearer overwritten"),
+                );
+            }
+        }
+
+        let mut cfg = minimal_config();
+        cfg.api_key = Some("stale-cloudflare-key".into());
+        cfg.auth_scheme = AuthScheme::CfAigAuthorization;
+        cfg.extra_headers
+            .insert("Authorization".into(), "Bearer extra-conflict".into());
+        cfg.bearer_resolver = Some(std::sync::Arc::new(Resolver));
+        cfg.header_injector = Some(std::sync::Arc::new(ConflictingInjector));
+        let client = SamplingClient::new(cfg).expect("client should build");
+        let (request, sent_prefix) = client.post("https://example.test/v1/responses");
+        let request = request.build().expect("request should build");
+        assert_eq!(
+            request
+                .headers()
+                .get("cf-aig-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer fresh-cloudflare-key")
+        );
+        assert!(request.headers().get(AUTHORIZATION).is_none());
+        assert!(request.headers().get("x-api-key").is_none());
+        assert!(request.headers().get("api-key").is_none());
+        assert_eq!(sent_prefix.as_deref(), Some("fresh-cloudf"));
     }
 
     // Regression: a past change dropped User-Agent from sampling requests.
@@ -3470,9 +4641,8 @@ mod tests {
         })
         .to_string();
 
-        let Ok(ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseOutputTextDelta(
-            event,
-        ))) = decode_responses_sse_frame("", &payload)
+        let Ok(ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseOutputTextDelta(event))) =
+            decode_responses_sse_frame("", &payload)
         else {
             panic!("a normal text delta containing auxiliary names must be preserved");
         };
@@ -3514,10 +4684,7 @@ mod tests {
             "",
             r#"{"type":"response.output_text.delta","sequence_number":9}"#,
         );
-        assert!(matches!(
-            decoded,
-            Err(SamplingError::Serialization(_))
-        ));
+        assert!(matches!(decoded, Err(SamplingError::Serialization(_))));
     }
 
     #[test]
@@ -3525,10 +4692,7 @@ mod tests {
         // Forward-compat: a Messages event type this build does not model is
         // a liveness Ping, not a fatal serialization error.
         let decoded = decode_messages_sse_frame(r#"{"type":"citation","index":0}"#);
-        assert!(matches!(
-            decoded,
-            Ok(messages::MessageStreamEvent::Ping)
-        ));
+        assert!(matches!(decoded, Ok(messages::MessageStreamEvent::Ping)));
     }
 
     #[test]
@@ -3536,18 +4700,12 @@ mod tests {
         let decoded = decode_messages_sse_frame(
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"brand_new_block","id":"b1"}}"#,
         );
-        assert!(matches!(
-            decoded,
-            Ok(messages::MessageStreamEvent::Ping)
-        ));
+        assert!(matches!(decoded, Ok(messages::MessageStreamEvent::Ping)));
 
         let decoded = decode_messages_sse_frame(
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"brand_new_delta","x":"y"}}"#,
         );
-        assert!(matches!(
-            decoded,
-            Ok(messages::MessageStreamEvent::Ping)
-        ));
+        assert!(matches!(decoded, Ok(messages::MessageStreamEvent::Ping)));
     }
 
     #[test]
@@ -3555,10 +4713,7 @@ mod tests {
         // Missing required fields on a known type: still a fatal
         // serialization error (wire corruption must not be hidden).
         let decoded = decode_messages_sse_frame(r#"{"type":"content_block_stop"}"#);
-        assert!(matches!(
-            decoded,
-            Err(SamplingError::Serialization(_))
-        ));
+        assert!(matches!(decoded, Err(SamplingError::Serialization(_))));
     }
 
     #[test]

@@ -688,6 +688,16 @@ pub enum Action {
     PermissionCancel,
     /// Log out: remove credentials and return to the login screen.
     Logout,
+    /// Log out of Kimi Code OAuth only (static API keys are unchanged).
+    LogoutKimi,
+    /// Log out of OpenAI Codex OAuth only.
+    LogoutOpenAiCodex,
+    /// Log out of Anthropic Claude OAuth only.
+    LogoutAnthropicClaude,
+    /// Log out of GitHub Copilot OAuth only (static tokens are unchanged).
+    LogoutGitHubCopilot,
+    /// Log out of Radius OAuth only (static Radius API keys are unchanged).
+    LogoutRadius,
     /// Log out and immediately start a new login flow.
     SwitchAccount,
     /// User pressed login on the welcome screen.
@@ -698,6 +708,10 @@ pub enum Action {
     LoginOpenAiCodex,
     /// Interactive Anthropic Claude (Pro/Max) subscription login (`/login claude`).
     LoginAnthropicClaude,
+    /// Interactive GitHub Copilot subscription login (`/login github`).
+    LoginGitHubCopilot,
+    /// Interactive Radius gateway login (`/login radius`).
+    LoginRadius,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -2037,6 +2051,16 @@ pub enum Effect {
     },
     /// Log out via `x.ai/auth/logout` (shell clears auth.json + in-memory state).
     Logout,
+    /// Clear Kimi Code OAuth locally (does not remove a static API key).
+    LogoutKimi,
+    /// Clear OpenAI Codex OAuth locally.
+    LogoutOpenAiCodex,
+    /// Clear Anthropic Claude OAuth locally.
+    LogoutAnthropicClaude,
+    /// Clear GitHub Copilot OAuth locally (does not remove a static token).
+    LogoutGitHubCopilot,
+    /// Clear Radius OAuth locally (does not remove a Radius API key).
+    LogoutRadius,
     /// Cancel an in-flight interactive auth on the shell (`x.ai/auth/cancel`).
     /// Used when the user abandons mid-session `/login` so the device-code
     /// poll stops instead of running until the code expires. `request_seq`
@@ -2806,6 +2830,26 @@ pub enum TaskResult {
     },
     /// Shell acknowledged logout (auth cleared).
     LogoutComplete,
+    /// Kimi Code scoped OAuth logout completed.
+    LogoutKimiComplete {
+        message: String,
+    },
+    /// OpenAI Codex scoped OAuth logout completed.
+    LogoutOpenAiCodexComplete {
+        message: String,
+    },
+    /// Anthropic Claude scoped OAuth logout completed.
+    LogoutAnthropicClaudeComplete {
+        message: String,
+    },
+    /// GitHub Copilot scoped OAuth logout completed.
+    LogoutGitHubCopilotComplete {
+        message: String,
+    },
+    /// Radius scoped OAuth logout completed.
+    LogoutRadiusComplete {
+        message: String,
+    },
     /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
     /// Shell responded to `x.ai/auth/check_subscription`. `verify` echoes

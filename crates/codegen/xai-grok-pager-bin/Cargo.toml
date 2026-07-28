@@ -49,6 +49,7 @@ tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 dunce = { workspace = true }
 semver = { workspace = true }
+rpassword = "7"
 xai-tty-utils = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }

@@ -490,6 +490,11 @@ mod tests {
             oidc_client_id: None,
             account_id: None,
             platform_base_url: None,
+            github_domain: None,
+            github_copilot_base_url: None,
+            github_copilot_available_models: None,
+            aws_profile: None,
+            aws_credential_chain: false,
         }
     }
     fn test_auth_manager() -> Arc<crate::auth::AuthManager> {

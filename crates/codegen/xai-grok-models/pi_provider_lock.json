@@ -1,0 +1,47 @@
+{
+  "model_data": {
+    "api_model_counts": {
+      "anthropic-messages": 276,
+      "azure-openai-responses": 38,
+      "bedrock-converse-stream": 114,
+      "google-generative-ai": 29,
+      "google-vertex": 12,
+      "mistral-conversations": 30,
+      "openai-codex-responses": 7,
+      "openai-completions": 512,
+      "openai-responses": 91
+    },
+    "dynamic_providers": [
+      "radius"
+    ],
+    "generated_at": "2026-07-25T12:44:19.521Z",
+    "manifest_sha256": "c2d89b03ccb2c095c59ead0437592b21e9676d049ad8e92ea90a466adf10b24d",
+    "schema_version": 3,
+    "static_model_count": 1109,
+    "static_provider_count": 37,
+    "structure_hash": "1a3c7cf59ada71c94abe4540976960524ee933034491c75d6418e2abc1b42535"
+  },
+  "outputs": {
+    "parity_report_sha256": "99c89e463afe323cccee67c76e010f8252e502a8ad54fbf257cf2b6654076dad",
+    "runtime_catalog_sha256": "ca285c05ede6e3c188fdb85eeea0254fffd1c67bf27e9ac491eb2df433ef5099",
+    "snapshot_sha256": "a8d0a90c09f1978d9a6797d288074056fd6666e4d5bc8c6cbb805f46611433a4"
+  },
+  "package": {
+    "name": "@earendil-works/pi-ai",
+    "npm_integrity": "sha512-3WFYRhEp3lQB3444EhPMBcM7zSaEUE3eJgHOR7s4081NLqbw/FsWilIKWXSua0Gv3sRr7m9xMidR3pPDE7jI/A==",
+    "sha1": "02ebdfc2997fd88ca1f51a7b5c01f337a9462f34",
+    "sha512": "dd6158461129de5401df8e381213cc05c33bcd2684504dde2601ce47bb38d3cd4d2ea6f0fc5b168a520a5974ae6b41afdec46bee6f71322751de93c313b8c8fc",
+    "tarball_url": "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-0.82.1.tgz",
+    "version": "0.82.1"
+  },
+  "pi_commit": "a597371bda2af70372d1323d550483b5f4a0ae36",
+  "pi_commit_date": "2026-07-27T15:05:08Z",
+  "repository": "https://github.com/earendil-works/pi",
+  "schema_version": 1,
+  "source_files": {
+    "packages/ai/package.json": "955aa1caab4c875fc7755abe7cacbf9002d9875c471e8d5af245e495ae1d4596",
+    "packages/ai/src/env-api-keys.ts": "e0ff1fa46bb9be5b540519b17f2538bf2227b793cdbc38889d51871c7484875d",
+    "packages/ai/src/models.generated.ts": "7ee1f5c5b61db7b3ac710833210edb883d2fe63997472c46c728e1c07204d468",
+    "packages/ai/src/providers/all.ts": "14053e9788c1eab0e62bae7664e995dc8e308285fc8c925168878cc5be1a8a24"
+  }
+}
