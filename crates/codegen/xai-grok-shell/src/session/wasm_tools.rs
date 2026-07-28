@@ -10,6 +10,72 @@ use xai_tool_types::ToolDescription;
 /// Client name prefix for WASM extension tools (`wasm_...`).
 pub const WASM_TOOL_PREFIX: &str = "wasm_";
 
+/// Cap deny-reason length before product telemetry (avoid huge guest strings).
+const TELEMETRY_REASON_MAX: usize = 256;
+
+/// Emit runtime counters to tracing **and** the product/dual telemetry funnel.
+///
+/// - Always: structured log (`target=wasm_extension`, same as
+///   [`ExtensionRuntime::log_metrics`](xai_grok_extension_runtime::ExtensionRuntime::log_metrics)).
+/// - Product Mixpanel / events: only when `telemetry_enabled`.
+/// - External OTEL: via [`log_event_dual`] when the external stream is active.
+pub fn emit_runtime_metrics(
+    telemetry_enabled: bool,
+    reason: &str,
+    runtime: &ExtensionRuntime,
+) {
+    let snap = runtime.metrics();
+    snap.log_tracing(reason);
+    xai_grok_telemetry::session_ctx::log_event_dual(
+        telemetry_enabled,
+        xai_grok_telemetry::events::WasmExtensionMetrics {
+            reason: reason.to_string(),
+            extension_count: runtime.len() as u32,
+            loads_ok: snap.loads_ok,
+            loads_failed: snap.loads_failed,
+            calls_ok: snap.calls_ok,
+            calls_failed: snap.calls_failed,
+            calls_timeout: snap.calls_timeout,
+            pre_tool_denies: snap.pre_tool_denies,
+            stop_blocks: snap.stop_blocks,
+            tools_collected: snap.tools_collected,
+            tools_invoked_ok: snap.tools_invoked_ok,
+            tools_invoked_err: snap.tools_invoked_err,
+            guest_log_lines: snap.guest_log_lines,
+        },
+    );
+}
+
+/// Product telemetry for a wasm pre_tool deny (in addition to [`HookBlocked`]
+/// with `hook_name = wasm:{ext}`).
+pub fn emit_wasm_extension_blocked(
+    telemetry_enabled: bool,
+    extension: &str,
+    tool_name: &str,
+    reason: &str,
+) {
+    let reason = truncate_reason(reason);
+    xai_grok_telemetry::session_ctx::log_event_dual(
+        telemetry_enabled,
+        xai_grok_telemetry::events::WasmExtensionBlocked {
+            extension: extension.to_string(),
+            tool_name: Some(tool_name.to_string()),
+            reason,
+        },
+    );
+}
+
+fn truncate_reason(s: &str) -> String {
+    if s.len() <= TELEMETRY_REASON_MAX {
+        return s.to_string();
+    }
+    let mut end = TELEMETRY_REASON_MAX;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 /// Dynamic tool that forwards `run` into a loaded WASM guest.
 pub struct WasmExtensionTool {
     runtime: ExtensionRuntime,
@@ -179,6 +245,28 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use xai_grok_extension_api::{Capability, ExtensionSpec};
+    use xai_grok_telemetry::events::TelemetryEvent;
+
+    #[test]
+    fn telemetry_event_names_are_stable() {
+        assert_eq!(
+            xai_grok_telemetry::events::WasmExtensionMetrics::NAME,
+            "wasm_extension_metrics"
+        );
+        assert_eq!(
+            xai_grok_telemetry::events::WasmExtensionBlocked::NAME,
+            "wasm_extension_blocked"
+        );
+    }
+
+    #[test]
+    fn truncate_reason_caps_length() {
+        let long = "x".repeat(500);
+        let t = truncate_reason(&long);
+        assert!(t.len() <= TELEMETRY_REASON_MAX + "…".len());
+        assert!(t.ends_with('…'));
+        assert_eq!(truncate_reason("short"), "short");
+    }
 
     /// Session-level smoke: load fixture guest → register session-scoped tools
     /// on a real ToolBridge → unregister cleanly (production multi-session path).

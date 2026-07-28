@@ -29,7 +29,8 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 - [x] Guest → host **`hyper_host.log`** / SDK `log_info` / …
 - [x] Runtime **metrics** snapshot (`loads_ok`, `pre_tool_denies`, `calls_timeout`, …)
 - [x] Metrics **lifecycle emit**: session_start / plugin_reload / session_end  
-  (`ExtensionRuntime::log_metrics`, target `wasm_extension`)
+  (tracing `wasm_extension` + product events `wasm_extension_metrics`)
+- [x] Deny telemetry: `wasm_extension_blocked` (+ existing `hook_blocked` with `wasm:{ext}`)
 - [x] Guest read-only **plugin data dir** (`plugin_data_dir_*` / SDK `plugin_data_dir()`)
 - [x] Shell smoke: session-scoped tool register + unregister on `ToolBridge`
 - [x] SessionActor e2e: `prepare_tool_call` wasm deny/allow + tool register

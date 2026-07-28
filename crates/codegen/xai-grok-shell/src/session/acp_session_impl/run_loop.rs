@@ -486,7 +486,11 @@ pub(super) async fn run_session(
                         {
                             let ext_rt = session.extension_runtime.borrow().clone();
                             let _ = ext_rt.dispatch_session_end().await;
-                            ext_rt.log_metrics("session_end_channel_closed");
+                            crate::session::wasm_tools::emit_runtime_metrics(
+                                session.telemetry_enabled,
+                                "session_end_channel_closed",
+                                &ext_rt,
+                            );
                         }
                         // Drop session-scoped wasm_* tools from the shared bridge.
                         {
@@ -1871,7 +1875,11 @@ pub(super) async fn run_session(
                                     "wasm extension tools registered at session_start"
                                 );
                             }
-                            ext_rt.log_metrics("session_start");
+                            crate::session::wasm_tools::emit_runtime_metrics(
+                                session.telemetry_enabled,
+                                "session_start",
+                                &ext_rt,
+                            );
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
                             let s = session.clone();
@@ -2191,7 +2199,11 @@ pub(super) async fn run_session(
                             {
                                 let ext_rt = session.extension_runtime.borrow().clone();
                                 let _ = ext_rt.dispatch_session_end().await;
-                                ext_rt.log_metrics("session_end_shutdown");
+                                crate::session::wasm_tools::emit_runtime_metrics(
+                                    session.telemetry_enabled,
+                                    "session_end_shutdown",
+                                    &ext_rt,
+                                );
                             }
                             // Drop session-scoped wasm_* tools from the shared bridge.
                             {

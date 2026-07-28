@@ -874,7 +874,11 @@ impl SessionActor {
                 wasm_tools = n,
                 "wasm extension tools synced to tool bridge"
             );
-            rt.log_metrics("plugin_reload");
+            crate::session::wasm_tools::emit_runtime_metrics(
+                self.telemetry_enabled,
+                "plugin_reload",
+                &rt,
+            );
         }
 
         // Reload hooks in the current session

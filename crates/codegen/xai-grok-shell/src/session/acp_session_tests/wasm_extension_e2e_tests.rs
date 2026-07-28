@@ -195,7 +195,11 @@ async fn session_actor_registers_and_unregisters_wasm_tools() {
             // Metrics from collect path.
             let m = rt.metrics();
             assert!(m.tools_collected >= 1, "{m}");
-            rt.log_metrics("session_actor_e2e");
+            crate::session::wasm_tools::emit_runtime_metrics(
+                false, // product funnel off in unit tests; still hits dual external path if active
+                "session_actor_e2e",
+                &rt,
+            );
         })
         .await;
 }

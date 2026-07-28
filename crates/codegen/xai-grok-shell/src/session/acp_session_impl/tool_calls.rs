@@ -1013,6 +1013,12 @@ impl SessionActor {
                     reason = %reason,
                     "wasm extension denied tool"
                 );
+                crate::session::wasm_tools::emit_wasm_extension_blocked(
+                    self.telemetry_enabled,
+                    &extension,
+                    &resolved_tool_name,
+                    &reason,
+                );
                 return Ok(Err(self
                     .deny_tool(
                         &call.id,
