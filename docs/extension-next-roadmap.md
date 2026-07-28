@@ -69,14 +69,26 @@
 | Component Model | 见 abi-strategy | **defer** |
 | multi-lang / UI Host API | 触发条件未到 | **defer** |
 
-### P2 — 可选大件（单独立项）
+### P2a — 生产向（易项优先）— **in progress**
+
+| # | 事项 | 状态 |
+|---|------|------|
+| 16 | Session end 注销 `wasm_*` 工具（防 bridge 泄漏） | **done** |
+| 17 | Guest → host `log` + SDK `log_info` / tracing | **done** |
+| 18 | Production checklist 文档 | **done** |
+| 19 | 真 shell session e2e（整 actor） | 可选加深 |
+| 20 | 更多运营指标 / metrics | 可选 |
+
+详见 [extension-production-checklist.md](./extension-production-checklist.md)。
+
+### P2b — 难项（触发条件到再开）
 
 | # | 事项 | 触发条件 |
 |---|------|----------|
 | 12 | Component Model 双轨 | 多真实插件 + 类型需求 |
 | 13 | before_model rewrite | 产品明确要 |
 | 14 | 多语言 | Rust 路径已跑通后投诉 |
-| 15 | UI Host API | ACP/pager 通道设计就绪 |
+| 15 | 完整 UI Host API | ACP/pager 通道设计就绪 |
 
 ---
 
@@ -90,4 +102,6 @@
 ## 5. 本文件状态
 
 - 排期：P0–P1.5 + Phase 4 bootstrap MVP **已完成**  
-- 下一刀：仅在触发条件满足时开 P2（CM / rewrite / multi-lang / UI）  
+- 当前：P2a 生产向易项（日志 / 会话清理 / checklist）  
+- 难 P2b 仍 defer  
+

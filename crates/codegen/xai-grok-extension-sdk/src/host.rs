@@ -22,6 +22,8 @@ unsafe extern "C" {
     fn raw_set_append_system(ptr: *const u8, len: i32);
     #[link_name = "set_gate_reason"]
     fn raw_set_gate_reason(ptr: *const u8, len: i32);
+    #[link_name = "log"]
+    fn raw_log(level: i32, ptr: *const u8, len: i32);
     #[link_name = "stop_hook_active"]
     fn raw_stop_hook_active() -> i32;
     #[link_name = "tool_index"]
@@ -115,6 +117,15 @@ pub fn set_tool_schema(s: &str) {
 
 pub fn set_tool_result(s: &str) {
     write_str(raw_set_tool_result, s);
+}
+
+/// Guest → host log. `level`: 0=debug, 1=info, 2=warn, 3=error.
+pub fn log(level: i32, msg: &str) {
+    let b = msg.as_bytes();
+    let len = b.len().min(32 * 1024) as i32;
+    unsafe {
+        raw_log(level, b.as_ptr(), len);
+    }
 }
 
 /// Substring search over raw bytes.

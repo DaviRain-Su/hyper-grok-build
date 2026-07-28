@@ -96,6 +96,24 @@ impl Tool for WasmExtensionTool {
     }
 }
 
+/// Drop session-owned `wasm_*` tools from the shared ToolBridge.
+///
+/// Must run on session end / shutdown so closed sessions do not leave tools
+/// visible to other sessions (production leak fix).
+pub fn unregister_session_wasm_tools(
+    bridge: &xai_grok_tools::bridge::ToolBridge,
+    previously_registered: &mut Vec<String>,
+) -> usize {
+    let mut n = 0usize;
+    for name in previously_registered.drain(..) {
+        if bridge.unregister_tool_by_name(&name) {
+            tracing::debug!(tool = %name, "unregistered session-owned wasm tool");
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Unregister only tools this session previously registered, then re-register
 /// from the extension runtime with **session-scoped client names** so concurrent
 /// sessions do not collide on the shared ToolBridge (Oracle finding).
@@ -108,11 +126,7 @@ pub async fn sync_wasm_tools_to_bridge(
     previously_registered: &mut Vec<String>,
     session_id: &str,
 ) -> usize {
-    for name in previously_registered.drain(..) {
-        if bridge.unregister_tool_by_name(&name) {
-            tracing::debug!(tool = %name, "unregistered session-owned wasm tool");
-        }
-    }
+    unregister_session_wasm_tools(bridge, previously_registered);
     let tools = runtime.collect_registered_tools().await;
     let mut registered = 0usize;
     let session_key = Some(session_id);

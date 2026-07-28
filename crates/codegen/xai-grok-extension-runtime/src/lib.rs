@@ -23,6 +23,7 @@
 //! | `prompt_len` / `prompt_byte` | | user prompt for before_agent_start |
 //! | `set_inject_context` / `set_append_system` | `(ptr,len)` | guest memory UTF-8 |
 //! | `set_gate_reason` | `(ptr,len)` | deny/stop reason string for host UI |
+//! | `log` | `(level,ptr,len)` | guest → host log (0=debug…3=error) |
 //! | `stop_hook_active` | `() -> i32` | 1 if stop gate already continued |
 //! | `compact_reason_len` / `compact_reason_byte` | | pre_compact reason |
 //!
@@ -67,8 +68,47 @@ pub enum RuntimeError {
     MissingExport(&'static str),
 }
 
+/// Log level for guest → host `hyper_host.log` (matches SDK constants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum GuestLogLevel {
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3,
+}
+
+impl GuestLogLevel {
+    pub fn from_i32(v: i32) -> Self {
+        match v {
+            0 => Self::Debug,
+            2 => Self::Warn,
+            3 => Self::Error,
+            _ => Self::Info,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// One guest log line captured during a call (for tests / optional UI).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestLogLine {
+    pub level: GuestLogLevel,
+    pub message: String,
+}
+
 /// Host-side state visible to guest imports during a call.
 struct HostCtx {
+    /// Extension name for tracing (set by runtime before each call).
+    guest_name: String,
     tool_name: String,
     tool_input: String,
     /// User prompt for `before_agent_start`.
@@ -88,6 +128,8 @@ struct HostCtx {
     tool_description_out: String,
     tool_schema_out: String,
     tool_result_out: String,
+    /// Captured `hyper_host.log` lines (capped).
+    guest_logs: Vec<GuestLogLine>,
     /// Resource limits (must live with the Store; Oracle memory-bound fix).
     limits: wasmtime::StoreLimits,
 }
@@ -95,6 +137,7 @@ struct HostCtx {
 impl Default for HostCtx {
     fn default() -> Self {
         Self {
+            guest_name: String::new(),
             tool_name: String::new(),
             tool_input: String::new(),
             prompt: String::new(),
@@ -108,6 +151,7 @@ impl Default for HostCtx {
             tool_description_out: String::new(),
             tool_schema_out: String::new(),
             tool_result_out: String::new(),
+            guest_logs: Vec::new(),
             // 256 pages * 64KiB = 16MiB max linear memory (rustc guests often need >1MiB).
             limits: wasmtime::StoreLimitsBuilder::new()
                 .memory_size(256 * 64 * 1024)
@@ -677,7 +721,12 @@ enum GuestCall {
 /// Outcome of one guest invocation (for UI / scrollback).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestCallResult {
-    Ok { extension: String, code: i32 },
+    Ok {
+        extension: String,
+        code: i32,
+        /// Guest `hyper_host.log` lines from this call (capped).
+        logs: Vec<GuestLogLine>,
+    },
     SkippedExport { extension: String, export: &'static str },
     SkippedCapability {
         extension: String,
@@ -685,6 +734,15 @@ pub enum GuestCallResult {
     },
     Failed { extension: String, error: String },
     Timeout { extension: String, limit: Duration },
+}
+
+impl GuestCallResult {
+    pub fn logs(&self) -> &[GuestLogLine] {
+        match self {
+            Self::Ok { logs, .. } => logs,
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -810,11 +868,12 @@ impl WasmGuest {
         })
     }
 
-    fn apply_host_inputs(data: &mut HostCtx, host: HostCtx) {
+    fn apply_host_inputs(data: &mut HostCtx, host: HostCtx, guest_name: &str) {
         // Keep resource limits attached to the store; only swap call inputs/outputs.
         let limits = std::mem::replace(&mut data.limits, HostCtx::default().limits);
         *data = host;
         data.limits = limits;
+        data.guest_name = guest_name.to_string();
         data.inject_context.clear();
         data.append_system.clear();
         data.gate_reason.clear();
@@ -822,10 +881,12 @@ impl WasmGuest {
         data.tool_description_out.clear();
         data.tool_schema_out.clear();
         data.tool_result_out.clear();
+        data.guest_logs.clear();
     }
 
     fn take_host_outputs(data: &mut HostCtx) -> HostCtx {
         HostCtx {
+            guest_name: std::mem::take(&mut data.guest_name),
             tool_name: std::mem::take(&mut data.tool_name),
             tool_input: std::mem::take(&mut data.tool_input),
             prompt: std::mem::take(&mut data.prompt),
@@ -839,6 +900,7 @@ impl WasmGuest {
             tool_description_out: std::mem::take(&mut data.tool_description_out),
             tool_schema_out: std::mem::take(&mut data.tool_schema_out),
             tool_result_out: std::mem::take(&mut data.tool_result_out),
+            guest_logs: std::mem::take(&mut data.guest_logs),
             limits: HostCtx::default().limits,
         }
     }
@@ -893,7 +955,7 @@ impl WasmGuest {
             }
 
             let live_guest = guard.as_mut().expect("just ensured");
-            Self::apply_host_inputs(live_guest.store.data_mut(), host);
+            Self::apply_host_inputs(live_guest.store.data_mut(), host, &name);
 
             if let Err(e) = live_guest.store.set_fuel(10_000_000) {
                 let host_out = Self::take_host_outputs(live_guest.store.data_mut());
@@ -924,17 +986,19 @@ impl WasmGuest {
                     );
                 }
             };
-            let result = match func.call(&mut live_guest.store, ()) {
+            let call_result = func.call(&mut live_guest.store, ());
+            let host_out = Self::take_host_outputs(live_guest.store.data_mut());
+            let result = match call_result {
                 Ok(code) => GuestCallResult::Ok {
                     extension: name,
                     code,
+                    logs: host_out.guest_logs.clone(),
                 },
                 Err(e) => GuestCallResult::Failed {
                     extension: name,
                     error: e.to_string(),
                 },
             };
-            let host_out = Self::take_host_outputs(live_guest.store.data_mut());
             (result, host_out)
         });
 
@@ -1073,6 +1137,46 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
                 if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
                     caller.data_mut().gate_reason = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    // Guest → host log (production observability; partial UI Host API).
+    // level: 0=debug 1=info 2=warn 3=error; msg is UTF-8 in guest memory.
+    linker
+        .func_wrap(
+            "hyper_host",
+            "log",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, level: i32, ptr: i32, len: i32| {
+                let Some(mut msg) = read_guest_utf8(&mut caller, ptr, len) else {
+                    return;
+                };
+                // Cap message size (same ballpark as inject).
+                if msg.len() > MAX_INJECT_BYTES {
+                    msg.truncate(MAX_INJECT_BYTES);
+                }
+                let lvl = GuestLogLevel::from_i32(level);
+                let guest = caller.data().guest_name.clone();
+                match lvl {
+                    GuestLogLevel::Debug => {
+                        tracing::debug!(target: "wasm_extension", extension = %guest, "{msg}");
+                    }
+                    GuestLogLevel::Info => {
+                        tracing::info!(target: "wasm_extension", extension = %guest, "{msg}");
+                    }
+                    GuestLogLevel::Warn => {
+                        tracing::warn!(target: "wasm_extension", extension = %guest, "{msg}");
+                    }
+                    GuestLogLevel::Error => {
+                        tracing::error!(target: "wasm_extension", extension = %guest, "{msg}");
+                    }
+                }
+                let logs = &mut caller.data_mut().guest_logs;
+                if logs.len() < 64 {
+                    logs.push(GuestLogLine {
+                        level: lvl,
+                        message: msg,
+                    });
                 }
             },
         )
@@ -1873,6 +1977,38 @@ mod tests {
     /// Phase 4 budget: load + session_start for N=5 minimal guests should stay
     /// well under a second on a normal debug build (design target ~100ms for
     /// release; we only enforce a soft CI ceiling here).
+    /// Guest emits a log line via `hyper_host.log` during session_start.
+    const LOG_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "log" (func $log (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "hello-from-guest")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            ;; level=1 (info), ptr=0, len=16
+            (call $log (i32.const 1) (i32.const 0) (i32.const 16))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn guest_host_log_is_captured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "log.wasm", LOG_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("logger", path, vec![])).unwrap();
+        let results = rt.dispatch_session_start().await;
+        match &results[0] {
+            GuestCallResult::Ok { code: 0, logs, .. } => {
+                assert_eq!(logs.len(), 1, "{logs:?}");
+                assert_eq!(logs[0].level, GuestLogLevel::Info);
+                assert_eq!(logs[0].message, "hello-from-guest");
+            }
+            other => panic!("expected Ok with logs, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn load_five_minimal_guests_under_budget() {
         let dir = tempfile::tempdir().unwrap();

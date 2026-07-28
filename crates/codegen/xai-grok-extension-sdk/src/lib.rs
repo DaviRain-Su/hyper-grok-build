@@ -126,3 +126,35 @@ pub fn tool_result(text: &str) {
 
 /// Standard empty JSON object schema for tools with no parameters.
 pub const EMPTY_OBJECT_SCHEMA: &str = r#"{"type":"object","properties":{}}"#;
+
+/// Guest log levels for [`log`] / [`log_info`] (match host `GuestLogLevel`).
+pub const LOG_DEBUG: i32 = 0;
+pub const LOG_INFO: i32 = 1;
+pub const LOG_WARN: i32 = 2;
+pub const LOG_ERROR: i32 = 3;
+
+/// Structured guest → host log (appears under tracing target `wasm_extension`).
+#[inline]
+pub fn log(level: i32, msg: &str) {
+    host::log(level, msg);
+}
+
+#[inline]
+pub fn log_debug(msg: &str) {
+    log(LOG_DEBUG, msg);
+}
+
+#[inline]
+pub fn log_info(msg: &str) {
+    log(LOG_INFO, msg);
+}
+
+#[inline]
+pub fn log_warn(msg: &str) {
+    log(LOG_WARN, msg);
+}
+
+#[inline]
+pub fn log_error(msg: &str) {
+    log(LOG_ERROR, msg);
+}

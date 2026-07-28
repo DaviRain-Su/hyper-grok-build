@@ -113,8 +113,16 @@ Core-wasm bootstrap ABI (Phase 0–3). Optional exports may be missing.
 | `prompt_len` / `prompt_byte` | User prompt (`before_agent_start`) |
 | `set_inject_context(ptr,len)` | Write inject string from guest `memory` |
 | `set_append_system(ptr,len)` | Write append-system string |
+| `set_gate_reason(ptr,len)` | Deny / stop reason for the host UI |
+| `log(level,ptr,len)` | Guest → host log (`0` debug … `3` error); use SDK `log_info` |
 | `stop_hook_active` | Whether stop already continued this turn |
 | `compact_reason_len` / `compact_reason_byte` | Compaction trigger |
+
+```rust
+// in a handler:
+log_info("path-guard: allowing tool");
+log_warn("suspicious pattern matched");
+```
 
 Injected text is applied as a **system-reminder** (inject) or
 `<system-extension>` (append)—not a full rewrite of the durable system prompt.

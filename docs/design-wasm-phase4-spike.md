@@ -49,10 +49,13 @@ validation: name / JSON Schema object / per-ext uniqueness
 - 其它语言：社区文档「如何产出同 ABI 的 wasm」  
 - Component 后：`componentize-js` 等再评估  
 
-## 5. UI Host API / store — **defer**
+## 5. UI Host API / store
 
-- `notify` / status line → ACP 扩展或 pager channel  
-- guest 持久化 → 仅经 host 写 `GROK_PLUGIN_DATA`  
+| 切片 | 状态 |
+|------|------|
+| Guest → host **`log`**（tracing `wasm_extension`） | **done**（bootstrap 生产可观测） |
+| `notify` / status line → ACP / pager | **defer** |
+| guest 持久化 → host 写 `GROK_PLUGIN_DATA` | **defer** |
 
 ## 6. Load budget — **soft CI test done**
 

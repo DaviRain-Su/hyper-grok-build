@@ -489,6 +489,20 @@ pub(super) async fn run_session(
                             .clone()
                             .dispatch_session_end()
                             .await;
+                        // Drop session-scoped wasm_* tools from the shared bridge.
+                        {
+                            let bridge = session.agent.borrow().tool_bridge().clone();
+                            let mut owned = session.wasm_registered_tools.borrow_mut();
+                            let n = crate::session::wasm_tools::unregister_session_wasm_tools(
+                                &bridge, &mut owned,
+                            );
+                            if n > 0 {
+                                tracing::info!(
+                                    wasm_tools = n,
+                                    "unregistered session wasm tools on channel_closed"
+                                );
+                            }
+                        }
                         session.dispatch_session_end_stop("channel_closed").await;
                         // Channel closed -- run memory session-end hook.
                         let mut session_end_result = "disabled";
@@ -2180,6 +2194,20 @@ pub(super) async fn run_session(
                                 .clone()
                                 .dispatch_session_end()
                                 .await;
+                            // Drop session-scoped wasm_* tools from the shared bridge.
+                            {
+                                let bridge = session.agent.borrow().tool_bridge().clone();
+                                let mut owned = session.wasm_registered_tools.borrow_mut();
+                                let n = crate::session::wasm_tools::unregister_session_wasm_tools(
+                                    &bridge, &mut owned,
+                                );
+                                if n > 0 {
+                                    tracing::info!(
+                                        wasm_tools = n,
+                                        "unregistered session wasm tools on shutdown"
+                                    );
+                                }
+                            }
                             session.dispatch_session_end_stop("shutdown").await;
                             // Memory: save session summary before shutdown
                             let mut session_end_result = "disabled";
