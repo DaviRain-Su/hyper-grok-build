@@ -874,6 +874,7 @@ impl SessionActor {
                 wasm_tools = n,
                 "wasm extension tools synced to tool bridge"
             );
+            rt.log_metrics("plugin_reload");
         }
 
         // Reload hooks in the current session

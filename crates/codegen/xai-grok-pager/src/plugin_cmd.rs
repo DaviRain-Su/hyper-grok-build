@@ -247,6 +247,31 @@ fn print_component_summary(manifest: &PluginManifest, root: &Path) {
         if has_lsp { ", LSP servers" } else { "" },
         if has_runtime { ", wasm runtime" } else { "" },
     );
+    // Ops visibility: surface WASM runtime contract without requiring `validate --load`.
+    if let Some(ref rt) = manifest.runtime {
+        let wasm = manifest
+            .runtime_wasm_path(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("{} (missing)", rt.wasm));
+        let caps = if rt.capabilities.is_empty() {
+            "(none — observe-only)".to_string()
+        } else {
+            rt.capabilities.join(", ")
+        };
+        let gate = rt
+            .gate_fail
+            .map(|g| format!("{g:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "default(env)".into());
+        println!("  runtime:");
+        println!("    wasm: {wasm}");
+        println!("    wit: {}", rt.wit);
+        println!("    capabilities: {caps}");
+        println!("    gate_fail: {gate}");
+    } else if has_runtime {
+        println!(
+            "  runtime: convention extension.wasm (no capabilities until plugin.json runtime block)"
+        );
+    }
 }
 
 fn abbreviated_commit(c: Option<&str>) -> &str {
@@ -848,7 +873,11 @@ strip = true
   "runtime": {{
     "wasm": "extension.wasm",
     "wit": "hyper:extension@0.1.0",
-    "capabilities": ["pre_tool_gate", "before_agent_inject"]
+    "capabilities": [
+      "pre_tool_gate",
+      "before_agent_inject",
+      "register_tool"
+    ]
   }}
 }}
 "#

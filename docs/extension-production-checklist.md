@@ -28,15 +28,21 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 - [x] Host `tracing` on load skip / trap / deny
 - [x] Guest → host **`hyper_host.log`** / SDK `log_info` / …
 - [x] Runtime **metrics** snapshot (`loads_ok`, `pre_tool_denies`, `calls_timeout`, …)
+- [x] Metrics **lifecycle emit**: session_start / plugin_reload / session_end  
+  (`ExtensionRuntime::log_metrics`, target `wasm_extension`)
 - [x] Guest read-only **plugin data dir** (`plugin_data_dir_*` / SDK `plugin_data_dir()`)
 - [x] Shell smoke: session-scoped tool register + unregister on `ToolBridge`
-- [ ] Full UI Host API (status line / ACP notify) — **defer**
+- [ ] Full UI Host API (status line / ACP notify) — **defer (P4)**
 
 ## Ops / rollout
 
 1. Enable a pilot plugin under `~/.grok/plugins/` with explicit `enabled`.
 2. Prefer `gate_fail: "closed"` only for security-critical gates after soak.
-3. Watch logs: `RUST_LOG=wasm_extension=info,xai_grok_extension_runtime=info`.
+3. Watch logs:
+   ```bash
+   RUST_LOG=wasm_extension=info,xai_grok_extension_runtime=info
+   ```
+   Look for `"wasm extension metrics"` with `reason=session_start|plugin_reload|session_end_*`.
 4. On session close, confirm no leftover `wasm_*` tools in multi-session hosts.
 5. Rebuild guests after SDK bumps: `grok plugin build --validate`.
 

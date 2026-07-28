@@ -200,6 +200,58 @@ pub struct ExtensionMetricsSnapshot {
     pub guest_log_lines: u64,
 }
 
+impl std::fmt::Display for ExtensionMetricsSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "loads_ok={} loads_failed={} calls_ok={} calls_failed={} calls_timeout={} \
+             pre_tool_denies={} stop_blocks={} tools_collected={} tools_invoked_ok={} \
+             tools_invoked_err={} guest_log_lines={}",
+            self.loads_ok,
+            self.loads_failed,
+            self.calls_ok,
+            self.calls_failed,
+            self.calls_timeout,
+            self.pre_tool_denies,
+            self.stop_blocks,
+            self.tools_collected,
+            self.tools_invoked_ok,
+            self.tools_invoked_err,
+            self.guest_log_lines,
+        )
+    }
+}
+
+impl ExtensionMetricsSnapshot {
+    /// Emit a structured ops log line (filter with `RUST_LOG=wasm_extension=info`).
+    pub fn log_tracing(&self, reason: &str) {
+        tracing::info!(
+            target: "wasm_extension",
+            reason = %reason,
+            loads_ok = self.loads_ok,
+            loads_failed = self.loads_failed,
+            calls_ok = self.calls_ok,
+            calls_failed = self.calls_failed,
+            calls_timeout = self.calls_timeout,
+            pre_tool_denies = self.pre_tool_denies,
+            stop_blocks = self.stop_blocks,
+            tools_collected = self.tools_collected,
+            tools_invoked_ok = self.tools_invoked_ok,
+            tools_invoked_err = self.tools_invoked_err,
+            guest_log_lines = self.guest_log_lines,
+            "wasm extension metrics"
+        );
+    }
+
+    /// True when any failure-ish counter is non-zero (ops dashboards / alerts).
+    pub fn has_failures(&self) -> bool {
+        self.loads_failed > 0
+            || self.calls_failed > 0
+            || self.calls_timeout > 0
+            || self.tools_invoked_err > 0
+    }
+}
+
 impl ExtensionMetrics {
     pub fn snapshot(&self) -> ExtensionMetricsSnapshot {
         ExtensionMetricsSnapshot {
@@ -297,6 +349,11 @@ impl ExtensionRuntime {
     /// Operational counters for this runtime (shared across clones).
     pub fn metrics(&self) -> ExtensionMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    /// Snapshot + structured log (session end / plugin reload / ops).
+    pub fn log_metrics(&self, reason: &str) {
+        self.metrics().log_tracing(reason);
     }
 
     pub fn len(&self) -> usize {
@@ -2269,6 +2326,10 @@ mod tests {
         let m = rt.metrics();
         assert!(m.calls_failed >= 1 || m.calls_timeout >= 1, "{m:?}");
         assert_eq!(m.pre_tool_denies, 1);
+        assert!(m.has_failures() || m.pre_tool_denies > 0);
+        assert!(m.to_string().contains("loads_ok=1"), "{m}");
+        // Smoke: structured log path does not panic.
+        rt.log_metrics("unit_test");
     }
 
     #[tokio::test]

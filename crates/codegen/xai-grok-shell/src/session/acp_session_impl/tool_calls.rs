@@ -1002,6 +1002,17 @@ impl SessionActor {
                 reason,
             } = wasm_result.decision
             {
+                let m = ext_rt.metrics();
+                tracing::warn!(
+                    target: "wasm_extension",
+                    extension = %extension,
+                    tool = %resolved_tool_name,
+                    pre_tool_denies = m.pre_tool_denies,
+                    calls_failed = m.calls_failed,
+                    calls_timeout = m.calls_timeout,
+                    reason = %reason,
+                    "wasm extension denied tool"
+                );
                 return Ok(Err(self
                     .deny_tool(
                         &call.id,

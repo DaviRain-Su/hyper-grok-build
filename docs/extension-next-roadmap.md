@@ -1,109 +1,91 @@
-# WASM Extensions：已完成 vs 下一步
+# WASM Extensions — 路线图（重排版 2026-07-28）
 
-| 日期 | 2026-07-28 |
-|------|------------|
-| 原则 | **Rust-first + 厚 SDK + 声明宏**；bootstrap ABI 正式；Component Model **不急换** |
+| 原则 | **Rust-first + 厚 SDK + 声明宏**；bootstrap ABI 正式；难项不插队 |
+|------|------------------------------------------------------------------|
+| 目标 | 把 **bootstrap MVP 推到可生产试点**；P2b/CM 等仍有触发条件再开 |
 
----
+命名说明（避免和「设计 Phase 0–4」混）：
 
-## 1. 已经做完的（不必再排）
-
-### Host / 生命周期
-- [x] wasmtime runtime、信任、capability  
-- [x] session_start / end、pre_tool、before_agent、stop、pre_compact  
-- [x] before_model **inject**（每轮 system-reminder）  
-- [x] register_tool MVP → session-scoped `wasm_*` ToolBridge  
-- [x] fail-closed（env + 每扩展 `runtime.gate_fail`）  
-- [x] 会话保留 Store/Instance、epoch/fuel、tool 校验  
-
-### DX（作者路径）
-- [x] `xai-grok-extension-sdk` + **声明宏**（不做过程宏）  
-- [x] `plugin init` / `plugin build` / `plugin validate --load`  
-- [x] 模板 + path-guard / stop-once 示例  
-- [x] `scripts/check-extensions.sh` + **GitHub CI** `extensions.yml`  
-- [x] user-guide / 设计 / Oracle / vs-Pi 文档  
-
-### 刻意不做 / 缓做
-- before_model **rewrite** 整段 history  
-- Component Model 硬切  
-- 多语言一等公民  
-- 完整 UI Host API（notify / status line）  
-
----
-
-## 2. 成熟态（第三方可写扩展）
-
-| 能力 | 状态 |
+| 名称 | 含义 |
 |------|------|
-| 作者 SDK + 声明宏 | **done** |
-| 一键 build | **`grok plugin build`** |
-| init = SDK 模板 | **done** |
-| runtime e2e + fixture wasm | **done** |
-| CI 编 wasm | **done**（path-filtered） |
-| 真 session e2e（整 shell） | 可选加深 |
-
-**一句话：** 装 SDK → `hyper_extension!` → `grok plugin build --validate` → 启用 plugin。
+| **设计 Phase 0–4** | 功能面分期（lifecycle → DX → 可信 → 新能力）— **bootstrap MVP 已关** |
+| **执行 P0–P4** | 工程排期：SDK → 生态 → **生产向** → **运营加深** → **远期难项** |
 
 ---
 
-## 3. 安排（按顺序）
+## 1. 已完成（不必再排）
 
-### P0 — 作者 SDK — **done**
-### P1 — 生态打磨 — **done**
-### P1.5 — 声明宏 DX — **done**
-### P1 收尾（第四阶段前） — **done this iteration**
+### 设计 Phase 0–3.5 + Phase 4 bootstrap MVP
+- Host 生命周期、gate/inject/stop、register_tool、before_model inject  
+- 会话 Store 保留、epoch/fuel、fail-closed、session-scoped tools  
+- SDK + 声明宏、`plugin init/build/validate`、CI `extensions.yml`  
 
-| # | 事项 | 状态 |
-|---|------|------|
-| 11 | GitHub CI `check-extensions` | **done** |
-| 11b | `grok plugin build`（替代独立 hyper-ext CLI） | **done** |
+### 执行 P0–P2a（生产向易项）— **done**
+- Session end 注销 `wasm_*`  
+- Guest log + plugin_data_dir  
+- Runtime metrics  
+- ToolBridge 双会话 smoke  
+- Production checklist  
 
-### Phase 4 — bootstrap 新能力 — **MVP closed**
+---
 
-| # | 事项 | 状态 |
-|---|------|------|
-| register_tool | MVP + session 命名 + 校验 | **done** |
-| before_model inject | system-reminder | **done** |
-| load-N budget test | N=5 软预算 | **done** |
-| before_model rewrite | 安全面大 | **defer** |
-| Component Model | 见 abi-strategy | **defer** |
-| multi-lang / UI Host API | 触发条件未到 | **defer** |
+## 2. 当前与后续排期
 
-### P2a — 生产向（易项优先）— **in progress**
+### P2 — 生产可试点 — **关闭**
 
 | # | 事项 | 状态 |
 |---|------|------|
-| 16 | Session end 注销 `wasm_*` 工具（防 bridge 泄漏） | **done** |
-| 17 | Guest → host `log` + SDK `log_info` / tracing | **done** |
-| 18 | Production checklist 文档 | **done** |
-| 19 | Shell/ToolBridge smoke（双会话工具名 + unregister） | **done** |
-| 20 | Runtime metrics snapshot | **done** |
-| 21 | Guest 只读 `plugin_data_dir` | **done** |
-| 22 | 整 SessionActor e2e | 可选加深 |
+| 16–21 | 清理 / log / metrics / data dir / bridge smoke / checklist | **done** |
+| 23 | metrics **结构化上报**（session_start / reload / session_end） | **done this cut** |
 
-详见 [extension-production-checklist.md](./extension-production-checklist.md)。
+**P2 出口标准（已满足）：** 第三方能 init→build→启用；多会话工具不泄漏；失败可观测。
 
-### P2b — 难项（触发条件到再开）
+### P3 — 运营加深（下一刀，易→中）
+
+| # | 事项 | 状态 | 说明 |
+|---|------|------|------|
+| 30 | metrics 进 session 生命周期日志 | **done** | session_start / reload / session_end |
+| 31 | deny 时同步打 metrics 摘要 | **done** | `tool_calls` warn + counters |
+| 32 | `plugin details` 展示 runtime/cap/gate_fail | **done** | print_component_summary |
+| 33 | init 默认 capabilities 与模板对齐 | **done** | +`register_tool` |
+| 34 | 整 SessionActor 级 e2e（可选） | optional | bridge smoke 已覆盖关键路径 |
+| 35 | 指标 → mixpanel/外部 telemetry 管道 | optional | 有产品需求再接 |
+
+### P4 — 远期难项（原 P2b / 设计 Phase 4 defer）— **有触发再开**
 
 | # | 事项 | 触发条件 |
 |---|------|----------|
-| 12 | Component Model 双轨 | 多真实插件 + 类型需求 |
-| 13 | before_model rewrite | 产品明确要 |
-| 14 | 多语言 | Rust 路径已跑通后投诉 |
-| 15 | 完整 UI Host API | ACP/pager 通道设计就绪 |
+| 40 | Component Model + wit-bindgen 双轨 | ≥3 真实插件 + 类型需求 |
+| 41 | before_model **rewrite** | 产品明确要且有审计方案 |
+| 42 | 多语言官方模板 | Rust 路径投诉高 / 企业强制 |
+| 43 | 完整 UI Host API（notify/status） | ACP/pager 通道设计就绪 |
+| 44 | 正式 release bench 与 SLA | 生产流量起来后 |
 
 ---
 
-## 4. 给第三方的成熟态一句话
+## 3. 未在早期规划、但应继续推的（已并入 P2/P3）
 
-> `grok plugin init` → 写 `hyper_extension!` → `grok plugin build --validate` → 启用。  
-> **不必**懂 wasmtime，**不必**过程宏，**不必**手写 ptr/len。
+| 项 | 来源 | 归入 |
+|----|------|------|
+| Session 工具 bridge 泄漏 | Oracle | P2 ✓ |
+| Guest 可观测 log | WIT host.log 草案 | P2 ✓ |
+| Ops counters | 生产 checklist | P2 ✓ |
+| plugin data dir 只读 | store 草案小步 | P2 ✓ |
+| Metrics 生命周期上报 | 运营 | P3 ✓ 本刀 |
+| UI 列表 runtime 可见 | 运营 | P3 |
+| 真 SessionActor e2e | 信心 | P3 optional |
+
+---
+
+## 4. 第三方一句话
+
+> `grok plugin init` → `hyper_extension!` → `grok plugin build --validate` → 启用。  
+> 看日志：`RUST_LOG=wasm_extension=info`。
 
 ---
 
 ## 5. 本文件状态
 
-- 排期：P0–P1.5 + Phase 4 bootstrap MVP **已完成**  
-- 当前：P2a 生产向易项（日志 / 会话清理 / checklist）  
-- 难 P2b 仍 defer  
-
+- **现在：** **P2 关闭**；**P3 主线 30–33 关闭**（可选 34–35 仍开放）  
+- **下一刀：** 仅可选加深或等触发开 P4  
+- 清单： [extension-production-checklist.md](./extension-production-checklist.md)  

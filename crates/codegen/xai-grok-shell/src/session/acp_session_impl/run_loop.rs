@@ -483,12 +483,11 @@ pub(super) async fn run_session(
                             .await;
                             session.send_hook_execution("session_end", None, None, &results).await;
                         }
-                        let _ = session
-                            .extension_runtime
-                            .borrow()
-                            .clone()
-                            .dispatch_session_end()
-                            .await;
+                        {
+                            let ext_rt = session.extension_runtime.borrow().clone();
+                            let _ = ext_rt.dispatch_session_end().await;
+                            ext_rt.log_metrics("session_end_channel_closed");
+                        }
                         // Drop session-scoped wasm_* tools from the shared bridge.
                         {
                             let bridge = session.agent.borrow().tool_bridge().clone();
@@ -1872,6 +1871,7 @@ pub(super) async fn run_session(
                                     "wasm extension tools registered at session_start"
                                 );
                             }
+                            ext_rt.log_metrics("session_start");
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
                             let s = session.clone();
@@ -2188,12 +2188,11 @@ pub(super) async fn run_session(
                                 .await;
                                 session.send_hook_execution("session_end", None, None, &results).await;
                             }
-                            let _ = session
-                                .extension_runtime
-                                .borrow()
-                                .clone()
-                                .dispatch_session_end()
-                                .await;
+                            {
+                                let ext_rt = session.extension_runtime.borrow().clone();
+                                let _ = ext_rt.dispatch_session_end().await;
+                                ext_rt.log_metrics("session_end_shutdown");
+                            }
                             // Drop session-scoped wasm_* tools from the shared bridge.
                             {
                                 let bridge = session.agent.borrow().tool_bridge().clone();
