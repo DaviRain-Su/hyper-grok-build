@@ -198,9 +198,13 @@ impl McpCredentialStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let write_path = xai_grok_config::fs_atomic::resolve_write_target(path)?;
+        if let Some(parent) = write_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         let content = serde_json::to_string_pretty(self)?;
-        let tmp_path = path.with_extension("tmp");
+        let tmp_path = write_path.with_extension("tmp");
 
         {
             use std::io::Write;
@@ -230,9 +234,9 @@ impl McpCredentialStore {
         // `mode(0o600)` only applies on create; tighten before rename.
         // Fail hard on tmp: credentials are not published yet.
         ensure_owner_only_permissions(&tmp_path)?;
-        std::fs::rename(&tmp_path, path)?;
+        std::fs::rename(&tmp_path, &write_path)?;
         // Best-effort after rename: new tokens are already published.
-        if let Err(e) = ensure_owner_only_permissions(path) {
+        if let Err(e) = ensure_owner_only_permissions(&write_path) {
             tracing::warn!(
                 error = %e,
                 path = %path.display(),
@@ -463,6 +467,31 @@ mod tests {
         assert_eq!(re_token.refresh_token().unwrap().secret(), "rt-456");
         assert_eq!(re.granted_scopes, vec!["read", "write"]);
         assert_eq!(re.token_received_at, Some(1730000000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let target = shared.join("mcp_credentials.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = dir.path().join("mcp_credentials.json");
+        symlink("shared/mcp_credentials.json", &link).unwrap();
+
+        let mut store = McpCredentialStore::default();
+        let url = Url::parse("https://test.example.com/mcp").unwrap();
+        store.insert_rmcp("test", &url, test_stored_creds("test-client"));
+        store.save_to(&link).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(McpCredentialStore::load_from(&target)
+            .unwrap()
+            .get("test", &url)
+            .is_some());
     }
 
     #[test]

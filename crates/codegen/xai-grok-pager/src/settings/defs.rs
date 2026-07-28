@@ -131,6 +131,11 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Paper",
         description: "Warm sepia paper light canvas; needs truecolor.",
     },
+    EnumChoice {
+        canonical: "base16-default-dark",
+        display: "Base16 Default Dark",
+        description: "Canonical Base16 dark palette; needs truecolor.",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -689,6 +694,11 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "paper",
         display: "Paper",
         description: "Warm sepia paper light canvas; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "base16-default-dark",
+        display: "Base16 Default Dark",
+        description: "Canonical Base16 dark palette; needs truecolor.",
     },
 ];
 

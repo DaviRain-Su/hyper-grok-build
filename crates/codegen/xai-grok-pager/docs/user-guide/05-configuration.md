@@ -330,7 +330,7 @@ disabled = ["wip-skill"]              # skill names to keep listed but inactive
 
 ### Harness compatibility
 
-Control vendor compatibility for Cursor, Claude, and Codex. Every cell defaults to `true`. Session cells stay staged and inert until a foreign-session scanner consumes them, and each tool needs both its `sessions` cell and the matching `resume-claude`, `resume-codex`, or `resume-cursor` skill — a missing skill means zero foreign-session filesystem I/O.
+Control vendor compatibility for Cursor, Claude, Codex, and OMP. Every cell defaults to `true`. Session discovery is lazy: each tool needs both its `sessions` cell and the matching `resume-claude`, `resume-codex`, `resume-cursor`, or `resume-omp` skill. If the skill is unavailable, Grok performs no filesystem I/O for that tool's sessions.
 
 ```toml
 [compat.cursor]
@@ -339,7 +339,7 @@ rules = true      # scan ~/.cursor/rules/ and <dir>/.cursor/rules/
 agents = true     # scan ~/.cursor/ for named instruction files
 mcps = true       # scan ~/.cursor/mcp.json and <cwd>/.cursor/mcp.json
 hooks = true      # scan ~/.cursor/hooks.json and <cwd>/.cursor/hooks.json
-sessions = true   # staged; no scanner consumer yet
+sessions = true   # list recent Cursor sessions for resume
 
 [compat.claude]
 skills = true     # scan ~/.claude/skills/ and <cwd>/.claude/skills/
@@ -347,13 +347,16 @@ rules = true      # scan ~/.claude/rules/ and <dir>/.claude/rules/
 agents = true     # scan ~/.claude/ and <dir>/.claude/CLAUDE*.md
 mcps = true       # scan ~/.claude.json for MCP servers
 hooks = true      # scan ~/.claude/settings.json for hooks
-sessions = true   # staged; no scanner consumer yet
+sessions = true   # list recent Claude Code sessions for resume
 
 [compat.codex]
-sessions = true   # staged; no scanner consumer yet
+sessions = true   # list recent Codex sessions for resume
+
+[compat.omp]
+sessions = true   # list recent OMP sessions for resume
 ```
 
-Codex's `skills`, `rules`, `agents`, `mcps`, and `hooks` cells are reserved and currently inert — they do not enable `.codex` discovery.
+Codex's `skills`, `rules`, `agents`, `mcps`, and `hooks` cells are reserved and currently inert — they do not enable `.codex` discovery. OMP currently exposes only the `sessions` compatibility cell. Its scanner follows OMP's default/profile/XDG session roots and the `PI_CODING_AGENT_DIR` override.
 
 For Claude and Cursor, `rules` and `agents` are independent: turning off named instruction files doesn't disable the home or project rules directory, and turning off rules doesn't disable named files. Claude's `agents` cell gates home-level `~/.claude/` named files and project `<dir>/.claude/CLAUDE*.md`; generic top-level `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` stay recognized. Project rule paths are scanned at every directory from the repo root down to the current one.
 

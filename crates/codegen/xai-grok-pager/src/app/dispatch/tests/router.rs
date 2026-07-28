@@ -362,6 +362,7 @@ fn seed_foreign_resume_hint(
             claude: true,
             codex: true,
             cursor: true,
+            omp: true,
         };
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
@@ -433,6 +434,7 @@ fn resume_foreign_session_consumes_hint_and_uses_each_tools_prompt() {
         (ForeignSessionTool::Claude, "/resume-claude native-id"),
         (ForeignSessionTool::Codex, "/resume-codex native-id"),
         (ForeignSessionTool::Cursor, "/resume-cursor native-id"),
+        (ForeignSessionTool::Omp, "/resume-omp native-id"),
     ] {
         let mut app = test_app();
         seed_foreign_resume_hint(&mut app, tool);
@@ -467,6 +469,7 @@ fn resume_foreign_session_stashes_prompt_behind_trust_and_auth() {
     for (tool, prompt, auth_pending) in [
         (ForeignSessionTool::Codex, "/resume-codex native-id", false),
         (ForeignSessionTool::Cursor, "/resume-cursor native-id", true),
+        (ForeignSessionTool::Omp, "/resume-omp native-id", false),
     ] {
         let mut app = test_app();
         if auth_pending {

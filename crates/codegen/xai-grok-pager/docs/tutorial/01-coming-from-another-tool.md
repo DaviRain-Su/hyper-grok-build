@@ -1,7 +1,8 @@
-# Coming from Claude, Cursor, or Codex?
+# Coming from Claude, Cursor, Codex, or OMP?
 
-Fear not — your settings, rules, and skills come with you. Grok Build
-reads the same project conventions other agents use, and imports the rest.
+Fear not — Grok Build can continue sessions from all four tools. It also reads
+supported project conventions and compatibility sources where the corresponding
+vendor integration is available.
 
 ## Picked up automatically
 
@@ -24,14 +25,17 @@ writes the items you selected into your `.grok` config. Re-run it anytime.
 
 ## Pick up where you left off
 
-The **`/resume-claude`**, **`/resume-codex`**, and **`/resume-cursor`**
-skills continue a recent session from those tools right here.
+The native foreign-session picker and recent-session hint support Claude Code,
+Codex, Cursor, and OMP. Selecting one dispatches the matching
+**`/resume-claude`**, **`/resume-codex`**, **`/resume-cursor`**, or
+**`/resume-omp`** integration.
 
 ## Check what was discovered
 
 Run **`grok inspect`** in a repo to see every rules file, skill, and MCP
 server Grok picked up, tagged with where it came from. Each compat source
-can be toggled in `[compat.claude]` / `[compat.cursor]` config sections.
+can be toggled in the matching `[compat.claude]`, `[compat.cursor]`,
+`[compat.codex]`, or `[compat.omp]` config section.
 
 And a few things you might have missed elsewhere: `/btw` asks a side
 question without interrupting the current task, and `/rewind` restores

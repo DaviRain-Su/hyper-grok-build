@@ -173,6 +173,64 @@ async fn load_rebuilds_chat_history_from_updates() {
         );
 }
 #[tokio::test]
+async fn converted_plain_text_fixture_loads_as_native_context() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let dir = adapter.session_dir(&info);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(super::super::SUMMARY_FILE),
+        r#"{"info":{"id":"test-session-123","cwd":"/test/workspace"},"session_summary":"Imported OMP session","generated_title":"Imported OMP session","created_at":"2026-07-27T00:00:00Z","updated_at":"2026-07-27T00:00:02Z","last_active_at":"2026-07-27T00:00:02Z","num_messages":2,"num_chat_messages":2,"current_model_id":"grok-4.5","chat_format_version":1}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(super::super::CHAT_HISTORY_FILE),
+        concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"remember imported context"}],"prompt_index":0}"#,
+            "\n",
+            r#"{"type":"assistant","content":"imported answer","model_id":"converted-from-omp"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(super::super::UPDATES_FILE),
+        concat!(
+            r#"{"timestamp":1785110401,"method":"session/update","params":{"sessionId":"test-session-123","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"remember imported context"},"_meta":{"modelId":"converted-from-omp","promptIndex":0}},"_meta":{"eventId":"test-session-123-1","agentTimestampMs":1785110401000}}}"#,
+            "\n",
+            r#"{"timestamp":1785110402,"method":"session/update","params":{"sessionId":"test-session-123","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"imported answer"},"_meta":{"modelId":"converted-from-omp"}},"_meta":{"eventId":"test-session-123-2","agentTimestampMs":1785110402000}}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let loaded = adapter.load_session(&info).await.unwrap();
+    assert_eq!(loaded.summary.current_model_id.0.as_ref(), "grok-4.5");
+    assert_eq!(loaded.chat_history.len(), 2);
+    match &loaded.chat_history[0] {
+        ConversationItem::User(user) => {
+            assert_eq!(user.prompt_index, Some(0));
+            assert!(matches!(
+                user.content.as_slice(),
+                [xai_grok_sampling_types::ContentPart::Text { text }]
+                    if text.as_ref() == "remember imported context"
+            ));
+        }
+        other => panic!("expected imported user item, got {other:?}"),
+    }
+    match &loaded.chat_history[1] {
+        ConversationItem::Assistant(assistant) => {
+            assert_eq!(assistant.content.as_ref(), "imported answer");
+            assert_eq!(assistant.model_id.as_deref(), Some("converted-from-omp"));
+        }
+        other => panic!("expected imported assistant item, got {other:?}"),
+    }
+    assert_eq!(loaded.updates.len(), 2);
+}
+
+#[tokio::test]
 async fn workflow_run_manifest_round_trips_and_clear_tombstone_wins() {
     use crate::session::workflow::store::{
         script_revision_path, WorkflowRunManifest, WORKFLOW_RUN_MANIFEST_VERSION,

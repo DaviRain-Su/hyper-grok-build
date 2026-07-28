@@ -1,14 +1,14 @@
 //! Hyper preset theme collection.
 //!
-//! Twelve additional built-in themes, layered on top of the original five
+//! Thirteen additional built-in themes, layered on top of the original five
 //! (GrokNight / GrokDay / TokyoNight / RosePineMoon / OscuraMidnight). They
-//! are distinguished primarily by **background color** — nine dark canvases
+//! are distinguished primarily by **background color** — ten dark canvases
 //! and three light ones — so users can pick a terminal mood at a glance.
 //!
 //! ## Why a shared builder
 //!
 //! The original themes each spell out all ~70 `Theme` fields by hand. That is
-//! fine for five, but error-prone for twelve. Instead, every preset supplies a
+//! fine for five, but error-prone for a growing catalog. Instead, every preset supplies a
 //! compact [`Palette`] of the ~18 colors that actually carry a theme's
 //! identity, and [`build`] expands it into the full [`Theme`] with consistent
 //! semantic-role assignments. This keeps the collection coherent (an error
@@ -357,6 +357,33 @@ const EMBER: Palette = Palette {
     orange: rgb(255, 159, 107),
 };
 
+/// Base16 Default Dark — the canonical Base16 dark palette by Chris Kempson.
+///
+/// The Base16 scheme defines one canvas, three progressively lighter UI
+/// surfaces, four foreground levels, and eight semantic accents. The compact
+/// theme builder needs a separate sunken surface, so it keeps that slot on
+/// `base00`; raised and selected rows use `base01` and `base02` respectively.
+const BASE16_DEFAULT_DARK: Palette = Palette {
+    base: rgb(0x18, 0x18, 0x18),       // base00
+    surface: rgb(0x18, 0x18, 0x18),    // base00
+    elevated: rgb(0x28, 0x28, 0x28),   // base01
+    overlay: rgb(0x38, 0x38, 0x38),    // base02
+    border: rgb(0x38, 0x38, 0x38),     // base02
+    border_active: rgb(0x58, 0x58, 0x58), // base03
+    text: rgb(0xd8, 0xd8, 0xd8),       // base05
+    text_dim: rgb(0xb8, 0xb8, 0xb8),   // base04
+    muted: rgb(0x58, 0x58, 0x58),      // base03
+    subtle: rgb(0x38, 0x38, 0x38),     // base02
+    primary: rgb(0x7c, 0xaf, 0xc2),    // base0D
+    secondary: rgb(0xba, 0x8b, 0xaf),  // base0E
+    red: rgb(0xab, 0x46, 0x42),        // base08
+    green: rgb(0xa1, 0xb5, 0x6c),      // base0B
+    yellow: rgb(0xf7, 0xca, 0x88),     // base0A
+    blue: rgb(0x7c, 0xaf, 0xc2),       // base0D
+    cyan: rgb(0x86, 0xc1, 0xb9),       // base0C
+    orange: rgb(0xdc, 0x96, 0x56),     // base09
+};
+
 /// Midnight OLED — pure black for OLED panels, amber-forward accents.
 const MIDNIGHT_OLED: Palette = Palette {
     base: rgb(0, 0, 0),
@@ -493,6 +520,11 @@ impl Theme {
     /// Midnight OLED — pure black with amber-forward accents (dark).
     pub const fn midnight_oled() -> Self {
         build(MIDNIGHT_OLED)
+    }
+
+    /// Base16 Default Dark — canonical Base16 palette by Chris Kempson.
+    pub const fn base16_default_dark() -> Self {
+        build(BASE16_DEFAULT_DARK)
     }
 
     /// Solarized Light — warm cream canvas (light).

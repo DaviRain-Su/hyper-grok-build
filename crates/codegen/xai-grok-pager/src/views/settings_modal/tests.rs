@@ -6724,6 +6724,7 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::SolarizedLight => crate::theme::Theme::solarized_light(),
         crate::theme::ThemeKind::CatppuccinLatte => crate::theme::Theme::catppuccin_latte(),
         crate::theme::ThemeKind::Paper => crate::theme::Theme::paper(),
+        crate::theme::ThemeKind::Base16DefaultDark => crate::theme::Theme::base16_default_dark(),
         crate::theme::ThemeKind::Auto => crate::theme::Theme::groknight(),
     };
     assert_ne!(

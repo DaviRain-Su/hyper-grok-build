@@ -1954,9 +1954,13 @@ pub fn persist_respect_manual_folds(enabled: bool) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let write_path = xai_grok_config::fs_atomic::resolve_write_target(&path)?;
+    if let Some(dir) = write_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
 
     #[cfg(unix)]
-    let prior_mode: Option<u32> = std::fs::metadata(&path).ok().map(|m| {
+    let prior_mode: Option<u32> = std::fs::metadata(&write_path).ok().map(|m| {
         use std::os::unix::fs::PermissionsExt;
         m.permissions().mode()
     });
@@ -1968,7 +1972,7 @@ pub fn persist_respect_manual_folds(enabled: bool) -> std::io::Result<()> {
             .unwrap_or(0);
         format!("toml.tmp.{}.{}", std::process::id(), nanos)
     };
-    let tmp = path.with_extension(suffix);
+    let tmp = write_path.with_extension(suffix);
     std::fs::write(&tmp, updated)?;
     #[cfg(unix)]
     {
@@ -1977,7 +1981,7 @@ pub fn persist_respect_manual_folds(enabled: bool) -> std::io::Result<()> {
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
         }
     }
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, &write_path)
 }
 
 fn upsert_respect_manual_folds(content: &str, enabled: bool) -> Result<String, String> {

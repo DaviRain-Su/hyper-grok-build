@@ -221,18 +221,77 @@ DOWNLOADS_DIR="$HYPER_HOME/downloads"
 BIN_DIR="$HYPER_HOME/bin"
 mkdir -p "$DOWNLOADS_DIR" "$BIN_DIR"
 
-# Versioned binary + smoke-test before touching the active link.
-VERSIONED="hyper-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}"
-mv -f "$TMP_DIR/hyper" "$DOWNLOADS_DIR/$VERSIONED"
-
-# Smoke-test the versioned download *before* swapping the managed symlink so a
-# bad binary (glibc / CPU incompatibility) never breaks a working install.
-"$DOWNLOADS_DIR/$VERSIONED" --version >/dev/null 2>&1 \
+# Smoke-test the extracted binary before touching either live component.
+# A bad binary must not leave a new bundle paired with the old executable.
+"$TMP_DIR/hyper" --version >/dev/null 2>&1 \
     || err "downloaded binary failed smoke test; existing install left untouched"
 
+VERSIONED="hyper-${RESOLVED_VERSION}-${PLATFORM_OS}-${PLATFORM_ARCH}"
+VERSIONED_PATH="$DOWNLOADS_DIR/$VERSIONED"
+VERSIONED_STAGE="$DOWNLOADS_DIR/$VERSIONED.install.$$"
+VERSIONED_ASIDE="$DOWNLOADS_DIR/$VERSIONED.old.$$"
+rm -f "$VERSIONED_STAGE" "$VERSIONED_ASIDE"
+mv "$TMP_DIR/hyper" "$VERSIONED_STAGE"
+
+# Stage the installer-owned bundle as a complete immutable tree. Whole-tree
+# replacement removes stale managed files; user skills remain in GROK_HOME/skills.
+GROK_HOME="${GROK_HOME:-$HOME/.grok}"
+BUNDLE_STAGE=""
+BUNDLE_ASIDE="$GROK_HOME/bundled.old.$$"
+if [ -d "$TMP_DIR/bundled" ]; then
+    mkdir -p "$GROK_HOME"
+    BUNDLE_STAGE="$GROK_HOME/bundled.install.$$"
+    rm -rf "$BUNDLE_STAGE" "$BUNDLE_ASIDE"
+    cp -R "$TMP_DIR/bundled" "$BUNDLE_STAGE" \
+        || { rm -f "$VERSIONED_STAGE"; err "failed to stage bundled runtime assets; existing install left untouched"; }
+fi
+
 TMP_LINK="$BIN_DIR/hyper.install.$$"
-ln -s "../downloads/$VERSIONED" "$TMP_LINK"
-mv -f "$TMP_LINK" "$BIN_DIR/hyper"
+ln -s "../downloads/$VERSIONED" "$TMP_LINK" \
+    || { rm -rf "$BUNDLE_STAGE"; rm -f "$VERSIONED_STAGE"; err "failed to stage active hyper link"; }
+
+OLD_TARGET=""
+if [ -L "$BIN_DIR/hyper" ]; then
+    OLD_TARGET="$(readlink "$BIN_DIR/hyper" || true)"
+elif [ -e "$BIN_DIR/hyper" ]; then
+    rm -f "$TMP_LINK" "$VERSIONED_STAGE"; rm -rf "$BUNDLE_STAGE"
+    err "$BIN_DIR/hyper is not a managed symlink; refusing to overwrite it"
+fi
+
+if [ -e "$VERSIONED_PATH" ]; then
+    mv "$VERSIONED_PATH" "$VERSIONED_ASIDE" \
+        || { rm -f "$TMP_LINK" "$VERSIONED_STAGE"; rm -rf "$BUNDLE_STAGE"; err "failed to preserve existing versioned binary"; }
+fi
+if ! mv "$VERSIONED_STAGE" "$VERSIONED_PATH"; then
+    [ ! -e "$VERSIONED_ASIDE" ] || mv "$VERSIONED_ASIDE" "$VERSIONED_PATH" || true
+    rm -f "$TMP_LINK"; rm -rf "$BUNDLE_STAGE"
+    err "failed to activate versioned binary; previous install restored"
+fi
+
+if [ -n "$BUNDLE_STAGE" ]; then
+    if [ -e "$GROK_HOME/bundled" ]; then
+        mv "$GROK_HOME/bundled" "$BUNDLE_ASIDE" \
+            || { rm -f "$TMP_LINK" "$VERSIONED_PATH"; [ ! -e "$VERSIONED_ASIDE" ] || mv "$VERSIONED_ASIDE" "$VERSIONED_PATH" || true; rm -rf "$BUNDLE_STAGE"; err "failed to preserve existing bundled runtime"; }
+    fi
+    if ! mv "$BUNDLE_STAGE" "$GROK_HOME/bundled"; then
+        [ ! -e "$BUNDLE_ASIDE" ] || mv "$BUNDLE_ASIDE" "$GROK_HOME/bundled" || true
+        rm -f "$TMP_LINK" "$VERSIONED_PATH"
+        [ ! -e "$VERSIONED_ASIDE" ] || mv "$VERSIONED_ASIDE" "$VERSIONED_PATH" || true
+        err "failed to activate bundled runtime; previous install restored"
+    fi
+fi
+
+if ! mv -f "$TMP_LINK" "$BIN_DIR/hyper"; then
+    if [ -n "$BUNDLE_STAGE" ]; then
+        rm -rf "$GROK_HOME/bundled"
+        [ ! -e "$BUNDLE_ASIDE" ] || mv "$BUNDLE_ASIDE" "$GROK_HOME/bundled" || true
+    fi
+    rm -f "$VERSIONED_PATH"
+    [ ! -e "$VERSIONED_ASIDE" ] || mv "$VERSIONED_ASIDE" "$VERSIONED_PATH" || true
+    err "failed to activate hyper binary; previous install restored"
+fi
+rm -rf "$BUNDLE_ASIDE"
+rm -f "$VERSIONED_ASIDE"
 
 printf '\nhyper v%s installed to %s\n' "$RESOLVED_VERSION" "$BIN_DIR/hyper"
 

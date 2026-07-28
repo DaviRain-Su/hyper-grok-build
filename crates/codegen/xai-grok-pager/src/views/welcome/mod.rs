@@ -2840,6 +2840,7 @@ mod tests {
             (ForeignSessionTool::Claude, "Claude Code"),
             (ForeignSessionTool::Codex, "Codex"),
             (ForeignSessionTool::Cursor, "Cursor"),
+            (ForeignSessionTool::Omp, "OMP"),
         ] {
             let hint = xai_grok_workspace::foreign_sessions::RecentForeignSession {
                 tool,

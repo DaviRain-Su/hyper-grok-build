@@ -143,9 +143,10 @@ pub fn mermaid_block_ranges(view: &MarkdownRenderView) -> Vec<Range<usize>> {
 
 /// Whether a theme renders diagrams on a dark surface.
 ///
-/// `GrokDay` is the only light theme; every other concrete theme (and the
-/// `GrokNight` default that `Auto` resolves to before it reaches the cache) is
-/// dark. The render worker maps this to `xai_grok_mermaid::MermaidTheme`; it
+/// `GrokDay` and the light-polarity presets render on a light canvas; every
+/// other concrete theme (and the `GrokNight` default that `Auto` resolves to
+/// before it reaches the cache) is dark. The render worker maps this to
+/// `xai_grok_mermaid::MermaidTheme`; it
 /// lives here (rather than referencing the engine crate) so the
 /// always-compiled detection module stays independent of the optional
 /// `mermaid` feature.
@@ -153,8 +154,9 @@ pub fn theme_is_dark(theme: ThemeKind) -> bool {
     if theme == ThemeKind::GrokDay {
         return false;
     }
-    // Light-polarity Hyper presets (Solarized Light, Catppuccin Latte, Paper)
-    // must render mermaid diagrams on a light canvas like GrokDay does.
+    // Light-polarity Hyper presets must render Mermaid diagrams on a light
+    // canvas like GrokDay does. Dark presets such as Base16 Default Dark are
+    // intentionally absent from LIGHT_PRESET_KINDS.
     !crate::theme::LIGHT_PRESET_KINDS.contains(&theme)
 }
 
@@ -830,16 +832,21 @@ mod tests {
     // -- theme mapping + cache filename --------------------------------------
 
     #[test]
-    fn theme_is_dark_maps_grokday_to_light_only() {
-        assert!(
-            !theme_is_dark(ThemeKind::GrokDay),
-            "GrokDay is the light theme"
-        );
+    fn theme_is_dark_maps_light_and_dark_presets() {
+        for light in [
+            ThemeKind::GrokDay,
+            ThemeKind::SolarizedLight,
+            ThemeKind::CatppuccinLatte,
+            ThemeKind::Paper,
+        ] {
+            assert!(!theme_is_dark(light), "{light:?} should be light");
+        }
         for dark in [
             ThemeKind::GrokNight,
             ThemeKind::TokyoNight,
             ThemeKind::RosePineMoon,
             ThemeKind::OscuraMidnight,
+            ThemeKind::Base16DefaultDark,
         ] {
             assert!(theme_is_dark(dark), "{dark:?} should be dark");
         }

@@ -1076,6 +1076,7 @@ pub(crate) async fn run(
             claude: compat.claude.sessions,
             codex: compat.codex.sessions,
             cursor: compat.cursor.sessions,
+            omp: compat.omp.sessions,
         };
 
     // Load notification config from [ui.notifications] in config.toml.

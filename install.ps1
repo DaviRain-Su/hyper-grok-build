@@ -105,6 +105,12 @@ try {
     $Binary = Get-ChildItem -Path $ExtractDir -Recurse -Filter "hyper.exe" | Select-Object -First 1
     if (-not $Binary) { Fail "archive $Asset does not contain hyper.exe" }
 
+    $BundledSource = Join-Path $ExtractDir "bundled"
+    $GrokHome = if ($env:GROK_HOME) { $env:GROK_HOME } else { Join-Path $HOME ".grok" }
+    $BundledDest = Join-Path $GrokHome "bundled"
+    $BundledStage = Join-Path $GrokHome ("bundled.install." + [System.IO.Path]::GetRandomFileName())
+    $BundledAside = Join-Path $GrokHome ("bundled.old." + [System.IO.Path]::GetRandomFileName())
+
     $BinDir = Join-Path $HyperHome "bin"
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $Dest = Join-Path $BinDir "hyper.exe"
@@ -113,6 +119,13 @@ try {
     & $Binary.FullName --version *> $null
     if ($LASTEXITCODE -ne 0) {
         Fail "downloaded binary failed smoke test (exit $LASTEXITCODE); existing install left untouched"
+    }
+
+    # Stage the installer-owned bundle only after the downloaded binary passes.
+    # Whole-tree replacement removes stale managed files without touching skills/.
+    if (Test-Path $BundledSource) {
+        New-Item -ItemType Directory -Path $GrokHome -Force | Out-Null
+        Copy-Item -Path $BundledSource -Destination $BundledStage -Recurse -Force
     }
 
     # A running hyper.exe blocks writes but allows renames — move it aside first.
@@ -141,8 +154,32 @@ try {
             Remove-Item -Path $Dest -Force -ErrorAction SilentlyContinue
             Move-Item -Path $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
         }
+        Remove-Item -Path $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
         Fail "installed binary failed to run (exit $LASTEXITCODE); previous install restored if available"
     }
+
+    # Activate the complete bundle after the binary is known-good. If bundle
+    # activation fails, roll the binary back as well so versions never mix.
+    if (Test-Path $BundledStage) {
+        try {
+            if (Test-Path $BundledDest) {
+                Move-Item -Path $BundledDest -Destination $BundledAside -Force
+            }
+            Move-Item -Path $BundledStage -Destination $BundledDest -Force
+        } catch {
+            Remove-Item -Path $BundledDest -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $BundledAside) {
+                Move-Item -Path $BundledAside -Destination $BundledDest -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -Path $Dest -Force -ErrorAction SilentlyContinue
+            if (Test-Path $Aside) {
+                Move-Item -Path $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
+            }
+            Fail "cannot activate bundled runtime; previous binary and bundle restored: $($_.Exception.Message)"
+        }
+    }
+    Remove-Item -Path $Aside -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $BundledAside -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host ""
     Write-Host "hyper v$ResolvedVersion installed to $Dest"

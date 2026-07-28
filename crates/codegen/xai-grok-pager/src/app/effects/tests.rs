@@ -1513,6 +1513,79 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     }
     drop(app_coordinator);
 }
+
+#[tokio::test]
+#[serial_test::serial(OMP_ENV)]
+async fn foreign_scan_task_supports_omp_only_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cwd = dunce::canonicalize(cwd.path()).unwrap();
+    let grok_home = root.path().join("grok-home");
+    std::fs::create_dir_all(
+        grok_home.join("bundled/skills/resume-omp"),
+    )
+    .unwrap();
+    std::fs::write(
+        grok_home.join("bundled/skills/resume-omp/SKILL.md"),
+        "---\nname: resume-omp\n---\n",
+    )
+    .unwrap();
+
+    let agent_dir = root.path().join("omp-agent");
+    let encoded_cwd = cwd
+        .to_string_lossy()
+        .trim_start_matches(['/', '\\'])
+        .replace(['/', '\\', ':'], "-");
+    let bucket = agent_dir
+        .join("sessions")
+        .join(format!("--{encoded_cwd}--"));
+    std::fs::create_dir_all(&bucket).unwrap();
+    let header = serde_json::json!({
+        "type": "session",
+        "version": 3,
+        "id": "omp-only-id",
+        "cwd": cwd.to_string_lossy(),
+        "title": "OMP-only session",
+    });
+    std::fs::write(bucket.join("session.jsonl"), format!("{header}\n")).unwrap();
+
+    let _agent_dir = crate::test_util::EnvVarGuard::set("PI_CODING_AGENT_DIR", &agent_dir);
+    let _omp_profile = crate::test_util::EnvVarGuard::set("OMP_PROFILE", "");
+    let _pi_profile = crate::test_util::EnvVarGuard::set("PI_PROFILE", "");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    let app_coordinator = crate::app::ForeignScanCoordinator::default();
+    app_coordinator.begin_request(42);
+    execute(
+        Effect::ScanForeignSessions {
+            cwd,
+            compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
+                omp: true,
+                ..Default::default()
+            },
+            grok_home,
+            coordinator: app_coordinator.clone(),
+            seq: 42,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    match tasks.join_next().await.expect("task").expect("no panic") {
+        TaskResult::ForeignSessionsScanned { entries, seq } => {
+            assert_eq!(seq, 42);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, "omp-only-id");
+            assert_eq!(entries[0].source, "omp");
+        }
+        other => panic!("expected ForeignSessionsScanned, got {other:?}"),
+    }
+    drop(app_coordinator);
+}
+
 #[tokio::test]
 async fn foreign_resume_detection_runs_as_task_result() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

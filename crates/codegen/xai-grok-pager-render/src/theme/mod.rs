@@ -57,11 +57,12 @@ pub enum ThemeKind {
     SolarizedLight = 15,
     CatppuccinLatte = 16,
     Paper = 17,
+    /// Base16 Default Dark by Chris Kempson.
+    Base16DefaultDark = 18,
 }
 
-/// The twelve Hyper preset kinds, in catalog order (nine dark, three light).
-/// Shared by [`ThemeKind::ALL`], the `current()` dispatch, and tests so the
-/// list lives in exactly one place.
+/// The Hyper preset kinds, in catalog order (ten dark, three light).
+/// Shared by tests that exercise every compact-palette theme.
 const PRESET_KINDS: &[ThemeKind] = &[
     ThemeKind::Everforest,
     ThemeKind::Nord,
@@ -75,6 +76,7 @@ const PRESET_KINDS: &[ThemeKind] = &[
     ThemeKind::SolarizedLight,
     ThemeKind::CatppuccinLatte,
     ThemeKind::Paper,
+    ThemeKind::Base16DefaultDark,
 ];
 
 /// The three light-polarity preset kinds. Callers that need to know a theme's
@@ -106,6 +108,7 @@ impl ThemeKind {
         ThemeKind::SolarizedLight,
         ThemeKind::CatppuccinLatte,
         ThemeKind::Paper,
+        ThemeKind::Base16DefaultDark,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -146,6 +149,7 @@ impl ThemeKind {
             Self::SolarizedLight => "solarized-light",
             Self::CatppuccinLatte => "catppuccin-latte",
             Self::Paper => "paper",
+            Self::Base16DefaultDark => "base16-default-dark",
         }
     }
 
@@ -176,7 +180,8 @@ impl ThemeKind {
             | Self::MidnightOled
             | Self::SolarizedLight
             | Self::CatppuccinLatte
-            | Self::Paper => true,
+            | Self::Paper
+            | Self::Base16DefaultDark => true,
         }
     }
 
@@ -205,6 +210,9 @@ impl ThemeKind {
             "solarized-light" => Some(Self::SolarizedLight),
             "catppuccin-latte" | "latte" => Some(Self::CatppuccinLatte),
             "paper" | "sepia" => Some(Self::Paper),
+            "base16" | "base16-dark" | "base16-default" | "base16-default-dark" => {
+                Some(Self::Base16DefaultDark)
+            }
             _ => None,
         }
     }
@@ -253,6 +261,7 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "solarized-light" => "Solarized Light",
         "catppuccin-latte" => "Catppuccin Latte",
         "paper" => "Paper",
+        "base16-default-dark" => "Base16 Default Dark",
         other => other,
     }
 }
@@ -396,6 +405,7 @@ impl Theme {
             ThemeKind::SolarizedLight => Self::solarized_light(),
             ThemeKind::CatppuccinLatte => Self::catppuccin_latte(),
             ThemeKind::Paper => Self::paper(),
+            ThemeKind::Base16DefaultDark => Self::base16_default_dark(),
         };
         // Sample polarity pre-quantization — post-quantize `bg_base` may
         // land on a named/indexed entry whose luminance is host-palette-
@@ -458,7 +468,7 @@ impl Theme {
     }
 
     /// Clamp a theme kind to what the terminal supports.
-    fn clamp_to_terminal(kind: ThemeKind) -> ThemeKind {
+    pub(super) fn clamp_to_terminal(kind: ThemeKind) -> ThemeKind {
         if kind.requires_truecolor() && !color_support::detect().has_truecolor() {
             ThemeKind::GrokNight
         } else {
@@ -767,6 +777,42 @@ pub fn reset_cursor_color() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base16_default_dark_has_stable_identity_and_canonical_palette() {
+        use ratatui::style::Color;
+
+        assert_eq!(ThemeKind::Base16DefaultDark as u8, 18);
+        for alias in [
+            "base16",
+            "base16-dark",
+            "base16-default",
+            "base16-default-dark",
+            "BASE16-DEFAULT-DARK",
+        ] {
+            assert_eq!(
+                ThemeKind::from_name(alias),
+                Some(ThemeKind::Base16DefaultDark)
+            );
+        }
+        assert_eq!(
+            display_name_for_canonical("base16-default-dark"),
+            "Base16 Default Dark"
+        );
+
+        let theme = Theme::base16_default_dark();
+        assert_eq!(theme.bg_base, Color::Rgb(0x18, 0x18, 0x18));
+        assert_eq!(theme.bg_light, Color::Rgb(0x28, 0x28, 0x28));
+        assert_eq!(theme.bg_visual, Color::Rgb(0x38, 0x38, 0x38));
+        assert_eq!(theme.text_primary, Color::Rgb(0xd8, 0xd8, 0xd8));
+        assert_eq!(theme.accent_error, Color::Rgb(0xab, 0x46, 0x42));
+        assert_eq!(theme.accent_success, Color::Rgb(0xa1, 0xb5, 0x6c));
+        assert_eq!(theme.accent_user, Color::Rgb(0x7c, 0xaf, 0xc2));
+        assert!(theme.is_dark());
+        assert!(ThemeKind::Base16DefaultDark.requires_truecolor());
+        assert!(ThemeKind::ALL.contains(&ThemeKind::Base16DefaultDark));
+        assert!(!LIGHT_PRESET_KINDS.contains(&ThemeKind::Base16DefaultDark));
+    }
 
     #[test]
     fn from_name_auto() {
@@ -1115,6 +1161,7 @@ mod tests {
                 ThemeKind::SolarizedLight => Theme::solarized_light(),
                 ThemeKind::CatppuccinLatte => Theme::catppuccin_latte(),
                 ThemeKind::Paper => Theme::paper(),
+                ThemeKind::Base16DefaultDark => Theme::base16_default_dark(),
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);

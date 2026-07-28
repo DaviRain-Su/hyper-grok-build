@@ -1,3 +1,10 @@
 /target
+/target-base16/
+/target-resume-omp/
+/target-session-compat/
+/target-symlink-fix/
+/target-user-test/
 **/*.rs.bk
+**/__pycache__/
+**/*.pyc
 .DS_Store

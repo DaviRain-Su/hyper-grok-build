@@ -142,20 +142,28 @@ pub(crate) fn backup_corrupt_auth_file(path: &Path) -> Option<PathBuf> {
         return None;
     }
 
+    let source = match xai_grok_config::fs_atomic::resolve_write_target(path) {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::warn!(error = %e, "auth: failed to resolve corrupt auth.json symlink");
+            return None;
+        }
+    };
+
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
 
-    let file_name = path
+    let file_name = source
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "auth.json".to_string());
 
     let backup_name = format!("{}.corrupt.{}", file_name, ts);
-    let backup = path.with_file_name(backup_name);
+    let backup = source.with_file_name(backup_name);
 
-    match std::fs::rename(path, &backup) {
+    match std::fs::rename(&source, &backup) {
         Ok(()) => {
             // Corrupt backups still hold token material — keep them owner-only.
             let _ = crate::util::secure_file::ensure_owner_only_permissions(&backup);
@@ -327,10 +335,17 @@ fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::
             "injected write fault (WRITE_FAULT_PATH)",
         ));
     }
+    // Resolve only the final component: atomic publication must update a
+    // user-owned symlink target without replacing the symlink itself.
+    let write_path = xai_grok_config::fs_atomic::resolve_write_target(auth_file)?;
+    if let Some(parent) = write_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     // Unique per write (pid + monotonic seq): two concurrent in-process writers
     // (e.g. background mint + proactive refresher) must not share one tmp path.
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-    let tmp = auth_file.with_extension(format!(
+    let tmp = write_path.with_extension(format!(
         "json.{}.{}.tmp",
         std::process::id(),
         TMP_SEQ.fetch_add(1, Ordering::Relaxed)
@@ -351,9 +366,9 @@ fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::
     write_store_to(&tmp, auth_store)?;
     #[cfg(windows)]
     {
-        let _ = std::fs::remove_file(auth_file);
+        let _ = std::fs::remove_file(&write_path);
     }
-    std::fs::rename(&tmp, auth_file)?;
+    std::fs::rename(&tmp, &write_path)?;
     tmp_reclaim.0 = None; // renamed into place; nothing to reclaim
     // Re-assert on the final path (covers rename edge cases / FS quirks).
     // Best-effort: rename already published the new tokens.
@@ -480,7 +495,8 @@ fn clear_scope_from_auth_json(path: &Path, scope: &str) -> std::io::Result<()> {
     };
     map.remove(scope);
     if map.is_empty() {
-        match std::fs::remove_file(path) {
+        let write_path = xai_grok_config::fs_atomic::resolve_write_target(path)?;
+        match std::fs::remove_file(&write_path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
@@ -1331,6 +1347,25 @@ mod write_fallback_tests {
         let path = dir.path().join("auth.json");
         write_auth_json(&path, &sample_store()).unwrap();
         assert_eq!(read_key(&path).as_deref(), Some("secret-key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_relative_auth_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let target = shared.join("auth.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = dir.path().join("auth.json");
+        symlink("shared/auth.json", &link).unwrap();
+
+        write_auth_json(&link, &sample_store()).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(read_key(&target).as_deref(), Some("secret-key"));
     }
 
     /// On a failed atomic write, the `TmpReclaim` guard must remove the temp

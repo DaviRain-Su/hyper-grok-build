@@ -54,8 +54,12 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
+    let write_path = xai_grok_config::fs_atomic::resolve_write_target(&path)?;
+    if let Some(parent) = write_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
     #[cfg(unix)]
-    let prior_mode: Option<u32> = match tokio::fs::metadata(&path).await {
+    let prior_mode: Option<u32> = match tokio::fs::metadata(&write_path).await {
         Ok(m) => {
             use std::os::unix::fs::PermissionsExt;
             Some(m.permissions().mode())
@@ -71,7 +75,7 @@ async fn save_config_locked(config: &Config) -> Result<()> {
             .unwrap_or(0);
         format!("toml.tmp.{}.{}", std::process::id(), nanos)
     };
-    let tmp = path.with_extension(suffix);
+    let tmp = write_path.with_extension(suffix);
     tokio::fs::write(&tmp, toml_str).await?;
     #[cfg(unix)]
     if let Some(mode) = prior_mode {
@@ -79,7 +83,7 @@ async fn save_config_locked(config: &Config) -> Result<()> {
         let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
     }
     let _ = prior_mode;
-    tokio::fs::rename(&tmp, &path).await?;
+    tokio::fs::rename(&tmp, &write_path).await?;
     Ok(())
 }
 /// Acquire the `config.toml` write lock used by [`save_config`], so callers that
@@ -103,8 +107,12 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let write_path = xai_grok_config::fs_atomic::resolve_write_target(path)?;
+    if let Some(parent) = write_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     #[cfg(unix)]
-    let prior_mode: Option<u32> = match std::fs::metadata(path) {
+    let prior_mode: Option<u32> = match std::fs::metadata(&write_path) {
         Ok(m) => {
             use std::os::unix::fs::PermissionsExt;
             Some(m.permissions().mode())
@@ -120,7 +128,7 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
             .unwrap_or(0);
         format!("toml.tmp.{}.{}", std::process::id(), nanos)
     };
-    let tmp = path.with_extension(suffix);
+    let tmp = write_path.with_extension(suffix);
     std::fs::write(&tmp, content)?;
     #[cfg(unix)]
     if let Some(mode) = prior_mode {
@@ -128,7 +136,7 @@ pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std:
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
     }
     let _ = prior_mode;
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    if let Err(e) = std::fs::rename(&tmp, &write_path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -312,6 +320,25 @@ mod tests {
         );
         assert!(!oauth.contains_key("plain"));
     }
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_string_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let target = shared.join("config.toml");
+        std::fs::write(&target, "old").unwrap();
+        let link = root.path().join("config.toml");
+        symlink("shared/config.toml", &link).unwrap();
+
+        atomic_write_string(&link, "new").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
     #[test]
     fn merge_section_preserves_unmodeled_fields() {
         let mut table = TomlMap::new();
