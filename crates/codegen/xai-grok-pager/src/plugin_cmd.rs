@@ -788,6 +788,40 @@ fn cmd_init(path: &str, name: Option<&str>) -> Result<()> {
             std::fs::copy(&from, &to)?;
         }
     }
+    // Point the new crate at the monorepo SDK when scaffolding from a source tree.
+    // Absolute path so the guest builds outside the workspace.
+    let sdk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../xai-grok-extension-sdk")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../xai-grok-extension-sdk")
+        });
+    let cargo_toml = format!(
+        r#"[workspace]
+
+[package]
+name = "{plugin_name}"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+xai-grok-extension-sdk = {{ path = "{sdk}" }}
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+"#,
+        plugin_name = plugin_name,
+        sdk = sdk_path.display()
+    );
+    std::fs::write(dest.join("Cargo.toml"), cargo_toml)?;
     // Fresh plugin.json with chosen name
     let plugin_json = format!(
         r#"{{

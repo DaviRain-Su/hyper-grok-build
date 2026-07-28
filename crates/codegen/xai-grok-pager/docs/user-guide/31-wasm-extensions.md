@@ -114,25 +114,31 @@ Order relative to classic hooks: **shell/HTTP hooks first, then WASM**.
 
 ---
 
-## Build a guest (Rust-first)
+## Build a guest (Rust-first + SDK)
 
-**Recommended:** copy the official Rust template:
-
-[`xai-grok-extension-runtime/examples/rust-guest-template/`](../../../xai-grok-extension-runtime/examples/rust-guest-template/)
+**Recommended:** use the **author SDK** (`xai-grok-extension-sdk`) so you never
+touch `ptr`/`len` host imports by hand.
 
 ```bash
+grok plugin init ./my-ext --name my-ext
+cd my-ext
+# edit src/lib.rs using:
+#   use xai_grok_extension_sdk::prelude::*;
+#   xai_grok_extension_sdk::extension_boilerplate!();
 rustup target add wasm32-unknown-unknown
-cd crates/codegen/xai-grok-extension-runtime/examples/rust-guest-template
 cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/hyper_ext_rust_guest_template.wasm \
    ./extension.wasm
+grok plugin validate . --load
 ```
 
-Use `#[no_mangle] extern "C"` exports and `#[link(wasm_import_module = "hyper_host")]`
-imports matching the bootstrap ABI below.
+Template + SDK sources:
 
-**WAT** (`examples/safe-shell-plugin/`) is only for ABI demos and unit fixtures—not
-the default author path.
+- SDK: `crates/codegen/xai-grok-extension-sdk/`
+- Template: [`examples/rust-guest-template/`](../../../xai-grok-extension-runtime/examples/rust-guest-template/)
+
+**WAT** (`examples/safe-shell-plugin/`) is only for host ABI fixtures—not the
+default author path.
 
 Future: Component Model + WIT (`hyper:extension@0.1.0`) will replace the
 bootstrap ABI without changing the plugin packaging model.

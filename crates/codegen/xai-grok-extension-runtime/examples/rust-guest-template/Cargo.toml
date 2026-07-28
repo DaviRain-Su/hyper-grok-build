@@ -1,5 +1,4 @@
-# Standalone package (not a workspace member). Empty workspace table keeps
-# cargo from treating the monorepo root as this crate's workspace.
+# Standalone package (not a workspace member).
 [workspace]
 
 [package]
@@ -7,12 +6,15 @@ name = "hyper-ext-rust-guest-template"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Minimal Rust → wasm32 guest for Hyper WASM extensions (official author path)"
+description = "Official Rust-first Hyper WASM guest template (uses xai-grok-extension-sdk)"
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 path = "src/lib.rs"
+
+[dependencies]
+xai-grok-extension-sdk = { path = "../../../xai-grok-extension-sdk" }
 
 [profile.release]
 opt-level = "s"

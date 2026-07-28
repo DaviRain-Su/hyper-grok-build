@@ -15840,6 +15840,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-extension-sdk"
+version = "0.1.0"
+
+[[package]]
 name = "xai-grok-hooks"
 version = "0.1.0"
 dependencies = [
