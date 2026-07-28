@@ -1829,12 +1829,8 @@ pub(super) async fn run_session(
                                 session.send_hook_execution("session_start", None, None, &results).await;
                             }
                             // WASM guests after shell hooks (observe / fail-open).
-                            let wasm_results = session
-                                .extension_runtime
-                                .borrow()
-                                .clone()
-                                .dispatch_session_start()
-                                .await;
+                            let ext_rt = session.extension_runtime.borrow().clone();
+                            let wasm_results = ext_rt.dispatch_session_start().await;
                             for r in &wasm_results {
                                 if let xai_grok_extension_runtime::GuestCallResult::Failed {
                                     extension,
@@ -1847,6 +1843,18 @@ pub(super) async fn run_session(
                                         "wasm extension session_start failed (fail-open)"
                                     );
                                 }
+                            }
+                            // Register wasm_* tools once extensions are warm.
+                            let bridge = session.agent.borrow().tool_bridge().clone();
+                            let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(
+                                &bridge, &ext_rt,
+                            )
+                            .await;
+                            if n > 0 {
+                                tracing::info!(
+                                    wasm_tools = n,
+                                    "wasm extension tools registered at session_start"
+                                );
                             }
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {

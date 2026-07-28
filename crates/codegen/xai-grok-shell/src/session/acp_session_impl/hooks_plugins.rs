@@ -844,7 +844,8 @@ impl SessionActor {
         // Update session's plugin registry snapshot
         *self.plugin_registry.borrow_mut() = new_registry_snapshot.clone();
 
-        // Rebuild WASM extension runtime from trusted/enabled plugins.
+        // Rebuild WASM extension runtime from trusted/enabled plugins and
+        // re-register wasm_* tools on the bridge.
         {
             let mut rt = self.extension_runtime.borrow_mut();
             let specs = new_registry_snapshot
@@ -861,6 +862,13 @@ impl SessionActor {
                 session_id = %sid,
                 wasm_extensions = rt.len(),
                 "extension runtime rebuilt from plugin registry"
+            );
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(&bridge, &rt).await;
+            tracing::info!(
+                session_id = %sid,
+                wasm_tools = n,
+                "wasm extension tools synced to tool bridge"
             );
         }
 

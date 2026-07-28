@@ -883,7 +883,7 @@ fn validate_runtime_section(manifest: &PluginManifest, root: &Path, load: bool) 
         .collect();
     if !unknown.is_empty() {
         bail!(
-            "unknown runtime.capabilities: {}. Known: pre_tool_gate, before_agent_inject, stop_gate",
+            "unknown runtime.capabilities: {}. Known: pre_tool_gate, before_agent_inject, stop_gate, register_tool",
             unknown.join(", ")
         );
     }

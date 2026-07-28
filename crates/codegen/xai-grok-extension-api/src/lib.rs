@@ -72,6 +72,49 @@ pub const EXPORT_ON_BEFORE_AGENT_START: &str = "hyper_ext_on_before_agent_start"
 pub const EXPORT_ON_STOP: &str = "hyper_ext_on_stop";
 /// Export name: pre-compaction observe; return `0` on success.
 pub const EXPORT_ON_PRE_COMPACT: &str = "hyper_ext_on_pre_compact";
+/// Return number of tools this guest registers (requires `register_tool`).
+pub const EXPORT_TOOL_COUNT: &str = "hyper_ext_tool_count";
+/// Describe tool at `tool_index` via `set_tool_*` host imports.
+pub const EXPORT_DESCRIBE_TOOL: &str = "hyper_ext_describe_tool";
+/// Invoke tool named in host `tool_name` with `tool_input`; write result via `set_tool_result`.
+pub const EXPORT_INVOKE_TOOL: &str = "hyper_ext_invoke_tool";
+
+/// One tool advertised by a WASM guest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmToolDescriptor {
+    pub extension: String,
+    pub name: String,
+    pub description: String,
+    /// JSON Schema object (as string). Empty → default empty object schema.
+    pub input_schema_json: String,
+}
+
+impl WasmToolDescriptor {
+    /// Client-facing tool name: `wasm_{extension}_{name}` (sanitized).
+    pub fn client_name(&self) -> String {
+        let ext = sanitize_tool_token(&self.extension);
+        let name = sanitize_tool_token(&self.name);
+        format!("wasm_{ext}_{name}")
+    }
+
+    pub fn parsed_schema(&self) -> serde_json::Value {
+        serde_json::from_str(&self.input_schema_json).unwrap_or_else(|_| {
+            serde_json::json!({"type": "object", "properties": {}})
+        })
+    }
+}
+
+fn sanitize_tool_token(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 /// Default wall-clock timeouts (design §7.3).
 pub mod timeouts {
@@ -148,6 +191,8 @@ pub enum Capability {
     PreToolGate,
     BeforeAgentInject,
     StopGate,
+    /// Guest may expose tools via `hyper_ext_tool_count` / describe / invoke.
+    RegisterTool,
 }
 
 impl Capability {
@@ -156,6 +201,7 @@ impl Capability {
             Self::PreToolGate => "pre_tool_gate",
             Self::BeforeAgentInject => "before_agent_inject",
             Self::StopGate => "stop_gate",
+            Self::RegisterTool => "register_tool",
         }
     }
 
@@ -164,6 +210,7 @@ impl Capability {
             "pre_tool_gate" => Some(Self::PreToolGate),
             "before_agent_inject" => Some(Self::BeforeAgentInject),
             "stop_gate" => Some(Self::StopGate),
+            "register_tool" => Some(Self::RegisterTool),
             _ => None,
         }
     }
@@ -373,10 +420,18 @@ mod tests {
             Capability::PreToolGate,
             Capability::BeforeAgentInject,
             Capability::StopGate,
+            Capability::RegisterTool,
         ] {
             assert_eq!(Capability::parse(cap.as_str()), Some(cap));
         }
         assert_eq!(Capability::parse("nope"), None);
+        let d = WasmToolDescriptor {
+            extension: "my-ext".into(),
+            name: "echo.tool".into(),
+            description: "d".into(),
+            input_schema_json: "{}".into(),
+        };
+        assert_eq!(d.client_name(), "wasm_my-ext_echo_tool");
     }
 
     #[test]

@@ -35,9 +35,10 @@ use std::time::Duration;
 
 use xai_grok_extension_api::{
     timeouts, BeforeAgentStartIn, BeforeAgentStartOut, Capability, ContractError, ExtensionSpec,
-    GateFailMode, PreCompactIn, PreToolIn, StopIn, StopOut, CORE_ABI_VERSION, EXPORT_ABI_VERSION,
-    EXPORT_ON_BEFORE_AGENT_START, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
-    EXPORT_ON_SESSION_START, EXPORT_ON_STOP, MAX_INJECT_BYTES,
+    GateFailMode, PreCompactIn, PreToolIn, StopIn, StopOut, WasmToolDescriptor, CORE_ABI_VERSION,
+    EXPORT_ABI_VERSION, EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START,
+    EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START,
+    EXPORT_ON_STOP, EXPORT_TOOL_COUNT, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES,
 };
 
 /// Errors from loading or calling a guest.
@@ -80,6 +81,13 @@ struct HostCtx {
     compact_reason: String,
     /// Written by guest via `set_gate_reason` (deny / stop block message).
     gate_reason: String,
+    /// Index for `describe_tool`.
+    tool_index: i32,
+    /// Written by guest during describe_tool / invoke_tool.
+    tool_name_out: String,
+    tool_description_out: String,
+    tool_schema_out: String,
+    tool_result_out: String,
 }
 
 /// Per-session registry of loaded extensions.
@@ -407,6 +415,115 @@ impl ExtensionRuntime {
         }
     }
 
+    /// Collect tools from guests with [`Capability::RegisterTool`].
+    pub async fn collect_registered_tools(&self) -> Vec<WasmToolDescriptor> {
+        let mut out = Vec::new();
+        #[cfg(feature = "wasm")]
+        for guest in &self.guests {
+            if !guest.capabilities.contains(&Capability::RegisterTool) {
+                continue;
+            }
+            let (count_res, _) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::ToolCount, timeouts::OBSERVE, HostCtx::default())
+                .await;
+            let count = match count_res {
+                GuestCallResult::Ok { code, .. } if code >= 0 => code as usize,
+                _ => continue,
+            };
+            // Cap tools per extension to avoid abuse.
+            let count = count.min(32);
+            for i in 0..count {
+                let host = HostCtx {
+                    tool_index: i as i32,
+                    ..HostCtx::default()
+                };
+                let (r, host_out) = guest
+                    .inner
+                    .call_with_timeout_host(GuestCall::DescribeTool, timeouts::OBSERVE, host)
+                    .await;
+                if !matches!(r, GuestCallResult::Ok { code: 0, .. }) {
+                    continue;
+                }
+                if host_out.tool_name_out.is_empty() {
+                    continue;
+                }
+                out.push(WasmToolDescriptor {
+                    extension: guest.name.clone(),
+                    name: host_out.tool_name_out,
+                    description: host_out.tool_description_out,
+                    input_schema_json: if host_out.tool_schema_out.is_empty() {
+                        r#"{"type":"object","properties":{}}"#.into()
+                    } else {
+                        host_out.tool_schema_out
+                    },
+                });
+            }
+        }
+        out
+    }
+
+    /// Invoke a tool registered by a guest. `tool_name` is the **short** name
+    /// from the guest (not the `wasm_*` client name).
+    pub async fn invoke_registered_tool(
+        &self,
+        extension: &str,
+        tool_name: &str,
+        args_json: &str,
+    ) -> Result<String, RuntimeError> {
+        #[cfg(feature = "wasm")]
+        {
+            let guest = self
+                .guests
+                .iter()
+                .find(|g| g.name == extension)
+                .ok_or_else(|| RuntimeError::Module(format!("extension not loaded: {extension}")))?;
+            if !guest.capabilities.contains(&Capability::RegisterTool) {
+                return Err(RuntimeError::Module(format!(
+                    "extension `{extension}` lacks register_tool capability"
+                )));
+            }
+            let args = if args_json.len() > MAX_TOOL_PAYLOAD_BYTES {
+                &args_json[..MAX_TOOL_PAYLOAD_BYTES]
+            } else {
+                args_json
+            };
+            let host = HostCtx {
+                tool_name: tool_name.to_string(),
+                tool_input: args.to_string(),
+                ..HostCtx::default()
+            };
+            let (r, host_out) = guest
+                .inner
+                .call_with_timeout_host(GuestCall::InvokeTool, timeouts::GATE, host)
+                .await;
+            match r {
+                GuestCallResult::Ok { code: 0, .. } => Ok(if host_out.tool_result_out.is_empty() {
+                    "ok".into()
+                } else {
+                    host_out.tool_result_out
+                }),
+                GuestCallResult::Ok { code, .. } => Err(RuntimeError::Module(format!(
+                    "invoke_tool returned {code}: {}",
+                    host_out.gate_reason
+                ))),
+                GuestCallResult::Failed { error, .. } => Err(RuntimeError::Trap(error)),
+                GuestCallResult::Timeout { limit, .. } => Err(RuntimeError::Timeout(limit)),
+                GuestCallResult::SkippedExport { export, .. } => {
+                    Err(RuntimeError::MissingExport(export))
+                }
+                GuestCallResult::SkippedCapability { .. } => {
+                    Err(RuntimeError::Module("capability skipped".into()))
+                }
+            }
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = (extension, tool_name, args_json);
+            Err(RuntimeError::WasmDisabled)
+        }
+    }
+
     async fn dispatch_all_observe(
         &self,
         call: GuestCall,
@@ -455,6 +572,9 @@ enum GuestCall {
     BeforeAgentStart,
     Stop,
     PreCompact,
+    ToolCount,
+    DescribeTool,
+    InvokeTool,
 }
 
 /// Outcome of one guest invocation (for UI / scrollback).
@@ -586,6 +706,9 @@ impl WasmGuest {
             GuestCall::BeforeAgentStart => EXPORT_ON_BEFORE_AGENT_START,
             GuestCall::Stop => EXPORT_ON_STOP,
             GuestCall::PreCompact => EXPORT_ON_PRE_COMPACT,
+            GuestCall::ToolCount => EXPORT_TOOL_COUNT,
+            GuestCall::DescribeTool => EXPORT_DESCRIBE_TOOL,
+            GuestCall::InvokeTool => EXPORT_INVOKE_TOOL,
         };
 
         let join = tokio::task::spawn_blocking(move || {
@@ -774,6 +897,57 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             "compact_reason_byte",
             |caller: wasmtime::Caller<'_, HostCtx>, idx: i32| -> i32 {
                 byte_at(&caller.data().compact_reason, idx)
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "tool_index",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 { caller.data().tool_index },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_tool_name",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().tool_name_out = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_tool_description",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().tool_description_out = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_tool_schema",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().tool_schema_out = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_tool_result",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().tool_result_out = s;
+                }
             },
         )
         .map_err(|e| RuntimeError::Module(e.to_string()))?;
@@ -1043,6 +1217,74 @@ mod tests {
             })
             .await;
         assert!(matches!(d.decision, PreToolDecision::Allow));
+    }
+
+    /// Registers one "echo" tool that returns the input JSON.
+    const ECHO_TOOL_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "tool_index" (func $tool_index (result i32)))
+          (import "hyper_host" "set_tool_name" (func $set_name (param i32 i32)))
+          (import "hyper_host" "set_tool_description" (func $set_desc (param i32 i32)))
+          (import "hyper_host" "set_tool_schema" (func $set_schema (param i32 i32)))
+          (import "hyper_host" "set_tool_result" (func $set_result (param i32 i32)))
+          (import "hyper_host" "input_len" (func $input_len (result i32)))
+          (import "hyper_host" "input_byte" (func $input_byte (param i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "echo")
+          (data (i32.const 16) "Echo args JSON back")
+          (data (i32.const 48) "{\"type\":\"object\",\"properties\":{}}")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_tool_count") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_describe_tool") (result i32)
+            (call $set_name (i32.const 0) (i32.const 4))
+            (call $set_desc (i32.const 16) (i32.const 19))
+            (call $set_schema (i32.const 48) (i32.const 33))
+            i32.const 0)
+          (func (export "hyper_ext_invoke_tool") (result i32)
+            (local $i i32) (local $n i32) (local $b i32)
+            ;; copy input into memory at 128
+            (local.set $n (call $input_len))
+            (if (i32.gt_s (local.get $n) (i32.const 256))
+              (then (local.set $n (i32.const 256))))
+            (local.set $i (i32.const 0))
+            (block $done
+              (loop $copy
+                (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+                (local.set $b (call $input_byte (local.get $i)))
+                (i32.store8 (i32.add (i32.const 128) (local.get $i)) (local.get $b))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $copy)
+              )
+            )
+            (call $set_result (i32.const 128) (local.get $n))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn register_and_invoke_echo_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "echo.wasm", ECHO_TOOL_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "echo-ext",
+            path,
+            vec![Capability::RegisterTool],
+        ))
+        .unwrap();
+        let tools = rt.collect_registered_tools().await;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tools[0].client_name(), "wasm_echo-ext_echo");
+        let out = rt
+            .invoke_registered_tool("echo-ext", "echo", r#"{"x":1}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("\"x\""), "{out}");
     }
 
     #[tokio::test]

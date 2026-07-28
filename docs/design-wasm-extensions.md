@@ -396,14 +396,16 @@ world extension {
 - [x] `plugin init` 脚手架 + PluginInfo `has_runtime`  
 - [x] Linker 缓存（热路径轻量复用）  
 
-### Phase 4+（能力加深 / 可缓）
+### Phase 4 — 新能力（第三梯队）
 
-- `register_tool`（设计：guest 描述 + host 调度；MVP 仍用 MCP）  
-- `before_model` rewrite（消息数组改写；安全面大）  
-- Component Model + wit-bindgen（取代 bootstrap ABI）  
-- TS/Go 等作者语言  
-- UI Host API / guest 持久 store  
-- 全 Instance 会话复用 + 正式 bench  
+- [x] **`register_tool` MVP**：guest list/invoke → `wasm_*` 工具挂 ToolBridge  
+- [ ] `before_model` rewrite  
+- [ ] Component Model + wit-bindgen  
+- [ ] TS/Go 等作者语言  
+- [ ] UI Host API / guest 持久 store  
+- [ ] 全 Instance 会话复用 + 正式 bench  
+
+细节见 [design-wasm-phase4-spike.md](./design-wasm-phase4-spike.md)。
 
 
 ---

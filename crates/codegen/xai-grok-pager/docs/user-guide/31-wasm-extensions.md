@@ -61,6 +61,7 @@ Minimal `plugin.json`:
 | `pre_tool_gate` | `pre_tool_use` may **deny** |
 | `before_agent_inject` | May inject context / append system notes before the agent loop |
 | `stop_gate` | May **block** turn completion (force another round) |
+| `register_tool` | Expose guest tools as `wasm_{ext}_{name}` on the tool bridge |
 
 Without a `runtime` block, a root-level `extension.wasm` is still discovered,
 but with **no capabilities**.
@@ -89,6 +90,9 @@ Core-wasm bootstrap ABI (Phase 0–3). Optional exports may be missing.
 | `hyper_ext_on_before_agent_start` | `0` | Needs `before_agent_inject` |
 | `hyper_ext_on_stop` | `0` allow stop / `1` block | Needs `stop_gate` |
 | `hyper_ext_on_pre_compact` | `0` | Observe only |
+| `hyper_ext_tool_count` | `n` tools | Needs `register_tool` |
+| `hyper_ext_describe_tool` | `0` + set_tool_* | Needs `register_tool` |
+| `hyper_ext_invoke_tool` | `0` + set_tool_result | Needs `register_tool` |
 
 ### Host imports (`hyper_host`)
 

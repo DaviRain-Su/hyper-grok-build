@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **spike notes only**（未实现） |
+| 状态 | **register_tool MVP 已落地**；Component Model / before_model 仍 spike |
 | 前提 | Phase 0–3.5 bootstrap 可用；Rust-first 作者路径 |
 | 日期 | 2026-07-28 |
 
@@ -20,17 +20,19 @@
 
 **不做：** 第一期就砍掉 bootstrap。
 
-## 2. `register_tool`
-
-**形状（草案）：**
+## 2. `register_tool` — MVP **已实现**（bootstrap ABI）
 
 ```text
-guest export: list_tools() -> list of { name, description, json_schema }
-host on tool call: invoke_tool(name, args_json) -> result_json
-  or host runs tool in sandbox and only asks guest for policy
+capability: register_tool
+exports:
+  hyper_ext_tool_count() -> i32
+  hyper_ext_describe_tool()  # host sets tool_index; guest set_tool_name/desc/schema
+  hyper_ext_invoke_tool()    # host sets tool_name + tool_input; guest set_tool_result
+client name: wasm_{extension}_{name}
+session: sync on plugin reload + session_start → ToolBridge.register_mcp_tools
 ```
 
-**建议：** 默认 **host-executed tools**（guest 只提供 schema + 轻量 handler），重工具继续 MCP。
+重工具仍走 MCP。Component Model 后再统一 schema 类型。
 
 ## 3. `before_model` rewrite
 

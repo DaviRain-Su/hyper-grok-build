@@ -1740,6 +1740,8 @@ pub(crate) async fn spawn_session_actor(
                     .filter_map(|p| p.extension_spec());
                 rt.rebuild_from_specs(specs);
             }
+            // Tool bridge registration happens after the session actor is fully
+            // constructed (async); see hooks_plugins apply + first tool prep.
             rt
         }),
         events: crate::session::events::EventTracker::new(
