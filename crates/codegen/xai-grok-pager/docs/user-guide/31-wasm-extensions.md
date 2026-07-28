@@ -62,6 +62,7 @@ Minimal `plugin.json`:
 | `before_agent_inject` | May inject context / append system notes before the agent loop |
 | `stop_gate` | May **block** turn completion (force another round) |
 | `register_tool` | Expose guest tools as `wasm_{ext}_{name}` on the tool bridge |
+| `before_model_inject` | Inject system-reminder **each model round** (not history rewrite) |
 
 Without a `runtime` block, a root-level `extension.wasm` is still discovered,
 but with **no capabilities**.
