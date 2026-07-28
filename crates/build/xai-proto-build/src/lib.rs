@@ -49,6 +49,10 @@ impl XaiProtoBuilder {
         }
     }
 
+    pub fn btree_map<S: AsRef<str>>(self, paths: impl IntoIterator<Item = S>) -> Self {
+        self.map_builder(|b| paths.into_iter().fold(b, |b, path| b.btree_map(path)))
+    }
+
     pub fn bytes<S: AsRef<str>>(self, paths: impl IntoIterator<Item = S>) -> Self {
         self.map_builder(|b| paths.into_iter().fold(b, |b, path| b.bytes(path)))
     }

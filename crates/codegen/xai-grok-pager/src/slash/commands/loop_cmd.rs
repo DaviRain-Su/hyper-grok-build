@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::grok_build::{
-    SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
 };
 
 use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
@@ -108,12 +108,17 @@ impl SlashCommand for LoopCommand {
         LOOP_REQUIRED_TOOLS
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
             return CommandResult::Message(loop_usage_message().to_string());
         }
 
         let (interval_token, prompt) = parse_loop_args(args);
+        let fire_mode = if ctx.pager_state.scheduler_background_loops {
+            LoopFireMode::Detached
+        } else {
+            LoopFireMode::InSession
+        };
 
         // Show a concrete cadence only for an unambiguous leading token;
         // otherwise a neutral placeholder, since the authoritative schedule
@@ -127,7 +132,7 @@ impl SlashCommand for LoopCommand {
         CommandResult::InjectSkill {
             display_text: format!("/loop {args}"),
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                loop_schedule_instruction(args),
+                loop_schedule_instruction(args, fire_mode),
             ))],
             display_as_skill: false,
             scheduled_task_preview: Some(ScheduledTaskPreview {
@@ -254,6 +259,10 @@ mod tests {
     }
 
     fn run_loop(args: &str) -> CommandResult {
+        run_loop_with_background_loops(args, true)
+    }
+
+    fn run_loop_with_background_loops(args: &str, background_loops: bool) -> CommandResult {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = CommandExecCtx {
@@ -262,7 +271,10 @@ mod tests {
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
-            pager_state: crate::settings::PagerLocalSnapshot::default(),
+            pager_state: crate::settings::PagerLocalSnapshot {
+                scheduler_background_loops: background_loops,
+                ..Default::default()
+            },
         };
         LoopCommand.run(&mut ctx, args)
     }
@@ -353,14 +365,19 @@ mod tests {
     #[test]
     fn run_instruction_matches_shared_helper() {
         let args = "2h run tests";
-        match run_loop(args) {
-            CommandResult::InjectSkill { prompt_blocks, .. } => {
-                let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {
-                    panic!("expected a text prompt block");
-                };
-                assert_eq!(text.text, loop_schedule_instruction(args));
+        for (background_loops, mode) in [
+            (true, LoopFireMode::Detached),
+            (false, LoopFireMode::InSession),
+        ] {
+            match run_loop_with_background_loops(args, background_loops) {
+                CommandResult::InjectSkill { prompt_blocks, .. } => {
+                    let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {
+                        panic!("expected a text prompt block");
+                    };
+                    assert_eq!(text.text, loop_schedule_instruction(args, mode));
+                }
+                other => panic!("expected InjectSkill, got {other:?}"),
             }
-            other => panic!("expected InjectSkill, got {other:?}"),
         }
     }
 

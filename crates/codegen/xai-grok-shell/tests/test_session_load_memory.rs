@@ -12,8 +12,10 @@
 #[global_allocator]
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
 
+use pretty_assertions::assert_eq;
 use xai_grok_shell::session::storage::{JsonlStorageAdapter, StorageAdapter, prepare_replay_lines};
 use xai_grok_shell::session::testkit::synth::{self, SessionSpec};
+use xai_grok_test_support::env::env_parse;
 
 #[cfg(feature = "dhat-heap")]
 use std::path::Path;
@@ -31,27 +33,8 @@ fn file_len(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).expect("stat updates.jsonl").len()
 }
 
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    let Ok(text) = std::env::var(key) else {
-        return default;
-    };
-    match text.parse() {
-        Ok(value) => value,
-        Err(_) => {
-            eprintln!("[test_session_load] ignoring unparseable {key}={text:?}; using default");
-            default
-        }
-    }
-}
-
 fn memory_spec() -> SessionSpec {
     SessionSpec::from_env_prefixed("SESSION_LOAD", SessionSpec::default())
-}
-
-// Replay keeps one user chunk plus the agent chunks per turn and drops the
-// redundant ACUs, mirroring `synth::prepare_session` and `prepare_replay_lines`.
-fn expected_replayed_lines(spec: &SessionSpec) -> usize {
-    spec.turns * (1 + spec.agent_chunks_per_turn)
 }
 
 /// Non-ignored zero-copy guard: every replay line must borrow from the
@@ -78,7 +61,7 @@ async fn prepare_replay_lines_borrows_the_transcript() {
     let prepared = prepare_replay_lines(&transcript, None);
     assert_eq!(
         prepared.lines.len(),
-        expected_replayed_lines(&spec),
+        synth::expected_replay_lines(&spec),
         "replay line count regressed"
     );
 
@@ -353,7 +336,7 @@ async fn session_load_dhat_bounded_and_freed() {
     let (info, dir) = synth::prepare_session(root.path(), cwd.path(), &opts).await;
     let updates_path = dir.join("updates.jsonl");
     let on_disk_bytes = file_len(&updates_path);
-    let expected_lines = expected_replayed_lines(&opts);
+    let expected_lines = synth::expected_replay_lines(&opts);
 
     let budget = DhatBudget {
         warmup: env_parse("SESSION_LOAD_WARMUP", 3usize),
@@ -366,12 +349,13 @@ async fn session_load_dhat_bounded_and_freed() {
 
     let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
 
-    let profiler = dhat::Profiler::builder().testing().build();
-
+    // Warm up before starting the profiler so its lifetime `max_bytes` covers
+    // only the measured window, not a warmup transient.
     for _ in 0..budget.warmup {
         let _ = run_load_cycle(&adapter, &info, &updates_path).await;
     }
 
+    let profiler = dhat::Profiler::builder().testing().build();
     let window_before = dhat::HeapStats::get();
     let mut replayed_lines = 0usize;
     for _ in 0..budget.cycles {
@@ -380,9 +364,8 @@ async fn session_load_dhat_bounded_and_freed() {
     let window_after = dhat::HeapStats::get();
     drop(profiler);
 
-    // `max_bytes` is a running maximum over the profiler's whole life (warmup
-    // included), so subtracting the post-warmup baseline yields a conservative
-    // upper bound on the load peak, never an underestimate.
+    // `max_bytes` spans only the measured window, so the peak over its starting
+    // baseline is a true load peak rather than a warmup artifact.
     let peak_over_baseline =
         (window_after.max_bytes as u64).saturating_sub(window_before.curr_bytes as u64);
 
@@ -412,6 +395,7 @@ async fn session_load_dhat_bounded_and_freed() {
 #[cfg(not(feature = "dhat-heap"))]
 mod rss {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -508,7 +492,7 @@ mod rss {
         }
 
         fn pass(&self) -> bool {
-            !self.measurable() || self.within_budget()
+            self.measurable() && self.within_budget()
         }
     }
 
@@ -533,14 +517,14 @@ mod rss {
         assert!(under.within_budget());
         assert!(under.pass());
 
-        // An unmeasurable baseline passes vacuously.
+        // Unmeasurable RSS fails the gate rather than passing vacuously.
         let unmeasurable = RssOutcome {
             baseline: None,
             peak_rss: 0,
             budget_mb: 1,
         };
         assert!(!unmeasurable.measurable());
-        assert!(unmeasurable.pass());
+        assert!(!unmeasurable.pass());
     }
 
     fn report_summary(mode: &str, counts: serde_json::Value, on_disk_bytes: u64, o: &RssOutcome) {
@@ -566,19 +550,21 @@ mod rss {
     }
 
     fn assert_bounds(label: Option<&str>, on_disk_bytes: u64, o: &RssOutcome) {
-        if o.measurable() {
-            let prefix = label.map(|l| format!("{l} ")).unwrap_or_default();
-            assert!(
-                o.within_budget(),
-                "{prefix}peak RSS grew {:.1} MB over baseline while loading a {:.1} MB updates file \
-                 (bound {} MB)",
-                o.peak_growth_bytes() as f64 / BYTES_PER_MB,
-                on_disk_bytes as f64 / BYTES_PER_MB,
-                o.budget_mb,
-            );
-        } else {
-            eprintln!("[soak] RSS measurement unavailable on this platform; bound skipped");
-        }
+        let prefix = label.map(|l| format!("{l} ")).unwrap_or_default();
+        // This soak exists to enforce a bound, so unmeasurable RSS is a failure,
+        // not a silent skip.
+        assert!(
+            o.measurable(),
+            "{prefix}RSS sampling unavailable; the soak cannot enforce a bound"
+        );
+        assert!(
+            o.within_budget(),
+            "{prefix}peak RSS grew {:.1} MB over baseline while loading a {:.1} MB updates file \
+             (bound {} MB)",
+            o.peak_growth_bytes() as f64 / BYTES_PER_MB,
+            on_disk_bytes as f64 / BYTES_PER_MB,
+            o.budget_mb,
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -590,7 +576,7 @@ mod rss {
         let (info, dir) = synth::prepare_session(root.path(), cwd.path(), &opts).await;
         let updates_path = dir.join("updates.jsonl");
         let on_disk_bytes = file_len(&updates_path);
-        let expected_lines = expected_replayed_lines(&opts);
+        let expected_lines = synth::expected_replay_lines(&opts);
 
         let budget_mb = env_parse("SESSION_LOAD_MAX_PEAK_MB", 1024u64);
         let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());

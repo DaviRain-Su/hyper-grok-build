@@ -1174,6 +1174,7 @@ fn make_test_handle(
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_id: acp::ModelId::new(model),
+        scheduler_background_loops: true,
         reasoning_effort: None,
         yolo_mode: yolo,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
@@ -1727,6 +1728,25 @@ async fn session_usage_dead_chat_state_actor_fails_closed() {
             .await
             .expect_err("dead chat-state actor");
     assert_eq!(err.code, acp::Error::internal_error().code);
+}
+/// The session responses publish the value THIS session's spawn pinned, so a
+/// client describing `/loop` fires can never contradict what the fires do.
+#[tokio::test(flavor = "current_thread")]
+async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("loop-mode-sess");
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info.id = sid.clone();
+    handle.scheduler_background_loops = false;
+    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+    let model_state = agent.model_state(Some(&sid));
+    let mut meta = serde_json::Map::new();
+    agent.insert_session_config_meta(&mut meta, &sid, "/tmp".to_string(), None, &model_state);
+    assert_eq!(
+        meta.get(crate::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY),
+        Some(&serde_json::json!(false)),
+        "session meta must carry the handle's pinned value"
+    );
 }
 /// Build a minimal MvpAgent with pre-loaded auth for gate tests.
 fn build_agent_with_auth(auth: crate::auth::GrokAuth) -> MvpAgent {

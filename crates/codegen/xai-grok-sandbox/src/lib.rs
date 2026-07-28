@@ -104,6 +104,19 @@ pub fn set_configured_profile(name: impl Into<String>) {
 pub fn configured_profile_name() -> Option<&'static str> {
     CONFIGURED_PROFILE.get().map(|s| s.as_str())
 }
+/// The non-`off` sandbox profile this process was **requested** with, if any.
+///
+/// This is the configured request, not a report that enforcement succeeded —
+/// `is_active()` can be false while the process is still confined (e.g. some
+/// Linux bwrap paths), and a requested-but-unapplied profile already warns the
+/// user. Keying on the request is the fail-closed choice.
+pub fn requested_confinement_profile() -> Option<&'static str> {
+    configured_profile_name().filter(|name| profile_confines(name))
+}
+fn profile_confines(name: &str) -> bool {
+    name.parse::<ProfileName>()
+        .is_ok_and(|profile| profile != ProfileName::Off)
+}
 /// Whether the sandbox was successfully applied to this process.
 pub fn is_active() -> bool {
     SANDBOX.get().is_some_and(|s| s.applied)
@@ -770,6 +783,15 @@ mod tests {
     fn configured_profile_is_recorded() {
         set_configured_profile("read-only");
         assert_eq!(configured_profile_name(), Some("read-only"));
+    }
+    #[test]
+    fn profile_confines_only_for_non_off_profiles() {
+        assert!(!super::profile_confines("off"));
+        assert!(!super::profile_confines("none"));
+        assert!(super::profile_confines("strict"));
+        assert!(super::profile_confines("read-only"));
+        assert!(super::profile_confines("readonly"));
+        assert!(super::profile_confines("my-custom-profile"));
     }
     #[test]
     fn known_launch_guard_is_linux_only() {

@@ -917,6 +917,7 @@ pub(crate) mod test_helpers {
             explicitly_killed: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
         }
     }
 

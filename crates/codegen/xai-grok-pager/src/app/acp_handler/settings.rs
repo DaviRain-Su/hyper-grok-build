@@ -318,6 +318,13 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         }
     }
 
+    // `scheduler_background_loops` is deliberately absent from this handler,
+    // unlike the flags above. A live session's scheduled fires keep the mode
+    // the shell pinned when the session's actor spawned, so applying a pushed
+    // flip here would make `/loop` promise a runtime those fires never get.
+    // The per-session value arrives on the `session/new` / `session/load`
+    // response instead (`AgentView::scheduler_background_loops`).
+
     // Re-resolve tips from config layers + the updated remote tips.
     if let Some(remote_tips) = update.tips {
         use xai_grok_shell::util::config::resolve_tips;

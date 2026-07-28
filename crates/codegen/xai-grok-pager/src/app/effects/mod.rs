@@ -11,7 +11,9 @@ use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
 pub use helpers::ConversationsPartial;
-pub(super) use helpers::parse_session_load_running_prompt_id;
+pub(super) use helpers::{
+    parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
+};
 pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
     persist_setting, sanitize_user_error,
@@ -261,6 +263,9 @@ pub(crate) fn execute(
                                 agent_id,
                                 session_id: resp.session_id,
                                 models: resp.models,
+                                scheduler_background_loops: parse_session_scheduler_background_loops(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -555,6 +560,9 @@ pub(crate) fn execute(
                                 worktree_path: worktree_root,
                                 session_cwd,
                                 models: resp.models,
+                                scheduler_background_loops: parse_session_scheduler_background_loops(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -636,6 +644,9 @@ pub(crate) fn execute(
                                 restore_summary,
                                 restore_degree,
                                 running_prompt_id,
+                                scheduler_background_loops: parse_session_scheduler_background_loops(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {

@@ -76,8 +76,8 @@ use xai_grok_sampler::SamplerConfig as SamplingConfig;
 use crate::session::persistence::PersistenceHandle;
 use crate::session::worktree::BackgroundCopyContext;
 use crate::session::{
-    ParsedPromptInfo, SessionCommand, SessionHandle, SessionLiveState, SessionThread,
-    info::Info as SessionInfo, spawn_session_on_thread,
+    ParsedPromptInfo, SCHEDULER_BACKGROUND_LOOPS_META_KEY, SessionCommand, SessionHandle,
+    SessionLiveState, SessionThread, info::Info as SessionInfo, spawn_session_on_thread,
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
@@ -820,7 +820,7 @@ pub struct MvpAgent {
     /// Pushed by the `InjectNotification` handler when a turn is active and the
     /// notification has `Next` priority. Drained by the session turn loop
     /// (`inject_pending_monitor_events`) into a hidden synthetic user message.
-    monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer,
+    monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer,
     /// The process launch directory, captured once at construction so the
     /// deferred launch-dir init paths share one source of truth instead of each
     /// re-calling `std::env::current_dir()` (which could drift if the process
@@ -1711,6 +1711,7 @@ impl MvpAgent {
                 explicitly_killed: false,
                 owner_session_id: None,
                 description: None,
+                is_backgrounded: true,
             };
             let notification = crate::extensions::notification::SessionNotification {
                 session_id: session_id.clone(),

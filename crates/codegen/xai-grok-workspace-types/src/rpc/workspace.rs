@@ -211,17 +211,15 @@ pub struct ScheduledTaskSnapshotWire {
     pub created_at: String,
 }
 
-/// Response of `workspace.tasks_snapshot` — outstanding background tasks and
-/// live scheduled tasks.
+/// Response of `workspace.tasks_snapshot`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TasksSnapshotResponse {
+    /// Incomplete and backgrounded only (not in-flight foreground runs).
     pub background_tasks: Vec<BackgroundTaskSnapshotWire>,
     pub scheduled_tasks: Vec<ScheduledTaskSnapshotWire>,
 }
 
-/// `workspace.tasks_snapshot` — point-in-time snapshot of the session's
-/// outstanding background tasks and scheduled tasks, for task
-/// UI rebuild on client attach/reconnect.
+/// Point-in-time task UI rebuild on attach/reconnect.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TasksSnapshotReq {
     pub session_id: String,

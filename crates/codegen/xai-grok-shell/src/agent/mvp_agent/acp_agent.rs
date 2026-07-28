@@ -1636,8 +1636,6 @@ impl acp::Agent for MvpAgent {
         } else {
             self.model_state(Some(&session_id))
         };
-        let (session_config_value, session_detail_value) = self
-            .session_config_meta(&session_id, cwd.as_str().to_owned(), None, &models);
         let applied_tool_overrides = match self
             .session_handle_waiting_for_load(&session_id)
             .await
@@ -1660,8 +1658,13 @@ impl acp::Agent for MvpAgent {
             "feedbackEnabled": feedback_enabled,
         });
         if let Some(obj) = meta.as_object_mut() {
-            obj.insert("x.ai/sessionConfig".to_string(), session_config_value);
-            obj.insert("x.ai/sessionDetail".to_string(), session_detail_value);
+            self.insert_session_config_meta(
+                obj,
+                &session_id,
+                cwd.as_str().to_owned(),
+                None,
+                &models,
+            );
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
         Ok(
@@ -2418,15 +2421,13 @@ impl acp::Agent for MvpAgent {
                 );
         }
         let model_state = self.model_state(Some(&session_id));
-        let (session_config_value, session_detail_value) = self
-            .session_config_meta(
-                &session_id,
-                session_cwd.clone().unwrap_or_default(),
-                summary.display_title_opt(),
-                &model_state,
-            );
-        response_meta_map.insert("x.ai/sessionConfig".to_string(), session_config_value);
-        response_meta_map.insert("x.ai/sessionDetail".to_string(), session_detail_value);
+        self.insert_session_config_meta(
+            &mut response_meta_map,
+            &session_id,
+            session_cwd.clone().unwrap_or_default(),
+            summary.display_title_opt(),
+            &model_state,
+        );
         let applied_tool_overrides = {
             let cmd_tx = self
                 .sessions

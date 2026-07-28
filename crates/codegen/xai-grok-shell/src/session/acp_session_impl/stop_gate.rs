@@ -388,6 +388,7 @@ mod stop_gate_snapshot_tests {
             explicitly_killed: false,
             owner_session_id: None,
             description: None,
+            is_backgrounded: false,
         }
     }
 

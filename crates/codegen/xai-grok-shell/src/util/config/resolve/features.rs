@@ -53,6 +53,8 @@ pub fn resolve_remote_fetch_enabled() -> bool {
     }
 }
 
+pub const REMOTE_FETCH_CONFIG_PATH: &str = "features.remote_fetch";
+
 fn remote_fetch_value(v: &TomlValue) -> Option<bool> {
     v.get("features")?.get("remote_fetch")?.as_bool()
 }

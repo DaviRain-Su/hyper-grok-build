@@ -2,7 +2,7 @@
 //! threads, fds, and heap/RSS reach steady state. A stub `ChildRunner` drives
 //! the real coordinator/transport.
 //!
-//!   SUBAGENT_SOAK_CYCLES=20000 cargo test -p xai-grok-shell \
+//!   SUBAGENT_SOAK_CYCLES=20000 cargo test -p xai-grok-tools \
 //!     [--features dhat-heap] --test test_subagent_soak -- --ignored --nocapture
 
 #![cfg(unix)]
@@ -78,6 +78,14 @@ impl Metric {
         match self {
             Metric::Rss => bytes_to_mib(raw),
             Metric::Threads | Metric::Fds => raw as f64,
+        }
+    }
+
+    /// RSS is sampled on every unix; thread and fd counts are Linux-only.
+    fn expected_on_this_platform(self) -> bool {
+        match self {
+            Metric::Rss => true,
+            Metric::Threads | Metric::Fds => cfg!(target_os = "linux"),
         }
     }
 }
@@ -162,6 +170,7 @@ struct Bounds {
     warmup: u64,
     #[serde(rename = "measured_cycles")]
     measure: u64,
+    concurrency: u64,
     max_thread_growth: u64,
     max_fd_growth: u64,
     max_rss_growth_mib: u64,
@@ -177,8 +186,10 @@ impl Bounds {
             // one-time cache fill.
             warmup: env_parse("SUBAGENT_SOAK_WARMUP", MAX_COMPLETED_ENTRIES as u64),
             measure: env_parse("SUBAGENT_SOAK_CYCLES", 512u64),
-            max_thread_growth: env_parse("SUBAGENT_SOAK_MAX_THREAD_GROWTH", 32u64),
-            max_fd_growth: env_parse("SUBAGENT_SOAK_MAX_FD_GROWTH", 64u64),
+            concurrency: env_parse("SUBAGENT_SOAK_CONCURRENCY", 16u64),
+            // RSS is looser than threads and fds to absorb allocator noise.
+            max_thread_growth: env_parse("SUBAGENT_SOAK_MAX_THREAD_GROWTH", 8u64),
+            max_fd_growth: env_parse("SUBAGENT_SOAK_MAX_FD_GROWTH", 16u64),
             max_rss_growth_mib: env_parse("SUBAGENT_SOAK_MAX_RSS_GROWTH_MIB", 256u64),
             max_blocks_per_cycle: env_parse("SUBAGENT_SOAK_MAX_BLOCKS_PER_CYCLE", 2.0f64),
             max_bytes_per_cycle: env_parse("SUBAGENT_SOAK_MAX_BYTES_PER_CYCLE", 4096.0f64),
@@ -211,10 +222,15 @@ fn serialize_counts<S: Serializer>(
         active,
         completed,
     } = counts;
-    let mut map = serializer.serialize_map(Some(3))?;
-    map.serialize_entry("pending", pending)?;
-    map.serialize_entry("active", active)?;
-    map.serialize_entry("completed", completed)?;
+    let entries = [
+        ("pending", pending),
+        ("active", active),
+        ("completed", completed),
+    ];
+    let mut map = serializer.serialize_map(Some(entries.len()))?;
+    for (key, value) in entries {
+        map.serialize_entry(key, value)?;
+    }
     map.end()
 }
 
@@ -276,7 +292,9 @@ impl ChildControl for SoakControl {
     }
 }
 
-struct SoakRunner;
+struct SoakRunner {
+    gate: Arc<tokio::sync::Semaphore>,
+}
 
 impl ChildRunner for SoakRunner {
     type Control = SoakControl;
@@ -286,6 +304,7 @@ impl ChildRunner for SoakRunner {
     type DescribeFuture = LocalBoxFuture<SubagentDescribeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
+        let gate = self.gate.clone();
         Box::pin(async move {
             let ChildRunRequest {
                 request,
@@ -319,6 +338,10 @@ impl ChildRunner for SoakRunner {
                     completion_data: (),
                     snapshot_ref: None,
                 };
+            }
+            if request.id.starts_with("conc-") {
+                // Hold in `active` until the concurrent phase releases the gate.
+                let _ = gate.acquire().await;
             }
             ChildRunOutput {
                 result: SubagentResult {
@@ -395,6 +418,42 @@ async fn run_cycle(backend: &ChannelBackend, i: u64) {
     );
 }
 
+async fn await_concurrency(backend: &ChannelBackend, n: u64) -> bool {
+    const MAX_POLLS: usize = 400;
+    const SLEEP: Duration = Duration::from_millis(5);
+    for _ in 0..MAX_POLLS {
+        if backend.registry_counts().await.active as u64 >= n {
+            return true;
+        }
+        tokio::time::sleep(SLEEP).await;
+    }
+    false
+}
+
+async fn concurrent_phase(backend: &ChannelBackend, gate: &tokio::sync::Semaphore, n: u64) {
+    let handles: Vec<_> = (0..n)
+        .map(|k| {
+            let backend = backend.clone();
+            tokio::task::spawn_local(async move {
+                backend.spawn(soak_request(format!("conc-{k}"), true)).await
+            })
+        })
+        .collect();
+
+    let reached = await_concurrency(backend, n).await;
+
+    // Release then join before asserting, so no child is left blocked on failure.
+    gate.add_permits(n as usize);
+    for h in handles {
+        let result = h.await.expect("concurrent spawn task");
+        assert!(
+            result.expect("concurrent spawn round-trips").success,
+            "concurrent child must complete"
+        );
+    }
+    assert!(reached, "expected {n} concurrently active children");
+}
+
 async fn warmup(backend: &ChannelBackend, cycles: u64) -> bool {
     for i in 0..cycles {
         run_cycle(backend, i).await;
@@ -402,7 +461,11 @@ async fn warmup(backend: &ChannelBackend, cycles: u64) -> bool {
     quiesce(backend).await
 }
 
-async fn measure(backend: &ChannelBackend, bounds: &Bounds, warmup_quiesced: bool) -> Measurement {
+async fn measure(
+    backend: &ChannelBackend,
+    bounds: &Bounds,
+    baseline_quiesced: bool,
+) -> Measurement {
     let heap_before = heap_capture();
     let before = ResourceSnapshot::capture();
 
@@ -411,9 +474,9 @@ async fn measure(backend: &ChannelBackend, bounds: &Bounds, warmup_quiesced: boo
     for i in bounds.warmup..(bounds.warmup + bounds.measure) {
         run_cycle(backend, i).await;
     }
-    // A warmup that never drained already poisons the `before` baseline, so skip
-    // the measured-window drain and report the window as not quiesced.
-    let quiesced = warmup_quiesced && quiesce(backend).await;
+    // A baseline that never drained already poisons `before`, so skip the
+    // measured-window drain and report the window as not quiesced.
+    let quiesced = baseline_quiesced && quiesce(backend).await;
 
     let heap_after = heap_capture();
     let after = ResourceSnapshot::capture();
@@ -429,6 +492,32 @@ async fn measure(backend: &ChannelBackend, bounds: &Bounds, warmup_quiesced: boo
             .map(|(before, after)| HeapMetrics::new(before, after, bounds.measure)),
         quiesced,
     }
+}
+
+/// Takes `expected` as a parameter so the skip arm is testable on any platform.
+fn metric_failure(
+    metric: Metric,
+    value: Option<usize>,
+    expected: bool,
+    bounds: &Bounds,
+) -> Option<String> {
+    let Some(raw) = value else {
+        return expected.then(|| {
+            format!(
+                "{}: growth sample unavailable; the soak cannot bound it",
+                metric.label()
+            )
+        });
+    };
+    let growth = metric.growth_in_budget_unit(raw);
+    let budget = metric.budget(bounds);
+    (growth > budget).then(|| {
+        let unit = metric.unit().map(|u| format!(" {u}")).unwrap_or_default();
+        format!(
+            "{}: grew {growth:.1}{unit} over the soak (bound {budget:.1}{unit})",
+            metric.label()
+        )
+    })
 }
 
 fn check_bounds(bounds: &Bounds, m: &Measurement) -> Vec<String> {
@@ -463,17 +552,9 @@ fn check_bounds(bounds: &Bounds, m: &Measurement) -> Vec<String> {
     }
 
     for metric in Metric::iter() {
-        let Some(raw) = m.growth.value_of(metric) else {
-            continue;
-        };
-        let growth = metric.growth_in_budget_unit(raw);
-        let budget = metric.budget(bounds);
-        if growth > budget {
-            let unit = metric.unit().map(|u| format!(" {u}")).unwrap_or_default();
-            failures.push(format!(
-                "{}: grew {growth:.1}{unit} over the soak (bound {budget:.1}{unit})",
-                metric.label()
-            ));
+        let expected = metric.expected_on_this_platform();
+        if let Some(f) = metric_failure(metric, m.growth.value_of(metric), expected, bounds) {
+            failures.push(f);
         }
     }
 
@@ -528,13 +609,19 @@ async fn subagent_lifecycle_soak_bounds_threads_fds_and_heap() {
                 foreground_budget: Duration::from_secs(600),
                 ..CoordinatorConfig::default()
             };
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
             tokio::task::spawn_local(
-                SubagentCoordinator::new(command_rx, SoakRunner, config).run(),
+                SubagentCoordinator::new(command_rx, SoakRunner { gate: gate.clone() }, config)
+                    .run(),
             );
             let backend = ChannelBackend::new(command_tx);
 
             let warmup_quiesced = warmup(&backend, bounds.warmup).await;
-            let measurement = measure(&backend, &bounds, warmup_quiesced).await;
+            // Drain the concurrent phase into the baseline; a failed drain marks
+            // the window unreliable.
+            concurrent_phase(&backend, &gate, bounds.concurrency).await;
+            let baseline_quiesced = warmup_quiesced && quiesce(&backend).await;
+            let measurement = measure(&backend, &bounds, baseline_quiesced).await;
 
             let summary = Summary {
                 bounds: &bounds,
@@ -552,6 +639,7 @@ async fn subagent_lifecycle_soak_bounds_threads_fds_and_heap() {
 
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn value_of_reads_the_matching_slot_of_snapshot_and_growth() {
@@ -606,6 +694,7 @@ mod tests {
         let bounds = Bounds {
             warmup: 0,
             measure: 0,
+            concurrency: 0,
             max_thread_growth: 3,
             max_fd_growth: 5,
             max_rss_growth_mib: 7,
@@ -638,11 +727,21 @@ mod tests {
         Bounds {
             warmup: 0,
             measure: 4,
+            concurrency: 4,
             max_thread_growth: 100,
             max_fd_growth: 100,
             max_rss_growth_mib: 100,
             max_blocks_per_cycle: 10.0,
             max_bytes_per_cycle: 10_000.0,
+        }
+    }
+
+    /// Zero growth that reads as measured, unlike `ResourceGrowth::default()`.
+    fn zero_growth() -> ResourceGrowth {
+        ResourceGrowth {
+            rss: Some(0),
+            threads: Some(0),
+            fds: Some(0),
         }
     }
 
@@ -663,13 +762,46 @@ mod tests {
 
     #[test]
     fn check_bounds_passes_a_clean_drained_window() {
-        let m = drained(ResourceGrowth::default(), None);
+        let m = drained(zero_growth(), None);
         assert!(check_bounds(&generous_bounds(), &m).is_empty());
     }
 
     #[test]
+    fn check_bounds_fails_when_an_expected_metric_is_unavailable() {
+        let growth = ResourceGrowth {
+            rss: None,
+            threads: Some(0),
+            fds: Some(0),
+        };
+        let failures = check_bounds(&generous_bounds(), &drained(growth, None));
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.starts_with("rss:") && f.contains("unavailable")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn metric_failure_covers_expected_missing_unexpected_missing_and_budget() {
+        let b = generous_bounds();
+        assert!(metric_failure(Metric::Threads, None, false, &b).is_none());
+        assert!(
+            metric_failure(Metric::Rss, None, true, &b)
+                .unwrap()
+                .contains("unavailable")
+        );
+        assert!(metric_failure(Metric::Fds, Some(0), true, &b).is_none());
+        assert!(
+            metric_failure(Metric::Rss, Some(500 * 1024 * 1024), true, &b)
+                .unwrap()
+                .starts_with("rss:")
+        );
+    }
+
+    #[test]
     fn check_bounds_reports_non_quiesce_first_and_alone() {
-        let mut m = drained(ResourceGrowth::default(), None);
+        let mut m = drained(zero_growth(), None);
         m.quiesced = false;
         m.counts.pending = 3;
         let failures = check_bounds(&generous_bounds(), &m);
@@ -704,7 +836,7 @@ mod tests {
     #[test]
     fn check_bounds_flags_nonzero_counts_and_heap_leak() {
         let mut m = drained(
-            ResourceGrowth::default(),
+            zero_growth(),
             Some(HeapMetrics {
                 before: HeapSample {
                     blocks: 0,
@@ -732,7 +864,7 @@ mod tests {
 
     #[test]
     fn check_bounds_flags_pending_while_quiesced() {
-        let mut m = drained(ResourceGrowth::default(), None);
+        let mut m = drained(zero_growth(), None);
         m.counts.pending = 3;
         let failures = check_bounds(&generous_bounds(), &m);
         assert!(
@@ -743,7 +875,7 @@ mod tests {
 
     #[test]
     fn check_bounds_flags_completed_over_cap() {
-        let mut m = drained(ResourceGrowth::default(), None);
+        let mut m = drained(zero_growth(), None);
         m.counts.completed = MAX_COMPLETED_ENTRIES + 1;
         let failures = check_bounds(&generous_bounds(), &m);
         assert!(
@@ -773,7 +905,7 @@ mod tests {
     #[test]
     fn check_bounds_flags_block_count_leak() {
         let m = drained(
-            ResourceGrowth::default(),
+            zero_growth(),
             Some(HeapMetrics {
                 before: HeapSample {
                     blocks: 0,

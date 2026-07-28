@@ -247,8 +247,7 @@ async fn list_outstanding_background_tasks(
         })
         .collect()
 }
-/// Point-in-time snapshot of the session's outstanding background terminal
-/// tasks and live scheduled tasks.
+/// Incomplete backgrounded terminal tasks + live scheduled tasks (client tray rebuild).
 async fn tasks_snapshot(toolset: &FinalizedToolset) -> TasksSnapshotResponse {
     let (terminal, scheduler) = {
         let res = toolset.resources.lock().await;
@@ -262,7 +261,7 @@ async fn tasks_snapshot(toolset: &FinalizedToolset) -> TasksSnapshotResponse {
             .list_tasks()
             .await
             .into_iter()
-            .filter(|t| !t.completed)
+            .filter(|t| t.is_outstanding_background())
             .map(|t| {
                 let command = t
                     .display_command
@@ -1523,6 +1522,149 @@ mod tests {
             "next_fire_at must be RFC3339: {}",
             loop_task.next_fire_at
         );
+    }
+    /// FG in-flight out of snapshot; after backgrounding in; completed BG out.
+    /// Preconditions ensure a bare `!completed` filter would fail.
+    #[tokio::test]
+    async fn tasks_snapshot_excludes_foreground_and_completed_processes() {
+        use crate::handle::tests::terminal_run_request;
+        use std::time::{Duration, Instant};
+        let handle = make_handle();
+        let cfg = background_capable_cfg();
+        let session = handle
+            .create_session_with_config(
+                "snap-fg-rpc",
+                None,
+                Some(cfg.clone()),
+                CapabilityMode::All,
+                None,
+                false,
+            )
+            .expect("create background-capable session");
+        session.set_bind_tool_config_fingerprint(serde_json::to_value(&cfg).ok());
+        let out_dir = tempfile::tempdir().expect("temp dir");
+        let handler = WorkspaceRpcHandler::new(handle.clone());
+        async fn snapshot(handler: &WorkspaceRpcHandler) -> TasksSnapshotResponse {
+            let value = handler
+                .dispatch(
+                    "workspace.tasks_snapshot",
+                    serde_json::json!({"session_id": "snap-fg-rpc"}),
+                    Some("snap-fg-rpc"),
+                )
+                .await
+                .expect("tasks_snapshot rpc");
+            serde_json::from_value(value).expect("decode response")
+        }
+        let backend = session.terminal_backend().clone();
+        let fg_req = terminal_run_request("sleep 30", out_dir.path(), "snap-fg-task");
+        let fg_join = tokio::spawn(async move { backend.run(fg_req).await });
+        let poll_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let listed = session.terminal_backend().list_tasks().await;
+            if listed.iter().any(|t| !t.completed && !t.is_backgrounded) {
+                break;
+            }
+            assert!(
+                Instant::now() < poll_deadline,
+                "timeout waiting for incomplete FG in list_tasks: {listed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let snap = snapshot(&handler).await;
+        assert!(
+            snap.background_tasks.is_empty(),
+            "in-flight FG must not appear in tasks_snapshot: {:?}",
+            snap.background_tasks
+        );
+        assert!(
+            session
+                .terminal_backend()
+                .background_foreground_command("snap-fg-task")
+                .await,
+            "expected FG process snap-fg-task to background"
+        );
+        let snap = snapshot(&handler).await;
+        assert!(
+            snap.background_tasks
+                .iter()
+                .any(|t| t.task_id == "snap-fg-task"),
+            "backgrounded former FG must appear: {:?}",
+            snap.background_tasks
+        );
+        assert_eq!(
+            snap.background_tasks.len(),
+            1,
+            "only the transitioned FG so far: {:?}",
+            snap.background_tasks
+        );
+        let bg = start_background_sleep(&session, out_dir.path(), "snap-bg-task").await;
+        let snap = snapshot(&handler).await;
+        assert_eq!(
+            snap.background_tasks.len(),
+            2,
+            "transitioned FG + incomplete BG must appear: {:?}",
+            snap.background_tasks
+        );
+        assert!(
+            snap.background_tasks
+                .iter()
+                .any(|t| t.task_id == bg.task_id),
+            "run_background task missing: {:?}",
+            snap.background_tasks
+        );
+        let short = session
+            .terminal_backend()
+            .run_background(terminal_run_request(
+                "true",
+                out_dir.path(),
+                "snap-done-task",
+            ))
+            .await
+            .expect("start short background task");
+        let done = session
+            .terminal_backend()
+            .wait_for_completion(&short.task_id, Some(Duration::from_secs(5)))
+            .await
+            .expect("short background task should complete");
+        assert!(done.completed, "short task must complete: {done:?}");
+        let listed = session.terminal_backend().list_tasks().await;
+        assert!(
+            listed
+                .iter()
+                .any(|t| t.task_id == short.task_id && t.completed && t.is_backgrounded),
+            "precondition: completed BG must still be in list_tasks: {listed:?}"
+        );
+        let snap = snapshot(&handler).await;
+        assert!(
+            snap.background_tasks
+                .iter()
+                .all(|t| t.task_id != short.task_id),
+            "completed BG must not appear: {:?}",
+            snap.background_tasks
+        );
+        assert_eq!(
+            snap.background_tasks.len(),
+            2,
+            "still-running BG tasks remain: {:?}",
+            snap.background_tasks
+        );
+        assert!(
+            snap.background_tasks
+                .iter()
+                .any(|t| t.task_id == bg.task_id),
+            "run_background task should still be present: {:?}",
+            snap.background_tasks
+        );
+        assert!(
+            snap.background_tasks
+                .iter()
+                .any(|t| t.task_id == "snap-fg-task"),
+            "transitioned FG should still be present: {:?}",
+            snap.background_tasks
+        );
+        session.terminal_backend().kill_task(&bg.task_id).await;
+        session.terminal_backend().kill_task("snap-fg-task").await;
+        let _ = fg_join.await;
     }
     /// Evicting one session while another is live must NOT global-drain (which
     /// would close the shared queue for the survivor) — even when the evicted

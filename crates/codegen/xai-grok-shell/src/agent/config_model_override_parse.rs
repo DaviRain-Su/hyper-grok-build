@@ -69,6 +69,9 @@ pub enum WarningTarget {
         #[serde(skip_serializing_if = "Option::is_none")]
         field: Option<String>,
     },
+    ConfigKey {
+        path: String,
+    },
 }
 
 impl WarningTarget {
@@ -81,6 +84,7 @@ impl WarningTarget {
             Self::AuthProvider { name, .. } => format!("auth_provider.\"{name}\""),
             Self::ModelProviderSection => "model_providers".to_owned(),
             Self::ModelProvider { id, .. } => format!("model_providers.\"{id}\""),
+            Self::ConfigKey { path } => path.clone(),
         }
     }
 
@@ -89,7 +93,10 @@ impl WarningTarget {
             Self::Model { field, .. }
             | Self::AuthProvider { field, .. }
             | Self::ModelProvider { field, .. } => field.as_deref(),
-            Self::ModelSection | Self::AuthProviderSection | Self::ModelProviderSection => None,
+            Self::ModelSection
+            | Self::AuthProviderSection
+            | Self::ModelProviderSection
+            | Self::ConfigKey { .. } => None,
         }
     }
 }
@@ -179,6 +186,14 @@ impl ConfigWarning {
         }
     }
 
+    pub(crate) fn config_key(path: String, kind: ConfigWarningKind, reason: String) -> Self {
+        Self {
+            target: WarningTarget::ConfigKey { path },
+            kind,
+            reason,
+        }
+    }
+
     pub(crate) fn field(&self) -> Option<&str> {
         self.target.field()
     }
@@ -252,13 +267,13 @@ pub(crate) fn log_config_warnings(warnings: &[ConfigWarning]) {
             field = warning.field().unwrap_or("(entry)"),
             kind = ?warning.kind,
             reason = %warning.reason,
-            "model_override: skipped invalid config"
+            "config: ignored unrecognized or invalid entry"
         );
     }
     if !warnings.is_empty() {
         tracing::warn!(
             warnings = warnings.len(),
-            "model_override: parsed with warnings; run `grok inspect` for details"
+            "config: parsed with warnings; run `grok inspect` for details"
         );
     }
 }

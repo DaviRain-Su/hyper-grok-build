@@ -1,7 +1,6 @@
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use super::task::MAX_SUBAGENT_DEPTH;
 use super::task::types::SubagentDepthCounter;
 
 pub use xai_grok_tools_api::slash_commands::WORKFLOW_TOOL_NAME;
@@ -237,7 +236,8 @@ impl xai_tool_runtime::Tool for WorkflowTool {
             (depth, sender)
         };
 
-        if depth >= MAX_SUBAGENT_DEPTH {
+        // Workflows stay top-level-only regardless of configurable subagent depth.
+        if depth > 0 {
             return Err(xai_tool_runtime::ToolError::custom(
                 "workflow_depth_exceeded",
                 "Workflows can only be launched from a top-level session (subagents and \

@@ -2,6 +2,7 @@
 //! sampling loop).
 use super::*;
 use tracing::Instrument as _;
+use xai_grok_tools::implementations::grok_build::LoopFireMode;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
@@ -340,12 +341,18 @@ impl SessionActor {
                         }
                         acc
                     });
+                let loop_fire_mode = if self.rebuild_spec.scheduler_background_loops {
+                    LoopFireMode::Detached
+                } else {
+                    LoopFireMode::InSession
+                };
                 let prompt_blocks = match slash_commands::resolve(
                     prompt_blocks,
                     &slash_skills,
                     availability,
                     skill_rewrite,
                     &named_workflows,
+                    loop_fire_mode,
                 ) {
                     Ok(blocks) => blocks,
                     Err(SlashCommandOutcome::Builtin(action)) => {
@@ -1454,7 +1461,7 @@ impl SessionActor {
         let Some(buffer) = &self.tool_context.monitor_event_buffer else {
             return;
         };
-        let mine = xai_grok_tools::implementations::grok_build::task::types::drain_owned(
+        let mine = xai_grok_tools::implementations::grok_build::monitor::types::drain_owned(
             buffer,
             Some(self.session_info.id.0.as_ref()),
         );

@@ -198,6 +198,33 @@ impl DisconnectCause {
             _ => None,
         }
     }
+    /// Bounded classification of transport error detail for metrics. Collapses
+    /// free-form OS/tungstenite messages into a small allowlist so reconnect
+    /// storms can be attributed without high-cardinality labels.
+    fn detail_class(&self) -> Option<&'static str> {
+        let detail = self.detail()?;
+        Some(classify_transport_detail(detail))
+    }
+}
+/// Map a transport error detail string to a bounded class label.
+fn classify_transport_detail(detail: &str) -> &'static str {
+    let d = detail.to_ascii_lowercase();
+    if d.contains("connection reset") || d.contains("econnreset") || d.contains("reset by peer") {
+        "connection_reset"
+    } else if d.contains("broken pipe") || d.contains("epipe") {
+        "broken_pipe"
+    } else if d.contains("unexpected eof")
+        || d.contains("connection closed")
+        || d.contains("connection aborted without closing")
+    {
+        "unexpected_eof"
+    } else if d.contains("timed out") || d.contains("timeout") || d.contains("etimedout") {
+        "timeout"
+    } else if d.contains("connection aborted") || d.contains("econnaborted") {
+        "connection_aborted"
+    } else {
+        "other"
+    }
 }
 struct OutageInfo {
     cause: DisconnectCause,
@@ -1458,6 +1485,9 @@ async fn reconnect_and_replay(
         "server reconnect succeeded"
     );
     crate::metrics::reconnect_cause(outage.cause.label());
+    if let Some(detail_class) = outage.cause.detail_class() {
+        crate::metrics::disconnect_detail_class(outage.cause.label(), detail_class);
+    }
     crate::metrics::reconnect_gap_observe(silent_gap_ms as f64 / 1_000.0);
     *inner.connection_id.lock().await = Some(ack.connection_id.clone());
     *inner.hello_capabilities.write() = std::mem::take(&mut ack.capabilities);
@@ -1680,6 +1710,29 @@ mod tests {
         assert_eq!(write.label(), "transport_write_error");
         assert_eq!(write.detail(), Some("pipe"));
         assert_eq!(DisconnectCause::Forced.label(), "forced");
+    }
+    #[test]
+    fn classify_transport_detail_is_bounded() {
+        assert_eq!(
+            classify_transport_detail("Connection reset by peer (os error 104)"),
+            "connection_reset"
+        );
+        assert_eq!(classify_transport_detail("Broken pipe"), "broken_pipe");
+        assert_eq!(
+            classify_transport_detail("Unexpected EOF"),
+            "unexpected_eof"
+        );
+        assert_eq!(classify_transport_detail("operation timed out"), "timeout");
+        assert_eq!(
+            classify_transport_detail("Connection aborted"),
+            "connection_aborted"
+        );
+        assert_eq!(classify_transport_detail("something novel"), "other");
+        assert_eq!(
+            DisconnectCause::ReadError("ECONNRESET".to_owned()).detail_class(),
+            Some("connection_reset")
+        );
+        assert!(DisconnectCause::Eof.detail_class().is_none());
     }
     #[test]
     fn conn_health_snapshot_without_clock_skew_reports_zero_jump() {

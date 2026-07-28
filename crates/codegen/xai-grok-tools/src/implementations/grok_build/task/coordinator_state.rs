@@ -14,7 +14,6 @@ use super::types::{
 };
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
-/// Public so the subagent soak test can assert the coordinator stays bounded.
 pub const MAX_COMPLETED_ENTRIES: usize = 1024;
 pub(super) const OUTPUT_UNAVAILABLE_PLACEHOLDER: &str = "[subagent output no longer available]";
 

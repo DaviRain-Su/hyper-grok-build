@@ -835,6 +835,7 @@ mod tests {
             explicitly_killed: false,
             owner_session_id: owner.map(|s| s.to_string()),
             description: None,
+            is_backgrounded: false,
         }
     }
 

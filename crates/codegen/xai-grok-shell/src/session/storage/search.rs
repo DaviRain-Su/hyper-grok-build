@@ -633,7 +633,7 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
                 && should_skip_session(path, max_file_size)
             {
                 let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                tracing::warn!(
+                tracing::debug!(
                     session_id = %session_id,
                     file_size = file_size,
                     max_size = max_file_size,

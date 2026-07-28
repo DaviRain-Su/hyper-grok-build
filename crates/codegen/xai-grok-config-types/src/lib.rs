@@ -1003,6 +1003,9 @@ pub struct RemoteSettings {
     /// further override per the resolver chain.
     #[serde(default)]
     pub auto_compact_threshold_percent: Option<u8>,
+    /// Max subagent nesting depth (`grok_build_settings.subagents_max_depth`).
+    #[serde(default)]
+    pub subagents_max_depth: Option<u32>,
     /// Global system-prompt identity label. Per-model override wins; see
     /// `resolve_system_prompt_label`.
     #[serde(default)]

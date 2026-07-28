@@ -67,7 +67,7 @@ grok agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 | `--always-approve` | Run without interactive tool-permission prompts. Alias: `--yolo`. |
 | `--reauth` | Authenticate before the agent starts. |
 | `--agent-profile <PATH>` | Load an agent profile from a file. |
-| `--leader` / `--no-leader` | Connect to a shared leader process, or force a local agent. |
+| `--leader` / `--no-leader` | Connect to a shared leader process, or force a local agent. When a non-`off` sandbox profile is requested, leader mode is refused so tools stay in-process (see [Sandbox Mode](18-sandbox.md)). |
 
 ---
 

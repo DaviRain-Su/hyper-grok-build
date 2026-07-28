@@ -7,4 +7,7 @@ pub mod bench;
 pub mod replay;
 
 pub use bench::synthesize_to_target_bytes;
-pub use replay::{SessionSpec, locate_session_dir, prepare_session, sid, write_rewind_jsonl};
+pub use replay::{
+    SessionSpec, expected_replay_lines, locate_session_dir, prepare_session, sid,
+    write_rewind_jsonl,
+};

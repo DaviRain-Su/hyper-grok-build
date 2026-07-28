@@ -165,6 +165,12 @@ fn write_updates_jsonl(path: &Path, session_id: &str, spec: &SessionSpec) {
     std::fs::write(path, out).expect("write updates.jsonl");
 }
 
+/// Replay keeps the per-turn user and agent chunks and drops ACUs; keep in sync
+/// with `write_updates_jsonl`.
+pub fn expected_replay_lines(spec: &SessionSpec) -> usize {
+    spec.turns * (1 + spec.agent_chunks_per_turn)
+}
+
 pub fn write_rewind_jsonl(path: &Path, spec: &SessionSpec) {
     let mut out = String::new();
     for p in 0..spec.rewind_points {

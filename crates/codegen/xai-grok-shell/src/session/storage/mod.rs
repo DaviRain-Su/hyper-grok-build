@@ -3006,6 +3006,42 @@ mod tests {
     }
 
     #[test]
+    fn filter_rewind_ignores_a_malformed_middle_line() {
+        let user_message_1 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"first"}}"#,
+        );
+        let agent_message_1 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp1"}}"#,
+        );
+        let user_message_2 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"second"}}"#,
+        );
+        let agent_message_2 = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resp2"}}"#,
+        );
+        let rewind_to_1 = xai_envelope(
+            r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
+        );
+        let torn = "{ torn, unparseable jsonl line";
+
+        // The malformed line is kept but not counted as a prompt boundary, so
+        // the rewind still drops prompt 1.
+        let survivors = filter_rewind_lines(vec![
+            user_message_1.as_str(),
+            agent_message_1.as_str(),
+            torn,
+            user_message_2.as_str(),
+            agent_message_2.as_str(),
+            rewind_to_1.as_str(),
+        ]);
+
+        pretty_assertions::assert_eq!(
+            survivors,
+            vec![user_message_1.as_str(), agent_message_1.as_str(), torn]
+        );
+    }
+
+    #[test]
     fn filter_rewind_to_zero_clears_all() {
         let u1 = acp_envelope(
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"only"}}"#,

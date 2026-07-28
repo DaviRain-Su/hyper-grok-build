@@ -178,7 +178,7 @@ pub struct ToolContext {
     /// (`inject_pending_monitor_events`) and surfaced as ONE hidden
     /// synthetic user message before the next sampling step.
     pub monitor_event_buffer:
-        Option<xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer>,
+        Option<xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer>,
     pub task_completion_reservations:
         Option<xai_grok_tools::reminders::task_completion::TaskCompletionReservations>,
     pub task_wake_suppressed:

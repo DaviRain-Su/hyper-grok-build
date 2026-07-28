@@ -9,6 +9,7 @@
 //!
 //! - `SubagentBackendResource` — backend for spawn/query/cancel (required)
 //! - `SubagentDepthCounter` — current nesting depth (optional, defaults to 0)
+//! - `MaxSubagentDepth` — max nesting (optional, defaults to [`MAX_SUBAGENT_DEPTH`])
 //! - `SessionIdResource` — current session ID for parent scoping (optional)
 //! - `SubagentForegroundWait` — host wait-window guard factory (optional)
 //! - `TaskModelValidator` — validates explicit model slugs before spawn
@@ -30,9 +31,15 @@ use crate::types::resources::SharedResources;
 use crate::types::tool::{ToolKind, ToolNamespace};
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
-/// Maximum nesting depth for subagents. A top-level session is depth 0;
-/// the first subagent is depth 1. Subagents cannot spawn further subagents.
+/// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
 pub const MAX_SUBAGENT_DEPTH: u32 = 1;
+
+pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resources) -> u32 {
+    resources
+        .get::<MaxSubagentDepth>()
+        .map(|d| d.0)
+        .unwrap_or(MAX_SUBAGENT_DEPTH)
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Tool implementation
@@ -125,10 +132,19 @@ impl xai_tool_runtime::Tool for TaskTool {
             .map(|cancellation| cancellation.0.clone());
 
         // 1. Depth check
-        let (depth, backend, model_validator, parent_session_id, parent_prompt_id, foreground_wait) = {
+        let (
+            depth,
+            max_depth,
+            backend,
+            model_validator,
+            parent_session_id,
+            parent_prompt_id,
+            foreground_wait,
+        ) = {
             let res = resources.lock().await;
 
             let depth = res.get::<SubagentDepthCounter>().map(|d| d.0).unwrap_or(0);
+            let max_depth = effective_max_subagent_depth(&res);
 
             let backend = res
                 .get::<SubagentBackendResource>()
@@ -155,6 +171,7 @@ impl xai_tool_runtime::Tool for TaskTool {
 
             (
                 depth,
+                max_depth,
                 backend,
                 model_validator,
                 parent_session_id,
@@ -163,9 +180,9 @@ impl xai_tool_runtime::Tool for TaskTool {
             )
         };
 
-        if depth >= MAX_SUBAGENT_DEPTH {
+        if depth >= max_depth {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Subagent depth limit exceeded (current depth: {depth}, max: {MAX_SUBAGENT_DEPTH}). \
+                "Subagent depth limit exceeded (current depth: {depth}, max: {max_depth}). \
                  Cannot spawn further nested subagents."
             )));
         }
@@ -556,6 +573,41 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("depth limit exceeded"), "error: {err}");
+    }
+
+    #[tokio::test]
+    async fn raised_max_depth_allows_nested_spawn() {
+        let (backend, mut rx) = make_backend();
+        let mut resources = Resources::new();
+        resources.insert(backend);
+        resources.insert(SubagentDepthCounter(1));
+        resources.insert(MaxSubagentDepth(2));
+        resources.insert(SessionIdResource("child-session".to_string()));
+        resources.insert(CurrentPromptIdResource("prompt-nested".to_string()));
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            TaskToolInput {
+                description: "nested ok".into(),
+                prompt: "should be allowed at max_depth=2".into(),
+                subagent_type: "explore".into(),
+                run_in_background: true,
+                capability_mode: None,
+                isolation: None,
+                resume_from: None,
+                cwd: None,
+                model: None,
+                task_id: None,
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok at depth 1 with max 2: {result:?}"
+        );
+        let _ = rx.try_recv();
     }
 
     #[tokio::test]

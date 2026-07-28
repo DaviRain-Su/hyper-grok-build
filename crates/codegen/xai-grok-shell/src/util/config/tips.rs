@@ -112,11 +112,13 @@ pub fn resolve_tips_from_disk(
     crate::util::tips::pick_and_advance(&all, grok_home)
 }
 
+pub const SLASH_COMMAND_TAGS_CONFIG_PATH: &str = "slash_command_tags";
+
 /// Parse `[slash_command_tags]` from a TOML value into a name → tag map.
 /// Only string values are kept; non-string entries are ignored.
 fn slash_command_tags_from_toml(root: &TomlValue) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    if let Some(TomlValue::Table(table)) = root.get("slash_command_tags") {
+    if let Some(TomlValue::Table(table)) = root.get(SLASH_COMMAND_TAGS_CONFIG_PATH) {
         for (name, value) in table {
             if let Some(tag) = value.as_str() {
                 out.insert(name.clone(), tag.to_string());

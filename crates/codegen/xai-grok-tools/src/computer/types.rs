@@ -219,6 +219,9 @@ pub struct TaskSnapshot {
     /// Model-supplied label for task UI / snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// True after explicit/user/auto backgrounding; false for pure foreground runs.
+    #[serde(default)]
+    pub is_backgrounded: bool,
 }
 
 impl TaskSnapshot {
@@ -237,6 +240,11 @@ impl TaskSnapshot {
     /// backing work).
     pub fn is_outstanding(&self) -> bool {
         !self.completed
+    }
+
+    /// Incomplete and backgrounded — tray/`tasks_snapshot` predicate (not FG in-flight).
+    pub fn is_outstanding_background(&self) -> bool {
+        !self.completed && self.is_backgrounded
     }
 }
 
