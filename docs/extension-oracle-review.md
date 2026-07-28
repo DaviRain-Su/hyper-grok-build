@@ -29,15 +29,23 @@ Not production-complete for multi-session `register_tool` or stateful lifecycle.
 
 See [extension-vs-pi.md](./extension-vs-pi.md). Headline: **extension base yes; full Pi parity no**.
 
-## Remaining after this fix batch
+## Second Oracle pass (post P2/P3) — ship-with-fixes acted on
 
-1. ~~Session-local ToolBridge or unique client names~~ → **session-scoped** `wasm_{session12}_{ext}_{name}` + collision suffix  
-2. ~~Per-session Store retention~~ → retained Store/Instance under `Arc<Mutex<_>>`  
-3. ~~Epoch interrupt~~ → `Config::epoch_interruption` + `Engine::increment_epoch` on wall-clock timeout  
-4. ~~Per-extension fail-closed~~ → `runtime.gate_fail` in `plugin.json`  
-5. ~~SDK custom session handlers~~ → `extension_boilerplate! { session_start: …, session_end: … }`  
-6. Publishable SDK on crates.io — still monorepo path dependency (expected)  
-7. Component Model / full Pi history rewrite / multi-language — deferred  
+| Finding | Action |
+|---------|--------|
+| Reload skipped lifecycle | **Fixed:** end → rebuild → start → tools |
+| UTF-8 invoke truncate panic | **Fixed:** reject `PayloadTooLarge` |
+| Cancel detach guest | **Fixed:** `EpochCancelGuard` Drop increments epoch |
+| Free-form deny telemetry | **Fixed:** `category` only (`explicit_deny` / fail_closed) |
+| plugin_data_dir overclaim | **Docs:** path metadata, no FS access |
+| Invoke unadvertised tools | **Fixed:** advertised set after collect |
+
+## Remaining deferred
+
+1. Publishable SDK on crates.io — monorepo path for now  
+2. Concurrent multi-SessionActor E2E  
+3. Component Model / history rewrite / multi-language / full UI Host API  
+
 
 ## Verification
 

@@ -844,10 +844,10 @@ impl SessionActor {
         // Update session's plugin registry snapshot
         *self.plugin_registry.borrow_mut() = new_registry_snapshot.clone();
 
-        // Rebuild WASM extension runtime from trusted/enabled plugins and
-        // re-register wasm_* tools on the bridge.
+        // Rebuild WASM extension runtime with full lifecycle:
+        // old session_end → rebuild → new session_start → tool sync.
+        // (Oracle H1: previous path skipped both lifecycle callbacks.)
         {
-            let mut rt = self.extension_runtime.borrow_mut();
             let specs = new_registry_snapshot
                 .as_ref()
                 .map(|reg| {
@@ -857,16 +857,49 @@ impl SessionActor {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            rt.rebuild_from_specs(specs);
-            tracing::info!(
-                session_id = %sid,
-                wasm_extensions = rt.len(),
-                "extension runtime rebuilt from plugin registry"
-            );
+
+            let old_rt = self.extension_runtime.borrow().clone();
+            if !old_rt.is_empty() {
+                let _ = old_rt.dispatch_session_end().await;
+                crate::session::wasm_tools::emit_runtime_metrics(
+                    self.telemetry_enabled,
+                    "plugin_reload_before",
+                    &old_rt,
+                );
+            }
+
+            {
+                let mut rt = self.extension_runtime.borrow_mut();
+                rt.rebuild_from_specs(specs);
+                tracing::info!(
+                    session_id = %sid,
+                    wasm_extensions = rt.len(),
+                    "extension runtime rebuilt from plugin registry"
+                );
+            }
+
+            let new_rt = self.extension_runtime.borrow().clone();
+            if !new_rt.is_empty() {
+                let results = new_rt.dispatch_session_start().await;
+                for r in &results {
+                    if let xai_grok_extension_runtime::GuestCallResult::Failed {
+                        extension,
+                        error,
+                    } = r
+                    {
+                        tracing::warn!(
+                            extension = %extension,
+                            error = %error,
+                            "wasm extension session_start failed after plugin reload (fail-open)"
+                        );
+                    }
+                }
+            }
+
             let bridge = self.agent.borrow().tool_bridge().clone();
             let mut owned = self.wasm_registered_tools.borrow_mut();
             let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(
-                &bridge, &rt, &mut owned, sid,
+                &bridge, &new_rt, &mut owned, sid,
             )
             .await;
             tracing::info!(
@@ -877,7 +910,7 @@ impl SessionActor {
             crate::session::wasm_tools::emit_runtime_metrics(
                 self.telemetry_enabled,
                 "plugin_reload",
-                &rt,
+                &new_rt,
             );
         }
 

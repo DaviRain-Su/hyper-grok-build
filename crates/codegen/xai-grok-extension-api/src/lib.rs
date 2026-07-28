@@ -428,6 +428,8 @@ pub struct PreToolIn {
 }
 
 impl PreToolIn {
+    /// Cap tool input on a **char boundary** (never panic mid-UTF-8).
+    /// Prefer rejecting at higher layers when full JSON is required.
     pub fn capped(mut self) -> Self {
         if self.tool_input_json.len() > MAX_TOOL_PAYLOAD_BYTES {
             truncate_utf8(&mut self.tool_input_json, MAX_TOOL_PAYLOAD_BYTES);

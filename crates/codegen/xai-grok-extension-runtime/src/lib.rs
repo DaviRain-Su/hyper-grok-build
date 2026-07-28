@@ -68,6 +68,14 @@ pub enum RuntimeError {
     AbiMismatch { got: i32 },
     #[error("required export `{0}` missing")]
     MissingExport(&'static str),
+    #[error("tool payload too large: {got} bytes (max {MAX_TOOL_PAYLOAD_BYTES})")]
+    PayloadTooLarge { got: usize },
+    #[error("invalid tool name `{0}`")]
+    InvalidToolName(String),
+    #[error("tool `{0}` was not advertised by extension `{1}`")]
+    UnknownTool(String, String),
+    #[error("tool arguments must be valid JSON")]
+    InvalidToolArgs,
 }
 
 /// Log level for guest → host `hyper_host.log` (matches SDK constants).
@@ -316,6 +324,9 @@ struct LoadedGuest {
     gate_fail: Option<GateFailMode>,
     /// Absolute plugin data dir (empty if unknown).
     plugin_data_dir: String,
+    /// Short tool names last returned by [`ExtensionRuntime::collect_registered_tools`].
+    /// Empty until first successful collect; when non-empty, invoke must match.
+    advertised_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     #[cfg(feature = "wasm")]
     inner: WasmGuest,
     #[cfg(not(feature = "wasm"))]
@@ -407,6 +418,9 @@ impl ExtensionRuntime {
                         capabilities: spec.capabilities.clone(),
                         gate_fail: spec.gate_fail,
                         plugin_data_dir,
+                        advertised_tools: Arc::new(std::sync::Mutex::new(
+                            std::collections::HashSet::new(),
+                        )),
                         inner,
                     });
                     self.metrics.loads_ok.fetch_add(1, Ordering::Relaxed);
@@ -698,7 +712,8 @@ impl ExtensionRuntime {
     /// Collect tools from guests with [`Capability::RegisterTool`].
     ///
     /// Drops tools with empty/invalid names, invalid JSON Schema, or duplicate
-    /// short names within the same extension (Oracle validation).
+    /// short names within the same extension (Oracle validation). Updates each
+    /// guest's advertised-tool set used by [`Self::invoke_registered_tool`].
     pub async fn collect_registered_tools(&self) -> Vec<WasmToolDescriptor> {
         let mut out = Vec::new();
         #[cfg(feature = "wasm")]
@@ -722,6 +737,7 @@ impl ExtensionRuntime {
             // Cap tools per extension to avoid abuse.
             let count = count.min(32);
             let mut seen_names = std::collections::HashSet::new();
+            let mut guest_tools = Vec::new();
             for i in 0..count {
                 let host = HostCtx {
                     tool_index: i as i32,
@@ -766,13 +782,17 @@ impl ExtensionRuntime {
                     );
                     continue;
                 }
-                out.push(WasmToolDescriptor {
+                guest_tools.push(WasmToolDescriptor {
                     extension: guest.name.clone(),
                     name,
                     description: host_out.tool_description_out,
                     input_schema_json: schema,
                 });
             }
+            if let Ok(mut set) = guest.advertised_tools.lock() {
+                *set = guest_tools.iter().map(|t| t.name.clone()).collect();
+            }
+            out.extend(guest_tools);
         }
         self.metrics
             .tools_collected
@@ -782,6 +802,11 @@ impl ExtensionRuntime {
 
     /// Invoke a tool registered by a guest. `tool_name` is the **short** name
     /// from the guest (not the `wasm_*` client name).
+    ///
+    /// Rejects oversized payloads (no UTF-8 byte-slice truncate), non-JSON
+    /// args, invalid names, and names not advertised by the last
+    /// [`Self::collect_registered_tools`] for that extension (when any were
+    /// collected).
     pub async fn invoke_registered_tool(
         &self,
         extension: &str,
@@ -800,14 +825,44 @@ impl ExtensionRuntime {
                     "extension `{extension}` lacks register_tool capability"
                 )));
             }
-            let args = if args_json.len() > MAX_TOOL_PAYLOAD_BYTES {
-                &args_json[..MAX_TOOL_PAYLOAD_BYTES]
-            } else {
-                args_json
-            };
+            if args_json.len() > MAX_TOOL_PAYLOAD_BYTES {
+                self.metrics
+                    .tools_invoked_err
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(RuntimeError::PayloadTooLarge {
+                    got: args_json.len(),
+                });
+            }
+            if !is_valid_guest_tool_name(tool_name) {
+                self.metrics
+                    .tools_invoked_err
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(RuntimeError::InvalidToolName(tool_name.to_string()));
+            }
+            {
+                let advertised = guest
+                    .advertised_tools
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if !advertised.is_empty() && !advertised.contains(tool_name) {
+                    self.metrics
+                        .tools_invoked_err
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Err(RuntimeError::UnknownTool(
+                        tool_name.to_string(),
+                        extension.to_string(),
+                    ));
+                }
+            }
+            if serde_json::from_str::<serde_json::Value>(args_json).is_err() {
+                self.metrics
+                    .tools_invoked_err
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(RuntimeError::InvalidToolArgs);
+            }
             let host = HostCtx {
                 tool_name: tool_name.to_string(),
-                tool_input: args.to_string(),
+                tool_input: args_json.to_string(),
                 plugin_data_dir: guest.plugin_data_dir.clone(),
                 ..HostCtx::default()
             };
@@ -1142,6 +1197,13 @@ impl WasmGuest {
             GuestCall::InvokeTool => EXPORT_INVOKE_TOOL,
         };
 
+        // If this future is dropped (cancel/shutdown) while the guest is still
+        // running, increment the epoch so fuel/epoch traps release the live mutex.
+        let mut cancel_guard = EpochCancelGuard {
+            engine: self.engine.clone(),
+            armed: true,
+        };
+
         let mut join = tokio::task::spawn_blocking(move || {
             let mut guard = match live.lock() {
                 Ok(g) => g,
@@ -1180,7 +1242,7 @@ impl WasmGuest {
                     host_out,
                 );
             }
-            // Trap after one epoch increment from the async timeout path.
+            // Trap after one epoch increment (timeout or Drop cancel path).
             live_guest.store.set_epoch_deadline(1);
 
             let func = match live_guest
@@ -1217,7 +1279,7 @@ impl WasmGuest {
 
         // Keep the JoinHandle on timeout so we can epoch-interrupt and await
         // the trap (dropping the handle would detach and leak the mutex hold).
-        tokio::select! {
+        let out = tokio::select! {
             r = &mut join => {
                 match r {
                     Ok(pair) => pair,
@@ -1260,6 +1322,32 @@ impl WasmGuest {
                     ),
                 }
             }
+        };
+        cancel_guard.disarm();
+        out
+    }
+}
+
+/// Increments the engine epoch when dropped while still armed so a cancelled
+/// async caller can interrupt a busy guest (Oracle H3).
+#[cfg(feature = "wasm")]
+struct EpochCancelGuard {
+    engine: wasmtime::Engine,
+    armed: bool,
+}
+
+#[cfg(feature = "wasm")]
+impl EpochCancelGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "wasm")]
+impl Drop for EpochCancelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.engine.increment_epoch();
         }
     }
 }
@@ -1842,6 +1930,57 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("\"x\""), "{out}");
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_oversized_payload_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "echo2.wasm", ECHO_TOOL_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "echo-ext",
+            path,
+            vec![Capability::RegisterTool],
+        ))
+        .unwrap();
+        let _ = rt.collect_registered_tools().await;
+        // Multibyte UTF-8 so a naïve byte truncate would panic mid-codepoint.
+        let mut body = "é".repeat(MAX_TOOL_PAYLOAD_BYTES);
+        body.push('x');
+        let args = format!(r#"{{"msg":"{body}"}}"#);
+        assert!(args.len() > MAX_TOOL_PAYLOAD_BYTES);
+        let err = rt
+            .invoke_registered_tool("echo-ext", "echo", &args)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::PayloadTooLarge { .. }),
+            "expected PayloadTooLarge, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_unknown_and_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "echo3.wasm", ECHO_TOOL_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "echo-ext",
+            path,
+            vec![Capability::RegisterTool],
+        ))
+        .unwrap();
+        let _ = rt.collect_registered_tools().await;
+        let err = rt
+            .invoke_registered_tool("echo-ext", "not_a_tool", "{}")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::UnknownTool(_, _)), "{err:?}");
+        let err = rt
+            .invoke_registered_tool("echo-ext", "echo", "not-json")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::InvalidToolArgs), "{err:?}");
     }
 
     #[tokio::test]

@@ -30,7 +30,10 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 - [x] Runtime **metrics** snapshot (`loads_ok`, `pre_tool_denies`, `calls_timeout`, …)
 - [x] Metrics **lifecycle emit**: session_start / plugin_reload / session_end  
   (tracing `wasm_extension` + product events `wasm_extension_metrics`)
-- [x] Deny telemetry: `wasm_extension_blocked` (+ existing `hook_blocked` with `wasm:{ext}`)
+- [x] Deny telemetry: `wasm_extension_blocked` with **category only** (no guest free-form text)
+- [x] Plugin reload: old `session_end` → rebuild → new `session_start` → tool sync
+- [x] Invoke rejects oversized/non-JSON args (no UTF-8 mid-codepoint slice)
+- [x] Cancel path epoch interrupt (`EpochCancelGuard` on drop)
 - [x] Guest read-only **plugin data dir** (`plugin_data_dir_*` / SDK `plugin_data_dir()`)
 - [x] Shell smoke: session-scoped tool register + unregister on `ToolBridge`
 - [x] SessionActor e2e: `prepare_tool_call` wasm deny/allow + tool register

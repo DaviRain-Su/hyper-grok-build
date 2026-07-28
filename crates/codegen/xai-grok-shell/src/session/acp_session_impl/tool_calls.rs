@@ -1017,7 +1017,7 @@ impl SessionActor {
                     self.telemetry_enabled,
                     &extension,
                     &resolved_tool_name,
-                    &reason,
+                    crate::session::wasm_tools::deny_category_from_reason(&reason),
                 );
                 return Ok(Err(self
                     .deny_tool(

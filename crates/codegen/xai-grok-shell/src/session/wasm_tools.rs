@@ -10,8 +10,31 @@ use xai_tool_types::ToolDescription;
 /// Client name prefix for WASM extension tools (`wasm_...`).
 pub const WASM_TOOL_PREFIX: &str = "wasm_";
 
-/// Cap deny-reason length before product telemetry (avoid huge guest strings).
-const TELEMETRY_REASON_MAX: usize = 256;
+/// Telemetry categories for wasm gate denials (no free-form guest text).
+pub const DENY_CAT_EXPLICIT: &str = "explicit_deny";
+pub const DENY_CAT_TRAP_CLOSED: &str = "trap_fail_closed";
+pub const DENY_CAT_TIMEOUT_CLOSED: &str = "timeout_fail_closed";
+
+/// Map a host-facing deny reason string to a telemetry category.
+///
+/// Free-form guest reasons always map to [`DENY_CAT_EXPLICIT`]; only host-generated
+/// fail-closed messages are classified as trap/timeout.
+pub fn deny_category_from_reason(reason: &str) -> &'static str {
+    let r = reason.to_ascii_lowercase();
+    if !r.contains("failed closed") {
+        return DENY_CAT_EXPLICIT;
+    }
+    // Host phrases: "trap/timeout", "timeout", or "trap".
+    let has_timeout = r.contains("timeout");
+    let has_trap = r.contains("trap");
+    match (has_trap, has_timeout) {
+        (false, true) => DENY_CAT_TIMEOUT_CLOSED,
+        (true, false) => DENY_CAT_TRAP_CLOSED,
+        // Combined host wording uses trap/timeout — treat as trap_fail_closed.
+        (true, true) => DENY_CAT_TRAP_CLOSED,
+        (false, false) => DENY_CAT_TRAP_CLOSED,
+    }
+}
 
 /// Emit runtime counters to tracing **and** the product/dual telemetry funnel.
 ///
@@ -47,33 +70,21 @@ pub fn emit_runtime_metrics(
 }
 
 /// Product telemetry for a wasm pre_tool deny (in addition to [`HookBlocked`]
-/// with `hook_name = wasm:{ext}`).
+/// with `hook_name = wasm:{ext}`). Uses a **category**, never free-form guest text.
 pub fn emit_wasm_extension_blocked(
     telemetry_enabled: bool,
     extension: &str,
     tool_name: &str,
-    reason: &str,
+    category: &str,
 ) {
-    let reason = truncate_reason(reason);
     xai_grok_telemetry::session_ctx::log_event_dual(
         telemetry_enabled,
         xai_grok_telemetry::events::WasmExtensionBlocked {
             extension: extension.to_string(),
             tool_name: Some(tool_name.to_string()),
-            reason,
+            category: category.to_string(),
         },
     );
-}
-
-fn truncate_reason(s: &str) -> String {
-    if s.len() <= TELEMETRY_REASON_MAX {
-        return s.to_string();
-    }
-    let mut end = TELEMETRY_REASON_MAX;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 /// Dynamic tool that forwards `run` into a loaded WASM guest.
@@ -260,12 +271,21 @@ mod tests {
     }
 
     #[test]
-    fn truncate_reason_caps_length() {
-        let long = "x".repeat(500);
-        let t = truncate_reason(&long);
-        assert!(t.len() <= TELEMETRY_REASON_MAX + "…".len());
-        assert!(t.ends_with('…'));
-        assert_eq!(truncate_reason("short"), "short");
+    fn deny_category_classifies_host_fail_closed() {
+        assert_eq!(
+            deny_category_from_reason(
+                "wasm extension `x` failed closed (trap/timeout on tool `t`)"
+            ),
+            DENY_CAT_TRAP_CLOSED
+        );
+        assert_eq!(
+            deny_category_from_reason("denied by wasm extension `x` (tool `t`)"),
+            DENY_CAT_EXPLICIT
+        );
+        assert_eq!(
+            deny_category_from_reason("guest said: user@secret.example/token"),
+            DENY_CAT_EXPLICIT
+        );
     }
 
     /// Session-level smoke: load fixture guest → register session-scoped tools

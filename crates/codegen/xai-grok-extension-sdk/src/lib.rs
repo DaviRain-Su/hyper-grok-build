@@ -159,7 +159,9 @@ pub fn log_error(msg: &str) {
     log(LOG_ERROR, msg);
 }
 
-/// Host-provided plugin data directory (`~/.grok/plugin-data/<id>/` when known).
+/// Host-provided plugin data directory path string (`~/.grok/plugin-data/<id>/`
+/// when known). **Metadata only** — the bootstrap guest has no filesystem
+/// import; do not assume you can open files at this path from Wasm.
 /// Empty when the host did not wire a path (e.g. bare runtime tests).
 pub fn plugin_data_dir() -> String {
     host::read_plugin_data_dir()

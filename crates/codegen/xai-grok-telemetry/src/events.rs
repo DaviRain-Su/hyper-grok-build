@@ -751,14 +751,15 @@ pub struct WasmExtensionMetrics {
 }
 
 /// A WASM pre_tool (or similar) gate denied a tool. Complements [`HookBlocked`]
-/// (`hook_name` = `wasm:{ext}`) with structured fields for dashboards.
+/// (`hook_name` = `wasm:{ext}`) with **categorical** fields only — never free-form
+/// guest text (Oracle H4 / PII).
 #[derive(Serialize)]
 pub struct WasmExtensionBlocked {
     pub extension: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
-    /// Short deny reason (host-capped; not full guest payload).
-    pub reason: String,
+    /// Bounded category: `explicit_deny` | `trap_fail_closed` | `timeout_fail_closed`.
+    pub category: String,
 }
 
 /// Per-callback outcome of a `PreToolUse` gate. A deny returns early, so callbacks
