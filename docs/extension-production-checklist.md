@@ -32,6 +32,8 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
   (`ExtensionRuntime::log_metrics`, target `wasm_extension`)
 - [x] Guest read-only **plugin data dir** (`plugin_data_dir_*` / SDK `plugin_data_dir()`)
 - [x] Shell smoke: session-scoped tool register + unregister on `ToolBridge`
+- [x] SessionActor e2e: `prepare_tool_call` wasm deny/allow + tool register
+  (`acp_session_tests/wasm_extension_e2e_tests.rs`)
 - [ ] Full UI Host API (status line / ACP notify) — **defer (P4)**
 
 ## Ops / rollout
@@ -60,5 +62,6 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 ```bash
 ./scripts/check-extensions.sh
 cargo test -p xai-grok-extension-runtime --lib
+cargo test -p xai-grok-shell --lib wasm_extension_e2e
 cargo check -p xai-grok-shell -p xai-grok-pager
 ```

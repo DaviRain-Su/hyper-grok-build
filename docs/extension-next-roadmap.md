@@ -48,7 +48,7 @@
 | 31 | deny 时同步打 metrics 摘要 | **done** | `tool_calls` warn + counters |
 | 32 | `plugin details` 展示 runtime/cap/gate_fail | **done** | print_component_summary |
 | 33 | init 默认 capabilities 与模板对齐 | **done** | +`register_tool` |
-| 34 | 整 SessionActor 级 e2e（可选） | optional | bridge smoke 已覆盖关键路径 |
+| 34 | 整 SessionActor 级 e2e（prepare_tool_call + tools） | **done** | `wasm_extension_e2e_tests` |
 | 35 | 指标 → mixpanel/外部 telemetry 管道 | optional | 有产品需求再接 |
 
 ### P4 — 远期难项（原 P2b / 设计 Phase 4 defer）— **有触发再开**
@@ -86,6 +86,6 @@
 
 ## 5. 本文件状态
 
-- **现在：** **P2 关闭**；**P3 主线 30–33 关闭**（可选 34–35 仍开放）  
-- **下一刀：** 仅可选加深或等触发开 P4  
+- **现在：** **P2 关闭**；**P3 主线 30–34 关闭**（仅 35 外部 telemetry 可选）  
+- **下一刀：** 试点真实插件 / 等触发开 P4  
 - 清单： [extension-production-checklist.md](./extension-production-checklist.md)  
