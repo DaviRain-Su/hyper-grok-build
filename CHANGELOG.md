@@ -4,6 +4,36 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r2] — 2026-07-28
+
+### Added
+- **Pi-aligned provider platform** — Data-driven registry and reproducible catalog sync pinned to `@earendil-works/pi-ai@0.82.1`, covering all 37 static Pi providers plus dynamic Radius discovery. Hyper now ships 42 provider rows and 1,144 catalog models with explicit endpoint, authentication, protocol, thinking, and request-compat metadata.
+- **Native provider backends** — First-class Google GenerateContent (Gemini and Vertex), Amazon Bedrock ConverseStream, and Pi `pi-messages` adapters with streaming text/reasoning, tool calls, cache/reasoning usage, provider-reported cost, and provider-native continuation state.
+- **Provider authentication** — GitHub Copilot OAuth and model discovery; Radius browser PKCE, device flow, refresh-token rotation, API-key priority, credential-scoped dynamic caching, single-flight refresh, and stale fallback; expanded API-key and hybrid-provider login/logout UX across CLI and TUI.
+- **WASM extension platform** — Trusted plugins can load sandboxed Wasmtime guests and participate in session start/end, before-agent, before-model, pre-tool, stop-gate, and pre-compaction lifecycle points. Capability-gated guests can inject context, deny tools, continue a turn, register session-scoped tools, emit metrics, and retain bounded per-session state.
+- **Extension author tooling** — New extension API/runtime/SDK crates, declarative Rust guest macros, checked-in examples, plugin init/build/validate commands, runtime details in `/plugins`, author documentation, and a path-filtered extension CI workflow.
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `02d9359`, including scheduler foreground/background loop semantics, plan-exit batch barriers, leader sandbox confinement, workspace/hub reliability, and pager session-state improvements.
+- **Provider routing architecture** — Sampling now dispatches through explicit backend adapters instead of inferring behavior from provider names. Opaque reasoning signatures are replayed only when model, backend, and endpoint identities match.
+
+### Fixed
+- **Provider stream correctness** — Hardened truncated/unknown event handling, zero-argument and interleaved tool calls, authoritative argument assembly, usage/cost accounting, idle timeouts, and portable fallback when native continuation identity changes.
+- **OAuth and dynamic catalog safety** — Radius callback errors are accepted only after OAuth state validation, expiry skew is applied once, and dynamic model updates remain atomic and credential-isolated.
+- **Extension lifecycle isolation** — WASM tools are scoped and cleaned up per session; concurrent sessions cannot unregister each other’s tools; fail-closed trap behavior, stop continuation caps, fuel/epoch bounds, and guest memory limits are covered end to end.
+
+### Notes
+- This is community revision `0.2.114-r2`; it remains a normal GitHub Release so installers and `hyper update` treat it as latest.
+- The extension ABI is the documented core-WASM bootstrap contract. Only trusted, enabled plugins load; policy gates default to fail-open for compatibility unless `runtime.gate_fail` or `GROK_EXTENSION_GATE_FAIL` selects `closed`.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r2
+```
+
 ## [0.2.114-r1] — 2026-07-28
 
 ### Added
