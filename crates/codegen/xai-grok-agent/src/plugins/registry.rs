@@ -77,6 +77,8 @@ pub struct LoadedPlugin {
     pub runtime_wasm: Option<PathBuf>,
     /// Capability strings from `plugin.json` `runtime.capabilities`.
     pub runtime_capabilities: Vec<String>,
+    /// Per-extension gate fail mode from `runtime.gate_fail` (overrides env default).
+    pub runtime_gate_fail: Option<xai_grok_extension_api::GateFailMode>,
     /// Whether a WASM runtime module was discovered.
     pub has_runtime: bool,
     /// Warning if this plugin won a name collision with another plugin.
@@ -118,6 +120,7 @@ impl LoadedPlugin {
             wasm_path,
             capabilities,
             trusted: true,
+            gate_fail: self.runtime_gate_fail,
         })
     }
 }
@@ -206,6 +209,11 @@ impl PluginRegistry {
                 .as_ref()
                 .map(|r| r.capabilities.clone())
                 .unwrap_or_default();
+            let runtime_gate_fail = dp
+                .manifest
+                .runtime
+                .as_ref()
+                .and_then(|r| r.gate_fail);
             let runtime_wasm = dp.runtime_wasm.clone();
             let has_runtime = runtime_wasm.is_some();
 
@@ -252,6 +260,7 @@ impl PluginRegistry {
                 inline_lsp_servers,
                 runtime_wasm,
                 runtime_capabilities,
+                runtime_gate_fail,
                 has_runtime,
                 conflict: dp.conflict,
             };

@@ -104,9 +104,30 @@ pub const EMPTY_OBJECT_SCHEMA: &str = r#"{"type":"object","properties":{}}"#;
 /// ```ignore
 /// xai_grok_extension_sdk::extension_boilerplate!();
 /// ```
+///
+/// Custom lifecycle handlers without dropping the macro:
+/// ```ignore
+/// fn on_start() -> i32 {
+///     // warm caches, etc.
+///     0
+/// }
+/// xai_grok_extension_sdk::extension_boilerplate! {
+///     session_start: on_start,
+/// }
+/// // or: session_start: || { 0 }, session_end: my_end
+/// ```
 #[macro_export]
 macro_rules! extension_boilerplate {
     () => {
+        $crate::extension_boilerplate!(session_start: || 0i32, session_end: || 0i32);
+    };
+    (session_start: $start:expr) => {
+        $crate::extension_boilerplate!(session_start: $start, session_end: || 0i32);
+    };
+    (session_end: $end:expr) => {
+        $crate::extension_boilerplate!(session_start: || 0i32, session_end: $end);
+    };
+    (session_start: $start:expr, session_end: $end:expr $(,)?) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn hyper_ext_abi_version() -> i32 {
             $crate::CORE_ABI_VERSION
@@ -114,12 +135,12 @@ macro_rules! extension_boilerplate {
 
         #[unsafe(no_mangle)]
         pub extern "C" fn hyper_ext_on_session_start() -> i32 {
-            0
+            ($start)()
         }
 
         #[unsafe(no_mangle)]
         pub extern "C" fn hyper_ext_on_session_end() -> i32 {
-            0
+            ($end)()
         }
     };
 }

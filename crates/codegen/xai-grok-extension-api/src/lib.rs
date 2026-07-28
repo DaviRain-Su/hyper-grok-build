@@ -92,11 +92,26 @@ pub struct WasmToolDescriptor {
 }
 
 impl WasmToolDescriptor {
-    /// Client-facing tool name: `wasm_{extension}_{name}` (sanitized).
+    /// Client-facing tool name without session scope: `wasm_{extension}_{name}`.
+    ///
+    /// Prefer [`Self::client_name_for_session`] when registering on a shared
+    /// ToolBridge so concurrent sessions do not collide.
     pub fn client_name(&self) -> String {
+        self.client_name_for_session(None)
+    }
+
+    /// Client-facing tool name, optionally session-scoped.
+    ///
+    /// With a session key: `wasm_{session}_{extension}_{name}` (all tokens
+    /// sanitized). Session keys are shortened to 12 alphanumeric chars so
+    /// UUIDs stay within tool-id length budgets.
+    pub fn client_name_for_session(&self, session_key: Option<&str>) -> String {
         let ext = sanitize_tool_token(&self.extension);
         let name = sanitize_tool_token(&self.name);
-        format!("wasm_{ext}_{name}")
+        match session_key.map(short_session_token).filter(|s| !s.is_empty()) {
+            Some(sk) => format!("wasm_{sk}_{ext}_{name}"),
+            None => format!("wasm_{ext}_{name}"),
+        }
     }
 
     pub fn parsed_schema(&self) -> serde_json::Value {
@@ -106,7 +121,33 @@ impl WasmToolDescriptor {
     }
 }
 
-fn sanitize_tool_token(s: &str) -> String {
+/// Max length for a guest-advertised short tool name.
+pub const MAX_TOOL_NAME_LEN: usize = 64;
+
+/// Whether a guest tool short-name is acceptable for registration.
+pub fn is_valid_guest_tool_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_TOOL_NAME_LEN {
+        return false;
+    }
+    // ToolId segments are [a-zA-Z0-9_-]+ after sanitization; allow `.` in the
+    // guest name (sanitized to `_`) for author convenience.
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// True when `schema_json` parses as a JSON object (or is empty → default).
+pub fn is_valid_tool_schema_json(schema_json: &str) -> bool {
+    if schema_json.is_empty() {
+        return true;
+    }
+    match serde_json::from_str::<serde_json::Value>(schema_json) {
+        Ok(v) => v.is_object(),
+        Err(_) => false,
+    }
+}
+
+/// Sanitize a token for use inside a `wasm_*` client tool name.
+pub fn sanitize_tool_token(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -115,6 +156,15 @@ fn sanitize_tool_token(s: &str) -> String {
                 '_'
             }
         })
+        .collect()
+}
+
+/// Compact session id fragment for tool client names (max 12 alnum chars).
+pub fn short_session_token(session_id: &str) -> String {
+    session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(12)
         .collect()
 }
 
@@ -239,6 +289,10 @@ pub struct RuntimeManifest {
     pub wit: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Per-extension gate fail mode. When set, overrides the process default
+    /// (`GROK_EXTENSION_GATE_FAIL` / runtime-level setting) for this guest only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_fail: Option<GateFailMode>,
 }
 
 fn default_wasm_path() -> String {
@@ -255,6 +309,7 @@ impl Default for RuntimeManifest {
             wasm: default_wasm_path(),
             wit: default_wit(),
             capabilities: Vec::new(),
+            gate_fail: None,
         }
     }
 }
@@ -279,6 +334,8 @@ pub struct ExtensionSpec {
     pub wasm_path: PathBuf,
     pub capabilities: Vec<Capability>,
     pub trusted: bool,
+    /// Per-extension gate fail mode; `None` inherits the runtime/process default.
+    pub gate_fail: Option<GateFailMode>,
 }
 
 impl ExtensionSpec {
@@ -289,6 +346,11 @@ impl ExtensionSpec {
 
     pub fn allows(&self, cap: Capability) -> bool {
         self.capabilities.contains(&cap)
+    }
+
+    /// Effective gate fail mode for this spec.
+    pub fn effective_gate_fail(&self, runtime_default: GateFailMode) -> GateFailMode {
+        self.gate_fail.unwrap_or(runtime_default)
     }
 }
 
@@ -439,6 +501,16 @@ mod tests {
             input_schema_json: "{}".into(),
         };
         assert_eq!(d.client_name(), "wasm_my-ext_echo_tool");
+        assert_eq!(
+            d.client_name_for_session(Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890")),
+            "wasm_a1b2c3d4e5f6_my-ext_echo_tool"
+        );
+        assert!(is_valid_guest_tool_name("echo_tool"));
+        assert!(!is_valid_guest_tool_name(""));
+        assert!(!is_valid_guest_tool_name("bad name"));
+        assert!(is_valid_tool_schema_json(r#"{"type":"object"}"#));
+        assert!(!is_valid_tool_schema_json("[1,2]"));
+        assert!(!is_valid_tool_schema_json("not-json"));
     }
 
     #[test]
@@ -448,8 +520,21 @@ mod tests {
             wasm_path: PathBuf::from("extension.wasm"),
             capabilities: vec![Capability::PreToolGate],
             trusted: false,
+            gate_fail: None,
         };
         assert!(!spec.may_load());
+        assert_eq!(
+            spec.effective_gate_fail(GateFailMode::Open),
+            GateFailMode::Open
+        );
+        let closed = ExtensionSpec {
+            gate_fail: Some(GateFailMode::Closed),
+            ..spec
+        };
+        assert_eq!(
+            closed.effective_gate_fail(GateFailMode::Open),
+            GateFailMode::Closed
+        );
     }
 
     #[test]
@@ -487,5 +572,10 @@ mod tests {
         let m: RuntimeManifest = serde_json::from_str("{}").unwrap();
         assert_eq!(m.wasm, "extension.wasm");
         assert_eq!(m.wit, WIT_PACKAGE_FULL);
+        assert_eq!(m.gate_fail, None);
+        let m2: RuntimeManifest =
+            serde_json::from_str(r#"{"gate_fail":"closed","capabilities":["pre_tool_gate"]}"#)
+                .unwrap();
+        assert_eq!(m2.gate_fail, Some(GateFailMode::Closed));
     }
 }

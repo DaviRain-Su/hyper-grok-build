@@ -1602,6 +1602,7 @@ mod tests {
             inline_lsp_servers: None,
             runtime_wasm: None,
             runtime_capabilities: vec![],
+            runtime_gate_fail: None,
             has_runtime: false,
             conflict: None,
         };
@@ -2357,6 +2358,7 @@ mod tests {
             inline_lsp_servers: None,
             runtime_wasm: None,
             runtime_capabilities: vec![],
+            runtime_gate_fail: None,
             has_runtime: false,
             conflict: None,
         }

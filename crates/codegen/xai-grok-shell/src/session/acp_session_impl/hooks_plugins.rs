@@ -866,7 +866,7 @@ impl SessionActor {
             let bridge = self.agent.borrow().tool_bridge().clone();
             let mut owned = self.wasm_registered_tools.borrow_mut();
             let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(
-                &bridge, &rt, &mut owned,
+                &bridge, &rt, &mut owned, sid,
             )
             .await;
             tracing::info!(

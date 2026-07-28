@@ -391,10 +391,14 @@ world extension {
 
 - [x] guest `set_gate_reason` + deny/stop 自定义 reason  
 - [x] `GateFailMode` + env `GROK_EXTENSION_GATE_FAIL=open|closed`  
+- [x] 每扩展 `runtime.gate_fail`（覆盖 env 默认）  
 - [x] `plugin validate --load`  
 - [x] e2e：加载 `rust-guest-template/extension.wasm` deny/inject  
 - [x] `plugin init` 脚手架 + PluginInfo `has_runtime`  
 - [x] Linker 缓存（热路径轻量复用）  
+- [x] 会话保留 Store/Instance（guest 全局状态跨调用）  
+- [x] Epoch interrupt + fuel 限制忙循环  
+- [x] 会话级 `wasm_{session}_{ext}_{name}` 工具名 + 注册校验  
 
 ### Phase 4 — 新能力（第三梯队）
 
@@ -403,8 +407,8 @@ world extension {
 - [ ] `before_model` **rewrite**（改消息数组）— 另议，安全面大  
 - [ ] Component Model + wit-bindgen — **可选升级**，见 [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)  
 - [ ] TS/Go 等作者语言  
-- [ ] UI Host API / guest 持久 store  
-- [ ] 全 Instance 会话复用 + 正式 bench  
+- [ ] UI Host API  
+- [ ] 正式 bench（加载 N 扩展）  
 
 细节见 [design-wasm-phase4-spike.md](./design-wasm-phase4-spike.md)。  
 **为何不必急着换 API：** [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)。

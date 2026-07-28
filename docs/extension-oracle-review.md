@@ -15,11 +15,11 @@ Not production-complete for multi-session `register_tool` or stateful lifecycle.
 |---|---------|--------|
 | 1 | Global `unregister_tools_by_prefix("wasm_")` cross-session unsafe | **Fixed:** session-owned name list + `unregister_tool_by_name` only |
 | 2 | Tools not synced at first session | **Already wired** at `DispatchSessionStartHook` + reload; comment clarified |
-| 3 | Stateless instance per call | **Documented** as intentional bootstrap; full Pi state deferred |
+| 3 | Stateless instance per call | **Fixed:** session-retained Store/Instance (guest globals persist) |
 | 4 | No memory limits | **Fixed:** module size cap + `StoreLimits` memory/tables |
-| 5 | fail-closed coarse | Env-level remains; per-extension later |
+| 5 | fail-closed coarse | **Fixed:** env default + per-extension `runtime.gate_fail` |
 | 6 | Coarse trust | Unchanged; product policy |
-| 7 | register_tool validation weak | Partial (no silent shared `wasm_tool` id) |
+| 7 | register_tool validation weak | **Fixed:** name/schema/uniqueness checks; session-scoped client names |
 | 8 | WIT marketed as live | ABI strategy doc already says bootstrap is real API |
 | 9 | Missing lifecycle inputs | Deferred |
 | 10 | discovery misses wasm-only dirs | **Fixed:** convention `extension.wasm` counts as component |
@@ -31,16 +31,19 @@ See [extension-vs-pi.md](./extension-vs-pi.md). Headline: **extension base yes; 
 
 ## Remaining after this fix batch
 
-1. Session-local ToolBridge or unique client names under multi-session contention  
-2. Optional per-session Store retention for state  
-3. Epoch interrupt / cancel spawn_blocking after timeout  
-4. Per-extension fail-closed in manifest  
-5. Publishable SDK + custom session_start without replacing boilerplate  
+1. ~~Session-local ToolBridge or unique client names~~ → **session-scoped** `wasm_{session12}_{ext}_{name}` + collision suffix  
+2. ~~Per-session Store retention~~ → retained Store/Instance under `Arc<Mutex<_>>`  
+3. ~~Epoch interrupt~~ → `Config::epoch_interruption` + `Engine::increment_epoch` on wall-clock timeout  
+4. ~~Per-extension fail-closed~~ → `runtime.gate_fail` in `plugin.json`  
+5. ~~SDK custom session handlers~~ → `extension_boilerplate! { session_start: …, session_end: … }`  
+6. Publishable SDK on crates.io — still monorepo path dependency (expected)  
+7. Component Model / full Pi history rewrite / multi-language — deferred  
 
 ## Verification
 
 ```bash
 ./scripts/check-extensions.sh
+cargo test -p xai-grok-extension-api --lib
 cargo test -p xai-grok-extension-runtime --lib
-cargo check -p xai-grok-shell
+cargo check -p xai-grok-shell -p xai-grok-agent
 ```

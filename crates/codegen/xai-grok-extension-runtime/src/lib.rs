@@ -34,12 +34,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use xai_grok_extension_api::{
-    timeouts, BeforeAgentStartIn, BeforeAgentStartOut, Capability, ContractError, ExtensionSpec,
-    GateFailMode, PreCompactIn, PreToolIn, StopIn, StopOut, WasmToolDescriptor, CORE_ABI_VERSION,
-    EXPORT_ABI_VERSION, EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START,
-    EXPORT_ON_BEFORE_MODEL, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
-    EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT, MAX_INJECT_BYTES,
-    MAX_TOOL_PAYLOAD_BYTES,
+    is_valid_guest_tool_name, is_valid_tool_schema_json, timeouts, BeforeAgentStartIn,
+    BeforeAgentStartOut, Capability, ContractError, ExtensionSpec, GateFailMode, PreCompactIn,
+    PreToolIn, StopIn, StopOut, WasmToolDescriptor, CORE_ABI_VERSION, EXPORT_ABI_VERSION,
+    EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START, EXPORT_ON_BEFORE_MODEL,
+    EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START,
+    EXPORT_ON_STOP, EXPORT_TOOL_COUNT, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES,
 };
 
 /// Errors from loading or calling a guest.
@@ -123,6 +123,8 @@ impl Default for HostCtx {
 #[derive(Clone)]
 pub struct ExtensionRuntime {
     guests: Vec<LoadedGuest>,
+    /// Process/runtime default when a guest does not set `gate_fail` in its
+    /// `plugin.json` `runtime` block.
     gate_fail: GateFailMode,
 }
 
@@ -139,10 +141,18 @@ impl Default for ExtensionRuntime {
 struct LoadedGuest {
     name: String,
     capabilities: Vec<Capability>,
+    /// Per-guest override; `None` uses [`ExtensionRuntime::gate_fail`].
+    gate_fail: Option<GateFailMode>,
     #[cfg(feature = "wasm")]
     inner: WasmGuest,
     #[cfg(not(feature = "wasm"))]
     _inner: (),
+}
+
+impl ExtensionRuntime {
+    fn effective_gate_fail(&self, guest: &LoadedGuest) -> GateFailMode {
+        guest.gate_fail.unwrap_or(self.gate_fail)
+    }
 }
 
 impl ExtensionRuntime {
@@ -205,6 +215,7 @@ impl ExtensionRuntime {
             self.guests.push(LoadedGuest {
                 name: spec.name.clone(),
                 capabilities: spec.capabilities.clone(),
+                gate_fail: spec.gate_fail,
                 inner,
             });
             Ok(())
@@ -330,7 +341,7 @@ impl ExtensionRuntime {
                 .await;
             let name = guest.name.clone();
             let blocked = matches!(&r, GuestCallResult::Ok { code: 1, .. });
-            let failed_closed = self.gate_fail == GateFailMode::Closed
+            let failed_closed = self.effective_gate_fail(guest) == GateFailMode::Closed
                 && matches!(
                     &r,
                     GuestCallResult::Failed { .. } | GuestCallResult::Timeout { .. }
@@ -420,7 +431,7 @@ impl ExtensionRuntime {
                 .await;
             let name = guest.name.clone();
             let denied = matches!(&r, GuestCallResult::Ok { code: 1, .. });
-            let failed_closed = self.gate_fail == GateFailMode::Closed
+            let failed_closed = self.effective_gate_fail(guest) == GateFailMode::Closed
                 && matches!(
                     &r,
                     GuestCallResult::Failed { .. } | GuestCallResult::Timeout { .. }
@@ -474,6 +485,9 @@ impl ExtensionRuntime {
     }
 
     /// Collect tools from guests with [`Capability::RegisterTool`].
+    ///
+    /// Drops tools with empty/invalid names, invalid JSON Schema, or duplicate
+    /// short names within the same extension (Oracle validation).
     pub async fn collect_registered_tools(&self) -> Vec<WasmToolDescriptor> {
         let mut out = Vec::new();
         #[cfg(feature = "wasm")]
@@ -491,6 +505,7 @@ impl ExtensionRuntime {
             };
             // Cap tools per extension to avoid abuse.
             let count = count.min(32);
+            let mut seen_names = std::collections::HashSet::new();
             for i in 0..count {
                 let host = HostCtx {
                     tool_index: i as i32,
@@ -503,18 +518,41 @@ impl ExtensionRuntime {
                 if !matches!(r, GuestCallResult::Ok { code: 0, .. }) {
                     continue;
                 }
-                if host_out.tool_name_out.is_empty() {
+                let name = host_out.tool_name_out;
+                if !is_valid_guest_tool_name(&name) {
+                    tracing::warn!(
+                        extension = %guest.name,
+                        tool = %name,
+                        "skipping wasm tool with invalid name"
+                    );
+                    continue;
+                }
+                if !seen_names.insert(name.clone()) {
+                    tracing::warn!(
+                        extension = %guest.name,
+                        tool = %name,
+                        "skipping duplicate wasm tool name within extension"
+                    );
+                    continue;
+                }
+                let schema = if host_out.tool_schema_out.is_empty() {
+                    r#"{"type":"object","properties":{}}"#.to_string()
+                } else {
+                    host_out.tool_schema_out
+                };
+                if !is_valid_tool_schema_json(&schema) {
+                    tracing::warn!(
+                        extension = %guest.name,
+                        tool = %name,
+                        "skipping wasm tool with invalid JSON Schema (must be object)"
+                    );
                     continue;
                 }
                 out.push(WasmToolDescriptor {
                     extension: guest.name.clone(),
-                    name: host_out.tool_name_out,
+                    name,
                     description: host_out.tool_description_out,
-                    input_schema_json: if host_out.tool_schema_out.is_empty() {
-                        r#"{"type":"object","properties":{}}"#.into()
-                    } else {
-                        host_out.tool_schema_out
-                    },
+                    input_schema_json: schema,
                 });
             }
         }
@@ -684,6 +722,14 @@ pub struct StopDispatch {
 // wasmtime backend
 // ---------------------------------------------------------------------------
 
+/// Retained store + instance so guest globals/memory survive across calls
+/// (Pi-like stateful lifecycle within one session runtime).
+#[cfg(feature = "wasm")]
+struct LiveGuest {
+    store: wasmtime::Store<HostCtx>,
+    instance: wasmtime::Instance,
+}
+
 #[cfg(feature = "wasm")]
 #[derive(Clone)]
 struct WasmGuest {
@@ -692,6 +738,8 @@ struct WasmGuest {
     module: Arc<wasmtime::Module>,
     /// Cached linker (host imports) — avoids re-registering funcs each call.
     linker: Arc<wasmtime::Linker<HostCtx>>,
+    /// Session-retained instance (shared across [`ExtensionRuntime`] clones).
+    live: Arc<std::sync::Mutex<Option<LiveGuest>>>,
 }
 
 #[cfg(feature = "wasm")]
@@ -721,18 +769,22 @@ impl WasmGuest {
         }
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
+        // Wall-clock timeout can interrupt busy guest loops via epoch trap.
+        config.epoch_interruption(true);
         let engine =
             wasmtime::Engine::new(&config).map_err(|e| RuntimeError::Module(e.to_string()))?;
         let module = wasmtime::Module::new(&engine, bytes)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
         let linker = Arc::new(build_linker(&engine)?);
 
-        // Validate ABI at load time.
+        // Validate ABI at load time (fresh store; live instance created on first call).
         let mut store = wasmtime::Store::new(&engine, HostCtx::default());
         store.limiter(|s| &mut s.limits);
         store
             .set_fuel(1_000_000)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_trap();
         let instance = linker
             .instantiate(&mut store, &module)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
@@ -754,7 +806,41 @@ impl WasmGuest {
             engine,
             module: Arc::new(module),
             linker,
+            live: Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    fn apply_host_inputs(data: &mut HostCtx, host: HostCtx) {
+        // Keep resource limits attached to the store; only swap call inputs/outputs.
+        let limits = std::mem::replace(&mut data.limits, HostCtx::default().limits);
+        *data = host;
+        data.limits = limits;
+        data.inject_context.clear();
+        data.append_system.clear();
+        data.gate_reason.clear();
+        data.tool_name_out.clear();
+        data.tool_description_out.clear();
+        data.tool_schema_out.clear();
+        data.tool_result_out.clear();
+    }
+
+    fn take_host_outputs(data: &mut HostCtx) -> HostCtx {
+        HostCtx {
+            tool_name: std::mem::take(&mut data.tool_name),
+            tool_input: std::mem::take(&mut data.tool_input),
+            prompt: std::mem::take(&mut data.prompt),
+            inject_context: std::mem::take(&mut data.inject_context),
+            append_system: std::mem::take(&mut data.append_system),
+            stop_hook_active: data.stop_hook_active,
+            compact_reason: std::mem::take(&mut data.compact_reason),
+            gate_reason: std::mem::take(&mut data.gate_reason),
+            tool_index: data.tool_index,
+            tool_name_out: std::mem::take(&mut data.tool_name_out),
+            tool_description_out: std::mem::take(&mut data.tool_description_out),
+            tool_schema_out: std::mem::take(&mut data.tool_schema_out),
+            tool_result_out: std::mem::take(&mut data.tool_result_out),
+            limits: HostCtx::default().limits,
+        }
     }
 
     async fn call_with_timeout_host(
@@ -766,6 +852,7 @@ impl WasmGuest {
         let engine = self.engine.clone();
         let module = Arc::clone(&self.module);
         let linker = Arc::clone(&self.linker);
+        let live = Arc::clone(&self.live);
         let name = self.name_for_logs.clone();
         let export = match call {
             GuestCall::SessionStart => EXPORT_ON_SESSION_START,
@@ -780,46 +867,64 @@ impl WasmGuest {
             GuestCall::InvokeTool => EXPORT_INVOKE_TOOL,
         };
 
-        let join = tokio::task::spawn_blocking(move || {
-            let mut store = wasmtime::Store::new(&engine, host);
-            store.limiter(|s| &mut s.limits);
-            if let Err(e) = store.set_fuel(10_000_000) {
-                let host = store.into_data();
+        let mut join = tokio::task::spawn_blocking(move || {
+            let mut guard = match live.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+
+            if guard.is_none() {
+                let mut store = wasmtime::Store::new(&engine, HostCtx::default());
+                store.limiter(|s| &mut s.limits);
+                store.epoch_deadline_trap();
+                let instance = match linker.instantiate(&mut store, &module) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        return (
+                            GuestCallResult::Failed {
+                                extension: name,
+                                error: e.to_string(),
+                            },
+                            host,
+                        );
+                    }
+                };
+                *guard = Some(LiveGuest { store, instance });
+            }
+
+            let live_guest = guard.as_mut().expect("just ensured");
+            Self::apply_host_inputs(live_guest.store.data_mut(), host);
+
+            if let Err(e) = live_guest.store.set_fuel(10_000_000) {
+                let host_out = Self::take_host_outputs(live_guest.store.data_mut());
                 return (
                     GuestCallResult::Failed {
                         extension: name,
                         error: e.to_string(),
                     },
-                    host,
+                    host_out,
                 );
             }
-            let instance = match linker.instantiate(&mut store, &module) {
-                Ok(i) => i,
-                Err(e) => {
-                    let host = store.into_data();
-                    return (
-                        GuestCallResult::Failed {
-                            extension: name,
-                            error: e.to_string(),
-                        },
-                        host,
-                    );
-                }
-            };
-            let func = match instance.get_typed_func::<(), i32>(&mut store, export) {
+            // Trap after one epoch increment from the async timeout path.
+            live_guest.store.set_epoch_deadline(1);
+
+            let func = match live_guest
+                .instance
+                .get_typed_func::<(), i32>(&mut live_guest.store, export)
+            {
                 Ok(f) => f,
                 Err(_) => {
-                    let host = store.into_data();
+                    let host_out = Self::take_host_outputs(live_guest.store.data_mut());
                     return (
                         GuestCallResult::SkippedExport {
                             extension: name,
                             export,
                         },
-                        host,
+                        host_out,
                     );
                 }
             };
-            let result = match func.call(&mut store, ()) {
+            let result = match func.call(&mut live_guest.store, ()) {
                 Ok(code) => GuestCallResult::Ok {
                     extension: name,
                     code,
@@ -829,26 +934,55 @@ impl WasmGuest {
                     error: e.to_string(),
                 },
             };
-            let host = store.into_data();
-            (result, host)
+            let host_out = Self::take_host_outputs(live_guest.store.data_mut());
+            (result, host_out)
         });
 
-        match tokio::time::timeout(limit, join).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(join_err)) => (
-                GuestCallResult::Failed {
-                    extension: self.name_for_logs.clone(),
-                    error: join_err.to_string(),
-                },
-                HostCtx::default(),
-            ),
-            Err(_) => (
-                GuestCallResult::Timeout {
-                    extension: self.name_for_logs.clone(),
-                    limit,
-                },
-                HostCtx::default(),
-            ),
+        // Keep the JoinHandle on timeout so we can epoch-interrupt and await
+        // the trap (dropping the handle would detach and leak the mutex hold).
+        tokio::select! {
+            r = &mut join => {
+                match r {
+                    Ok(pair) => pair,
+                    Err(join_err) => (
+                        GuestCallResult::Failed {
+                            extension: self.name_for_logs.clone(),
+                            error: join_err.to_string(),
+                        },
+                        HostCtx::default(),
+                    ),
+                }
+            }
+            _ = tokio::time::sleep(limit) => {
+                self.engine.increment_epoch();
+                let grace = Duration::from_millis(250);
+                match tokio::time::timeout(grace, join).await {
+                    Ok(Ok((result, host_out))) => match result {
+                        GuestCallResult::Failed { extension, .. } => (
+                            GuestCallResult::Timeout {
+                                extension,
+                                limit,
+                            },
+                            host_out,
+                        ),
+                        other => (other, host_out),
+                    },
+                    Ok(Err(join_err)) => (
+                        GuestCallResult::Failed {
+                            extension: self.name_for_logs.clone(),
+                            error: join_err.to_string(),
+                        },
+                        HostCtx::default(),
+                    ),
+                    Err(_) => (
+                        GuestCallResult::Timeout {
+                            extension: self.name_for_logs.clone(),
+                            limit,
+                        },
+                        HostCtx::default(),
+                    ),
+                }
+            }
         }
     }
 }
@@ -1177,6 +1311,22 @@ mod tests {
             wasm_path: path,
             capabilities: caps,
             trusted: true,
+            gate_fail: None,
+        }
+    }
+
+    fn trusted_spec_gate(
+        name: &str,
+        path: PathBuf,
+        caps: Vec<Capability>,
+        gate_fail: GateFailMode,
+    ) -> ExtensionSpec {
+        ExtensionSpec {
+            name: name.into(),
+            wasm_path: path,
+            capabilities: caps,
+            trusted: true,
+            gate_fail: Some(gate_fail),
         }
     }
 
@@ -1573,5 +1723,150 @@ mod tests {
             Err(RuntimeError::MissingExport(EXPORT_ON_SESSION_START)) => {}
             Err(e) => panic!("expected MissingExport(session_start), got {e:?}"),
         }
+    }
+
+    /// Global counter increments across calls only when the instance is retained.
+    const STATEFUL_COUNTER_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "set_tool_result" (func $set_result (param i32 i32)))
+          (import "hyper_host" "set_tool_name" (func $set_name (param i32 i32)))
+          (import "hyper_host" "set_tool_description" (func $set_desc (param i32 i32)))
+          (import "hyper_host" "set_tool_schema" (func $set_schema (param i32 i32)))
+          (memory (export "memory") 1)
+          (global $count (mut i32) (i32.const 0))
+          (data (i32.const 0) "counter")
+          (data (i32.const 16) "stateful counter")
+          (data (i32.const 48) "{\"type\":\"object\",\"properties\":{}}")
+          (data (i32.const 96) "1")
+          (data (i32.const 98) "2")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_tool_count") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_describe_tool") (result i32)
+            (call $set_name (i32.const 0) (i32.const 7))
+            (call $set_desc (i32.const 16) (i32.const 16))
+            (call $set_schema (i32.const 48) (i32.const 33))
+            i32.const 0)
+          (func (export "hyper_ext_invoke_tool") (result i32)
+            (global.set $count (i32.add (global.get $count) (i32.const 1)))
+            (if (i32.eq (global.get $count) (i32.const 1))
+              (then (call $set_result (i32.const 96) (i32.const 1)))
+              (else (call $set_result (i32.const 98) (i32.const 1))))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn retained_instance_preserves_guest_globals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "state.wasm", STATEFUL_COUNTER_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "stateful",
+            path,
+            vec![Capability::RegisterTool],
+        ))
+        .unwrap();
+        let a = rt
+            .invoke_registered_tool("stateful", "counter", "{}")
+            .await
+            .unwrap();
+        let b = rt
+            .invoke_registered_tool("stateful", "counter", "{}")
+            .await
+            .unwrap();
+        assert_eq!(a, "1", "first invoke should see count=1");
+        assert_eq!(b, "2", "second invoke should see retained count=2, got {b}");
+    }
+
+    #[tokio::test]
+    async fn per_extension_fail_closed_overrides_runtime_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "trap-tool3.wasm", TRAP_ON_PRE_TOOL);
+        // Runtime default open, guest manifest closed → deny on trap.
+        let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Open);
+        rt.load(&trusted_spec_gate(
+            "trap",
+            path,
+            vec![Capability::PreToolGate],
+            GateFailMode::Closed,
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "x".into(),
+                tool_input_json: "{}".into(),
+            })
+            .await;
+        assert!(matches!(d.decision, PreToolDecision::Deny { .. }));
+    }
+
+    const BAD_TOOL_NAME_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "set_tool_name" (func $set_name (param i32 i32)))
+          (import "hyper_host" "set_tool_schema" (func $set_schema (param i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "bad name")
+          (data (i32.const 16) "not-json")
+          (func (export "hyper_ext_abi_version") (result i32) i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32) i32.const 0)
+          (func (export "hyper_ext_tool_count") (result i32) i32.const 1)
+          (func (export "hyper_ext_describe_tool") (result i32)
+            (call $set_name (i32.const 0) (i32.const 8))
+            (call $set_schema (i32.const 16) (i32.const 8))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn collect_tools_skips_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "bad-tool.wasm", BAD_TOOL_NAME_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "bad",
+            path,
+            vec![Capability::RegisterTool],
+        ))
+        .unwrap();
+        let tools = rt.collect_registered_tools().await;
+        assert!(tools.is_empty(), "invalid tool should be skipped: {tools:?}");
+    }
+
+    /// Busy loop until fuel/epoch kills it (no host imports).
+    const INFINITE_LOOP_GUEST: &str = r#"
+        (module
+          (func (export "hyper_ext_abi_version") (result i32) i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            (loop $forever (br $forever))
+            i32.const 0)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn busy_guest_is_bounded_by_fuel_or_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "loop.wasm", INFINITE_LOOP_GUEST);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec("loop", path, vec![])).unwrap();
+        let start = std::time::Instant::now();
+        let results = rt.dispatch_session_start().await;
+        // Fuel often wins first on a tight loop; epoch path also maps to Timeout.
+        assert!(
+            matches!(
+                &results[0],
+                GuestCallResult::Timeout { .. } | GuestCallResult::Failed { .. }
+            ),
+            "expected Timeout or Failed, got {:?}",
+            results[0]
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "bounded path too slow: {:?}",
+            start.elapsed()
+        );
     }
 }

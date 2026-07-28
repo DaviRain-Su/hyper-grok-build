@@ -887,6 +887,7 @@ mod tests {
                 wasm: "ext.wasm".into(),
                 wit: xai_grok_extension_api::WIT_PACKAGE_FULL.into(),
                 capabilities: vec!["pre_tool_gate".into()],
+                gate_fail: None,
             }),
         };
         assert_eq!(m2.runtime_wasm_path(root).as_deref(), Some(custom.as_path()));

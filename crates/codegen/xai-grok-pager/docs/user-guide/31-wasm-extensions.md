@@ -48,10 +48,14 @@ Minimal `plugin.json`:
   "runtime": {
     "wasm": "extension.wasm",
     "wit": "hyper:extension@0.1.0",
-    "capabilities": ["pre_tool_gate"]
+    "capabilities": ["pre_tool_gate"],
+    "gate_fail": "closed"
   }
 }
 ```
+
+`gate_fail` is optional (`open` | `closed`). When set, it overrides the process
+default from `GROK_EXTENSION_GATE_FAIL` for **this** extension only.
 
 ### Capabilities
 
@@ -61,7 +65,7 @@ Minimal `plugin.json`:
 | `pre_tool_gate` | `pre_tool_use` may **deny** |
 | `before_agent_inject` | May inject context / append system notes before the agent loop |
 | `stop_gate` | May **block** turn completion (force another round) |
-| `register_tool` | Expose guest tools as `wasm_{ext}_{name}` on the tool bridge |
+| `register_tool` | Expose guest tools as session-scoped `wasm_{session}_{ext}_{name}` |
 | `before_model_inject` | Inject system-reminder **each model round** (not history rewrite) |
 
 Without a `runtime` block, a root-level `extension.wasm` is still discovered,
@@ -74,7 +78,12 @@ but with **no capabilities**.
 - Only **enabled + trusted** plugins load WASM (same trust model as hooks/MCP).
 - User plugins under `~/.grok/plugins/` are auto-trusted.
 - Project plugins need folder trust / install `--trust`.
-- Guest traps and timeouts are **fail-open** (do not crash the session).
+- Guest traps and timeouts are **fail-open** by default (do not crash the session).
+  Set `GROK_EXTENSION_GATE_FAIL=closed` or per-plugin `runtime.gate_fail: "closed"`
+  so a trap/timeout on a gate capability becomes **deny/block**.
+- Each session keeps one Store/Instance per loaded guest (guest globals persist
+  across calls within that session). Busy loops are cut by fuel and epoch
+  interrupt when the wall-clock timeout fires.
 
 ---
 
@@ -125,6 +134,8 @@ cd my-ext
 # edit src/lib.rs using:
 #   use xai_grok_extension_sdk::prelude::*;
 #   xai_grok_extension_sdk::extension_boilerplate!();
+# custom lifecycle (optional):
+#   extension_boilerplate! { session_start: || { /* warm */ 0 }, }
 rustup target add wasm32-unknown-unknown
 cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/hyper_ext_rust_guest_template.wasm \
