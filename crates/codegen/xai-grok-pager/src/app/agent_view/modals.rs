@@ -2209,6 +2209,8 @@ mod extensions_action_target_tests {
             marketplace_source: None,
             origin: None,
             conflict: None,
+            has_runtime: false,
+            runtime_capabilities: vec![],
         }
     }
 
@@ -2968,6 +2970,8 @@ mod extensions_modal_confirmation_tests {
             marketplace_source: None,
             origin: None,
             conflict: None,
+            has_runtime: false,
+            runtime_capabilities: vec![],
         }
     }
 

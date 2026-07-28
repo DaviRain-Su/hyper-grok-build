@@ -147,14 +147,21 @@ enabled = ["safe-shell-wasm"]
 
 Reload plugins in the TUI (`/plugins` → `r`) or start a new session.
 
-Validate before sharing:
+Scaffold and validate:
 
 ```bash
-grok plugin validate ./safe-shell-wasm
+grok plugin init ./my-ext --name my-ext
+grok plugin validate ./my-ext --load   # also instantiate ABI
 ```
 
-Checks name, runtime path, `\0asm` magic, WIT compatibility, and known
-capabilities.
+`--load` uses wasmtime to verify `hyper_ext_abi_version` and required exports.
+
+Hard security gates (optional fail-closed):
+
+```bash
+export GROK_EXTENSION_GATE_FAIL=closed   # trap/timeout on gates → deny
+# default: open (fail-open, same as classic hooks)
+```
 
 ---
 

@@ -24,6 +24,7 @@ extern "C" {
     fn prompt_byte(idx: i32) -> i32;
     fn set_inject_context(ptr: *const u8, len: i32);
     fn set_append_system(ptr: *const u8, len: i32);
+    fn set_gate_reason(ptr: *const u8, len: i32);
     fn stop_hook_active() -> i32;
 }
 
@@ -50,6 +51,10 @@ pub extern "C" fn hyper_ext_on_session_end() -> i32 {
 pub extern "C" fn hyper_ext_on_pre_tool_use() -> i32 {
     // Example: deny if tool input JSON contains ASCII "rm -rf"
     if input_contains(b"rm -rf") {
+        let msg = b"rust-guest-template: blocked rm -rf in tool input";
+        unsafe {
+            set_gate_reason(msg.as_ptr(), msg.len() as i32);
+        }
         1
     } else {
         0

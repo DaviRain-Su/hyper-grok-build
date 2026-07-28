@@ -71,6 +71,8 @@ pub fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlugin) -> 
         marketplace_source: marketplace_source_label(&origin),
         origin: Some(origin),
         conflict: plugin.conflict.clone(),
+        has_runtime: plugin.has_runtime,
+        runtime_capabilities: plugin.runtime_capabilities.clone(),
     }
 }
 

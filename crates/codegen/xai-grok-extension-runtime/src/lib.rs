@@ -22,6 +22,7 @@
 //! | `input_byte` | `(i32) -> i32` | byte at index, or `-1` |
 //! | `prompt_len` / `prompt_byte` | | user prompt for before_agent_start |
 //! | `set_inject_context` / `set_append_system` | `(ptr,len)` | guest memory UTF-8 |
+//! | `set_gate_reason` | `(ptr,len)` | deny/stop reason string for host UI |
 //! | `stop_hook_active` | `() -> i32` | 1 if stop gate already continued |
 //! | `compact_reason_len` / `compact_reason_byte` | | pre_compact reason |
 //!
@@ -34,7 +35,7 @@ use std::time::Duration;
 
 use xai_grok_extension_api::{
     timeouts, BeforeAgentStartIn, BeforeAgentStartOut, Capability, ContractError, ExtensionSpec,
-    PreCompactIn, PreToolIn, StopIn, StopOut, CORE_ABI_VERSION, EXPORT_ABI_VERSION,
+    GateFailMode, PreCompactIn, PreToolIn, StopIn, StopOut, CORE_ABI_VERSION, EXPORT_ABI_VERSION,
     EXPORT_ON_BEFORE_AGENT_START, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
     EXPORT_ON_SESSION_START, EXPORT_ON_STOP, MAX_INJECT_BYTES,
 };
@@ -77,12 +78,24 @@ struct HostCtx {
     append_system: String,
     stop_hook_active: bool,
     compact_reason: String,
+    /// Written by guest via `set_gate_reason` (deny / stop block message).
+    gate_reason: String,
 }
 
 /// Per-session registry of loaded extensions.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ExtensionRuntime {
     guests: Vec<LoadedGuest>,
+    gate_fail: GateFailMode,
+}
+
+impl Default for ExtensionRuntime {
+    fn default() -> Self {
+        Self {
+            guests: Vec::new(),
+            gate_fail: GateFailMode::from_env(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -98,6 +111,19 @@ struct LoadedGuest {
 impl ExtensionRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_gate_fail(mut self, mode: GateFailMode) -> Self {
+        self.gate_fail = mode;
+        self
+    }
+
+    pub fn set_gate_fail(&mut self, mode: GateFailMode) {
+        self.gate_fail = mode;
+    }
+
+    pub fn gate_fail(&self) -> GateFailMode {
+        self.gate_fail
     }
 
     pub fn len(&self) -> usize {
@@ -232,18 +258,28 @@ impl ExtensionRuntime {
                 stop_hook_active: input.stop_hook_active,
                 ..HostCtx::default()
             };
-            let (r, _) = guest
+            let (r, host_out) = guest
                 .inner
                 .call_with_timeout_host(GuestCall::Stop, timeouts::GATE, host)
                 .await;
-            let blocked = matches!(&r, GuestCallResult::Ok { code: 1, .. });
             let name = guest.name.clone();
+            let blocked = matches!(&r, GuestCallResult::Ok { code: 1, .. });
+            let failed_closed = self.gate_fail == GateFailMode::Closed
+                && matches!(
+                    &r,
+                    GuestCallResult::Failed { .. } | GuestCallResult::Timeout { .. }
+                );
             results.push((name.clone(), r));
-            if blocked {
+            if blocked || failed_closed {
+                let reason = if !host_out.gate_reason.is_empty() {
+                    host_out.gate_reason
+                } else if failed_closed {
+                    format!("wasm extension `{name}` failed closed (trap/timeout on stop)")
+                } else {
+                    format!("blocked by wasm extension `{name}`")
+                };
                 return StopDispatch {
-                    decision: StopOut::Block {
-                        reason: format!("blocked by wasm extension `{name}`"),
-                    },
+                    decision: StopOut::Block { reason },
                     results,
                 };
             }
@@ -291,7 +327,7 @@ impl ExtensionRuntime {
     }
 
     /// Pre-tool gate: first deny wins among guests with [`Capability::PreToolGate`].
-    /// Trap/timeout/missing export = fail-open.
+    /// Trap/timeout: [`GateFailMode::Open`] allows; [`GateFailMode::Closed`] denies.
     pub async fn dispatch_pre_tool_use(&self, input: &PreToolIn) -> PreToolDispatch {
         let input = input.clone().capped();
         let mut results = Vec::new();
@@ -312,21 +348,36 @@ impl ExtensionRuntime {
                 tool_input: input.tool_input_json.clone(),
                 ..HostCtx::default()
             };
-            let (r, _) = guest
+            let (r, host_out) = guest
                 .inner
                 .call_with_timeout_host(GuestCall::PreToolUse, timeouts::GATE, host)
                 .await;
-            let denied = matches!(&r, GuestCallResult::Ok { code: 1, .. });
             let name = guest.name.clone();
+            let denied = matches!(&r, GuestCallResult::Ok { code: 1, .. });
+            let failed_closed = self.gate_fail == GateFailMode::Closed
+                && matches!(
+                    &r,
+                    GuestCallResult::Failed { .. } | GuestCallResult::Timeout { .. }
+                );
             results.push((name.clone(), r));
-            if denied {
+            if denied || failed_closed {
+                let reason = if !host_out.gate_reason.is_empty() {
+                    host_out.gate_reason
+                } else if failed_closed {
+                    format!(
+                        "wasm extension `{name}` failed closed (trap/timeout on tool `{}`)",
+                        input.tool_name
+                    )
+                } else {
+                    format!(
+                        "denied by wasm extension `{name}` (tool `{}`)",
+                        input.tool_name
+                    )
+                };
                 return PreToolDispatch {
                     decision: PreToolDecision::Deny {
-                        extension: name.clone(),
-                        reason: format!(
-                            "denied by wasm extension `{name}` (tool `{}`)",
-                            input.tool_name
-                        ),
+                        extension: name,
+                        reason,
                     },
                     results,
                 };
@@ -340,6 +391,19 @@ impl ExtensionRuntime {
         PreToolDispatch {
             decision: PreToolDecision::Allow,
             results,
+        }
+    }
+
+    /// Load-only validation (ABI + required exports). Used by `plugin validate --load`.
+    pub fn validate_wasm_file(path: &Path) -> Result<(), RuntimeError> {
+        #[cfg(feature = "wasm")]
+        {
+            WasmGuest::load(path).map(|_| ())
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = path;
+            Err(RuntimeError::WasmDisabled)
         }
     }
 
@@ -447,6 +511,8 @@ struct WasmGuest {
     name_for_logs: String,
     engine: wasmtime::Engine,
     module: Arc<wasmtime::Module>,
+    /// Cached linker (host imports) — avoids re-registering funcs each call.
+    linker: Arc<wasmtime::Linker<HostCtx>>,
 }
 
 #[cfg(feature = "wasm")]
@@ -472,13 +538,13 @@ impl WasmGuest {
             wasmtime::Engine::new(&config).map_err(|e| RuntimeError::Module(e.to_string()))?;
         let module = wasmtime::Module::new(&engine, bytes)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
+        let linker = Arc::new(build_linker(&engine)?);
 
         // Validate ABI at load time.
         let mut store = wasmtime::Store::new(&engine, HostCtx::default());
         store
             .set_fuel(1_000_000)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
-        let linker = build_linker(&engine)?;
         let instance = linker
             .instantiate(&mut store, &module)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
@@ -499,6 +565,7 @@ impl WasmGuest {
             name_for_logs,
             engine,
             module: Arc::new(module),
+            linker,
         })
     }
 
@@ -510,6 +577,7 @@ impl WasmGuest {
     ) -> (GuestCallResult, HostCtx) {
         let engine = self.engine.clone();
         let module = Arc::clone(&self.module);
+        let linker = Arc::clone(&self.linker);
         let name = self.name_for_logs.clone();
         let export = match call {
             GuestCall::SessionStart => EXPORT_ON_SESSION_START,
@@ -532,19 +600,6 @@ impl WasmGuest {
                     host,
                 );
             }
-            let linker = match build_linker(&engine) {
-                Ok(l) => l,
-                Err(e) => {
-                    let host = store.into_data();
-                    return (
-                        GuestCallResult::Failed {
-                            extension: name,
-                            error: e.to_string(),
-                        },
-                        host,
-                    );
-                }
-            };
             let instance = match linker.instantiate(&mut store, &module) {
                 Ok(i) => i,
                 Err(e) => {
@@ -680,6 +735,17 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
             |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
                 if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
                     caller.data_mut().append_system = s;
+                }
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "set_gate_reason",
+            |mut caller: wasmtime::Caller<'_, HostCtx>, ptr: i32, len: i32| {
+                if let Some(s) = read_guest_utf8(&mut caller, ptr, len) {
+                    caller.data_mut().gate_reason = s;
                 }
             },
         )
@@ -827,6 +893,32 @@ mod tests {
         )
     "#;
 
+    const DENY_WITH_REASON: &str = r#"
+        (module
+          (import "hyper_host" "set_gate_reason" (func $set_reason (param i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "custom-deny-reason")
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_pre_tool_use") (result i32)
+            (call $set_reason (i32.const 0) (i32.const 18))
+            i32.const 1)
+        )
+    "#;
+
+    const TRAP_ON_PRE_TOOL: &str = r#"
+        (module
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_pre_tool_use") (result i32)
+            unreachable)
+        )
+    "#;
+
     fn write_wasm(dir: &tempfile::TempDir, name: &str, wat: &str) -> PathBuf {
         let path = dir.path().join(name);
         let bytes = wat_to_wasm(wat).expect("wat");
@@ -886,6 +978,111 @@ mod tests {
         rt.load(&trusted_spec("trap", path, vec![])).unwrap();
         let results = rt.dispatch_session_start().await;
         assert!(matches!(results[0], GuestCallResult::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn deny_with_custom_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "deny.wasm", DENY_WITH_REASON);
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "pol",
+            path,
+            vec![Capability::PreToolGate],
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "run_terminal_command".into(),
+                tool_input_json: "{}".into(),
+            })
+            .await;
+        match d.decision {
+            PreToolDecision::Deny { reason, .. } => {
+                assert!(reason.contains("custom-deny-reason"), "{reason}");
+            }
+            _ => panic!("expected deny"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_closed_denies_on_trap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "trap-tool.wasm", TRAP_ON_PRE_TOOL);
+        let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Closed);
+        rt.load(&trusted_spec(
+            "trap",
+            path,
+            vec![Capability::PreToolGate],
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "x".into(),
+                tool_input_json: "{}".into(),
+            })
+            .await;
+        assert!(matches!(d.decision, PreToolDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn fail_open_allows_on_trap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "trap-tool2.wasm", TRAP_ON_PRE_TOOL);
+        let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Open);
+        rt.load(&trusted_spec(
+            "trap",
+            path,
+            vec![Capability::PreToolGate],
+        ))
+        .unwrap();
+        let d = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "x".into(),
+                tool_input_json: "{}".into(),
+            })
+            .await;
+        assert!(matches!(d.decision, PreToolDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn e2e_load_checked_in_rust_template_wasm() {
+        // Integration-style: load the official Rust template's extension.wasm
+        // from the examples tree (checked into git).
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/rust-guest-template/extension.wasm");
+        if !path.is_file() {
+            eprintln!("skip: no rust-guest-template/extension.wasm");
+            return;
+        }
+        ExtensionRuntime::validate_wasm_file(&path).expect("validate load");
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "rust-guest-template",
+            path,
+            vec![Capability::PreToolGate, Capability::BeforeAgentInject],
+        ))
+        .unwrap();
+        let deny = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "run_terminal_command".into(),
+                tool_input_json: r#"{"command":"rm -rf /tmp"}"#.into(),
+            })
+            .await;
+        assert!(matches!(deny.decision, PreToolDecision::Deny { .. }));
+        let allow = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "run_terminal_command".into(),
+                tool_input_json: r#"{"command":"ls"}"#.into(),
+            })
+            .await;
+        assert!(matches!(allow.decision, PreToolDecision::Allow));
+        let inj = rt
+            .dispatch_before_agent_start(&BeforeAgentStartIn {
+                prompt: "hi".into(),
+            })
+            .await;
+        assert!(inj.has_injection());
     }
 
     #[tokio::test]

@@ -25,6 +25,37 @@ pub const WIT_PACKAGE_FULL: &str = "hyper:extension@0.1.0";
 /// Phase 0 core-wasm ABI version. Guests export `hyper_ext_abi_version() -> i32`.
 pub const CORE_ABI_VERSION: i32 = 1;
 
+/// How gate handlers treat guest trap / timeout.
+///
+/// Default [`GateFailMode::Open`] matches classic hooks (fail-open). Set
+/// [`GateFailMode::Closed`] for hard security policies (deny on trap/timeout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateFailMode {
+    /// Trap/timeout → allow (log only).
+    #[default]
+    Open,
+    /// Trap/timeout on a gate capability → deny/block.
+    Closed,
+}
+
+impl GateFailMode {
+    /// Parse `open` / `closed` (case-insensitive). Unknown → Open.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "closed" | "fail-closed" | "fail_closed" => Self::Closed,
+            _ => Self::Open,
+        }
+    }
+
+    /// From `GROK_EXTENSION_GATE_FAIL` env (`open` | `closed`).
+    pub fn from_env() -> Self {
+        std::env::var("GROK_EXTENSION_GATE_FAIL")
+            .map(|v| Self::parse(&v))
+            .unwrap_or_default()
+    }
+}
+
 /// Export name: guest returns [`CORE_ABI_VERSION`].
 pub const EXPORT_ABI_VERSION: &str = "hyper_ext_abi_version";
 /// Export name: session start handler; return `0` on success.

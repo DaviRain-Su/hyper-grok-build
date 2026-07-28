@@ -387,13 +387,24 @@ world extension {
 - [x] 回写 competitive-analysis A13 → building（Phase 3）  
 
 
-### Phase 4+（不在本设计强制范围）
+### Phase 3.5 — 生产可信路径（三梯队第一批）
 
-- `register_tool`  
-- `before_model` rewrite  
-- TS→component 工具链  
-- UI notify Host API  
-- guest 持久 store（`GROK_PLUGIN_DATA` 经 host 读写）
+- [x] guest `set_gate_reason` + deny/stop 自定义 reason  
+- [x] `GateFailMode` + env `GROK_EXTENSION_GATE_FAIL=open|closed`  
+- [x] `plugin validate --load`  
+- [x] e2e：加载 `rust-guest-template/extension.wasm` deny/inject  
+- [x] `plugin init` 脚手架 + PluginInfo `has_runtime`  
+- [x] Linker 缓存（热路径轻量复用）  
+
+### Phase 4+（能力加深 / 可缓）
+
+- `register_tool`（设计：guest 描述 + host 调度；MVP 仍用 MCP）  
+- `before_model` rewrite（消息数组改写；安全面大）  
+- Component Model + wit-bindgen（取代 bootstrap ABI）  
+- TS/Go 等作者语言  
+- UI Host API / guest 持久 store  
+- 全 Instance 会话复用 + 正式 bench  
+
 
 ---
 

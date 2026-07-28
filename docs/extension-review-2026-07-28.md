@@ -90,15 +90,20 @@
 
 ---
 
-## 5. 建议的后续 backlog（人机继续时）
+## 5. Backlog 状态（三梯队执行）
 
-1. Rust guest 官方模板 + 构建说明（`cargo build --target wasm32-unknown-unknown`）  
-2. validate `--load`  
-3. gate fail-closed 可选  
-4. 热路径基准 + 可选 instance 复用  
-5. Component Model 迁移 spike  
-6. e2e：装插件 → 危险命令 deny  
-7. Oracle / 第二人 review（本文件 + 四 commit）
+| # | 事项 | 状态 |
+|---|------|------|
+| 1 | Rust guest 模板 | **done** |
+| 2 | validate `--load` | **done** |
+| 3 | gate fail-closed 可选 | **done** (`GROK_EXTENSION_GATE_FAIL`) |
+| 4 | deny reason | **done** (`set_gate_reason`) |
+| 5 | e2e rust template wasm | **done** (unit 级 load+deny) |
+| 6 | `plugin init` | **done** |
+| 7 | UI has_runtime | **done** (DTO + components 行) |
+| 8 | Linker 缓存 | **done** |
+| 9 | Component Model / register_tool / multi-lang | Phase 4+ |
+| 10 | Oracle 二审 | 可选 |
 
 ---
 
@@ -110,9 +115,9 @@
 - [x] stop gate  
 - [x] validate 基础检查  
 - [x] unit 测通过  
-- [ ] Rust-first 官方模板（本 review 后补）  
-- [ ] e2e  
-- [ ] fail-closed 选项  
+- [x] Rust-first 官方模板  
+- [x] e2e load template wasm  
+- [x] fail-closed 选项  
 
 ---
 

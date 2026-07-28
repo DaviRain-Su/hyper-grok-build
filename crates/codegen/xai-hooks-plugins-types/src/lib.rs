@@ -272,6 +272,12 @@ pub struct PluginInfo {
     /// Warning when this plugin shadowed another with the same name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// Whether a WASM `extension.wasm` (or runtime block) was discovered.
+    #[serde(default)]
+    pub has_runtime: bool,
+    /// Capability strings from `plugin.json` `runtime.capabilities`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_capabilities: Vec<String>,
 }
 
 /// Response for `x.ai/plugins/list`.
@@ -741,6 +747,8 @@ mod tests {
             marketplace_source: None,
             origin: Some(PluginOrigin::UserGrok),
             conflict: None,
+            has_runtime: false,
+            runtime_capabilities: vec![],
         };
         let json = serde_json::to_string(&plugin).unwrap();
         assert!(json.contains("skillCount"));

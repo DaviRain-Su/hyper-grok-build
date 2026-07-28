@@ -150,6 +150,8 @@ pub(crate) fn test_plugin_info(
         marketplace_source: None,
         origin,
         conflict: None,
+        has_runtime: false,
+        runtime_capabilities: vec![],
     }
 }
 
@@ -2453,6 +2455,16 @@ fn build_plugin_fields(plugin: &xai_hooks_plugins_types::PluginInfo) -> Vec<Stri
             components.push(format!("{} MCP: blocked", plugin.mcp_server_count));
         }
         McpStatus::None => {}
+    }
+    if plugin.has_runtime {
+        if plugin.runtime_capabilities.is_empty() {
+            components.push("wasm runtime".into());
+        } else {
+            components.push(format!(
+                "wasm runtime ({})",
+                plugin.runtime_capabilities.join(", ")
+            ));
+        }
     }
     components
 }

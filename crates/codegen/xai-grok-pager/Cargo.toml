@@ -118,6 +118,7 @@ tar = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-agent = { workspace = true }
 xai-grok-extension-api = { path = "../xai-grok-extension-api" }
+xai-grok-extension-runtime = { path = "../xai-grok-extension-runtime" }
 xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 wait-timeout = { workspace = true }
