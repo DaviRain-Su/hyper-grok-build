@@ -24,6 +24,10 @@ unsafe extern "C" {
     fn raw_set_gate_reason(ptr: *const u8, len: i32);
     #[link_name = "log"]
     fn raw_log(level: i32, ptr: *const u8, len: i32);
+    #[link_name = "plugin_data_dir_len"]
+    fn raw_plugin_data_dir_len() -> i32;
+    #[link_name = "plugin_data_dir_byte"]
+    fn raw_plugin_data_dir_byte(idx: i32) -> i32;
     #[link_name = "stop_hook_active"]
     fn raw_stop_hook_active() -> i32;
     #[link_name = "tool_index"]
@@ -126,6 +130,15 @@ pub fn log(level: i32, msg: &str) {
     unsafe {
         raw_log(level, b.as_ptr(), len);
     }
+}
+
+/// Absolute plugin data directory path (may be empty if host did not set one).
+pub fn read_plugin_data_dir() -> String {
+    String::from_utf8_lossy(&read_bytes(
+        raw_plugin_data_dir_len,
+        raw_plugin_data_dir_byte,
+    ))
+    .into_owned()
 }
 
 /// Substring search over raw bytes.

@@ -121,6 +121,7 @@ impl LoadedPlugin {
             capabilities,
             trusted: true,
             gate_fail: self.runtime_gate_fail,
+            plugin_data_dir: Some(self.data_dir()),
         })
     }
 }

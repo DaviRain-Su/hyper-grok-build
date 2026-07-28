@@ -173,3 +173,97 @@ pub async fn sync_wasm_tools_to_bridge(
     }
     registered
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use xai_grok_extension_api::{Capability, ExtensionSpec};
+
+    /// Session-level smoke: load fixture guest → register session-scoped tools
+    /// on a real ToolBridge → unregister cleanly (production multi-session path).
+    #[tokio::test]
+    async fn sync_and_unregister_wasm_tools_smoke() {
+        let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
+        if !wasm.is_file() {
+            eprintln!("skip: no rust-guest-template/extension.wasm");
+            return;
+        }
+
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&ExtensionSpec {
+            name: "smoke-ext".into(),
+            wasm_path: wasm,
+            capabilities: vec![Capability::RegisterTool],
+            trusted: true,
+            gate_fail: None,
+            plugin_data_dir: Some(PathBuf::from("/tmp/hyper-ext-smoke-data")),
+        })
+        .expect("load fixture wasm");
+
+        let bridge = xai_grok_tools::bridge::ToolBridge::for_test();
+        let mut owned = Vec::new();
+        let session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let n = sync_wasm_tools_to_bridge(&bridge, &rt, &mut owned, session_id).await;
+        assert!(n >= 1, "expected at least one wasm tool from template");
+        assert_eq!(owned.len(), n);
+        for name in &owned {
+            assert!(
+                name.starts_with(WASM_TOOL_PREFIX),
+                "client name must be wasm_*: {name}"
+            );
+            assert!(
+                name.contains("aaaaaaaa") || name.contains("smoke"),
+                "session or ext fragment expected in {name}"
+            );
+            assert!(
+                bridge.tool_kind(name).is_some(),
+                "registered tool should be visible on bridge: {name}"
+            );
+        }
+
+        // Metrics should have collected tools.
+        let m = rt.metrics();
+        assert!(m.loads_ok >= 1);
+        assert!(m.tools_collected >= 1);
+
+        let dropped = unregister_session_wasm_tools(&bridge, &mut owned);
+        assert_eq!(dropped, n);
+        assert!(owned.is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_sessions_get_distinct_client_names() {
+        let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../xai-grok-extension-runtime/examples/rust-guest-template/extension.wasm");
+        if !wasm.is_file() {
+            return;
+        }
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&ExtensionSpec {
+            name: "echo-ext".into(),
+            wasm_path: wasm,
+            capabilities: vec![Capability::RegisterTool],
+            trusted: true,
+            gate_fail: None,
+            plugin_data_dir: None,
+        })
+        .unwrap();
+
+        let bridge = xai_grok_tools::bridge::ToolBridge::for_test();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let n1 = sync_wasm_tools_to_bridge(&bridge, &rt, &mut a, "11111111-1111-1111-1111-111111111111")
+            .await;
+        let n2 = sync_wasm_tools_to_bridge(&bridge, &rt, &mut b, "22222222-2222-2222-2222-222222222222")
+            .await;
+        assert!(n1 >= 1 && n2 >= 1);
+        // Names must not collide across sessions on the shared bridge.
+        for name in &a {
+            assert!(!b.contains(name), "session B must not share name {name}");
+        }
+        unregister_session_wasm_tools(&bridge, &mut a);
+        unregister_session_wasm_tools(&bridge, &mut b);
+    }
+}

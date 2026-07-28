@@ -24,6 +24,7 @@
 //! | `set_inject_context` / `set_append_system` | `(ptr,len)` | guest memory UTF-8 |
 //! | `set_gate_reason` | `(ptr,len)` | deny/stop reason string for host UI |
 //! | `log` | `(level,ptr,len)` | guest → host log (0=debug…3=error) |
+//! | `plugin_data_dir_len` / `plugin_data_dir_byte` | plugin data dir path |
 //! | `stop_hook_active` | `() -> i32` | 1 if stop gate already continued |
 //! | `compact_reason_len` / `compact_reason_byte` | | pre_compact reason |
 //!
@@ -31,6 +32,7 @@
 //! See `docs/design-wasm-extensions.md`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -109,6 +111,8 @@ pub struct GuestLogLine {
 struct HostCtx {
     /// Extension name for tracing (set by runtime before each call).
     guest_name: String,
+    /// Absolute plugin data directory (may be empty).
+    plugin_data_dir: String,
     tool_name: String,
     tool_input: String,
     /// User prompt for `before_agent_start`.
@@ -138,6 +142,7 @@ impl Default for HostCtx {
     fn default() -> Self {
         Self {
             guest_name: String::new(),
+            plugin_data_dir: String::new(),
             tool_name: String::new(),
             tool_input: String::new(),
             prompt: String::new(),
@@ -163,6 +168,73 @@ impl Default for HostCtx {
     }
 }
 
+/// Process-wide-ish counters for one [`ExtensionRuntime`] (shared across clones).
+#[derive(Debug, Default)]
+pub struct ExtensionMetrics {
+    pub loads_ok: AtomicU64,
+    pub loads_failed: AtomicU64,
+    pub calls_ok: AtomicU64,
+    pub calls_failed: AtomicU64,
+    pub calls_timeout: AtomicU64,
+    pub pre_tool_denies: AtomicU64,
+    pub stop_blocks: AtomicU64,
+    pub tools_collected: AtomicU64,
+    pub tools_invoked_ok: AtomicU64,
+    pub tools_invoked_err: AtomicU64,
+    pub guest_log_lines: AtomicU64,
+}
+
+/// Snapshot of [`ExtensionMetrics`] for logs / tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtensionMetricsSnapshot {
+    pub loads_ok: u64,
+    pub loads_failed: u64,
+    pub calls_ok: u64,
+    pub calls_failed: u64,
+    pub calls_timeout: u64,
+    pub pre_tool_denies: u64,
+    pub stop_blocks: u64,
+    pub tools_collected: u64,
+    pub tools_invoked_ok: u64,
+    pub tools_invoked_err: u64,
+    pub guest_log_lines: u64,
+}
+
+impl ExtensionMetrics {
+    pub fn snapshot(&self) -> ExtensionMetricsSnapshot {
+        ExtensionMetricsSnapshot {
+            loads_ok: self.loads_ok.load(Ordering::Relaxed),
+            loads_failed: self.loads_failed.load(Ordering::Relaxed),
+            calls_ok: self.calls_ok.load(Ordering::Relaxed),
+            calls_failed: self.calls_failed.load(Ordering::Relaxed),
+            calls_timeout: self.calls_timeout.load(Ordering::Relaxed),
+            pre_tool_denies: self.pre_tool_denies.load(Ordering::Relaxed),
+            stop_blocks: self.stop_blocks.load(Ordering::Relaxed),
+            tools_collected: self.tools_collected.load(Ordering::Relaxed),
+            tools_invoked_ok: self.tools_invoked_ok.load(Ordering::Relaxed),
+            tools_invoked_err: self.tools_invoked_err.load(Ordering::Relaxed),
+            guest_log_lines: self.guest_log_lines.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_call(&self, r: &GuestCallResult) {
+        match r {
+            GuestCallResult::Ok { logs, .. } => {
+                self.calls_ok.fetch_add(1, Ordering::Relaxed);
+                self.guest_log_lines
+                    .fetch_add(logs.len() as u64, Ordering::Relaxed);
+            }
+            GuestCallResult::Failed { .. } => {
+                self.calls_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            GuestCallResult::Timeout { .. } => {
+                self.calls_timeout.fetch_add(1, Ordering::Relaxed);
+            }
+            GuestCallResult::SkippedExport { .. } | GuestCallResult::SkippedCapability { .. } => {}
+        }
+    }
+}
+
 /// Per-session registry of loaded extensions.
 #[derive(Clone)]
 pub struct ExtensionRuntime {
@@ -170,6 +242,8 @@ pub struct ExtensionRuntime {
     /// Process/runtime default when a guest does not set `gate_fail` in its
     /// `plugin.json` `runtime` block.
     gate_fail: GateFailMode,
+    /// Shared counters (survives [`Clone`] of the runtime for async dispatch).
+    metrics: Arc<ExtensionMetrics>,
 }
 
 impl Default for ExtensionRuntime {
@@ -177,6 +251,7 @@ impl Default for ExtensionRuntime {
         Self {
             guests: Vec::new(),
             gate_fail: GateFailMode::from_env(),
+            metrics: Arc::new(ExtensionMetrics::default()),
         }
     }
 }
@@ -187,6 +262,8 @@ struct LoadedGuest {
     capabilities: Vec<Capability>,
     /// Per-guest override; `None` uses [`ExtensionRuntime::gate_fail`].
     gate_fail: Option<GateFailMode>,
+    /// Absolute plugin data dir (empty if unknown).
+    plugin_data_dir: String,
     #[cfg(feature = "wasm")]
     inner: WasmGuest,
     #[cfg(not(feature = "wasm"))]
@@ -215,6 +292,11 @@ impl ExtensionRuntime {
 
     pub fn gate_fail(&self) -> GateFailMode {
         self.gate_fail
+    }
+
+    /// Operational counters for this runtime (shared across clones).
+    pub fn metrics(&self) -> ExtensionMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     pub fn len(&self) -> usize {
@@ -251,22 +333,38 @@ impl ExtensionRuntime {
     /// Load a trusted extension. Untrusted specs return [`ContractError::NotTrusted`].
     pub fn load(&mut self, spec: &ExtensionSpec) -> Result<(), RuntimeError> {
         if !spec.may_load() {
+            self.metrics.loads_failed.fetch_add(1, Ordering::Relaxed);
             return Err(ContractError::NotTrusted.into());
         }
         #[cfg(feature = "wasm")]
         {
-            let inner = WasmGuest::load(&spec.wasm_path)?;
-            self.guests.push(LoadedGuest {
-                name: spec.name.clone(),
-                capabilities: spec.capabilities.clone(),
-                gate_fail: spec.gate_fail,
-                inner,
-            });
-            Ok(())
+            match WasmGuest::load(&spec.wasm_path) {
+                Ok(inner) => {
+                    let plugin_data_dir = spec
+                        .plugin_data_dir
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    self.guests.push(LoadedGuest {
+                        name: spec.name.clone(),
+                        capabilities: spec.capabilities.clone(),
+                        gate_fail: spec.gate_fail,
+                        plugin_data_dir,
+                        inner,
+                    });
+                    self.metrics.loads_ok.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+                Err(e) => {
+                    self.metrics.loads_failed.fetch_add(1, Ordering::Relaxed);
+                    Err(e)
+                }
+            }
         }
         #[cfg(not(feature = "wasm"))]
         {
             let _ = spec;
+            self.metrics.loads_failed.fetch_add(1, Ordering::Relaxed);
             Err(RuntimeError::WasmDisabled)
         }
     }
@@ -333,12 +431,14 @@ impl ExtensionRuntime {
             }
             let host = HostCtx {
                 prompt: input.prompt.clone(),
+                plugin_data_dir: guest.plugin_data_dir.clone(),
                 ..HostCtx::default()
             };
             let (r, host_out) = guest
                 .inner
                 .call_with_timeout_host(call, timeout, host)
                 .await;
+            self.metrics.record_call(&r);
             if matches!(&r, GuestCallResult::Ok { code: 0, .. }) {
                 let piece = BeforeAgentStartOut {
                     inject_context: non_empty(host_out.inject_context),
@@ -377,12 +477,14 @@ impl ExtensionRuntime {
             }
             let host = HostCtx {
                 stop_hook_active: input.stop_hook_active,
+                plugin_data_dir: guest.plugin_data_dir.clone(),
                 ..HostCtx::default()
             };
             let (r, host_out) = guest
                 .inner
                 .call_with_timeout_host(GuestCall::Stop, timeouts::GATE, host)
                 .await;
+            self.metrics.record_call(&r);
             let name = guest.name.clone();
             let blocked = matches!(&r, GuestCallResult::Ok { code: 1, .. });
             let failed_closed = self.effective_gate_fail(guest) == GateFailMode::Closed
@@ -392,6 +494,7 @@ impl ExtensionRuntime {
                 );
             results.push((name.clone(), r));
             if blocked || failed_closed {
+                self.metrics.stop_blocks.fetch_add(1, Ordering::Relaxed);
                 let reason = if !host_out.gate_reason.is_empty() {
                     host_out.gate_reason
                 } else if failed_closed {
@@ -423,12 +526,14 @@ impl ExtensionRuntime {
         for guest in &self.guests {
             let host = HostCtx {
                 compact_reason: input.reason.clone(),
+                plugin_data_dir: guest.plugin_data_dir.clone(),
                 ..HostCtx::default()
             };
             let (r, _) = guest
                 .inner
                 .call_with_timeout_host(GuestCall::PreCompact, timeouts::OBSERVE, host)
                 .await;
+            self.metrics.record_call(&r);
             // Missing export is fine (optional handler).
             if !matches!(
                 &r,
@@ -467,12 +572,14 @@ impl ExtensionRuntime {
             let host = HostCtx {
                 tool_name: input.tool_name.clone(),
                 tool_input: input.tool_input_json.clone(),
+                plugin_data_dir: guest.plugin_data_dir.clone(),
                 ..HostCtx::default()
             };
             let (r, host_out) = guest
                 .inner
                 .call_with_timeout_host(GuestCall::PreToolUse, timeouts::GATE, host)
                 .await;
+            self.metrics.record_call(&r);
             let name = guest.name.clone();
             let denied = matches!(&r, GuestCallResult::Ok { code: 1, .. });
             let failed_closed = self.effective_gate_fail(guest) == GateFailMode::Closed
@@ -482,6 +589,9 @@ impl ExtensionRuntime {
                 );
             results.push((name.clone(), r));
             if denied || failed_closed {
+                self.metrics
+                    .pre_tool_denies
+                    .fetch_add(1, Ordering::Relaxed);
                 let reason = if !host_out.gate_reason.is_empty() {
                     host_out.gate_reason
                 } else if failed_closed {
@@ -539,10 +649,15 @@ impl ExtensionRuntime {
             if !guest.capabilities.contains(&Capability::RegisterTool) {
                 continue;
             }
+            let host = HostCtx {
+                plugin_data_dir: guest.plugin_data_dir.clone(),
+                ..HostCtx::default()
+            };
             let (count_res, _) = guest
                 .inner
-                .call_with_timeout_host(GuestCall::ToolCount, timeouts::OBSERVE, HostCtx::default())
+                .call_with_timeout_host(GuestCall::ToolCount, timeouts::OBSERVE, host)
                 .await;
+            self.metrics.record_call(&count_res);
             let count = match count_res {
                 GuestCallResult::Ok { code, .. } if code >= 0 => code as usize,
                 _ => continue,
@@ -553,12 +668,14 @@ impl ExtensionRuntime {
             for i in 0..count {
                 let host = HostCtx {
                     tool_index: i as i32,
+                    plugin_data_dir: guest.plugin_data_dir.clone(),
                     ..HostCtx::default()
                 };
                 let (r, host_out) = guest
                     .inner
                     .call_with_timeout_host(GuestCall::DescribeTool, timeouts::OBSERVE, host)
                     .await;
+                self.metrics.record_call(&r);
                 if !matches!(r, GuestCallResult::Ok { code: 0, .. }) {
                     continue;
                 }
@@ -600,6 +717,9 @@ impl ExtensionRuntime {
                 });
             }
         }
+        self.metrics
+            .tools_collected
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
         out
     }
 
@@ -631,28 +751,56 @@ impl ExtensionRuntime {
             let host = HostCtx {
                 tool_name: tool_name.to_string(),
                 tool_input: args.to_string(),
+                plugin_data_dir: guest.plugin_data_dir.clone(),
                 ..HostCtx::default()
             };
             let (r, host_out) = guest
                 .inner
                 .call_with_timeout_host(GuestCall::InvokeTool, timeouts::GATE, host)
                 .await;
+            self.metrics.record_call(&r);
             match r {
-                GuestCallResult::Ok { code: 0, .. } => Ok(if host_out.tool_result_out.is_empty() {
-                    "ok".into()
-                } else {
-                    host_out.tool_result_out
-                }),
-                GuestCallResult::Ok { code, .. } => Err(RuntimeError::Module(format!(
-                    "invoke_tool returned {code}: {}",
-                    host_out.gate_reason
-                ))),
-                GuestCallResult::Failed { error, .. } => Err(RuntimeError::Trap(error)),
-                GuestCallResult::Timeout { limit, .. } => Err(RuntimeError::Timeout(limit)),
+                GuestCallResult::Ok { code: 0, .. } => {
+                    self.metrics
+                        .tools_invoked_ok
+                        .fetch_add(1, Ordering::Relaxed);
+                    Ok(if host_out.tool_result_out.is_empty() {
+                        "ok".into()
+                    } else {
+                        host_out.tool_result_out
+                    })
+                }
+                GuestCallResult::Ok { code, .. } => {
+                    self.metrics
+                        .tools_invoked_err
+                        .fetch_add(1, Ordering::Relaxed);
+                    Err(RuntimeError::Module(format!(
+                        "invoke_tool returned {code}: {}",
+                        host_out.gate_reason
+                    )))
+                }
+                GuestCallResult::Failed { error, .. } => {
+                    self.metrics
+                        .tools_invoked_err
+                        .fetch_add(1, Ordering::Relaxed);
+                    Err(RuntimeError::Trap(error))
+                }
+                GuestCallResult::Timeout { limit, .. } => {
+                    self.metrics
+                        .tools_invoked_err
+                        .fetch_add(1, Ordering::Relaxed);
+                    Err(RuntimeError::Timeout(limit))
+                }
                 GuestCallResult::SkippedExport { export, .. } => {
+                    self.metrics
+                        .tools_invoked_err
+                        .fetch_add(1, Ordering::Relaxed);
                     Err(RuntimeError::MissingExport(export))
                 }
                 GuestCallResult::SkippedCapability { .. } => {
+                    self.metrics
+                        .tools_invoked_err
+                        .fetch_add(1, Ordering::Relaxed);
                     Err(RuntimeError::Module("capability skipped".into()))
                 }
             }
@@ -672,10 +820,15 @@ impl ExtensionRuntime {
         let mut out = Vec::with_capacity(self.guests.len());
         #[cfg(feature = "wasm")]
         for guest in &self.guests {
+            let host = HostCtx {
+                plugin_data_dir: guest.plugin_data_dir.clone(),
+                ..HostCtx::default()
+            };
             let (r, _) = guest
                 .inner
-                .call_with_timeout_host(call, timeout, HostCtx::default())
+                .call_with_timeout_host(call, timeout, host)
                 .await;
+            self.metrics.record_call(&r);
             out.push(r);
         }
         #[cfg(not(feature = "wasm"))]
@@ -871,9 +1024,11 @@ impl WasmGuest {
     fn apply_host_inputs(data: &mut HostCtx, host: HostCtx, guest_name: &str) {
         // Keep resource limits attached to the store; only swap call inputs/outputs.
         let limits = std::mem::replace(&mut data.limits, HostCtx::default().limits);
+        let plugin_data_dir = host.plugin_data_dir.clone();
         *data = host;
         data.limits = limits;
         data.guest_name = guest_name.to_string();
+        data.plugin_data_dir = plugin_data_dir;
         data.inject_context.clear();
         data.append_system.clear();
         data.gate_reason.clear();
@@ -887,6 +1042,7 @@ impl WasmGuest {
     fn take_host_outputs(data: &mut HostCtx) -> HostCtx {
         HostCtx {
             guest_name: std::mem::take(&mut data.guest_name),
+            plugin_data_dir: std::mem::take(&mut data.plugin_data_dir),
             tool_name: std::mem::take(&mut data.tool_name),
             tool_input: std::mem::take(&mut data.tool_input),
             prompt: std::mem::take(&mut data.prompt),
@@ -1184,6 +1340,24 @@ fn build_linker(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostCtx>, 
     linker
         .func_wrap(
             "hyper_host",
+            "plugin_data_dir_len",
+            |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
+                caller.data().plugin_data_dir.len() as i32
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
+            "plugin_data_dir_byte",
+            |caller: wasmtime::Caller<'_, HostCtx>, idx: i32| -> i32 {
+                byte_at(&caller.data().plugin_data_dir, idx)
+            },
+        )
+        .map_err(|e| RuntimeError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "hyper_host",
             "stop_hook_active",
             |caller: wasmtime::Caller<'_, HostCtx>| -> i32 {
                 i32::from(caller.data().stop_hook_active)
@@ -1416,6 +1590,7 @@ mod tests {
             capabilities: caps,
             trusted: true,
             gate_fail: None,
+            plugin_data_dir: None,
         }
     }
 
@@ -1431,6 +1606,7 @@ mod tests {
             capabilities: caps,
             trusted: true,
             gate_fail: Some(gate_fail),
+            plugin_data_dir: None,
         }
     }
 
@@ -2007,6 +2183,92 @@ mod tests {
             }
             other => panic!("expected Ok with logs, got {other:?}"),
         }
+        let m = rt.metrics();
+        assert!(m.loads_ok >= 1);
+        assert!(m.calls_ok >= 1);
+        assert!(m.guest_log_lines >= 1);
+    }
+
+    /// Reads plugin_data_dir and writes it to set_gate_reason (via deny path).
+    const DATA_DIR_GUEST: &str = r#"
+        (module
+          (import "hyper_host" "plugin_data_dir_len" (func $dir_len (result i32)))
+          (import "hyper_host" "plugin_data_dir_byte" (func $dir_byte (param i32) (result i32)))
+          (import "hyper_host" "set_gate_reason" (func $set_reason (param i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "hyper_ext_abi_version") (result i32)
+            i32.const 1)
+          (func (export "hyper_ext_on_session_start") (result i32)
+            i32.const 0)
+          (func (export "hyper_ext_on_pre_tool_use") (result i32)
+            (local $i i32) (local $n i32) (local $b i32)
+            (local.set $n (call $dir_len))
+            (if (i32.gt_s (local.get $n) (i32.const 200))
+              (then (local.set $n (i32.const 200))))
+            (local.set $i (i32.const 0))
+            (block $done
+              (loop $copy
+                (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+                (local.set $b (call $dir_byte (local.get $i)))
+                (i32.store8 (local.get $i) (local.get $b))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $copy)
+              )
+            )
+            (call $set_reason (i32.const 0) (local.get $n))
+            i32.const 1)
+        )
+    "#;
+
+    #[tokio::test]
+    async fn plugin_data_dir_visible_to_guest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "datadir.wasm", DATA_DIR_GUEST);
+        let data = dir.path().join("plugin-data");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut rt = ExtensionRuntime::new();
+        let mut spec = trusted_spec("data-guest", path, vec![Capability::PreToolGate]);
+        spec.plugin_data_dir = Some(data.clone());
+        rt.load(&spec).unwrap();
+        let d = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "x".into(),
+                tool_input_json: "{}".into(),
+            })
+            .await;
+        match d.decision {
+            PreToolDecision::Deny { reason, .. } => {
+                assert!(
+                    reason.contains("plugin-data") || reason.contains(&*data.to_string_lossy()),
+                    "reason should include data dir path, got {reason}"
+                );
+            }
+            other => panic!("expected deny with data dir reason, got {other:?}"),
+        }
+        assert_eq!(rt.metrics().pre_tool_denies, 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_count_load_and_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wasm(&dir, "trap-m.wasm", TRAP_ON_PRE_TOOL);
+        let mut rt = ExtensionRuntime::new().with_gate_fail(GateFailMode::Closed);
+        rt.load(&trusted_spec(
+            "trap",
+            path,
+            vec![Capability::PreToolGate],
+        ))
+        .unwrap();
+        assert_eq!(rt.metrics().loads_ok, 1);
+        let _ = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "x".into(),
+                tool_input_json: "{}".into(),
+            })
+            .await;
+        let m = rt.metrics();
+        assert!(m.calls_failed >= 1 || m.calls_timeout >= 1, "{m:?}");
+        assert_eq!(m.pre_tool_denies, 1);
     }
 
     #[tokio::test]

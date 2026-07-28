@@ -115,6 +115,7 @@ Core-wasm bootstrap ABI (Phase 0–3). Optional exports may be missing.
 | `set_append_system(ptr,len)` | Write append-system string |
 | `set_gate_reason(ptr,len)` | Deny / stop reason for the host UI |
 | `log(level,ptr,len)` | Guest → host log (`0` debug … `3` error); use SDK `log_info` |
+| `plugin_data_dir_len` / `plugin_data_dir_byte` | Plugin data dir (`~/.grok/plugin-data/<id>/`); SDK `plugin_data_dir()` |
 | `stop_hook_active` | Whether stop already continued this turn |
 | `compact_reason_len` / `compact_reason_byte` | Compaction trigger |
 
@@ -122,6 +123,7 @@ Core-wasm bootstrap ABI (Phase 0–3). Optional exports may be missing.
 // in a handler:
 log_info("path-guard: allowing tool");
 log_warn("suspicious pattern matched");
+let data = plugin_data_dir(); // may be empty in bare tests
 ```
 
 Injected text is applied as a **system-reminder** (inject) or

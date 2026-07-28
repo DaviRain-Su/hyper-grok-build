@@ -26,7 +26,10 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 ## Observability (shipped light)
 
 - [x] Host `tracing` on load skip / trap / deny
-- [x] Guest → host **`hyper_host.log`** / SDK `log_info!` path (`log_info`, …)
+- [x] Guest → host **`hyper_host.log`** / SDK `log_info` / …
+- [x] Runtime **metrics** snapshot (`loads_ok`, `pre_tool_denies`, `calls_timeout`, …)
+- [x] Guest read-only **plugin data dir** (`plugin_data_dir_*` / SDK `plugin_data_dir()`)
+- [x] Shell smoke: session-scoped tool register + unregister on `ToolBridge`
 - [ ] Full UI Host API (status line / ACP notify) — **defer**
 
 ## Ops / rollout

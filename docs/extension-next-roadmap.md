@@ -76,8 +76,10 @@
 | 16 | Session end 注销 `wasm_*` 工具（防 bridge 泄漏） | **done** |
 | 17 | Guest → host `log` + SDK `log_info` / tracing | **done** |
 | 18 | Production checklist 文档 | **done** |
-| 19 | 真 shell session e2e（整 actor） | 可选加深 |
-| 20 | 更多运营指标 / metrics | 可选 |
+| 19 | Shell/ToolBridge smoke（双会话工具名 + unregister） | **done** |
+| 20 | Runtime metrics snapshot | **done** |
+| 21 | Guest 只读 `plugin_data_dir` | **done** |
+| 22 | 整 SessionActor e2e | 可选加深 |
 
 详见 [extension-production-checklist.md](./extension-production-checklist.md)。
 

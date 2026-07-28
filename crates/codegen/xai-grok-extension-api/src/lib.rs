@@ -336,6 +336,9 @@ pub struct ExtensionSpec {
     pub trusted: bool,
     /// Per-extension gate fail mode; `None` inherits the runtime/process default.
     pub gate_fail: Option<GateFailMode>,
+    /// Absolute plugin data directory (`~/.grok/plugin-data/<id>/`), if known.
+    /// Exposed read-only to the guest via `hyper_host.plugin_data_dir_*`.
+    pub plugin_data_dir: Option<PathBuf>,
 }
 
 impl ExtensionSpec {
@@ -521,6 +524,7 @@ mod tests {
             capabilities: vec![Capability::PreToolGate],
             trusted: false,
             gate_fail: None,
+            plugin_data_dir: None,
         };
         assert!(!spec.may_load());
         assert_eq!(

@@ -2451,6 +2451,10 @@ mod inline_auto_compact_flow_tests {
             hook_load_errors: std::cell::RefCell::new(Vec::new()),
             plugin_registry: std::cell::RefCell::new(None),
             plugin_registry_handle: None,
+        extension_runtime: std::cell::RefCell::new(
+            xai_grok_extension_runtime::ExtensionRuntime::new(),
+        ),
+        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
             events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
             observability_bridge: noop_observability_bridge(),
             current_turn_number: std::cell::Cell::new(0),
