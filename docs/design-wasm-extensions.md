@@ -72,7 +72,7 @@
 | 第一期 `register_tool` 完整版 | P2；MVP 用 MCP 顶 |
 | 把 Hyper 砍成 Pi 四工具默认 | 学扩展纪律，不阉割产品 |
 | 替换 hooks/MCP | 并存，不是迁移强迫 |
-| 任意语言无文档支持 | 作者语言先 **Rust → component**；TS→wasm 后置 |
+| 多语言一等公民（当前阶段） | **Rust-first**；Go/AS/TS 等后置；WAT 仅 fixture |
 
 ---
 
@@ -380,7 +380,8 @@ world extension {
 
 ### Phase 3 — 开发者体验
 
-- [ ] `hyper extension init` 模板（Rust guest）— 暂缓；WAT 示例足够起步  
+- [x] Rust guest 模板：`examples/rust-guest-template/`（`extension init` CLI 仍可后置）  
+
 - [x] `grok plugin validate` 检查 wasm 魔数、WIT、capabilities  
 - [x] 文档：user-guide `31-wasm-extensions.md` + plugins 交叉引用  
 - [x] 回写 competitive-analysis A13 → building（Phase 3）  
@@ -428,7 +429,7 @@ world extension {
 | R3 | before_agent inject 呈现方式 | system 片段，不伪造 user |
 | R4 | hooks 与 wasm 顺序 | 先 hooks 后 wasm |
 | R5 | 未 trust 行为 | **不加载** runtime |
-| R6 | guest 语言 | 先 Rust；TS 后置 |
+| R6 | guest 语言 | **Rust-first（已决议）**；多语言后置；见 extension-review |
 | R7 | 是否新事件名进 HookEventName | `BeforeAgentStart` 加入事件表，或 bus 内部事件 + 文档映射；**倾向加入正式事件表** 以便 UI/ACP 一致 |
 
 ---

@@ -1,0 +1,10 @@
+{
+  "name": "rust-guest-template",
+  "version": "0.1.0",
+  "description": "Official Rust-first WASM guest template (core-wasm bootstrap ABI)",
+  "runtime": {
+    "wasm": "extension.wasm",
+    "wit": "hyper:extension@0.1.0",
+    "capabilities": ["pre_tool_gate", "before_agent_inject"]
+  }
+}

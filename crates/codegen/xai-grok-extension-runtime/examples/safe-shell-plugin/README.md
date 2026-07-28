@@ -1,4 +1,8 @@
-# safe-shell-wasm (Phase 1 example)
+# safe-shell-wasm (Phase 1 WAT fixture)
+
+> **Not the recommended author path.** Prefer the **Rust** template:
+> [`../rust-guest-template/`](../rust-guest-template/).
+> This WAT package is for ABI demos and runtime unit-test parity.
 
 Denies tool calls whose JSON input contains the substring `rm -rf`, using the
 **core-wasm bootstrap ABI** described in

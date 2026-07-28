@@ -1,0 +1,20 @@
+# Standalone package (not a workspace member). Empty workspace table keeps
+# cargo from treating the monorepo root as this crate's workspace.
+[workspace]
+
+[package]
+name = "hyper-ext-rust-guest-template"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Minimal Rust → wasm32 guest for Hyper WASM extensions (official author path)"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
