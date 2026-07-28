@@ -48,7 +48,7 @@
 | 31 | deny 时同步打 metrics 摘要 | **done** | `tool_calls` warn + counters |
 | 32 | `plugin details` 展示 runtime/cap/gate_fail | **done** | print_component_summary |
 | 33 | init 默认 capabilities 与模板对齐 | **done** | +`register_tool` |
-| 34 | 整 SessionActor 级 e2e（prepare_tool_call + tools） | **done** | `wasm_extension_e2e_tests` |
+| 34 | SessionActor e2e（deny/allow/tools/stop/before_model/fail-closed/并发） | **done** | `wasm_extension_e2e_tests` |
 | 35 | 指标 → product/dual telemetry 管道 | **done** | `wasm_extension_metrics` / `_blocked` |
 
 ### P4 — 远期难项（原 P2b / 设计 Phase 4 defer）— **有触发再开**

@@ -40,11 +40,20 @@ See [extension-vs-pi.md](./extension-vs-pi.md). Headline: **extension base yes; 
 | plugin_data_dir overclaim | **Docs:** path metadata, no FS access |
 | Invoke unadvertised tools | **Fixed:** advertised set after collect |
 
+## Follow-up coverage (after ship-with-fixes)
+
+| Item | Status |
+|------|--------|
+| Concurrent dual-session tools on one bridge | **done** (`concurrent_sessions_share_bridge_without_cross_unregister`) |
+| `run_stop_gate` + stop-once fixture | **done** |
+| before_model inject + system-reminder | **done** |
+| fail-closed trap via `prepare_tool_call` | **done** |
+
 ## Remaining deferred
 
 1. Publishable SDK on crates.io — monorepo path for now  
-2. Concurrent multi-SessionActor E2E  
-3. Component Model / history rewrite / multi-language / full UI Host API  
+2. Component Model / history rewrite / multi-language / full UI Host API  
+
 
 
 ## Verification

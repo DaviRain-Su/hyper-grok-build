@@ -36,7 +36,8 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 - [x] Cancel path epoch interrupt (`EpochCancelGuard` on drop)
 - [x] Guest read-only **plugin data dir** (`plugin_data_dir_*` / SDK `plugin_data_dir()`)
 - [x] Shell smoke: session-scoped tool register + unregister on `ToolBridge`
-- [x] SessionActor e2e: `prepare_tool_call` wasm deny/allow + tool register
+- [x] SessionActor e2e: deny/allow, tools, **concurrent bridge**, **stop_gate**,
+  **before_model inject**, **fail-closed trap**
   (`acp_session_tests/wasm_extension_e2e_tests.rs`)
 - [ ] Full UI Host API (status line / ACP notify) — **defer (P4)**
 

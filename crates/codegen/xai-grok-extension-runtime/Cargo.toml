@@ -17,11 +17,12 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tracing = { workspace = true }
 xai-grok-extension-api = { path = "../xai-grok-extension-api" }
 wasmtime = { version = "31", optional = true, default-features = true }
+# Used by [`wat_to_wasm`] for host/shell tests and fixtures.
+wat = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-wat = "1"
 
 [lints]
 workspace = true

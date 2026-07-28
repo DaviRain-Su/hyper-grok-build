@@ -1611,7 +1611,7 @@ fn read_guest_utf8(
     Some(String::from_utf8_lossy(slice).into_owned())
 }
 
-#[cfg(test)]
+/// Compile WAT text to a core Wasm module (test helpers / shell e2e fixtures).
 pub fn wat_to_wasm(wat: &str) -> Result<Vec<u8>, String> {
     wat::parse_str(wat).map_err(|e| e.to_string())
 }
