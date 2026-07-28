@@ -78,6 +78,8 @@ pub const EXPORT_TOOL_COUNT: &str = "hyper_ext_tool_count";
 pub const EXPORT_DESCRIBE_TOOL: &str = "hyper_ext_describe_tool";
 /// Invoke tool named in host `tool_name` with `tool_input`; write result via `set_tool_result`.
 pub const EXPORT_INVOKE_TOOL: &str = "hyper_ext_invoke_tool";
+/// Before each model round (tool loop iteration); inject via set_inject_context.
+pub const EXPORT_ON_BEFORE_MODEL: &str = "hyper_ext_on_before_model";
 
 /// One tool advertised by a WASM guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +195,8 @@ pub enum Capability {
     StopGate,
     /// Guest may expose tools via `hyper_ext_tool_count` / describe / invoke.
     RegisterTool,
+    /// Per-model-round inject (system-reminder), not full history rewrite.
+    BeforeModelInject,
 }
 
 impl Capability {
@@ -202,6 +206,7 @@ impl Capability {
             Self::BeforeAgentInject => "before_agent_inject",
             Self::StopGate => "stop_gate",
             Self::RegisterTool => "register_tool",
+            Self::BeforeModelInject => "before_model_inject",
         }
     }
 
@@ -211,6 +216,7 @@ impl Capability {
             "before_agent_inject" => Some(Self::BeforeAgentInject),
             "stop_gate" => Some(Self::StopGate),
             "register_tool" => Some(Self::RegisterTool),
+            "before_model_inject" => Some(Self::BeforeModelInject),
             _ => None,
         }
     }
@@ -421,6 +427,7 @@ mod tests {
             Capability::BeforeAgentInject,
             Capability::StopGate,
             Capability::RegisterTool,
+            Capability::BeforeModelInject,
         ] {
             assert_eq!(Capability::parse(cap.as_str()), Some(cap));
         }

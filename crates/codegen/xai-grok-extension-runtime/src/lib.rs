@@ -37,8 +37,9 @@ use xai_grok_extension_api::{
     timeouts, BeforeAgentStartIn, BeforeAgentStartOut, Capability, ContractError, ExtensionSpec,
     GateFailMode, PreCompactIn, PreToolIn, StopIn, StopOut, WasmToolDescriptor, CORE_ABI_VERSION,
     EXPORT_ABI_VERSION, EXPORT_DESCRIBE_TOOL, EXPORT_INVOKE_TOOL, EXPORT_ON_BEFORE_AGENT_START,
-    EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END, EXPORT_ON_SESSION_START,
-    EXPORT_ON_STOP, EXPORT_TOOL_COUNT, MAX_INJECT_BYTES, MAX_TOOL_PAYLOAD_BYTES,
+    EXPORT_ON_BEFORE_MODEL, EXPORT_ON_PRE_COMPACT, EXPORT_ON_PRE_TOOL_USE, EXPORT_ON_SESSION_END,
+    EXPORT_ON_SESSION_START, EXPORT_ON_STOP, EXPORT_TOOL_COUNT, MAX_INJECT_BYTES,
+    MAX_TOOL_PAYLOAD_BYTES,
 };
 
 /// Errors from loading or calling a guest.
@@ -203,16 +204,46 @@ impl ExtensionRuntime {
         &self,
         input: &BeforeAgentStartIn,
     ) -> BeforeAgentStartDispatch {
+        self.dispatch_inject_event(
+            input,
+            Capability::BeforeAgentInject,
+            GuestCall::BeforeAgentStart,
+            timeouts::BEFORE_AGENT,
+        )
+        .await
+    }
+
+    /// Before each model round (tool loop): inject only, no history rewrite.
+    pub async fn dispatch_before_model(
+        &self,
+        input: &BeforeAgentStartIn,
+    ) -> BeforeAgentStartDispatch {
+        self.dispatch_inject_event(
+            input,
+            Capability::BeforeModelInject,
+            GuestCall::BeforeModel,
+            timeouts::BEFORE_AGENT,
+        )
+        .await
+    }
+
+    async fn dispatch_inject_event(
+        &self,
+        input: &BeforeAgentStartIn,
+        cap: Capability,
+        call: GuestCall,
+        timeout: Duration,
+    ) -> BeforeAgentStartDispatch {
         let mut merged = BeforeAgentStartOut::default();
         let mut results = Vec::new();
         #[cfg(feature = "wasm")]
         for guest in &self.guests {
-            if !guest.capabilities.contains(&Capability::BeforeAgentInject) {
+            if !guest.capabilities.contains(&cap) {
                 results.push((
                     guest.name.clone(),
                     GuestCallResult::SkippedCapability {
                         extension: guest.name.clone(),
-                        capability: Capability::BeforeAgentInject,
+                        capability: cap,
                     },
                 ));
                 continue;
@@ -223,14 +254,13 @@ impl ExtensionRuntime {
             };
             let (r, host_out) = guest
                 .inner
-                .call_with_timeout_host(GuestCall::BeforeAgentStart, timeouts::BEFORE_AGENT, host)
+                .call_with_timeout_host(call, timeout, host)
                 .await;
             if matches!(&r, GuestCallResult::Ok { code: 0, .. }) {
                 let piece = BeforeAgentStartOut {
                     inject_context: non_empty(host_out.inject_context),
                     append_system: non_empty(host_out.append_system),
                 };
-                // Tag source extension for multi-plugin merge readability.
                 let piece = tag_extension_out(piece, &guest.name);
                 merged = merged.merge_append(piece);
             }
@@ -238,7 +268,7 @@ impl ExtensionRuntime {
         }
         #[cfg(not(feature = "wasm"))]
         {
-            let _ = input;
+            let _ = (input, call, timeout, cap);
             let _ = &results;
         }
         BeforeAgentStartDispatch {
@@ -570,6 +600,7 @@ enum GuestCall {
     SessionEnd,
     PreToolUse,
     BeforeAgentStart,
+    BeforeModel,
     Stop,
     PreCompact,
     ToolCount,
@@ -704,6 +735,7 @@ impl WasmGuest {
             GuestCall::SessionEnd => EXPORT_ON_SESSION_END,
             GuestCall::PreToolUse => EXPORT_ON_PRE_TOOL_USE,
             GuestCall::BeforeAgentStart => EXPORT_ON_BEFORE_AGENT_START,
+            GuestCall::BeforeModel => EXPORT_ON_BEFORE_MODEL,
             GuestCall::Stop => EXPORT_ON_STOP,
             GuestCall::PreCompact => EXPORT_ON_PRE_COMPACT,
             GuestCall::ToolCount => EXPORT_TOOL_COUNT,

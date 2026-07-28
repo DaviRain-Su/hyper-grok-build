@@ -399,13 +399,15 @@ world extension {
 ### Phase 4 — 新能力（第三梯队）
 
 - [x] **`register_tool` MVP**：guest list/invoke → `wasm_*` 工具挂 ToolBridge  
-- [ ] `before_model` rewrite  
-- [ ] Component Model + wit-bindgen  
+- [x] **`before_model` inject**（每轮模型调用前 system-reminder；**不是** history rewrite）  
+- [ ] `before_model` **rewrite**（改消息数组）— 另议，安全面大  
+- [ ] Component Model + wit-bindgen — **可选升级**，见 [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)  
 - [ ] TS/Go 等作者语言  
 - [ ] UI Host API / guest 持久 store  
 - [ ] 全 Instance 会话复用 + 正式 bench  
 
-细节见 [design-wasm-phase4-spike.md](./design-wasm-phase4-spike.md)。
+细节见 [design-wasm-phase4-spike.md](./design-wasm-phase4-spike.md)。  
+**为何不必急着换 API：** [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)。
 
 
 ---

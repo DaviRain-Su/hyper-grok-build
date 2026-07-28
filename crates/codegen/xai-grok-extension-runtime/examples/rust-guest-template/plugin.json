@@ -5,6 +5,11 @@
   "runtime": {
     "wasm": "extension.wasm",
     "wit": "hyper:extension@0.1.0",
-    "capabilities": ["pre_tool_gate", "before_agent_inject"]
+    "capabilities": [
+      "pre_tool_gate",
+      "before_agent_inject",
+      "before_model_inject",
+      "register_tool"
+    ]
   }
 }

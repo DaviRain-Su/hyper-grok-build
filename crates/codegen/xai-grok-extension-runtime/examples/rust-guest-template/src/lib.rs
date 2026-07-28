@@ -26,6 +26,11 @@ extern "C" {
     fn set_append_system(ptr: *const u8, len: i32);
     fn set_gate_reason(ptr: *const u8, len: i32);
     fn stop_hook_active() -> i32;
+    fn tool_index() -> i32;
+    fn set_tool_name(ptr: *const u8, len: i32);
+    fn set_tool_description(ptr: *const u8, len: i32);
+    fn set_tool_schema(ptr: *const u8, len: i32);
+    fn set_tool_result(ptr: *const u8, len: i32);
 }
 
 // ── Required / recommended exports ─────────────────────────────────────────
@@ -80,6 +85,58 @@ pub extern "C" fn hyper_ext_on_stop() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn hyper_ext_on_pre_compact() -> i32 {
+    0
+}
+
+/// Per model-round inject. Requires `before_model_inject`.
+#[no_mangle]
+pub extern "C" fn hyper_ext_on_before_model() -> i32 {
+    0
+}
+
+// ── Optional register_tool example (enable capability in plugin.json) ─────
+
+#[no_mangle]
+pub extern "C" fn hyper_ext_tool_count() -> i32 {
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn hyper_ext_describe_tool() -> i32 {
+    // Only tool index 0.
+    if unsafe { tool_index() } != 0 {
+        return 1;
+    }
+    let name = b"echo";
+    let desc = b"Echo tool_input JSON back (demo register_tool)";
+    let schema = br#"{"type":"object","properties":{"msg":{"type":"string"}}}"#;
+    unsafe {
+        set_tool_name(name.as_ptr(), name.len() as i32);
+        set_tool_description(desc.as_ptr(), desc.len() as i32);
+        set_tool_schema(schema.as_ptr(), schema.len() as i32);
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn hyper_ext_invoke_tool() -> i32 {
+    // Copy host tool_input into a small stack buffer via input_byte.
+    let n = unsafe { input_len() };
+    if n < 0 {
+        return 1;
+    }
+    let n = (n as usize).min(512);
+    let mut buf = [0u8; 512];
+    for i in 0..n {
+        let b = unsafe { input_byte(i as i32) };
+        if b < 0 {
+            break;
+        }
+        buf[i] = b as u8;
+    }
+    unsafe {
+        set_tool_result(buf.as_ptr(), n as i32);
+    }
     0
 }
 
