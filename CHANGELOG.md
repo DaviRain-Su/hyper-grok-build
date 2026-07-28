@@ -4,17 +4,32 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r1] — 2026-07-28
+
 ### Added
 - **OpenCode Go subscription provider** — Configure a Console-issued Go API key with `/providers opencode-go <key>` or `OPENCODE_API_KEY`, then use the bundled `opencode-go/*` catalog. Models are routed per official metadata across OpenAI Chat Completions and Anthropic Messages; `/login opencode-go` explains the documented API-key flow instead of reusing OpenCode's undocumented, CLI-specific OAuth client identity.
 - **Isolated Hyper self-updates** — `hyper update` and startup auto-update now resolve only `DaviRain-Su/hyper-grok-build` GitHub Releases, verify `SHA256SUMS`, and keep managed binaries/update state under `~/.hyper`. The official `~/.grok/bin/grok` installation is never used as an update target.
 - **12 preset themes** — A curated collection layered on top of the original five, distinguished primarily by background color: nine dark (`everforest`, `nord`, `dracula`, `gruvbox`, `catppuccin-mocha`, `solarized-dark`, `deep-ocean`, `ember`, `midnight-oled`) and three light (`solarized-light`, `catppuccin-latte`, `paper`). Pick via `/theme <name>`, Settings → Appearance → Theme, or the `auto` dark/light pairings. All are truecolor (RGB) and fall back to Grok Night on 256/16-color terminals. Each preset is defined from a compact palette expanded through a shared builder so semantic roles (error=red, success=green, sunken code blocks, scrollbar contrast) stay consistent across the set.
 - **Translations for the 12 preset themes** — `settings.{theme,auto_dark_theme,auto_light_theme}.choice.*.description` for the nine dark + three light presets across all nine non-English locales (de, es, fr, ja, ko, pt-BR, ru, zh-CN, zh-TW); previously they fell back to English.
+- **Nix flake packaging** — `flake.nix` / `flake.lock` package `hyper` from `xai-grok-pager-bin` with a matching `devShell`. Package version is read from the root `VERSION` file (no hardcoding). Documented in README as `nix build` / `nix run` / `nix develop`.
 
 ### Fixed
 - **Bare login provider drift** — Bare `/login` and the welcome-screen Login action now resolve the advertised xAI `grok.com` / enterprise OIDC method on every invocation instead of reusing a prior explicit Kimi, OpenAI, or Claude selection. Third-party subscription login remains available only through its explicit provider command.
 - **Same-version republish safety** — Community deployments use the release archive SHA-256 as part of their identity, so a deliberately republished tag installs once and converges. Downloads are locked, staged, smoke-tested, and atomically activated without overwriting the current binary first.
 - **Theme switch appeared to need a restart** — On terminals that don't advertise truecolor, the Settings → Appearance theme picker still offered the truecolor-only presets. Selecting one clamped the live view to Grok Night (screen unchanged) yet persisted the choice, so it only "took effect" after a restart (the startup path applies the persisted theme un-clamped). The picker now hides themes the current terminal can't render (mirrors `/theme`'s `available()` gate), so `theme` / `auto_dark_theme` / `auto_light_theme` only list renderable options.
 - **Theme toasts bypassed i18n** — The `theme` / `auto_dark_theme` / `auto_light_theme` "✓ …" confirmation toasts were hardcoded English (label + format). They now route through the localized `toast.saved` bundle like every other setting.
+
+### Notes
+- Community revision tag uses a `-rN` suffix (`0.2.114-r1`) so we can ship Hyper-only changes without claiming a clean upstream patch bump. Later community revisions on the same line can be `0.2.114-r2`, `0.2.114-r3`, …
+- Wire version remains lockstep with Hyper crate versions (`0.2.114-r1`). GitHub Release is published as a normal (non-prerelease) release so installers and `hyper update` treat it as latest.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r1
+```
 
 ## [0.2.113] — 2026-07-27
 

@@ -216,6 +216,9 @@ jobs:
         with:
           files: dist/*
           draft: false
+          # Keep community revision tags (e.g. v0.2.114-r1) as full releases.
+          # installers / `hyper update` refuse GitHub "prerelease" on /latest.
+          prerelease: false
           make_latest: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
