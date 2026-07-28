@@ -96,7 +96,7 @@ hyper                # 启动 TUI
 安装指定版本:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.113
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r3
 ```
 
 安装程序会根据发布版的 `SHA256SUMS` 校验每一次下载,
@@ -198,7 +198,7 @@ cargo build -p xai-grok-pager-bin --profile release-dist
 
 1. 将根目录的 [`VERSION`](VERSION) 文件设置为 **monorepo 锁步客户端版本**
    (与 `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version` 保持一致,当前为 `0.2.113`)。CI 会把它编译进
+   `xai-grok-version` 保持一致,当前为 `0.2.114-r3`)。CI 会把它编译进
    `x-grok-client-version`;xAI 会拒绝低于 **0.1.202** 的客户端(HTTP 426)。
    **不要**自己编造一个较低的营销版本号(例如 `0.1.0`)。
 2. 在 `dev`(或你的发布分支)上提交;更新 `CHANGELOG.md`。
@@ -216,14 +216,14 @@ git push origin "v${VERSION}"
 
 | 产物 | 示例 |
 | ----- | ------- |
-| macOS arm64 | `hyper-0.2.113-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `hyper-0.2.113-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64(glibc) | `hyper-0.2.113-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64(glibc) | `hyper-0.2.113-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `hyper-0.2.113-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `hyper-0.2.114-r3-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `hyper-0.2.114-r3-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64(glibc) | `hyper-0.2.114-r3-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64(glibc) | `hyper-0.2.114-r3-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `hyper-0.2.114-r3-x86_64-pc-windows-msvc.zip` |
 | 校验和 | `SHA256SUMS` |
 
-标签必须与 `VERSION` 完全一致(`v0.2.113` ↔ `0.2.113`),否则构建会失败。
+标签必须与 `VERSION` 完全一致(`v0.2.114-r3` ↔ `0.2.114-r3`),否则构建会失败。
 
 ---
 

@@ -359,15 +359,16 @@ panic = "abort"
 #
 # Hardening: thin LTO for cross-crate optimization with reasonable link times,
 # codegen-units=1 maximizes optimization (whole-program analysis, no CGU boundaries).
-# debug=1 emits line-tables DWARF; strip=false keeps symbols so CI can extract
-# .debug sidecars (Linux) or .dSYM bundles (macOS) before stripping post-build.
+# Distribution archives do not publish debug sidecars, so do not emit embedded
+# debug metadata and ask each target linker to remove non-runtime symbols. This
+# avoids the 1.36 GB unstripped Linux binaries shipped in v0.2.114-r2.
 # Linker flags (RELRO, NX stack) are set per-target in .cargo/config.toml.
 [profile.release-dist]
 inherits = "release"
 lto = "thin"
 codegen-units = 1
-strip = false
-debug = 1
+strip = "symbols"
+debug = 0
 split-debuginfo = "off"
 
 # Production profile for latency-sensitive x-product services (VF, home-mixer).

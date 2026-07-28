@@ -4,6 +4,24 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r3] — 2026-07-28
+
+### Fixed
+- **OpenCode Go retry response parsing** — Accept valid Chat Completions chunks and Messages `message_start` events that omit only the provider response ID, while leaving semantic tool-call validation and other required stream fields unchanged.
+- **Oversized Linux release binaries** — Distribution builds no longer embed debug metadata or retain non-runtime symbols. The release workflow now rejects binaries over 256 MiB and verifies that Linux artifacts contain no DWARF debug sections.
+
+### Notes
+- This is community revision `0.2.114-r3`; it remains a normal GitHub Release so installers and `hyper update` treat it as latest.
+- The r2 size regression was Linux-specific: both Linux binaries unpacked to about 1.36 GB, while r2 macOS binaries were 174–188 MB and Windows was 151 MB. The stricter release profile is applied consistently to all five targets.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r3
+```
+
 ## [0.2.114-r2] — 2026-07-28
 
 ### Added

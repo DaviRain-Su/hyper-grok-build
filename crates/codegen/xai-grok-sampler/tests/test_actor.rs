@@ -386,8 +386,12 @@ async fn two_concurrent_requests_complete_with_correct_request_ids() {
 // Retry on transient transport error
 // ---------------------------------------------------------------------------
 
+/// OpenCode Go can omit the response-level `id` from otherwise valid Chat
+/// Completions chunks, including the successful attempt after a transient
+/// gateway failure. That metadata omission must not turn a valid retry into a
+/// fatal Serialization error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retries_on_500_then_succeeds() {
+async fn retries_on_500_then_accepts_chunk_without_response_id() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -403,8 +407,23 @@ async fn retries_on_500_then_succeeds() {
                         json!({ "error": { "message": "transient" } }).to_string(),
                     ))
                 } else {
-                    // Subsequent attempts: success.
-                    let events = sse::chat_completion_events("ok", "test-model");
+                    // Subsequent attempt: a valid OpenAI-compatible chunk whose
+                    // response-level metadata omits only `id` (OpenCode Go).
+                    let events = vec![
+                        Event::default().data(
+                            json!({
+                                "object": "chat.completion.chunk",
+                                "created": 0,
+                                "model": "test-model",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": { "role": "assistant", "content": "ok" },
+                                    "finish_reason": "stop"
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                    ];
                     Ok(Sse::new(stream::iter(
                         events.into_iter().map(Ok::<_, std::convert::Infallible>),
                     )))

@@ -196,6 +196,10 @@ pub struct Metadata {
 /// Non-streaming response from POST /v1/messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagesResponse {
+    /// Provider-issued response ID. Compatible gateways may omit it from a
+    /// streamed `message_start`; it is not used to correlate content blocks or
+    /// tool calls, whose IDs remain required.
+    #[serde(default)]
     pub id: String,
     #[serde(rename = "type")]
     pub r#type: String, // "message"
@@ -321,6 +325,33 @@ pub struct StreamError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_start_accepts_missing_response_id() {
+        let event: MessageStreamEvent = serde_json::from_str(
+            r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"minimax-m3","stop_reason":null,"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+        )
+        .expect("a response-level id is optional compatibility metadata");
+
+        match event {
+            MessageStreamEvent::MessageStart { message } => {
+                assert!(message.id.is_empty());
+                assert_eq!(message.model, "minimax-m3");
+            }
+            other => panic!("expected MessageStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_start_still_requires_tool_call_ids() {
+        let event = serde_json::from_str::<MessageStreamEvent>(
+            r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[{"type":"tool_use","name":"read_file","input":{}}],"model":"minimax-m3","stop_reason":null,"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+        );
+        assert!(
+            event.is_err(),
+            "tool-use ids are semantic and must remain required"
+        );
+    }
 
     #[test]
     fn stop_reason_deserializes_all_known_values_and_catches_unknown() {

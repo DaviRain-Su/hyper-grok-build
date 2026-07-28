@@ -633,6 +633,10 @@ pub struct CompletionTokensDetails {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionChunk {
+    /// Provider-issued response ID. Some OpenAI-compatible gateways (notably
+    /// OpenCode Go) omit it on otherwise valid streamed chunks after a retry.
+    /// Hyper does not use this transport ID to correlate content or tool calls.
+    #[serde(default)]
     pub id: String,
     pub object: String,
     pub created: u64,
@@ -1405,6 +1409,25 @@ impl From<crate::messages::MessagesRequest> for MessagesRequestWrapper {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn chat_completion_chunk_accepts_missing_response_id() {
+        let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "opencode-go-model",
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("a response-level id is optional compatibility metadata");
+
+        assert!(chunk.id.is_empty());
+        assert_eq!(chunk.model, "opencode-go-model");
+        assert_eq!(chunk.choices.len(), 1);
+    }
 
     #[test]
     fn reasoning_effort_serde_lowercase_round_trip() {

@@ -4717,6 +4717,20 @@ mod tests {
     }
 
     #[test]
+    fn decode_messages_sse_frame_accepts_message_start_without_response_id() {
+        let decoded = decode_messages_sse_frame(
+            r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[],"model":"minimax-m3","stop_reason":null,"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+        );
+        match decoded {
+            Ok(messages::MessageStreamEvent::MessageStart { message }) => {
+                assert!(message.id.is_empty());
+                assert_eq!(message.model, "minimax-m3");
+            }
+            other => panic!("expected MessageStart, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn decode_messages_sse_frame_parses_ping_and_text_delta() {
         assert!(matches!(
             decode_messages_sse_frame(r#"{"type":"ping"}"#),

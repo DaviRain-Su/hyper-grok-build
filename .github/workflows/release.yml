@@ -15,6 +15,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Fail before packaging if debug metadata accidentally inflates a distribution
+  # binary again. Current stripped targets are below 200 MiB; 256 MiB leaves
+  # headroom for normal dependency growth while catching the r2 Linux regression.
+  MAX_RELEASE_BINARY_BYTES: "268435456"
   # audiopus_sys builds bundled Opus from an older CMake project. New CMake
   # releases reject that project's historical policy floor unless this is set.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
@@ -129,6 +133,36 @@ jobs:
         env:
           GROK_VERSION: ${{ env.GROK_VERSION }}
         run: cargo build --profile release-dist -p xai-grok-pager-bin --features community-build --locked --target ${{ matrix.target }}
+
+      - name: Verify stripped release binary
+        shell: bash
+        run: |
+          suffix=""
+          if [ "${{ runner.os }}" = "Windows" ]; then suffix=".exe"; fi
+          src=""
+          for cand in \
+            "target/${{ matrix.target }}/release-dist/hyper${suffix}" \
+            "target/${{ matrix.target }}/release-dist/xai-grok-pager${suffix}"
+          do
+            if [ -f "$cand" ]; then src="$cand"; break; fi
+          done
+          [ -n "$src" ] || { echo "release binary not found under release-dist/" >&2; exit 1; }
+
+          bytes="$(wc -c < "$src" | tr -d '[:space:]')"
+          echo "release binary: $src ($bytes bytes; limit $MAX_RELEASE_BINARY_BYTES)"
+          if [ "$bytes" -gt "$MAX_RELEASE_BINARY_BYTES" ]; then
+            echo "release binary exceeds the 256 MiB distribution limit; check debug/strip settings" >&2
+            exit 1
+          fi
+
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sections="$RUNNER_TEMP/hyper-sections.txt"
+            readelf -SW "$src" > "$sections"
+            if grep -Eq '\.(z)?debug_|\.gnu_debuglink' "$sections"; then
+              echo "Linux release binary still contains debug sections" >&2
+              exit 1
+            fi
+          fi
 
       - name: Package archive (tar.gz)
         if: runner.os != 'Windows'
