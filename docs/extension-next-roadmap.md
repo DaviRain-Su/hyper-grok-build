@@ -57,12 +57,15 @@
 
 ### P1 — 生态打磨（SDK 之后）
 
-| # | 事项 |
-|---|------|
-| 6 | 2～3 个真实示例插件（path-guard / stop-verify / echo-tool）用 SDK 重写 |
-| 7 | runtime 级 e2e 保持绿；可选 shell 级测 |
-| 8 | CI：`wasm32` build + `validate --load` 模板 |
-| 9 | `/plugins` UI 展示更完整 runtime 信息（若还糙） |
+| # | 事项 | 状态 |
+|---|------|------|
+| 6 | SDK 示例 path-guard / stop-once（+ 模板 echo tool） | **done** |
+| 7 | runtime e2e（template + 两示例） | **done** |
+| 8 | `scripts/check-extensions.sh` 编 wasm + test | **done** |
+| 9 | Pi 对照矩阵 `docs/extension-vs-pi.md` | **done** |
+| 10 | `/plugins` UI has_runtime | 已有 |
+| 11 | GitHub CI 挂 check-extensions | 可选 |
+| 12 | Oracle / 人审 vs Pi | 本迭代 |
 
 ### P2 — 可选大件（单独立项，不插队）
 

@@ -1334,7 +1334,11 @@ mod tests {
         rt.load(&trusted_spec(
             "rust-guest-template",
             path,
-            vec![Capability::PreToolGate, Capability::BeforeAgentInject],
+            vec![
+                Capability::PreToolGate,
+                Capability::BeforeAgentInject,
+                Capability::RegisterTool,
+            ],
         ))
         .unwrap();
         let deny = rt
@@ -1357,6 +1361,54 @@ mod tests {
             })
             .await;
         assert!(inj.has_injection());
+        let tools = rt.collect_registered_tools().await;
+        assert!(
+            tools.iter().any(|t| t.name == "echo"),
+            "template should register echo tool: {tools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_sdk_path_guard_and_stop_once() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let guard = root.join("sdk-path-guard/extension.wasm");
+        let stop = root.join("sdk-stop-once/extension.wasm");
+        if !guard.is_file() || !stop.is_file() {
+            eprintln!("skip: run scripts/check-extensions.sh to build example wasm");
+            return;
+        }
+        let mut rt = ExtensionRuntime::new();
+        rt.load(&trusted_spec(
+            "sdk-path-guard",
+            guard,
+            vec![Capability::PreToolGate],
+        ))
+        .unwrap();
+        rt.load(&trusted_spec(
+            "sdk-stop-once",
+            stop,
+            vec![Capability::StopGate],
+        ))
+        .unwrap();
+        let deny = rt
+            .dispatch_pre_tool_use(&PreToolIn {
+                tool_name: "run_terminal_command".into(),
+                tool_input_json: r#"{"command":"mkfs.ext4 /dev/sda"}"#.into(),
+            })
+            .await;
+        assert!(matches!(deny.decision, PreToolDecision::Deny { .. }));
+        let block = rt
+            .dispatch_stop(&StopIn {
+                stop_hook_active: false,
+            })
+            .await;
+        assert!(matches!(block.decision, StopOut::Block { .. }));
+        let cont = rt
+            .dispatch_stop(&StopIn {
+                stop_hook_active: true,
+            })
+            .await;
+        assert!(matches!(cont.decision, StopOut::Continue));
     }
 
     #[tokio::test]

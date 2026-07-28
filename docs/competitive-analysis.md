@@ -502,7 +502,7 @@ Hyper 可占据的位置（power user）：
 | A10 | 中途纠偏 / 旁支提问不打断主线语义 | Nanocodex steer/fork | interjection + session UX | P2 | idea | |
 | A11 | 超大任务有里程碑与验收，不靠单 session 硬撑 | Droid Missions | plan.md 字段 | P3 | idea | 轻量即可 |
 | A12 | 多 tool 编排不必每步回模型 | Nanocodex Code Mode | tools runtime 实验 | P3 | idea | spike only |
-| A13 | 扩展工作流**不改核心**即可分享 | Pi packages | plugins/skills + **WASM Extension Bus** | 横向 | **building**（Phase 3） | [design-wasm-extensions.md](./design-wasm-extensions.md)；lifecycle+validate+user-guide；Component Model 后续 |
+| A13 | 扩展工作流**不改核心**即可分享 | Pi packages | plugins/skills + **WASM Extension Bus + SDK** | 横向 | **building**（P1 示例/SDK） | [design-wasm-extensions.md](./design-wasm-extensions.md)；[extension-vs-pi.md](./extension-vs-pi.md) |
 | A14 | 一键 effort 搭配表 | Amp Modes | config preset | — | **wont**（缓停） | [design-modes.md](./design-modes.md) §0 |
 | A15 | 云 thread / collab | Amp / omp | — | — | wont | 个人后置 |
 | A16 | 企业 SDLC 云平台 | Droid | — | — | wont | 体验可借 |

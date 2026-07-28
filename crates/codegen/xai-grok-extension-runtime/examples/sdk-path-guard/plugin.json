@@ -1,0 +1,10 @@
+{
+  "name": "sdk-path-guard",
+  "version": "0.1.0",
+  "description": "SDK example: deny destructive shell patterns in tool input",
+  "runtime": {
+    "wasm": "extension.wasm",
+    "wit": "hyper:extension@0.1.0",
+    "capabilities": ["pre_tool_gate"]
+  }
+}
