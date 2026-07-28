@@ -53,9 +53,12 @@
 
           hyper-grok-build = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
             pname = "hyper-grok-build";
-            # Root `VERSION` file is the lockstep client version, identical
-            # to `crates/codegen/xai-grok-pager-bin/Cargo.toml`'s `version`.
-            version = "0.2.113";
+            # The lockstep client version lives in the root `VERSION` file
+            # (the README's "Releasing" section says to set it there; the
+            # shipped crate's `Cargo.toml` is kept in sync by hand). Read
+            # it so the nix package version tracks `VERSION` automatically
+            # instead of drifting when the project is bumped.
+            version = builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile ./VERSION);
 
             # Whole-workspace source — vendored `third_party/*` path deps and
             # `.cargo/config.toml` (linker hardening, jemalloc page size,
