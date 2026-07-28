@@ -68,7 +68,6 @@ pub enum RuntimeError {
 }
 
 /// Host-side state visible to guest imports during a call.
-#[derive(Debug, Clone, Default)]
 struct HostCtx {
     tool_name: String,
     tool_input: String,
@@ -89,6 +88,35 @@ struct HostCtx {
     tool_description_out: String,
     tool_schema_out: String,
     tool_result_out: String,
+    /// Resource limits (must live with the Store; Oracle memory-bound fix).
+    limits: wasmtime::StoreLimits,
+}
+
+impl Default for HostCtx {
+    fn default() -> Self {
+        Self {
+            tool_name: String::new(),
+            tool_input: String::new(),
+            prompt: String::new(),
+            inject_context: String::new(),
+            append_system: String::new(),
+            stop_hook_active: false,
+            compact_reason: String::new(),
+            gate_reason: String::new(),
+            tool_index: 0,
+            tool_name_out: String::new(),
+            tool_description_out: String::new(),
+            tool_schema_out: String::new(),
+            tool_result_out: String::new(),
+            // 256 pages * 64KiB = 16MiB max linear memory (rustc guests often need >1MiB).
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(256 * 64 * 1024)
+                .instances(1)
+                .memories(1)
+                .tables(4)
+                .build(),
+        }
+    }
 }
 
 /// Per-session registry of loaded extensions.
@@ -683,6 +711,14 @@ impl WasmGuest {
     }
 
     fn from_bytes(name_for_logs: String, bytes: &[u8]) -> Result<Self, RuntimeError> {
+        // Cap module size to reduce compile/OOM risk (Oracle).
+        const MAX_WASM_BYTES: usize = 8 * 1024 * 1024;
+        if bytes.len() > MAX_WASM_BYTES {
+            return Err(RuntimeError::Module(format!(
+                "wasm module too large: {} bytes (max {MAX_WASM_BYTES})",
+                bytes.len()
+            )));
+        }
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
         let engine =
@@ -693,6 +729,7 @@ impl WasmGuest {
 
         // Validate ABI at load time.
         let mut store = wasmtime::Store::new(&engine, HostCtx::default());
+        store.limiter(|s| &mut s.limits);
         store
             .set_fuel(1_000_000)
             .map_err(|e| RuntimeError::Module(e.to_string()))?;
@@ -745,6 +782,7 @@ impl WasmGuest {
 
         let join = tokio::task::spawn_blocking(move || {
             let mut store = wasmtime::Store::new(&engine, host);
+            store.limiter(|s| &mut s.limits);
             if let Err(e) = store.set_fuel(10_000_000) {
                 let host = store.into_data();
                 return (

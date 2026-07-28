@@ -943,6 +943,9 @@ pub(crate) struct SessionActor {
     /// session actor: `RefCell` is sufficient.
     pub(crate) extension_runtime:
         std::cell::RefCell<xai_grok_extension_runtime::ExtensionRuntime>,
+    /// Client tool names this session registered on the shared ToolBridge
+    /// (session-scoped unregister; see Oracle review).
+    pub(crate) wasm_registered_tools: std::cell::RefCell<Vec<String>>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.
     pub(crate) events: crate::session::events::EventTracker,

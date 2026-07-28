@@ -864,7 +864,11 @@ impl SessionActor {
                 "extension runtime rebuilt from plugin registry"
             );
             let bridge = self.agent.borrow().tool_bridge().clone();
-            let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(&bridge, &rt).await;
+            let mut owned = self.wasm_registered_tools.borrow_mut();
+            let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(
+                &bridge, &rt, &mut owned,
+            )
+            .await;
             tracing::info!(
                 session_id = %sid,
                 wasm_tools = n,

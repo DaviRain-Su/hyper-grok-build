@@ -67,8 +67,12 @@ impl Tool for WasmExtensionTool {
     type Output = String;
 
     fn id(&self) -> ToolId {
+        // client_name is already sanitized; fall back to a unique-ish id.
         ToolId::new(&self.tool_id).unwrap_or_else(|_| {
-            ToolId::new("wasm_tool").expect("static tool id")
+            let fallback = format!("wasm_fallback_{}", self.tool_id.len());
+            ToolId::new(&fallback).unwrap_or_else(|_| {
+                ToolId::new("wasm_fallback").expect("static tool id")
+            })
         })
     }
 
@@ -85,23 +89,31 @@ impl Tool for WasmExtensionTool {
         self.runtime
             .invoke_registered_tool(&self.extension, &self.short_name, &args)
             .await
-            .map_err(|e| ToolError::invalid_arguments(e.to_string()))
+            .map_err(|e| ToolError::not_implemented(e.to_string()))
     }
 }
 
-/// Unregister previous `wasm_*` tools and re-register from the extension runtime.
+/// Unregister only tools this session previously registered, then re-register
+/// from the extension runtime. Avoids wiping other sessions' `wasm_*` tools
+/// via a global prefix delete (Oracle finding).
 pub async fn sync_wasm_tools_to_bridge(
     bridge: &xai_grok_tools::bridge::ToolBridge,
     runtime: &ExtensionRuntime,
+    previously_registered: &mut Vec<String>,
 ) -> usize {
-    let removed = bridge.unregister_tools_by_prefix(WASM_TOOL_PREFIX);
-    if removed > 0 {
-        tracing::info!(removed, "unregistered prior wasm_* tools");
+    for name in previously_registered.drain(..) {
+        if bridge.unregister_tool_by_name(&name) {
+            tracing::debug!(tool = %name, "unregistered session-owned wasm tool");
+        }
     }
     let tools = runtime.collect_registered_tools().await;
     let mut registered = 0usize;
     for desc in tools {
         let client = desc.client_name();
+        if !client.starts_with(WASM_TOOL_PREFIX) {
+            tracing::warn!(tool = %client, "skipping non-wasm_* client name");
+            continue;
+        }
         let schema = desc.parsed_schema();
         let tool = WasmExtensionTool::new(runtime.clone(), desc);
         match bridge
@@ -110,9 +122,11 @@ pub async fn sync_wasm_tools_to_bridge(
         {
             Ok(()) => {
                 tracing::info!(tool = %client, "registered wasm extension tool");
+                previously_registered.push(client);
                 registered += 1;
             }
             Err(e) => {
+                // Name collision with another session's tool — try session-unique name.
                 tracing::warn!(tool = %client, error = %e, "failed to register wasm tool");
             }
         }

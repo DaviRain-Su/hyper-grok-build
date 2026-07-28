@@ -1846,8 +1846,9 @@ pub(super) async fn run_session(
                             }
                             // Register wasm_* tools once extensions are warm.
                             let bridge = session.agent.borrow().tool_bridge().clone();
+                            let mut owned = session.wasm_registered_tools.borrow_mut();
                             let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(
-                                &bridge, &ext_rt,
+                                &bridge, &ext_rt, &mut owned,
                             )
                             .await;
                             if n > 0 {

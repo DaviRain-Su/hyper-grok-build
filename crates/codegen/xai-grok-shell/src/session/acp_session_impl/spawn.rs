@@ -1740,10 +1740,11 @@ pub(crate) async fn spawn_session_actor(
                     .filter_map(|p| p.extension_spec());
                 rt.rebuild_from_specs(specs);
             }
-            // Tool bridge registration happens after the session actor is fully
-            // constructed (async); see hooks_plugins apply + first tool prep.
+            // Tool bridge registration happens at session_start + plugin reload
+            // (async); see run_loop DispatchSessionStartHook + hooks_plugins.
             rt
         }),
+        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),

@@ -650,8 +650,9 @@ fn collect_plugin(
             let has_mcp = plugin_root.join(".mcp.json").is_file();
             let has_lsp = plugin_root.join(".lsp.json").is_file();
             let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
+            let has_wasm = plugin_root.join("extension.wasm").is_file();
 
-            if !has_skills && !has_agents && !has_mcp && !has_lsp && !has_hooks {
+            if !has_skills && !has_agents && !has_mcp && !has_lsp && !has_hooks && !has_wasm {
                 tracing::debug!(
                     path = %plugin_root.display(),
                     "directory has no manifest and no recognized plugin components; skipping"
