@@ -16076,6 +16076,7 @@ dependencies = [
  "xai-grok-announcements",
  "xai-grok-config",
  "xai-grok-extension-api",
+ "xai-grok-extension-runtime",
  "xai-grok-markdown",
  "xai-grok-mermaid",
  "xai-grok-models",
