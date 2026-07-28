@@ -131,17 +131,21 @@ touch `ptr`/`len` host imports by hand.
 ```bash
 grok plugin init ./my-ext --name my-ext
 cd my-ext
-# edit src/lib.rs using:
+# edit src/lib.rs — declarative macros only (no proc-macro):
 #   use xai_grok_extension_sdk::prelude::*;
-#   xai_grok_extension_sdk::extension_boilerplate!();
-# custom lifecycle (optional):
-#   extension_boilerplate! { session_start: || { /* warm */ 0 }, }
+#   xai_grok_extension_sdk::hyper_extension! {
+#       pre_tool_use: || { if input_contains("rm -rf") { deny("no") } else { allow() } },
+#       tools: { echo { description: "echo", invoke: |a| { tool_result(a); allow() } } }
+#   }
 rustup target add wasm32-unknown-unknown
 cargo build --release --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/hyper_ext_rust_guest_template.wasm \
    ./extension.wasm
 grok plugin validate . --load
 ```
+
+Author DX is **`macro_rules!` only** (`hyper_extension!`, `export_pre_tool_use!`,
+`extension_tools!`, …). We intentionally **do not** ship a proc-macro `#[extension]`.
 
 Template + SDK sources:
 

@@ -1,7 +1,6 @@
 //! SDK example: block obviously destructive commands in tool JSON.
+//! Declarative macros only (no proc-macro).
 use xai_grok_extension_sdk::prelude::*;
-
-xai_grok_extension_sdk::extension_boilerplate!();
 
 const BLOCK: &[&str] = &[
     "rm -rf /",
@@ -14,16 +13,16 @@ const BLOCK: &[&str] = &[
     "chmod -R 777 /",
 ];
 
-#[unsafe(no_mangle)]
-pub extern "C" fn hyper_ext_on_pre_tool_use() -> i32 {
-    for pat in BLOCK {
-        if input_contains(pat) {
-            return deny(&format!("sdk-path-guard: blocked pattern `{pat}`"));
+xai_grok_extension_sdk::hyper_extension! {
+    pre_tool_use: || {
+        for pat in BLOCK {
+            if input_contains(pat) {
+                return deny(&format!("sdk-path-guard: blocked pattern `{pat}`"));
+            }
         }
+        if input_contains("rm -rf") {
+            return deny("sdk-path-guard: blocked `rm -rf` in tool input");
+        }
+        allow()
     }
-    // Broad rm -rf anywhere in the payload
-    if input_contains("rm -rf") {
-        return deny("sdk-path-guard: blocked `rm -rf` in tool input");
-    }
-    allow()
 }

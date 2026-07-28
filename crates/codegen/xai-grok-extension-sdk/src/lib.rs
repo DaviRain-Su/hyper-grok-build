@@ -3,22 +3,43 @@
 //! Safe helpers for writing Hyper WASM guests without hand-rolling
 //! `hyper_host` imports and `ptr`/`len` calls.
 //!
+//! ## Authoring style
+//!
+//! Prefer **declarative macros** (`macro_rules!`) — there is **no** proc-macro
+//! crate. Closures stay ordinary Rust so rust-analyzer and tests work.
+//!
 //! ## Quick start
 //!
 //! ```ignore
 //! use xai_grok_extension_sdk::prelude::*;
 //!
-//! extension_boilerplate!();
-//!
-//! #[no_mangle]
-//! pub extern "C" fn hyper_ext_on_pre_tool_use() -> i32 {
-//!     if input_contains("rm -rf") {
-//!         deny("blocked rm -rf")
-//!     } else {
+//! hyper_extension! {
+//!     pre_tool_use: || {
+//!         if input_contains("rm -rf") {
+//!             deny("blocked rm -rf")
+//!         } else {
+//!             allow()
+//!         }
+//!     },
+//!     before_agent_start: || {
+//!         inject_context("prefer dedicated tools over recursive shell search");
 //!         allow()
+//!     },
+//!     tools: {
+//!         echo {
+//!             description: "Echo args JSON",
+//!             schema: r#"{"type":"object","properties":{"msg":{"type":"string"}}}"#,
+//!             invoke: |args| {
+//!                 tool_result(args);
+//!                 allow()
+//!             }
+//!         }
 //!     }
 //! }
 //! ```
+//!
+//! Or compose smaller macros: [`extension_boilerplate!`], [`export_pre_tool_use!`],
+//! [`extension_tools!`], …
 //!
 //! Build with `cargo build --release --target wasm32-unknown-unknown`.
 //! See `xai-grok-extension-runtime/examples/rust-guest-template`.
@@ -26,9 +47,11 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod host;
+#[macro_use]
+mod macros;
 pub mod prelude;
 
-/// Must match host [`CORE_ABI_VERSION`](xai_grok_extension_api is host-side).
+/// Must match host CORE_ABI_VERSION.
 pub const CORE_ABI_VERSION: i32 = 1;
 
 /// Gate decision: allow the action (tool / stop).
@@ -82,6 +105,12 @@ pub fn tool_index() -> i32 {
     host::tool_index()
 }
 
+/// Whether the stop gate already continued this turn.
+#[inline]
+pub fn stop_hook_active() -> bool {
+    host::stop_hook_active()
+}
+
 /// Advertise tool metadata while handling `hyper_ext_describe_tool`.
 pub fn describe_tool(name: &str, description: &str, json_schema: &str) {
     host::set_tool_name(name);
@@ -97,50 +126,3 @@ pub fn tool_result(text: &str) {
 
 /// Standard empty JSON object schema for tools with no parameters.
 pub const EMPTY_OBJECT_SCHEMA: &str = r#"{"type":"object","properties":{}}"#;
-
-/// Emit the minimal required exports: abi_version, session_start, session_end.
-///
-/// Expand in the guest crate root:
-/// ```ignore
-/// xai_grok_extension_sdk::extension_boilerplate!();
-/// ```
-///
-/// Custom lifecycle handlers without dropping the macro:
-/// ```ignore
-/// fn on_start() -> i32 {
-///     // warm caches, etc.
-///     0
-/// }
-/// xai_grok_extension_sdk::extension_boilerplate! {
-///     session_start: on_start,
-/// }
-/// // or: session_start: || { 0 }, session_end: my_end
-/// ```
-#[macro_export]
-macro_rules! extension_boilerplate {
-    () => {
-        $crate::extension_boilerplate!(session_start: || 0i32, session_end: || 0i32);
-    };
-    (session_start: $start:expr) => {
-        $crate::extension_boilerplate!(session_start: $start, session_end: || 0i32);
-    };
-    (session_end: $end:expr) => {
-        $crate::extension_boilerplate!(session_start: || 0i32, session_end: $end);
-    };
-    (session_start: $start:expr, session_end: $end:expr $(,)?) => {
-        #[unsafe(no_mangle)]
-        pub extern "C" fn hyper_ext_abi_version() -> i32 {
-            $crate::CORE_ABI_VERSION
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn hyper_ext_on_session_start() -> i32 {
-            ($start)()
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn hyper_ext_on_session_end() -> i32 {
-            ($end)()
-        }
-    };
-}

@@ -381,6 +381,8 @@ world extension {
 ### Phase 3 — 开发者体验
 
 - [x] Rust guest 模板：`examples/rust-guest-template/`（`extension init` CLI 仍可后置）  
+- [x] 作者 SDK：`xai-grok-extension-sdk` + **声明宏**（`hyper_extension!` / `export_*!` / `extension_tools!`）  
+- [x] **不做**过程宏 `#[extension]` / `#[tool]`（维护成本高、IDE 体验差）  
 
 - [x] `grok plugin validate` 检查 wasm 魔数、WIT、capabilities  
 - [x] 文档：user-guide `31-wasm-extensions.md` + plugins 交叉引用  

@@ -67,11 +67,18 @@
 | 11 | GitHub CI 挂 check-extensions | 可选 |
 | 12 | Oracle / 人审 vs Pi | 本迭代 |
 
+### P1.5 — 声明宏 DX（替代过程宏）
+
+| # | 事项 | 状态 |
+|---|------|------|
+| 10a | **不要**过程宏 `#[extension]` / `#[tool]` | **明确不做**（难维护、IDE 差） |
+| 10b | `macro_rules!`：`hyper_extension!` / `export_*!` / `extension_tools!` | **done** |
+| 10c | 模板 + sdk 示例迁到声明宏 | **done** |
+
 ### P2 — 可选大件（单独立项，不插队）
 
 | # | 事项 | 触发条件 |
 |---|------|----------|
-| 10 | 过程宏 `#[extension]` / `#[tool]` | SDK 手写 helper 仍啰嗦 |
 | 11 | `hyper-ext` CLI（build/pack） | init 不够用 |
 | 12 | Component Model 双轨 | 见 abi-strategy |
 | 13 | before_model rewrite | 产品明确要 |
