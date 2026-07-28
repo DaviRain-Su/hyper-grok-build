@@ -216,11 +216,12 @@ jobs:
         with:
           files: dist/*
           draft: false
-          # Keep community revision tags (e.g. v0.2.114-r1) as full releases.
-          # installers / `hyper update` refuse GitHub "prerelease" on /latest.
+          # Always publish as a full release. Community revision tags use a
+          # hyphenated suffix (e.g. v0.2.114-r1); treating those as GitHub
+          # prereleases would hide them from /latest and break installers /
+          # `hyper update`.
           prerelease: false
           make_latest: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
