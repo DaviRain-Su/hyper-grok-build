@@ -1,0 +1,22 @@
+# Standalone package (not a workspace member).
+[workspace]
+
+[package]
+name = "hyper-ext-rust-guest-template"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Official Rust-first Hyper WASM guest template (uses xai-grok-extension-sdk)"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+xai-grok-extension-sdk = { path = "../../../xai-grok-extension-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

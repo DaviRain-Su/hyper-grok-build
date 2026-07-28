@@ -343,6 +343,7 @@ A plugin is a directory with any combination of:
 - **Hooks**: a `hooks/hooks.json` file
 - **MCP servers**: a `.mcp.json` file
 - **LSP servers**: a `.lsp.json` file
+- **WASM runtime** (optional): `extension.wasm` and/or `plugin.json` `runtime` block — see [WASM Extensions](31-wasm-extensions.md)
 
 An optional `plugin.json` manifest can override paths or add metadata; without one, Grok discovers components from these standard directories. For example, a `team-tools` plugin might bundle a deploy skill, a code-review agent, pre-commit hooks, and a Linear MCP server, installed together in one step.
 

@@ -36,6 +36,6 @@ pub use client::{
 };
 pub use events::TelemetryEvent;
 pub use session_ctx::{
-    EmitterOrigin, TelemetryCtx, emit_event, emit_event_with_origin, log_event, log_session_event,
-    log_session_event_with_origin, with_session_ctx,
+    EmitterOrigin, TelemetryCtx, emit_event, emit_event_with_origin, log_event, log_event_dual,
+    log_session_event, log_session_event_with_origin, with_session_ctx,
 };

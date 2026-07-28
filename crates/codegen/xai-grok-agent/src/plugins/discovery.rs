@@ -156,6 +156,8 @@ pub struct DiscoveredPlugin {
     pub mcp_config_path: Option<PathBuf>,
     /// Resolved LSP config file path.
     pub lsp_config_path: Option<PathBuf>,
+    /// Resolved WASM extension module path (`extension.wasm` / manifest runtime).
+    pub runtime_wasm: Option<PathBuf>,
     /// Warning message when this plugin won a name collision.
     pub conflict: Option<String>,
 }
@@ -648,8 +650,9 @@ fn collect_plugin(
             let has_mcp = plugin_root.join(".mcp.json").is_file();
             let has_lsp = plugin_root.join(".lsp.json").is_file();
             let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
+            let has_wasm = plugin_root.join("extension.wasm").is_file();
 
-            if !has_skills && !has_agents && !has_mcp && !has_lsp && !has_hooks {
+            if !has_skills && !has_agents && !has_mcp && !has_lsp && !has_hooks && !has_wasm {
                 tracing::debug!(
                     path = %plugin_root.display(),
                     "directory has no manifest and no recognized plugin components; skipping"
@@ -672,6 +675,7 @@ fn collect_plugin(
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+            runtime: None,
             }
         }
         Err(e) => {
@@ -706,6 +710,7 @@ fn collect_plugin(
     let hooks_path = manifest.hooks_path(plugin_root);
     let mcp_config_path = manifest.mcp_config_path(plugin_root);
     let lsp_config_path = manifest.lsp_config_path(plugin_root);
+    let runtime_wasm = manifest.runtime_wasm_path(plugin_root);
 
     candidates.push(DiscoveredPlugin {
         manifest,
@@ -721,6 +726,7 @@ fn collect_plugin(
         hooks_path,
         mcp_config_path,
         lsp_config_path,
+        runtime_wasm,
         conflict: None,
     });
 }

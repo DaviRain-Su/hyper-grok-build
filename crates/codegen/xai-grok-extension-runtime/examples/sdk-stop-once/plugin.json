@@ -1,0 +1,10 @@
+{
+  "name": "sdk-stop-once",
+  "version": "0.1.0",
+  "description": "SDK example: block the first stop so the agent keeps working once (demo stop_gate)",
+  "runtime": {
+    "wasm": "extension.wasm",
+    "wit": "hyper:extension@0.1.0",
+    "capabilities": ["stop_gate"]
+  }
+}

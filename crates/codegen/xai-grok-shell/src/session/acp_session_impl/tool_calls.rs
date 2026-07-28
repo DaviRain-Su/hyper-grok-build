@@ -1032,6 +1032,49 @@ impl SessionActor {
                 return Ok(Err(denied));
             }
         }
+        // WASM extensions always run after shell/HTTP hooks (even when no hooks
+        // are registered). Order: hooks → wasm → continue. Fail-open on trap.
+        // Clone the runtime so we never hold a RefCell guard across `.await`.
+        let ext_rt = self.extension_runtime.borrow().clone();
+        if !ext_rt.is_empty() {
+            let pre_in = xai_grok_extension_api::PreToolIn {
+                tool_name: resolved_tool_name.clone(),
+                tool_input_json: raw_input.to_string(),
+            };
+            let wasm_result = ext_rt.dispatch_pre_tool_use(&pre_in).await;
+            if let xai_grok_extension_runtime::PreToolDecision::Deny {
+                extension,
+                reason,
+            } = wasm_result.decision
+            {
+                let m = ext_rt.metrics();
+                tracing::warn!(
+                    target: "wasm_extension",
+                    extension = %extension,
+                    tool = %resolved_tool_name,
+                    pre_tool_denies = m.pre_tool_denies,
+                    calls_failed = m.calls_failed,
+                    calls_timeout = m.calls_timeout,
+                    reason = %reason,
+                    "wasm extension denied tool"
+                );
+                crate::session::wasm_tools::emit_wasm_extension_blocked(
+                    self.telemetry_enabled,
+                    &extension,
+                    &resolved_tool_name,
+                    crate::session::wasm_tools::deny_category_from_reason(&reason),
+                );
+                return Ok(Err(self
+                    .deny_tool(
+                        &call.id,
+                        &tool_call_id,
+                        resolved_tool_name.clone(),
+                        format!("wasm:{extension}"),
+                        reason,
+                    )
+                    .await?));
+            }
+        }
         let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
             self.plan_mode
                 .lock()

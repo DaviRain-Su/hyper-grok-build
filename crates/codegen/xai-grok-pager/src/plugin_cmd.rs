@@ -140,6 +140,30 @@ pub enum PluginCommand {
         /// Path to plugin directory (default: current directory).
         #[arg(default_value = ".")]
         path: String,
+        /// Actually load the WASM module and check ABI/exports (requires wasmtime).
+        #[arg(long)]
+        load: bool,
+    },
+    /// Scaffold a Rust-first WASM extension plugin directory
+    Init {
+        /// Directory to create (default: ./my-wasm-ext).
+        #[arg(default_value = "./my-wasm-ext")]
+        path: String,
+        /// Plugin name (kebab-case). Defaults to the directory name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Build a Rust WASM guest and install `extension.wasm` (or `runtime.wasm` path)
+    Build {
+        /// Path to plugin / guest crate directory (default: current directory).
+        #[arg(default_value = ".")]
+        path: String,
+        /// Use a debug (unoptimized) build.
+        #[arg(long)]
+        debug: bool,
+        /// Run `plugin validate --load` after a successful build.
+        #[arg(long)]
+        validate: bool,
     },
     /// Create a release git tag from the plugin's manifest version
     Tag {
@@ -212,15 +236,42 @@ fn print_component_summary(manifest: &PluginManifest, root: &Path) {
         manifest.mcp_config_path(root).is_some() || manifest.inline_mcp_servers().is_some();
     let has_lsp =
         manifest.lsp_config_path(root).is_some() || manifest.inline_lsp_servers().is_some();
+    let has_runtime = manifest.runtime_wasm_path(root).is_some();
     println!(
-        "  components: {} skill dir(s), {} command dir(s), {} agent dir(s){}{}{}",
+        "  components: {} skill dir(s), {} command dir(s), {} agent dir(s){}{}{}{}",
         skills.len(),
         commands.len(),
         agents.len(),
         if has_hooks { ", hooks" } else { "" },
         if has_mcp { ", MCP servers" } else { "" },
         if has_lsp { ", LSP servers" } else { "" },
+        if has_runtime { ", wasm runtime" } else { "" },
     );
+    // Ops visibility: surface WASM runtime contract without requiring `validate --load`.
+    if let Some(ref rt) = manifest.runtime {
+        let wasm = manifest
+            .runtime_wasm_path(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("{} (missing)", rt.wasm));
+        let caps = if rt.capabilities.is_empty() {
+            "(none — observe-only)".to_string()
+        } else {
+            rt.capabilities.join(", ")
+        };
+        let gate = rt
+            .gate_fail
+            .map(|g| format!("{g:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "default(env)".into());
+        println!("  runtime:");
+        println!("    wasm: {wasm}");
+        println!("    wit: {}", rt.wit);
+        println!("    capabilities: {caps}");
+        println!("    gate_fail: {gate}");
+    } else if has_runtime {
+        println!(
+            "  runtime: convention extension.wasm (no capabilities until plugin.json runtime block)"
+        );
+    }
 }
 
 fn abbreviated_commit(c: Option<&str>) -> &str {
@@ -251,7 +302,13 @@ pub async fn run(args: PluginArgs) -> Result<()> {
         PluginCommand::Enable { name } => cmd_enable(&name),
         PluginCommand::Disable { name } => cmd_disable(&name),
         PluginCommand::Details { name } => cmd_details(&name),
-        PluginCommand::Validate { path } => cmd_validate(&path),
+        PluginCommand::Validate { path, load } => cmd_validate(&path, load),
+        PluginCommand::Init { path, name } => cmd_init(&path, name.as_deref()),
+        PluginCommand::Build {
+            path,
+            debug,
+            validate,
+        } => cmd_build(&path, debug, validate),
         PluginCommand::Tag {
             path,
             push,
@@ -680,7 +737,7 @@ fn cmd_details(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_validate(path: &str) -> Result<()> {
+fn cmd_validate(path: &str, load: bool) -> Result<()> {
     let root = PathBuf::from(path);
     if !root.is_dir() {
         bail!("Not a directory: {path}");
@@ -699,18 +756,367 @@ fn cmd_validate(path: &str) -> Result<()> {
                 println!("  description: {d}");
             }
             print_component_summary(&manifest, &root);
+            validate_runtime_section(&manifest, &root, load)?;
             Ok(())
         }
         Ok(ManifestLoadResult::NotFound) => {
-            println!(
-                "No plugin.json found. Grok discovers skills, agents, and hooks \
-                 automatically from standard directories. A manifest is only needed \
-                 for custom paths or metadata."
-            );
-            Ok(())
+            // Convention-only plugins may still ship extension.wasm.
+            let convention_wasm = root.join("extension.wasm");
+            if convention_wasm.is_file() {
+                println!(
+                    "No plugin.json found. Found convention runtime at {}.",
+                    convention_wasm.display()
+                );
+                println!(
+                    "  tip: add a plugin.json with runtime.capabilities so gate/inject effects apply"
+                );
+                if load {
+                    validate_wasm_load(&convention_wasm)?;
+                }
+                Ok(())
+            } else {
+                println!(
+                    "No plugin.json found. Grok discovers skills, agents, hooks, and optional \
+                     extension.wasm automatically from standard directories. A manifest is only \
+                     needed for custom paths, metadata, or WASM capabilities."
+                );
+                Ok(())
+            }
         }
         Err(e) => bail!("Failed to load manifest: {e}"),
     }
+}
+
+fn cmd_init(path: &str, name: Option<&str>) -> Result<()> {
+    let dest = PathBuf::from(path);
+    if dest.exists() {
+        bail!("Refusing to overwrite existing path: {}", dest.display());
+    }
+    let plugin_name = name
+        .map(|s| s.to_string())
+        .or_else(|| {
+            dest.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "my-wasm-ext".into());
+    // Validate kebab-ish name
+    if plugin_name.is_empty()
+        || !plugin_name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        bail!("Plugin name must be kebab-case (lowercase, digits, hyphens): {plugin_name}");
+    }
+
+    let template = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../xai-grok-extension-runtime/examples/rust-guest-template");
+    if !template.is_dir() {
+        bail!(
+            "Rust guest template not found at {} (install from source tree)",
+            template.display()
+        );
+    }
+
+    std::fs::create_dir_all(&dest)?;
+    // Copy template files (not target/)
+    for entry in ["Cargo.toml", "src/lib.rs", "README.md", "extension.wasm"] {
+        let from = template.join(entry);
+        let to = dest.join(entry);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if from.is_file() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    // Point the new crate at the monorepo SDK when scaffolding from a source tree.
+    // Absolute path so the guest builds outside the workspace.
+    let sdk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../xai-grok-extension-sdk")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../xai-grok-extension-sdk")
+        });
+    let cargo_toml = format!(
+        r#"[workspace]
+
+[package]
+name = "{plugin_name}"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+xai-grok-extension-sdk = {{ path = "{sdk}" }}
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+"#,
+        plugin_name = plugin_name,
+        sdk = sdk_path.display()
+    );
+    std::fs::write(dest.join("Cargo.toml"), cargo_toml)?;
+    // Fresh plugin.json with chosen name
+    let plugin_json = format!(
+        r#"{{
+  "name": "{plugin_name}",
+  "version": "0.1.0",
+  "description": "Rust WASM extension scaffolded by grok plugin init",
+  "runtime": {{
+    "wasm": "extension.wasm",
+    "wit": "hyper:extension@0.1.0",
+    "capabilities": [
+      "pre_tool_gate",
+      "before_agent_inject",
+      "register_tool"
+    ]
+  }}
+}}
+"#
+    );
+    std::fs::write(dest.join("plugin.json"), plugin_json)?;
+    std::fs::write(
+        dest.join(".gitignore"),
+        "target/\nCargo.lock\n",
+    )?;
+
+    println!("Created Rust WASM extension at {}", dest.display());
+    println!("  name: {plugin_name}");
+    println!("Next:");
+    println!("  cd {}", dest.display());
+    println!("  rustup target add wasm32-unknown-unknown");
+    println!("  grok plugin build . --validate");
+    println!("  # enable in ~/.grok/config.toml [plugins] enabled = [\"{plugin_name}\"]");
+    Ok(())
+}
+
+/// Build `wasm32-unknown-unknown` cdylib and copy the product into the plugin
+/// runtime path (`extension.wasm` by default).
+fn cmd_build(path: &str, debug: bool, validate: bool) -> Result<()> {
+    let root = PathBuf::from(path);
+    if !root.is_dir() {
+        bail!("Not a directory: {path}");
+    }
+    let cargo_toml = root.join("Cargo.toml");
+    if !cargo_toml.is_file() {
+        bail!(
+            "No Cargo.toml in {} — `plugin build` expects a Rust guest crate \
+             (from `grok plugin init` or the rust-guest-template)",
+            root.display()
+        );
+    }
+
+    // Best-effort: ensure the target is installed (ignore failure; cargo will error clearly).
+    let _ = std::process::Command::new("rustup")
+        .args(["target", "add", "wasm32-unknown-unknown"])
+        .status();
+
+    let profile = if debug { "debug" } else { "release" };
+    let mut cargo = std::process::Command::new("cargo");
+    cargo
+        .current_dir(&root)
+        .arg("build")
+        .arg("--target")
+        .arg("wasm32-unknown-unknown");
+    if !debug {
+        cargo.arg("--release");
+    }
+    println!(
+        "Building guest (target=wasm32-unknown-unknown, profile={profile}) in {} …",
+        root.display()
+    );
+    let status = cargo
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to run cargo: {e}"))?;
+    if !status.success() {
+        bail!("cargo build failed with status {status}");
+    }
+
+    let out_dir = root
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join(profile);
+    if !out_dir.is_dir() {
+        bail!("build output directory missing: {}", out_dir.display());
+    }
+
+    let wasm_src = find_guest_wasm_artifact(&out_dir)?;
+    let dest = runtime_wasm_dest(&root);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&wasm_src, &dest).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to copy {} → {}: {e}",
+            wasm_src.display(),
+            dest.display()
+        )
+    })?;
+    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "Installed {} ({} bytes) from {}",
+        dest.display(),
+        size,
+        wasm_src.display()
+    );
+
+    if validate {
+        cmd_validate(path, true)?;
+    } else {
+        println!("tip: re-run with --validate to load-check ABI exports");
+    }
+    Ok(())
+}
+
+/// Prefer the package cdylib; skip `deps/` and `*.d` companions.
+fn find_guest_wasm_artifact(out_dir: &Path) -> Result<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(out_dir)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", out_dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().and_then(|s| s.to_str()) == Some("wasm")
+                && !p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.starts_with("lib") && n.contains(".rlib"))
+        })
+        .collect();
+    // Prefer non-`deps` (we're only listing out_dir root) and shorter names
+    // (package name often shorter than hashed deps if any leak).
+    candidates.sort_by_key(|p| {
+        (
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.len())
+                .unwrap_or(0),
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
+        )
+    });
+    candidates.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no .wasm artifact in {} — ensure [lib] crate-type includes \"cdylib\"",
+            out_dir.display()
+        )
+    })
+}
+
+/// Destination path for the built guest module.
+fn runtime_wasm_dest(root: &Path) -> PathBuf {
+    match load_manifest(root) {
+        Ok(ManifestLoadResult::Found(m)) => {
+            if let Some(p) = m.runtime_wasm_path(root) {
+                // If the declared file is missing, still write to that relative path.
+                return p;
+            }
+            if let Some(ref rt) = m.runtime {
+                return root.join(&rt.wasm);
+            }
+        }
+        _ => {}
+    }
+    root.join("extension.wasm")
+}
+
+fn validate_wasm_load(wasm_path: &Path) -> Result<()> {
+    xai_grok_extension_runtime::ExtensionRuntime::validate_wasm_file(wasm_path).map_err(|e| {
+        anyhow::anyhow!("WASM load/ABI check failed for {}: {e}", wasm_path.display())
+    })?;
+    println!("  runtime load: ok (ABI + required exports)");
+    Ok(())
+}
+
+/// Validate optional WASM runtime block (file presence, WIT, capabilities).
+fn validate_runtime_section(manifest: &PluginManifest, root: &Path, load: bool) -> Result<()> {
+    let Some(ref rt) = manifest.runtime else {
+        if let Some(path) = manifest.runtime_wasm_path(root) {
+            println!(
+                "  runtime: {} (convention; no capabilities — observe-only until declared)",
+                path.display()
+            );
+            if load {
+                validate_wasm_load(&path)?;
+            }
+        }
+        return Ok(());
+    };
+
+    if !xai_grok_extension_api::wit_compatible(&rt.wit) {
+        bail!(
+            "runtime.wit `{}` is not compatible with host {} (expected hyper:extension@0.1.x)",
+            rt.wit,
+            xai_grok_extension_api::WIT_PACKAGE_FULL
+        );
+    }
+
+    let wasm_path = manifest.runtime_wasm_path(root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "runtime.wasm `{}` not found under plugin root (or path escapes the root)",
+            rt.wasm
+        )
+    })?;
+
+    // Magic: \0asm
+    let magic = std::fs::read(&wasm_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", wasm_path.display()))?;
+    if magic.len() < 4 || &magic[..4] != b"\0asm" {
+        bail!(
+            "{} is not a valid WebAssembly binary (missing \\0asm magic)",
+            wasm_path.display()
+        );
+    }
+
+    let caps: Vec<_> = rt
+        .capabilities
+        .iter()
+        .filter_map(|c| xai_grok_extension_api::Capability::parse(c).map(|p| (c.as_str(), p)))
+        .collect();
+    let unknown: Vec<_> = rt
+        .capabilities
+        .iter()
+        .filter(|c| xai_grok_extension_api::Capability::parse(c).is_none())
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        bail!(
+            "unknown runtime.capabilities: {}. Known: pre_tool_gate, before_agent_inject, before_model_inject, stop_gate, register_tool",
+            unknown.join(", ")
+        );
+    }
+
+    println!("  runtime:");
+    println!("    wasm: {}", wasm_path.display());
+    println!("    wit: {} (ok)", rt.wit);
+    if caps.is_empty() {
+        println!("    capabilities: (none — observe-only)");
+    } else {
+        println!(
+            "    capabilities: {}",
+            caps.iter()
+                .map(|(s, _)| *s)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("  runtime validation: ok");
+    if load {
+        validate_wasm_load(&wasm_path)?;
+    } else {
+        println!("  tip: re-run with --load to instantiate the module and check ABI exports");
+    }
+    Ok(())
 }
 
 fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {

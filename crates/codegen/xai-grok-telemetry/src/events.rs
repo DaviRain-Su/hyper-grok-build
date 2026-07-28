@@ -724,6 +724,44 @@ pub struct HookBlocked {
     pub hook_name: String,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WASM extensions (bootstrap runtime ops)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lifecycle snapshot of one session's [`xai_grok_extension_runtime`] counters.
+/// Emitted at session_start / plugin_reload / session_end (product + dual path).
+#[derive(Serialize)]
+pub struct WasmExtensionMetrics {
+    /// Why this sample was taken: `session_start`, `plugin_reload`,
+    /// `session_end_shutdown`, `session_end_channel_closed`, …
+    pub reason: String,
+    /// Number of guests currently loaded in the session runtime.
+    pub extension_count: u32,
+    pub loads_ok: u64,
+    pub loads_failed: u64,
+    pub calls_ok: u64,
+    pub calls_failed: u64,
+    pub calls_timeout: u64,
+    pub pre_tool_denies: u64,
+    pub stop_blocks: u64,
+    pub tools_collected: u64,
+    pub tools_invoked_ok: u64,
+    pub tools_invoked_err: u64,
+    pub guest_log_lines: u64,
+}
+
+/// A WASM pre_tool (or similar) gate denied a tool. Complements [`HookBlocked`]
+/// (`hook_name` = `wasm:{ext}`) with **categorical** fields only — never free-form
+/// guest text (Oracle H4 / PII).
+#[derive(Serialize)]
+pub struct WasmExtensionBlocked {
+    pub extension: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Bounded category: `explicit_deny` | `trap_fail_closed` | `timeout_fail_closed`.
+    pub category: String,
+}
+
 /// Per-callback outcome of a `PreToolUse` gate. A deny returns early, so callbacks
 /// still pending at that point are not logged.
 #[derive(Serialize)]
@@ -1667,6 +1705,8 @@ telemetry_event!(HookRemoved, "hook_removed");
 telemetry_event!(HookTrusted, "hook_trusted");
 telemetry_event!(HookExecuted, "hook_executed");
 telemetry_event!(HookBlocked, "hook_blocked");
+telemetry_event!(WasmExtensionMetrics, "wasm_extension_metrics");
+telemetry_event!(WasmExtensionBlocked, "wasm_extension_blocked");
 telemetry_event!(ClientHookGate, "client_hook_gate");
 telemetry_event!(SkillAdded, "skill_added");
 telemetry_event!(SkillRemoved, "skill_removed");

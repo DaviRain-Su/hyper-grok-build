@@ -938,6 +938,14 @@ pub(crate) struct SessionActor {
     /// Shared handle to the agent-level plugin registry.
     /// Used by `/plugins reload` to trigger a rebuild that new sessions see.
     pub(crate) plugin_registry_handle: Option<xai_grok_agent::plugins::SharedPluginRegistryHandle>,
+    /// WASM extension runtime rebuilt from trusted, enabled plugins that ship
+    /// `extension.wasm` (see `docs/design-wasm-extensions.md`). Single-threaded
+    /// session actor: `RefCell` is sufficient.
+    pub(crate) extension_runtime:
+        std::cell::RefCell<xai_grok_extension_runtime::ExtensionRuntime>,
+    /// Client tool names this session registered on the shared ToolBridge
+    /// (session-scoped unregister; see Oracle review).
+    pub(crate) wasm_registered_tools: std::cell::RefCell<Vec<String>>,
     /// Centralized event tracking: event log, turn-end guard, active tool,
     /// doom loop terminate flag. All event-related state lives here.
     pub(crate) events: crate::session::events::EventTracker,
@@ -1378,6 +1386,9 @@ fn load_prompt_context_from_dir(
 #[cfg(test)]
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/wasm_extension_e2e_tests.rs"]
+mod wasm_extension_e2e_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;

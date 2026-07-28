@@ -158,6 +158,8 @@ xai-grok-config = { workspace = true }
 xai-grok-config-types = { workspace = true }
 xai-grok-memory = { workspace = true }
 xai-grok-hooks = { path = "../xai-grok-hooks" }
+xai-grok-extension-api = { path = "../xai-grok-extension-api" }
+xai-grok-extension-runtime = { path = "../xai-grok-extension-runtime" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
 xai-file-utils = { path = "../xai-file-utils" }

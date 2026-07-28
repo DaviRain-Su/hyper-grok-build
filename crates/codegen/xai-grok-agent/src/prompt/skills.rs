@@ -1600,6 +1600,10 @@ mod tests {
             inline_hooks: None,
             inline_mcp_servers: None,
             inline_lsp_servers: None,
+            runtime_wasm: None,
+            runtime_capabilities: vec![],
+            runtime_gate_fail: None,
+            has_runtime: false,
             conflict: None,
         };
 
@@ -1648,6 +1652,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+            runtime: None,
             },
             id: PluginId::new(PluginScope::User, root, name),
             root: root.to_path_buf(),
@@ -1661,6 +1666,7 @@ mod tests {
             hooks_path: None,
             mcp_config_path: None,
             lsp_config_path: None,
+            runtime_wasm: None,
             conflict: None,
         };
         crate::plugins::PluginRegistry::from_discovered(vec![dp], &[], &[name.to_string()])
@@ -2350,6 +2356,10 @@ mod tests {
             inline_hooks: None,
             inline_mcp_servers: None,
             inline_lsp_servers: None,
+            runtime_wasm: None,
+            runtime_capabilities: vec![],
+            runtime_gate_fail: None,
+            has_runtime: false,
             conflict: None,
         }
     }

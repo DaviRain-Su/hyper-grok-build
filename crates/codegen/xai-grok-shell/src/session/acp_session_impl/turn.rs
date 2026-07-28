@@ -853,12 +853,43 @@ impl SessionActor {
                 self.dispatch_hook(
                     xai_grok_hooks::event::HookEventName::UserPromptSubmit,
                     xai_grok_hooks::event::HookPayload::UserPromptSubmit {
-                        prompt: Some(prompt_text_for_hook),
+                        prompt: Some(prompt_text_for_hook.clone()),
                     },
                     Some(prompt_id),
                     None,
                 )
                 .await;
+                // Pi-style before_agent_start: wasm guests may inject context / append
+                // system notes (design-wasm-extensions Phase 2). Uses system-reminder
+                // messages so we do not rewrite the durable system prompt blob.
+                {
+                    let ext_rt = self.extension_runtime.borrow().clone();
+                    if !ext_rt.is_empty() {
+                        let d = ext_rt
+                            .dispatch_before_agent_start(
+                                &xai_grok_extension_api::BeforeAgentStartIn {
+                                    prompt: prompt_text_for_hook.clone(),
+                                },
+                            )
+                            .await;
+                        if let Some(ctx) = d.out.inject_context.as_deref() {
+                            self.push_system_reminder(ctx);
+                            tracing::info!(
+                                session_id = %self.session_info.id.0,
+                                bytes = ctx.len(),
+                                "wasm before_agent_start inject_context applied"
+                            );
+                        }
+                        if let Some(sys) = d.out.append_system.as_deref() {
+                            self.push_system_reminder_with_tag(sys, "system-extension");
+                            tracing::info!(
+                                session_id = %self.session_info.id.0,
+                                bytes = sys.len(),
+                                "wasm before_agent_start append_system applied"
+                            );
+                        }
+                    }
+                }
                 let turn_scope_guard = TurnSubagentScopeGuard::new(
                     self.current_prompt_id.clone(),
                     prompt_id.to_string(),
@@ -2044,6 +2075,26 @@ impl SessionActor {
         loop {
             self.emit_event(crate::session::events::Event::LoopStarted { loop_index });
             loop_index += 1;
+            // before_model inject (per model round): system-reminder only — never
+            // rewrites chat history. Requires capability `before_model_inject`.
+            {
+                let ext_rt = self.extension_runtime.borrow().clone();
+                if ext_rt.has_capability(xai_grok_extension_api::Capability::BeforeModelInject) {
+                    // Round-level prompt context is not the original user text;
+                    // pass empty — guests can still inject static policy.
+                    let d = ext_rt
+                        .dispatch_before_model(&xai_grok_extension_api::BeforeAgentStartIn {
+                            prompt: String::new(),
+                        })
+                        .await;
+                    if let Some(ctx) = d.out.inject_context.as_deref() {
+                        self.push_system_reminder(ctx);
+                    }
+                    if let Some(sys) = d.out.append_system.as_deref() {
+                        self.push_system_reminder_with_tag(sys, "system-extension");
+                    }
+                }
+            }
             if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
                 let run_len = identical_tool_calls.run_len;
                 let tool_name = identical_tool_calls.tool_name.clone();

@@ -720,6 +720,10 @@ mod tests {
             inline_hooks: None,
             inline_mcp_servers: None,
             inline_lsp_servers: None,
+            runtime_wasm: None,
+            runtime_capabilities: vec![],
+            runtime_gate_fail: None,
+            has_runtime: false,
             conflict: None,
         };
 
@@ -740,6 +744,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
+            runtime: None,
             },
             id: PluginId::new(scope, &root, plugin_name),
             root: root.clone(),
@@ -753,6 +758,7 @@ mod tests {
             hooks_path: None,
             mcp_config_path: None,
             lsp_config_path: None,
+            runtime_wasm: None,
             conflict: None,
         };
         PluginRegistry::from_discovered(vec![discovered], &[], &[plugin_name.to_string()])

@@ -1,0 +1,28 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-extension-runtime"
+version = "0.1.0"
+edition.workspace = true
+description = "Wasmtime-backed runtime for Hyper WASM extensions (Phase 0 core-wasm ABI bootstrap)"
+
+[features]
+default = ["wasm"]
+## Enable wasmtime loading. Disable to compile a no-op runtime (size / platforms).
+wasm = ["dep:wasmtime"]
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tracing = { workspace = true }
+xai-grok-extension-api = { path = "../xai-grok-extension-api" }
+wasmtime = { version = "31", optional = true, default-features = true }
+# Used by [`wat_to_wasm`] for host/shell tests and fixtures.
+wat = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

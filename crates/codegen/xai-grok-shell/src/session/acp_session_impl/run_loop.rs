@@ -483,6 +483,29 @@ pub(super) async fn run_session(
                             .await;
                             session.send_hook_execution("session_end", None, None, &results).await;
                         }
+                        {
+                            let ext_rt = session.extension_runtime.borrow().clone();
+                            let _ = ext_rt.dispatch_session_end().await;
+                            crate::session::wasm_tools::emit_runtime_metrics(
+                                session.telemetry_enabled,
+                                "session_end_channel_closed",
+                                &ext_rt,
+                            );
+                        }
+                        // Drop session-scoped wasm_* tools from the shared bridge.
+                        {
+                            let bridge = session.agent.borrow().tool_bridge().clone();
+                            let mut owned = session.wasm_registered_tools.borrow_mut();
+                            let n = crate::session::wasm_tools::unregister_session_wasm_tools(
+                                &bridge, &mut owned,
+                            );
+                            if n > 0 {
+                                tracing::info!(
+                                    wasm_tools = n,
+                                    "unregistered session wasm tools on channel_closed"
+                                );
+                            }
+                        }
                         session.dispatch_session_end_stop("channel_closed").await;
                         // Channel closed -- run memory session-end hook.
                         let mut session_end_result = "disabled";
@@ -1822,6 +1845,41 @@ pub(super) async fn run_session(
                                 .await;
                                 session.send_hook_execution("session_start", None, None, &results).await;
                             }
+                            // WASM guests after shell hooks (observe / fail-open).
+                            let ext_rt = session.extension_runtime.borrow().clone();
+                            let wasm_results = ext_rt.dispatch_session_start().await;
+                            for r in &wasm_results {
+                                if let xai_grok_extension_runtime::GuestCallResult::Failed {
+                                    extension,
+                                    error,
+                                } = r
+                                {
+                                    tracing::warn!(
+                                        extension = %extension,
+                                        error = %error,
+                                        "wasm extension session_start failed (fail-open)"
+                                    );
+                                }
+                            }
+                            // Register wasm_* tools once extensions are warm.
+                            let bridge = session.agent.borrow().tool_bridge().clone();
+                            let mut owned = session.wasm_registered_tools.borrow_mut();
+                            let sid = session.session_info.id.0.as_ref();
+                            let n = crate::session::wasm_tools::sync_wasm_tools_to_bridge(
+                                &bridge, &ext_rt, &mut owned, sid,
+                            )
+                            .await;
+                            if n > 0 {
+                                tracing::info!(
+                                    wasm_tools = n,
+                                    "wasm extension tools registered at session_start"
+                                );
+                            }
+                            crate::session::wasm_tools::emit_runtime_metrics(
+                                session.telemetry_enabled,
+                                "session_start",
+                                &ext_rt,
+                            );
                         }
                         SessionCommand::GetFeedbackContext { turn_number, responds_to } => {
                             let s = session.clone();
@@ -2137,6 +2195,29 @@ pub(super) async fn run_session(
                                 )
                                 .await;
                                 session.send_hook_execution("session_end", None, None, &results).await;
+                            }
+                            {
+                                let ext_rt = session.extension_runtime.borrow().clone();
+                                let _ = ext_rt.dispatch_session_end().await;
+                                crate::session::wasm_tools::emit_runtime_metrics(
+                                    session.telemetry_enabled,
+                                    "session_end_shutdown",
+                                    &ext_rt,
+                                );
+                            }
+                            // Drop session-scoped wasm_* tools from the shared bridge.
+                            {
+                                let bridge = session.agent.borrow().tool_bridge().clone();
+                                let mut owned = session.wasm_registered_tools.borrow_mut();
+                                let n = crate::session::wasm_tools::unregister_session_wasm_tools(
+                                    &bridge, &mut owned,
+                                );
+                                if n > 0 {
+                                    tracing::info!(
+                                        wasm_tools = n,
+                                        "unregistered session wasm tools on shutdown"
+                                    );
+                                }
                             }
                             session.dispatch_session_end_stop("shutdown").await;
                             // Memory: save session summary before shutdown

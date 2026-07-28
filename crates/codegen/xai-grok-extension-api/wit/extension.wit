@@ -1,0 +1,68 @@
+// Hyper WASM extension contract (design target).
+//
+// Phase 0 runtime uses a core-wasm bootstrap ABI (see
+// `xai-grok-extension-runtime`); this WIT is the stable Component Model
+// surface for Phase 1+ and guest authors.
+//
+// Package: hyper:extension@0.1.0
+// Design: docs/design-wasm-extensions.md
+
+package hyper:extension@0.1.0;
+
+interface host {
+    /// Structured log from guest to host (always available when loaded).
+    log: func(level: string, msg: string);
+}
+
+interface types {
+    record session-start-in {
+        session-id: string,
+        cwd: string,
+        reason: string,
+    }
+
+    record before-agent-start-in {
+        prompt: string,
+    }
+
+    record before-agent-start-out {
+        inject-context: option<string>,
+        append-system: option<string>,
+    }
+
+    record pre-tool-in {
+        tool-name: string,
+        tool-input-json: string,
+    }
+
+    variant pre-tool-out {
+        allow,
+        deny(string),
+    }
+
+    record post-tool-in {
+        tool-name: string,
+        success: bool,
+    }
+
+    record stop-in {
+        stop-hook-active: bool,
+    }
+
+    variant stop-out {
+        continue,
+        block(string),
+    }
+
+    record pre-compact-in {
+        reason: string,
+    }
+}
+
+world extension {
+    import host;
+    // Guest exports (bound via wit-bindgen in Phase 1+):
+    //   init / on-session-start / on-before-agent-start /
+    //   on-pre-tool-use / on-post-tool-use / on-stop /
+    //   on-pre-compact / on-session-end
+}

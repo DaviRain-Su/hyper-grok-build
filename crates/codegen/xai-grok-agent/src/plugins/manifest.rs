@@ -167,6 +167,10 @@ pub struct PluginManifest {
     pub mcp_servers: Option<PathOrInline>,
     #[serde(default)]
     pub lsp_servers: Option<PathOrInline>,
+    /// Optional WASM runtime extension (Pi-style guest). See
+    /// `docs/design-wasm-extensions.md` and `xai-grok-extension-api`.
+    #[serde(default)]
+    pub runtime: Option<xai_grok_extension_api::RuntimeManifest>,
 }
 
 impl PluginManifest {
@@ -242,6 +246,43 @@ impl PluginManifest {
         match &self.lsp_servers {
             Some(PathOrInline::Inline(v)) => Some(v),
             _ => None,
+        }
+    }
+
+    /// Resolve the WASM extension path from `runtime.wasm` (default
+    /// `extension.wasm` when a runtime block is present).
+    ///
+    /// Returns `None` when there is no runtime block, the path escapes the
+    /// plugin root, or the file is missing. Convention-only plugins without a
+    /// `runtime` block also pick up a root-level `extension.wasm` if present.
+    pub fn runtime_wasm_path(&self, plugin_root: &Path) -> Option<PathBuf> {
+        let rel = self
+            .runtime
+            .as_ref()
+            .map(|r| r.wasm.as_str())
+            .unwrap_or("extension.wasm");
+        // Without an explicit runtime block, only auto-discover the default name.
+        if self.runtime.is_none() {
+            let default = plugin_root.join("extension.wasm");
+            return default.is_file().then_some(default);
+        }
+        let resolved = plugin_root.join(rel);
+        if !is_path_contained(&resolved, plugin_root) {
+            tracing::warn!(
+                path = %resolved.display(),
+                plugin_root = %plugin_root.display(),
+                "runtime.wasm path escapes plugin root; skipping"
+            );
+            return None;
+        }
+        if resolved.is_file() {
+            Some(resolved)
+        } else {
+            tracing::warn!(
+                path = %resolved.display(),
+                "plugin runtime.wasm missing; skipping wasm extension"
+            );
+            None
         }
     }
 
@@ -640,6 +681,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+        runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -667,6 +709,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+        runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -696,6 +739,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+        runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -725,6 +769,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
+        runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -754,6 +799,7 @@ mod tests {
             hooks: Some(PathOrInline::Path("../outside-hooks.json".to_string())),
             mcp_servers: None,
             lsp_servers: None,
+        runtime: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -784,11 +830,70 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Path("../outside-mcp.json".to_string())),
             lsp_servers: None,
+        runtime: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
             "MCP path escaping plugin root should be rejected"
         );
+    }
+
+    #[test]
+    fn runtime_wasm_path_from_manifest_and_convention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let wasm = root.join("extension.wasm");
+        std::fs::write(&wasm, b"\0asm").unwrap();
+
+        // Convention: no runtime block still finds extension.wasm
+        let m = PluginManifest {
+            name: "conv".into(),
+            version: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            keywords: vec![],
+            skills: None,
+            commands: None,
+            agents: None,
+            hooks: None,
+            mcp_servers: None,
+            lsp_servers: None,
+            runtime: None,
+        };
+        assert_eq!(m.runtime_wasm_path(root).as_deref(), Some(wasm.as_path()));
+
+        // Explicit runtime block with capabilities
+        let custom = root.join("ext.wasm");
+        std::fs::write(&custom, b"\0asm").unwrap();
+        let m2 = PluginManifest {
+            name: "explicit".into(),
+            version: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            keywords: vec![],
+            skills: None,
+            commands: None,
+            agents: None,
+            hooks: None,
+            mcp_servers: None,
+            lsp_servers: None,
+            runtime: Some(xai_grok_extension_api::RuntimeManifest {
+                wasm: "ext.wasm".into(),
+                wit: xai_grok_extension_api::WIT_PACKAGE_FULL.into(),
+                capabilities: vec!["pre_tool_gate".into()],
+                gate_fail: None,
+            }),
+        };
+        assert_eq!(m2.runtime_wasm_path(root).as_deref(), Some(custom.as_path()));
+        assert!(m2.runtime.as_ref().unwrap().has_capability(
+            xai_grok_extension_api::Capability::PreToolGate
+        ));
     }
 
     fn manifest_with_inline_mcp(servers: serde_json::Value) -> PluginManifest {
@@ -807,6 +912,7 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Inline(servers)),
             lsp_servers: None,
+        runtime: None,
         }
     }
 
