@@ -402,15 +402,16 @@ world extension {
 - [x] Epoch interrupt + fuel 限制忙循环  
 - [x] 会话级 `wasm_{session}_{ext}_{name}` 工具名 + 注册校验  
 
-### Phase 4 — 新能力（第三梯队）
+### Phase 4 — 新能力（第三梯队）— **bootstrap MVP 关闭**
 
-- [x] **`register_tool` MVP**：guest list/invoke → `wasm_*` 工具挂 ToolBridge  
+- [x] **`register_tool` MVP**：guest list/invoke → session-scoped `wasm_*` ToolBridge  
 - [x] **`before_model` inject**（每轮模型调用前 system-reminder；**不是** history rewrite）  
-- [ ] `before_model` **rewrite**（改消息数组）— 另议，安全面大  
-- [ ] Component Model + wit-bindgen — **可选升级**，见 [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)  
-- [ ] TS/Go 等作者语言  
-- [ ] UI Host API  
-- [ ] 正式 bench（加载 N 扩展）  
+- [x] load-N 预算测（N=5 软 CI ceiling）  
+- [x] 作者一键 build：`grok plugin build` + path-filtered CI  
+- [ ] `before_model` **rewrite**（改消息数组）— **defer**，安全面大  
+- [ ] Component Model + wit-bindgen — **defer**，见 [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)  
+- [ ] TS/Go 等作者语言 — **defer**  
+- [ ] UI Host API — **defer**  
 
 细节见 [design-wasm-phase4-spike.md](./design-wasm-phase4-spike.md)。  
 **为何不必急着换 API：** [design-wasm-abi-strategy.md](./design-wasm-abi-strategy.md)。

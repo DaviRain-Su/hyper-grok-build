@@ -138,10 +138,7 @@ cd my-ext
 #       tools: { echo { description: "echo", invoke: |a| { tool_result(a); allow() } } }
 #   }
 rustup target add wasm32-unknown-unknown
-cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/hyper_ext_rust_guest_template.wasm \
-   ./extension.wasm
-grok plugin validate . --load
+grok plugin build . --validate
 ```
 
 Author DX is **`macro_rules!` only** (`hyper_extension!`, `export_pre_tool_use!`,
@@ -177,10 +174,13 @@ Scaffold and validate:
 
 ```bash
 grok plugin init ./my-ext --name my-ext
-grok plugin validate ./my-ext --load   # also instantiate ABI
+cd my-ext
+grok plugin build . --validate   # cargo wasm32 + copy extension.wasm + ABI load
 ```
 
-`--load` uses wasmtime to verify `hyper_ext_abi_version` and required exports.
+`plugin build` runs `cargo build --target wasm32-unknown-unknown`, installs the
+cdylib as `extension.wasm` (or `runtime.wasm` from the manifest), and with
+`--validate` instantiates the module to check ABI exports.
 
 Hard security gates (optional fail-closed):
 

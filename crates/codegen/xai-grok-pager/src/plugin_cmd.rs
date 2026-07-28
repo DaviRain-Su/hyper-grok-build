@@ -153,6 +153,18 @@ pub enum PluginCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Build a Rust WASM guest and install `extension.wasm` (or `runtime.wasm` path)
+    Build {
+        /// Path to plugin / guest crate directory (default: current directory).
+        #[arg(default_value = ".")]
+        path: String,
+        /// Use a debug (unoptimized) build.
+        #[arg(long)]
+        debug: bool,
+        /// Run `plugin validate --load` after a successful build.
+        #[arg(long)]
+        validate: bool,
+    },
     /// Create a release git tag from the plugin's manifest version
     Tag {
         /// Path to plugin directory (default: current directory).
@@ -267,6 +279,11 @@ pub async fn run(args: PluginArgs) -> Result<()> {
         PluginCommand::Details { name } => cmd_details(&name),
         PluginCommand::Validate { path, load } => cmd_validate(&path, load),
         PluginCommand::Init { path, name } => cmd_init(&path, name.as_deref()),
+        PluginCommand::Build {
+            path,
+            debug,
+            validate,
+        } => cmd_build(&path, debug, validate),
         PluginCommand::Tag {
             path,
             push,
@@ -847,13 +864,141 @@ strip = true
     println!("Next:");
     println!("  cd {}", dest.display());
     println!("  rustup target add wasm32-unknown-unknown");
-    println!("  cargo build --release --target wasm32-unknown-unknown");
-    println!(
-        "  cp target/wasm32-unknown-unknown/release/hyper_ext_rust_guest_template.wasm extension.wasm"
-    );
-    println!("  grok plugin validate . --load");
+    println!("  grok plugin build . --validate");
     println!("  # enable in ~/.grok/config.toml [plugins] enabled = [\"{plugin_name}\"]");
     Ok(())
+}
+
+/// Build `wasm32-unknown-unknown` cdylib and copy the product into the plugin
+/// runtime path (`extension.wasm` by default).
+fn cmd_build(path: &str, debug: bool, validate: bool) -> Result<()> {
+    let root = PathBuf::from(path);
+    if !root.is_dir() {
+        bail!("Not a directory: {path}");
+    }
+    let cargo_toml = root.join("Cargo.toml");
+    if !cargo_toml.is_file() {
+        bail!(
+            "No Cargo.toml in {} — `plugin build` expects a Rust guest crate \
+             (from `grok plugin init` or the rust-guest-template)",
+            root.display()
+        );
+    }
+
+    // Best-effort: ensure the target is installed (ignore failure; cargo will error clearly).
+    let _ = std::process::Command::new("rustup")
+        .args(["target", "add", "wasm32-unknown-unknown"])
+        .status();
+
+    let profile = if debug { "debug" } else { "release" };
+    let mut cargo = std::process::Command::new("cargo");
+    cargo
+        .current_dir(&root)
+        .arg("build")
+        .arg("--target")
+        .arg("wasm32-unknown-unknown");
+    if !debug {
+        cargo.arg("--release");
+    }
+    println!(
+        "Building guest (target=wasm32-unknown-unknown, profile={profile}) in {} …",
+        root.display()
+    );
+    let status = cargo
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to run cargo: {e}"))?;
+    if !status.success() {
+        bail!("cargo build failed with status {status}");
+    }
+
+    let out_dir = root
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join(profile);
+    if !out_dir.is_dir() {
+        bail!("build output directory missing: {}", out_dir.display());
+    }
+
+    let wasm_src = find_guest_wasm_artifact(&out_dir)?;
+    let dest = runtime_wasm_dest(&root);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&wasm_src, &dest).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to copy {} → {}: {e}",
+            wasm_src.display(),
+            dest.display()
+        )
+    })?;
+    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "Installed {} ({} bytes) from {}",
+        dest.display(),
+        size,
+        wasm_src.display()
+    );
+
+    if validate {
+        cmd_validate(path, true)?;
+    } else {
+        println!("tip: re-run with --validate to load-check ABI exports");
+    }
+    Ok(())
+}
+
+/// Prefer the package cdylib; skip `deps/` and `*.d` companions.
+fn find_guest_wasm_artifact(out_dir: &Path) -> Result<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(out_dir)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", out_dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().and_then(|s| s.to_str()) == Some("wasm")
+                && !p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.starts_with("lib") && n.contains(".rlib"))
+        })
+        .collect();
+    // Prefer non-`deps` (we're only listing out_dir root) and shorter names
+    // (package name often shorter than hashed deps if any leak).
+    candidates.sort_by_key(|p| {
+        (
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.len())
+                .unwrap_or(0),
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
+        )
+    });
+    candidates.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no .wasm artifact in {} — ensure [lib] crate-type includes \"cdylib\"",
+            out_dir.display()
+        )
+    })
+}
+
+/// Destination path for the built guest module.
+fn runtime_wasm_dest(root: &Path) -> PathBuf {
+    match load_manifest(root) {
+        Ok(ManifestLoadResult::Found(m)) => {
+            if let Some(p) = m.runtime_wasm_path(root) {
+                // If the declared file is missing, still write to that relative path.
+                return p;
+            }
+            if let Some(ref rt) = m.runtime {
+                return root.join(&rt.wasm);
+            }
+        }
+        _ => {}
+    }
+    root.join("extension.wasm")
 }
 
 fn validate_wasm_load(wasm_path: &Path) -> Result<()> {

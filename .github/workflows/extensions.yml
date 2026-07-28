@@ -1,0 +1,45 @@
+name: WASM extensions
+
+# Keep the extension author path green: rebuild official guest fixtures and
+# run host runtime unit tests. Path-filtered so the full monorepo is not
+# rebuilt on unrelated PRs.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "crates/codegen/xai-grok-extension-api/**"
+      - "crates/codegen/xai-grok-extension-runtime/**"
+      - "crates/codegen/xai-grok-extension-sdk/**"
+      - "scripts/check-extensions.sh"
+      - ".github/workflows/extensions.yml"
+  pull_request:
+    paths:
+      - "crates/codegen/xai-grok-extension-api/**"
+      - "crates/codegen/xai-grok-extension-runtime/**"
+      - "crates/codegen/xai-grok-extension-sdk/**"
+      - "scripts/check-extensions.sh"
+      - ".github/workflows/extensions.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-extensions:
+    name: check-extensions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - name: Add wasm32 guest target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Smoke build guests + unit tests
+        run: ./scripts/check-extensions.sh

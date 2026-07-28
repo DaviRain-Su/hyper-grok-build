@@ -1869,4 +1869,43 @@ mod tests {
             start.elapsed()
         );
     }
+
+    /// Phase 4 budget: load + session_start for N=5 minimal guests should stay
+    /// well under a second on a normal debug build (design target ~100ms for
+    /// release; we only enforce a soft CI ceiling here).
+    #[tokio::test]
+    async fn load_five_minimal_guests_under_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = ExtensionRuntime::new();
+        let t0 = std::time::Instant::now();
+        for i in 0..5 {
+            let path = write_wasm(&dir, &format!("g{i}.wasm"), MINIMAL_GUEST);
+            rt.load(&trusted_spec(&format!("guest-{i}"), path, vec![]))
+                .unwrap();
+        }
+        let load_elapsed = t0.elapsed();
+        assert_eq!(rt.len(), 5);
+        let t1 = std::time::Instant::now();
+        let results = rt.dispatch_session_start().await;
+        let start_elapsed = t1.elapsed();
+        assert_eq!(results.len(), 5);
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r, GuestCallResult::Ok { code: 0, .. })),
+            "all session_start should succeed: {results:?}"
+        );
+        // Generous CI ceiling (debug + cold wasmtime compile of tiny modules).
+        assert!(
+            load_elapsed < Duration::from_secs(10),
+            "load 5 guests took {load_elapsed:?} (budget 10s debug)"
+        );
+        assert!(
+            start_elapsed < Duration::from_secs(5),
+            "session_start×5 took {start_elapsed:?} (budget 5s debug)"
+        );
+        eprintln!(
+            "bench load_five: load={load_elapsed:?} session_start={start_elapsed:?}"
+        );
+    }
 }
