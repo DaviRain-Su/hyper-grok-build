@@ -4,10 +4,30 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r4] — 2026-07-29
+
 ### Added
-- **Native OMP session continuation** — `/resume-omp`, the foreign-session picker, recent-session Ctrl+U hint, and `[compat.omp].sessions` now discover OMP CLI sessions lazily behind the same bundled-runtime gate as Claude, Codex, and Cursor. Release archives install the native `resume-omp` wrapper plus the shared inert-history reader, including OMP profile/XDG/custom-root and native-ID support.
+- **Native OMP session continuation** — `/resume-omp`, the foreign-session picker, recent-session Ctrl+U hint, and `[compat.omp].sessions` now discover OMP CLI sessions lazily behind the same bundled-runtime gate as Claude, Codex, and Cursor. Release archives ship the `resume-omp` skill plus the shared inert-history reader (`bundled/skills/shared/resume-session`), including OMP profile/XDG/custom-root and native-ID support.
 - **Base16 Default Dark and OMP themes** — Adds stable theme IDs 18 (`base16-default-dark`) and 19 (`omp` / Titanium), terminal-capability clamping for syntax colors, and release packaging for the shared resume-session readers.
-- **Extension author proc macros** — Recommended guest path is now `#[hyper_plugin]` / `#[hyper_hook]` / `#[hyper_tool]` so handlers stay ordinary named functions for IDE navigation; legacy `hyper_extension!` remains for source compatibility.
+- **Extension author proc macros** — Recommended guest path is now `#[hyper_plugin]` / `#[hyper_hook]` / `#[hyper_tool]` so handlers stay ordinary named functions for IDE navigation; legacy `hyper_extension!` remains for source compatibility. WASM bootstrap ABI stays at version 1.
+- **MCP enable/disable CLI and project unstick** — Server enable state can be persisted through user `disabled_mcp_servers` (and per-server `enabled` when present). Enabling can clear sticky project-level `enabled = false` without rewriting shared project configs on disable.
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `5da6962` (monorepo `SOURCE_REV` `2a818575…`), including session lifecycle reaping (child processes, LSP, stdio MCP, subagents), plan/minimal scrollback and reasoning separation, SuperGrok Plus tier surfaces, workspace `git_sync_base` / git_commit hardening, fuzzy @-file-search degradation, and circuit-breaker gRPC retry policy.
+- **Symlink-preserving config persistence** — Atomic configuration and credential writes resolve final-component symlinks before replace so user-managed config/auth/MCP links are not clobbered.
+- **Installer bundled runtime** — Unix and Windows installers install the release `bundled/` tree under `~/.grok/bundled` after the binary smoke-tests. Unix keeps checksum-versioned binary identity under `~/.hyper/downloads`; Windows continues to activate a fixed `~/.hyper/bin/hyper.exe` path with rollback.
+
+### Notes
+- This is community revision `0.2.114-r4`; it remains a normal GitHub Release so installers and `hyper update` treat it as latest.
+- Extension guests still target the core-WASM bootstrap ABI (`CORE_ABI_VERSION = 1`). Only trusted, enabled plugins load.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r4
+```
 
 ## [0.2.114-r3] — 2026-07-28
 
