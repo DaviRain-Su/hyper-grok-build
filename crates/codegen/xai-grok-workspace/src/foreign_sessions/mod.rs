@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod capability;
 mod claude;
 mod codex;
+mod omp;
 use capability::{ApprovedRoot, open_sqlite_transaction};
 pub const MAX_SESSIONS_PER_TOOL: usize = 50;
 pub const MAX_SESSION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -20,6 +21,7 @@ pub enum ForeignSessionTool {
     Claude,
     Codex,
     Cursor,
+    Omp,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ForeignSessionSource {
@@ -30,6 +32,7 @@ pub enum ForeignSessionSource {
     CodexChatGpt,
     CursorDesktop,
     CursorCli,
+    OmpCli,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignSessionSummary {
@@ -86,13 +89,27 @@ pub struct EnabledForeignSessionSources {
     pub claude: bool,
     pub codex: bool,
     pub cursor: bool,
+    pub omp: bool,
+}
+
+impl EnabledForeignSessionSources {
+    pub const fn any(self) -> bool {
+        self.claude || self.codex || self.cursor || self.omp
+    }
 }
 pub fn scan_foreign_sessions(
     cwd: &Path,
     enabled: EnabledForeignSessionSources,
 ) -> Vec<ForeignSessionSummary> {
     let scan_cursor = |_: &Path, _: SystemTime| Vec::new();
-    scan_with(cwd, enabled, claude::scan, codex::scan, scan_cursor)
+    scan_with(
+        cwd,
+        enabled,
+        claude::scan,
+        codex::scan,
+        scan_cursor,
+        omp::scan,
+    )
 }
 pub fn most_recent_foreign_session(
     cwd: &Path,
@@ -108,12 +125,13 @@ pub fn most_recent_foreign_session(
         claude::most_recent,
         codex::most_recent,
         recent_cursor,
+        omp::most_recent,
     ) {
         RecentProbe::Complete(session) => session,
         RecentProbe::Incomplete => None,
     }
 }
-fn most_recent_with<Claude, Codex, Cursor>(
+fn most_recent_with<Claude, Codex, Cursor, Omp>(
     cwd: &Path,
     enabled: EnabledForeignSessionSources,
     within: Duration,
@@ -121,19 +139,21 @@ fn most_recent_with<Claude, Codex, Cursor>(
     recent_claude: Claude,
     recent_codex: Codex,
     recent_cursor: Cursor,
+    recent_omp: Omp,
 ) -> RecentProbe<RecentForeignSession>
 where
     Claude: FnOnce(&Path, SystemTime, Duration) -> RecentProbe<RecentCandidate>,
     Codex: FnOnce(&Path, SystemTime, Duration) -> RecentProbe<RecentCandidate>,
     Cursor: FnOnce(&Path, SystemTime, Duration) -> RecentProbe<RecentCandidate>,
+    Omp: FnOnce(&Path, SystemTime, Duration) -> RecentProbe<RecentCandidate>,
 {
-    if !enabled.claude && !enabled.codex && !enabled.cursor {
+    if !enabled.any() {
         return RecentProbe::Complete(None);
     }
     let Ok(cwd) = dunce::canonicalize(cwd) else {
         return RecentProbe::Complete(None);
     };
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates = Vec::with_capacity(4);
     if enabled.claude {
         match recent_claude(&cwd, now, within) {
             RecentProbe::Complete(candidate) => candidates.extend(candidate),
@@ -148,6 +168,12 @@ where
     }
     if enabled.cursor {
         match recent_cursor(&cwd, now, within) {
+            RecentProbe::Complete(candidate) => candidates.extend(candidate),
+            RecentProbe::Incomplete => return RecentProbe::Incomplete,
+        }
+    }
+    if enabled.omp {
+        match recent_omp(&cwd, now, within) {
             RecentProbe::Complete(candidate) => candidates.extend(candidate),
             RecentProbe::Incomplete => return RecentProbe::Incomplete,
         }
@@ -173,19 +199,21 @@ fn recent_candidate_order(a: &RecentCandidate, b: &RecentCandidate) -> Ordering 
         .then_with(|| a.native_id.cmp(&b.native_id))
         .then_with(|| a.source.cmp(&b.source))
 }
-fn scan_with<Claude, Codex, Cursor>(
+fn scan_with<Claude, Codex, Cursor, Omp>(
     cwd: &Path,
     enabled: EnabledForeignSessionSources,
     mut scan_claude: Claude,
     mut scan_codex: Codex,
     mut scan_cursor: Cursor,
+    mut scan_omp: Omp,
 ) -> Vec<ForeignSessionSummary>
 where
     Claude: FnMut(&Path, SystemTime) -> Vec<ForeignSessionSummary>,
     Codex: FnMut(&Path, SystemTime) -> Vec<ForeignSessionSummary>,
     Cursor: FnMut(&Path, SystemTime) -> Vec<ForeignSessionSummary>,
+    Omp: FnMut(&Path, SystemTime) -> Vec<ForeignSessionSummary>,
 {
-    if !enabled.claude && !enabled.codex && !enabled.cursor {
+    if !enabled.any() {
         return Vec::new();
     }
     let canonical_cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -213,6 +241,13 @@ where
         let mut tool_sessions = Vec::new();
         for cwd in &cwd_spellings {
             tool_sessions.extend(scan_cursor(cwd, now));
+        }
+        sessions.extend(finish_tool_scan(tool_sessions));
+    }
+    if enabled.omp {
+        let mut tool_sessions = Vec::new();
+        for cwd in &cwd_spellings {
+            tool_sessions.extend(scan_omp(cwd, now));
         }
         sessions.extend(finish_tool_scan(tool_sessions));
     }
@@ -346,6 +381,7 @@ mod tests {
             claude: true,
             codex: true,
             cursor: true,
+            omp: false,
         };
         let winner = most_recent_with(
             &cwd,
@@ -375,6 +411,9 @@ mod tests {
                     "cursor",
                     now - Duration::from_secs(2),
                 )
+            },
+            |_, _, _| -> RecentProbe<RecentCandidate> {
+                panic!("disabled omp store touched")
             },
         )
         .unwrap();
@@ -409,6 +448,9 @@ mod tests {
                     now,
                 )
             },
+            |_, _, _| -> RecentProbe<RecentCandidate> {
+                panic!("disabled omp store touched")
+            },
         )
         .unwrap();
         assert_eq!(tied.tool, ForeignSessionTool::Claude);
@@ -439,6 +481,7 @@ mod tests {
             },
             |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled codex store touched") },
             |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled cursor store touched") },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         )
         .unwrap();
         assert_eq!(at_cutoff.age, within);
@@ -457,6 +500,7 @@ mod tests {
             },
             |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled codex store touched") },
             |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled cursor store touched") },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         )
         .unwrap();
         assert_eq!(future.age, Duration::ZERO);
@@ -479,6 +523,9 @@ mod tests {
                 },
                 |_, _, _| -> RecentProbe<RecentCandidate> {
                     panic!("disabled cursor store touched")
+                },
+                |_, _, _| -> RecentProbe<RecentCandidate> {
+                    panic!("disabled omp store touched")
                 },
             )
             .is_none()
@@ -518,6 +565,7 @@ mod tests {
                 calls.set((claude, codex, 1));
                 RecentProbe::Complete(None)
             },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         );
         assert_eq!(calls.get(), (0, 1, 0));
         assert_eq!(found.unwrap().tool, ForeignSessionTool::Codex);
@@ -533,6 +581,7 @@ mod tests {
                 claude: true,
                 codex: true,
                 cursor: true,
+                omp: false,
             },
             Duration::from_secs(600),
             now,
@@ -546,6 +595,7 @@ mod tests {
                 )
             },
             |_, _, _| RecentProbe::Complete(None),
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         );
         assert_eq!(result, RecentProbe::Incomplete);
     }
@@ -571,6 +621,7 @@ mod tests {
                 RecentProbe::Complete(None)
             },
             |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled cursor store touched") },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         );
         assert!(found.is_none());
     }
@@ -585,6 +636,7 @@ mod tests {
                 claude: true,
                 codex: true,
                 cursor: true,
+                omp: false,
             },
             Duration::from_secs(600),
             SystemTime::now(),
@@ -600,6 +652,7 @@ mod tests {
                 calls.set(calls.get() + 1);
                 RecentProbe::Complete(None)
             },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         );
         assert!(found.is_none());
         assert_eq!(calls.get(), 0);
@@ -612,6 +665,7 @@ mod tests {
             |_, _| panic!("claude scanner called"),
             |_, _| panic!("codex scanner called"),
             |_, _| panic!("cursor scanner called"),
+            |_, _| panic!("omp scanner called"),
         );
         assert!(sessions.is_empty());
     }
@@ -638,6 +692,7 @@ mod tests {
                 cursor_calls.set(cursor_calls.get() + 1);
                 Vec::new()
             },
+            |_, _| panic!("omp scanner called"),
         );
         assert_eq!(
             (claude_calls.get(), codex_calls.get(), cursor_calls.get()),
@@ -713,6 +768,7 @@ mod tests {
                 Vec::new()
             },
             |_, _| panic!("cursor scanner called"),
+            |_, _| panic!("omp scanner called"),
         );
         assert_eq!(
             received.into_inner(),
@@ -735,6 +791,7 @@ mod tests {
                     received.borrow_mut().push(cwd.to_path_buf());
                     Vec::new()
                 },
+                |_, _| panic!("omp scanner called"),
             );
             assert_eq!(received.into_inner(), vec![expected, link]);
         }
@@ -758,6 +815,89 @@ mod tests {
                 Vec::new()
             },
             |_, _| panic!("cursor scanner called"),
+            |_, _| panic!("omp scanner called"),
         );
+    }
+    #[test]
+    fn omp_only_gating_invokes_omp_store_and_skips_others() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let root = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(root.path()).unwrap();
+        let enabled = EnabledForeignSessionSources {
+            omp: true,
+            ..Default::default()
+        };
+        let winner = most_recent_with(
+            &cwd,
+            enabled,
+            Duration::from_secs(600),
+            now,
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled claude store touched") },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled codex store touched") },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled cursor store touched") },
+            |_, _, _| {
+                complete_candidate(
+                    ForeignSessionTool::Omp,
+                    ForeignSessionSource::OmpCli,
+                    "omp",
+                    now - Duration::from_secs(2),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(winner.tool, ForeignSessionTool::Omp);
+        assert_eq!(winner.native_id, "omp");
+        assert_eq!(winner.age, Duration::from_secs(2));
+    }
+    #[test]
+    fn omp_only_scan_invokes_omp_scanner_and_skips_others() {
+        let claude_calls = Cell::new(0);
+        let codex_calls = Cell::new(0);
+        let cursor_calls = Cell::new(0);
+        let omp_calls = Cell::new(0);
+        let sessions = scan_with(
+            Path::new("/repo"),
+            EnabledForeignSessionSources {
+                omp: true,
+                ..Default::default()
+            },
+            |_, _| {
+                claude_calls.set(claude_calls.get() + 1);
+                Vec::new()
+            },
+            |_, _| {
+                codex_calls.set(codex_calls.get() + 1);
+                Vec::new()
+            },
+            |_, _| {
+                cursor_calls.set(cursor_calls.get() + 1);
+                Vec::new()
+            },
+            |_, _| {
+                omp_calls.set(omp_calls.get() + 1);
+                vec![ForeignSessionSummary {
+                    tool: ForeignSessionTool::Omp,
+                    source: ForeignSessionSource::OmpCli,
+                    native_id: "omp-session".to_owned(),
+                    title: "OMP session".to_owned(),
+                    cwd: PathBuf::from("/repo"),
+                    updated_at: SystemTime::now(),
+                    branch: None,
+                }]
+            },
+        );
+        assert_eq!(
+            (
+                claude_calls.get(),
+                codex_calls.get(),
+                cursor_calls.get(),
+                omp_calls.get()
+            ),
+            (0, 0, 0, 1)
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].tool, ForeignSessionTool::Omp);
+        assert_eq!(sessions[0].source, ForeignSessionSource::OmpCli);
+        assert_eq!(sessions[0].native_id, "omp-session");
     }
 }

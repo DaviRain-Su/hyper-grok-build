@@ -55,7 +55,7 @@ impl AppView {
     pub(crate) fn begin_foreign_resume_detection(&mut self) -> Option<Effect> {
         let compat = self.foreign_session_compat;
         if self.foreign_resume_launch.is_some()
-            || !(compat.claude || compat.codex || compat.cursor)
+            || !compat.any()
             || !self.pristine_foreign_resume_welcome()
         {
             return None;
@@ -232,16 +232,18 @@ pub(crate) enum ForeignPickerSource {
     Claude,
     Codex,
     Cursor,
+    Omp,
 }
 
 impl ForeignPickerSource {
-    const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Cursor];
+    const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Cursor, Self::Omp];
 
     pub(crate) fn from_tool(tool: ForeignSessionTool) -> Self {
         match tool {
             ForeignSessionTool::Claude => Self::Claude,
             ForeignSessionTool::Codex => Self::Codex,
             ForeignSessionTool::Cursor => Self::Cursor,
+            ForeignSessionTool::Omp => Self::Omp,
         }
     }
 
@@ -250,6 +252,7 @@ impl ForeignPickerSource {
             Self::Claude => ForeignSessionTool::Claude,
             Self::Codex => ForeignSessionTool::Codex,
             Self::Cursor => ForeignSessionTool::Cursor,
+            Self::Omp => ForeignSessionTool::Omp,
         }
     }
 
@@ -258,6 +261,7 @@ impl ForeignPickerSource {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
+            "omp" => Some(Self::Omp),
             _ => None,
         }
     }
@@ -267,6 +271,7 @@ impl ForeignPickerSource {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::Omp => "omp",
         }
     }
 
@@ -275,6 +280,7 @@ impl ForeignPickerSource {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
+            Self::Omp => "OMP",
         }
     }
 
@@ -283,6 +289,7 @@ impl ForeignPickerSource {
             Self::Claude => "resume-claude",
             Self::Codex => "resume-codex",
             Self::Cursor => "resume-cursor",
+            Self::Omp => "resume-omp",
         }
     }
 
@@ -291,6 +298,7 @@ impl ForeignPickerSource {
             Self::Claude => compat.claude,
             Self::Codex => compat.codex,
             Self::Cursor => compat.cursor,
+            Self::Omp => compat.omp,
         }
     }
 
@@ -299,6 +307,7 @@ impl ForeignPickerSource {
             Self::Claude => enabled.claude = true,
             Self::Codex => enabled.codex = true,
             Self::Cursor => enabled.cursor = true,
+            Self::Omp => enabled.omp = true,
         }
     }
 
@@ -388,7 +397,7 @@ where
     WorkFut: Future<Output = T>,
 {
     let enabled = gated_sources_async_with(compat, grok_home, metadata_exists).await;
-    if !(enabled.claude || enabled.codex || enabled.cursor) {
+    if !enabled.any() {
         return None;
     }
     Some(work(enabled).await)
@@ -420,7 +429,7 @@ pub(crate) fn scan_effect(
     seq: u64,
 ) -> Option<Effect> {
     coordinator.begin_request(seq);
-    (compat.claude || compat.codex || compat.cursor).then(|| Effect::ScanForeignSessions {
+    compat.any().then(|| Effect::ScanForeignSessions {
         cwd: cwd.to_path_buf(),
         compat,
         grok_home: grok_home.to_path_buf(),
@@ -537,6 +546,7 @@ mod tests {
             claude: true,
             codex: true,
             cursor: true,
+            omp: true,
         }
     }
 
@@ -615,7 +625,8 @@ mod tests {
             std::future::ready(
                 path.contains("bundled/skills/resume-claude")
                     || path.contains("skills/resume-codex")
-                    || path.contains("bundled/skills/resume-cursor"),
+                    || path.contains("bundled/skills/resume-cursor")
+                    || path.contains("skills/resume-omp"),
             )
         })
         .await;
@@ -625,6 +636,7 @@ mod tests {
                 claude: true,
                 codex: true,
                 cursor: true,
+                omp: true,
             }
         );
     }
@@ -680,6 +692,7 @@ mod tests {
                     claude: true,
                     codex: true,
                     cursor: true,
+                    omp: true,
                 },
                 seq: 2,
                 ..
@@ -790,6 +803,11 @@ mod tests {
                 "cursor",
                 "/resume-cursor native-id",
             ),
+            (
+                ForeignPickerSource::Omp,
+                "omp",
+                "/resume-omp native-id",
+            ),
         ] {
             assert_eq!(source.picker_source(), wire);
             assert_eq!(source.resume_prompt("native-id"), prompt);
@@ -836,6 +854,11 @@ mod tests {
                 ForeignSessionTool::Cursor,
                 ForeignSessionSource::CursorCli,
                 "cursor",
+            ),
+            (
+                ForeignSessionTool::Omp,
+                ForeignSessionSource::OmpCli,
+                "omp",
             ),
         ] {
             let entry = map_summary(ForeignSessionSummary {

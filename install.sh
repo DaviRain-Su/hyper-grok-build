@@ -268,8 +268,8 @@ fi
 printf 'Checksum verified.\n'
 
 # ── Extract + install ────────────────────────────────────────────────────────
-# Extract only the root-level binary to stdout. Other archive paths are never
-# materialized, so a malformed archive cannot traverse out of the temp dir.
+# Extract only trusted members: the root-level binary, plus optional
+# installer-owned `bundled/` assets (no `..` path segments).
 tar -tzf "$TMP_DIR/$ASSET" > "$TMP_DIR/archive.list" \
     || err "failed to inspect $ASSET"
 if ! BINARY_MEMBER="$(awk '
@@ -284,6 +284,24 @@ tar -xOzf "$TMP_DIR/$ASSET" "$BINARY_MEMBER" > "$TMP_DIR/hyper" \
 BINARY_SIZE="$(wc -c < "$TMP_DIR/hyper" | tr -d '[:space:]')"
 [ "$BINARY_SIZE" -le 1073741824 ] || err "extracted hyper exceeds the 1 GiB safety limit"
 chmod 0755 "$TMP_DIR/hyper"
+
+# Optionally extract the installer-owned `bundled/` tree for resume-session
+# skills and related runtime assets packaged in the release archive.
+: > "$TMP_DIR/bundled.members"
+while IFS= read -r member; do
+    case "$member" in
+        bundled|bundled/*|./bundled|./bundled/*) ;;
+        *) continue ;;
+    esac
+    case "$member" in
+        *..*) err "archive $ASSET contains an unsafe bundled path: $member" ;;
+    esac
+    printf '%s\n' "$member" >> "$TMP_DIR/bundled.members"
+done < "$TMP_DIR/archive.list"
+if [ -s "$TMP_DIR/bundled.members" ]; then
+    tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" -T "$TMP_DIR/bundled.members" \
+        || err "failed to extract bundled runtime assets from $ASSET"
+fi
 
 ensure_directory() {
     path="$1"
@@ -315,11 +333,26 @@ chmod 0755 "$STAGED"
 mv -f "$STAGED" "$DEST"
 STAGED=""
 
+# Stage the installer-owned bundle as a complete immutable tree. Whole-tree
+# replacement removes stale managed files; user skills remain in GROK_HOME/skills.
+GROK_HOME="${GROK_HOME:-$HOME/.grok}"
+BUNDLE_STAGE=""
+BUNDLE_ASIDE="$GROK_HOME/bundled.old.$$"
+if [ -d "$TMP_DIR/bundled" ]; then
+    ensure_directory "$GROK_HOME" "Grok home"
+    BUNDLE_STAGE="$GROK_HOME/bundled.install.$$"
+    rm -rf "$BUNDLE_STAGE" "$BUNDLE_ASIDE"
+    cp -R "$TMP_DIR/bundled" "$BUNDLE_STAGE" \
+        || err "failed to stage bundled runtime assets; existing install left untouched"
+fi
+
 TMP_LINK="$BIN_DIR/hyper.install.$$"
 [ ! -e "$TMP_LINK" ] && [ ! -L "$TMP_LINK" ] \
-    || err "temporary activation path already exists: $TMP_LINK"
-ln -s "../downloads/$VERSIONED" "$TMP_LINK"
-mv -f "$TMP_LINK" "$BIN_DIR/hyper"
+    || { rm -rf "$BUNDLE_STAGE"; err "temporary activation path already exists: $TMP_LINK"; }
+ln -s "../downloads/$VERSIONED" "$TMP_LINK" \
+    || { rm -rf "$BUNDLE_STAGE"; err "failed to stage active hyper link"; }
+mv -f "$TMP_LINK" "$BIN_DIR/hyper" \
+    || { rm -f "$TMP_LINK"; rm -rf "$BUNDLE_STAGE"; err "failed to activate hyper binary"; }
 TMP_LINK=""
 
 # Record the exact release-archive identity used by the in-app community
@@ -327,18 +360,32 @@ TMP_LINK=""
 # without ever consulting the official Grok updater state under ~/.grok.
 STATE_FILE="$HYPER_HOME/update-state.json"
 STATE_TMP="$(mktemp "$HYPER_HOME/.update-state.XXXXXX")" \
-    || err "could not create temporary update state under $HYPER_HOME"
+    || { rm -rf "$BUNDLE_STAGE"; err "could not create temporary update state under $HYPER_HOME"; }
 CHECKED_AT="$(date -u +%s)"
 case "$CHECKED_AT" in
-    *[!0-9]*|'') err "could not determine the current Unix timestamp" ;;
+    *[!0-9]*|'') rm -rf "$BUNDLE_STAGE"; err "could not determine the current Unix timestamp" ;;
 esac
 # These fields are safe to serialize directly: version/tag and asset names are
 # constrained above, the digest is exactly 64 hex characters, and the managed
 # filename is composed only from those validated values.
 printf '{\n  "installed_version": "%s",\n  "installed_asset": "%s",\n  "installed_sha256": "%s",\n  "installed_binary": "%s",\n  "checked_at_unix": %s\n}\n' \
     "$RESOLVED_VERSION" "$ASSET" "$EXPECTED" "$VERSIONED" "$CHECKED_AT" > "$STATE_TMP"
-mv -f "$STATE_TMP" "$STATE_FILE"
+mv -f "$STATE_TMP" "$STATE_FILE" \
+    || { rm -rf "$BUNDLE_STAGE"; err "could not record Hyper update state"; }
 STATE_TMP=""
+
+# Activate the complete bundle after the binary is known-good.
+if [ -n "$BUNDLE_STAGE" ]; then
+    if [ -e "$GROK_HOME/bundled" ]; then
+        mv "$GROK_HOME/bundled" "$BUNDLE_ASIDE" \
+            || { rm -rf "$BUNDLE_STAGE"; err "failed to preserve existing bundled runtime"; }
+    fi
+    if ! mv "$BUNDLE_STAGE" "$GROK_HOME/bundled"; then
+        [ ! -e "$BUNDLE_ASIDE" ] || mv "$BUNDLE_ASIDE" "$GROK_HOME/bundled" || true
+        err "failed to activate bundled runtime; previous bundle restored if available"
+    fi
+fi
+rm -rf "$BUNDLE_ASIDE"
 
 printf '\nhyper v%s installed to %s\n' "$RESOLVED_VERSION" "$BIN_DIR/hyper"
 

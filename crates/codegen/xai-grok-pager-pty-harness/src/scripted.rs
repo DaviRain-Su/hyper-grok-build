@@ -546,11 +546,7 @@ impl ScriptedScenarioRunner {
             .collect();
 
         if let Some(config_toml) = &scenario.environment.config_toml {
-            let grok_home = content.home().join(".grok");
-            fs::create_dir_all(&grok_home)
-                .with_context(|| format!("create scenario GROK_HOME {}", grok_home.display()))?;
-            fs::write(grok_home.join("config.toml"), config_toml)
-                .context("write scenario config.toml")?;
+            write_scenario_config(content.sandbox(), config_toml)?;
         }
 
         let env_refs: Vec<(&str, &str)> = scenario
@@ -680,6 +676,16 @@ impl ScriptedScenarioRunner {
         write_bug_markdown(&run_dir, &report)?;
         Ok(report)
     }
+}
+
+fn write_scenario_config(
+    sandbox: &xai_grok_test_support::TestSandbox,
+    config_toml: &str,
+) -> Result<()> {
+    let grok_home = sandbox.grok_home();
+    fs::create_dir_all(grok_home)
+        .with_context(|| format!("create scenario GROK_HOME {}", grok_home.display()))?;
+    fs::write(grok_home.join("config.toml"), config_toml).context("write scenario config.toml")
 }
 
 /// Create a temp dir for a scenario [`WorkspaceConfig`]: write its files
@@ -2045,6 +2051,24 @@ mod tests {
         assert_eq!(scenario.name, "welcome");
         assert_eq!(scenario.terminal.rows, DEFAULT_ROWS);
         assert_eq!(scenario.steps.len(), 2);
+    }
+
+    #[test]
+    fn scenario_config_is_written_to_explicit_grok_home() {
+        let sandbox = xai_grok_test_support::TestSandbox::new();
+        let config = "[ui]\ntheme = \"omp\"\n";
+
+        write_scenario_config(&sandbox, config).expect("write scenario config");
+
+        assert_eq!(
+            std::fs::read_to_string(sandbox.grok_home().join("config.toml"))
+                .expect("read scenario config"),
+            config
+        );
+        assert!(
+            !sandbox.home().join(".grok/.grok/config.toml").exists(),
+            "scenario config must not be nested below GROK_HOME"
+        );
     }
 
     #[test]

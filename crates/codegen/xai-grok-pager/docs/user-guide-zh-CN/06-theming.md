@@ -6,15 +6,29 @@ Grok Build 的 TUI 颜色统一来自一套中心主题。你可以在 Grok 运�
 
 ## 可用主题
 
-Grok 内置五个主题，另有 `auto` 选项会跟随系统外观：
+Grok 内置十九个主题，另有 `auto` 选项会跟随系统外观：
 
 | 主题 | 配置名 | 说明 | 需要真彩色 |
 |-------|-------------|-------------|--------------------|
-| **GrokNight** | `groknight`, `grok-night`, `dark` | 中性深色底 + 品红强调色。默认主题。在 256 色与 16 色终端量化后仍清晰可读。 | 否 |
-| **GrokDay** | `grokday`, `grok-day`, `light`, `day` | 适合浅色终端背景的浅色主题。 | 否 |
-| **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | 来自 Tokyo Night 色板的深色偏蓝背景。量化后会失去特色。 | 是 |
-| **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | 来自 Rosé Pine 系列的柔和深色色板，带淡紫强调色。 | 是 |
-| **OscuraMidnight** | `oscura`, `oscura-midnight` | 深邃深色底 + 紫色强调色。 | 是 |
+| **GrokNight** | `groknight`, `grok-night`, `dark` | 中性深色底 + 品红强调色。默认主题。 | 否 |
+| **GrokDay** | `grokday`, `grok-day`, `light`, `day` | 适合明亮环境的浅色主题。 | 否 |
+| **TokyoNight** | `tokyonight`, `tokyo-night`, `tokyo` | Tokyo Night 深色偏蓝色板。 | 是 |
+| **RosePineMoon** | `rosepine`, `rose-pine`, `rosepine-moon`, `rose-pine-moon` | 柔和深色底与淡紫强调色。 | 是 |
+| **OscuraMidnight** | `oscura`, `oscura-midnight` | 深邃底色与暖色强调。 | 是 |
+| **Everforest** | `everforest`, `ever-forest` | 柔和森林绿色。 | 是 |
+| **Nord** | `nord` | 冷色北极灰与霜蓝强调。 | 是 |
+| **Dracula** | `dracula` | 紫灰底与鲜明强调色。 | 是 |
+| **Gruvbox Dark** | `gruvbox`, `gruvbox-dark` | 温暖复古棕色。 | 是 |
+| **Catppuccin Mocha** | `catppuccin`, `catppuccin-mocha`, `mocha` | 柔和粉彩深色色板。 | 是 |
+| **Solarized Dark** | `solarized`, `solarized-dark` | 经典 Solarized 青绿色底。 | 是 |
+| **Deep Ocean** | `deep-ocean`, `deepocean`, `ocean` | 近黑海军蓝与明亮蓝色。 | 是 |
+| **Ember** | `ember` | 深栗色与玫瑰/琥珀强调。 | 是 |
+| **Midnight OLED** | `midnight-oled`, `oled`, `midnight` | 纯黑底与琥珀强调。 | 是 |
+| **Solarized Light** | `solarized-light` | 暖奶油色浅色画布。 | 是 |
+| **Catppuccin Latte** | `catppuccin-latte`, `latte` | 冷调浅灰蓝色板。 | 是 |
+| **Paper** | `paper`, `sepia` | 暖色复古纸张画布。 | 是 |
+| **Base16 Default Dark** | `base16-default-dark`, `base16-default`, `base16-dark`, `base16` | Chris Kempson 的经典 Base16 Default Dark 色板。 | 是 |
+| **OMP Titanium** | `omp`, `titanium`, `omp-titanium` | 高对比钛金属表面与电光蓝强调色。 | 是 |
 
 主题名不区分大小写。`auto` 选项（别名 `system`）见 [自动主题（系统外观）](#auto-theme-system-appearance)。
 
@@ -110,7 +124,7 @@ auto_light_theme = "grokday"
 - 在 **256 色** 终端上，每个 RGB 值映射到最近的索引色板项。
 - 在 **16 色** 终端上，颜色映射到 ANSI 名称。
 
-GrokNight 与 GrokDay 使用中性灰色，量化后仍然清晰。TokyoNight、RosePineMoon 与 OscuraMidnight 使用特色着色背景，量化后会失去特色，因此主题选择器会在非真彩色终端上隐藏它们。
+GrokNight 与 GrokDay 使用中性灰色，量化后仍然清晰。其他完整 TUI 主题依赖明确的 RGB 画布和语义层次，因此主题选择器会在非真彩色终端上隐藏它们。极简模式仍直接使用终端原生 ANSI 色板，所以终端已配置 Base16 时会自然沿用该色板。
 
 ### 运行时生成的颜色
 
@@ -147,8 +161,8 @@ Grok 使用 OSC 12 转义序列将终端光标设为当前主题的 `accent_user
 
 Grok 内置三个用于代码块语法高亮的 `.tmTheme` 文件，并按当前主题选择其一：
 
-- `grok-night.tmTheme` -- GrokNight、RosePineMoon 与 OscuraMidnight
-- `grok-day.tmTheme` -- GrokDay
+- `grok-night.tmTheme` -- GrokNight 及所有深色预设（包括 Base16 Default Dark）
+- `grok-day.tmTheme` -- GrokDay 及所有浅色预设
 - `tokyo-night.tmTheme` -- TokyoNight
 
 切换主题时，Grok 会自动选择对应文件。`.tmTheme` 文件内置在二进制中，无法用自定义文件替换。

@@ -4,6 +4,11 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Native OMP session continuation** — `/resume-omp`, the foreign-session picker, recent-session Ctrl+U hint, and `[compat.omp].sessions` now discover OMP CLI sessions lazily behind the same bundled-runtime gate as Claude, Codex, and Cursor. Release archives install the native `resume-omp` wrapper plus the shared inert-history reader, including OMP profile/XDG/custom-root and native-ID support.
+- **Base16 Default Dark and OMP themes** — Adds stable theme IDs 18 (`base16-default-dark`) and 19 (`omp` / Titanium), terminal-capability clamping for syntax colors, and release packaging for the shared resume-session readers.
+- **Extension author proc macros** — Recommended guest path is now `#[hyper_plugin]` / `#[hyper_hook]` / `#[hyper_tool]` so handlers stay ordinary named functions for IDE navigation; legacy `hyper_extension!` remains for source compatibility.
+
 ## [0.2.114-r3] — 2026-07-28
 
 ### Fixed

@@ -134,13 +134,18 @@ try {
     Write-Host "Checksum verified."
 
     # ── Extract + install ────────────────────────────────────────────────────
-    # Materialize only the unique root-level executable. Nested paths and
-    # symlink-like Unix entries are never extracted.
+    # Materialize only the unique root-level executable, plus optional
+    # installer-owned `bundled/` assets. Nested path traversal is rejected.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $BinaryPath = Join-Path $TmpDir "hyper.exe"
+    $BundledSource = Join-Path $TmpDir "bundled"
+    $GrokHome = if ($env:GROK_HOME) { $env:GROK_HOME } else { Join-Path $HOME ".grok" }
+    $BundledDest = Join-Path $GrokHome "bundled"
+    $BundledStage = Join-Path $GrokHome ("bundled.install." + [System.IO.Path]::GetRandomFileName())
+    $BundledAside = Join-Path $GrokHome ("bundled.old." + [System.IO.Path]::GetRandomFileName())
     $Zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
     try {
-        if (@($Zip.Entries).Count -gt 32) {
+        if (@($Zip.Entries).Count -gt 4096) {
             Fail "archive $Asset contains too many entries"
         }
         $BinaryEntries = @($Zip.Entries | Where-Object {
@@ -160,6 +165,33 @@ try {
         [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
             $BinaryEntry, $BinaryPath, $true
         )
+
+        $BundledEntries = @($Zip.Entries | Where-Object {
+            $name = $_.FullName.Replace('\', '/')
+            ($name -eq "bundled" -or $name -eq "./bundled" -or
+             $name.StartsWith("bundled/") -or $name.StartsWith("./bundled/")) -and
+            (-not $name.Contains(".."))
+        })
+        foreach ($entry in $BundledEntries) {
+            $name = $entry.FullName.Replace('\', '/').TrimStart('./')
+            if ($name.Contains("..")) {
+                Fail "archive $Asset contains an unsafe bundled path: $($entry.FullName)"
+            }
+            $destPath = Join-Path $TmpDir ($name -replace '/', [IO.Path]::DirectorySeparatorChar)
+            if ($name.EndsWith('/')) {
+                New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+                continue
+            }
+            $parent = Split-Path -Parent $destPath
+            if ($parent) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            if ($entry.Length -gt 0 -or -not $name.EndsWith('/')) {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
+                    $entry, $destPath, $true
+                )
+            }
+        }
     } finally {
         $Zip.Dispose()
     }
@@ -191,6 +223,13 @@ try {
         Fail "downloaded binary failed smoke test ($PreSmokeDetail); existing install left untouched"
     }
 
+    # Stage the installer-owned bundle only after the downloaded binary passes.
+    # Whole-tree replacement removes stale managed files without touching skills/.
+    if (Test-Path -LiteralPath $BundledSource) {
+        New-Item -ItemType Directory -Path $GrokHome -Force | Out-Null
+        Copy-Item -Path $BundledSource -Destination $BundledStage -Recurse -Force
+    }
+
     # Prepare parseable updater state before touching the active executable.
     # Windows PowerShell 5.1's `-Encoding UTF8` writes a BOM, which serde_json
     # rejects, so write explicit UTF-8 without BOM.
@@ -216,6 +255,7 @@ try {
         try {
             Move-Item -LiteralPath $Dest -Destination $Aside
         } catch {
+            Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
             Fail "cannot replace $Dest (close all running hyper sessions and retry): $($_.Exception.Message)"
         }
     }
@@ -225,6 +265,7 @@ try {
         if ($HadPrior -and (Test-Path -LiteralPath $Aside)) {
             Move-Item -LiteralPath $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
         }
+        Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
         Fail "cannot install to $Dest: $($_.Exception.Message)"
     }
 
@@ -243,6 +284,7 @@ try {
         if ($HadPrior -and (Test-Path -LiteralPath $Aside)) {
             Move-Item -LiteralPath $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
         }
+        Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
         Fail "installed binary failed to run ($ActiveSmokeDetail); previous install restored if available"
     }
 
@@ -265,10 +307,27 @@ try {
         if ($HadPrior -and (Test-Path -LiteralPath $Aside)) {
             Move-Item -LiteralPath $Aside -Destination $Dest -Force -ErrorAction SilentlyContinue
         }
+        Remove-Item -LiteralPath $BundledStage -Recurse -Force -ErrorAction SilentlyContinue
         Fail "cannot record Hyper update state; previous install restored if available: $($_.Exception.Message)"
     }
     if ($HadState -and (Test-Path -LiteralPath $StateAside)) {
         Remove-Item -LiteralPath $StateAside -Force -ErrorAction SilentlyContinue
+    }
+
+    # Activate the complete bundle after the binary is known-good.
+    if (Test-Path -LiteralPath $BundledStage) {
+        try {
+            if (Test-Path -LiteralPath $BundledDest) {
+                Move-Item -LiteralPath $BundledDest -Destination $BundledAside -Force
+            }
+            Move-Item -LiteralPath $BundledStage -Destination $BundledDest -Force
+        } catch {
+            Remove-Item -LiteralPath $BundledDest -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $BundledAside) {
+                Move-Item -LiteralPath $BundledAside -Destination $BundledDest -Force -ErrorAction SilentlyContinue
+            }
+            Fail "cannot activate bundled runtime; previous bundle restored if available: $($_.Exception.Message)"
+        }
     }
 
     if ($HadPrior -and (Test-Path -LiteralPath $Aside)) {
@@ -276,6 +335,7 @@ try {
         # and a later install can remove it after that process exits.
         Remove-Item -LiteralPath $Aside -Force -ErrorAction SilentlyContinue
     }
+    Remove-Item -LiteralPath $BundledAside -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host ""
     Write-Host "hyper v$ResolvedVersion installed to $Dest"

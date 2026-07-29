@@ -424,7 +424,11 @@ pub async fn save_mcp_preferences_to(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp = path.with_extension(format!(
+    let write_path = xai_grok_config::fs_atomic::resolve_write_target(path)?;
+    if let Some(parent) = write_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = write_path.with_extension(format!(
         "json.tmp.{}{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -440,7 +444,7 @@ pub async fn save_mcp_preferences_to(
             .await
             .map_err(|e| anyhow::anyhow!("failed to set mcp preferences permissions: {e}"))?;
     }
-    tokio::fs::rename(&tmp, path).await?;
+    tokio::fs::rename(&tmp, &write_path).await?;
     Ok(())
 }
 
@@ -616,12 +620,7 @@ pub async fn save_mcp_disabled_tools(server_name: &str, disabled_tools: &[String
     }
 
     let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    super::persist::atomic_write_string(&path, &toml_str)?;
     Ok(())
 }
 
@@ -668,12 +667,7 @@ pub async fn save_mcp_server_enabled(server_name: &str, enabled: bool) -> Result
     }
 
     let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    super::persist::atomic_write_string(&path, &toml_str)?;
     Ok(())
 }
 
@@ -725,12 +719,7 @@ pub async fn save_mcp_server_config_at(
     }
 
     let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    super::persist::atomic_write_string(&path, &toml_str)?;
     Ok(())
 }
 
@@ -802,12 +791,7 @@ pub async fn delete_mcp_server_config_at(
     }
 
     let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
+    super::persist::atomic_write_string(path, &toml_str)?;
 
     // Clean up OAuth credentials for the deleted server.
     if let Ok(mut cred_store) = xai_grok_mcp::credentials::McpCredentialStore::load_default() {

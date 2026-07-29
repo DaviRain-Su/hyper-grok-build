@@ -842,6 +842,7 @@ pub fn resolve_compat_sessions_from_raw(
             CompatVendor::Cursor => config.cursor.sessions = value,
             CompatVendor::Claude => config.claude.sessions = value,
             CompatVendor::Codex => config.codex.sessions = value,
+            CompatVendor::Omp => config.omp.sessions = value,
         }
     }
     resolve_compat_config(&config, remote)
@@ -13182,6 +13183,7 @@ agent_type = "cursor"
             (CompatVendor::Cursor, "cursor"),
             (CompatVendor::Claude, "claude"),
             (CompatVendor::Codex, "codex"),
+            (CompatVendor::Omp, "omp"),
         ] {
             let config = parse_compat(&format!("[compat.{section}]\nsessions = false"));
             assert_session_one_disabled(resolve_compat_config(&config, None), vendor);
@@ -13337,6 +13339,7 @@ hooks = true
             (CompatVendor::Cursor, "GROK_CURSOR_SESSIONS_ENABLED"),
             (CompatVendor::Claude, "GROK_CLAUDE_SESSIONS_ENABLED"),
             (CompatVendor::Codex, "GROK_CODEX_SESSIONS_ENABLED"),
+            (CompatVendor::Omp, "GROK_OMP_SESSIONS_ENABLED"),
         ] {
             let _disabled = EnvGuard::set(env_var, "false");
             assert_session_one_disabled(

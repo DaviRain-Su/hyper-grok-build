@@ -20,6 +20,7 @@ pub enum CompatVendor {
     Cursor,
     Claude,
     Codex,
+    Omp,
 }
 
 impl CompatVendor {
@@ -28,6 +29,7 @@ impl CompatVendor {
             Self::Cursor => "cursor",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Omp => "omp",
         }
     }
 }
@@ -118,12 +120,14 @@ impl CompatCell {
     pub const fn is_runtime_supported(self) -> bool {
         match self.vendor {
             CompatVendor::Cursor | CompatVendor::Claude => true,
-            CompatVendor::Codex => matches!(self.surface, CompatSurface::Sessions),
+            CompatVendor::Codex | CompatVendor::Omp => {
+                matches!(self.surface, CompatSurface::Sessions)
+            }
         }
     }
 }
 
-pub const COMPAT_CELLS: [CompatCell; 18] = [
+pub const COMPAT_CELLS: [CompatCell; 19] = [
     CompatCell::new(
         CompatVendor::Cursor,
         CompatSurface::Skills,
@@ -232,6 +236,12 @@ pub const COMPAT_CELLS: [CompatCell; 18] = [
         "GROK_CODEX_SESSIONS_ENABLED",
         Some(CompatRemoteKey::CodexSessions),
     ),
+    CompatCell::new(
+        CompatVendor::Omp,
+        CompatSurface::Sessions,
+        "GROK_OMP_SESSIONS_ENABLED",
+        None,
+    ),
 ];
 
 /// Raw per-vendor compat cells parsed from `[compat.<vendor>]` TOML.
@@ -269,6 +279,8 @@ pub struct CompatConfigToml {
     pub claude: VendorCompatToml,
     #[serde(default)]
     pub codex: VendorCompatToml,
+    #[serde(default)]
+    pub omp: VendorCompatToml,
 }
 
 impl CompatConfigToml {
@@ -277,6 +289,7 @@ impl CompatConfigToml {
             CompatVendor::Cursor => self.cursor.value(cell.surface()),
             CompatVendor::Claude => self.claude.value(cell.surface()),
             CompatVendor::Codex => self.codex.value(cell.surface()),
+            CompatVendor::Omp => self.omp.value(cell.surface()),
         }
     }
 }
@@ -338,6 +351,7 @@ pub struct CompatConfig {
     pub cursor: VendorCompat,
     pub claude: VendorCompat,
     pub codex: VendorCompat,
+    pub omp: VendorCompat,
 }
 
 impl CompatConfig {
@@ -346,6 +360,7 @@ impl CompatConfig {
             CompatVendor::Cursor => self.cursor.value(cell.surface()),
             CompatVendor::Claude => self.claude.value(cell.surface()),
             CompatVendor::Codex => self.codex.value(cell.surface()),
+            CompatVendor::Omp => self.omp.value(cell.surface()),
         }
     }
 
@@ -354,6 +369,7 @@ impl CompatConfig {
             CompatVendor::Cursor => self.cursor.set(cell.surface(), value),
             CompatVendor::Claude => self.claude.set(cell.surface(), value),
             CompatVendor::Codex => self.codex.set(cell.surface(), value),
+            CompatVendor::Omp => self.omp.set(cell.surface(), value),
         }
     }
 
@@ -467,6 +483,7 @@ mod tests {
                 ("codex", "mcps", None),
                 ("codex", "hooks", None),
                 ("codex", "sessions", Some(CodexSessions)),
+                ("omp", "sessions", None),
             ]
         );
 
@@ -479,7 +496,12 @@ mod tests {
                 cell.surface().as_str()
             );
         }
-        for vendor in [defaults.cursor, defaults.claude, defaults.codex] {
+        for vendor in [
+            defaults.cursor,
+            defaults.claude,
+            defaults.codex,
+            defaults.omp,
+        ] {
             assert!(vendor.skills && vendor.rules && vendor.agents);
             assert!(vendor.mcps && vendor.hooks);
             assert!(vendor.sessions);
@@ -505,6 +527,7 @@ mod tests {
                 ("claude", "hooks"),
                 ("claude", "sessions"),
                 ("codex", "sessions"),
+                ("omp", "sessions"),
             ]
         );
     }
@@ -620,6 +643,7 @@ mod tests {
         assert_eq!(parsed.claude, VendorCompatToml::default());
         assert_eq!(parsed.codex.sessions, Some(true));
         assert_eq!(parsed.codex.skills, None);
+        assert_eq!(parsed.omp, VendorCompatToml::default());
 
         // mcps cell round-trips the same way.
         let parsed: CompatConfigToml = serde_yaml::from_str("claude:\n  mcps: false\n").unwrap();
@@ -628,5 +652,12 @@ mod tests {
         assert_eq!(parsed.claude.sessions, None);
         assert_eq!(parsed.cursor, VendorCompatToml::default());
         assert_eq!(parsed.codex, VendorCompatToml::default());
+        assert_eq!(parsed.omp, VendorCompatToml::default());
+
+        // omp's only supported cell (sessions) round-trips the same way.
+        let parsed: CompatConfigToml = serde_yaml::from_str("omp:\n  sessions: false\n").unwrap();
+        assert_eq!(parsed.omp.sessions, Some(false));
+        assert_eq!(parsed.omp.skills, None);
+        assert_eq!(parsed.cursor, VendorCompatToml::default());
     }
 }

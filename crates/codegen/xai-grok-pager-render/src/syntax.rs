@@ -21,7 +21,7 @@
 //! That matches the "first + second" minimal syntax policy: default-fg baseline
 //! plus a dual-polarity accent map, with zero polarity detection.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 pub use xai_grok_markdown::Syntect;
 
@@ -33,6 +33,9 @@ use crate::theme::ThemeKind;
 static SYNTECT_GROKNIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_TOKYONIGHT: OnceLock<Syntect> = OnceLock::new();
 static SYNTECT_GROKDAY: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_BASE16_DEFAULT_DARK: OnceLock<Syntect> = OnceLock::new();
+static SYNTECT_OMP: LazyLock<Syntect> =
+    LazyLock::new(|| Syntect::new(include_bytes!("../assets/omp.tmTheme")));
 
 /// Convert syntect style to ratatui foreground-only style, quantized for
 /// terminal color support (or polarity-safe under the terminal-native lock).
@@ -160,6 +163,10 @@ pub fn get_syntect() -> &'static Syntect {
         | ThemeKind::Ember
         | ThemeKind::MidnightOled => SYNTECT_GROKNIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/grok-night.tmTheme"))),
+        ThemeKind::Base16DefaultDark => SYNTECT_BASE16_DEFAULT_DARK.get_or_init(|| {
+            Syntect::new(include_bytes!("../assets/base16-default-dark.tmTheme"))
+        }),
+        ThemeKind::Omp => &SYNTECT_OMP,
         ThemeKind::TokyoNight => SYNTECT_TOKYONIGHT
             .get_or_init(|| Syntect::new(include_bytes!("../assets/tokyo-night.tmTheme"))),
         // GrokDay + light Hyper presets share the day syntect palette.
@@ -176,17 +183,33 @@ mod tests {
     use super::*;
     use crate::theme::cache as theme_cache;
 
+    struct ThemeTestStateGuard;
+
+    impl ThemeTestStateGuard {
+        fn new() -> Self {
+            theme_cache::reset_for_test();
+            theme_cache::set_terminal_native_lock(false);
+            crate::theme::color_support::force_level_for_test(None);
+            Self
+        }
+    }
+
+    impl Drop for ThemeTestStateGuard {
+        fn drop(&mut self) {
+            crate::theme::color_support::force_level_for_test(None);
+            theme_cache::set_terminal_native_lock(false);
+            theme_cache::reset_for_test();
+        }
+    }
+
     /// Hold the theme test lock so we can flip the terminal-native flag.
     fn with_native_lock<R>(locked: bool, f: impl FnOnce() -> R) -> R {
         let _guard = theme_cache::test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        theme_cache::reset_for_test();
+        let _state = ThemeTestStateGuard::new();
         theme_cache::set_terminal_native_lock(locked);
-        let out = f();
-        theme_cache::set_terminal_native_lock(false);
-        theme_cache::reset_for_test();
-        out
+        f()
     }
 
     #[test]
@@ -260,6 +283,130 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "fn main() {}");
         assert_eq!(spans[0].style.fg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn base16_default_dark_uses_canonical_syntax_palette() {
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _state = ThemeTestStateGuard::new();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::TrueColor,
+        ));
+        theme_cache::set(ThemeKind::Base16DefaultDark);
+
+        let syn = get_syntect();
+        let settings = &syn.theme.settings;
+        assert_eq!(
+            settings.background,
+            Some(syntect::highlighting::Color {
+                r: 0x18,
+                g: 0x18,
+                b: 0x18,
+                a: 0xff,
+            })
+        );
+        assert_eq!(
+            settings.foreground,
+            Some(syntect::highlighting::Color {
+                r: 0xd8,
+                g: 0xd8,
+                b: 0xd8,
+                a: 0xff,
+            })
+        );
+        assert_eq!(
+            settings.selection,
+            Some(syntect::highlighting::Color {
+                r: 0x38,
+                g: 0x38,
+                b: 0x38,
+                a: 0xff,
+            })
+        );
+
+        let mut highlighter = syn.highlight_lines_for_token("rust");
+        let spans = highlight_line(
+            "fn main() { let value = 42; let text = \"ok\"; /* note */ }",
+            &mut highlighter,
+            syn,
+            Style::default(),
+        );
+        let color_for = |needle: &str| {
+            spans
+                .iter()
+                .find(|span| span.content.contains(needle))
+                .and_then(|span| span.style.fg)
+                .unwrap_or_else(|| panic!("missing highlighted token {needle:?}: {spans:?}"))
+        };
+        assert_eq!(color_for("fn"), Color::Rgb(0xba, 0x8b, 0xaf)); // base0E keyword
+        assert_eq!(color_for("main"), Color::Rgb(0x7c, 0xaf, 0xc2)); // base0D function
+        assert_eq!(color_for("42"), Color::Rgb(0xdc, 0x96, 0x56)); // base09 constant
+        assert_eq!(color_for("ok"), Color::Rgb(0xa1, 0xb5, 0x6c)); // base0B string
+        assert_eq!(color_for("note"), Color::Rgb(0x58, 0x58, 0x58)); // base03 comment
+    }
+
+    #[test]
+    fn omp_uses_titanium_syntax_palette() {
+        let _guard = theme_cache::test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _state = ThemeTestStateGuard::new();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::TrueColor,
+        ));
+        theme_cache::set(ThemeKind::Omp);
+
+        let syn = get_syntect();
+        let settings = &syn.theme.settings;
+        assert_eq!(
+            settings.background,
+            Some(syntect::highlighting::Color {
+                r: 0x15,
+                g: 0x18,
+                b: 0x20,
+                a: 0xff,
+            })
+        );
+        assert_eq!(
+            settings.foreground,
+            Some(syntect::highlighting::Color {
+                r: 0xe8,
+                g: 0xec,
+                b: 0xf4,
+                a: 0xff,
+            })
+        );
+        assert_eq!(
+            settings.selection,
+            Some(syntect::highlighting::Color {
+                r: 0x00,
+                g: 0x82,
+                b: 0xb3,
+                a: 0xff,
+            })
+        );
+
+        let mut highlighter = syn.highlight_lines_for_token("rust");
+        let spans = highlight_line(
+            "fn main() { let value = 42; let text = \"ok\"; /* note */ }",
+            &mut highlighter,
+            syn,
+            Style::default(),
+        );
+        let color_for = |needle: &str| {
+            spans
+                .iter()
+                .find(|span| span.content.contains(needle))
+                .and_then(|span| span.style.fg)
+                .unwrap_or_else(|| panic!("missing highlighted token {needle:?}: {spans:?}"))
+        };
+        assert_eq!(color_for("fn"), Color::Rgb(0x00, 0xb4, 0xff));
+        assert_eq!(color_for("main"), Color::Rgb(0x00, 0xff, 0x88));
+        assert_eq!(color_for("42"), Color::Rgb(0xff, 0xb3, 0x47));
+        assert_eq!(color_for("ok"), Color::Rgb(0xd4, 0xc0, 0x90));
+        assert_eq!(color_for("note"), Color::Rgb(0x6b, 0x72, 0x80));
     }
 
     #[test]

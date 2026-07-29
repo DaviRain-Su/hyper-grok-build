@@ -140,6 +140,7 @@ fn modal_refetch_clears_orphaned_welcome_foreign_loading() {
             claude: true,
             codex: true,
             cursor: true,
+            omp: true,
         };
     app.session_picker_lanes.foreign_loading = true;
     open_session_picker_with(&mut app, vec![]);
@@ -170,6 +171,7 @@ fn modal_foreign_scan_uses_native_list_cwd() {
             claude: true,
             codex: true,
             cursor: true,
+            omp: true,
         };
     open_session_picker_with(&mut app, vec![]);
 
@@ -929,6 +931,45 @@ fn gated_foreign_pick_replaces_all_prior_startup_intents() {
 }
 
 #[test]
+fn gated_omp_foreign_pick_defers_behind_trust_and_emits_resume_prompt() {
+    let mut app = test_app_with_agent();
+    app.trust_state = TrustState::Pending {
+        workspace: PathBuf::from("/repo"),
+    };
+    open_session_picker_with(
+        &mut app,
+        vec![make_foreign_entry("omp-deferred", "omp", "/repo")],
+    );
+
+    assert!(dispatch(Action::PickSession(0), &mut app).is_empty());
+    assert!(matches!(
+        app.deferred_startup.session.as_ref(),
+        Some(crate::app::session_startup::DeferredSessionStartup::ForeignResume {
+            tool: ForeignSessionTool::Omp,
+            native_id,
+        }) if native_id == "omp-deferred"
+    ));
+
+    app.trust_state = TrustState::Done;
+    let effects = drain_startup_actions(&mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateSession { .. }))
+    );
+    let new_id = AgentId(1);
+    assert_eq!(app.active_view, ActiveView::Agent(new_id));
+    assert_eq!(
+        app.agents[&new_id]
+            .session
+            .pending_prompts
+            .front()
+            .map(|prompt| prompt.text.as_str()),
+        Some("/resume-omp omp-deferred")
+    );
+}
+
+#[test]
 fn welcome_and_modal_foreign_picks_always_target_fresh_sessions() {
     let mut welcome = test_app();
     welcome.session_picker_entries =
@@ -967,6 +1008,27 @@ fn welcome_and_modal_foreign_picks_always_target_fresh_sessions() {
             .front()
             .map(|prompt| prompt.text.as_str()),
         Some("/resume-cursor cursor-native")
+    );
+}
+
+#[test]
+fn welcome_omp_foreign_pick_targets_fresh_session_with_resume_prompt() {
+    let mut welcome = test_app();
+    welcome.session_picker_entries =
+        Some(vec![make_foreign_entry("omp-native", "omp", "/repo")]);
+    let effects = dispatch(Action::PickSession(0), &mut welcome);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreateSession { .. }))
+    );
+    assert_eq!(
+        welcome.agents[&AgentId(0)]
+            .session
+            .pending_prompts
+            .front()
+            .map(|prompt| prompt.text.as_str()),
+        Some("/resume-omp omp-native")
     );
 }
 
@@ -1011,6 +1073,7 @@ fn chat_picker_never_launches_or_accepts_foreign_scan() {
             claude: true,
             codex: true,
             cursor: true,
+            omp: true,
         };
     let effects = dispatch(Action::FetchSessionList, &mut app);
     assert!(matches!(
@@ -1036,6 +1099,7 @@ fn native_fetch_effect_precedes_background_foreign_gate() {
             claude: true,
             codex: true,
             cursor: true,
+            omp: true,
         };
 
     let effects = dispatch(Action::FetchSessionList, &mut app);

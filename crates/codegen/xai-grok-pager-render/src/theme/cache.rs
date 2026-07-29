@@ -13,8 +13,8 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use super::ThemeKind;
 use super::system_appearance;
+use super::{Theme, ThemeKind};
 
 /// In-memory theme kind, encoded as a `u8` matching the
 /// `ThemeKind` discriminants. Loaded from disk once at startup via
@@ -69,6 +69,8 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::SolarizedLight as u8 => ThemeKind::SolarizedLight,
         x if x == ThemeKind::CatppuccinLatte as u8 => ThemeKind::CatppuccinLatte,
         x if x == ThemeKind::Paper as u8 => ThemeKind::Paper,
+        x if x == ThemeKind::Base16DefaultDark as u8 => ThemeKind::Base16DefaultDark,
+        x if x == ThemeKind::Omp as u8 => ThemeKind::Omp,
         _ => ThemeKind::GrokNight,
     }
 }
@@ -109,7 +111,7 @@ pub fn current_kind() -> ThemeKind {
         // published while we were waiting on the mutex.
         if !LOADED.load(Ordering::Acquire) {
             if let Some(kind) = load_from_disk() {
-                CURRENT.store(kind as u8, Ordering::Relaxed);
+                CURRENT.store(Theme::clamp_to_terminal(kind) as u8, Ordering::Relaxed);
             }
             LOADED.store(true, Ordering::Release);
         }
@@ -214,7 +216,7 @@ fn resolve_from_config(config_theme: Option<ThemeKind>, osc11_fallback: bool) ->
             };
             return resolve_from_appearance(appearance);
         }
-        return kind;
+        return Theme::clamp_to_terminal(kind);
     }
 
     // Default: GrokNight
@@ -224,9 +226,10 @@ fn resolve_from_config(config_theme: Option<ThemeKind>, osc11_fallback: bool) ->
 /// Map an optional appearance detection result to a concrete `ThemeKind`.
 fn resolve_from_appearance(appearance: Option<system_appearance::SystemAppearance>) -> ThemeKind {
     let config = auto_theme_config();
-    appearance
+    let kind = appearance
         .map(|a| system_appearance::to_theme_kind(a, config.dark_theme, config.light_theme))
-        .unwrap_or(ThemeKind::GrokNight)
+        .unwrap_or(ThemeKind::GrokNight);
+    Theme::clamp_to_terminal(kind)
 }
 
 /// Resolve "auto" by detecting system appearance and mapping via config.
@@ -382,6 +385,80 @@ pub fn pin_theme() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cache_decodes_base16_default_dark_stable_id() {
+        assert_eq!(theme_kind_from_u8(18), ThemeKind::Base16DefaultDark);
+        assert_eq!(theme_kind_from_u8(u8::MAX), ThemeKind::GrokNight);
+    }
+
+    #[test]
+    fn cache_decodes_omp_stable_id() {
+        assert_eq!(theme_kind_from_u8(19), ThemeKind::Omp);
+        assert_eq!(theme_kind_from_u8(u8::MAX), ThemeKind::GrokNight);
+    }
+
+    #[test]
+    fn omp_config_name_resolves_as_initial_theme() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        reset_for_test();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::TrueColor,
+        ));
+
+        assert_eq!(
+            resolve_from_config(ThemeKind::from_name("omp"), false),
+            ThemeKind::Omp
+        );
+        assert_eq!(
+            resolve_from_config(ThemeKind::from_name("titanium"), false),
+            ThemeKind::Omp
+        );
+
+        crate::theme::color_support::force_level_for_test(None);
+        reset_for_test();
+    }
+
+    #[test]
+    fn persisted_truecolor_theme_clamps_when_terminal_lacks_truecolor() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::Ansi256,
+        ));
+        set_disk_kind_override_for_test(Some(ThemeKind::Base16DefaultDark));
+
+        assert_eq!(current_kind(), ThemeKind::GrokNight);
+        assert_eq!(
+            resolve_from_config(Some(ThemeKind::Base16DefaultDark), false),
+            ThemeKind::GrokNight
+        );
+
+        set_disk_kind_override_for_test(None);
+        crate::theme::color_support::force_level_for_test(None);
+        reset_for_test();
+    }
+
+    #[test]
+    fn auto_truecolor_theme_clamps_when_terminal_lacks_truecolor() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::Ansi256,
+        ));
+        *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(AutoThemeConfig {
+            dark_theme: Some(ThemeKind::Base16DefaultDark),
+            light_theme: Some(ThemeKind::GrokDay),
+        });
+
+        assert_eq!(
+            resolve_from_appearance(Some(system_appearance::SystemAppearance::Dark)),
+            ThemeKind::GrokNight
+        );
+
+        crate::theme::color_support::force_level_for_test(None);
+        reset_for_test();
+    }
+
     /// Helper: run a test body while holding the global test lock and
     /// with a clean initial state.
     fn with_test_env(f: impl FnOnce()) {
@@ -426,6 +503,9 @@ mod tests {
     fn explicit_set_after_published_lazy_load_owns_final_state() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::TrueColor,
+        ));
         set_disk_kind_override_for_test(Some(ThemeKind::TokyoNight));
         set_load_pause_for_test(true);
         let loader = std::thread::spawn(current_kind);
@@ -435,6 +515,7 @@ mod tests {
         set(ThemeKind::GrokNight);
         assert_eq!(current_kind(), ThemeKind::GrokNight);
         set_disk_kind_override_for_test(None);
+        crate::theme::color_support::force_level_for_test(None);
         reset_for_test();
     }
 
@@ -687,24 +768,32 @@ mod tests {
     #[test]
     fn resolve_auto_with_custom_dark_config() {
         with_test_env(|| {
+            crate::theme::color_support::force_level_for_test(Some(
+                crate::theme::color_support::ColorLevel::TrueColor,
+            ));
             set_test_auto_config(AutoThemeConfig {
                 dark_theme: Some(ThemeKind::TokyoNight),
                 light_theme: None,
             });
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Dark));
             assert_eq!(resolve_auto(), ThemeKind::TokyoNight);
+            crate::theme::color_support::force_level_for_test(None);
         });
     }
 
     #[test]
     fn resolve_auto_with_custom_light_config() {
         with_test_env(|| {
+            crate::theme::color_support::force_level_for_test(Some(
+                crate::theme::color_support::ColorLevel::TrueColor,
+            ));
             set_test_auto_config(AutoThemeConfig {
                 dark_theme: None,
                 light_theme: Some(ThemeKind::RosePineMoon),
             });
             system_appearance::set_mock(Some(system_appearance::SystemAppearance::Light));
             assert_eq!(resolve_auto(), ThemeKind::RosePineMoon);
+            crate::theme::color_support::force_level_for_test(None);
         });
     }
 

@@ -70,7 +70,7 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
-    // --- Hyper preset collection (nine dark, three light) ---------------
+    // --- Hyper preset collection (eleven dark, three light) -------------
     EnumChoice {
         canonical: "everforest",
         display: "Everforest",
@@ -130,6 +130,16 @@ const THEME_CHOICES: &[EnumChoice] = &[
         canonical: "paper",
         display: "Paper",
         description: "Warm sepia paper light canvas; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "base16-default-dark",
+        display: "Base16 Default Dark",
+        description: "Canonical Base16 dark palette; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "omp",
+        display: "OMP Titanium",
+        description: "High-contrast titanium surfaces with electric-blue accents; needs truecolor.",
     },
 ];
 
@@ -629,7 +639,7 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
-    // --- Hyper preset collection (nine dark, three light) ---------------
+    // --- Hyper preset collection (eleven dark, three light) -------------
     EnumChoice {
         canonical: "everforest",
         display: "Everforest",
@@ -689,6 +699,16 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "paper",
         display: "Paper",
         description: "Warm sepia paper light canvas; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "base16-default-dark",
+        display: "Base16 Default Dark",
+        description: "Canonical Base16 dark palette; needs truecolor.",
+    },
+    EnumChoice {
+        canonical: "omp",
+        display: "OMP Titanium",
+        description: "High-contrast titanium surfaces with electric-blue accents; needs truecolor.",
     },
 ];
 

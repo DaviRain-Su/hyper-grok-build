@@ -322,7 +322,8 @@ impl TrustStore {
     fn persist_doc(path: &Path, doc: &TrustDocument) -> io::Result<()> {
         use std::io::Write;
 
-        let parent = path.parent().ok_or_else(|| {
+        let write_path = xai_grok_config::fs_atomic::resolve_write_target(path)?;
+        let parent = write_path.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "trust store path has no parent",
@@ -341,7 +342,7 @@ impl TrustStore {
         // durability; `sync_all` is what guarantees the bytes hit disk.)
         tmp.as_file().sync_all()?;
         // Atomic publish.
-        tmp.persist(path).map_err(|e| e.error)?;
+        tmp.persist(&write_path).map_err(|e| e.error)?;
         Ok(())
     }
 }
@@ -580,6 +581,25 @@ fn migrate_legacy_hook_trust_in(legacy_file: &Path, store: &mut TrustStore) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_doc_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let target = shared.join(TRUST_FILE_NAME);
+        std::fs::write(&target, "").unwrap();
+        let link = tmp.path().join(TRUST_FILE_NAME);
+        symlink(format!("shared/{TRUST_FILE_NAME}"), &link).unwrap();
+
+        TrustStore::persist_doc(&link, &TrustDocument::default()).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::read_to_string(&target).unwrap().contains("version"));
+    }
 
     #[test]
     fn migrate_legacy_hook_trust_seeds_store_and_renames_file() {

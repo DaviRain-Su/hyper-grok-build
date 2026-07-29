@@ -2,8 +2,8 @@ name: Release
 
 # On tag push v*, build the single-file `hyper` binary for the five supported
 # targets, package per-target archives named
-# hyper-<version>-<target-triple>.{tar.gz|zip} (binary + LICENSE + NOTICE +
-# THIRD-PARTY-NOTICES), generate SHA256SUMS, and publish everything as a
+# hyper-<version>-<target-triple>.{tar.gz|zip} (binary + bundled runtime skills +
+# LICENSE + NOTICE + THIRD-PARTY-NOTICES), generate SHA256SUMS, and publish as a
 # GitHub Release. install.sh / install.ps1 resolve these exact asset names.
 
 on:
@@ -185,6 +185,9 @@ jobs:
           cp "$src" "$staging/hyper"
           chmod 0755 "$staging/hyper"
           cp LICENSE "$staging/"
+          cp -R bundled "$staging/"
+          find "$staging/bundled" -type d -name __pycache__ -prune -exec rm -rf {} +
+          find "$staging/bundled" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
           [ -f NOTICE ] && cp NOTICE "$staging/"
           for f in THIRD-PARTY-NOTICES THIRD-PARTY-NOTICES.md; do
             [ -f "$f" ] && cp "$f" "$staging/"
@@ -211,6 +214,11 @@ jobs:
           }
           Copy-Item $src (Join-Path $staging "hyper.exe")
           Copy-Item LICENSE $staging
+          Copy-Item bundled $staging -Recurse
+          Get-ChildItem (Join-Path $staging "bundled") -Directory -Recurse -Filter "__pycache__" |
+            Remove-Item -Recurse -Force
+          Get-ChildItem (Join-Path $staging "bundled") -File -Recurse -Include "*.pyc", "*.pyo" |
+            Remove-Item -Force
           if (Test-Path NOTICE) { Copy-Item NOTICE $staging }
           foreach ($f in @("THIRD-PARTY-NOTICES", "THIRD-PARTY-NOTICES.md")) {
             if (Test-Path $f) { Copy-Item $f $staging }

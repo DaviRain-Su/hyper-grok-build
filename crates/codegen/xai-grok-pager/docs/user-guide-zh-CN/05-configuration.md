@@ -328,7 +328,7 @@ disabled = ["wip-skill"]              # 保留列出但不激活的技能名
 
 ### 宿主兼容性
 
-控制 Cursor、Claude 与 Codex 的厂商兼容。每个单元默认 `true`。会话单元保持暂存且惰性，直到外部会话扫描器消费它们；每个工具需要其 `sessions` 单元与匹配的 `resume-claude`、`resume-codex` 或 `resume-cursor` 技能 —— 缺少技能则零外部会话文件系统 I/O。
+控制 Cursor、Claude、Codex 与 OMP 的厂商兼容。每个单元默认 `true`。会话发现按需执行：每个工具需要其 `sessions` 单元与匹配的 `resume-claude`、`resume-codex`、`resume-cursor` 或 `resume-omp` 技能；缺少技能时，Grok 不会读取该工具的会话文件系统。
 
 ```toml
 [compat.cursor]
@@ -337,7 +337,7 @@ rules = true      # 扫描 ~/.cursor/rules/ 与 <dir>/.cursor/rules/
 agents = true     # 扫描 ~/.cursor/ 中的具名指令文件
 mcps = true       # 扫描 ~/.cursor/mcp.json 与 <cwd>/.cursor/mcp.json
 hooks = true      # 扫描 ~/.cursor/hooks.json 与 <cwd>/.cursor/hooks.json
-sessions = true   # 暂存；尚无扫描器消费者
+sessions = true   # 列出近期 Cursor 会话以便恢复
 
 [compat.claude]
 skills = true     # 扫描 ~/.claude/skills/ 与 <cwd>/.claude/skills/
@@ -345,13 +345,16 @@ rules = true      # 扫描 ~/.claude/rules/ 与 <dir>/.claude/rules/
 agents = true     # 扫描 ~/.claude/ 与 <dir>/.claude/CLAUDE*.md
 mcps = true       # 从 ~/.claude.json 扫描 MCP 服务器
 hooks = true      # 从 ~/.claude/settings.json 扫描 hooks
-sessions = true   # 暂存；尚无扫描器消费者
+sessions = true   # 列出近期 Claude Code 会话以便恢复
 
 [compat.codex]
-sessions = true   # 暂存；尚无扫描器消费者
+sessions = true   # 列出近期 Codex 会话以便恢复
+
+[compat.omp]
+sessions = true   # 列出近期 OMP 会话以便恢复
 ```
 
-Codex 的 `skills`、`rules`、`agents`、`mcps` 与 `hooks` 单元为预留且当前惰性 —— 不会启用 `.codex` 发现。
+Codex 的 `skills`、`rules`、`agents`、`mcps` 与 `hooks` 单元为预留且当前惰性 —— 不会启用 `.codex` 发现。OMP 当前仅提供 `sessions` 兼容单元；扫描器遵循 OMP 的默认/profile/XDG 会话目录以及 `PI_CODING_AGENT_DIR` 覆盖。
 
 对 Claude 与 Cursor，`rules` 与 `agents` 相互独立：关闭具名指令文件不会禁用主目录或项目规则目录，关闭规则也不会禁用具名文件。Claude 的 `agents` 单元门控主目录级 `~/.claude/` 具名文件与项目 `<dir>/.claude/CLAUDE*.md`；通用顶层 `Claude.md`、`CLAUDE.md` 与 `CLAUDE.local.md` 仍被识别。项目规则路径从仓库根到当前目录的每一层都会扫描。
 

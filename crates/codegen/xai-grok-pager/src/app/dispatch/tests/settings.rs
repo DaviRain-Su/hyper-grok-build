@@ -2861,14 +2861,9 @@ fn dispatch_cycle_mode_refreshes_open_modal_snapshot() {
 /// `app.current_ui.theme`, fires a toast, and toggles AUTO_MODE
 /// off (kind is concrete).
 ///
-/// Note: we persist `grokday` (a non-truecolor theme) here
-/// because `Effect::PersistSetting`'s payload is `&'static str`
-/// from the registry's canonical table — the persisted CANONICAL
-/// is what we're asserting, NOT the live theme cache (which
-/// `clamp_to_terminal` might fold to GrokNight in non-truecolor
-/// test environments). Persist + canonical contract is the test
-/// invariant; the cache contract is exercised separately by the
-/// `*_applies_when_*` tests.
+/// The payload uses the registry's canonical `&'static str`; the live cache may
+/// clamp truecolor-only themes on limited terminals, but persistence must retain
+/// the user's exact Base16 choice for the next capable terminal.
 #[test]
 fn set_theme_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
@@ -2876,7 +2871,7 @@ fn set_theme_emits_persist_setting_with_correct_payload() {
         let mut app = test_app_with_agent();
         assert_eq!(app.current_ui.theme, None);
         crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
-        let effects = dispatch(Action::SetTheme("grokday".into()), &mut app);
+        let effects = dispatch(Action::SetTheme("base16-default-dark".into()), &mut app);
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting {
@@ -2885,12 +2880,15 @@ fn set_theme_emits_persist_setting_with_correct_payload() {
                 rollback_value,
             } => {
                 assert_eq!(*key, "theme");
-                assert_eq!(*value, SettingValue::Enum("grokday"));
+                assert_eq!(*value, SettingValue::Enum("base16-default-dark"));
                 assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
-        assert_eq!(app.current_ui.theme.as_deref(), Some("grokday"));
+        assert_eq!(
+            app.current_ui.theme.as_deref(),
+            Some("base16-default-dark")
+        );
         assert!(
             !crate::theme::cache::is_auto_mode(),
             "concrete theme commit must disable AUTO_MODE",
