@@ -381,8 +381,9 @@ world extension {
 ### Phase 3 — 开发者体验
 
 - [x] Rust guest 模板：`examples/rust-guest-template/`（`extension init` CLI 仍可后置）  
-- [x] 作者 SDK：`xai-grok-extension-sdk` + **声明宏**（`hyper_extension!` / `export_*!` / `extension_tools!`）  
-- [x] **不做**过程宏 `#[extension]` / `#[tool]`（维护成本高、IDE 体验差）  
+- [x] 作者 SDK：`xai-grok-extension-sdk` + **过程宏**（`#[hyper_plugin]` / `#[hyper_hook]` / `#[hyper_tool]`）  
+- [x] 兼容层：旧 `hyper_extension!` / `export_*!` / `extension_tools!` 声明宏仍可用  
+- [x] 过程宏目标：handler 保持普通命名函数，改善 rust-analyzer 跳转与错误 span  
 
 - [x] `grok plugin validate` 检查 wasm 魔数、WIT、capabilities  
 - [x] 文档：user-guide `31-wasm-extensions.md` + plugins 交叉引用  

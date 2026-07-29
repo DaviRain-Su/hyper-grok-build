@@ -1,7 +1,8 @@
 //! Hyper WASM guest — written with **xai-grok-extension-sdk** (recommended path).
 //!
-//! Uses **declarative macros only** (`hyper_extension!` / `macro_rules!`) —
-//! no proc-macro attributes.
+//! Lifecycle hooks and tools are ordinary named Rust functions. The
+//! `#[hyper_plugin]` procedural macro generates the stable `hyper_ext_*` ABI
+//! exports around them.
 //!
 //! ```bash
 //! rustup target add wasm32-unknown-unknown
@@ -14,29 +15,34 @@
 
 use xai_grok_extension_sdk::prelude::*;
 
-xai_grok_extension_sdk::hyper_extension! {
+#[hyper_plugin]
+mod plugin {
+    use super::*;
+
     // capability: pre_tool_gate
-    pre_tool_use: || {
+    #[hyper_hook(pre_tool_use)]
+    fn guard_destructive_commands() -> i32 {
         if input_contains("rm -rf") {
             deny("rust-guest-template: blocked rm -rf in tool input")
         } else {
             allow()
         }
-    },
+    }
+
     // capability: before_agent_inject
-    before_agent_start: || {
+    #[hyper_hook(before_agent_start)]
+    fn add_agent_guidance() -> i32 {
         inject_context("Rust SDK guest: prefer dedicated tools over recursive shell search.");
         allow()
-    },
+    }
+
     // capability: register_tool
-    tools: {
-        echo {
-            description: "Echo tool_input JSON back (SDK register_tool demo)",
-            schema: r#"{"type":"object","properties":{"msg":{"type":"string"}}}"#,
-            invoke: |args| {
-                tool_result(args);
-                allow()
-            }
-        }
+    #[hyper_tool(
+        description = "Echo tool_input JSON back (SDK register_tool demo)",
+        schema = r#"{"type":"object","properties":{"msg":{"type":"string"}}}"#
+    )]
+    fn echo(args: &str) -> i32 {
+        tool_result(args);
+        allow()
     }
 }

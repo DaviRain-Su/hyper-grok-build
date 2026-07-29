@@ -25,7 +25,12 @@ build_guest "$EX/rust-guest-template" hyper_ext_rust_guest_template
 build_guest "$EX/sdk-path-guard" sdk_path_guard
 build_guest "$EX/sdk-stop-once" sdk_stop_once
 
-echo "==> cargo test extension-runtime + extension-api + extension-sdk"
-cargo test -p xai-grok-extension-runtime -p xai-grok-extension-api -p xai-grok-extension-sdk --lib
+echo "==> cargo test extension-runtime + extension-api + extension-sdk + extension-macros"
+cargo test \
+  -p xai-grok-extension-runtime \
+  -p xai-grok-extension-api \
+  -p xai-grok-extension-sdk \
+  -p xai-grok-extension-macros \
+  --lib
 
 echo "==> OK (extensions smoke)"

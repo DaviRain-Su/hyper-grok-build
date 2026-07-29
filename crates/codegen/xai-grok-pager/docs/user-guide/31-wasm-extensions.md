@@ -141,22 +141,34 @@ touch `ptr`/`len` host imports by hand.
 ```bash
 grok plugin init ./my-ext --name my-ext
 cd my-ext
-# edit src/lib.rs — declarative macros only (no proc-macro):
+# edit src/lib.rs — recommended: ordinary functions + proc-macro attributes:
 #   use xai_grok_extension_sdk::prelude::*;
-#   xai_grok_extension_sdk::hyper_extension! {
-#       pre_tool_use: || { if input_contains("rm -rf") { deny("no") } else { allow() } },
-#       tools: { echo { description: "echo", invoke: |a| { tool_result(a); allow() } } }
+#   #[hyper_plugin]
+#   mod plugin {
+#       use super::*;
+#       #[hyper_hook(pre_tool_use)]
+#       fn guard() -> i32 {
+#           if input_contains("rm -rf") { deny("no") } else { allow() }
+#       }
+#       #[hyper_tool(description = "echo")]
+#       fn echo(args: &str) -> i32 { tool_result(args); allow() }
 #   }
 rustup target add wasm32-unknown-unknown
 grok plugin build . --validate
 ```
 
-Author DX is **`macro_rules!` only** (`hyper_extension!`, `export_pre_tool_use!`,
-`extension_tools!`, …). We intentionally **do not** ship a proc-macro `#[extension]`.
+Author DX prefers **`#[hyper_plugin]` / `#[hyper_hook]` / `#[hyper_tool]`** so
+handlers stay ordinary named functions (better IDE jump-to-definition and spans).
+The older `hyper_extension!` declarative macros remain for source compatibility.
+
+`plugin build` only rebuilds the guest `extension.wasm`. You do **not** rebuild
+the Hyper binary. In a live session, `/plugins reload` reloads guests and
+re-syncs `wasm_*` tools.
 
 Template + SDK sources:
 
 - SDK: `crates/codegen/xai-grok-extension-sdk/`
+- Proc macros: `crates/codegen/xai-grok-extension-macros/`
 - Template: [`examples/rust-guest-template/`](../../../xai-grok-extension-runtime/examples/rust-guest-template/)
 
 **WAT** (`examples/safe-shell-plugin/`) is only for host ABI fixtures—not the

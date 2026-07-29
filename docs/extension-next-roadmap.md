@@ -1,6 +1,6 @@
 # WASM Extensions — 路线图（重排版 2026-07-28）
 
-| 原则 | **Rust-first + 厚 SDK + 声明宏**；bootstrap ABI 正式；难项不插队 |
+| 原则 | **Rust-first + 厚 SDK + 过程宏（属性）**；bootstrap ABI 正式；难项不插队 |
 |------|------------------------------------------------------------------|
 | 目标 | 把 **bootstrap MVP 推到可生产试点**；P2b/CM 等仍有触发条件再开 |
 
@@ -18,7 +18,7 @@
 ### 设计 Phase 0–3.5 + Phase 4 bootstrap MVP
 - Host 生命周期、gate/inject/stop、register_tool、before_model inject  
 - 会话 Store 保留、epoch/fuel、fail-closed、session-scoped tools  
-- SDK + 声明宏、`plugin init/build/validate`、CI `extensions.yml`  
+- SDK + 过程宏（`#[hyper_plugin]`）+ 声明宏兼容层、`plugin init/build/validate`、CI `extensions.yml`  
 
 ### 执行 P0–P2a（生产向易项）— **done**
 - Session end 注销 `wasm_*`  
@@ -79,7 +79,7 @@
 
 ## 4. 第三方一句话
 
-> `grok plugin init` → `hyper_extension!` → `grok plugin build --validate` → 启用。  
+> `grok plugin init` → `#[hyper_plugin]` 普通函数 → `grok plugin build --validate` → 启用 / `/plugins reload`。  
 > 看日志：`RUST_LOG=wasm_extension=info`。
 
 ---

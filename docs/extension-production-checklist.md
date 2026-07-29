@@ -8,7 +8,7 @@ Push the **bootstrap MVP** toward production without waiting on hard Phase 4
 
 ## Author path (must work)
 
-- [x] `grok plugin init` → SDK template + `hyper_extension!`
+- [x] `grok plugin init` → SDK template + `#[hyper_plugin]`
 - [x] `grok plugin build . --validate` → `extension.wasm` + ABI load
 - [x] Path-filtered CI: `.github/workflows/extensions.yml`
 - [x] user-guide `31-wasm-extensions.md`

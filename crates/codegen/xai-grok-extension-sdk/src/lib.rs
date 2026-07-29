@@ -5,41 +5,47 @@
 //!
 //! ## Authoring style
 //!
-//! Prefer **declarative macros** (`macro_rules!`) — there is **no** proc-macro
-//! crate. Closures stay ordinary Rust so rust-analyzer and tests work.
+//! Prefer the [`hyper_plugin`] procedural macro. Hook and tool implementations
+//! remain ordinary named Rust functions, so rust-analyzer can navigate to them
+//! and compiler diagnostics point at the author code instead of a token DSL.
 //!
 //! ## Quick start
 //!
 //! ```ignore
 //! use xai_grok_extension_sdk::prelude::*;
 //!
-//! hyper_extension! {
-//!     pre_tool_use: || {
+//! #[hyper_plugin]
+//! mod plugin {
+//!     use super::*;
+//!
+//!     #[hyper_hook(pre_tool_use)]
+//!     fn guard_destructive_commands() -> i32 {
 //!         if input_contains("rm -rf") {
 //!             deny("blocked rm -rf")
 //!         } else {
 //!             allow()
 //!         }
-//!     },
-//!     before_agent_start: || {
+//!     }
+//!
+//!     #[hyper_hook(before_agent_start)]
+//!     fn add_agent_guidance() -> i32 {
 //!         inject_context("prefer dedicated tools over recursive shell search");
 //!         allow()
-//!     },
-//!     tools: {
-//!         echo {
-//!             description: "Echo args JSON",
-//!             schema: r#"{"type":"object","properties":{"msg":{"type":"string"}}}"#,
-//!             invoke: |args| {
-//!                 tool_result(args);
-//!                 allow()
-//!             }
-//!         }
+//!     }
+//!
+//!     #[hyper_tool(
+//!         description = "Echo args JSON",
+//!         schema = r#"{"type":"object","properties":{"msg":{"type":"string"}}}"#
+//!     )]
+//!     fn echo(args: &str) -> i32 {
+//!         tool_result(args);
+//!         allow()
 //!     }
 //! }
 //! ```
 //!
-//! Or compose smaller macros: [`extension_boilerplate!`], [`export_pre_tool_use!`],
-//! [`extension_tools!`], …
+//! The older `hyper_extension!` and component `macro_rules!` exports remain
+//! available for source compatibility, but new plugins should use attributes.
 //!
 //! Build with `cargo build --release --target wasm32-unknown-unknown`.
 //! See `xai-grok-extension-runtime/examples/rust-guest-template`.
@@ -50,6 +56,8 @@ pub mod host;
 #[macro_use]
 mod macros;
 pub mod prelude;
+
+pub use xai_grok_extension_macros::{hyper_hook, hyper_plugin, hyper_tool};
 
 /// Must match host CORE_ABI_VERSION.
 pub const CORE_ABI_VERSION: i32 = 1;

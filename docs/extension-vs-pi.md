@@ -38,7 +38,7 @@
 | 主题 / prompt templates | ● | ◐ | **半** | 产品内置 themes/skills，非 WASM |
 | Skills | ● | ● | **齐** | 声明式 SKILL.md |
 | 信任 / 沙箱 | 弱 | ● | **更强** | trusted + capability + fail-closed 可选 |
-| 官方作者 SDK | TS 原生 | ● Rust SDK | **齐（声明宏）** | `hyper_extension!` / 无过程宏 |
+| 官方作者 SDK | TS 原生 | ● Rust SDK | **齐（过程宏）** | `#[hyper_plugin]` + 普通函数；旧 `hyper_extension!` 兼容 |
 | 热重载 | ● `/reload` | ◐ | **半** | plugin reload 重建 runtime |
 | 示例生态 | 50+ | 3+ SDK 例 | **弱** | 持续加 |
 
@@ -77,7 +77,7 @@
 2. register_tool 命名/权限是否与 MCP 冲突  
 3. SDK 抽象是否泄漏过多 ABI  
 4. 与 Pi 的差异是否应在 README 写清「非功能对等」  
-5. 下一步：更多示例 / CI / Component Model（**不做**过程宏；用声明宏）  
+5. 下一步：更多示例 / CI / Component Model；作者路径已切过程宏  
 
 ---
 

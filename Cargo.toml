@@ -27,6 +27,7 @@ members = [
     "crates/codegen/xai-grok-env",
     "crates/codegen/xai-grok-hooks",
     "crates/codegen/xai-grok-extension-api",
+    "crates/codegen/xai-grok-extension-macros",
     "crates/codegen/xai-grok-extension-runtime",
     "crates/codegen/xai-grok-extension-sdk",
     "crates/codegen/xai-grok-http",
@@ -308,6 +309,7 @@ xai-grok-config = { path = "crates/codegen/xai-grok-config" }
 xai-grok-config-types = { path = "crates/codegen/xai-grok-config-types" }
 xai-grok-env = { path = "crates/codegen/xai-grok-env" }
 xai-grok-extension-api = { path = "crates/codegen/xai-grok-extension-api" }
+xai-grok-extension-macros = { path = "crates/codegen/xai-grok-extension-macros" }
 xai-grok-extension-runtime = { path = "crates/codegen/xai-grok-extension-runtime" }
 xai-grok-extension-sdk = { path = "crates/codegen/xai-grok-extension-sdk" }
 xai-grok-http = { path = "crates/codegen/xai-grok-http" }

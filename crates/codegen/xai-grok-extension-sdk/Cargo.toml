@@ -7,7 +7,9 @@ description = "Author SDK for Hyper WASM extensions (Rust-first): hide bootstrap
 publish = false
 
 [dependencies]
-# Intentionally empty: must stay usable as a wasm32 guest dependency.
+# Compiled for the host toolchain only; generated guests keep the small
+# wasm32 runtime surface in this crate.
+xai-grok-extension-macros.workspace = true
 
 [lints]
 workspace = true

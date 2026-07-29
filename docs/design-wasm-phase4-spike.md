@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |----|------|
 | 状态 | **bootstrap Phase 4 MVP 关闭**；Component Model / rewrite / multi-lang / UI 仍 defer |
-| 前提 | Phase 0–3.5 + SDK 声明宏 + `plugin build` / CI |
+| 前提 | Phase 0–3.5 + SDK 过程宏（`#[hyper_plugin]`）+ `plugin build` / CI |
 | 日期 | 2026-07-28 |
 
 ## 1. Component Model + WIT — **defer**

@@ -9,6 +9,7 @@ on:
     branches: [main, master]
     paths:
       - "crates/codegen/xai-grok-extension-api/**"
+      - "crates/codegen/xai-grok-extension-macros/**"
       - "crates/codegen/xai-grok-extension-runtime/**"
       - "crates/codegen/xai-grok-extension-sdk/**"
       - "scripts/check-extensions.sh"
@@ -16,6 +17,7 @@ on:
   pull_request:
     paths:
       - "crates/codegen/xai-grok-extension-api/**"
+      - "crates/codegen/xai-grok-extension-macros/**"
       - "crates/codegen/xai-grok-extension-runtime/**"
       - "crates/codegen/xai-grok-extension-sdk/**"
       - "scripts/check-extensions.sh"

@@ -15948,6 +15948,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-extension-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "xai-grok-extension-runtime"
 version = "0.1.0"
 dependencies = [
@@ -15964,6 +15974,9 @@ dependencies = [
 [[package]]
 name = "xai-grok-extension-sdk"
 version = "0.1.0"
+dependencies = [
+ "xai-grok-extension-macros",
+]
 
 [[package]]
 name = "xai-grok-hooks"

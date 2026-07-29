@@ -1,7 +1,8 @@
-//! Declarative macros for Hyper WASM guests.
+//! Legacy declarative macros for Hyper WASM guests.
 //!
-//! **Policy:** author DX is `macro_rules!` only — no proc-macro crate.
-//! Handlers are plain closures/`fn` so rust-analyzer still works.
+//! These exports remain source-compatible for existing guests. New plugins
+//! should use `#[hyper_plugin]` with ordinary annotated functions so IDE
+//! navigation and compiler spans stay attached to author code.
 
 /// Minimal required exports: `abi_version`, `session_start`, `session_end`.
 ///
@@ -184,10 +185,10 @@ macro_rules! extension_tools {
     };
 }
 
-/// One-shot guest skeleton: abi + session + optional handlers + optional tools.
+/// Legacy one-shot guest skeleton: abi + session + optional handlers + tools.
 ///
-/// Prefer this over hand-written `#[no_mangle]` exports. Uses **only**
-/// declarative macros (no proc-macro).
+/// Prefer this over hand-written `#[no_mangle]` exports when maintaining an
+/// existing macro-based guest. New guests should use `#[hyper_plugin]`.
 ///
 /// ```ignore
 /// hyper_extension! {

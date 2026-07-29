@@ -1,5 +1,5 @@
 //! SDK example: block obviously destructive commands in tool JSON.
-//! Declarative macros only (no proc-macro).
+//! The hook is an ordinary function wrapped by the `#[hyper_plugin]` proc macro.
 use xai_grok_extension_sdk::prelude::*;
 
 const BLOCK: &[&str] = &[
@@ -13,8 +13,12 @@ const BLOCK: &[&str] = &[
     "chmod -R 777 /",
 ];
 
-xai_grok_extension_sdk::hyper_extension! {
-    pre_tool_use: || {
+#[hyper_plugin]
+mod plugin {
+    use super::*;
+
+    #[hyper_hook(pre_tool_use)]
+    fn block_destructive_paths() -> i32 {
         for pat in BLOCK {
             if input_contains(pat) {
                 log_warn(&format!("sdk-path-guard: blocked pattern `{pat}`"));
