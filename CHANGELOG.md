@@ -4,6 +4,24 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r5] — 2026-07-29
+
+### Fixed
+- **Linux glibc floor** — Release Linux `linux-gnu` binaries are linked with `cargo-zigbuild` against **glibc 2.17** (Ubuntu 16.04 / RHEL 7 class) instead of the ubuntu-24.04 runner libc. Host-built artifacts required GLIBC_2.39 (`pidfd_*`, `__isoc23_*`) and failed on older distros. CI refuses to publish if the binary's max `GLIBC_*` symbol exceeds the floor. Asset names stay `*-unknown-linux-gnu` (no musl; musl remains blocked by sqlite-vec/jemalloc CFLAGS).
+- **Installer bundled skills extract** — `install.sh` only lists file members for `tar -T` (skip directory entries with trailing `/`). GNU tar 1.35 otherwise failed to extract `bundled/skills` from release archives.
+
+### Notes
+- This is community revision `0.2.114-r5`; it remains a normal GitHub Release so installers and `hyper update` treat it as latest.
+- Existing asset names (`*-unknown-linux-gnu`) are unchanged; only the dynamic symbol floor improves.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r5
+```
+
 ## [0.2.114-r4] — 2026-07-29
 
 ### Added

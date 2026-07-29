@@ -22,6 +22,14 @@ env:
   # audiopus_sys builds bundled Opus from an older CMake project. New CMake
   # releases reject that project's historical policy floor unless this is set.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # Linux gnu artifacts are linked against this glibc floor via cargo-zigbuild
+  # (not the runner's host libc). 2.17 ≈ RHEL 7 / Ubuntu 16.04 / manylinux2014,
+  # so the same x86_64-unknown-linux-gnu tarball runs on old and new distros.
+  # GitHub-hosted ubuntu-16.04 runners are long gone; building on ubuntu-24.04
+  # *without* zigbuild would require GLIBC_2.39 (pidfd_*, __isoc23_*).
+  LINUX_GLIBC_FLOOR: "2.17"
+  # Zig is only used as the C compiler / linker for Linux release builds.
+  ZIG_VERSION: "0.14.1"
 
 jobs:
   build:
@@ -37,8 +45,10 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-14
           # glibc dynamic binaries — proven release path (jemalloc + sqlite-vec).
-          # musl static builds are blocked until sqlite-vec is vendored without
-          # global CFLAGS (target-wide -Du_int* poisons tikv-jemalloc-sys).
+          # Host stays on ubuntu-24.04 for a modern toolchain; cargo-zigbuild
+          # retargets the link to LINUX_GLIBC_FLOOR so we do not inherit 2.39.
+          # musl static builds remain blocked until sqlite-vec is vendored
+          # without global CFLAGS (target-wide -Du_int* poisons jemalloc-sys).
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
@@ -78,6 +88,19 @@ jobs:
 
       - name: Add build target
         run: rustup target add ${{ matrix.target }}
+
+      # Linux only: pin the dynamic symbol floor independent of the runner libc.
+      - name: Install Zig (Linux glibc floor)
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild (Linux)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install dotslash (protoc launcher)
         run: cargo install dotslash --locked
@@ -127,12 +150,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Include the glibc floor so a floor bump does not reuse stale native
+          # objects linked against a different libc abilist.
+          key: ${{ matrix.target }}-glibc-${{ env.LINUX_GLIBC_FLOOR }}
 
       - name: Build hyper (release-dist)
         env:
           GROK_VERSION: ${{ env.GROK_VERSION }}
-        run: cargo build --profile release-dist -p xai-grok-pager-bin --features community-build --locked --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          common=(--profile release-dist -p xai-grok-pager-bin --features community-build --locked)
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            # cargo-zigbuild accepts `<triple>.<glibc>`; artifacts still land under
+            # target/<triple>/release-dist/ (suffix is only a link-floor selector).
+            cargo zigbuild "${common[@]}" \
+              --target "${{ matrix.target }}.${LINUX_GLIBC_FLOOR}"
+          else
+            cargo build "${common[@]}" --target "${{ matrix.target }}"
+          fi
 
       - name: Verify stripped release binary
         shell: bash
@@ -160,6 +196,28 @@ jobs:
             readelf -SW "$src" > "$sections"
             if grep -Eq '\.(z)?debug_|\.gnu_debuglink' "$sections"; then
               echo "Linux release binary still contains debug sections" >&2
+              exit 1
+            fi
+
+            # Guard against accidental host-glibc linkage (e.g. falling back to
+            # plain `cargo build` on ubuntu-24.04 would reintroduce 2.39).
+            max_glibc="$(
+              objdump -T "$src" 2>/dev/null \
+                | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+                | sed 's/^GLIBC_//' \
+                | sort -V \
+                | tail -1
+            )"
+            if [ -z "$max_glibc" ]; then
+              echo "could not determine GLIBC symbol versions from $src" >&2
+              exit 1
+            fi
+            echo "Linux max GLIBC symbol version: $max_glibc (floor target ${LINUX_GLIBC_FLOOR})"
+            # Fail if max_glibc > LINUX_GLIBC_FLOOR (sort -V: a b sorted => a <= b).
+            if ! printf '%s\n' "$max_glibc" "${LINUX_GLIBC_FLOOR}" | sort -V -C; then
+              echo "release binary requires GLIBC_${max_glibc} > ${LINUX_GLIBC_FLOOR}" >&2
+              echo "zigbuild glibc floor was not applied; refuse to publish" >&2
+              objdump -T "$src" 2>/dev/null | grep 'GLIBC_' | sort -u | tail -30 >&2 || true
               exit 1
             fi
           fi
