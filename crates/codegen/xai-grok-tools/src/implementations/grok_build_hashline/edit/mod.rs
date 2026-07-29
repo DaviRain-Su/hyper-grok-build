@@ -22,7 +22,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::resources::resolve_model_path;
 use crate::util::format_not_found_error;
 
-const DESCRIPTION: &str = r#"Edit a file using anchors from ${{ tools.by_kind.read }} or ${{ tools.by_kind.search }}.
+const DESCRIPTION: &str = r#"Edit a file using anchors${%- if tools.by_kind.read and tools.by_kind.search %} from ${{ tools.by_kind.read }} or ${{ tools.by_kind.search }}${%- elif tools.by_kind.read %} from ${{ tools.by_kind.read }}${%- elif tools.by_kind.search %} from ${{ tools.by_kind.search }}${%- endif %}.
 
 Operations (use the "op" field):
 
@@ -65,7 +65,7 @@ Follow-up edits:
   (e.g. "{example_anchor}"). Always include the line number. Do NOT include → or
   the line content after it.
 - Never fabricate or modify anchors — only use exact anchors as returned by
-  previous read, grep, or edit calls."#;
+  previous tool outputs."#;
 
 /// `hashline_edit` tool — edits files using anchor references.
 #[derive(Debug, Default)]
@@ -264,7 +264,7 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "hashline_edit",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

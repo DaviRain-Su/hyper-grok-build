@@ -755,6 +755,9 @@ impl WorkspaceRpcHandler {
             <GitCommitReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<GitCommitReq>(params, &self.workspace, None).await
             }
+            <GitSyncBaseReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<GitSyncBaseReq>(params, &self.workspace, None).await
+            }
             <GitCheckoutReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<GitCheckoutReq>(params, &self.workspace, None).await
             }
@@ -3186,6 +3189,7 @@ mod tests {
             <GitUnstageReq as WorkspaceRpc>::METHOD,
             <GitDiscardReq as WorkspaceRpc>::METHOD,
             <GitCommitReq as WorkspaceRpc>::METHOD,
+            <GitSyncBaseReq as WorkspaceRpc>::METHOD,
             <GitCheckoutReq as WorkspaceRpc>::METHOD,
             <GitStashReq as WorkspaceRpc>::METHOD,
             <GitInfoReq as WorkspaceRpc>::METHOD,

@@ -25,7 +25,7 @@ impl crate::types::tool_metadata::ToolMetadata for GetTerminalCommandOutputTool 
         r#"Get output and status from a background terminal command${%- if tools.by_kind.monitor %} or monitor${%- endif %}.
 
 Usage notes:
-- Pass ${{ params.background_task_action.task_ids }} with one or more ids from ${{ params.execute.is_background }}=true commands${%- if tools.by_kind.monitor %} (a monitor's ${{ params.kill_task_action.task_id }} is returned by ${{ tools.by_kind.monitor }})${%- endif %}; for a single task use a one-element array. Multiple ids with a positive ${{ params.background_task_action.timeout_ms }} wait until all complete
+- Pass ${{ params.background_task_action.task_ids }} with one or more ids from ${%- if params is defined and params.execute is defined and params.execute.is_background %} ${{ params.execute.is_background }}=true commands${%- else %} background commands${%- endif %}${%- if tools.by_kind.monitor %} (a monitor's ${{ params.kill_task_action.task_id }} is returned by ${{ tools.by_kind.monitor }})${%- endif %}; for a single task use a one-element array. Multiple ids with a positive ${{ params.background_task_action.timeout_ms }} wait until all complete
 - Omit ${{ params.background_task_action.timeout_ms }} or pass 0 for a non-blocking status snapshot; set a positive ${{ params.background_task_action.timeout_ms }} to wait up to that many milliseconds, capped at ~10 min
 - Returns current output, status, and exit code if completed${%- if tools.by_kind.read %}
 - If output is large, use ${{ tools.by_kind.read }} on the output_file path${%- endif %}"#
@@ -54,7 +54,7 @@ impl xai_tool_runtime::Tool for GetTerminalCommandOutputTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "get_terminal_command_output",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

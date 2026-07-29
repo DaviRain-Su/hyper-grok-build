@@ -938,7 +938,7 @@ async fn e2e_restart_monitor_preserves_replacement_client() {
 
             let lsp_manager = Arc::new(tokio::sync::Mutex::new(mgr));
             let monitor = tokio::task::spawn_local(restart_monitor(
-                lsp_manager.clone(),
+                Arc::downgrade(&lsp_manager),
                 "mock-ts".to_string(),
             ));
 
@@ -946,18 +946,15 @@ async fn e2e_restart_monitor_preserves_replacement_client() {
 
             {
                 let mut mgr = lsp_manager.lock().await;
-                let stale = mgr.clients.remove("mock-ts").unwrap();
-                mgr.clients.insert(
-                    "mock-ts".to_string(),
-                    LspClient {
-                        lifecycle_id: original_lifecycle_id,
-                        open_documents: tracked_docs
-                            .into_iter()
-                            .map(|(uri, lang)| (uri, (0, lang)))
-                            .collect(),
-                        ..stale
-                    },
-                );
+                // Mutate in place: LspClient now implements Drop, so moving
+                // fields out with `..stale` is rejected.
+                let mut stale = mgr.clients.remove("mock-ts").unwrap();
+                stale.lifecycle_id = original_lifecycle_id;
+                stale.open_documents = tracked_docs
+                    .into_iter()
+                    .map(|(uri, lang)| (uri, (0, lang)))
+                    .collect();
+                mgr.clients.insert("mock-ts".to_string(), stale);
                 let healthy_lifecycle_id = mgr.alloc_lifecycle_id();
                 let healthy = LspClient::start(
                     "mock-ts".to_string(),
@@ -985,6 +982,36 @@ async fn e2e_restart_monitor_preserves_replacement_client() {
             monitor.abort();
             let _ = monitor.await;
             lsp_manager.lock().await.shutdown().await;
+        })
+        .await;
+}
+
+/// The monitor holds only a `Weak` to the manager, so once the sole strong
+/// `Arc` drops at session teardown the next poll's upgrade fails and the task
+/// must exit. A `Weak`->`Arc` regression would keep the manager (and its child
+/// processes) alive and the join would time out.
+#[tokio::test(flavor = "current_thread")]
+async fn restart_monitor_exits_when_manager_arc_dropped() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (_dir, script_path) = write_mock_server();
+            let workspace = tempfile::tempdir().unwrap();
+            let mgr = single_server_manager(&script_path, &workspace).await;
+
+            // A live client keeps the monitor polling (rather than exiting on a
+            // missing client), so the only way out is a failed `Weak` upgrade.
+            let lsp_manager = Arc::new(tokio::sync::Mutex::new(mgr));
+            let monitor = tokio::task::spawn_local(restart_monitor(
+                Arc::downgrade(&lsp_manager),
+                "mock-ts".to_string(),
+            ));
+
+            drop(lsp_manager);
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), monitor)
+                .await
+                .expect("monitor must exit once the manager Arc is dropped")
+                .expect("monitor task should not panic");
         })
         .await;
 }
@@ -1152,7 +1179,7 @@ async fn e2e_restart_monitor_emits_failed_on_restart_init_error() {
 
             let lsp_manager = Arc::new(tokio::sync::Mutex::new(mgr));
             let monitor = tokio::task::spawn_local(restart_monitor(
-                lsp_manager.clone(),
+                Arc::downgrade(&lsp_manager),
                 "failing".to_string(),
             ));
 
@@ -1310,4 +1337,111 @@ async fn e2e_restart_replay_requeues_pending_diagnostics() {
     assert_eq!(summary.file_count, 1);
 
     mgr.lock().await.shutdown().await;
+}
+
+/// Polls `try_wait` until the child is reaped or the budget expires; a live
+/// child (failed kill) times out and returns false.
+#[cfg(unix)]
+async fn std_child_died(child: &mut std::process::Child) -> bool {
+    for _ in 0..50 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// A language-server child enrolled via a `ProcessScope` is reaped by
+/// `kill_all`, proving session close reclaims LSP servers even while the owning
+/// client is still alive (the wedged-actor case).
+#[cfg(unix)]
+#[tokio::test]
+async fn scope_reaps_enrolled_language_server_child() {
+    let (_script_dir, _workspace, mut client) = start_mock_client().await;
+
+    let scope = crate::util::ProcessScope::new();
+    assert!(
+        client.enroll(Some(&scope)),
+        "enroll on an open scope must succeed"
+    );
+    assert_eq!(
+        scope.live_count(),
+        1,
+        "enroll must register the server group"
+    );
+
+    // Take the child handle to observe death; the client keeps the owning
+    // Arc<ProcessGroup>, so the scope's weak stays live across kill_all.
+    let mut child = client.child_process.take().expect("stdio child");
+    scope.kill_all();
+
+    // Prove kill_all killed the child WHILE the client is still alive (the
+    // wedged-actor case) — dropping the client first would let its own Drop
+    // killpg mask a broken kill_all. `waitid(WNOWAIT)` observes the exit
+    // without reaping (signal 0 can't: it succeeds on a zombie), so the
+    // SIGKILLed leader stays unreaped and its pgid reserved. nix only
+    // exposes waitid on Linux; macOS falls back to the weaker
+    // drop-then-reap order below (CI runs the strong branch).
+    #[cfg(target_os = "linux")]
+    {
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        let mut died = false;
+        for _ in 0..50 {
+            use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
+            match waitid(
+                Id::Pid(pid),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG,
+            ) {
+                Ok(WaitStatus::StillAlive) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Ok(_) => {
+                    died = true;
+                    break;
+                }
+                Err(e) => panic!("waitid on the server child failed: {e}"),
+            }
+        }
+        assert!(
+            died,
+            "scope.kill_all must kill the enrolled server child while the client is alive"
+        );
+    }
+
+    // Linux: the leader is dead but unreaped, so its pgid is still reserved —
+    // the client Drop's killpg targets the zombie's group, not a reused pgid.
+    // macOS: dropping before the reap keeps the same pgid-reservation safety,
+    // at the cost of not isolating kill_all from the Drop killpg.
+    drop(client);
+
+    assert!(
+        std_child_died(&mut child).await,
+        "scope.kill_all must reap the enrolled server child"
+    );
+}
+
+/// Dropping an `LspClient` without `shutdown` still reaps its server child, so a
+/// session never orphans a language server when graceful teardown is skipped.
+/// Probes the pid with signal 0 (ESRCH once reaped) since the client owns the
+/// child handle and waits on it during `Drop`.
+#[cfg(unix)]
+#[tokio::test]
+async fn drop_reaps_server_child_without_shutdown() {
+    let (_script_dir, _workspace, client) = start_mock_client().await;
+
+    let pid = client.child_process.as_ref().expect("stdio child").id() as i32;
+    let alive = |pid: i32| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    assert!(alive(pid), "server child should be running before drop");
+
+    drop(client);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        !alive(pid),
+        "Drop must reap the server child even without shutdown"
+    );
 }

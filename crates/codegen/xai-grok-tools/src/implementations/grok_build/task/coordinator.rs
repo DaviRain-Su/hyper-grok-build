@@ -163,7 +163,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         match command {
             SubagentEvent::Spawn(command) => {
                 let mut request = *command.request;
-                if let Some((root_parent, loop_task_id)) = self
+                if let Some((root_parent, loop_task_id, spawner_cancelled)) = self
                     .active
                     .values()
                     .find(|child| child.child_session_id == request.parent_session_id)
@@ -171,9 +171,24 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         (
                             child.request.parent_session_id.clone(),
                             child.request.runtime_overrides.loop_task_id.clone(),
+                            child.cancellation.is_cancelled(),
                         )
                     })
                 {
+                    if spawner_cancelled {
+                        // The parent subagent is being torn down, so its late
+                        // child would be orphaned against the closed scope.
+                        let id = request.id.clone();
+                        let _ = command.result_tx.send(SubagentResult {
+                            success: false,
+                            cancelled: true,
+                            error: Some("parent subagent is being torn down".to_owned()),
+                            subagent_id: id.clone(),
+                            child_session_id: id,
+                            ..Default::default()
+                        });
+                        return;
+                    }
                     request.parent_session_id = root_parent;
                     request.surface_completion = false;
                     if request.runtime_overrides.loop_task_id.is_none() {
@@ -291,9 +306,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .collect();
                 let _ = request.respond_to.send(completions);
             }
-            SubagentEvent::DiscardSessionCompletions { parent_session_id } => {
+            SubagentEvent::TeardownSession { parent_session_id } => {
                 self.pending_completions
                     .retain(|completion| completion.parent_session_id != parent_session_id);
+                self.teardown_session_children(&parent_session_id);
             }
             SubagentEvent::Outstanding(request) => {
                 // Reap again here so turn-freeze / Outstanding polls see
@@ -606,7 +622,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 summary,
             });
             // Bound the buffer (drop oldest): sessions unloaded without a
-            // DiscardSessionCompletions cannot grow it unboundedly.
+            // TeardownSession cannot grow it unboundedly.
             const MAX_PENDING_COMPLETIONS: usize = 256;
             if self.pending_completions.len() > MAX_PENDING_COMPLETIONS {
                 let excess = self.pending_completions.len() - MAX_PENDING_COMPLETIONS;
@@ -716,6 +732,34 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             {
                 child.cancellation.cancel();
             }
+        }
+    }
+
+    fn teardown_session_children(&mut self, parent_session_id: &str) {
+        let mut cancelled = 0;
+        for child in self.active.values_mut() {
+            if child.request.parent_session_id == parent_session_id {
+                // Parent is gone: do not rebuffer this completion for a later
+                // resume of the same session id.
+                child.request.surface_completion = false;
+                child.cancellation.cancel();
+                child.control.cancel();
+                cancelled += 1;
+            }
+        }
+        for child in self.pending.values_mut() {
+            if child.request.parent_session_id == parent_session_id {
+                child.request.surface_completion = false;
+                child.cancellation.cancel();
+                cancelled += 1;
+            }
+        }
+        if cancelled > 0 {
+            tracing::info!(
+                parent_session_id,
+                cancelled,
+                "cancelled subagents on session teardown"
+            );
         }
     }
 

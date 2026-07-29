@@ -125,6 +125,7 @@ fn spawn_terminal_and_display_refresh_telemetry(tel: StartupTel) {
             terminal.xtversion = %t.xtversion,
             terminal.term_version = %t.term_version,
             terminal.term_version_source = %t.term_version_source,
+            terminal.kitty_event_types_withheld = t.kitty_event_types_withheld,
         )
         .entered();
         tracing::info!("terminal environment detected");

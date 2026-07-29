@@ -911,14 +911,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::CodingDataSharingUpdated { agent_id, opted_in } => {
-            handle_coding_data_sharing_updated(app, agent_id, opted_in)
-        }
+        TaskResult::CodingDataSharingUpdated {
+            agent_id,
+            opted_in,
+            seq,
+        } => handle_coding_data_sharing_updated(app, agent_id, opted_in, seq),
         TaskResult::CodingDataSharingFailed {
             agent_id,
             error,
             rollback_to_opted_in,
-        } => handle_coding_data_sharing_failed(app, agent_id, error, rollback_to_opted_in),
+            seq,
+        } => handle_coding_data_sharing_failed(app, agent_id, error, rollback_to_opted_in, seq),
         TaskResult::RenameSessionComplete { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 let safe = crate::views::session_title::sanitize_display_text(&title);

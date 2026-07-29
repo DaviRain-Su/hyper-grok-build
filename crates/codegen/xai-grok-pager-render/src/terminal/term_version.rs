@@ -15,13 +15,15 @@ use std::collections::HashMap;
 
 use super::{TerminalName, terminal_name_from_term_program};
 
-/// Which environment variable produced a [`TermVersion`].
+/// Which source produced a [`TermVersion`].
 ///
 /// The rendered labels are stable telemetry values — do not rename them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum TermVersionSource {
     None,
+    /// The runtime [`crate::terminal::da2`] probe — the only non-env source.
+    Da2,
     /// `TERM_PROGRAM_VERSION`, or its SSH-surviving `LC_TERMINAL_VERSION`
     /// mirror (iTerm2 only).
     TermProgram,
@@ -62,6 +64,19 @@ fn corroborates(named: TerminalName, env_brand: TerminalName) -> bool {
                 env_brand,
                 TerminalName::VsCode | TerminalName::Cursor | TerminalName::Windsurf
             ))
+}
+
+/// Pick the best available version: a runtime probe outranks the environment,
+/// since a live self-report cannot be inherited across a process, SSH or
+/// multiplexer boundary, nor go stale. XTVERSION has no arm — its payload is a
+/// name-and-version string, and it rides `TerminalTelemetry::xtversion`.
+pub(super) fn best_term_version(
+    da2: Option<&str>,
+    env_version: Option<&TermVersion>,
+) -> (String, TermVersionSource) {
+    da2.map(|version| (version.to_owned(), TermVersionSource::Da2))
+        .or_else(|| env_version.map(|v| (v.version.clone(), v.source)))
+        .unwrap_or_else(|| (String::new(), TermVersionSource::None))
 }
 
 /// Look up an env value, trimmed; `env_get` alone would pass whitespace.
@@ -136,9 +151,43 @@ mod tests {
     #[test]
     fn source_labels_are_pinned() {
         assert_eq!(TermVersionSource::None.to_string(), "none");
+        assert_eq!(TermVersionSource::Da2.to_string(), "da2");
         assert_eq!(TermVersionSource::TermProgram.to_string(), "term_program");
         assert_eq!(TermVersionSource::WezTerm.to_string(), "wezterm");
         assert_eq!(TermVersionSource::Vte.to_string(), "vte");
+    }
+
+    /// Driven through `best_term_version` rather than the probe's process-global
+    /// `OnceLock`: this crate's tests share one process, so recording a reply
+    /// would race every env-precedence assertion below.
+    #[test]
+    fn a_probed_version_outranks_env() {
+        let env = TermVersion::new("7402", TermVersionSource::Vte);
+        assert_eq!(
+            best_term_version(Some("0.25.0"), Some(&env)),
+            ("0.25.0".to_owned(), TermVersionSource::Da2)
+        );
+        assert_eq!(
+            best_term_version(None, Some(&env)),
+            ("7402".to_owned(), TermVersionSource::Vte)
+        );
+        assert_eq!(
+            best_term_version(None, None),
+            (String::new(), TermVersionSource::None)
+        );
+    }
+
+    /// The version has to reach the feedback card; its source has no field on
+    /// the wire type to reach it through.
+    #[test]
+    fn feedback_info_carries_the_version() {
+        let present =
+            build_terminal_context_from_env(&env_from(&[("VTE_VERSION", "7402")])).feedback_info();
+        assert_eq!(present.term_version.as_deref(), Some("7402"));
+
+        let absent = build_terminal_context_from_env(&env_from(&[("TERM", "xterm-256color")]))
+            .feedback_info();
+        assert_eq!(absent.term_version, None);
     }
 
     #[test]

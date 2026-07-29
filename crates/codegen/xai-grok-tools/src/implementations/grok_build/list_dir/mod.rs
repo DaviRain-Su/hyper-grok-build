@@ -463,7 +463,7 @@ impl xai_tool_runtime::Tool for ListDirTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "list_dir",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {

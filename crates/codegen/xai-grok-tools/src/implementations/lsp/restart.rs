@@ -1,7 +1,7 @@
 //! Monitors LSP servers for crashes and auto-restarts them.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_lsp::lsp_types::Url;
 
@@ -9,16 +9,21 @@ use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::manager::LspManager;
 use super::{DiagnosticsNotify, file_uri};
+use crate::util::ProcessScope;
 
-/// Waits for the current lifecycle to exit.
+/// Waits for the current lifecycle to exit. Returns `None` (stop monitoring)
+/// when the manager is gone or the server's client has been removed.
+///
+/// See `restart_monitor` for the Weak/lifetime argument.
 async fn wait_for_crashed_lifecycle(
-    lsp_manager: &Arc<tokio::sync::Mutex<LspManager>>,
+    lsp_manager: &Weak<tokio::sync::Mutex<LspManager>>,
     server_name: &str,
     poll_interval: std::time::Duration,
 ) -> Option<u64> {
     loop {
         tokio::time::sleep(poll_interval).await;
-        let mgr = lsp_manager.lock().await;
+        let mgr_arc = lsp_manager.upgrade()?;
+        let mgr = mgr_arc.lock().await;
         match mgr.clients.get(server_name) {
             Some(client) if client.main_loop.is_finished() => return Some(client.lifecycle_id),
             Some(_) => continue,
@@ -51,13 +56,7 @@ async fn take_crashed_client_if_current(
     lsp_manager: &Arc<tokio::sync::Mutex<LspManager>>,
     server_name: &str,
     crashed_lifecycle_id: u64,
-) -> Option<(
-    u64,
-    LspServerConfig,
-    PathBuf,
-    DiagnosticsNotify,
-    Vec<(String, String)>,
-)> {
+) -> Option<RestartContext> {
     let mut mgr = lsp_manager.lock().await;
     let current = mgr.clients.get(server_name)?;
     if current.lifecycle_id != crashed_lifecycle_id {
@@ -70,16 +69,15 @@ async fn take_crashed_client_if_current(
         .map(|client| client.tracked_documents())
         .unwrap_or_default();
     let server_config = mgr.servers.get(server_name).cloned()?;
-    let new_lifecycle_id = mgr.alloc_lifecycle_id();
-    let workspace_root = mgr.workspace_root.clone();
-    let diagnostics_notify = mgr.diagnostics_ready.clone();
-    Some((
-        new_lifecycle_id,
+    let next_lifecycle_id = mgr.alloc_lifecycle_id();
+    Some(RestartContext {
+        next_lifecycle_id,
         server_config,
-        workspace_root,
-        diagnostics_notify,
+        workspace_root: mgr.workspace_root.clone(),
+        diagnostics_notify: mgr.diagnostics_ready.clone(),
         tracked_docs,
-    ))
+        process_scope: mgr.process_scope.clone(),
+    })
 }
 
 /// Removes the crashed client if it is still current.
@@ -125,6 +123,9 @@ struct RestartContext {
     workspace_root: PathBuf,
     diagnostics_notify: DiagnosticsNotify,
     tracked_docs: Vec<(String, String)>,
+    /// Snapshotted under the same manager lock as the rest of the context so
+    /// each restart enrolls without an extra lock roundtrip.
+    process_scope: Option<ProcessScope>,
 }
 
 enum RestartOutcome {
@@ -183,6 +184,7 @@ async fn restart_lsp_with_retries(
         workspace_root,
         diagnostics_notify,
         tracked_docs,
+        process_scope,
     } = restart_ctx;
 
     loop {
@@ -208,8 +210,23 @@ async fn restart_lsp_with_retries(
         .await
         {
             Ok(mut restarted_client) => {
+                if !restarted_client.enroll(process_scope.as_ref()) {
+                    // Closed scope == session teardown killed the child at
+                    // registration; drop the client rather than install a dead
+                    // server and churn through further respawns.
+                    tracing::info!(server = %server_name, "session scope closed, dropping restarted server");
+                    return RestartOutcome::Shutdown;
+                }
                 let replayed_doc_count = tracked_docs.len();
                 let replayed_uris = replay_tracked_documents(&mut restarted_client, &tracked_docs);
+                // Re-check after the replay window: a `kill_all` between enroll
+                // and install has already SIGKILLed the enrolled child, and
+                // `install` only checks `shutting_down` (never set by
+                // `kill_all`) — installing here would mark a dead server ready.
+                if process_scope.as_ref().is_some_and(|s| s.is_closed()) {
+                    tracing::info!(server = %server_name, "session scope closed during restart, dropping restarted server");
+                    return RestartOutcome::Shutdown;
+                }
                 if let Err(restarted_client) = install_restarted_client(
                     lsp_manager,
                     server_name,
@@ -264,8 +281,13 @@ async fn restart_lsp_with_retries(
 }
 
 /// Monitors one server entry and replaces crashed lifecycles.
+///
+/// Takes a `Weak` to the manager so the monitor never keeps the `LspManager`
+/// (and its child processes) alive past the owning session: it upgrades only
+/// briefly per poll and for the duration of a single restart. When the manager
+/// is dropped at session teardown, the next upgrade fails and the monitor exits.
 pub async fn restart_monitor(
-    lsp_manager: Arc<tokio::sync::Mutex<LspManager>>,
+    lsp_manager: Weak<tokio::sync::Mutex<LspManager>>,
     server_name: String,
 ) {
     // Lifetime restart budget for this server monitor. Successful restarts
@@ -279,6 +301,12 @@ pub async fn restart_monitor(
         let Some(crashed_lifecycle_id) =
             wait_for_crashed_lifecycle(&lsp_manager, &server_name, POLL_INTERVAL).await
         else {
+            return;
+        };
+
+        // Upgrade to a strong ref only for this restart; stop if the manager was
+        // dropped between crash detection and here.
+        let Some(lsp_manager) = lsp_manager.upgrade() else {
             return;
         };
 
@@ -339,23 +367,10 @@ pub async fn restart_monitor(
                 backoff_ms: backoff.as_millis() as u64,
             });
 
-        let Some((
-            next_lifecycle_id,
-            server_config,
-            workspace_root,
-            diagnostics_notify,
-            tracked_docs,
-        )) = take_crashed_client_if_current(&lsp_manager, &server_name, crashed_lifecycle_id).await
+        let Some(restart) =
+            take_crashed_client_if_current(&lsp_manager, &server_name, crashed_lifecycle_id).await
         else {
             continue;
-        };
-
-        let restart = RestartContext {
-            next_lifecycle_id,
-            server_config,
-            workspace_root,
-            diagnostics_notify,
-            tracked_docs,
         };
 
         match restart_lsp_with_retries(

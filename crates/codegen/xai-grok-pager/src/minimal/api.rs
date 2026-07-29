@@ -589,6 +589,13 @@ pub fn sync_pending_user_input_marks(v: &mut AgentView) {
     v.sync_pending_user_input_marks();
 }
 
+/// Scrollback entry id of the tool row for `tool_call_id`, while the tracker
+/// still has that tool pending. `None` once it has been reaped, or if it never
+/// reached scrollback.
+pub fn pending_tool_entry_id(v: &AgentView, tool_call_id: &str) -> Option<EntryId> {
+    v.session.tracker.pending_tool_entry_id(tool_call_id)
+}
+
 /// [`AgentView::draw_active_modal`] — minimal reuses the full-TUI modal renderer.
 pub fn draw_active_modal(
     v: &mut AgentView,

@@ -385,10 +385,22 @@ pub const MAX_MULTI_WAIT_IDS: usize = 20;
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TaskOutputToolInput {
     /// Task IDs to query. Pass one or more; a single task is a one-element list.
+    ///
+    /// Lenient on the wire (invisible to the advertised schema — schemars
+    /// ignores serde aliases and custom deserializers): also accepts the
+    /// singular `task_id` key and a bare string/number instead of an array.
+    /// Models frequently mirror `kill_task`'s singular `task_id` here (in
+    /// soak rollouts 3 of 4 organic calls did) and previously hard-failed
+    /// with "Provide a non-empty task_ids list", after which they abandoned
+    /// the background-task workflow for shell polling.
     #[schemars(
         description = "Task IDs to get output from. Pass one or more; for a single task use a one-element array. With a positive timeout_ms, multiple ids wait until all complete. Omit timeout_ms or pass 0 for a non-blocking snapshot."
     )]
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "task_id",
+        deserialize_with = "crate::serde_lenient::deserialize_lenient_string_list"
+    )]
     pub task_ids: Vec<String>,
 
     /// When set and positive, wait up to this many milliseconds; omit or `0` polls.
@@ -839,7 +851,7 @@ Workspace boundary:
 pub const GENERAL_PURPOSE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "general-purpose",
     description: "General purpose agent for multi-step tasks.",
-    tools_template: "Has access to all tools: \
+    tools_template: "Has access to: \
          ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, ${{ tools.by_kind.edit }}, \
          ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, ${{ tools.by_kind.web_search }}, \
          and ${{ tools.by_kind.plan }}.",
@@ -860,10 +872,10 @@ pub const EXPLORE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
 pub const PLAN_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "plan",
     description: "Software architect for planning implementation strategies.",
-    tools_template: "Read-only \u{2014} has access to all tools except file editing \
-         (${{ tools.by_kind.edit }} is not available): \
+    tools_template: "Read-only \u{2014} has access to: \
          ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}, \
-         ${{ tools.by_kind.web_search }}, and ${{ tools.by_kind.plan }}.",
+         ${{ tools.by_kind.web_search }}, and ${{ tools.by_kind.plan }}. \
+         File editing and command execution are not available.",
     prompt_template: PLAN_PROMPT,
 };
 
@@ -1195,14 +1207,14 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
 
     let target_suffix = lifecycle_target_suffix(monitor_present, subagent_present);
 
-    let mut sources: Vec<String> = Vec::new();
-    if let Some(p) = bash_background_param {
-        sources.push(format!("{p}=true commands"));
-    }
-    if let Some(p) = subagent_background_param {
-        sources.push(format!("{p}=true subagents"));
-    }
-    let sources = sources.join(" or ");
+    let sources = match (bash_background_param, subagent_background_param) {
+        // Both params share one client-facing name: don't repeat it.
+        (Some(b), Some(s)) if b == s => format!("{b}=true commands or subagents"),
+        (Some(b), Some(s)) => format!("{b}=true commands or {s}=true subagents"),
+        (Some(b), None) => format!("{b}=true commands"),
+        (None, Some(s)) => format!("{s}=true subagents"),
+        (None, None) => "background tasks".to_string(),
+    };
 
     let monitor_note = monitor_task_id_note(monitor_tool, task_id_param);
     let read_note = match read_tool {
@@ -1238,14 +1250,14 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
         subagent_background_param,
     } = *naming;
 
-    let mut sources: Vec<String> = Vec::new();
-    if let Some(p) = bash_background_param {
-        sources.push(format!("{p}=true"));
-    }
-    if let Some(p) = subagent_background_param {
-        sources.push(format!("{p}=true"));
-    }
-    let sources = sources.join(" or ");
+    let sources = match (bash_background_param, subagent_background_param) {
+        // Both params share one client-facing name: don't repeat it.
+        (Some(b), Some(s)) if b == s => format!("{b}=true commands or subagents"),
+        (Some(b), Some(s)) => format!("{b}=true commands or {s}=true subagents"),
+        (Some(b), None) => format!("{b}=true commands"),
+        (None, Some(s)) => format!("{s}=true subagents"),
+        (None, None) => "background tasks".to_string(),
+    };
 
     format!(
         "Wait for multiple background tasks or subagents to complete.\n\n\
@@ -1376,6 +1388,54 @@ mod tests {
         };
         let value = serde_json::to_value(&input).unwrap();
         assert!(value.get("model").is_none());
+    }
+
+    #[test]
+    fn task_output_input_accepts_singular_task_id_alias() {
+        // Canonical plural form (unchanged).
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_ids": ["a", "b"]}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["a", "b"]);
+
+        // Singular key with a bare string — the shape models organically send
+        // (mirroring kill_task's singular task_id).
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_id": "abc-123", "timeout_ms": 0}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["abc-123"]);
+        assert_eq!(input.timeout_ms, Some(0));
+
+        // Singular key with an array also works.
+        let input: TaskOutputToolInput =
+            serde_json::from_str(r#"{"task_id": ["x", "y"]}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["x", "y"]);
+
+        // Plural key with a bare string.
+        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_ids": "solo"}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["solo"]);
+
+        // Bare number (observed: an OS PID) becomes a string id, so the tool
+        // answers "Task 228 not found" instead of a deserialize error.
+        let input: TaskOutputToolInput = serde_json::from_str(r#"{"task_id": 228}"#).unwrap();
+        assert_eq!(input.resolved_task_ids(), vec!["228"]);
+    }
+
+    #[test]
+    fn task_output_input_schema_does_not_advertise_the_alias() {
+        // The leniency is wire-only: the advertised schema must keep exactly
+        // the canonical properties (task_ids, timeout_ms) so tool-definition
+        // dumps and param randomization are unaffected.
+        let schema = serde_json::to_value(schemars::schema_for!(TaskOutputToolInput)).unwrap();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("task_ids"));
+        assert!(props.contains_key("timeout_ms"));
+        assert!(
+            !props.contains_key("task_id"),
+            "singular alias must not leak into the schema: {props:?}"
+        );
+        assert_eq!(props.len(), 2);
+        // And task_ids stays a plain string array.
+        assert_eq!(props["task_ids"]["type"], "array");
+        assert_eq!(props["task_ids"]["items"]["type"], "string");
     }
 
     #[test]
@@ -1612,12 +1672,12 @@ mod tests {
         // Bare-kind naming reproduces the placeholder kinds verbatim.
         assert_eq!(
             GENERAL_PURPOSE_SUBAGENT.render_tools(&plain_tool_naming()),
-            "Has access to all tools: execute, read, edit, list, search, web_search, and plan."
+            "Has access to: execute, read, edit, list, search, web_search, and plan."
         );
         assert_eq!(
             PLAN_SUBAGENT.render_tools(&plain_tool_naming()),
-            "Read-only \u{2014} has access to all tools except file editing (edit is not available): \
-             read, list, search, web_search, and plan."
+            "Read-only \u{2014} has access to: read, list, search, web_search, and plan. \
+             File editing and command execution are not available."
         );
 
         // Real tool names are substituted per kind.
@@ -1786,7 +1846,7 @@ mod tests {
             desc,
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
-             - Pass task_ids with one or more ids from background=true commands or background=true subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
+             - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
              - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at ~10 min\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
@@ -1827,7 +1887,7 @@ mod tests {
             "Wait for multiple background tasks or subagents to complete.\n\n\
              Prefer get_command_or_subagent_output with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
              Usage notes:\n\
-             - task_ids: list of task IDs from background=true or background=true\n\
+             - task_ids: list of task IDs from background=true commands or subagents\n\
              - mode: 'wait_all' or 'wait_any'\n\
              - timeout_ms: optional max wait, default 30s, capped at ~10 min"
         );
@@ -1840,7 +1900,9 @@ mod tests {
             bash_background_param: None,
             subagent_background_param: Some("run_in_background"),
         });
-        assert!(desc.contains("- task_ids: list of task IDs from run_in_background=true\n"));
+        assert!(
+            desc.contains("- task_ids: list of task IDs from run_in_background=true subagents\n")
+        );
         assert!(desc.contains("Prefer get_task_output with task_ids"));
     }
 }

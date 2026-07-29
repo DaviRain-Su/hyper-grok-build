@@ -281,7 +281,8 @@ impl crate::types::tool_metadata::ToolMetadata for UseTool {
     fn description_template(&self) -> &str {
         "Call an MCP integration tool.\n\n\
          The `tool_name` must be the qualified `server__tool` name (e.g., `linear__save_issue`). \
-         The `tool_input` must conform exactly to the input schema returned by `${{ tools.by_kind.search_tool }}`."
+         The `tool_input` must conform exactly to the tool's input schema\
+         ${%- if tools.by_kind.search_tool %} as returned by `${{ tools.by_kind.search_tool }}`${%- endif %}."
     }
 }
 
@@ -299,7 +300,7 @@ impl xai_tool_runtime::Tool for UseTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "use_tool",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

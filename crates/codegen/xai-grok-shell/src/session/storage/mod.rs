@@ -20,6 +20,7 @@ pub mod jsonl;
 pub(crate) mod relocation;
 pub mod search;
 pub mod search_fts;
+mod search_recovery;
 pub mod search_remote_sync;
 pub(crate) mod summary_write;
 

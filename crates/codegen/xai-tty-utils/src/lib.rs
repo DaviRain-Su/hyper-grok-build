@@ -42,6 +42,8 @@ use std::io;
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};
 
+pub mod runtime;
+
 // ---------------------------------------------------------------------------
 // TTY detach — pre_exec building block
 // ---------------------------------------------------------------------------

@@ -135,8 +135,9 @@ pub(crate) struct SessionHarnessMetrics {
     pub memory_enabled: bool,
     pub auto_update: Option<bool>,
     pub cwd: String,
-    pub skills_config: xai_grok_agent::prompt::skills::SkillsConfig,
-    /// Resolved vendor-compat config, so recorded skill / AGENTS.md names match
+    /// Filled from the built agent's bridge so `into_event` doesn't re-walk the disk.
+    pub skill_names: Vec<String>,
+    /// Resolved vendor-compat config, so recorded AGENTS.md names match
     /// what the session actually discovers.
     pub compat: xai_grok_tools::types::compat::CompatConfig,
     pub plugin_registry: Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>>,
@@ -189,16 +190,6 @@ impl SessionHarnessMetrics {
                 .map(|n| n.to_string_lossy().into_owned())
         })
         .collect();
-        let skill_names = xai_grok_agent::prompt::skills::list_skills_with_plugins(
-            Some(&self.cwd),
-            &self.skills_config,
-            self.plugin_registry.as_deref(),
-            self.compat,
-        )
-        .await
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
         SessionHarness {
             session_id: self.session_id,
             client_identifier: self.client_identifier,
@@ -207,7 +198,7 @@ impl SessionHarnessMetrics {
             permission_mode: self.permission_mode,
             mcp_server_names: self.mcp_server_names,
             plugin_names: self.plugin_names,
-            skill_names,
+            skill_names: self.skill_names,
             lsp_server_names: self.lsp_server_names,
             hook_names,
             agents_md_dir_names,

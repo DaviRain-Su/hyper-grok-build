@@ -405,12 +405,7 @@ fn live_tail_renderer<'a>(
     cwd: &'a std::path::Path,
     tick: u64,
 ) -> EntryRenderer<'a> {
-    EntryRenderer::new(entry, theme)
-        .with_appearance(appearance.clone())
-        .with_cwd(Some(cwd))
-        .with_tick(tick)
-        .with_flat_background(true)
-        .with_hide_accent(true)
+    super::commit::minimal_renderer(entry, theme, appearance.clone(), cwd, tick)
 }
 /// Render the uncommitted tail (entries past the commit frontier), bottom-anchored
 /// so the most recent output is always visible; the topmost visible entry is
@@ -814,6 +809,46 @@ mod tests {
             tail_height(&agent, width, &appearance),
             painted_height.saturating_add(super::super::commit::MINIMAL_BLOCK_GAP)
         );
+    }
+    /// The tail and the committed footprint are one builder with a different
+    /// tick; this is the net for anyone tempted to fork them again.
+    #[test]
+    fn the_animation_tick_never_changes_a_blocks_height() {
+        use xai_grok_pager::scrollback::RenderBlock;
+        use xai_grok_pager::scrollback::entry::ScrollbackEntry;
+        minimal_api::set_show_thinking_blocks(true);
+        let theme = Theme::current();
+        let cwd = std::path::PathBuf::from("/tmp");
+        let appearance = super::super::commit::committed_appearance(
+            &xai_grok_pager::appearance::AppearanceConfig::default(),
+        );
+        let long = "reasoning that wraps a good few times even at a hundred and \
+                    twenty columns because it simply keeps going and going and going";
+        for block in [
+            RenderBlock::thinking(long),
+            RenderBlock::agent_message(long),
+            RenderBlock::execute("ls -la"),
+        ] {
+            let entry = ScrollbackEntry::new(block);
+            for width in [20u16, 40, 80, 120] {
+                let live =
+                    live_tail_renderer(&entry, &theme, &appearance, &cwd, 7).desired_height(width);
+                let committed = live_tail_renderer(
+                    &entry,
+                    &theme,
+                    &appearance,
+                    &cwd,
+                    super::super::commit::COMMITTED_TICK,
+                )
+                .desired_height(width);
+                assert_eq!(
+                    live, committed,
+                    "{:?} @{width}: a block's height must not depend on the tick, or the \
+                     prompt jumps on commit",
+                    entry.block
+                );
+            }
+        }
     }
     #[test]
     fn minimal_status_shows_rich_activity_and_idle_hint() {

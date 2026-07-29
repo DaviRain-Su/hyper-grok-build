@@ -745,6 +745,7 @@ pub(crate) async fn run_shell_child(
     tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
     tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
+    tool_ctx.process_scope = ctx.process_scope.clone();
     let parent_traceparent = xai_file_utils::trace_context::current_traceparent();
     let tracker_child_cwd = child_session_info.cwd.clone();
     let tracker_model_id = effective_model_id.0.to_string();

@@ -64,6 +64,12 @@ struct TemplateContext {
     /// true everywhere else. Tool descriptions branch on this to swap
     /// Unix-centric guidance for PowerShell-aware guidance.
     has_unix_utilities: bool,
+    /// Whether the client delivers system reminders (e.g. completion
+    /// notifications for backgrounded commands/subagents) to the model.
+    /// Descriptions that promise "you are notified on completion" branch
+    /// on this so the promise is only made when it can be kept. Defaults
+    /// to `true` (prod CLI behavior).
+    system_reminders_enabled: bool,
 }
 
 /// Shared render implementation: fast-path check + MiniJinja render.
@@ -117,6 +123,59 @@ impl std::error::Error for TemplateRenderError {
 
 /// Pre-built template renderer stored in Resources.
 ///
+/// Strip unrendered template markers (`${{ … }}` and `${% … %}`) from `raw`.
+///
+/// Last-resort fallback for when MiniJinja rendering fails: the model must
+/// never see raw template syntax, so the offending spans are dropped
+/// entirely. The result may read slightly awkwardly around the removed
+/// spans, but it is always plain prose.
+/// Render-failure fallback: strip template markers so the model never sees
+/// raw syntax. A render failure always indicates a template bug, so debug
+/// builds (tests, local dev) panic loudly instead of degrading; release
+/// builds log and degrade gracefully.
+///
+/// Not for the *intentional* pre-finalize sanitize path
+/// (`sanitized_description_template`), which calls
+/// [`strip_template_markers`] directly.
+#[track_caller]
+pub fn strip_markers_on_render_failure(raw: &str, err: &TemplateRenderError) -> String {
+    debug_assert!(
+        false,
+        "description template failed to render — fix the template instead of \
+         relying on the marker-strip fallback: {err}"
+    );
+    tracing::warn!("Description template render failed, stripping markers: {err}");
+    strip_template_markers(raw)
+}
+
+pub fn strip_template_markers(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let close: Option<usize> = if after.starts_with('{') {
+            after.find("}}").map(|i| i + 2)
+        } else if after.starts_with('%') {
+            after.find("%}").map(|i| i + 2)
+        } else {
+            None
+        };
+        match close {
+            Some(end_in_after) => {
+                out.push_str(&rest[..start]);
+                rest = &rest[start + 2 + end_in_after..];
+            }
+            None => {
+                // `${` that is not a marker (or unterminated) — keep as-is.
+                out.push_str(&rest[..start + 2]);
+                rest = &rest[start + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Created once at finalize time and available to all tools and reminders
 /// via `resources.get::<TemplateRenderer>()`. Uses MiniJinja with custom
 /// `${{ }}` / `${%  %}` delimiters to avoid collisions with literal `{{ }}`
@@ -158,8 +217,18 @@ impl TemplateRenderer {
                 // comparison is naturally false there — no cfg guard needed.
                 shell_uses_semicolon: xai_grok_config::shell::chain_separator() == ";",
                 has_unix_utilities: xai_grok_config::shell::has_unix_utilities(),
+                system_reminders_enabled: true,
             },
         }
+    }
+
+    /// Override whether templates see `system_reminders_enabled` as true.
+    /// Called at finalize time with the client's setting; every other
+    /// construction site keeps the default (`true`).
+    #[must_use]
+    pub fn with_system_reminders_enabled(mut self, enabled: bool) -> Self {
+        self.ctx.system_reminders_enabled = enabled;
+        self
     }
 
     /// Render a template string with the full context.
@@ -193,8 +262,8 @@ impl TemplateRenderer {
     /// `$defs`. Property keys are remapped separately; this resolves
     /// descriptions that reference another param/tool via
     /// `${{ params.<kind>.<param> }}` or `${{ tools.by_kind.<kind> }}`.
-    /// Untemplated descriptions are left as-is; a render failure logs and leaves
-    /// the raw description in place.
+    /// Untemplated descriptions are left as-is; a render failure logs and
+    /// strips the template markers so raw syntax never reaches the model.
     pub fn render_schema_descriptions(&self, schema: &mut serde_json::Value) {
         match schema {
             serde_json::Value::Object(map) => {
@@ -204,12 +273,7 @@ impl TemplateRenderer {
                     {
                         match self.render(desc) {
                             Ok(r) => Some(r),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "schema description template render failed, leaving raw: {e}"
-                                );
-                                None
-                            }
+                            Err(e) => Some(strip_markers_on_render_failure(desc, &e)),
                         }
                     }
                     _ => None,
@@ -340,6 +404,21 @@ impl std::fmt::Debug for TemplateRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_template_markers_removes_interpolations_and_tags() {
+        let raw = "Use ${{ tools.by_kind.read }} first.${%- if tools.by_kind.edit %} Then ${{ tools.by_kind.edit }}.${%- endif %}";
+        assert_eq!(strip_template_markers(raw), "Use  first. Then .");
+    }
+
+    #[test]
+    fn strip_template_markers_keeps_plain_text_and_literal_dollar_brace() {
+        assert_eq!(strip_template_markers("no markers here"), "no markers here");
+        // `${` not followed by `{`/`%` is preserved (e.g. shell `${VAR}`).
+        assert_eq!(strip_template_markers("echo ${VAR}"), "echo ${VAR}");
+        // Unterminated marker is preserved rather than eating the rest.
+        assert_eq!(strip_template_markers("broken ${{ tail"), "broken ${{ tail");
+    }
 
     fn make_renderer(
         tools: &[(ToolKind, &str)],
@@ -536,6 +615,18 @@ mod tests {
             .render("${%- if tools.by_kind.search %}Use search.${%- endif %}OK")
             .unwrap();
         assert_eq!(result, "OK");
+    }
+
+    /// Documents MiniJinja's default (lenient) undefined behavior: a missing
+    /// kind in *output* position renders as an empty string with `Ok`, it
+    /// does NOT return `Err`. Callers that want a fallback name for a
+    /// missing kind must check for an empty result — `.unwrap_or_else` on
+    /// the `Result` alone never fires for this case.
+    #[test]
+    fn render_missing_kind_output_position_is_empty_ok() {
+        let r = make_renderer(&[], &[]);
+        let result = r.render("${{ tools.by_kind.background_task_action }}");
+        assert_eq!(result.unwrap(), "");
     }
 
     #[test]

@@ -13,9 +13,16 @@
 //! triggers so callers never need to touch the FTS table directly.
 //! The `cwd` column is intentionally excluded from the FTS table — it is a
 //! filter dimension only, applied via JOIN on `session_docs`.
+//!
+//! The index is a rebuildable cache: an unusable file is quarantined and
+//! recreated once (see [`super::search_recovery`] and [`with_index`]).
+
+use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use xai_sqlite_journal::JournalMode;
+
+use super::search_recovery;
 
 /// Bump when making breaking schema changes that require dropping and
 /// recreating tables, or to force a rebuild of stale index content
@@ -33,19 +40,6 @@ pub struct SessionDoc {
     pub content: String,
     /// blake3 hash of `content` — used to skip redundant upserts.
     pub content_hash: String,
-    /// Byte offset in `updates.jsonl` up to which content has been indexed.
-    /// Used for delta indexing: on subsequent updates, only bytes after this
-    /// offset are parsed and merged with existing content.
-    pub last_indexed_offset: u64,
-}
-
-/// State of a previously indexed session, returned by
-/// [`SessionSearchIndex::get_session_index_state`].
-#[derive(Debug, Clone)]
-pub struct SessionIndexState {
-    pub content: String,
-    pub content_hash: String,
-    pub last_indexed_offset: u64,
 }
 
 /// A single search result row.
@@ -73,6 +67,28 @@ pub struct SessionSearchIndex {
     db: Connection,
 }
 
+pub fn with_index<R>(
+    db_path: &Path,
+    op: impl Fn(&SessionSearchIndex) -> Result<R, rusqlite::Error>,
+) -> Result<R, rusqlite::Error> {
+    let index = SessionSearchIndex::open_or_create(db_path)?;
+    match op(&index) {
+        Ok(value) => Ok(value),
+        Err(e) if search_recovery::is_unusable_db_error(&e) => {
+            drop(index);
+            search_recovery::heal_unusable(
+                db_path,
+                &e,
+                SessionSearchIndex::probe_usable,
+                SessionSearchIndex::recreate,
+            );
+            let index = SessionSearchIndex::open_or_create(db_path)?;
+            op(&index)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 impl SessionSearchIndex {
     /// Open (or create) the FTS index at `db_path`.
     ///
@@ -82,25 +98,53 @@ impl SessionSearchIndex {
     /// and deletes the `last_bootstrap_at` completed-bootstrap marker so the
     /// wipe is observable to bootstrap/staleness checks.
     /// A NEWER stored version is tolerated read/write without dropping.
-    pub fn open_or_create(db_path: &std::path::Path) -> Result<Self, rusqlite::Error> {
+    ///
+    /// If the existing file is corrupt / not a database, quarantines it and
+    /// opens a fresh empty index (see [`super::search_recovery::heal_unusable`]).
+    pub fn open_or_create(db_path: &Path) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // The mode decision statfs's the parent dir created above.
+        let journal_mode = JournalMode::for_db_path(db_path);
+
+        match Self::open_with_journal_mode(db_path, journal_mode) {
+            Ok(index) => Ok(index),
+            Err(e) if search_recovery::is_unusable_db_error(&e) => {
+                search_recovery::heal_unusable(db_path, &e, Self::probe_usable, Self::recreate);
+                Self::open_with_journal_mode(db_path, journal_mode)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Open an existing index without the corruption self-heal; returns the
+    /// unusable-DB error instead of quarantining.
+    pub fn open_existing(db_path: &Path) -> Result<Self, rusqlite::Error> {
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         Self::open_with_journal_mode(db_path, JournalMode::for_db_path(db_path))
     }
 
-    /// Open with an explicit journal mode — the seam tests use to exercise
-    /// the network-filesystem decision on a local disk.
+    fn probe_usable(db_path: &Path) -> Result<bool, rusqlite::Error> {
+        let conn = JournalMode::for_db_path(db_path).open_readonly(db_path)?;
+        let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+        let first: Option<String> = stmt.query_map([], |row| row.get(0))?.next().transpose()?;
+        Ok(first.as_deref() == Some("ok"))
+    }
+
+    fn recreate(db_path: &Path) -> Result<(), rusqlite::Error> {
+        Self::open_with_journal_mode(db_path, JournalMode::for_db_path(db_path)).map(|_| ())
+    }
+
     fn open_with_journal_mode(
-        db_path: &std::path::Path,
+        db_path: &Path,
         journal_mode: JournalMode,
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
         let db = journal_mode.open(db_path)?;
 
-        // Check existing schema version
         let stored_version: Option<String> = db
             .query_row(
                 "SELECT value FROM meta WHERE key = 'session_search_schema_version'",
@@ -155,7 +199,6 @@ impl SessionSearchIndex {
             );
         }
 
-        // Create tables + content-synced FTS5 with auto-sync triggers
         db.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS meta (
@@ -202,20 +245,6 @@ impl SessionSearchIndex {
             ",
         )?;
 
-        // Add last_indexed_offset column (idempotent migration).
-        match db.execute(
-            "ALTER TABLE session_docs ADD COLUMN last_indexed_offset INTEGER NOT NULL DEFAULT 0",
-            [],
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                let msg = e.to_string();
-                if !msg.contains("duplicate column") {
-                    return Err(e);
-                }
-            }
-        }
-
         // Persist schema version — but never regress the row a newer
         // generation owns (it would re-trigger that binary's upgrade drop).
         if stored != Some(current) && !owned_by_newer {
@@ -235,23 +264,21 @@ impl SessionSearchIndex {
     /// automatically.
     pub fn upsert_doc(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
         self.db.execute(
-            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash, last_indexed_offset)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(session_id) DO UPDATE SET
                  cwd = excluded.cwd,
                  updated_at = excluded.updated_at,
                  title = excluded.title,
                  content = excluded.content,
-                 content_hash = excluded.content_hash,
-                 last_indexed_offset = excluded.last_indexed_offset",
+                 content_hash = excluded.content_hash",
             params![
                 doc.session_id,
                 doc.cwd,
                 doc.updated_at_unix,
                 doc.title,
                 doc.content,
-                doc.content_hash,
-                doc.last_indexed_offset as i64
+                doc.content_hash
             ],
         )?;
         Ok(())
@@ -264,8 +291,8 @@ impl SessionSearchIndex {
     /// written between the check and the insert.
     pub fn insert_doc_if_absent(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
         self.db.execute(
-            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash, last_indexed_offset)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(session_id) DO NOTHING",
             params![
                 doc.session_id,
@@ -273,8 +300,7 @@ impl SessionSearchIndex {
                 doc.updated_at_unix,
                 doc.title,
                 doc.content,
-                doc.content_hash,
-                doc.last_indexed_offset as i64
+                doc.content_hash
             ],
         )?;
         Ok(())
@@ -302,44 +328,6 @@ impl SessionSearchIndex {
             .optional()
     }
 
-    /// Return the full index state for a session: content, content_hash,
-    /// and last_indexed_offset. Used by the delta indexing path.
-    pub fn get_session_index_state(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<SessionIndexState>, rusqlite::Error> {
-        self.db
-            .query_row(
-                "SELECT content, content_hash, last_indexed_offset FROM session_docs WHERE session_id = ?1",
-                params![session_id],
-                |row| {
-                    let content: String = row.get(0)?;
-                    let content_hash: String = row.get(1)?;
-                    let offset: i64 = row.get(2)?;
-                    Ok(SessionIndexState {
-                        content,
-                        content_hash,
-                        last_indexed_offset: offset as u64,
-                    })
-                },
-            )
-            .optional()
-    }
-
-    /// Update only the `last_indexed_offset` for a session without touching
-    /// content or hash (avoids firing FTS triggers when content is unchanged).
-    pub fn update_indexed_offset(
-        &self,
-        session_id: &str,
-        offset: u64,
-    ) -> Result<(), rusqlite::Error> {
-        self.db.execute(
-            "UPDATE session_docs SET last_indexed_offset = ?2 WHERE session_id = ?1",
-            params![session_id, offset as i64],
-        )?;
-        Ok(())
-    }
-
     /// Read a value from the `meta` key-value table.
     pub fn get_meta(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
         self.db
@@ -357,6 +345,13 @@ impl SessionSearchIndex {
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    /// Remove a value from the `meta` key-value table.
+    pub fn delete_meta(&self, key: &str) -> Result<(), rusqlite::Error> {
+        self.db
+            .execute("DELETE FROM meta WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -573,7 +568,6 @@ mod tests {
             title: title.to_string(),
             content: content.to_string(),
             content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
-            last_indexed_offset: 0,
         }
     }
 
@@ -767,6 +761,73 @@ mod tests {
             Some(SCHEMA_VERSION),
             "rebuild rewrites the current version"
         );
+    }
+
+    #[test]
+    fn test_malformed_db_file_is_quarantined_and_recreated() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session_search.sqlite");
+        // Not a SQLite database — classic "file is not a database" / NOTADB.
+        std::fs::write(&path, b"this is not a sqlite database at all").unwrap();
+
+        // Drive the production entrypoint: it heals on open, then the op runs.
+        with_index(&path, |index| {
+            index.upsert_doc(&test_doc("s1", "after heal", "session search works again"))
+        })
+        .expect("with_index self-heals then upserts");
+        let qr = with_index(&path, |index| index.query("works", None, 10, 0, false))
+            .expect("query after heal");
+        assert_eq!(qr.results[0].session_id, "s1");
+
+        // Original path is a real DB again; a quarantine sibling should exist.
+        assert!(path.is_file());
+        let quarantined: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("corrupt"))
+            .collect();
+        assert!(
+            !quarantined.is_empty(),
+            "expected a quarantined corrupt sibling, got {quarantined:?}"
+        );
+    }
+
+    #[test]
+    fn test_with_index_retries_op_once_after_heal() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session_search.sqlite");
+        // A non-db file gives a real "unusable" error to inject into the op.
+        let bogus = tmp.path().join("bogus.sqlite");
+        std::fs::write(&bogus, b"not-sqlite").unwrap();
+
+        // The first op attempt reports the DB unusable, as a mid-op corruption
+        // would; with_index heals (a no-op here, the DB is healthy) and retries
+        // the op exactly once, which then succeeds.
+        let calls = std::cell::Cell::new(0u32);
+        let result = with_index(&path, |index| {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n == 0 {
+                match SessionSearchIndex::open_with_journal_mode(&bogus, JournalMode::Wal) {
+                    Ok(_) => unreachable!("a non-sqlite file cannot open as a database"),
+                    Err(e) => Err(e),
+                }
+            } else {
+                index.upsert_doc(&test_doc("s1", "t", "retried body"))
+            }
+        });
+
+        assert!(result.is_ok(), "op should succeed on the retry: {result:?}");
+        assert_eq!(
+            calls.get(),
+            2,
+            "op runs once, fails unusable, then runs once more"
+        );
+
+        let index = SessionSearchIndex::open_or_create(&path).unwrap();
+        let qr = index.query("retried", None, 10, 0, false).unwrap();
+        assert_eq!(qr.results.len(), 1, "the retried op's write is persisted");
     }
 
     /// Repro: the on-disk state left behind by a pre-ratchet binary that

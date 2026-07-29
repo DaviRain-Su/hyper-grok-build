@@ -12,6 +12,7 @@ pub mod serde_helpers;
 pub mod session_types;
 pub mod storage_types;
 pub mod subagent_bundle;
+pub mod team_managed_config_types;
 
 pub use client_metrics_types::*;
 pub use deployment_config_types::*;
@@ -21,3 +22,4 @@ pub use sandbox_types::*;
 pub use session_types::*;
 pub use storage_types::*;
 pub use subagent_bundle::*;
+pub use team_managed_config_types::*;

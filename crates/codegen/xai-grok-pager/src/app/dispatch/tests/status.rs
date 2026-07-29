@@ -60,94 +60,14 @@ fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
     assert_eq!(q.last().map(|e| e.text.as_str()), Some("c"));
 }
 
-#[test]
-fn show_privacy_info_zdr() {
-    let mut app = test_app_with_agent();
-    app.is_zdr = true;
-    let effects = dispatch(Action::ShowPrivacyInfo, &mut app);
-    assert!(effects.is_empty());
-    let text = last_system_text(&app, AgentId(0));
-    assert!(text.contains("Zero Data Retention"));
-    assert!(
-        text.contains("Other settings (not changed by /privacy)"),
-        "must list other settings knobs: {text}",
-    );
-    assert!(
-        text.contains("GROK_TELEMETRY_ENABLED") && text.contains("GROK_EXTERNAL_OTEL"),
-        "must list telemetry/OTEL config keys: {text}",
-    );
-}
-
-/// `/privacy` info-print uses the desktop-aligned "privacy mode" /
-/// "share data" labels from the user's intentional rewrite.
-#[test]
-fn show_privacy_info_opted_out() {
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = true;
-    let effects = dispatch(Action::ShowPrivacyInfo, &mut app);
-    assert!(effects.is_empty());
-    let text = last_system_text(&app, AgentId(0));
-    assert!(
-        text.contains("Privacy: privacy mode"),
-        "info-print must use 'Privacy: privacy mode' (desktop-aligned label): {text}",
-    );
-    assert!(text.contains("/privacy opt-in"));
-    assert!(
-        text.contains("Other settings (not changed by /privacy)")
-            && text.contains("GROK_TELEMETRY_ENABLED")
-            && text.contains("trace_upload")
-            && text.contains("GROK_EXTERNAL_OTEL"),
-        "must list config knobs not changed by /privacy: {text}",
-    );
-}
-
-#[test]
-fn show_privacy_info_opted_in() {
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = false;
-    let effects = dispatch(Action::ShowPrivacyInfo, &mut app);
-    assert!(effects.is_empty());
-    let text = last_system_text(&app, AgentId(0));
-    assert!(
-        text.contains("Privacy: share data"),
-        "info-print must use 'Privacy: share data' (desktop-aligned label): {text}",
-    );
-    assert!(text.contains("/privacy opt-out"));
-}
-
-/// The info-print uses desktop-aligned labels ("privacy mode" /
-/// "share data"). This test pins those labels to catch accidental
-/// regressions to the registry's "Opt in" / "Opt out" display
-/// strings.
-#[test]
-fn show_privacy_info_does_not_use_old_desktop_labels() {
-    // opted-out → "Privacy: privacy mode"
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = true;
-    let _ = dispatch(Action::ShowPrivacyInfo, &mut app);
-    let text = last_system_text(&app, AgentId(0));
-    assert!(
-        text.contains("privacy mode"),
-        "[opted-out] info-print must contain 'privacy mode': {text:?}",
-    );
-
-    // opted-in → "Privacy: share data"
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = false;
-    let _ = dispatch(Action::ShowPrivacyInfo, &mut app);
-    let text = last_system_text(&app, AgentId(0));
-    assert!(
-        text.contains("share data"),
-        "[opted-in] info-print must contain 'share data': {text:?}",
-    );
-}
-
 // ── coding_data_sharing dispatch tests ───
 //
-// The dispatcher uses **optimistic + rollback + toast**, matching the
-// `set_yolo_mode` pattern. These tests pin the contract:
-//   - Guards (ZDR, non-admin team) toast and short-circuit.
-//   - Idempotent dispatch toasts but emits no Effect.
+// The dispatcher uses **optimistic + rollback**, matching the
+// `set_yolo_mode` pattern minus its toasts — the surfaces that change this
+// setting show the result themselves. These tests pin the contract:
+//   - Guards (ZDR, non-admin team) toast and short-circuit; they are the
+//     only paths that still speak up, because nothing else on screen would.
+//   - Idempotent dispatch emits no Effect and says nothing.
 //   - Optimistic mutation flips `app.coding_data_retention_opt_out`
 //     BEFORE the Effect is emitted.
 //   - `Effect::SetCodingDataSharing` carries
@@ -156,74 +76,26 @@ fn show_privacy_info_does_not_use_old_desktop_labels() {
 //     mutation; `TaskResult::CodingDataSharingUpdated` re-anchors
 //     to the server-confirmed value.
 
-/// Idempotent re-dispatch when already opted-in toasts but emits
-/// no Effect (avoids a wasted ACP round-trip).
-///
-/// Toast uses the **display name** ("Opt in", not the
-/// snake-case canonical "opt-in") AND the **destructive `⚠`
-/// glyph** on the opt-in direction (privacy-degrading).
+/// Idempotent re-dispatch skips the ACP round-trip.
 #[test]
-fn set_coding_data_sharing_idempotent_opt_in() {
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = false; // currently opted-in
-    let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
-    assert!(
-        effects.is_empty(),
-        "idempotent re-dispatch must NOT emit Effect"
-    );
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains("Opt in"),
-        "toast must show display name 'Opt in' (PR 9 R1, General-3 Issue 6): {toast}",
-    );
-    assert!(
-        !toast.contains("opt-in"),
-        "toast must NOT use snake-case canonical 'opt-in' — display name only: {toast}",
-    );
-    assert!(
-        toast.contains('\u{26A0}'),
-        "idempotent opt-in toast uses ⚠ destructive-warning glyph (PR 9 R1, \
-             General-3 Issue 5): {toast}",
-    );
-    // State unchanged.
-    assert!(
-        !app.coding_data_retention_opt_out,
-        "idempotent path must not mutate state",
-    );
-}
-
-/// Idempotent re-dispatch when already opted-out toasts but emits
-/// no Effect.
-///
-/// Opt-out direction uses the **uniform `✓` glyph**
-/// (restoring the safe default) and the display name "Opt out".
-#[test]
-fn set_coding_data_sharing_idempotent_opt_out() {
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = true; // currently opted-out
-    let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
-    assert!(
-        effects.is_empty(),
-        "idempotent re-dispatch must NOT emit Effect"
-    );
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains("Opt out"),
-        "toast must show display name 'Opt out': {toast}",
-    );
-    assert!(
-        toast.contains('\u{2713}'),
-        "idempotent opt-out toast uses ✓ safe-default glyph: {toast}",
-    );
-    assert!(
-        !toast.contains('\u{26A0}'),
-        "opt-out is the safe direction — must NOT use ⚠: {toast}",
-    );
-    // State unchanged.
-    assert!(
-        app.coding_data_retention_opt_out,
-        "idempotent path must not mutate state",
-    );
+fn set_coding_data_sharing_idempotent_is_silent_and_effect_free() {
+    for opted_in in [true, false] {
+        let mut app = test_app_with_agent();
+        app.coding_data_retention_opt_out = !opted_in; // already at the target
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in }, &mut app);
+        assert!(
+            effects.is_empty(),
+            "idempotent re-dispatch must NOT emit Effect (opted_in={opted_in})"
+        );
+        assert!(
+            app.agents[&AgentId(0)].toast.is_none(),
+            "idempotent re-dispatch must not toast (opted_in={opted_in})"
+        );
+        assert_eq!(
+            app.coding_data_retention_opt_out, !opted_in,
+            "idempotent path must not mutate state (opted_in={opted_in})",
+        );
+    }
 }
 
 /// ZDR teams are blocked from toggling. The blocked path
@@ -314,7 +186,7 @@ fn set_coding_data_sharing_allowed_for_admin() {
 }
 
 /// Non-idempotent dispatch emits one Effect AND mutates state
-/// optimistically AND toasts.
+/// optimistically.
 #[test]
 fn set_coding_data_sharing_produces_effect_and_optimistic_mutation() {
     let mut app = test_app_with_agent();
@@ -326,12 +198,17 @@ fn set_coding_data_sharing_produces_effect_and_optimistic_mutation() {
             agent_id,
             opted_in,
             rollback_to_opted_in,
+            seq,
         } => {
             assert_eq!(*agent_id, AgentId(0));
             assert!(!*opted_in);
             assert!(
                 *rollback_to_opted_in,
                 "rollback_to_opted_in must be pre-toggle value (true == opted-in)",
+            );
+            assert_eq!(
+                *seq, app.coding_data_write_seq,
+                "the effect must carry the generation it was dispatched under",
             );
         }
         other => panic!("expected SetCodingDataSharing Effect, got {other:?}"),
@@ -341,38 +218,36 @@ fn set_coding_data_sharing_produces_effect_and_optimistic_mutation() {
         app.coding_data_retention_opt_out,
         "dispatch must optimistically mutate state",
     );
-    // Toast on every dispatch (SHELL setter contract).
-    assert!(app.agents[&AgentId(0)].toast.is_some());
+    assert!(
+        app.agents[&AgentId(0)].toast.is_none(),
+        "changing this setting must not toast — the settings row is the feedback",
+    );
 }
 
 /// `TaskResult::CodingDataSharingUpdated` re-anchors state to the
-/// server-confirmed value (defense-in-depth) and re-toasts.
+/// server-confirmed value (defense-in-depth).
 #[test]
-fn coding_data_sharing_updated_re_anchors_state_and_re_toasts() {
+fn coding_data_sharing_updated_re_anchors_state() {
     let mut app = test_app_with_agent();
     // Simulate post-optimistic state: opted-out.
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
     // Server confirms opt-out (same as optimistic).
+    let seq = app.coding_data_write_seq;
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
             agent_id: id,
             opted_in: false,
+            seq,
         }),
         &mut app,
     );
     assert!(effects.is_empty(), "TaskResult arm must NOT emit Effect");
     // State re-anchored (was already true, stays true).
     assert!(app.coding_data_retention_opt_out);
-    // Re-toast on confirmation uses display name + ✓.
-    let toast = read_toast(&app);
     assert!(
-        toast.contains("Opt out"),
-        "confirmation toast must use display name 'Opt out': {toast}",
-    );
-    assert!(
-        toast.contains('\u{2713}'),
-        "opt-out confirmation toast uses ✓: {toast}",
+        app.agents[&AgentId(0)].toast.is_none(),
+        "server confirmation must not toast",
     );
 }
 
@@ -386,10 +261,12 @@ fn coding_data_sharing_updated_corrects_state_if_server_disagrees() {
     // overrides to "opt-in" (e.g. policy that prevents opt-out).
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
+    let seq = app.coding_data_write_seq;
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
             agent_id: id,
             opted_in: true, // server says opted-in
+            seq,
         }),
         &mut app,
     );
@@ -398,19 +275,6 @@ fn coding_data_sharing_updated_corrects_state_if_server_disagrees() {
     assert!(
         !app.coding_data_retention_opt_out,
         "server-confirmed opt-in must overwrite optimistic opt-out",
-    );
-    // Server-correction toast uses the destructive ⚠
-    // pattern for the opt-in direction (the privacy-degrading
-    // override deserves the warning glyph even if the SERVER, not
-    // the user, made the call).
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains("Opt in"),
-        "post-correction toast uses display name 'Opt in': {toast}",
-    );
-    assert!(
-        toast.contains('\u{26A0}'),
-        "opt-in direction always uses ⚠ glyph, even on server-correction path: {toast}",
     );
 }
 
@@ -428,11 +292,13 @@ fn coding_data_sharing_failed_rolls_back_and_toasts_error() {
     // was opt-in (true), so `rollback_to_opted_in = true`.
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
+    let seq = app.coding_data_write_seq;
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: id,
             error: "server error".into(),
             rollback_to_opted_in: true,
+            seq,
         }),
         &mut app,
     );
@@ -462,11 +328,13 @@ fn coding_data_sharing_failed_rolls_back_to_opt_out() {
     // failed, pre-toggle was opt-out).
     app.coding_data_retention_opt_out = false;
     let id = AgentId(0);
+    let seq = app.coding_data_write_seq;
     let effects = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: id,
             error: "network timeout".into(),
             rollback_to_opted_in: false,
+            seq,
         }),
         &mut app,
     );
@@ -522,11 +390,13 @@ fn coding_data_sharing_failed_refreshes_open_modal_snapshot() {
     // Optimistic flip.
     let _ = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
     // ACP failure.
+    let seq = app.coding_data_write_seq;
     let _ = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: AgentId(0),
             error: "x".into(),
             rollback_to_opted_in: true,
+            seq,
         }),
         &mut app,
     );
@@ -540,103 +410,18 @@ fn coding_data_sharing_failed_refreshes_open_modal_snapshot() {
     );
 }
 
-// ── coding_data_sharing toast tests ─────────────
-
-/// The opt-in transition
-/// uses the **`⚠` destructive-warning glyph** + spelled-out
-/// consequence text — mirroring `yolo_toast`'s
-/// "Always-approve ON: all tool actions auto-run" pattern. The
-/// consequence text is verbatim-pinned because the toast is the
-/// only post-commit feedback for a privacy-degrading transition;
-/// a future PR that softens the wording silently degrades the
-/// safety affordance.
 #[test]
-fn set_coding_data_sharing_opt_in_renders_destructive_warning_toast() {
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = true; // currently opted-out
-    let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
-    assert_eq!(effects.len(), 1, "non-idempotent opt-in must emit Effect");
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains('\u{26A0}'),
-        "opt-in toast MUST use ⚠ glyph (PR 9 R1, General-3 Issue 5 — \
-             privacy-degrading transition deserves destructive-warning glyph): {toast}",
-    );
-    assert!(
-        !toast.contains('\u{2713}'),
-        "opt-in toast MUST NOT use the uniform ✓ glyph — that's the \
-             safe-default toast for opt-out: {toast}",
-    );
-    assert!(
-        toast.contains("Opt in"),
-        "destructive toast still uses display name 'Opt in': {toast}",
-    );
-    // Consequence text pinned: a future PR softening this loses
-    // the safety affordance.
-    assert!(
-        toast.contains("code samples"),
-        "destructive toast must spell out the consequence \
-             (mention 'code samples'): {toast}",
-    );
-    assert!(
-        toast.contains("training"),
-        "destructive toast must spell out the consequence \
-             (mention 'training'): {toast}",
-    );
-}
-
-/// The opt-out transition uses the
-/// uniform `✓` glyph (safe default), NOT the destructive `⚠`.
-/// Mirrors `yolo_toast(false)` precedent — restoring the safe
-/// default doesn't warrant the heavier visual.
-#[test]
-fn set_coding_data_sharing_opt_out_renders_safe_default_toast() {
-    let mut app = test_app_with_agent();
-    app.coding_data_retention_opt_out = false; // currently opted-in
-    let _ = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
-    let toast = read_toast(&app);
-    assert!(
-        toast.contains('\u{2713}'),
-        "opt-out toast uses ✓ safe-default glyph: {toast}",
-    );
-    assert!(
-        !toast.contains('\u{26A0}'),
-        "opt-out toast MUST NOT use ⚠ — that's reserved for the privacy-degrading \
-             direction (PR 9 R1): {toast}",
-    );
-    assert!(toast.contains("Opt out"));
-}
-
-/// The toast renders
-/// the registered `EnumChoice.display` ("Opt in" / "Opt out"),
-/// NOT the persisted canonical ("opt-in" / "opt-out"). Mirrors
-/// the `set_theme_toast_format_uses_display_name` contract.
-/// The display strings here are pinned by the
-/// `coding_data_sharing_choices_use_canonical_strings` e2e test
-/// (registry side) AND
-/// `pr9_coding_data_sharing_choices_use_canonical_strings` (which
-/// also pins the display labels via the same EnumChoice
-/// entries).
-#[test]
-fn coding_data_sharing_toast_format_uses_display_name() {
-    let mut app = test_app_with_agent();
-    // Opt-in direction.
-    app.coding_data_retention_opt_out = true;
-    let _ = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
-    let opt_in_toast = read_toast(&app);
-    assert!(
-        opt_in_toast.contains("Opt in"),
-        "opt-in toast uses display 'Opt in', not canonical 'opt-in': {opt_in_toast}",
-    );
-    // Clear and test opt-out direction.
-    app.agents.get_mut(&AgentId(0)).unwrap().toast = None;
-    app.coding_data_retention_opt_out = false;
-    let _ = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
-    let opt_out_toast = read_toast(&app);
-    assert!(
-        opt_out_toast.contains("Opt out"),
-        "opt-out toast uses display 'Opt out', not canonical 'opt-out': {opt_out_toast}",
-    );
+fn set_coding_data_sharing_is_silent_in_both_directions() {
+    for opted_in in [true, false] {
+        let mut app = test_app_with_agent();
+        app.coding_data_retention_opt_out = opted_in; // a real change either way
+        let _ = dispatch(Action::SetCodingDataSharing { opted_in }, &mut app);
+        assert!(
+            app.agents[&AgentId(0)].toast.is_none(),
+            "opted_in={opted_in} must not toast, got {:?}",
+            app.agents[&AgentId(0)].toast,
+        );
+    }
 }
 
 /// The failure toast
@@ -650,11 +435,13 @@ fn coding_data_sharing_failed_scrubs_long_error_messages() {
     let id = AgentId(0);
     // ~500-char error simulating a stack trace / HTML 502 page.
     let huge_error = "a".repeat(500);
+    let seq = app.coding_data_write_seq;
     let _ = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: id,
             error: huge_error.clone(),
             rollback_to_opted_in: false,
+            seq,
         }),
         &mut app,
     );
@@ -680,11 +467,13 @@ fn coding_data_sharing_failed_scrubs_control_chars_in_error() {
     let id = AgentId(0);
     // Short message with embedded newlines.
     let multiline = "line1\nline2\nline3".to_string();
+    let seq = app.coding_data_write_seq;
     let _ = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: id,
             error: multiline.clone(),
             rollback_to_opted_in: false,
+            seq,
         }),
         &mut app,
     );
@@ -709,11 +498,13 @@ fn coding_data_sharing_failed_preserves_short_clean_error_message() {
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
     let short_clean = "network timeout".to_string();
+    let seq = app.coding_data_write_seq;
     let _ = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: id,
             error: short_clean.clone(),
             rollback_to_opted_in: false,
+            seq,
         }),
         &mut app,
     );
@@ -804,7 +595,7 @@ fn privacy_banner_ready_app() -> AppView {
     app.privacy_notice_rollout = true;
     app.privacy_banner_acked = None;
     app.privacy_banner_reshow_days = None;
-    app.privacy_banner_accept_inflight = false;
+    app.privacy_banner_opt_in_inflight = false;
     app.is_zdr = false;
     app.team_name = None;
     app.coding_data_retention_opt_out = true;
@@ -841,28 +632,30 @@ fn privacy_banner_should_show_respects_gates() {
     assert!(!app.privacy_banner_should_show(), "rollout off");
 }
 
-/// Accept success: ACP confirmation acks the banner.
+/// `[Opt in]` success: ACP confirmation acks the banner.
 #[test]
-fn privacy_banner_accept_success_acks() {
+fn privacy_banner_opt_in_success_acks() {
     let mut app = privacy_banner_ready_app();
-    let effects = dispatch(Action::PrivacyBannerAccept, &mut app);
+    let effects = dispatch(Action::PrivacyBannerOptIn, &mut app);
     assert_eq!(effects.len(), 1);
     assert!(matches!(
         &effects[0],
         Effect::SetCodingDataSharing { opted_in: true, .. }
     ));
-    assert!(app.privacy_banner_accept_inflight);
+    assert!(app.privacy_banner_opt_in_inflight);
     assert!(!app.coding_data_retention_opt_out);
     assert!(app.privacy_banner_acked.is_none());
 
+    let seq = app.coding_data_write_seq;
     let ack_effects = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
             agent_id: AgentId(0),
             opted_in: true,
+            seq,
         }),
         &mut app,
     );
-    assert!(!app.privacy_banner_accept_inflight);
+    assert!(!app.privacy_banner_opt_in_inflight);
     assert!(app.privacy_banner_acked.is_some());
     assert!(
         ack_effects
@@ -872,24 +665,26 @@ fn privacy_banner_accept_success_acks() {
     );
 }
 
-/// Accept failure: no ack; welcome toast carries the error.
+/// `[Opt in]` failure: no ack; welcome toast carries the error.
 #[test]
-fn privacy_banner_accept_failure_no_ack_sets_welcome_toast() {
+fn privacy_banner_opt_in_failure_no_ack_sets_welcome_toast() {
     let mut app = privacy_banner_ready_app();
-    let effects = dispatch(Action::PrivacyBannerAccept, &mut app);
+    let effects = dispatch(Action::PrivacyBannerOptIn, &mut app);
     assert_eq!(effects.len(), 1);
-    assert!(app.privacy_banner_accept_inflight);
+    assert!(app.privacy_banner_opt_in_inflight);
 
+    let seq = app.coding_data_write_seq;
     let fail_effects = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: AgentId(0),
             error: "server error".into(),
             rollback_to_opted_in: false,
+            seq,
         }),
         &mut app,
     );
     assert!(fail_effects.is_empty());
-    assert!(!app.privacy_banner_accept_inflight);
+    assert!(!app.privacy_banner_opt_in_inflight);
     assert!(app.privacy_banner_acked.is_none());
     assert!(
         app.coding_data_retention_opt_out,
@@ -902,38 +697,160 @@ fn privacy_banner_accept_failure_no_ack_sets_welcome_toast() {
         .unwrap_or("");
     assert!(
         toast.contains("coding data sharing"),
-        "welcome toast on Accept failure: {toast}"
+        "welcome toast on [Opt in] failure: {toast}"
     );
     assert!(toast.contains("server error"), "error in toast: {toast}");
 }
 
-/// Customize while an Accept ACP call is inflight must be a no-op: an
-/// eager ack would survive the Accept-failure rollback and hide the
+/// `[Opt out]` while an `[Opt in]` ACP call is inflight must be a no-op:
+/// an eager ack would survive the opt-in-failure rollback and hide the
 /// banner forever.
 #[test]
-fn privacy_banner_customize_noop_while_accept_inflight() {
+fn privacy_banner_opt_out_noop_while_opt_in_inflight() {
     let mut app = privacy_banner_ready_app();
-    let _ = dispatch(Action::PrivacyBannerAccept, &mut app);
-    assert!(app.privacy_banner_accept_inflight);
+    let _ = dispatch(Action::PrivacyBannerOptIn, &mut app);
+    assert!(app.privacy_banner_opt_in_inflight);
 
-    let effects = dispatch(Action::PrivacyBannerCustomize, &mut app);
+    let effects = dispatch(Action::PrivacyBannerOptOut, &mut app);
     assert!(
         effects.is_empty(),
-        "customize during inflight accept must be a no-op: {effects:?}"
+        "[Opt out] during an inflight [Opt in] must be a no-op: {effects:?}"
     );
     assert!(app.privacy_banner_acked.is_none(), "no ack while inflight");
 
+    let seq = app.coding_data_write_seq;
     let _ = dispatch(
         Action::TaskComplete(TaskResult::CodingDataSharingFailed {
             agent_id: AgentId(0),
             error: "server error".into(),
             rollback_to_opted_in: false,
+            seq,
         }),
         &mut app,
     );
     assert!(
         app.privacy_banner_should_show(),
-        "failed Accept must keep the banner even after a raced Customize"
+        "a failed [Opt in] must keep the banner even after a raced [Opt out]"
+    );
+}
+
+/// The ack must not hinge on the round trip, unlike `[Opt in]`'s.
+#[test]
+fn privacy_banner_opt_out_acks_now_and_records_decline() {
+    use crate::views::modal::ActiveModal;
+    let mut app = privacy_banner_ready_app();
+
+    let effects = dispatch(Action::PrivacyBannerOptOut, &mut app);
+
+    assert!(
+        app.privacy_banner_acked.is_some(),
+        "the ack lands on click, not on an ACP reply"
+    );
+    assert!(
+        !app.privacy_banner_should_show(),
+        "the banner is gone the moment it is dismissed"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistPrivacyBannerAcked { .. })),
+        "ack must persist: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::SetCodingDataSharing {
+                opted_in: false,
+                rollback_to_opted_in: false,
+                ..
+            }
+        )),
+        "the decline rides the ordinary write, so its response re-anchors \
+         the mirror like every other one: {effects:?}"
+    );
+    assert!(
+        !app.privacy_banner_opt_in_inflight,
+        "a best-effort write must not arm the opt-in inflight guard, which \
+         would block [Opt in] and confuse both ACP result handlers"
+    );
+    assert!(
+        app.coding_data_retention_opt_out,
+        "declining leaves the user opted out"
+    );
+    assert!(
+        app.agents
+            .values()
+            .all(|a| !matches!(a.active_modal, Some(ActiveModal::Settings { .. }))),
+        "[Opt out] answers the question; it must not detour into settings"
+    );
+}
+
+/// A superseded reply must not touch state. `[Opt out]` fires a write, the
+/// user opts in from settings before it lands, and only then does the stale
+/// decline answer: its `rollback_to_opted_in: false` was captured before the
+/// opt-in existed, so applying it would flip the pager to opted-out while
+/// the server holds opted-in — claiming data isn't retained when it is.
+#[test]
+fn superseded_coding_data_reply_cannot_clobber_a_newer_write() {
+    for stale_failed in [true, false] {
+        let mut app = privacy_banner_ready_app();
+
+        // Write 1: the banner decline.
+        let _ = dispatch(Action::PrivacyBannerOptOut, &mut app);
+        assert_eq!(app.coding_data_write_seq, 1);
+
+        // Write 2: the user opts in from settings, and it confirms.
+        let _ = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert_eq!(app.coding_data_write_seq, 2);
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+                agent_id: AgentId(0),
+                opted_in: true,
+                seq: 2,
+            }),
+            &mut app,
+        );
+        assert!(!app.coding_data_retention_opt_out, "opted in");
+
+        // Write 1 finally answers, either way it can.
+        let stale_reply = if stale_failed {
+            TaskResult::CodingDataSharingFailed {
+                agent_id: AgentId(0),
+                error: "network timeout".into(),
+                rollback_to_opted_in: false,
+                seq: 1,
+            }
+        } else {
+            TaskResult::CodingDataSharingUpdated {
+                agent_id: AgentId(0),
+                opted_in: false,
+                seq: 1,
+            }
+        };
+        let effects = dispatch(Action::TaskComplete(stale_reply), &mut app);
+
+        assert!(effects.is_empty(), "stale reply must emit nothing");
+        assert!(
+            !app.coding_data_retention_opt_out,
+            "stale reply must not undo the newer opt-in (failed={stale_failed})"
+        );
+        assert!(
+            app.agents[&AgentId(0)].toast.is_none(),
+            "stale reply must not toast — nothing the user is looking at failed"
+        );
+    }
+}
+
+/// A double-click (or a stale frame's hit rect) must not send a second
+/// decline.
+#[test]
+fn privacy_banner_opt_out_is_idempotent() {
+    let mut app = privacy_banner_ready_app();
+    let _ = dispatch(Action::PrivacyBannerOptOut, &mut app);
+    let again = dispatch(Action::PrivacyBannerOptOut, &mut app);
+    assert!(
+        again.is_empty(),
+        "second dismissal must be inert: {again:?}"
     );
 }
 

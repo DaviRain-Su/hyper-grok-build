@@ -72,6 +72,17 @@ pub trait ToolMetadata: Send + Sync {
         Expr::True
     }
 
+    /// Model-safe fallback description for `xai_tool_runtime::Tool::description()`
+    /// implementations: the raw template with all `${{ … }}` / `${% … %}`
+    /// markers stripped.
+    ///
+    /// The registry path (`versioned_definition`) renders templates properly
+    /// with the finalized toolset context; this is only for consumers that
+    /// bypass the registry, which must never see raw template syntax.
+    fn sanitized_description_template(&self) -> String {
+        crate::types::template_renderer::strip_template_markers(self.description_template())
+    }
+
     /// Build the tool definition for a given contract version.
     ///
     /// Default: renders `description_template()` via the `TemplateRenderer`
@@ -90,8 +101,7 @@ pub trait ToolMetadata: Send + Sync {
     ) -> ToolDefinition {
         let raw_desc = description_override.unwrap_or_else(|| self.description_template());
         let description = renderer.render(raw_desc).unwrap_or_else(|e| {
-            tracing::warn!("Description template render failed, using raw: {e}");
-            raw_desc.to_string()
+            crate::types::template_renderer::strip_markers_on_render_failure(raw_desc, &e)
         });
         let remapped_schema = if param_map.is_empty() {
             input_schema.clone()

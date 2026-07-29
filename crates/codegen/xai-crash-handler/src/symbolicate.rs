@@ -81,6 +81,9 @@ pub fn format_report(blob: &CrashBlob, frames: &[ResolvedFrame]) -> String {
 pub fn signal_name(sig: u8) -> &'static str {
     match sig as i32 {
         4 => "SIGILL (Illegal instruction)",
+        // SIGABRT is 6 on both macOS and Linux.
+        // With panic = "abort", every Rust panic terminates via SIGABRT.
+        6 => "SIGABRT (Abort)",
         // SIGBUS is 10 on macOS, 7 on Linux
         7 | 10 => "SIGBUS (Bus error)",
         11 => "SIGSEGV (Segmentation fault)",
@@ -89,6 +92,11 @@ pub fn signal_name(sig: u8) -> &'static str {
 }
 
 fn si_code_name(sig: u8, code: i32) -> &'static str {
+    // SIGABRT carries no fault-specific si_code (abort(3) raises it directly;
+    // the kernel reports SI_USER/SI_TKILL-style origins instead).
+    if sig == 6 {
+        return "abort() - raised by the process (e.g. Rust panic with panic=abort)";
+    }
     let is_bus = sig == 7 || sig == 10;
     if is_bus {
         match code {
@@ -112,6 +120,7 @@ mod tests {
 
     #[test]
     fn signal_names() {
+        assert_eq!(signal_name(6), "SIGABRT (Abort)");
         assert_eq!(signal_name(10), "SIGBUS (Bus error)");
         assert_eq!(signal_name(7), "SIGBUS (Bus error)");
         assert_eq!(signal_name(11), "SIGSEGV (Segmentation fault)");

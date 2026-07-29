@@ -1474,7 +1474,7 @@ impl acp::Agent for MvpAgent {
                 .await
                 .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
         };
-        self.session_turn_numbers.borrow_mut().insert(session_id.clone(), 0u64);
+        self.set_turn_number(&session_id, 0u64);
         let chat_history = vec![];
         let client_code_nav_enabled = arguments
             .meta
@@ -1861,9 +1861,7 @@ impl acp::Agent for MvpAgent {
         let restored_awaiting_plan_approval = persisted_plan_mode
             .as_ref()
             .is_some_and(|s| s.awaiting_plan_approval);
-        self.session_turn_numbers
-            .borrow_mut()
-            .insert(session_id.clone(), summary.next_trace_turn);
+        self.set_turn_number(&session_id, summary.next_trace_turn);
         tracing::info!(
             session_id = %session_id.0,
             next_trace_turn = summary.next_trace_turn,
@@ -2775,10 +2773,7 @@ impl acp::Agent for MvpAgent {
             );
         }
         let next_trace_turn = self
-            .session_turn_numbers
-            .borrow()
-            .get(&arguments.session_id)
-            .copied()
+            .session_turn_number(&arguments.session_id)
             .unwrap_or_else(|| turn_number.saturating_add(1));
         let _ = handle
             .cmd_tx

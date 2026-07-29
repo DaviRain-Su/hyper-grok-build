@@ -74,6 +74,12 @@ fn plan_scrollback_body(plan_content: Option<&str>) -> String {
 /// a short notice so the user sees *why* approval is parked (otherwise only the
 /// controls strip appears and the session looks stuck).
 ///
+/// The block is anchored **above** the still-running `exit_plan_mode` tool row,
+/// not appended after it, so the commit frontier reaches the plan while the
+/// approval is still parked. Users reported losing the head of a plan to the
+/// clipped live tail; design doc §6.16 has the full argument and the rejected
+/// alternatives.
+///
 /// NOTE (draw-path state mutation + replay durability): this pushes into
 /// `ScrollbackState` from the render path — a deliberate exception, since the
 /// plan block must enter the normal commit pipeline. The pushed block is
@@ -110,9 +116,17 @@ pub fn maybe_commit_plan(app: &mut AppView) {
     // if it ever did, stamping the id anyway would treat the plan as committed
     // while nothing ever reaches native scrollback.
     if let Some(agent) = app.agents.get_mut(&id) {
-        agent
-            .scrollback
-            .push_block(RenderBlock::agent_message(content));
+        let block = RenderBlock::agent_message(content);
+        // No anchor (the tool was reaped): append, and the plan commits at turn
+        // end — the pre-fix behavior, still better than dropping it.
+        match minimal_api::pending_tool_entry_id(agent, &tool_call_id) {
+            Some(anchor) => {
+                agent.scrollback.insert_block_before(anchor, block);
+            }
+            None => {
+                agent.scrollback.push_block(block);
+            }
+        }
         minimal_api::set_minimal_committed_plan_id(app, Some(tool_call_id));
     }
 }

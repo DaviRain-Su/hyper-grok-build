@@ -34,19 +34,18 @@ const MAX_BYTES: usize = 50 * 1024;
 
 // ─── Description ────────────────────────────────────────────────────
 
-const DESCRIPTION: &str = r#"Reads a file from the local filesystem. You can access any file directly by using this tool.
+const DESCRIPTION: &str = r#"Reads a file or directory from the local filesystem. You can access any file directly by using this tool.
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
 - The ${{ params.read.filePath }} parameter must be an absolute path, not a relative path
-- By default, it reads up to {max_lines_read} lines starting from the beginning of the file
+- By default, it reads up to 2000 lines starting from the beginning of the file
 - You can optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
 - Any lines longer than {max_chars_per_line} characters will be truncated
-- Results are returned using cat -n format, with line numbers starting at 1. The format is: LINE_NUMBER→LINE_CONTENT, where LINE_NUMBER is right-aligned and padded with spaces
+- Contents are returned with each line prefixed by its line number as `LINE_NUMBER: LINE_CONTENT`, with line numbers starting at 1. For example, if a file has contents "foo\n", you will receive "1: foo"
+- For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories
 - This tool can read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as this tool uses multimodal LLMs.
-- This tool can read PDF files (.pdf). PDFs are processed page by page, extracting both text and visual content for analysis.
-- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.
-- This tool can only read files, not directories.${%- if tools.by_kind.execute %} To read a directory, use an ls command via the ${{ tools.by_kind.execute }} tool.${%- endif %}
+- This tool can read PDF files (.pdf). PDFs are presented visually to the multimodal LLM as attachments.
 - You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel.
 - You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."#;
@@ -129,7 +128,7 @@ impl xai_tool_runtime::Tool for ReadTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "read",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -541,12 +540,16 @@ mod tests {
             "renamed offset/limit must appear:\n{rendered}"
         );
         assert!(
-            rendered.contains("via the run_command tool"),
-            "resolved execute tool name must appear:\n{rendered}"
+            rendered.contains("file or directory")
+                && rendered.contains("trailing `/` for subdirectories"),
+            "directory support must be documented:\n{rendered}"
         );
         assert!(
-            !rendered.contains("a line offset and limit") && !rendered.contains("Bash tool"),
-            "stale offset/limit/Bash-tool literals must not remain:\n{rendered}"
+            !rendered.contains("only read files")
+                && !rendered.contains("ls command")
+                && !rendered.contains("a line offset and limit")
+                && !rendered.contains("Bash tool"),
+            "stale files-only/ls/offset/Bash-tool literals must not remain:\n{rendered}"
         );
     }
 

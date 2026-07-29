@@ -248,6 +248,7 @@ fn main() -> anyhow::Result<()> {
         None
     };
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(xai_tty_utils::runtime::capped_worker_threads().get())
         .enable_all()
         .build()?
         .block_on(run(args, cwd))
@@ -441,6 +442,14 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
             tracing::info!("metric export enabled");
         }
         None => tracing::info!("metric export disabled (not connected)"),
+    }
+    if metric_donation_pump.is_some()
+        && let Some((tx, control_port)) = &preview_shutdown
+    {
+        tokio::spawn(preview_supervisor::supervise_preview_metrics(
+            *control_port,
+            tx.subscribe(),
+        ));
     }
     tracing::info!(
         server_id = ?server_id,

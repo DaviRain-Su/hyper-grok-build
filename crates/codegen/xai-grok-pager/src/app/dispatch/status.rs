@@ -68,51 +68,46 @@ pub(super) fn dispatch_show_session_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// Show privacy and data retention status as a system message in scrollback.
-///
-/// Three-state display: Enterprise ZDR, coding data sharing opted out,
-/// or opted in. Labels align with `CODING_DATA_SHARING_CHOICES` in
-/// `settings/defs.rs` and the `coding_data_sharing_toast` format.
-///
-/// Also lists config knobs that `/privacy` does not change (technical
-/// pointers only; no policy claims).
-pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
-    let mut lines = Vec::new();
-
-    if app.is_zdr {
-        // Enterprise ZDR -- the team has disabled retention entirely.
-        lines.push("  Zero Data Retention: enabled");
-        lines.push("  Your data is not retained or used for training (ZDR enabled).");
-    } else if app.coding_data_retention_opt_out {
-        // Coding data sharing opted out -- matches desktop's "Privacy mode" state.
-        lines.push("  Privacy: privacy mode");
-        lines.push("  Your code data will not be trained on or used to improve the product.");
-        lines.push("");
-        lines.push("  Use /privacy opt-in to share data and help improve the product.");
-    } else {
-        // Coding data sharing opted in -- matches desktop's "Share data" state.
-        lines.push("  Privacy: share data");
-        lines.push("  Usage and code data may be used by SpaceXAI to improve the product.");
-        lines.push("");
-        lines.push("  Use /privacy opt-out to enable privacy mode.");
-    }
-
-    // Config keys only; do not describe retention/training/analytics policy here.
-    lines.push("");
-    lines.push("  Other settings (not changed by /privacy):");
-    lines.push("  - [features] telemetry / GROK_TELEMETRY_ENABLED");
-    lines.push("  - [telemetry] trace_upload / GROK_TELEMETRY_TRACE_UPLOAD");
-    lines.push("  - GROK_EXTERNAL_OTEL / OTEL_*");
-    lines.push("");
-    lines.push("  Learn more: https://x.ai/legal");
-    let text = lines.join("\n");
-    push_system_to_any_agent(app, &text);
-    vec![]
-}
-
 /// State-only mutation for `coding_data_sharing`. SHELL-owned.
 pub(super) fn set_coding_data_sharing_inner(app: &mut AppView, opted_in: bool) {
     app.coding_data_retention_opt_out = !opted_in;
+}
+
+/// Agent the coding-data ACP write is attributed to. Privacy is app-level,
+/// so the id only routes the result back; `AgentId(0)` is the synthetic
+/// stand-in for the welcome screen, where the banner is reachable before a
+/// session exists.
+fn coding_data_sharing_agent_id(app: &AppView) -> AgentId {
+    match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => app.agents.keys().next().copied().unwrap_or(AgentId(0)),
+    }
+}
+
+/// Claim the next write generation. Every `SetCodingDataSharing` must take
+/// one so its reply can be matched against the newest write.
+fn next_coding_data_write_seq(app: &mut AppView) -> u64 {
+    app.coding_data_write_seq += 1;
+    app.coding_data_write_seq
+}
+
+/// Is this reply from the newest write? Writes to this endpoint run
+/// concurrently and can land out of order, so an older reply must not touch
+/// state: its `rollback_to_opted_in` predates the newer write, and applying
+/// it would silently undo whatever the user did since.
+fn is_current_coding_data_write(app: &AppView, seq: u64, agent_id: AgentId) -> bool {
+    if seq == app.coding_data_write_seq {
+        return true;
+    }
+    tracing::debug!(
+        target: "settings",
+        key = "coding_data_sharing",
+        ?agent_id,
+        seq,
+        current = app.coding_data_write_seq,
+        "dropping superseded coding-data reply",
+    );
+    false
 }
 
 /// Set coding-data-sharing preference. SHELL-owned, auth-metadata-backed
@@ -134,29 +129,18 @@ pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<
             return vec![];
         }
     }
-    // Synthetic AgentId(0) when no agents (welcome banner Accept).
-    let agent_id = match app.active_view {
-        crate::app::app_view::ActiveView::Agent(id) => id,
-        _ => app
-            .agents
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or(crate::app::agent::AgentId(0)),
-    };
-
+    let agent_id = coding_data_sharing_agent_id(app);
     let prev = !app.coding_data_retention_opt_out;
 
-    // ── Idempotent path: toast but skip the ACP round-trip. ──────────
+    // ── Idempotent path: skip the ACP round-trip. ────────────────────
     if prev == opted_in {
-        app.show_toast(&coding_data_sharing_toast(opted_in));
         return vec![];
     }
 
-    // ── Optimistic mutation: state, then UI feedback, then effect. ───
+    // Optimistic mutation. Success is silent; only the refusals above and
+    // the failure handler toast.
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
-    app.show_toast(&coding_data_sharing_toast(opted_in));
 
     tracing::info!(
         target: "settings",
@@ -169,30 +153,8 @@ pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<
         agent_id,
         opted_in,
         rollback_to_opted_in: prev,
+        seq: next_coding_data_write_seq(app),
     }]
-}
-
-/// Format the `Coding data sharing` toast. Asymmetric: opt-in
-/// (privacy-degrading) uses ⚠ + consequence text; opt-out (safe
-/// default) uses ✓. Uses display names from the registry catalog.
-pub(super) fn coding_data_sharing_toast(opted_in: bool) -> String {
-    let display = display_for_coding_data_sharing_canonical(opted_in);
-    if opted_in {
-        // Privacy-degrading: warn glyph + spelled-out consequence.
-        format!(
-            "\u{26A0} Coding data sharing: {display} \u{2014} code samples may be retained \
-             for training"
-        )
-    } else {
-        // Safe default — uniform ✓ glyph.
-        format!("\u{2713} Coding data sharing: {display}")
-    }
-}
-
-/// Display string for the canonical bool. Keep aligned with
-/// `CODING_DATA_SHARING_CHOICES` in `settings/defs.rs`.
-fn display_for_coding_data_sharing_canonical(opted_in: bool) -> &'static str {
-    if opted_in { "Opt in" } else { "Opt out" }
 }
 
 /// Scrub an untrusted error string for toast display. Substitutes a
@@ -209,21 +171,6 @@ pub(super) fn scrub_error_for_toast(error: &str) -> String {
         "server error (see logs for details)".to_string()
     } else {
         error.to_string()
-    }
-}
-
-/// Push a system message to the active agent's scrollback, or to any available
-/// agent if on the welcome screen.
-fn push_system_to_any_agent(app: &mut AppView, msg: &str) {
-    let block = crate::scrollback::block::RenderBlock::system(msg.to_string());
-    if let ActiveView::Agent(id) = app.active_view
-        && let Some(agent) = app.agents.get_mut(&id)
-    {
-        agent.scrollback.push_block(block);
-        return;
-    }
-    if let Some(agent) = app.agents.values_mut().next() {
-        agent.scrollback.push_block(block);
     }
 }
 
@@ -430,16 +377,16 @@ pub(super) fn handle_coding_data_sharing_updated(
     app: &mut AppView,
     agent_id: AgentId,
     opted_in: bool,
+    seq: u64,
 ) -> Vec<Effect> {
+    if !is_current_coding_data_write(app, seq, agent_id) {
+        return vec![];
+    }
     // Re-anchor mirror to server-confirmed value (defense-in-depth against
     // server reshaping the boolean). `agent_id` discarded — privacy is
     // app-level, not per-agent.
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
-    // Re-toast on confirmation. Without this, a slow ACP round-trip would
-    // leave the user with only the optimistic toast (already faded) and no
-    // server-confirmed feedback.
-    app.show_toast(&coding_data_sharing_toast(opted_in));
     tracing::info!(
         target: "settings",
         key = "coding_data_sharing",
@@ -448,9 +395,9 @@ pub(super) fn handle_coding_data_sharing_updated(
         "ACP update confirmed; mirror re-anchored",
     );
     let mut effects = vec![];
-    // Ack only after successful opt-in from the privacy banner Accept path.
-    if app.privacy_banner_accept_inflight {
-        app.privacy_banner_accept_inflight = false;
+    // Ack only after a successful opt-in from the banner's [Opt in].
+    if app.privacy_banner_opt_in_inflight {
+        app.privacy_banner_opt_in_inflight = false;
         if opted_in {
             effects.extend(ack_privacy_banner(app));
         }
@@ -463,7 +410,15 @@ pub(super) fn handle_coding_data_sharing_failed(
     agent_id: AgentId,
     error: String,
     rollback_to_opted_in: bool,
+    seq: u64,
 ) -> Vec<Effect> {
+    // A superseded failure must not revert: `rollback_to_opted_in` predates
+    // the newer write, so applying it would undo a change the user made
+    // after this one was sent. It must not toast either — nothing the user
+    // is looking at failed.
+    if !is_current_coding_data_write(app, seq, agent_id) {
+        return vec![];
+    }
     // Revert optimistic mutation: inner → refresh → toast. `agent_id`
     // discarded — privacy is global.
     set_coding_data_sharing_inner(app, rollback_to_opted_in);
@@ -481,8 +436,8 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed; reverted optimistic mutation",
     );
-    // Accept failure: no ack; clear inflight so the banner stays.
-    app.privacy_banner_accept_inflight = false;
+    // Opt-in failure: no ack; clear inflight so the banner stays.
+    app.privacy_banner_opt_in_inflight = false;
     vec![]
 }
 
@@ -493,31 +448,43 @@ pub(in crate::app::dispatch) fn ack_privacy_banner(app: &mut AppView) -> Vec<Eff
     vec![Effect::PersistPrivacyBannerAcked { acked_at }]
 }
 
-/// Accept: opt-in via settings path; ack only after ACP success.
-pub(in crate::app::dispatch) fn dispatch_privacy_banner_accept(app: &mut AppView) -> Vec<Effect> {
-    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+/// `[Opt in]`: opt in via the settings path; ack only after ACP success, so
+/// a failed round trip leaves the banner up instead of recording a change
+/// that did not happen.
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_opt_in(app: &mut AppView) -> Vec<Effect> {
+    if app.privacy_banner_opt_in_inflight || !app.privacy_banner_should_show() {
         return vec![];
     }
     let effects = set_coding_data_sharing(app, true);
     // should_show guarantees opted-out + unguarded, so effects is only empty
-    // if a guard regresses; leaving inflight false keeps Accept clickable.
-    app.privacy_banner_accept_inflight = !effects.is_empty();
+    // if a guard regresses; leaving inflight false keeps [Opt in] clickable.
+    app.privacy_banner_opt_in_inflight = !effects.is_empty();
     effects
 }
 
-/// Customize: ack, then open settings on coding_data_sharing
-/// (creates/switches agent when opened from welcome).
-pub(in crate::app::dispatch) fn dispatch_privacy_banner_customize(
-    app: &mut AppView,
-) -> Vec<Effect> {
-    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+/// `[Opt out]`: ack locally, then record the decline.
+///
+/// The ack does NOT wait on the server, unlike `[Opt in]`'s: the user asked
+/// for no change, so gating dismissal on a round trip would only re-ask a
+/// question they answered.
+///
+/// The write is built here rather than through `set_coding_data_sharing`,
+/// whose idempotent guard would skip it — the user is already opted out,
+/// and recording that is the point. Its response re-anchors the mirror;
+/// concurrent writes to this endpoint are still unordered.
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_opt_out(app: &mut AppView) -> Vec<Effect> {
+    if app.privacy_banner_opt_in_inflight || !app.privacy_banner_should_show() {
         return vec![];
     }
     let mut effects = ack_privacy_banner(app);
-    effects.extend(super::settings::ui::dispatch_open_settings(
-        app,
-        Some("coding_data_sharing"),
-    ));
+    effects.push(Effect::SetCodingDataSharing {
+        agent_id: coding_data_sharing_agent_id(app),
+        opted_in: false,
+        // Already opted out, so the revert is a no-op — and the generation
+        // guard drops it entirely if the user has opted in since.
+        rollback_to_opted_in: false,
+        seq: next_coding_data_write_seq(app),
+    });
     effects
 }
 

@@ -106,6 +106,8 @@ impl GboomState {
         // On terminals that report key releases (Kitty keyboard protocol),
         // latch keys on press/release so the player can move and turn at
         // once; otherwise fall back to the repeat-bridging timer model.
+        // Deliberately `kitty_flags_pushed`, not `kitty_releases_reported`: the
+        // game pushes its own REPORT_ALL_KEYS layer over a downgraded base.
         game.set_release_aware(crate::terminal::kitty_flags_pushed());
         Self {
             game,

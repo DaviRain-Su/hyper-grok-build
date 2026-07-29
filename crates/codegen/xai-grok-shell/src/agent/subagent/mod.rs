@@ -103,6 +103,12 @@ impl AutoCompactThresholdTiers {
 pub(crate) struct SubagentSpawnContext {
     /// Parent's LSP runtime — inherited via ToolContext, same as fs/terminal.
     pub lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
+    /// Root session's process scope, inherited so the subagent's own child
+    /// processes are reaped when the parent session closes. It is the root's
+    /// (not an intermediate parent's) because xai-grok-tools task/coordinator.rs
+    /// `handle_command`'s Spawn arm re-parents nested Spawn requests to the root
+    /// parent, so every subagent resolves back to the root session.
+    pub process_scope: Option<xai_tty_utils::ProcessScope>,
     /// Parent's client-registered hooks, inherited so the subagent's tool calls hit the
     /// same PreToolUse gate and its events fire the same observe hooks over the parent's
     /// connection. Empty when the parent has none. Filled by the coordinator after the

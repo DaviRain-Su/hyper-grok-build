@@ -539,6 +539,7 @@ pub async fn handle(
                 signoff: req.signoff,
                 push: req.push,
                 sync: req.sync,
+                ..Default::default()
             };
             let commit_result = ops
                 .dispatch(&op, None)

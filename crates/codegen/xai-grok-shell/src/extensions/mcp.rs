@@ -785,18 +785,12 @@ pub async fn init_agent_mcp_pool(mcp_state: &Arc<TokioMutex<McpState>>, cwd: &st
     }
 
     let noop = xai_file_utils::events::EventWriter::noop();
-    let results = start_mcp_servers(
-        configs,
-        None,
-        Some(cwd),
-        &Default::default(),
-        &Default::default(),
-        &noop,
-        // Pass Interactive to preserve prior deferred-OAuth behavior. A session-less SDK agent can
-        // reach this non-interactively; threading real non-interactivity here is a deliberate follow-up.
-        crate::session::mcp_servers::OauthInteractivity::Interactive,
-    )
-    .await;
+    // session_less picks Interactive to preserve prior deferred-OAuth behavior. A session-less SDK
+    // agent can reach this non-interactively; threading real non-interactivity is a deliberate follow-up.
+    let ctx = crate::session::mcp_servers::McpSpawnCtx::session_less(&noop);
+    let meta = Default::default();
+    let oauth = Default::default();
+    let results = start_mcp_servers(configs, Some(cwd), &meta, &oauth, &ctx).await;
     let clients: HashMap<McpServerName, Arc<McpClient>> = results
         .into_iter()
         .filter_map(|r| match r {
@@ -1731,7 +1725,7 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         if let Some(connector_id) = gateway_connector_id {
             if let Err(e) =
-                crate::util::config::save_mcp_server_enabled(&req.server_name, true).await
+                crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await
             {
                 tracing::warn!(
                     server = req.server_name.as_str(),
@@ -1752,7 +1746,9 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             crate::session::managed_mcp::invalidate_cache(agent.managed_mcp_cache()).await;
         }
         let managed_configs = agent.get_managed_mcp_configs().await;
-        if let Err(e) = crate::util::config::save_mcp_server_enabled(&req.server_name, true).await {
+        if let Err(e) =
+            crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await
+        {
             tracing::warn!(
                 server = req.server_name.as_str(),
                 error = %e,
@@ -1933,8 +1929,8 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     // The toggle path spawns a task that adds the server to
-    // `disabled_mcp_servers`. Clean that up since we're deleting entirely.
-    let _ = crate::util::config::save_mcp_server_enabled(&req.server_name, true).await;
+    // `disabled_mcp_servers`. Clear user list only — do not unstick project.
+    let _ = crate::util::config::save_user_mcp_server_enabled(&req.server_name, true).await;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }

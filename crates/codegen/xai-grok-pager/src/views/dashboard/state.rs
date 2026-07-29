@@ -475,9 +475,9 @@ pub struct DashboardState {
     pub peek_reply_rect: Option<Rect>,
     /// Directory the reply's `@` file-search daemon is currently rooted
     /// at. Tracked so [`Self::ensure_peek_reply_cwd`] can skip a
-    /// `retarget` (which rebuilds the daemon thread) when the peeked
-    /// agent's cwd hasn't actually changed. `None` = the construction
-    /// default (`.`); set to the launch cwd at dashboard open.
+    /// `retarget` (which drops the daemon so the next @-use rebuilds it)
+    /// when the peeked agent's cwd hasn't actually changed. `None` = the
+    /// construction default (`.`); set to the launch cwd at dashboard open.
     peek_reply_cwd: Option<PathBuf>,
     /// Cwd of the currently-peeked agent, recorded by the render pass
     /// (which has the agents map). Applied lazily to the reply's `@`
@@ -1919,12 +1919,12 @@ impl DashboardState {
     /// Lazily root the reply's `@` file-search daemon at the peeked
     /// agent's cwd (recorded in [`Self::peek_reply_target_cwd`]).
     ///
-    /// Applied only when it differs from the daemon's current root and
-    /// only at the moment the user composes into the reply — never on a
-    /// bare cursor move — because `retarget` rebuilds the matcher daemon
-    /// thread. So navigating past a dozen agents in other directories
-    /// costs nothing; the (single) retarget happens on the first
-    /// keystroke/paste into the reply, deduped by cwd.
+    /// Applied only when it differs from the daemon's current root, and only
+    /// when the user composes into the reply (never on a bare cursor move),
+    /// because `retarget` throws away the built matcher daemon and the next
+    /// @-use rebuilds it. So navigating past a dozen agents in other
+    /// directories costs nothing; the single retarget happens on the first
+    /// keystroke or paste into the reply, deduped by cwd.
     fn ensure_peek_reply_cwd(&mut self) {
         if let Some(target) = self.peek_reply_target_cwd.clone()
             && self.peek_reply_cwd.as_deref() != Some(target.as_path())

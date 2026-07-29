@@ -45,7 +45,7 @@ impl xai_tool_runtime::Tool for MemorySearchImpl {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "memory_search",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

@@ -3,7 +3,7 @@
 //! Individual test modules import via `use super::common::*`.
 
 pub(crate) use serde_json::json;
-pub(crate) use std::path::Path;
+pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::time::{Duration, Instant};
 pub(crate) use xai_grok_pager_pty_harness::{
     AgentTurnExpectation, ContentController, EnvOp, MockModel, PtyExitPoll, PtyHarness,
@@ -916,6 +916,63 @@ pub(crate) const MINIMAL_IDLE_SENTINEL: &str = "minimal · /help";
 /// reverse-command segment.
 pub(crate) const MINIMAL_SWITCH_BACK_IDLE_SENTINEL: &str =
     "minimal · /fullscreen to go back · /help";
+
+/// Header of minimal's parked plan-approval controls strip.
+pub(crate) const PLAN_PARKED_SENTINEL: &str = "Plan ready for review";
+
+/// A plan body the `exit_plan_mode` tool will read off disk. Every step carries
+/// a unique `{tag}{NNN}` sentinel, because a truncated plan still contains its
+/// head and would pass a plain substring check.
+pub(crate) fn plan_body(tag: &str, lines: usize) -> String {
+    let mut s = format!("# {tag} Plan\n\n");
+    for i in 0..lines {
+        s.push_str(&format!("- {tag}{i:03} step of the plan\n"));
+    }
+    s
+}
+
+/// Steps of a [`plan_body`] missing from everything the user could reach by
+/// scrolling: native scrollback plus the visible screen.
+pub(crate) fn plan_lines_missing(harness: &mut PtyHarness, tag: &str, lines: usize) -> Vec<usize> {
+    let full = harness.full_text();
+    (0..lines)
+        .filter(|i| !full.contains(&format!("{tag}{i:03}")))
+        .collect()
+}
+
+/// Steps of a [`plan_body`] that appear more than once — the print-once guard.
+pub(crate) fn plan_lines_duplicated(
+    harness: &mut PtyHarness,
+    tag: &str,
+    lines: usize,
+) -> Vec<usize> {
+    let full = harness.full_text();
+    (0..lines)
+        .filter(|i| full.matches(&format!("{tag}{i:03}")).count() > 1)
+        .collect()
+}
+
+/// Locate `<grok_home>/sessions/<encoded cwd>/<session id>/`, where the shell
+/// keeps the session's `plan.md`. Polls: the first turn creates it
+/// asynchronously.
+pub(crate) fn session_dir(content: &ContentController, harness: &mut PtyHarness) -> PathBuf {
+    let sessions = content.home().join(".grok").join("sessions");
+    for _ in 0..100 {
+        if let Ok(outer) = std::fs::read_dir(&sessions) {
+            for cwd_dir in outer.flatten() {
+                if let Ok(inner) = std::fs::read_dir(cwd_dir.path()) {
+                    for entry in inner.flatten() {
+                        if entry.path().is_dir() {
+                            return entry.path();
+                        }
+                    }
+                }
+            }
+        }
+        harness.update(Duration::from_millis(100));
+    }
+    panic!("no session dir under {}", sessions.display());
+}
 
 /// Spawn the pager in minimal mode against `content` at the default size.
 pub(crate) fn spawn_minimal(content: &ContentController) -> PtyHarness {

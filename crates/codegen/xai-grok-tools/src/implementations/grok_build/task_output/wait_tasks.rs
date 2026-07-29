@@ -33,10 +33,10 @@ impl crate::types::tool_metadata::ToolMetadata for WaitTasksTool {
     fn description_template(&self) -> &str {
         // Canonical wording lives in the shared builder; `versioned_definition`
         // renders it context-aware from the finalized toolset. This static
-        // fallback mirrors the default grok-build toolset.
+        // fallback uses canonical tool/param names.
         static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             xai_tool_types::build_wait_tasks_description(&xai_tool_types::WaitTasksToolNaming {
-                background_retrieval_tool: "get_command_or_subagent_output",
+                background_retrieval_tool: "get_task_output",
                 bash_background_param: Some("is_background"),
                 subagent_background_param: Some("run_in_background"),
             })
@@ -114,7 +114,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "wait_tasks",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -229,7 +229,7 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
 
         let completed_count = results
             .iter()
-            .filter(|r| r.status == "completed" || r.status == "failed" || r.status == "cancelled")
+            .filter(|r| super::is_terminal_status(&r.status))
             .count();
         let total = results.len();
         let summary = format!("{completed_count}/{total} tasks completed (wait_any)");

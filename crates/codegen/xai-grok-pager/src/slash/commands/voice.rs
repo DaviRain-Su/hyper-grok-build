@@ -26,11 +26,11 @@ impl SlashCommand for VoiceCommand {
     }
 
     fn description(&self) -> &str {
-        // Chord is Ctrl+Space or F8. On non-Kitty terminals hold-to-talk is
-        // impossible (no key releases), so it's always toggle — say so. On Kitty
-        // it's configurable (toggle or hold via `voice_capture_mode`), so leave
-        // the behavior unspecified.
-        if crate::app::kitty_flags_pushed() {
+        // Chord is Ctrl+Space or F8. Without key releases hold-to-talk is
+        // impossible, so it's always toggle — say so. With them it's
+        // configurable (toggle or hold via `voice_capture_mode`), so leave the
+        // behavior unspecified.
+        if crate::app::kitty_releases_reported() {
             "Dictation (Ctrl+Space/F8; Esc/Enter to stop)"
         } else {
             "Toggle dictation (Ctrl+Space/F8; Esc/Enter to stop)"

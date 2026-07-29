@@ -19,7 +19,7 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 const DESCRIPTION: &str = r#"Create or overwrite a file.
 
-- Writing to an existing path replaces the file — read it first with the ${{ tools.by_kind.read }} tool.
+- Writing to an existing path replaces the file${%- if tools.by_kind.read %} — read it first with the ${{ tools.by_kind.read }} tool${%- endif %}.
 - Parent directories are created for you."#;
 
 // ─── Input ───────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ impl xai_tool_runtime::Tool for WriteTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "write",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

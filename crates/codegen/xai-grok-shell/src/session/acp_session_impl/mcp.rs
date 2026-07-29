@@ -481,15 +481,18 @@ impl SessionActor {
             crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
         let byo_config = oauth_config_map.get(server_name).cloned();
         let event_writer = self.events.writer();
-        let mode = crate::session::mcp_servers::OauthInteractivity::Interactive;
+        let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
+            session_id,
+            &event_writer,
+            crate::session::mcp_servers::OauthInteractivity::Interactive,
+            self.tool_context.process_scope.as_ref(),
+        );
         let new_client = crate::session::mcp_servers::start_mcp_server(
             server_config,
-            Some(session_id),
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
-            &event_writer,
-            mode,
+            &ctx,
         )
         .await
         .map_err(|e| format!("Failed to prepare OAuth for '{}': {}", server_name, e))?;
@@ -973,15 +976,18 @@ impl SessionActor {
             crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
         let byo_config = oauth_config_map.get(server).cloned();
         let event_writer = self.events.writer();
-        let mode = OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive);
+        let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
+            session_id,
+            &event_writer,
+            OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive),
+            self.tool_context.process_scope.as_ref(),
+        );
         let new_client = crate::session::mcp_servers::start_mcp_server(
             server_config.clone(),
-            Some(session_id),
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
-            &event_writer,
-            mode,
+            &ctx,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1242,16 +1248,19 @@ impl SessionActor {
             &toml_mcp_names,
         );
         let spawn_writer = self.events.writer();
-        let mode = OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive);
+        let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
+            session_id,
+            &spawn_writer,
+            OauthInteractivity::from_non_interactive(self.startup_hints.non_interactive),
+            self.tool_context.process_scope.as_ref(),
+        );
         let mcp_results = build_pending_clients(
             &self.mcp_state,
             configs_to_start,
-            Some(session_id),
             Some(cwd),
             &meta_config_map,
             &oauth_config_map,
-            &spawn_writer,
-            mode,
+            &ctx,
         )
         .await;
         tokio::task::yield_now().await;

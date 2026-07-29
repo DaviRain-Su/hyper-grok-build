@@ -17,6 +17,7 @@ use async_lsp::lsp_types::{
 
 use super::config::{LspServerConfig, LspTransport};
 use super::{DiagnosticsMap, DiagnosticsNotify, LspError, LspMainLoop, file_uri};
+use crate::util::{ProcessGroup, ProcessScope};
 
 #[cfg(test)]
 use super::config::REQUEST_TIMEOUT;
@@ -38,6 +39,11 @@ pub struct LspClient {
     pub main_loop: tokio::task::JoinHandle<()>,
     pub stderr_task: Option<tokio::task::JoinHandle<()>>,
     pub child_process: Option<std::process::Child>,
+    /// Strong owner of the server child's process group. The session
+    /// [`ProcessScope`] holds only a `Weak`, so dropping this on clean teardown
+    /// stops the scope from reaping a reused PID. `None` for the socket transport
+    /// (no child) or if group creation failed.
+    process_group: Option<Arc<ProcessGroup>>,
     pub shutdown_timeout: std::time::Duration,
 }
 
@@ -46,6 +52,16 @@ impl std::fmt::Debug for LspClient {
         f.debug_struct("LspClient")
             .field("server_name", &self.server_name)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for LspClient {
+    /// Teardown backstop. `LspBackendAdapter`'s graceful shutdown only runs when
+    /// a tokio runtime is current, so killing the child here avoids orphaning one
+    /// language-server process per session. Idempotent with `shutdown`, which
+    /// takes the same fields first.
+    fn drop(&mut self) {
+        self.reap_children();
     }
 }
 
@@ -226,8 +242,47 @@ impl LspClient {
             main_loop: main_loop_handle,
             stderr_task,
             child_process,
+            process_group: None,
             shutdown_timeout: std::time::Duration::from_millis(config.shutdown_timeout_ms()),
         })
+    }
+
+    /// Install a process group for this freshly started stdio server: register a
+    /// `Weak` into the session [`ProcessScope`] (when set) while this client keeps
+    /// the strong `Arc`; installed even without a scope so this client's own
+    /// `Drop` killpg's the whole child tree. No-op for the socket transport.
+    /// See the `process_group` field doc for the Weak/reuse-safety argument.
+    ///
+    /// Returns `false` when the scope was already closed (session teardown raced
+    /// this start): the child has been killed at registration, so the caller must
+    /// discard this client instead of installing it as ready.
+    pub(crate) fn enroll(&mut self, scope: Option<&ProcessScope>) -> bool {
+        let Some(child) = self.child_process.as_ref() else {
+            return true;
+        };
+        // Group-creation failures degrade to leader-only cleanup and exempt this
+        // server from session-close reaping — actionable and otherwise invisible,
+        // so they warrant `warn`.
+        let mut group = match ProcessGroup::new() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(server = %self.server_name, pid = child.id(), error = %e, "LSP: ProcessGroup::new failed; server exempt from session reaping");
+                return true;
+            }
+        };
+        if let Err(e) = group.attach_std(child) {
+            tracing::warn!(server = %self.server_name, pid = child.id(), error = %e, "LSP: attach to process group failed; server exempt from session reaping");
+            return true;
+        }
+        let group = Arc::new(group);
+        let enrolled = match scope {
+            Some(scope) => scope.register(&group),
+            None => true,
+        };
+        // Keep the strong Arc either way so `Drop`/`shutdown` reap the tree —
+        // including the already-killed leader in the closed-scope case.
+        self.process_group = Some(group);
+        enrolled
     }
 
     async fn start_stdio(
@@ -346,6 +401,15 @@ impl LspClient {
     }
 
     pub async fn shutdown(mut self) {
+        // Dead transport — a crashed server, or the session scope's
+        // SIGKILL-on-close (see grok-shell `take_session`) landing before this
+        // Drop-spawned graceful task ran. The shutdown/exit handshake can only
+        // fail, so skip it (and its warnings) and just reap.
+        if self.main_loop.is_finished() {
+            tracing::debug!(server = %self.server_name, "LSP transport already down; skipping shutdown handshake");
+            self.reap_children();
+            return;
+        }
         self.close_all_documents();
 
         let result = tokio::time::timeout(self.shutdown_timeout, async {
@@ -367,16 +431,29 @@ impl LspClient {
             self.main_loop.abort();
         }
 
-        if let Err(e) = self.main_loop.await
+        // `&mut`-await (not move) so `self` is never partially moved: `LspClient`
+        // has a `Drop` impl, and you cannot move fields out of a `Drop` type.
+        if let Err(e) = (&mut self.main_loop).await
             && !e.is_cancelled()
         {
             tracing::warn!(server = %self.server_name, error = %e, "LSP main loop task panicked");
         }
 
-        if let Some(task) = self.stderr_task {
+        self.reap_children();
+    }
+
+    /// Shared teardown for `Drop` and `shutdown`: abort the tasks, then reap
+    /// grandchildren via the group before the leader. Idempotent via `take`, so
+    /// running it from both paths is safe.
+    fn reap_children(&mut self) {
+        self.main_loop.abort();
+        if let Some(task) = self.stderr_task.take() {
             task.abort();
         }
-        if let Some(mut child) = self.child_process {
+        if let Some(group) = self.process_group.take() {
+            let _ = group.kill();
+        }
+        if let Some(mut child) = self.child_process.take() {
             let _ = child.kill();
             let _ = child.wait();
         }

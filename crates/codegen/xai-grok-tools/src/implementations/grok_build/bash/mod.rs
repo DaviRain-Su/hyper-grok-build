@@ -1,6 +1,10 @@
 //! `run_terminal_cmd` (Bash) tool — new architecture (`Tool` trait).
 //!
-//! Executes bash commands in a persistent shell session with optional timeout.
+//! Executes bash commands with optional timeout. Whether shell state (cwd,
+//! env vars, aliases) persists between calls depends on the `Terminal`
+//! backend: the local backend emulates persistence by capturing and
+//! replaying state across commands (see [`crate::computer::local::shell_state`]);
+//! other backends may run each command in a fresh session.
 //! Supports both foreground (blocking) and background (returns task_id) execution.
 //!
 //! Optional `find`→`bfs` / `grep`→`ugrep` shadows: see
@@ -259,12 +263,12 @@ pub struct BashToolInput {
     #[cfg_attr(not(unix), schemars(description = "The command to run."))]
     pub command: String,
 
-    /// Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes).
-    /// `timeout: 0` in background mode disables the wrapper timeout entirely;
-    /// the task runs until it exits or is killed via the kill task tool.
+    /// Optional timeout in milliseconds (max 300000). Default: 120000
+    /// (2 minutes), enforced for foreground commands only. Background
+    /// semantics live in the tool-description usage notes.
     // keep in sync with the rustdoc above
     #[schemars(
-        description = "Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes). `timeout: 0` in background mode disables the wrapper timeout entirely; the task runs until it exits or is killed via the kill task tool.",
+        description = "Optional timeout in milliseconds (max 300000). Default: 120000 (2 minutes), enforced for foreground commands only.",
         default = "schema_default_timeout_ms"
     )]
     // Some models serialize numeric tool args
@@ -289,8 +293,11 @@ pub struct BashToolInput {
     /// Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it.
     // "task id" stays plain English: the kill/get-output input params are
     // renameable, so naming a literal key here goes stale after randomization.
+    // The notification sentence renders only when the client delivers system
+    // reminders (`system_reminders_enabled` template flag); otherwise it
+    // points at the get-output tool when one is served.
     #[schemars(
-        description = "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it."
+        description = "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background${%- if system_reminders_enabled %}; you are notified on completion, so do not poll or sleep-wait for it${%- elif tools.by_kind.background_task_action %}; check on it later with the ${{ tools.by_kind.background_task_action }} tool${%- endif %}."
     )]
     #[serde(
         default,
@@ -1251,7 +1258,11 @@ impl BashTool {
     /// without the floor the schema would advertise `max 0` while timeout
     /// resolution enforces a 1ms ceiling — a model-visible mismatch. Flooring
     /// here keeps the advertised max equal to the enforced max (≥1ms).
-    pub(crate) fn effective_max_timeout_ms(params: &BashParams) -> u64 {
+    ///
+    /// `pub` (not `pub(crate)`): the cursor `Shell` adapter
+    /// (xai-grok-cursor) uses this ceiling to report the true FG wait in
+    /// its auto-background template.
+    pub fn effective_max_timeout_ms(params: &BashParams) -> u64 {
         let configured = params
             .max_timeout_secs
             .filter(|s| *s > 0.0)
@@ -1403,9 +1414,12 @@ impl BashTool {
     ) -> Result<String, xai_tool_runtime::ToolError> {
         let res = resources.lock().await;
         let renderer = res.require::<TemplateRenderer>()?;
+        // Presence-aware lookup (not a template render): a missing kind
+        // renders as empty-`Ok`, so a `Result` fallback never fires.
         let get_task_name = renderer
-            .render("${{ tools.by_kind.background_task_action }}")
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            .tool_for_kind(ToolKind::BackgroundTaskAction)
+            .unwrap_or("get_task_output")
+            .to_string();
         let task_ids_param = renderer
             .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")
             .unwrap_or("task_ids");
@@ -1433,22 +1447,24 @@ impl BashTool {
                 {
                     let max_ms = Self::effective_max_timeout_ms(params);
                     let default_ms = Self::effective_default_timeout_ms(params);
-                    // `max_timeout_secs` is a foreground-only ceiling; background
-                    // `{name}: 0` is always unbounded, so this note is
-                    // unconditional.
-                    let bg_zero = format!(
-                        "`{timeout_param_name}: 0` in background mode disables the wrapper timeout entirely; the task runs until it exits or is killed via the kill task tool."
-                    );
+                    // The default and max ceiling are foreground-only.
+                    // Background semantics live in the tool-description usage
+                    // notes (single copy); the "foreground only" scoping here
+                    // keeps the property from contradicting them.
                     // Keep main-style auto-bg wording (no FG-budget ms advertised).
                     // Follow-up: surface effective_auto_bg_wait_ms / FG budget here
                     // once we deliberately change model-facing copy.
-                    let desc = if auto_bg {
+                    let desc = if !background_enabled {
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. If not specified, commands exceeding the default timeout will be automatically backgrounded. {bg_zero}"
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}."
+                        )
+                    } else if auto_bg {
+                        format!(
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}; foreground commands exceeding it are automatically backgrounded."
                         )
                     } else {
                         format!(
-                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}. {bg_zero}"
+                            "Optional {timeout_param_name} in milliseconds (max {max_ms}). Default: {default_ms}, enforced for foreground commands only."
                         )
                     };
                     timeout_prop.insert("description".to_string(), serde_json::json!(desc));
@@ -1488,8 +1504,7 @@ impl BashTool {
         renderer
             .render_with_extra(raw_desc, &extras)
             .unwrap_or_else(|e| {
-                tracing::warn!("Description template render failed, using raw: {e}");
-                raw_desc.to_string()
+                crate::types::template_renderer::strip_markers_on_render_failure(raw_desc, &e)
             })
     }
 
@@ -1508,10 +1523,10 @@ impl BashTool {
         r#"Run a ${%- if is_windows %} shell command${%- else %} bash command${%- endif %} and return its output.
 
 Usage notes:
-  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %}
-  - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}.
-  - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
-  - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it.${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
+  - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
+  - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely${%- if tools.by_kind.kill_task_action %}; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}${%- endif %}.
+  - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.
+  - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified on completion, so do not poll or sleep-wait for it.${%- elif tools.by_kind.background_task_action %} Check on it later with the ${{ tools.by_kind.background_task_action }} tool.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
@@ -1679,7 +1694,7 @@ impl xai_tool_runtime::Tool for BashTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "run_terminal_cmd",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -1946,13 +1961,16 @@ impl xai_tool_runtime::Tool for BashTool {
             is_legacy,
         ) {
             // `is_background` is the canonical param key (the input-schema
-            // property name); `background` has no entry and resolves to "".
-            let bg_param_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ params.execute.is_background }}",
-            )
-            .await
-            .unwrap_or_else(|_| "is_background".to_string());
+            // property name). Presence-aware lookup (not a template render):
+            // a missing entry renders as empty-`Ok`, so a `Result` fallback
+            // never fires.
+            let bg_param_name = {
+                let res = resources.lock().await;
+                res.get::<TemplateRenderer>()
+                    .and_then(|r| r.param_for_kind(ToolKind::Execute, "is_background"))
+                    .unwrap_or("is_background")
+                    .to_string()
+            };
             let message = match violation {
                 BackgroundOpViolation::Bash => Self::background_operator_validation_message(
                     is_legacy,
@@ -3409,6 +3427,38 @@ mod tests {
         }
     }
 
+    /// The get-output tool is absent from the finalized toolset (no
+    /// `BackgroundTaskAction` mapping): the retrieval hint must fall back to
+    /// the canonical `get_task_output` name instead of rendering an empty
+    /// tool name. A missing kind renders as empty-`Ok` (lenient undefined),
+    /// so the old `Result`-based fallback never fired.
+    #[tokio::test]
+    async fn background_hint_falls_back_when_get_output_tool_absent() {
+        let mut resources = make_resources(MockTerminal::background_ok("t2"));
+        resources.insert(TemplateRenderer::new(HashMap::new(), HashMap::new()));
+
+        let tool = BashTool;
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_bg_input("sleep 60"),
+        )
+        .await
+        .unwrap();
+
+        match result {
+            BashToolOutput::Background(bg) => {
+                assert!(
+                    bg.retrieval_hint
+                        .contains("Use get_task_output tool with task_ids=[\"t2\"]"),
+                    "Hint should fall back to canonical names: {}",
+                    bg.retrieval_hint
+                );
+            }
+            BashToolOutput::Foreground(_) => panic!("Expected background output"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // format_default_prompt tests
     // -----------------------------------------------------------------------
@@ -4347,13 +4397,11 @@ mod tests {
                 .as_str()
                 .expect("max_wait description");
             assert!(
-                desc.contains("Optional max_wait in milliseconds")
-                    && desc.contains("`max_wait: 0`"),
+                desc.contains("Optional max_wait in milliseconds"),
                 "renamed timeout must appear in property description:\n{desc}"
             );
             assert!(
-                !desc.contains("`timeout: 0`")
-                    && !desc.contains("Optional timeout in milliseconds"),
+                !desc.contains("Optional timeout in milliseconds"),
                 "canonical timeout must not remain in property description:\n{desc}"
             );
         }
@@ -4397,7 +4445,7 @@ mod tests {
                 .as_str()
                 .expect("timeout description");
             assert!(
-                desc.contains("Optional timeout in milliseconds") && desc.contains("`timeout: 0`"),
+                desc.contains("Optional timeout in milliseconds"),
                 "property description must match schema key, not kind-wide alias:\n{desc}"
             );
             assert!(

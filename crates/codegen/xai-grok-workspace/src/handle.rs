@@ -2634,14 +2634,18 @@ impl WorkspaceHandle {
             let overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
             let meta_config_map = McpMetaConfigMap::new();
             let oauth_config_map = McpOAuthConfigMap::new();
+            let ctx = xai_grok_mcp::servers::McpSpawnCtx::for_session(
+                &session_id_owned,
+                &event_writer,
+                xai_grok_mcp::servers::OauthInteractivity::Interactive,
+                None,
+            );
             rt_handle.block_on(xai_grok_mcp::servers::start_mcp_servers(
                 configs,
-                Some(&session_id_owned),
                 &overrides_map,
                 &meta_config_map,
                 &oauth_config_map,
-                &event_writer,
-                xai_grok_mcp::servers::OauthInteractivity::Interactive,
+                &ctx,
             ))
         })
         .await

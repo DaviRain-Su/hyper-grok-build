@@ -443,15 +443,14 @@ View credit usage or manage billing. Alias: `/cost`.
 
 ### `/privacy`
 
-Show or toggle privacy and data-retention status.
+Open Settings on **Coding data, retention, and training**, where you choose
+**Opt in** or **Opt out**. Takes no arguments.
 
 ```
 /privacy
-/privacy opt-in
-/privacy opt-out
 ```
 
-`/privacy` doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts, only a team admin can toggle privacy this way, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)).
+This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser.
 
 ---
 

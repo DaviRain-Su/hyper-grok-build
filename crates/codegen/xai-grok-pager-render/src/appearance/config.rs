@@ -52,6 +52,8 @@ pub struct AppearanceConfig {
     /// Maximum rows a single committed block may occupy in minimal mode before
     /// it is truncated with a "… N more lines" footer.
     pub minimal_max_commit_rows: u16,
+    /// Resolved `[terminal] minimal_collapse_thinking`.
+    pub minimal_collapse_thinking: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -559,6 +561,16 @@ pub struct ThinkingConfig {
     /// (matching tool block title style), and respects muted_collapsed when collapsed.
     /// When false (default), the header is always dim/muted gray.
     pub header_bright: bool,
+    /// Render the reasoning body de-emphasized (SGR dim + italic) on top of the
+    /// `bg_blend` fade, for surfaces where the fade alone cannot separate
+    /// reasoning from the answer. **Not a TOML key** — minimal mode sets it;
+    /// see the minimal-mode design doc §6.16.
+    pub body_dim_italic: bool,
+    /// Append a dim "(ctrl+e to expand)" affordance to the *collapsed* header
+    /// when it fits on the same row (never adds a row). **Not a TOML key** —
+    /// minimal mode sets it, being the only surface where a folded block cannot
+    /// be unfolded in place.
+    pub collapsed_expand_hint: bool,
 }
 
 impl Default for ThinkingConfig {
@@ -571,6 +583,8 @@ impl Default for ThinkingConfig {
             animate: true,
             header: true,
             header_bright: false,
+            body_dim_italic: false,
+            collapsed_expand_hint: false,
         }
     }
 }
@@ -768,6 +782,12 @@ pub struct RawTerminalConfig {
     pub minimal_live_rows: Option<u16>,
     /// Maximum rows for a single committed block in minimal mode. Default 2000.
     pub minimal_max_commit_rows: Option<u16>,
+    /// Commit reasoning ("Thought for Xs") to native scrollback COLLAPSED to
+    /// its one-line header instead of in full. Default false — minimal
+    /// deliberately keeps the whole reasoning body in the transcript (K9); this
+    /// is the opt-out for a terser scrollback. The body stays reachable with
+    /// `Ctrl+E` / `/expand` and `/transcript`.
+    pub minimal_collapse_thinking: bool,
 }
 
 impl Default for RawTerminalConfig {
@@ -777,6 +797,7 @@ impl Default for RawTerminalConfig {
             minimal: false,
             minimal_live_rows: None,
             minimal_max_commit_rows: None,
+            minimal_collapse_thinking: false,
         }
     }
 }
@@ -1435,6 +1456,7 @@ impl From<RawAppearanceConfig> for AppearanceConfig {
             minimal: raw.terminal.minimal,
             minimal_live_rows: raw.terminal.minimal_live_rows.unwrap_or(10),
             minimal_max_commit_rows: raw.terminal.minimal_max_commit_rows.unwrap_or(2000),
+            minimal_collapse_thinking: raw.terminal.minimal_collapse_thinking,
         }
     }
 }
@@ -1603,6 +1625,8 @@ impl From<RawThinkingConfig> for ThinkingConfig {
             animate: raw.animate,
             header: raw.header,
             header_bright: raw.header_bright,
+            body_dim_italic: false,
+            collapsed_expand_hint: false,
         }
     }
 }
@@ -2467,5 +2491,45 @@ gutter_bg = true
             toml.contains("alt_screen = "),
             "Missing alt_screen in generated config:\n{toml}"
         );
+    }
+
+    /// A config written before the key existed must still parse and keep K9.
+    #[test]
+    fn minimal_collapse_thinking_defaults_off_and_old_configs_parse() {
+        let empty: RawAppearanceConfig = toml::from_str("").expect("empty config must parse");
+        assert!(!empty.terminal.minimal_collapse_thinking);
+        assert!(!AppearanceConfig::from(empty).minimal_collapse_thinking);
+
+        let legacy: RawAppearanceConfig =
+            toml::from_str("[terminal]\nminimal = true\nminimal_live_rows = 12\n")
+                .expect("legacy config must parse");
+        let cfg: AppearanceConfig = legacy.into();
+        assert!(cfg.minimal);
+        assert_eq!(cfg.minimal_live_rows, 12);
+        assert!(
+            !cfg.minimal_collapse_thinking,
+            "a config written before the key existed must keep the K9 default"
+        );
+
+        assert!(!AppearanceConfig::default().minimal_collapse_thinking);
+    }
+
+    #[test]
+    fn minimal_collapse_thinking_opt_in_parses() {
+        let raw: RawAppearanceConfig =
+            toml::from_str("[terminal]\nminimal_collapse_thinking = true\n").unwrap();
+        assert!(AppearanceConfig::from(raw).minimal_collapse_thinking);
+    }
+
+    /// The reasoning-legibility toggles must stay un-settable from pager.toml.
+    #[test]
+    fn thinking_body_treatment_is_off_by_default_and_not_a_toml_key() {
+        let cfg = AppearanceConfig::default();
+        assert!(!cfg.scrollback.blocks.thinking.body_dim_italic);
+        assert!(!cfg.scrollback.blocks.thinking.collapsed_expand_hint);
+
+        let template = RawAppearanceConfig::to_toml_with_comments();
+        assert!(!template.contains("body_dim_italic"));
+        assert!(!template.contains("collapsed_expand_hint"));
     }
 }

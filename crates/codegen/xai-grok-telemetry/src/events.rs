@@ -1260,6 +1260,11 @@ pub struct TerminalTelemetry {
     /// `"20240203-110809-5046fc22"`, `"7402"`). Empty when unknown.
     pub term_version: String,
     pub term_version_source: String,
+    /// The Kitty protocol was negotiated *without* `REPORT_EVENT_TYPES` because
+    /// `term_version` identified a build that mis-encodes key releases
+    /// (Alacritty ≤ 0.14.x). A field rather than its own event so the affected
+    /// population always has a denominator.
+    pub kitty_event_types_withheld: bool,
     pub host_os: String,
     pub display_server: String,
     pub modifier_cmd_fate: String,
@@ -1893,6 +1898,7 @@ mod tests {
             xtversion: "".into(),
             term_version: "".into(),
             term_version_source: "none".into(),
+            kitty_event_types_withheld: false,
             host_os: "linux".into(),
             display_server: "unknown".into(),
             modifier_cmd_fate: "unknown".into(),

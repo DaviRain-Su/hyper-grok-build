@@ -133,11 +133,9 @@ fn parse_rg_line(line: &str) -> Option<(usize, char, &str)> {
     Some((num, sep, &line[idx + 1..]))
 }
 
-const DESCRIPTION: &str = r#"Search file contents with anchor-annotated results for use with ${{ tools.by_kind.edit }}.
+const DESCRIPTION: &str = r#"Search file contents with anchor-annotated results${%- if tools.by_kind.edit %} for use with ${{ tools.by_kind.edit }}${%- endif %}.
 
-Match lines include anchors you can pass directly to ${{ tools.by_kind.edit }} without
-needing to ${{ tools.by_kind.read }} the file first. Unlike ${{ tools.by_kind.read }},
-this grep format keeps grep-style separators after the anchor: `:` for
+Match lines include anchors${%- if tools.by_kind.edit %} you can pass directly to ${{ tools.by_kind.edit }}${%- if tools.by_kind.read %} without needing to ${{ tools.by_kind.read }} the file first${%- endif %}${%- endif %}. This grep format keeps grep-style separators after the anchor: `:` for
 match lines and `-` for context lines.
 
 Content output format:
@@ -210,7 +208,7 @@ impl xai_tool_runtime::Tool for HashlineGrepTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "hashline_grep",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

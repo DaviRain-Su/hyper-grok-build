@@ -56,6 +56,10 @@ pub(crate) fn snapshot_to_result(
                 // status so callers don't treat an intentional kill as an
                 // error. Matches the subagent "cancelled" status.
                 "cancelled"
+            } else if s.signal.as_deref() == Some("timeout") {
+                // Wrapper-timeout kill (backend sets the sentinel "timeout"
+                // signal); a generic "failed" would hide why the task died.
+                "timed_out"
             } else if s.exit_code == Some(0) {
                 "completed"
             } else {
@@ -152,6 +156,52 @@ mod tests {
         // An intentional kill must be distinct from a genuine failure.
         assert_eq!(result.status, "cancelled");
         assert_ne!(result.status, "failed");
+    }
+
+    /// A wrapper-timeout kill (backend sets the sentinel "timeout" signal,
+    /// no exit code) must surface as "timed_out", not a generic "failed".
+    #[test]
+    fn test_snapshot_to_result_timeout_kill_is_timed_out() {
+        let mut snapshot = make_test_snapshot("test-1", true, None);
+        snapshot.signal = Some("timeout".to_string());
+        let result = snapshot_to_result(snapshot, "read_file", DEFAULT_TOOL_OUTPUT_BYTES);
+
+        assert_eq!(result.status, "timed_out");
+        assert_eq!(result.exit_code, None);
+    }
+
+    /// An explicit kill wins over the timeout signal: the model asked for the
+    /// kill, so it must see "cancelled" regardless of how the process died.
+    #[test]
+    fn test_snapshot_to_result_explicit_kill_beats_timeout_signal() {
+        let mut snapshot = make_test_snapshot("test-1", true, None);
+        snapshot.explicitly_killed = true;
+        snapshot.signal = Some("timeout".to_string());
+        let result = snapshot_to_result(snapshot, "read_file", DEFAULT_TOOL_OUTPUT_BYTES);
+
+        assert_eq!(result.status, "cancelled");
+    }
+
+    /// Empty output renders "(no output yet)" only while running; terminal
+    /// states must not imply more output may arrive.
+    #[test]
+    fn test_no_output_wording_tracks_task_state() {
+        let mut running = make_test_snapshot("test-1", false, None);
+        running.output = String::new();
+        let result = snapshot_to_result(running, "read_file", DEFAULT_TOOL_OUTPUT_BYTES);
+        let prompt = ToolOutput::TaskOutput(xai_tool_types::TaskOutputOutput::Result(result))
+            .to_prompt_format();
+        assert!(prompt.contains("(no output yet)"), "running: {prompt}");
+
+        let mut timed_out = make_test_snapshot("test-2", true, None);
+        timed_out.output = String::new();
+        timed_out.signal = Some("timeout".to_string());
+        let result = snapshot_to_result(timed_out, "read_file", DEFAULT_TOOL_OUTPUT_BYTES);
+        let prompt = ToolOutput::TaskOutput(xai_tool_types::TaskOutputOutput::Result(result))
+            .to_prompt_format();
+        assert!(prompt.contains("Status: timed_out"), "prompt: {prompt}");
+        assert!(prompt.contains("(no output)"), "prompt: {prompt}");
+        assert!(!prompt.contains("(no output yet)"), "prompt: {prompt}");
     }
 
     #[test]

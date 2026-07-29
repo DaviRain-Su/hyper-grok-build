@@ -86,7 +86,7 @@ impl xai_tool_runtime::Tool for EnterPlanModeTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "enter_plan_mode",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -121,17 +121,22 @@ impl xai_tool_runtime::Tool for EnterPlanModeTool {
             let (seed_target, plan_file_path) = resolve_plan_file_path(&res);
 
             // Resolve client-facing tool names via TemplateRenderer.
+            // Presence-aware lookups (not template renders): a missing kind
+            // renders as empty-`Ok`, so a `Result` fallback never fires.
             let hints = if let Some(renderer) = res.get::<TemplateRenderer>() {
                 EnterPlanModeToolHints {
                     ask_user: renderer
-                        .render("${{ tools.by_kind.ask_user }}")
-                        .unwrap_or_else(|_| "ask_user_question".to_owned()),
+                        .tool_for_kind(crate::types::tool::ToolKind::AskUser)
+                        .unwrap_or("ask_user_question")
+                        .to_owned(),
                     exit_plan: renderer
-                        .render("${{ tools.by_kind.exit_plan }}")
-                        .unwrap_or_else(|_| "exit_plan_mode".to_owned()),
+                        .tool_for_kind(crate::types::tool::ToolKind::ExitPlan)
+                        .unwrap_or("exit_plan_mode")
+                        .to_owned(),
                     task: renderer
-                        .render("${{ tools.by_kind.task }}")
-                        .unwrap_or_default(),
+                        .tool_for_kind(crate::types::tool::ToolKind::Task)
+                        .unwrap_or_default()
+                        .to_owned(),
                 }
             } else {
                 EnterPlanModeToolHints::default()

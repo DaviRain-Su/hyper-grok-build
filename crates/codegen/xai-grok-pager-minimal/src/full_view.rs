@@ -367,6 +367,41 @@ mod tests {
         );
     }
 
+    /// `/transcript` is the escape hatch `minimal_collapse_thinking` leans on,
+    /// so it must ignore the committed display mode.
+    #[test]
+    fn transcript_expands_thinking_committed_collapsed() {
+        let theme = Theme::current();
+        let appearance = super::super::commit::committed_appearance(
+            &xai_grok_pager::appearance::AppearanceConfig {
+                minimal_collapse_thinking: true,
+                ..Default::default()
+            },
+        );
+        let mut entry = ScrollbackEntry::new(RenderBlock::thinking(
+            "REASONINGBODY folded away at commit time",
+        ));
+        entry.set_display_mode(super::super::commit::minimal_commit_display_mode(
+            &entry.block,
+            &appearance,
+        ));
+        assert_eq!(entry.display_mode(), DisplayMode::Collapsed);
+
+        xai_grok_pager::appearance::cache::set_show_thinking_blocks(true);
+        let mut out = String::new();
+        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &mut out);
+        xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
+
+        assert!(
+            out.contains("REASONINGBODY"),
+            "a collapsed commit must still expand in /transcript: {out:?}"
+        );
+        assert!(
+            !out.contains("ctrl+e to expand"),
+            "no expand hint in the fully-expanded transcript: {out:?}"
+        );
+    }
+
     #[test]
     fn transcript_uses_owning_session_cwd_for_tool_paths() {
         let theme = Theme::current();

@@ -45,6 +45,7 @@ pub struct CodexListDirInput {
 
     /// The entry number to start listing from. Must be 1 or greater.
     #[serde(default = "default_offset")]
+    #[schemars(range(min = 1))]
     pub offset: usize,
 
     /// The maximum number of entries to return.
@@ -53,6 +54,7 @@ pub struct CodexListDirInput {
 
     /// The maximum directory depth to traverse. Must be 1 or greater.
     #[serde(default = "default_depth")]
+    #[schemars(range(min = 1))]
     pub depth: usize,
 }
 
@@ -285,7 +287,7 @@ impl xai_tool_runtime::Tool for CodexListDirTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "list_dir",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

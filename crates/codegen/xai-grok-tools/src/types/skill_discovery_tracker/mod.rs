@@ -141,6 +141,11 @@ pub struct SkillManager {
     /// `paths:`-gated skills held back from the listing until a matching file
     /// is touched, plus their activation state. See [`ConditionalSkills`].
     conditional: ConditionalSkills,
+
+    /// Every skill name from session-start discovery, set once by
+    /// `ToolRegistryBuilder::finalize` from the unfiltered
+    /// `SessionContext.skills`. The `paths:` gate never applies here.
+    discovery_snapshot_names: Vec<String>,
 }
 
 /// Canonicalize a skill path, falling back to the raw path for not-yet-created
@@ -467,6 +472,19 @@ impl SkillManager {
     /// for slash command advertisement.
     pub fn slash_skills(&self) -> Vec<SkillInfo> {
         dedupe_by_canonical_path_and_name(&self.discovered_skills, &self.startup_skills)
+    }
+
+    /// Set the full-discovery snapshot (see `discovery_snapshot_names`).
+    /// Write-once by design: the only caller is `ToolRegistryBuilder::finalize`.
+    pub(crate) fn set_discovery_snapshot_names(&mut self, names: Vec<String>) {
+        self.discovery_snapshot_names = names;
+    }
+
+    /// Every skill name from session-start discovery. Set only by
+    /// `ToolRegistryBuilder::finalize`; empty for a manager seeded
+    /// without it.
+    pub fn discovery_snapshot_names(&self) -> &[String] {
+        &self.discovery_snapshot_names
     }
 
     /// Render the canonical listing for the entire current skill set, for

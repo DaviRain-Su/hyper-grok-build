@@ -760,6 +760,160 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
     harness.actor.abort();
 }
 
+/// Spawn an await-to-completion child under `session` and consume its request
+/// event, returning the join handle for the in-flight spawn.
+async fn spawn_session_child(
+    harness: &mut Harness,
+    id: &str,
+    session: &str,
+) -> tokio::task::JoinHandle<Result<SubagentResult, xai_tool_runtime::ToolError>> {
+    let mut req = request(id, false);
+    req.await_to_completion = true;
+    req.parent_session_id = session.to_owned();
+    let backend = harness.backend.clone();
+    let handle = tokio::spawn(async move { backend.spawn(req).await });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|r| r.id.as_str()),
+        Some(id)
+    );
+    handle
+}
+
+#[tokio::test]
+async fn teardown_session_children_spares_other_sessions() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+
+    // Two children under "parent" (one active, one pending) plus one under a
+    // different session that must survive.
+    let keep = spawn_session_child(&mut harness, "keep-active", "other").await;
+    let kill_active = spawn_session_child(&mut harness, "kill-active", "parent").await;
+
+    // Start the children spawned so far; kill-pending subscribes after start, so
+    // it never receives it and stays pending.
+    let _ = harness.start.send(());
+    let mut started = std::collections::HashSet::new();
+    started.insert(harness.started.recv().await.unwrap());
+    started.insert(harness.started.recv().await.unwrap());
+    assert!(started.contains("keep-active") && started.contains("kill-active"));
+
+    let kill_pending = spawn_session_child(&mut harness, "kill-pending", "parent").await;
+
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::TeardownSession {
+            parent_session_id: "parent".to_owned(),
+        })
+        .expect("actor command channel open");
+
+    assert!(kill_active.await.unwrap().unwrap().cancelled);
+    assert!(kill_pending.await.unwrap().unwrap().cancelled);
+
+    assert!(
+        !keep.is_finished(),
+        "a different session's child must not be cancelled"
+    );
+    let _ = harness.finish.send(());
+    let keep = keep.await.unwrap().unwrap();
+    assert!(keep.success && !keep.cancelled);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn teardown_cancels_background_child_without_rebuffering() {
+    let mut harness = harness_with_config(
+        true,
+        CoordinatorConfig {
+            buffer_completions: true,
+            ..CoordinatorConfig::default()
+        },
+    );
+
+    // A background subagent that outlives its parent is the production case that
+    // rebuffers a completion for a later resume of the same session id.
+    let mut req = request("bg", true);
+    req.parent_session_id = "parent".to_owned();
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(req).await }
+    });
+    assert_eq!(
+        harness
+            .requests
+            .recv()
+            .await
+            .as_ref()
+            .map(|r| r.id.as_str()),
+        Some("bg")
+    );
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("bg"));
+
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::TeardownSession {
+            parent_session_id: "parent".to_owned(),
+        })
+        .expect("actor command channel open");
+
+    // Wait for the cancelled child to finish, then assert it buffered nothing.
+    let _ = harness.completions.recv().await;
+    let (tx, rx) = oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::Completions(SubagentCompletionsRequest {
+            parent_session_id: Some("parent".to_owned()),
+            suppress_ids: Vec::new(),
+            respond_to: tx,
+        }))
+        .expect("actor command channel open");
+    assert!(
+        rx.await.unwrap().is_empty(),
+        "torn-down background child must not rebuffer a completion"
+    );
+    let _ = spawn.await;
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn teardown_rejects_spawn_from_cancelled_parent() {
+    // wait_after_cancel keeps the cancelled parent in `active`, so its late
+    // nested Spawn still finds it.
+    let mut harness = harness_with_options(true, true, CoordinatorConfig::default());
+
+    // A parent subagent whose child_session_id is "A".
+    let parent = spawn_session_child(&mut harness, "A", "parent").await;
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("A"));
+
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::TeardownSession {
+            parent_session_id: "parent".to_owned(),
+        })
+        .expect("actor command channel open");
+
+    // A nested Spawn from the now-cancelled parent (parent_session_id = its
+    // child_session_id) must be rejected, not reparented and left running.
+    let mut nested = request("B", false);
+    nested.await_to_completion = true;
+    nested.parent_session_id = "A".to_owned();
+    let outcome = harness.backend.spawn(nested).await.unwrap();
+    assert!(outcome.cancelled && !outcome.success);
+
+    let _ = harness.finish.send(());
+    let _ = parent.await;
+    harness.actor.abort();
+}
+
 #[tokio::test]
 async fn usage_events_feed_sorted_outstanding_reply() {
     let mut harness = harness(true, std::time::Duration::from_secs(60));
@@ -1032,7 +1186,7 @@ async fn buffered_completion_output_cap_bounds_buffered_summary() {
 }
 
 #[tokio::test]
-async fn discard_session_completions_drops_only_that_sessions_buffer() {
+async fn teardown_session_drops_only_that_sessions_buffer() {
     let mut harness = harness_with_config(
         false,
         CoordinatorConfig {
@@ -1053,11 +1207,11 @@ async fn discard_session_completions_drops_only_that_sessions_buffer() {
         let _ = harness.completions.recv().await;
     }
 
-    // Removing parent-a (session unload) discards its buffered completion...
+    // Tearing down parent-a discards its buffered completion...
     harness
         .backend
         .sender()
-        .send(SubagentEvent::DiscardSessionCompletions {
+        .send(SubagentEvent::TeardownSession {
             parent_session_id: "parent-a".to_owned(),
         })
         .expect("actor command channel open");

@@ -265,7 +265,7 @@ impl TaskOutputTool {
 
         let completed_count = results
             .iter()
-            .filter(|r| r.status == "completed" || r.status == "failed" || r.status == "cancelled")
+            .filter(|r| is_terminal_status(&r.status))
             .count();
         let total = results.len();
         let mode_str = if waits { "wait_all" } else { "poll" };
@@ -280,6 +280,12 @@ impl TaskOutputTool {
 }
 
 pub(crate) use xai_tool_types::MAX_MULTI_WAIT_IDS;
+
+/// Terminal task statuses as produced by `snapshot_to_result` /
+/// `format_subagent_snapshot`; multi-wait summaries count these as finished.
+pub(crate) fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "timed_out")
+}
 
 pub(crate) fn not_found_result(task_id: &str) -> TaskOutputResult {
     TaskOutputResult {
@@ -769,7 +775,7 @@ impl xai_tool_runtime::Tool for TaskOutputTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "get_task_output",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

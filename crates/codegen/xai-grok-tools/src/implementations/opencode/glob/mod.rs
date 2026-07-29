@@ -28,12 +28,14 @@ const MAX_STDOUT_BYTES: usize = 5_000_000;
 
 // ─── Description ────────────────────────────────────────────────────
 
-const DESCRIPTION: &str = r#"Lists files and directories in a given path.
+const DESCRIPTION: &str = r#"Fast file pattern matching tool that works with any codebase size.
 
-Other details:
-    - The result does not display dot-files and dot-directories.
-    - Respects .gitignore patterns (files/directories ignored by git are not shown).
-    - Large directories are summarized with file counts and extension breakdowns instead of listing all files."#;
+- Supports glob patterns like "**/*.js" or "src/**/*.ts" via the required ${{ params.list.pattern }} parameter
+- Optionally set ${{ params.list.path }} to pick the directory to search in (defaults to the current working directory)
+- Returns matching file paths sorted by modification time (most recent first), capped at 100 results
+- Hidden (dot) files are included; .gitignore patterns are respected for paths the pattern does not explicitly match
+- Use this tool when you need to find files by name patterns
+- You can call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful."#;
 
 // ─── Input ──────────────────────────────────────────────────────────
 
@@ -132,7 +134,7 @@ impl xai_tool_runtime::Tool for GlobTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "glob",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -334,6 +336,34 @@ mod tests {
         let mut resources = Resources::new();
         resources.insert(Cwd(cwd.to_path_buf()));
         resources
+    }
+
+    #[test]
+    fn description_template_tracks_renamed_pattern_and_path() {
+        use crate::types::template_renderer::TemplateRenderer;
+        use crate::types::tool_metadata::ToolMetadata;
+        use std::collections::HashMap;
+
+        let tools = HashMap::from([(ToolKind::List, "glob".to_string())]);
+        let params = HashMap::from([(
+            ToolKind::List,
+            HashMap::from([
+                ("pattern".to_string(), "file_pattern".to_string()),
+                ("path".to_string(), "search_dir".to_string()),
+            ]),
+        )]);
+        let rendered = TemplateRenderer::new(tools, params)
+            .render(ToolMetadata::description_template(&GlobTool))
+            .unwrap();
+        assert!(
+            rendered.contains("required file_pattern parameter")
+                && rendered.contains("set search_dir"),
+            "renamed pattern/path params must appear:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("extension breakdowns") && !rendered.contains("dot-directories"),
+            "stale list_dir-style claims must not remain:\n{rendered}"
+        );
     }
 
     #[tokio::test]

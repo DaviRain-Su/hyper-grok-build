@@ -58,6 +58,19 @@ impl ProcessScope {
         }
     }
 
+    /// True once [`kill_all`](Self::kill_all) has run. Enrollment sites use
+    /// this to re-check after work done between a successful [`register`] and
+    /// publishing the child (e.g. installing a client): a `kill_all` in that
+    /// window has already SIGKILLed the enrolled child, so publishing it would
+    /// advertise a dead server. The check is racy by nature (close can land
+    /// right after it) — it narrows the window; the child itself is reaped by
+    /// `kill_all` in every ordering once registered.
+    ///
+    /// [`register`]: Self::register
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Relaxed)
+    }
+
     /// Configure `cmd` so its spawned child becomes the leader of a new process
     /// group / job. Call this **before** `cmd.spawn()`, then [`enroll`] the
     /// resulting child (or build the group yourself and [`register`] it).
@@ -74,13 +87,18 @@ impl ProcessScope {
     /// last `Arc` (clean reap) makes this registration a silent no-op, which is
     /// what keeps [`kill_all`] PID-reuse-safe.
     ///
+    /// Returns `true` if the group was enrolled. Returns `false` if the scope
+    /// was already closed ([`kill_all`] latched): the group is killed on the
+    /// spot, and the caller should treat the child as dead — fail its start
+    /// rather than proceed against a killed process.
+    ///
     /// For spawn sites (e.g. the MCP child handle, the bash terminal) that
     /// already build their own [`ProcessGroup`] and own its lifecycle; sites that
     /// don't can use [`enroll`] instead.
     ///
     /// [`kill_all`]: Self::kill_all
     /// [`enroll`]: Self::enroll
-    pub fn register(&self, group: &Arc<ProcessGroup>) {
+    pub fn register(&self, group: &Arc<ProcessGroup>) -> bool {
         let mut groups = self.lock();
         if self.inner.closed.load(Ordering::Relaxed) {
             // The scope was already reclaimed (`kill_all` ran) and won't run
@@ -90,16 +108,19 @@ impl ProcessScope {
             // non-blocking, so killing under the lock is fine and serializes
             // with a concurrent `kill_all`.
             let _ = group.kill();
-            return;
+            return false;
         }
         groups.retain(|w| w.strong_count() > 0);
         groups.push(Arc::downgrade(group));
+        true
     }
 
     /// Build a process group for an already-spawned `child` (which must have been
     /// configured via [`prepare`]), register a [`Weak`] into this scope, and
-    /// return the owning `Arc` for the caller to hold. Errors only if the child
-    /// already exited (nothing to attach) — not a leak.
+    /// return the owning `Arc` for the caller to hold. Errors if the child
+    /// already exited (nothing to attach) — not a leak — or if the scope was
+    /// already closed, in which case the child has been killed and the caller
+    /// must not proceed with it.
     ///
     /// [`prepare`]: Self::prepare
     #[must_use = "the returned Arc<ProcessGroup> must be kept alive or the scope cannot reap the child"]
@@ -107,7 +128,11 @@ impl ProcessScope {
         let mut group = ProcessGroup::new()?;
         group.attach(child)?;
         let group = Arc::new(group);
-        self.register(&group);
+        if !self.register(&group) {
+            return Err(io::Error::other(
+                "process scope already closed; child killed",
+            ));
+        }
         Ok(group)
     }
 
@@ -283,7 +308,8 @@ mod tests {
     }
 
     /// Close/spawn race: a child enrolled *after* `kill_all` must be killed on
-    /// the spot, not leaked — `kill_all` won't run again to catch it.
+    /// the spot, not leaked — `kill_all` won't run again to catch it — and the
+    /// caller must be told (enroll errors) so it doesn't proceed with a dead child.
     #[tokio::test]
     async fn register_after_kill_all_reaps_immediately() {
         let scope = ProcessScope::new();
@@ -293,7 +319,10 @@ mod tests {
         scope.prepare(&mut cmd);
         #[allow(clippy::disallowed_methods)] // test: exercises enroll() after close
         let mut child = cmd.spawn().unwrap();
-        let _group = scope.enroll(&child).unwrap(); // register() runs post-close
+        assert!(
+            scope.enroll(&child).is_err(),
+            "post-close enroll must surface the closed scope"
+        );
         assert_eq!(
             scope.live_count(),
             0,

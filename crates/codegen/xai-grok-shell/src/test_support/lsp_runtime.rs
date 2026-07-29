@@ -19,6 +19,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
     let (tx, _rx) = mpsc::unbounded_channel();
     SubagentSpawnContext {
         lsp: None,
+        process_scope: None,
         parent_max_turns: None,
         client_hooks: Default::default(),
         sampling_config: xai_grok_sampler::SamplerConfig {

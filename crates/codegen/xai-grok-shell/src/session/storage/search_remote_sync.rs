@@ -139,10 +139,19 @@ pub fn try_read_last_bootstrap_at(db_path: &Path) -> Result<Option<i64>, String>
 /// Write `last_bootstrap_at` into the sqlite meta table.
 pub fn write_last_bootstrap_at(db_path: &Path) -> io::Result<()> {
     let index =
-        SessionSearchIndex::open_or_create(db_path).map_err(|e| io::Error::other(e.to_string()))?;
+        SessionSearchIndex::open_existing(db_path).map_err(|e| io::Error::other(e.to_string()))?;
     let now = chrono::Utc::now().timestamp();
     index
         .set_meta(META_KEY_LAST_BOOTSTRAP, &now.to_string())
+        .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Remove the completed-bootstrap marker.
+pub fn clear_last_bootstrap_at(db_path: &Path) -> io::Result<()> {
+    let index =
+        SessionSearchIndex::open_existing(db_path).map_err(|e| io::Error::other(e.to_string()))?;
+    index
+        .delete_meta(META_KEY_LAST_BOOTSTRAP)
         .map_err(|e| io::Error::other(e.to_string()))
 }
 

@@ -711,9 +711,8 @@ fn dispatch_open_settings_opens_then_close_on_reentry() {
         );
     }
 }
-/// A focused open (privacy banner Customize) landing on an agent whose
-/// settings modal is already open must reopen focused on the requested
-/// row — not toggle the modal closed.
+/// A focused open on an agent whose settings modal is already open must
+/// reopen focused on the requested row — not toggle the modal closed.
 #[test]
 fn dispatch_open_settings_focus_reopens_when_already_open() {
     use crate::views::modal::ActiveModal;
@@ -738,6 +737,62 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
         state.focused_setting().map(|(k, _)| k),
         Some("coding_data_sharing"),
         "focused re-entry must land on the requested row"
+    );
+}
+/// Chooser when editable, browse row when locked. The team-admin arm is the
+/// one a `team_name.is_some()` shortcut would break.
+#[test]
+fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::settings_modal::SettingsModalMode;
+    let open_focused = |app: &mut AppView| -> SettingsModalMode {
+        let _ = dispatch(
+            Action::OpenSettingsFocus {
+                key: "coding_data_sharing",
+            },
+            app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
+            panic!("settings modal must be open")
+        };
+        assert_eq!(
+            state.focused_setting().map(|(k, _)| k),
+            Some("coding_data_sharing"),
+            "every landing focuses the row"
+        );
+        state.mode()
+    };
+    let mut app = test_app_with_agent();
+    assert!(
+        matches!(
+            open_focused(&mut app),
+            SettingsModalMode::PickingEnum { .. }
+        ),
+        "an editable setting opens its chooser"
+    );
+    let mut app = test_app_with_agent();
+    app.is_zdr = true;
+    assert!(
+        matches!(open_focused(&mut app), SettingsModalMode::Browse),
+        "ZDR must stop at the row that says so"
+    );
+    let mut app = test_app_with_agent();
+    app.team_name = Some("acme".to_string());
+    app.team_role = Some("member".to_string());
+    assert!(
+        matches!(open_focused(&mut app), SettingsModalMode::Browse),
+        "a team-managed lock must stop at the row that says so"
+    );
+    let mut app = test_app_with_agent();
+    app.team_name = Some("acme".to_string());
+    app.team_role = Some("admin".to_string());
+    assert!(
+        matches!(
+            open_focused(&mut app),
+            SettingsModalMode::PickingEnum { .. }
+        ),
+        "a team admin is not locked"
     );
 }
 /// `dispatch_open_reset_confirm` moves the Settings modal state

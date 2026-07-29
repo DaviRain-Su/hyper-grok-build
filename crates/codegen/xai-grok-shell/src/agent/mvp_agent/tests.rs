@@ -34,6 +34,7 @@ fn jwt_tier_claim_maps_free_and_paid() {
         jwt_tier_claim(&jwt_with_tier(6)).as_deref(),
         Some("supergrok_lite")
     );
+    assert_eq!(jwt_tier_claim(&jwt_with_tier(9)).as_deref(), Some("9"));
     assert_eq!(jwt_tier_claim(&jwt_with_tier(99)).as_deref(), Some("99"));
 }
 fn auth_with_mode(mode: crate::auth::AuthMode, key: &str) -> crate::auth::GrokAuth {
@@ -106,6 +107,7 @@ fn jwt_claim_matches_user_subscription_tier_known_pairs() {
         ("x_premium", "XPremium"),
         ("x_premium_plus", "XPremiumPlus"),
         ("supergrok_heavy", "SuperGrokPro"),
+        ("9", "EnterpriseMystery"),
         ("supergrok_lite", "SuperGrokLite"),
     ];
     for (claim, user_tier) in cases {
@@ -129,6 +131,10 @@ fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
     assert!(!jwt_claim_matches_user_subscription_tier("", "XPremium"));
     assert!(!jwt_claim_matches_user_subscription_tier(
         "supergrok_heavy",
+        "EnterpriseMystery"
+    ));
+    assert!(!jwt_claim_matches_user_subscription_tier(
+        "0",
         "EnterpriseMystery"
     ));
 }
@@ -397,8 +403,8 @@ fn settings_allow_access_field_absent_is_blocked() {
     };
     assert!(!settings_allow_access(Some(&rs)));
 }
-/// After allocating a turn number, `session_turn_numbers` holds the next
-/// value (current + 1). This is the value that must be persisted via
+/// After allocating a turn number, the retained (in-memory) turn counter holds
+/// the next value (current + 1). This is the value that must be persisted via
 /// `SetNextTraceTurn` so the counter survives restarts.
 #[test]
 fn allocate_turn_number_advances_counter() {
@@ -1816,6 +1822,8 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+#[cfg(unix)]
+mod process_scope_reclaim;
 mod subagent_spawn_context_tests;
 /// No load in flight and no session → the wait returns immediately
 /// (the caller then surfaces "unknown session id" exactly as before).
@@ -3167,16 +3175,21 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         sid.0.to_string(),
         acp::ModelId::new(std::sync::Arc::from("gone-model")),
     );
-    agent
-        .session_turn_numbers
-        .borrow_mut()
-        .insert(sid.clone(), 3);
+    agent.set_turn_number(&sid, 3);
     let (_permission_tx, permission_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_grok_workspace::permission::PermissionEvent>();
     agent
-        .permission_event_receivers
+        .retained_resources
         .borrow_mut()
-        .insert(sid.clone(), permission_rx);
+        .entry(sid.clone())
+        .or_default()
+        .permission_event_receiver = Some(permission_rx);
+    agent
+        .resident_resources
+        .borrow_mut()
+        .entry(sid.clone())
+        .or_default()
+        .require_gateway = true;
     agent.remove_session(&sid);
     assert!(
         toolset_weak.upgrade().is_none(),
@@ -3188,8 +3201,11 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
             .borrow()
             .contains_key(sid.0.as_ref())
     );
-    assert!(!agent.session_turn_numbers.borrow().contains_key(&sid));
-    assert!(!agent.permission_event_receivers.borrow().contains_key(&sid));
+    assert!(!agent.resident_resources.borrow().contains_key(&sid));
+    assert!(
+        !agent.retained_resources.borrow().contains_key(&sid),
+        "retained per-session resources must be reclaimed on removal"
+    );
 }
 /// Without a bridge, `ext_method` falls through to the unchanged local
 /// dispatch (`rewind::handle`), which reports the missing session — proving
@@ -3237,7 +3253,7 @@ fn cancel_does_not_forward_to_bridge_in_local_mode() {
     });
 }
 /// Regression (post-cancel slot hang, first bad release 0.2.101; see
-/// `dispatch_locks`). SDK e2e shape:
+/// `dispatch_lock`). SDK e2e shape:
 /// `test_cancel_ends_in_flight_turn_and_frees_slot` (grok-agent-sdk).
 #[test]
 fn cancel_never_overtakes_in_flight_prompt_intake() {

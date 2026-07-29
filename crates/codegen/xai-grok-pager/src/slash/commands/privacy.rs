@@ -1,18 +1,11 @@
-//! `/privacy` -- show or toggle privacy and data retention status.
+//! `/privacy` -- open the "Coding data, retention, and training" setting.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Show or toggle privacy and data retention status.
-///
-/// Usage:
-/// - `/privacy`             show current status
-/// - `/privacy opt-in`      opt in to coding data sharing
-/// - `/privacy opt-out`     opt out of coding data sharing
-///
-/// Case-insensitive. Only unambiguous aliases are accepted (e.g. `in`,
-/// `share`, `out`, `private`) — generic toggles like `on`/`off` are
-/// rejected because they're ambiguous in privacy context.
+const CODING_DATA_SHARING_KEY: &str = "coding_data_sharing";
+
+/// Open settings on `coding_data_sharing`. Takes no arguments.
 pub struct PrivacyCommand;
 
 impl SlashCommand for PrivacyCommand {
@@ -21,193 +14,90 @@ impl SlashCommand for PrivacyCommand {
     }
 
     fn description(&self) -> &str {
-        "Show or toggle privacy & data retention status"
+        // Reads as the row it opens: "Coding data, retention, and training".
+        "Open coding data, retention, and training settings"
     }
 
     fn usage(&self) -> &str {
-        "/privacy [opt-in|opt-out]"
+        "/privacy"
     }
 
-    fn takes_args(&self) -> bool {
-        true
+    /// Trailing text is ignored, not rejected: `/privacy opt-in` from muscle
+    /// memory should land on the page, not error.
+    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        CommandResult::Action(Action::OpenSettingsFocus {
+            key: CODING_DATA_SHARING_KEY,
+        })
     }
-
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let arg = args.trim();
-        if arg.is_empty() {
-            return CommandResult::Action(Action::ShowPrivacyInfo);
-        }
-        match parse_privacy_arg(arg) {
-            Some(opted_in) => CommandResult::Action(Action::SetCodingDataSharing { opted_in }),
-            None => CommandResult::Error(format!(
-                "Unknown argument `{arg}`. Valid options: opt-in (aliases: in, share) | \
-                 opt-out (aliases: out, private)."
-            )),
-        }
-    }
-}
-
-/// Parse `/privacy <arg>` into `Some(true)` (opt-in), `Some(false)`
-/// (opt-out), or `None` (unknown). Case-insensitive ASCII matching.
-#[doc(hidden)]
-pub fn parse_privacy_arg(arg: &str) -> Option<bool> {
-    const OPT_IN_ALIASES: &[&str] = &["opt-in", "in", "share"];
-    const OPT_OUT_ALIASES: &[&str] = &["opt-out", "out", "private"];
-
-    if OPT_IN_ALIASES.iter().any(|a| arg.eq_ignore_ascii_case(a)) {
-        return Some(true);
-    }
-    if OPT_OUT_ALIASES.iter().any(|a| arg.eq_ignore_ascii_case(a)) {
-        return Some(false);
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_opt_in_canonical() {
-        assert_eq!(parse_privacy_arg("opt-in"), Some(true));
-    }
-
-    #[test]
-    fn parse_opt_out_canonical() {
-        assert_eq!(parse_privacy_arg("opt-out"), Some(false));
-    }
-
-    /// Case-insensitive matching.
-    #[test]
-    fn parse_case_insensitive() {
-        for variant in &["OPT-IN", "Opt-In", "opt-IN", "OpT-iN"] {
-            assert_eq!(
-                parse_privacy_arg(variant),
-                Some(true),
-                "case-insensitive parse must accept `{variant}` as opt-in",
-            );
-        }
-        for variant in &["OPT-OUT", "Opt-Out", "opt-OUT", "OpT-oUt"] {
-            assert_eq!(
-                parse_privacy_arg(variant),
-                Some(false),
-                "case-insensitive parse must accept `{variant}` as opt-out",
-            );
-        }
-    }
-
-    /// Pins the accepted alias catalog.
-    #[test]
-    fn parse_opt_in_aliases() {
-        for alias in &["in", "share"] {
-            assert_eq!(
-                parse_privacy_arg(alias),
-                Some(true),
-                "alias `{alias}` must map to opt-in",
-            );
-        }
-    }
-
-    #[test]
-    fn parse_opt_out_aliases() {
-        for alias in &["out", "private"] {
-            assert_eq!(
-                parse_privacy_arg(alias),
-                Some(false),
-                "alias `{alias}` must map to opt-out",
-            );
-        }
-    }
-
-    /// Ambiguous generic-toggle aliases must be rejected — `/privacy on`
-    /// is ambiguous (could mean opt-in or opt-out).
-    #[test]
-    fn parse_rejects_ambiguous_generic_aliases() {
-        for ambiguous in &[
-            "on", "off", "true", "false", "enable", "enabled", "disable", "disabled",
-        ] {
-            assert_eq!(
-                parse_privacy_arg(ambiguous),
-                None,
-                "ambiguous alias `{ambiguous}` MUST be rejected — it would let a user typing \
-                 `/privacy {ambiguous}` get the OPPOSITE of their intent in privacy context. \
-                 See Security Issue 10 in PR 9 R1.",
-            );
-        }
-    }
-
-    /// Unknown arguments return None → the command surfaces an error
-    /// listing valid options. Pins the "no silent fallback" contract.
-    #[test]
-    fn parse_unknown_returns_none() {
-        for unknown in &["yes", "no", "maybe", "opt-maybe", "", " ", "1", "0"] {
-            assert_eq!(
-                parse_privacy_arg(unknown),
-                None,
-                "unknown arg `{unknown}` must NOT parse",
-            );
-        }
-    }
-
-    /// Alias families must not overlap.
-    #[test]
-    fn alias_families_disjoint() {
-        let opt_in_results: Vec<bool> = ["opt-in", "in", "share"]
-            .iter()
-            .map(|a| parse_privacy_arg(a).unwrap())
-            .collect();
-        assert!(
-            opt_in_results.iter().all(|b| *b),
-            "every opt-in alias must parse to true",
-        );
-        let opt_out_results: Vec<bool> = ["opt-out", "out", "private"]
-            .iter()
-            .map(|a| parse_privacy_arg(a).unwrap())
-            .collect();
-        assert!(
-            opt_out_results.iter().all(|b| !*b),
-            "every opt-out alias must parse to false",
-        );
-    }
-
-    /// Error message must list every accepted alias.
-    #[test]
-    fn error_message_lists_all_accepted_aliases() {
+    /// Run `/privacy <args>` in `mode`.
+    fn run_privacy(args: &str, mode: crate::app::ScreenMode) -> CommandResult {
         use crate::acp::model_state::ModelState;
         use crate::app::bundle::BundleState;
 
-        let cmd = PrivacyCommand;
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = CommandExecCtx {
             models: &models,
             session_id: None,
             bundle_state: &bundle,
-            screen_mode: crate::app::ScreenMode::Inline,
+            screen_mode: mode,
             billing_surface_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
-        let result = cmd.run(&mut ctx, "garbage-input");
-        match result {
-            CommandResult::Error(msg) => {
-                // Every accepted alias appears in the error message.
-                for alias in &["opt-in", "in", "share", "opt-out", "out", "private"] {
-                    assert!(
-                        msg.contains(alias),
-                        "error message must mention alias `{alias}` so the user knows \
-                         what to type; msg = {msg:?}",
-                    );
-                }
-                // Dropped ambiguous aliases must not appear.
-                for dropped in &["off", "true", "false", "enable", "disable"] {
-                    assert!(
-                        !msg.contains(dropped),
-                        "dropped alias `{dropped}` must NOT appear in error message \
-                         (would suggest it's still accepted); msg = {msg:?}",
-                    );
-                }
-            }
-            other => panic!("expected Error result for unknown arg, got {other:?}"),
+        PrivacyCommand.run(&mut ctx, args)
+    }
+
+    fn opens_settings_row(result: &CommandResult) -> bool {
+        matches!(
+            result,
+            CommandResult::Action(Action::OpenSettingsFocus {
+                key: CODING_DATA_SHARING_KEY
+            })
+        )
+    }
+
+    /// Minimal suppresses the privacy banner, so `/privacy` is the only
+    /// route to the page there — no mode may fall back to something else.
+    #[test]
+    fn privacy_opens_settings_row_in_every_screen_mode() {
+        use crate::app::ScreenMode;
+        for mode in [
+            ScreenMode::Fullscreen,
+            ScreenMode::Inline,
+            ScreenMode::Minimal,
+        ] {
+            let result = run_privacy("", mode);
+            assert!(
+                opens_settings_row(&result),
+                "`/privacy` in {mode:?} must open the settings row, got {result:?}",
+            );
+        }
+    }
+
+    /// The arguments this used to accept must not linger as hidden aliases
+    /// that change a privacy preference straight from the prompt.
+    #[test]
+    fn arguments_are_ignored_not_honored() {
+        use crate::app::ScreenMode;
+        assert!(
+            !PrivacyCommand.takes_args(),
+            "the dropdown must not offer an argument slot"
+        );
+        for args in [
+            "   ", "opt-in", "opt-out", "in", "out", "share", "private", "status", "info",
+            "garbage",
+        ] {
+            let result = run_privacy(args, ScreenMode::Inline);
+            assert!(
+                opens_settings_row(&result),
+                "`/privacy {args}` must just open the page, got {result:?}",
+            );
         }
     }
 }

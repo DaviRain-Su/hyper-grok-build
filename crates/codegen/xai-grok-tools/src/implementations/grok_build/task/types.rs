@@ -854,9 +854,8 @@ pub enum SubagentEvent {
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
     Completions(SubagentCompletionsRequest),
-    /// Fire-and-forget: drop buffered completions owned by a removed session
-    /// so unloaded sessions cannot leak entries into the shared buffer.
-    DiscardSessionCompletions {
+    /// Discard a closed session's buffered completions and cancel its children.
+    TeardownSession {
         parent_session_id: String,
     },
     Outstanding(SubagentOutstandingRequest),
@@ -872,12 +871,7 @@ pub enum SubagentEvent {
 
 // Resource types
 
-/// Unified sender for all subagent coordinator events.
-///
-/// Cloned into each session's `ToolContext` / `ToolBridge Resources` so
-/// that `TaskTool`, `TaskOutputTool`, `KillTaskTool`, completion
-/// reminders, compaction queries, and turn-end guards all send through
-/// a single channel.
+/// One shared channel to the subagent coordinator, cloned into each session.
 #[derive(Clone, Educe)]
 #[educe(Debug)]
 pub struct SubagentEventSender(#[educe(Debug(ignore))] pub mpsc::UnboundedSender<SubagentEvent>);

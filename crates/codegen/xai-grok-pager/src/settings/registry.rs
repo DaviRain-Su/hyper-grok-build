@@ -785,6 +785,11 @@ pub fn current_value_for(
     }
 }
 
+/// Consent chooser: no docs tip, and no `d` reset (hint or key).
+pub fn is_consent_chooser(key: &str) -> bool {
+    key == "coding_data_sharing"
+}
+
 /// Default value for `key`, derived from the registry metadata.
 pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
     match &meta.kind {

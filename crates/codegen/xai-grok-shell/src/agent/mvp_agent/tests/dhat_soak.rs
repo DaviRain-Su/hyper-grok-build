@@ -38,18 +38,16 @@ fn populate_and_evict(agent: &MvpAgent, i: usize) {
 
     let (_ptx, prx) = tokio::sync::mpsc::unbounded_channel::<PermissionEvent>();
     agent
-        .permission_event_receivers
+        .retained_resources
         .borrow_mut()
-        .insert(sid.clone(), prx);
-    agent
-        .session_turn_numbers
-        .borrow_mut()
-        .insert(sid.clone(), i as u64);
+        .entry(sid.clone())
+        .or_default()
+        .permission_event_receiver = Some(prx);
+    agent.set_turn_number(&sid, i as u64);
     agent.model_unavailable_sessions.borrow_mut().insert(
         sid.0.to_string(),
         acp::ModelId::new(std::sync::Arc::from("gone-model")),
     );
-
     agent.remove_session(&sid);
 }
 

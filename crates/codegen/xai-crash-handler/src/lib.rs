@@ -1,7 +1,11 @@
 //! Cross-platform crash handler with startup crash detection.
 //!
-//! - **Unix**: SIGBUS/SIGSEGV via `sigaction(2)`.
+//! - **Unix**: SIGBUS/SIGSEGV/SIGABRT via `sigaction(2)`. SIGABRT capture
+//!   means `panic = "abort"` builds (every shipped release) leave a crash
+//!   report when a Rust panic aborts the process.
 //! - **Windows**: access violations via `SetUnhandledExceptionFilter`.
+//!   SIGABRT capture is Unix-only — `abort()` on Windows does not route
+//!   through the unhandled-exception filter.
 //!
 //! # Usage
 //!
@@ -66,7 +70,8 @@ pub struct CrashReport {
     pub report_path: PathBuf,
 }
 
-/// Install the crash handler for SIGBUS and SIGSEGV.
+/// Install the crash handler for SIGBUS, SIGSEGV, and SIGABRT (Unix; on
+/// Windows only access violations are captured).
 ///
 /// Must be called early in `main()`, before any async runtime or thread
 /// spawning. Creates `crash_dir` if it does not exist.
@@ -77,7 +82,8 @@ pub fn install(config: CrashHandlerConfig) -> bool {
     handler::install(&config.crash_dir, &config.app_version)
 }
 
-/// Install a minimal SIGSEGV/SIGBUS handler that only restores the terminal.
+/// Install a minimal SIGSEGV/SIGBUS/SIGABRT handler that only restores the
+/// terminal.
 ///
 /// On Unix, saves the current termios state, allocates an alternate signal
 /// stack, and registers a handler that writes terminal restore escape
@@ -96,13 +102,13 @@ pub fn install_terminal_restore_only() {
     handler::install_terminal_restore_only()
 }
 
-/// Upgrade SIGSEGV/SIGBUS handlers to include terminal escape code
+/// Upgrade SIGSEGV/SIGBUS/SIGABRT handlers to include terminal escape code
 /// restoration. Call when TUI modes are enabled.
 pub fn enable_terminal_escape_restore() {
     handler::enable_terminal_escape_restore()
 }
 
-/// Downgrade SIGSEGV/SIGBUS handlers to termios-only restoration.
+/// Downgrade SIGSEGV/SIGBUS/SIGABRT handlers to termios-only restoration.
 /// Call when TUI modes are disabled.
 pub fn disable_terminal_escape_restore() {
     handler::disable_terminal_escape_restore()

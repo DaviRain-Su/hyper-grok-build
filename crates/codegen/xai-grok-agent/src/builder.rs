@@ -1591,6 +1591,64 @@ mod tests {
             "should distinguish a fresh restart from resume"
         );
     }
+    /// The bridge's full-discovery snapshot must record every discovered
+    /// skill name — including `paths:`-gated and preloaded skills that the
+    /// listing baseline (`slash_skills`) holds back — so session-start
+    /// telemetry can reuse it instead of re-walking the disk.
+    #[tokio::test]
+    async fn discovery_snapshot_records_gated_and_preloaded_skills() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::notification::ToolNotificationHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let write_skill = |dir: &str, content: &str| {
+            let d = tmp.path().join(".grok/skills").join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), content).unwrap();
+        };
+        write_skill(
+            "snapshot-plain-skill",
+            "---\nname: snapshot-plain-skill\ndescription: plain\n---\nbody\n",
+        );
+        write_skill(
+            "snapshot-gated-skill",
+            "---\nname: snapshot-gated-skill\ndescription: gated\npaths: \"src/**\"\n---\nbody\n",
+        );
+        let mut definition = crate::config::AgentDefinition::default_grok_build();
+        definition.skills = vec!["snapshot-plain-skill".to_string()];
+        let agent = AgentBuilder::new(
+            tmp.path().to_path_buf(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(definition)
+        .build()
+        .await
+        .expect("agent should build with local skill fixtures");
+        let snapshot = agent.tool_bridge().skill_discovery_snapshot_names().await;
+        assert!(
+            snapshot.contains(&"snapshot-plain-skill".to_string()),
+            "preloaded skill missing from snapshot: {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains(&"snapshot-gated-skill".to_string()),
+            "paths:-gated skill missing from snapshot: {snapshot:?}"
+        );
+        let listed: Vec<String> = agent
+            .tool_bridge()
+            .slash_skills()
+            .await
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !listed.contains(&"snapshot-gated-skill".to_string()),
+            "paths:-gated skill must stay out of the listing baseline: {listed:?}"
+        );
+        assert!(
+            !listed.contains(&"snapshot-plain-skill".to_string()),
+            "preloaded skill must stay out of the listing baseline: {listed:?}"
+        );
+    }
     async fn build_pager_agent(
         profile: crate::config::AgentDefinition,
         subagents_enabled: bool,

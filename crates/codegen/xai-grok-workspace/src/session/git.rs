@@ -10,9 +10,10 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use url::Url;
 pub use xai_grok_workspace_types::rpc::git::{
-    ChangeType, CommitData, CommitResult, DiscardScope, GitBranchEntry, GitBranchListData,
-    GitDiffsData, GitError, GitFileChange, GitInfoData, GitReadFile, GitReadFilesData,
-    GitStatusData, StageData, VcsKind,
+    ChangeType, CommitData, CommitOutcome, CommitResult, DiscardScope, GitBranchEntry,
+    GitBranchListData, GitCommitReq, GitDiffsData, GitError, GitFileChange, GitInfoData,
+    GitReadFile, GitReadFilesData, GitStatusData, GitSyncBaseOutcome, GitSyncBaseResult,
+    PushStatus, StageData, VcsKind,
 };
 pub const ERROR_CODE_DIFF_SIZE_EXCEEDED: &str = "DIFF_SIZE_EXCEEDED";
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2282,60 +2283,282 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
     }
     failed_adds == 0
 }
-pub async fn commit(
-    git_root: &Path,
-    message: &str,
-    amend: bool,
-    signoff: bool,
-    push: bool,
-    sync: bool,
-) -> Result<CommitResult> {
+/// Run a git CLI command returning `(success, combined stdout+stderr)` instead
+/// of collapsing failure into an error. `LC_ALL=C` pins git's message locale so
+/// callers can classify output (e.g. non-fast-forward push rejections) by
+/// string-match. Errors only on spawn failure.
+async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
+    tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli_raw");
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd).arg("--no-optional-locks");
+    for &(key, val) in xai_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
+        cmd.env(key, val);
+    }
+    cmd.env("LC_ALL", "C");
+    cmd.stdin(std::process::Stdio::null());
+    xai_grok_tools::util::detach_command(&mut cmd);
+    cmd.envs(xai_grok_tools::util::pager_env());
+    let output = cmd.args(args).output().await?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    Ok((output.status.success(), combined))
+}
+/// Marker line guarding the default-exclude seed. Environments may pre-seed
+/// the same block at provision time under this marker; whichever side seeds
+/// first wins and the other becomes a no-op.
+const DEFAULT_EXCLUDES_MARKER: &str = "grok default excludes";
+/// Local-only default excludes (`.git/info/exclude` — never enters the repo's
+/// history) so `stage_all` can't sweep in dependency trees, build output, or
+/// env files. `git add -f` still overrides.
+const DEFAULT_EXCLUDES_BLOCK: &str = "\
+# grok default excludes (local-only; seeded by the workspace git_commit op)
+.grok/
+node_modules/
+.env
+.env.*
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+.turbo/
+.cache/
+.parcel-cache/
+coverage/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pnpm-store/
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+";
+/// Seed [`DEFAULT_EXCLUDES_BLOCK`] into the repo's `info/exclude` unless the
+/// marker is already present. Resolves the real file via `--git-path` so
+/// gitfile and linked-worktree checkouts seed the common dir, not a dead
+/// `.git/info` path.
+async fn seed_default_excludes(git_root: &Path) -> Result<()> {
+    let exclude_rel = git_cli(git_root, &["rev-parse", "--git-path", "info/exclude"]).await?;
+    let exclude_path = {
+        let p = Path::new(&exclude_rel);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            git_root.join(p)
+        }
+    };
+    let existing = tokio::fs::read_to_string(&exclude_path)
+        .await
+        .unwrap_or_default();
+    if existing.contains(DEFAULT_EXCLUDES_MARKER) {
+        return Ok(());
+    }
+    if let Some(parent) = exclude_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(DEFAULT_EXCLUDES_BLOCK);
+    tokio::fs::write(&exclude_path, content).await?;
+    tracing::debug!(path = %exclude_path.display(), "seeded default git excludes");
+    Ok(())
+}
+/// Push HEAD to origin, classifying the failure mode. Never forces. Returns
+/// the combined output alongside the [`PushStatus`].
+async fn push_classified(git_root: &Path) -> Result<(PushStatus, String)> {
+    let (ok, out) = git_cli_raw(git_root, &["push", "-u", "origin", "HEAD"]).await?;
+    if ok {
+        return Ok((PushStatus::Ok, out));
+    }
+    let lower = out.to_lowercase();
+    let status = if lower.contains("non-fast-forward") || lower.contains("fetch first") {
+        PushStatus::Conflict
+    } else {
+        PushStatus::Failed
+    };
+    Ok((status, out))
+}
+/// Refuse unless the workspace is on exactly `expected`. Detached HEAD
+/// reports "HEAD" and so never matches.
+async fn ensure_on_branch(git_root: &Path, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let current = git_cli(git_root, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    anyhow::ensure!(
+        current == expected,
+        "workspace is on '{current}', expected '{expected}'"
+    );
+    Ok(())
+}
+pub async fn commit(git_root: &Path, req: &GitCommitReq) -> Result<CommitResult> {
     let start = std::time::Instant::now();
-    let mut args = vec!["commit", "-m", message];
-    if amend {
-        args.push("--amend");
+    ensure_on_branch(git_root, req.expected_branch.as_deref()).await?;
+    if req.seed_default_excludes {
+        seed_default_excludes(git_root).await?;
     }
-    if signoff {
-        args.push("--signoff");
+    if req.stage_all {
+        git_cli(git_root, &["add", "-A"]).await?;
     }
-    git_cli(git_root, &args).await?;
-    let commit_hash = git_cli(git_root, &["rev-parse", "HEAD"]).await.ok();
-    let short_hash = commit_hash
-        .as_ref()
-        .and_then(|h| h.get(..7))
-        .unwrap_or("unknown");
-    let mut combined_output = format!("Committed: {}", short_hash);
+    let clean = req.stage_all
+        && !req.amend
+        && git_cli_raw(git_root, &["diff", "--cached", "--quiet"])
+            .await?
+            .0;
+    let mut combined_output;
+    if clean {
+        combined_output = "Nothing to commit; working tree clean".to_owned();
+    } else {
+        let mut args = vec!["commit", "-m", &req.message];
+        if req.amend {
+            args.push("--amend");
+        }
+        if req.signoff {
+            args.push("--signoff");
+        }
+        git_cli(git_root, &args).await?;
+        combined_output = String::new();
+    }
+    let mut commit_hash = git_cli(git_root, &["rev-parse", "HEAD"]).await.ok();
+    if !clean {
+        let short_hash = commit_hash
+            .as_ref()
+            .and_then(|h| h.get(..7))
+            .unwrap_or("unknown");
+        combined_output = format!("Committed: {}", short_hash);
+    }
     let mut warning = None;
-    if sync {
+    let mut push_status = PushStatus::NotRequested;
+    if req.sync {
         match git_cli(git_root, &["pull", "--rebase"]).await {
             Ok(pull_out) => {
                 combined_output.push_str("\n--- Pull ---\n");
                 combined_output.push_str(&pull_out);
+                commit_hash = git_cli(git_root, &["rev-parse", "HEAD"]).await.ok();
             }
             Err(e) => {
                 warning = Some(format!("Couldn't pull the latest changes. {}", e));
+                push_status = PushStatus::Skipped;
             }
         }
     }
-    if warning.is_none() && (push || sync) {
-        match git_cli(git_root, &["push", "-u", "origin", "HEAD"]).await {
-            Ok(push_out) => {
+    if warning.is_none() && (req.push || req.sync) {
+        let (status, push_out) = push_classified(git_root).await?;
+        push_status = status;
+        match status {
+            PushStatus::Ok => {
                 combined_output.push_str("\n--- Push ---\n");
                 combined_output.push_str(&push_out);
             }
-            Err(e) => {
-                warning = Some(format!("Couldn't push your changes. {}", e));
+            _ => {
+                warning = Some(format!("Couldn't push your changes. {}", push_out));
             }
         }
     }
-    tracing::debug!(amend, push, sync, elapsed = ?start.elapsed(), "git.commit");
+    tracing::debug!(
+        amend = req.amend,
+        push = req.push,
+        sync = req.sync,
+        stage_all = req.stage_all,
+        clean,
+        push_status = ?push_status,
+        elapsed = ?start.elapsed(),
+        "git.commit"
+    );
     Ok(CommitResult {
         data: CommitData {
-            commit_hash,
+            commit_hash: commit_hash.clone(),
             output: Some(combined_output),
         },
         warning,
+        outcome: Some(CommitOutcome {
+            sha: commit_hash,
+            clean,
+            pushed: push_status == PushStatus::Ok,
+            push: push_status,
+        }),
     })
+}
+/// Merge the base branch into the current branch (`workspace.git_sync_base`).
+/// Merge, never rebase: conv-branch history must not be rewritten. On
+/// conflicts the merge is left in progress for resolution; `abort` rolls it
+/// back.
+pub async fn sync_base(
+    git_root: &Path,
+    base_ref: Option<&str>,
+    abort: bool,
+    expected_branch: Option<&str>,
+) -> Result<GitSyncBaseResult> {
+    async fn merge_in_progress(git_root: &Path) -> Result<bool> {
+        Ok(
+            git_cli_raw(git_root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                .await?
+                .0,
+        )
+    }
+    if abort {
+        let (_ok, out) = git_cli_raw(git_root, &["merge", "--abort"]).await?;
+        anyhow::ensure!(
+            !merge_in_progress(git_root).await?,
+            "merge --abort failed: {out}"
+        );
+        return Ok(GitSyncBaseResult {
+            outcome: GitSyncBaseOutcome::Aborted,
+        });
+    }
+    ensure_on_branch(git_root, expected_branch).await?;
+    anyhow::ensure!(
+        !merge_in_progress(git_root).await?,
+        "a merge is already in progress; resolve it or call again with abort"
+    );
+    let dirty = git_cli(git_root, &["status", "--porcelain"]).await?;
+    anyhow::ensure!(
+        dirty.is_empty(),
+        "working tree is not clean; commit or discard changes before syncing the base"
+    );
+    let base = base_ref.unwrap_or("HEAD");
+    let (fetched, fetch_out) = git_cli_raw(git_root, &["fetch", "origin", base]).await?;
+    anyhow::ensure!(fetched, "fetch of base ref '{base}' failed: {fetch_out}");
+    if git_cli_raw(
+        git_root,
+        &["merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"],
+    )
+    .await?
+    .0
+    {
+        return Ok(GitSyncBaseResult {
+            outcome: GitSyncBaseOutcome::UpToDate,
+        });
+    }
+    let (merged, merge_out) = git_cli_raw(git_root, &["merge", "--no-edit", "FETCH_HEAD"]).await?;
+    if merged {
+        let sha = git_cli(git_root, &["rev-parse", "HEAD"]).await?;
+        return Ok(GitSyncBaseResult {
+            outcome: GitSyncBaseOutcome::Merged { sha },
+        });
+    }
+    if merge_in_progress(git_root).await? {
+        let files = git_cli(git_root, &["diff", "--name-only", "--diff-filter=U"])
+            .await?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        return Ok(GitSyncBaseResult {
+            outcome: GitSyncBaseOutcome::Conflicts { files },
+        });
+    }
+    anyhow::bail!("merge of base ref '{base}' failed: {merge_out}")
 }
 pub async fn stage_content(git_root: &Path, path: &str, content: &str) -> Result<()> {
     let git_root = git_root.to_path_buf();
@@ -4206,5 +4429,418 @@ mod restore_code_tests {
             stash_list.trim().is_empty(),
             "no stash entry should remain after the pop, got: {stash_list:?}"
         );
+    }
+    fn skip_without_git_cli() -> bool {
+        std::env::var("BAZEL_TEST").is_ok()
+    }
+    /// `origin.git` (bare, HEAD → main) plus a work clone on `conv/t` forked
+    /// from a pushed `main`. Returns (tempdir, work path).
+    async fn conv_repo_with_origin() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("origin.git");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git_cli(&bare, &["init", "--bare"]).await.unwrap();
+        git_cli(&bare, &["symbolic-ref", "HEAD", "refs/heads/main"])
+            .await
+            .unwrap();
+        git_cli(&work, &["init", "-b", "main"]).await.unwrap();
+        configure_test_identity(&work).await;
+        std::fs::write(work.join("README.md"), "base\n").unwrap();
+        git_cli(&work, &["add", "-A"]).await.unwrap();
+        git_cli(&work, &["commit", "-m", "init"]).await.unwrap();
+        git_cli(&work, &["remote", "add", "origin", bare.to_str().unwrap()])
+            .await
+            .unwrap();
+        git_cli(&work, &["push", "-u", "origin", "main"])
+            .await
+            .unwrap();
+        git_cli(&work, &["checkout", "-b", "conv/t"]).await.unwrap();
+        (tmp, work)
+    }
+    async fn configure_test_identity(repo: &Path) {
+        git_cli(repo, &["config", "user.name", "test"])
+            .await
+            .unwrap();
+        git_cli(repo, &["config", "user.email", "test@test.com"])
+            .await
+            .unwrap();
+        git_cli(repo, &["config", "commit.gpgsign", "false"])
+            .await
+            .unwrap();
+    }
+    fn conv_commit_req(push: bool) -> GitCommitReq {
+        GitCommitReq {
+            message: "conv commit".to_owned(),
+            push,
+            stage_all: true,
+            seed_default_excludes: true,
+            expected_branch: Some("conv/t".to_owned()),
+            ..Default::default()
+        }
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn conv_commit_seeds_excludes_and_pushes() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (_tmp, work) = conv_repo_with_origin().await;
+        std::fs::create_dir_all(work.join("node_modules")).unwrap();
+        std::fs::write(work.join("node_modules/dep.js"), "x").unwrap();
+        std::fs::write(work.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(work.join("src.txt"), "real").unwrap();
+        let res = commit(&work, &conv_commit_req(true)).await.unwrap();
+        let outcome = res.outcome.expect("git backend returns an outcome");
+        assert!(!outcome.clean);
+        assert!(outcome.pushed);
+        assert_eq!(outcome.push, PushStatus::Ok);
+        let sha = outcome.sha.expect("commit produced a HEAD");
+        let tree = git_cli(&work, &["ls-tree", "-r", "--name-only", "HEAD"])
+            .await
+            .unwrap();
+        assert!(tree.contains("src.txt"));
+        assert!(
+            !tree.contains(".env"),
+            "seeded excludes must hide .env: {tree}"
+        );
+        assert!(!tree.contains("node_modules"), "{tree}");
+        let remote_sha = git_cli(&work, &["rev-parse", "origin/conv/t"])
+            .await
+            .unwrap();
+        assert_eq!(remote_sha, sha);
+        let res2 = commit(&work, &conv_commit_req(true)).await.unwrap();
+        let outcome2 = res2.outcome.unwrap();
+        assert!(outcome2.clean);
+        assert_eq!(outcome2.sha.as_deref(), Some(sha.as_str()));
+        let exclude = git_cli(&work, &["rev-parse", "--git-path", "info/exclude"])
+            .await
+            .unwrap();
+        let content = std::fs::read_to_string(work.join(exclude)).unwrap();
+        assert_eq!(content.matches(DEFAULT_EXCLUDES_MARKER).count(), 1);
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn conv_commit_legacy_clean_tree_still_errors_without_stage_all() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (_tmp, work) = conv_repo_with_origin().await;
+        let req = GitCommitReq {
+            message: "nothing staged".to_owned(),
+            ..Default::default()
+        };
+        assert!(
+            commit(&work, &req).await.is_err(),
+            "legacy contract: committing with nothing staged errors"
+        );
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn conv_commit_refuses_wrong_branch() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (_tmp, work) = conv_repo_with_origin().await;
+        let mut req = conv_commit_req(false);
+        req.expected_branch = Some("conv/other".to_owned());
+        let err = commit(&work, &req).await.expect_err("wrong branch refused");
+        assert!(err.to_string().contains("expected 'conv/other'"), "{err}");
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn conv_commit_classifies_non_fast_forward_push_and_never_forces() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (tmp, work) = conv_repo_with_origin().await;
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        commit(&work, &conv_commit_req(true)).await.unwrap();
+        let work2 = tmp.path().join("work2");
+        git_cli(
+            tmp.path(),
+            &[
+                "clone",
+                "--branch",
+                "conv/t",
+                tmp.path().join("origin.git").to_str().unwrap(),
+                work2.to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        configure_test_identity(&work2).await;
+        std::fs::write(work2.join("b.txt"), "b").unwrap();
+        git_cli(&work2, &["add", "-A"]).await.unwrap();
+        git_cli(&work2, &["commit", "-m", "out of band"])
+            .await
+            .unwrap();
+        git_cli(&work2, &["push", "origin", "conv/t"])
+            .await
+            .unwrap();
+        let diverged_sha = git_cli(&work2, &["rev-parse", "HEAD"]).await.unwrap();
+        std::fs::write(work.join("c.txt"), "c").unwrap();
+        let res = commit(&work, &conv_commit_req(true)).await.unwrap();
+        let outcome = res.outcome.unwrap();
+        assert!(!outcome.clean);
+        assert!(!outcome.pushed);
+        assert_eq!(outcome.push, PushStatus::Conflict);
+        assert!(
+            res.warning.is_some(),
+            "push failure still surfaces a warning"
+        );
+        git_cli(&work, &["fetch", "origin", "conv/t"])
+            .await
+            .unwrap();
+        let remote_sha = git_cli(&work, &["rev-parse", "FETCH_HEAD"]).await.unwrap();
+        assert_eq!(remote_sha, diverged_sha);
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn sync_rebase_reports_the_rewritten_head() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (tmp, work) = conv_repo_with_origin().await;
+        git_cli(&work, &["checkout", "main"]).await.unwrap();
+        let work2 = tmp.path().join("work2");
+        git_cli(
+            tmp.path(),
+            &[
+                "clone",
+                "--branch",
+                "main",
+                tmp.path().join("origin.git").to_str().unwrap(),
+                work2.to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        configure_test_identity(&work2).await;
+        std::fs::write(work2.join("base.txt"), "base").unwrap();
+        git_cli(&work2, &["add", "-A"]).await.unwrap();
+        git_cli(&work2, &["commit", "-m", "advance main"])
+            .await
+            .unwrap();
+        git_cli(&work2, &["push", "origin", "main"]).await.unwrap();
+        std::fs::write(work.join("local.txt"), "local").unwrap();
+        let req = GitCommitReq {
+            message: "local commit".to_owned(),
+            sync: true,
+            stage_all: true,
+            expected_branch: Some("main".to_owned()),
+            ..Default::default()
+        };
+        let res = commit(&work, &req).await.unwrap();
+        let outcome = res.outcome.unwrap();
+        assert!(outcome.pushed);
+        let head = git_cli(&work, &["rev-parse", "HEAD"]).await.unwrap();
+        assert_eq!(
+            outcome.sha.as_deref(),
+            Some(head.as_str()),
+            "sha must be the post-rebase HEAD"
+        );
+        assert_eq!(res.data.commit_hash.as_deref(), Some(head.as_str()));
+        let remote = git_cli(&work, &["rev-parse", "origin/main"]).await.unwrap();
+        assert_eq!(remote, head);
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn sync_base_up_to_date_and_clean_merge() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (tmp, work) = conv_repo_with_origin().await;
+        std::fs::write(work.join("conv.txt"), "conv").unwrap();
+        commit(&work, &conv_commit_req(true)).await.unwrap();
+        for base in [Some("main"), None] {
+            let res = sync_base(&work, base, false, Some("conv/t")).await.unwrap();
+            assert_eq!(res.outcome, GitSyncBaseOutcome::UpToDate, "base={base:?}");
+        }
+        let work2 = tmp.path().join("work2");
+        git_cli(
+            tmp.path(),
+            &[
+                "clone",
+                "--branch",
+                "main",
+                tmp.path().join("origin.git").to_str().unwrap(),
+                work2.to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        configure_test_identity(&work2).await;
+        std::fs::write(work2.join("base.txt"), "base change").unwrap();
+        git_cli(&work2, &["add", "-A"]).await.unwrap();
+        git_cli(&work2, &["commit", "-m", "advance main"])
+            .await
+            .unwrap();
+        git_cli(&work2, &["push", "origin", "main"]).await.unwrap();
+        let res = sync_base(&work, Some("main"), false, Some("conv/t"))
+            .await
+            .unwrap();
+        match res.outcome {
+            GitSyncBaseOutcome::Merged { sha } => {
+                assert_eq!(sha, git_cli(&work, &["rev-parse", "HEAD"]).await.unwrap());
+                assert!(
+                    work.join("base.txt").exists(),
+                    "merge brought the base file in"
+                );
+            }
+            other => panic!("expected Merged, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn sync_base_conflicts_left_in_progress_and_abort_rolls_back() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (tmp, work) = conv_repo_with_origin().await;
+        std::fs::write(work.join("README.md"), "conv version\n").unwrap();
+        commit(&work, &conv_commit_req(true)).await.unwrap();
+        let pre_merge_sha = git_cli(&work, &["rev-parse", "HEAD"]).await.unwrap();
+        let work2 = tmp.path().join("work2");
+        git_cli(
+            tmp.path(),
+            &[
+                "clone",
+                "--branch",
+                "main",
+                tmp.path().join("origin.git").to_str().unwrap(),
+                work2.to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        configure_test_identity(&work2).await;
+        std::fs::write(work2.join("README.md"), "main version\n").unwrap();
+        git_cli(&work2, &["add", "-A"]).await.unwrap();
+        git_cli(&work2, &["commit", "-m", "conflicting base change"])
+            .await
+            .unwrap();
+        git_cli(&work2, &["push", "origin", "main"]).await.unwrap();
+        let res = sync_base(&work, Some("main"), false, Some("conv/t"))
+            .await
+            .unwrap();
+        match &res.outcome {
+            GitSyncBaseOutcome::Conflicts { files } => {
+                assert_eq!(files, &vec!["README.md".to_owned()]);
+            }
+            other => panic!("expected Conflicts, got {other:?}"),
+        }
+        assert!(
+            git_cli_raw(&work, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                .await
+                .unwrap()
+                .0,
+            "conflicted merge must stay in progress"
+        );
+        assert!(
+            sync_base(&work, Some("main"), false, Some("conv/t"))
+                .await
+                .is_err()
+        );
+        let res = sync_base(&work, None, true, Some("not-the-branch"))
+            .await
+            .unwrap();
+        assert_eq!(res.outcome, GitSyncBaseOutcome::Aborted);
+        assert!(
+            !git_cli_raw(&work, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                .await
+                .unwrap()
+                .0
+        );
+        assert_eq!(
+            git_cli(&work, &["rev-parse", "HEAD"]).await.unwrap(),
+            pre_merge_sha
+        );
+        assert_eq!(
+            std::fs::read_to_string(work.join("README.md")).unwrap(),
+            "conv version\n"
+        );
+        let res = sync_base(&work, None, true, None).await.unwrap();
+        assert_eq!(res.outcome, GitSyncBaseOutcome::Aborted);
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn sync_base_refuses_wrong_branch() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (_tmp, work) = conv_repo_with_origin().await;
+        let err = sync_base(&work, Some("main"), false, Some("conv/other"))
+            .await
+            .expect_err("wrong branch refused");
+        assert!(err.to_string().contains("expected 'conv/other'"), "{err}");
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn sync_pull_failure_reports_push_skipped() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (_tmp, work) = conv_repo_with_origin().await;
+        std::fs::write(work.join("local.txt"), "local").unwrap();
+        let req = GitCommitReq {
+            message: "local".to_owned(),
+            sync: true,
+            stage_all: true,
+            ..Default::default()
+        };
+        let res = commit(&work, &req).await.unwrap();
+        assert!(res.warning.is_some(), "pull failure surfaces a warning");
+        let outcome = res.outcome.unwrap();
+        assert!(!outcome.pushed);
+        assert_eq!(
+            outcome.push,
+            PushStatus::Skipped,
+            "an implied push skipped by a pull failure must not read as never-requested"
+        );
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "test invokes git CLI which is not always available"
+    )]
+    async fn sync_base_refuses_dirty_tree() {
+        if skip_without_git_cli() {
+            return;
+        }
+        let (_tmp, work) = conv_repo_with_origin().await;
+        std::fs::write(work.join("dirty.txt"), "uncommitted").unwrap();
+        let err = sync_base(&work, Some("main"), false, Some("conv/t"))
+            .await
+            .expect_err("dirty tree refused");
+        assert!(err.to_string().contains("not clean"), "{err}");
     }
 }

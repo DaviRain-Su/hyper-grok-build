@@ -4158,14 +4158,11 @@ fn advance_next_recovers_when_selection_is_hidden() {
 #[test]
 fn advance_prev_recovers_when_selection_is_hidden() {
     let mut s = make_state();
-    // Apply a filter matching only show_timestamps and simple_mode.
-    // "mode" matches both: compact_mode label, simple_mode label
-    // AND show_timestamps via... actually let's pick a more reliable
-    // filter — use individual keywords. "simple" matches simple_mode
-    // only. Let's use that and corrupt selected to compact_mode
-    // (hidden). Up should land on the LAST visible setting which
-    // is simple_mode.
-    s.set_query("simple");
+    // The filter must match exactly one setting, so the "LAST visible"
+    // target is unambiguous. `ascii` is a simple_mode keyword and hits
+    // nothing else (settings_e2e pins that). Corrupt `selected` to the
+    // now-hidden compact_mode; Up must land on simple_mode.
+    s.set_query("ascii");
     let compact_idx = s
         .rows
         .iter()
@@ -4620,8 +4617,8 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
 /// Two-line rows expand `state.row_rects` to span BOTH lines so
 /// mouse clicks on either line trigger the same default action.
 ///
-/// `coding_data_sharing`: label 19 + value "Opt out" 7 + chevron
-/// 2 + chrome 4 = 32 cells one-line. We render at width=28 so
+/// `coding_data_sharing`'s label plus the value "Opt out", the chevron,
+/// and the row chrome are far wider than the width=28 we render at, so
 /// the row drops to two lines.
 #[test]
 fn two_line_row_hit_rect_spans_both_lines() {
@@ -4689,7 +4686,7 @@ fn two_line_row_hit_rect_spans_both_lines() {
 #[test]
 fn two_line_row_with_expansion_renders_three_segments() {
     let mut s = make_state();
-    // Coding data sharing's label + value (with chevron) won't
+    // The coding-data row's label + value (with chevron) won't
     // fit on a 28-col line, forcing two-line layout.
     let row_idx = s
         .rows
@@ -4715,11 +4712,22 @@ fn two_line_row_with_expansion_renders_three_segments() {
         "expanded two-line row must allocate ≥2 lines for the row itself, got height={}",
         rect.height
     );
-    // The row label is on line 1.
+    // The row label is on line 1. A 28-col row truncates a long label, so
+    // match the head of the live copy rather than the whole string.
     let label_line = buf_row_text(&buf, rect.y, area.x, area.width);
+    let label = s
+        .registry
+        .find("coding_data_sharing")
+        .expect("registered")
+        .label;
+    let head: String = label
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        label_line.contains("Coding data sharing"),
-        "line 1 must contain the row label: {label_line:?}"
+        label_line.contains(&head),
+        "line 1 must contain the row label (head {head:?}): {label_line:?}"
     );
     // The value (display: "Opt out" or similar) is on line 2.
     let value_line = buf_row_text(&buf, rect.y + 1, area.x, area.width);
@@ -6395,6 +6403,66 @@ fn hover_breadcrumb_flips_state_and_returns_changed() {
     );
 }
 
+/// `d` must be inert on a consent chooser, not merely hidden from the
+/// footer.
+#[test]
+fn consent_chooser_drops_tip_and_reset() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 40,
+    };
+    let screen = |s: &mut SettingsModalState| {
+        let mut buf = Buffer::empty(area);
+        render_settings_modal(&mut buf, area, s, false, None);
+        (0..area.height)
+            .map(|y| buf_row_text(&buf, y, area.x, area.width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut consent = enter_picker_for("coding_data_sharing");
+    let text = screen(&mut consent);
+    assert!(
+        !text.contains("Ask Grok"),
+        "consent chooser must not render the docs tip:\n{text}"
+    );
+    assert!(
+        !text.contains("d reset"),
+        "consent chooser must not offer reset:\n{text}"
+    );
+    assert!(
+        text.contains("Enter select"),
+        "the other footer hints must survive:\n{text}"
+    );
+
+    let outcome = handle_settings_key(
+        &mut consent,
+        &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Unchanged),
+        "`d` must be inert on a consent chooser, got {outcome:?}"
+    );
+    assert!(
+        matches!(consent.mode(), SettingsModalMode::PickingEnum { .. }),
+        "`d` must leave the chooser open, got {:?}",
+        consent.mode()
+    );
+
+    let mut ordinary = enter_picker_for("theme");
+    let text = screen(&mut ordinary);
+    assert!(
+        text.contains("d reset") && text.contains("Ask Grok"),
+        "ordinary pickers keep the tip and the reset hint:\n{text}"
+    );
+    assert!(
+        text.contains("Enter select") && !text.contains("Enter commit"),
+        "every chooser selects an answer rather than committing a value:\n{text}"
+    );
+}
+
 /// The row-list-with-search-bar layout reserves row 1 (below
 /// the search bar) for a `─` divider in `gray_dim` — palette
 /// parity.
@@ -7563,6 +7631,86 @@ fn locked_coding_data_sharing_row_does_not_open_picker() {
     assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 }
 
+/// `d` on a locked row must not open the confirm dialog: the dispatch-time
+/// guard would refuse the reset anyway, but only after walking the user
+/// through a confirmation for a change that cannot happen.
+#[test]
+fn locked_coding_data_sharing_row_refuses_reset() {
+    for lock in [
+        CodingDataSharingLock::Zdr,
+        CodingDataSharingLock::TeamManaged,
+    ] {
+        let mut s = make_locked_state(lock);
+        s.selected = coding_data_sharing_row_idx(&s);
+        let out = handle_settings_key(
+            &mut s,
+            &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(out, SettingsKeyOutcome::Unchanged),
+            "`d` on a locked row must be a no-op ({lock:?}), got {out:?}"
+        );
+    }
+
+    // Control arm: no lock → `d` still opens the confirm dialog.
+    let mut s = make_state();
+    s.selected = coding_data_sharing_row_idx(&s);
+    let out = handle_settings_key(
+        &mut s,
+        &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    );
+    assert!(
+        matches!(
+            out,
+            SettingsKeyOutcome::Action(Action::OpenResetConfirm {
+                key: "coding_data_sharing"
+            })
+        ),
+        "`d` on an unlocked row must still offer reset, got {out:?}"
+    );
+}
+
+/// `→ expand` stays on a locked row — that is how the lock reason is read.
+#[test]
+fn locked_row_footer_drops_the_keys_it_refuses() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 40,
+    };
+    let screen = |s: &mut SettingsModalState| {
+        let mut buf = Buffer::empty(area);
+        render_settings_modal(&mut buf, area, s, false, None);
+        (0..area.height)
+            .map(|y| buf_row_text(&buf, y, area.x, area.width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut locked = make_locked_state(CodingDataSharingLock::Zdr);
+    locked.selected = coding_data_sharing_row_idx(&locked);
+    let text = screen(&mut locked);
+    for hint in ["d reset", "Enter edit", "Space toggle"] {
+        assert!(
+            !text.contains(hint),
+            "a locked row must not advertise `{hint}`:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("expand"),
+        "`→ expand` reads the lock reason and must survive:\n{text}"
+    );
+
+    let mut unlocked = make_state();
+    unlocked.selected = coding_data_sharing_row_idx(&unlocked);
+    let text = screen(&mut unlocked);
+    assert!(
+        text.contains("d reset") && text.contains("Enter edit"),
+        "an unlocked row keeps the full footer:\n{text}"
+    );
+}
+
 /// Locked rows drop the `›` enter-affordance and render a per-variant
 /// value: ZDR replaces opt-in/out with "ZDR"; team-managed keeps the
 /// value with an " · Admin Managed" suffix. Unlocked rows keep the plain
@@ -7660,8 +7808,19 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
         text.contains("Managed by your team admin."),
         "expanded locked row must show the lock reason: {text:?}"
     );
+    // Token from the live description so this survives copy edits.
+    let desc = s
+        .registry
+        .find("coding_data_sharing")
+        .expect("registered")
+        .description;
+    let desc_head: String = desc
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        !text.contains("Controls whether"),
+        !text.contains(&desc_head),
         "locked expansion must replace the description, not append to it: {text:?}"
     );
 
@@ -7673,7 +7832,7 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
     render_rows(&mut buf, area, &mut s, &theme);
     let text = flatten(&buf);
     assert!(
-        text.contains("Controls whether"),
+        text.contains(&desc_head),
         "expanded row must render the registry description: {text:?}"
     );
     assert!(

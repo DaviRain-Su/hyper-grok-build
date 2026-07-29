@@ -5287,51 +5287,23 @@ fn default_selected_permission_mouse_click_on_indicator_opens_picker_in_one_clic
     }
 }
 
-/// The `/privacy` slash command's argument parser
-/// is case-insensitive and supports a deliberately-pared-down list of
-/// unambiguous-semantic aliases. The unit-level coverage lives in the
-/// slash command module; this e2e test pins the integration contract
-/// (the parser is reachable from the slash command and produces the
-/// expected `Action`).
-///
-/// Ambiguous aliases
-/// (`on/off/true/false/enable/disable`) were DROPPED because they
-/// could be read either as "turn on privacy" (=opt-out) or "turn on
-/// sharing" (=opt-in). For a privacy-critical setting we err on the
-/// side of explicit, unambiguous arguments. The test below verifies
-/// both the accept list AND the reject list.
+/// `/privacy` takes no arguments: it opens the settings page and nothing
+/// else. The alias parser it used to carry (`opt-in`, `share`, `out`, …) is
+/// gone — a one-word prompt alias could flip a privacy preference with none
+/// of the disclosure copy in front of the user, and the ambiguous forms
+/// (`on`/`off`) risked landing on the opposite of the intent.
 #[test]
-fn pr9_privacy_slash_command_parses_aliases() {
-    use xai_grok_pager::slash::commands::privacy::parse_privacy_arg;
+fn pr9_privacy_slash_command_takes_no_arguments() {
+    use xai_grok_pager::slash::commands::builtin_commands;
+    use xai_grok_pager::slash::registry::CommandRegistry;
 
-    // Canonical names.
-    assert_eq!(parse_privacy_arg("opt-in"), Some(true));
-    assert_eq!(parse_privacy_arg("opt-out"), Some(false));
-
-    // Case-insensitive (sample).
-    assert_eq!(parse_privacy_arg("Opt-In"), Some(true));
-    assert_eq!(parse_privacy_arg("OPT-OUT"), Some(false));
-
-    // Unambiguous-semantic aliases (pruned list).
-    assert_eq!(parse_privacy_arg("in"), Some(true));
-    assert_eq!(parse_privacy_arg("out"), Some(false));
-    assert_eq!(parse_privacy_arg("share"), Some(true));
-    assert_eq!(parse_privacy_arg("private"), Some(false));
-
-    // Ambiguous aliases MUST be rejected. `/privacy on`
-    // could be read as "turn on privacy" (=opt-out, the OPPOSITE of
-    // what an earlier mapping returned). For a privacy
-    // setting, ambiguity = silent data-exfiltration risk.
-    for ambiguous in &["on", "off", "true", "false", "enable", "disable"] {
-        assert_eq!(
-            parse_privacy_arg(ambiguous),
-            None,
-            "ambiguous alias `{ambiguous}` MUST be rejected (PR 9 R1, Security Issue 10)",
-        );
-    }
-
-    // Unknown.
-    assert_eq!(parse_privacy_arg("maybe"), None);
+    let reg = CommandRegistry::new(builtin_commands());
+    let cmd = reg.get("privacy").expect("/privacy must be registered");
+    assert!(
+        !cmd.takes_args(),
+        "/privacy must not advertise an argument slot"
+    );
+    assert_eq!(cmd.usage(), "/privacy");
 }
 
 // ---------------------------------------------------------------------------

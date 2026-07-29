@@ -48,9 +48,8 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 // to "" here (the kind-params map is keyed by schema property names).
 const DESCRIPTION: &str = r#"Performs exact string replacements in files.
 
-Usage:
-- You must use your `${{ tools.by_kind.read }}` tool at least once in the conversation before editing.
-- When editing text from ${{ tools.by_kind.read }} tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + →. Everything after that → separator is the actual file content to match. Never include any part of the line number prefix in the ${{ params.edit.oldString }} or ${{ params.edit.newString }}.
+Usage:${%- if tools.by_kind.read %}
+- When editing text from ${{ tools.by_kind.read }} tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + ": ". Everything after that ": " separator is the actual file content to match. Never include any part of the line number prefix in the ${{ params.edit.oldString }} or ${{ params.edit.newString }}.${%- endif %}
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - The edit will FAIL if `${{ params.edit.oldString }}` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `${{ params.edit.replaceAll }}` to change every instance of `${{ params.edit.oldString }}`.
 - Use `${{ params.edit.replaceAll }}` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
@@ -156,7 +155,7 @@ impl xai_tool_runtime::Tool for EditTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "edit",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

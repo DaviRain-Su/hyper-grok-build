@@ -733,47 +733,8 @@ pub(crate) async fn spawn_session_actor(
         };
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
-    let initial_agent_type = Some(agent_definition.name.clone());
-    let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
-        let plugin_names = plugin_registry
-            .as_ref()
-            .map(|reg| {
-                reg.active_plugins()
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(super::telemetry::SessionHarnessMetrics {
-            session_id: session_info.id.0.to_string(),
-            client_identifier: session_client_identifier.clone(),
-            model_id: session_model_id.0.to_string(),
-            agent_name: agent_definition.name.clone(),
-            permission_mode: if session_yolo_mode {
-                xai_grok_telemetry::enums::PermissionMode::AlwaysApprove
-            } else if session_auto_mode
-                && crate::util::config::auto_permission_mode_enabled_from_disk()
-            {
-                xai_grok_telemetry::enums::PermissionMode::Auto
-            } else {
-                xai_grok_telemetry::enums::PermissionMode::Ask
-            },
-            mcp_server_names: mcp_servers
-                .iter()
-                .map(|s| mcp_server_name(s).to_owned())
-                .collect(),
-            lsp_server_names: tool_context.lsp_server_names.clone(),
-            memory_enabled: memory_config.is_some(),
-            auto_update,
-            cwd: tool_context.cwd.as_str().to_owned(),
-            skills_config: skills_config.clone(),
-            compat,
-            plugin_registry: plugin_registry.clone(),
-            plugin_names,
-        })
-    } else {
-        None
-    };
+    let initial_agent_name = agent_definition.name.clone();
+    let initial_agent_type = Some(initial_agent_name.clone());
     let compaction_policy = xai_grok_agent::CompactionPolicy {
         auto_compact_threshold_percent: auto_compact_threshold_percent as u32,
         compact_model: None,
@@ -1055,6 +1016,46 @@ pub(crate) async fn spawn_session_actor(
         .tool_bridge()
         .update_resource(task_wake_suppressed)
         .await;
+    let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
+        let plugin_names = plugin_registry
+            .as_ref()
+            .map(|reg| {
+                reg.active_plugins()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(super::telemetry::SessionHarnessMetrics {
+            session_id: session_info.id.0.to_string(),
+            client_identifier: session_client_identifier.clone(),
+            model_id: session_model_id.0.to_string(),
+            agent_name: initial_agent_name,
+            permission_mode: if session_yolo_mode {
+                xai_grok_telemetry::enums::PermissionMode::AlwaysApprove
+            } else if session_auto_mode
+                && crate::util::config::auto_permission_mode_enabled_from_disk()
+            {
+                xai_grok_telemetry::enums::PermissionMode::Auto
+            } else {
+                xai_grok_telemetry::enums::PermissionMode::Ask
+            },
+            mcp_server_names: mcp_servers
+                .iter()
+                .map(|s| mcp_server_name(s).to_owned())
+                .collect(),
+            lsp_server_names: tool_context.lsp_server_names.clone(),
+            memory_enabled: memory_config.is_some(),
+            auto_update,
+            cwd: tool_context.cwd.as_str().to_owned(),
+            skill_names: agent.tool_bridge().skill_discovery_snapshot_names().await,
+            compat,
+            plugin_registry: plugin_registry.clone(),
+            plugin_names,
+        })
+    } else {
+        None
+    };
     let resolved_task_output =
         xai_grok_tools::reminders::task_completion::resolve_task_output_tool_name(
             agent.tool_bridge(),

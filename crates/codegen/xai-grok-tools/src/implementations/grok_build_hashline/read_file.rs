@@ -84,7 +84,7 @@ Anchors are valid only for the file state at read time — after any edit,
 use the fresh anchors returned by ${{ tools.by_kind.edit }} or re-read the file.${%- endif %}
 
 Usage:
-- The ${{ params.read.target_file }} parameter must be an absolute path, not a relative path
+- The ${{ params.read.target_file }} parameter accepts either a relative path in the workspace or an absolute path
 - By default reads up to {max_lines_read} lines from the beginning
 - Optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} for large files
 - Can read images (PNG, JPG, etc.) and PDF files (each page rendered as an image; use ${{ params.read.pages }} for PDFs with more than 10 pages, max 20 per call)
@@ -153,7 +153,7 @@ impl xai_tool_runtime::Tool for HashlineReadTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "hashline_read",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

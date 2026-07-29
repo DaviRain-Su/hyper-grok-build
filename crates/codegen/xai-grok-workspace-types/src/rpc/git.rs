@@ -160,7 +160,7 @@ impl WorkspaceRpc for GitDiscardReq {
     type Response = ();
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitCommitReq {
     #[serde(default)]
     pub git_root: Option<std::path::PathBuf>,
@@ -173,11 +173,76 @@ pub struct GitCommitReq {
     pub push: bool,
     #[serde(default)]
     pub sync: bool,
+    /// Stage everything (`git add -A`, honoring `.gitignore` and
+    /// `info/exclude`) before committing. With this set, a tree with nothing
+    /// to commit is a result (`CommitOutcome::clean`), not an error, and the
+    /// push step still runs — so a retry can deliver an earlier unpushed
+    /// commit. Without it, committing with nothing staged is an error.
+    #[serde(default)]
+    pub stage_all: bool,
+    /// Seed the local-only default excludes (`.env`, `node_modules/`, build
+    /// output, …) into `info/exclude` before staging, so `stage_all` can
+    /// never sweep them in. Idempotent: guarded by a marker line, shared
+    /// with environments that pre-seed the same block.
+    #[serde(default)]
+    pub seed_default_excludes: bool,
+    /// Refuse to commit unless the workspace is on exactly this branch
+    /// (detached HEAD never matches). Guards single-writer conversation
+    /// branches.
+    #[serde(default)]
+    pub expected_branch: Option<String>,
 }
 
 impl WorkspaceRpc for GitCommitReq {
     const METHOD: &'static str = "workspace.git_commit";
     type Response = CommitResult;
+}
+
+/// Merge the base branch into the current (conversation) branch. Merge,
+/// never rebase — conv-branch history must not be rewritten. On conflicts
+/// the merge is left in progress so an agent can resolve and commit it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitSyncBaseReq {
+    #[serde(default)]
+    pub git_root: Option<std::path::PathBuf>,
+    /// Ref on `origin` to merge in. `None` ⇒ the remote's default branch
+    /// (`git fetch origin HEAD`).
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Roll back an in-progress merge (`git merge --abort`) instead of
+    /// merging. Idempotent: no merge in progress is still `Aborted`.
+    #[serde(default)]
+    pub abort: bool,
+    /// Refuse to merge unless the workspace is on exactly this branch
+    /// (detached HEAD never matches), mirroring `GitCommitReq`. Ignored for
+    /// `abort`, which must stay usable as a rollback wherever the merge
+    /// happened.
+    #[serde(default)]
+    pub expected_branch: Option<String>,
+}
+
+impl WorkspaceRpc for GitSyncBaseReq {
+    const METHOD: &'static str = "workspace.git_sync_base";
+    type Response = GitSyncBaseResult;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GitSyncBaseResult {
+    pub outcome: GitSyncBaseOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitSyncBaseOutcome {
+    /// The base is already an ancestor of HEAD; nothing to merge.
+    UpToDate,
+    /// Clean merge; `sha` is the new merge commit (HEAD).
+    Merged { sha: String },
+    /// The merge hit conflicts and was left in progress for resolution;
+    /// `files` are the unmerged paths.
+    Conflicts { files: Vec<String> },
+    /// An in-progress merge was rolled back (or none existed).
+    Aborted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +450,44 @@ pub struct CommitData {
 pub struct CommitResult {
     pub data: CommitData,
     pub warning: Option<String>,
+    /// Structured outcome of the commit + push, for machine callers.
+    /// `None` from servers predating the field and from the jj backend;
+    /// `data`/`warning` are the human-readable channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<CommitOutcome>,
+}
+
+/// Machine-readable result of a `workspace.git_commit` call.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitOutcome {
+    /// Workspace HEAD after the op (full hex). `None` only when the repo has
+    /// no commits at all.
+    pub sha: Option<String>,
+    /// Nothing new was committed by this call (tree clean after staging).
+    pub clean: bool,
+    /// The push (when requested) delivered the branch to the remote.
+    pub pushed: bool,
+    pub push: PushStatus,
+}
+
+/// Push-step classification for [`CommitOutcome`]. A non-fast-forward
+/// rejection on a single-writer conversation branch means the remote
+/// diverged and needs resolution — the op never forces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushStatus {
+    /// No push was requested.
+    #[default]
+    NotRequested,
+    /// A push was requested but skipped because a prior step (the `sync`
+    /// pull) failed; nothing was pushed.
+    Skipped,
+    Ok,
+    /// Rejected as non-fast-forward (remote diverged); never forced.
+    Conflict,
+    /// Failed for any other reason (auth, network, remote unavailable).
+    Failed,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

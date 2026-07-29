@@ -109,6 +109,10 @@ grok mcp add --transport sse linear https://mcp.linear.app/sse
 # Remove a server
 grok mcp remove github
 
+# Enable or disable a local/TOML (or compat-sourced) server
+grok mcp enable github
+grok mcp disable github
+
 # Diagnose a server's configuration and connectivity
 grok mcp doctor               # Check every configured server
 grok mcp doctor github        # Check one server
@@ -117,9 +121,15 @@ grok mcp doctor --json        # Machine-readable output
 
 The transport defaults to `stdio`; pass `--transport http` or `--transport sse` for remote servers.
 
-By default `grok mcp add` writes to `~/.grok/config.toml` (`--scope user`). Use `--scope project` to write to `.grok/config.toml` in the current directory instead, which can be committed and shared with your team (see [Project-Scoped MCP Servers](#project-scoped-mcp-servers)). Header and environment variable values are stored verbatim, so reference secrets as `${VAR}` instead of pasting them into a committed project config (see [Example Configurations](#example-configurations)). `grok mcp list` shows servers from both scopes, marking project-scoped ones with `(project)`.
+By default `grok mcp add` writes to `~/.grok/config.toml` (`--scope user`). Use `--scope project` to write to `.grok/config.toml` in the current directory instead, which can be committed and shared with your team (see [Project-Scoped MCP Servers](#project-scoped-mcp-servers)). Header and environment variable values are stored verbatim, so reference secrets as `${VAR}` instead of pasting them into a committed project config (see [Example Configurations](#example-configurations)). `grok mcp list` shows servers from both scopes, marking project-scoped ones with `(project)` and disabled ones with `(disabled)`.
 
 `grok mcp remove` searches both scopes and exits 0 after removing the server. It exits 1 when the name is not found, or when the name is defined in both user and project scope — pass `--scope` to say which one to remove.
+
+`grok mcp enable` / `disable` persist the personal on/off state to user `~/.grok/config.toml` (`disabled_mcp_servers`, and `[mcp_servers.<name>].enabled` when that entry exists). Scope:
+
+- **Known names:** user/project Grok TOML, names already on the disabled list, compat sources (`.mcp.json`, Claude, Cursor), **plugin** MCP servers (same discovery as doctor/`/mcps`), and legacy managed `grok_com_*` (no local entry required).
+- **Enable only:** if the cwd-nearest project definition has sticky `enabled = false`, that single key is cleared (comments preserved); disable never rewrites project configs.
+- **Not full `/mcps` parity:** gateway connectors (`managed_gateway:…`, stored under `disabled_mcp_tools.__managed_gateway_connectors`) stay Space-only in the TUI. Idempotent; unknown names exit 1.
 
 Breaking changes from earlier releases: `--env` now takes one `KEY=value` per flag (use `-e A=1 -e B=2`, not `--env A=1 B=2`), and server names may only contain letters, numbers, hyphens, and underscores.
 
@@ -171,7 +181,7 @@ MCP tools are namespaced with the server name to avoid collisions:
 
 ## Toggle Servers at Runtime
 
-You can enable or disable MCP servers during a session without restarting Grok.
+You can enable or disable MCP servers without restarting Grok (TUI `/mcps` or CLI — see [CLI Management](#cli-management)).
 
 ### The /mcps Modal
 

@@ -27,7 +27,7 @@ impl crate::types::tool_metadata::ToolMetadata for MonitorTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Start a background monitor that streams events from a long-running script. Each stdout line is an event - you can keep working and notifications arrive in the chat. Exit ends the watch.
+        r#"Start a background monitor that streams events from a long-running script. Each stdout line is an event${%- if system_reminders_enabled %} - you can keep working and notifications arrive in the chat${%- endif %}. Exit ends the watch.
 
 **Output volume**: Every stdout line becomes a message in the conversation, so write selective filters. In pipes use `grep --line-buffered` (plain `grep` buffers and delays events by minutes).
 
@@ -57,7 +57,7 @@ impl xai_tool_runtime::Tool for MonitorTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "monitor",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

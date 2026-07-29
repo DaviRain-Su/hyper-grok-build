@@ -1433,6 +1433,8 @@ pub(crate) async fn run(
 
     // Fire-and-forget XTVERSION query; must sit immediately before the input
     // reader thread is spawned so no earlier stdin consumer eats the reply.
+    // DA2 shares that constraint but runs earlier, in `init_terminal`, so its
+    // version is already resolved when the startup telemetry above is emitted.
     crate::terminal::xtversion::probe_at_startup();
 
     // Read terminal events on a dedicated thread and forward them over an mpsc
@@ -3393,13 +3395,13 @@ async fn drain_and_process(
         }
         // Voice capture chord (Ctrl+Space or F8), handled here before normal
         // routing so the release reaches us and the key never lands as text.
-        // Hold-to-talk under Kitty (press records, release stops), else tap
-        // toggle. A release is only ours when a hold session owns it, so a bare
-        // Space release (Ctrl lifted first) stops hold-to-talk without eating
-        // every Space release during normal typing. `[ui].voice_keybind_enabled`
-        // (read live, like `voice_capture_mode`) silences chord presses without
-        // touching `/voice` — see `voice_chord_claims_event` for the exact
-        // press/release/hold gating.
+        // Hold-to-talk where releases are reported (press records, release
+        // stops), else tap toggle. A release is only ours when a hold session
+        // owns it, so a bare Space release (Ctrl lifted first) stops
+        // hold-to-talk without eating every Space release during normal typing.
+        // `[ui].voice_keybind_enabled` (read live, like `voice_capture_mode`)
+        // silences chord presses without touching `/voice` — see
+        // `voice_chord_claims_event` for the exact press/release/hold gating.
         if let Event::Key(ke) = ev
             && app.voice_mode_enabled
             && xai_grok_voice::AUDIO_SUPPORTED
@@ -3417,7 +3419,7 @@ async fn drain_and_process(
             ) == "hold";
             let action = voice_chord_action(
                 hold_mode,
-                crate::app::kitty_flags_pushed(),
+                crate::app::kitty_releases_reported(),
                 ke.kind,
                 app.voice_listening(),
                 app.voice_hold_owned(),
@@ -3633,19 +3635,18 @@ fn is_pasteable_key_event(ev: &Event) -> bool {
 
 /// Map a voice-chord key event to its action (pure, so it's unit-testable).
 ///
-/// Hold mode on Kitty is press-to-record / release-to-stop, but only a
-/// hold-*owned* session stops on release; a `/voice`/toggle session (not
-/// hold-owned) has no release of its own, so a press toggles it off. Elsewhere
-/// it's a tap toggle.
+/// Hold mode is press-to-record / release-to-stop, but only a hold-*owned*
+/// session stops on release; a `/voice`/toggle session (not hold-owned) has no
+/// release of its own, so a press toggles it off. Elsewhere it's a tap toggle.
 fn voice_chord_action(
     hold_mode: bool,
-    kitty: bool,
+    releases_reported: bool,
     kind: KeyEventKind,
     listening: bool,
     hold_owned: bool,
 ) -> Option<crate::app::actions::Action> {
     use crate::app::actions::Action;
-    if hold_mode && kitty {
+    if hold_mode && releases_reported {
         match kind {
             KeyEventKind::Press if !listening => Some(Action::EnableVoiceMode),
             KeyEventKind::Press if !hold_owned => Some(Action::VoiceToggle),
@@ -3977,8 +3978,8 @@ mod tests {
     #[test]
     fn voice_chord_action_cases() {
         use crate::app::actions::Action;
-        // (hold_mode, kitty, kind, listening, hold_owned) -> action tag, with the
-        // toggle-stop case being a past regression.
+        // (hold_mode, releases_reported, kind, listening, hold_owned) -> action
+        // tag, with the toggle-stop case being a past regression.
         let press = KeyEventKind::Press;
         let release = KeyEventKind::Release;
         let tag = |a: Option<Action>| match a {
@@ -3989,22 +3990,24 @@ mod tests {
             _ => "other",
         };
         let cases = [
-            // hold+Kitty: press idle starts; release stops; press on a hold-owned
-            // session waits; press on a non-hold (/voice/toggle) session toggles off.
+            // hold + releases: press idle starts; release stops; press on a
+            // hold-owned session waits; press on a non-hold (/voice/toggle)
+            // session toggles off.
             ((true, true, press, false, false), "start"),
             ((true, true, release, true, true), "stop"),
             ((true, true, press, true, true), "none"),
             ((true, true, press, true, false), "toggle"),
-            // Non-hold (toggle mode or no Kitty releases): press toggles, release noops.
+            // Non-hold (toggle mode or no reported releases): press toggles,
+            // release noops.
             ((false, false, press, false, false), "toggle"),
             ((false, false, release, true, false), "none"),
             ((true, false, release, true, false), "none"),
         ];
-        for ((hold, kitty, kind, listening, owned), want) in cases {
+        for ((hold, releases, kind, listening, owned), want) in cases {
             assert_eq!(
-                tag(voice_chord_action(hold, kitty, kind, listening, owned)),
+                tag(voice_chord_action(hold, releases, kind, listening, owned)),
                 want,
-                "voice_chord_action({hold},{kitty},{kind:?},{listening},{owned})"
+                "voice_chord_action({hold},{releases},{kind:?},{listening},{owned})"
             );
         }
     }

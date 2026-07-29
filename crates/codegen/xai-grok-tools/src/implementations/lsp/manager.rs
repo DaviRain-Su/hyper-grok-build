@@ -9,6 +9,7 @@ use async_lsp::lsp_types::{DiagnosticSeverity, Url};
 use super::client::LspClient;
 use super::config::LspServerConfig;
 use super::{DiagnosticsNotify, file_uri};
+use crate::util::ProcessScope;
 
 #[cfg(test)]
 use super::format::{format_locations_labeled, format_symbols};
@@ -45,6 +46,10 @@ pub struct LspManager {
     pub shutting_down: bool,
     pub next_lifecycle_id: u64,
     pub notification_handle: crate::notification::ToolNotificationHandle,
+    /// When set, each spawned server's process group is registered here so the
+    /// agent can reap the language-server trees on session close. `None` outside
+    /// an agent session.
+    pub process_scope: Option<ProcessScope>,
 }
 
 impl Default for LspManager {
@@ -60,6 +65,7 @@ impl Default for LspManager {
             shutting_down: false,
             next_lifecycle_id: 1,
             notification_handle: crate::notification::ToolNotificationHandle::noop(),
+            process_scope: None,
         }
     }
 }
@@ -78,6 +84,13 @@ impl LspManager {
             notification_handle,
             ..Self::default()
         }
+    }
+
+    /// Attach the session process scope so spawned servers are enrolled for
+    /// reclaim.
+    pub fn with_process_scope(mut self, scope: Option<ProcessScope>) -> Self {
+        self.process_scope = scope;
+        self
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -140,7 +153,24 @@ impl LspManager {
             )
             .await
             {
-                Ok(client) => {
+                Ok(mut client) => {
+                    if !client.enroll(self.process_scope.as_ref()) {
+                        // Session teardown raced this start: the closed scope
+                        // killed the child at registration. Installing the
+                        // client would advertise a dead server and feed the
+                        // restart monitor respawn churn, so stop starting
+                        // servers for this manager instead.
+                        tracing::info!(server = %name, "session scope closed during LSP start; discarding server");
+                        self.shutting_down = true;
+                        return;
+                    }
+                    // Same race as the restart path: `kill_all` landing between
+                    // enroll and insert has already SIGKILLed the child.
+                    if self.process_scope.as_ref().is_some_and(|s| s.is_closed()) {
+                        tracing::info!(server = %name, "session scope closed during LSP start; discarding server");
+                        self.shutting_down = true;
+                        return;
+                    }
                     tracing::info!(server = %name, "LSP server ready");
                     self.notification_handle
                         .send_lsp_ready(crate::notification::LspServerReady {

@@ -1,11 +1,16 @@
-//! Lenient deserializers for tool-argument booleans: a boolean may arrive as a
-//! JSON string (`"true"`) or number (`1`) when a client doesn't coerce args
-//! against the tool schema. Accepted forms (strings case-insensitive, trimmed;
-//! `null` is `false`):
+//! Lenient deserializers for tool arguments whose wire shape models get
+//! wrong in predictable ways.
+//!
+//! Booleans may arrive as a JSON string (`"true"`) or number (`1`) when a
+//! client doesn't coerce args against the tool schema. Accepted forms
+//! (strings case-insensitive, trimmed; `null` is `false`):
 //!
 //! | Truthy                                | Falsy                                          |
 //! |---------------------------------------|------------------------------------------------|
 //! | `true`, `"true"`, `"yes"`, `"1"`, `1` | `false`, `"false"`, `"no"`, `"0"`, `0`, `null` |
+//!
+//! String lists (e.g. `task_ids`) may arrive as a bare string or number
+//! instead of an array; see [`lenient_string_list_from_json`].
 
 use serde::Deserialize;
 
@@ -69,6 +74,43 @@ where
     lenient_bool_from_json(&value)
         .map(Some)
         .ok_or_else(|| serde::de::Error::custom(invalid_bool_message(&value)))
+}
+
+/// Parse a JSON value into a list of strings, tolerating the shapes models
+/// actually send:
+///
+/// - array of strings/numbers → each element as a string (`228` → `"228"`),
+/// - bare string or number → one-element list,
+/// - `null` → empty list.
+///
+/// Booleans, objects, and nested arrays are rejected (`None`).
+pub fn lenient_string_list_from_json(value: &serde_json::Value) -> Option<Vec<String>> {
+    fn item_to_string(v: &serde_json::Value) -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+    match value {
+        serde_json::Value::Array(items) => items.iter().map(item_to_string).collect(),
+        serde_json::Value::Null => Some(Vec::new()),
+        other => item_to_string(other).map(|s| vec![s]),
+    }
+}
+
+/// Deserialize a `Vec<String>` per [`lenient_string_list_from_json`]; pair
+/// with `#[serde(default)]` so an absent key yields an empty list.
+pub fn deserialize_lenient_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    lenient_string_list_from_json(&value).ok_or_else(|| {
+        serde::de::Error::custom(format!(
+            "expected a list of string ids (or a single string), got {value}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -191,5 +233,51 @@ mod tests {
         assert_eq!(deser_opt_bool(r#"{"value":"yes"}"#).unwrap(), Some(true));
         assert_eq!(deser_opt_bool(r#"{"value":0}"#).unwrap(), Some(false));
         assert!(deser_opt_bool(r#"{"value":"nope"}"#).is_err());
+    }
+
+    // ── lenient string lists ─────────────────────────────────────────────
+
+    #[test]
+    fn string_list_accepts_arrays_strings_and_numbers() {
+        assert_eq!(
+            lenient_string_list_from_json(&json!(["a", "b"])),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            lenient_string_list_from_json(&json!("abc")),
+            Some(vec!["abc".to_string()])
+        );
+        // A bare OS-PID-style number becomes a one-element string list so the
+        // tool can answer with a clean "Task 228 not found" instead of a
+        // deserialize error.
+        assert_eq!(
+            lenient_string_list_from_json(&json!(228)),
+            Some(vec!["228".to_string()])
+        );
+        assert_eq!(
+            lenient_string_list_from_json(&json!([1, "b"])),
+            Some(vec!["1".to_string(), "b".to_string()])
+        );
+        assert_eq!(lenient_string_list_from_json(&json!(null)), Some(vec![]));
+    }
+
+    #[test]
+    fn string_list_rejects_non_id_shapes() {
+        for v in [json!(true), json!({}), json!([["nested"]]), json!([true])] {
+            assert_eq!(lenient_string_list_from_json(&v), None, "should reject {v}");
+        }
+    }
+
+    #[test]
+    fn deserialize_string_list_reports_readable_error() {
+        #[derive(Debug, Deserialize)]
+        struct Wrapper {
+            #[serde(default, deserialize_with = "deserialize_lenient_string_list")]
+            value: Vec<String>,
+        }
+        let err = serde_json::from_str::<Wrapper>(r#"{"value":{}}"#).unwrap_err();
+        assert!(err.to_string().contains("expected a list of string ids"));
+        let ok: Wrapper = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(ok.value.is_empty());
     }
 }

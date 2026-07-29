@@ -166,6 +166,8 @@ pub async fn commit(cwd: &Path, message: &str) -> Result<CommitResult> {
             output: Some("Commit described and new change started".to_string()),
         },
         warning: None,
+        // The structured outcome is a git-backend concept.
+        outcome: None,
     })
 }
 

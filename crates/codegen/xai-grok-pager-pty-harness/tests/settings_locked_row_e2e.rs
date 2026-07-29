@@ -1,4 +1,4 @@
-//! E2E: the settings modal's locked `Coding data sharing` row, driven off
+//! E2E: the settings modal's locked coding-data row, driven off
 //! the seeded auth entry through the full pipeline (auth.json → shell
 //! `GrokAuth` → auth meta → `AppView::coding_data_sharing_lock()` →
 //! `PagerLocalSnapshot` → render):
@@ -33,11 +33,16 @@ use xai_grok_pager_pty_harness::{
 const ROWS: u16 = 50;
 const COLS: u16 = 120;
 const BANNER_TITLE: &str = "Help improve Grok";
-const ROW_LABEL: &str = "Coding data sharing";
+/// Head of the row's label (`Coding data, retention, and training`). The
+/// modal truncates long labels, so match the stable prefix.
+const ROW_LABEL: &str = "Coding data";
 const CHEVRON: &str = "\u{203A}"; // ›
 const ZDR_REASON: &str = "Your team has Zero Data Retention.";
 const TEAM_REASON: &str = "Managed by your team admin.";
-const DESCRIPTION_PREFIX: &str = "Controls whether";
+/// Head of the row's description in `settings/defs.rs`. Kept short so it
+/// can't span one of the modal's word wraps — `contains_text` joins rows
+/// with `\n`, so a match on wrapped copy would silently never fire.
+const DESCRIPTION_PREFIX: &str = "Opt-in to provide SpaceXAI";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore] // opt-in: spawns the real pager binary in a PTY (CI runs with --ignored)
@@ -222,7 +227,7 @@ fn open_settings_and_grab_row_line(pager: &mut PtyHarness) -> Result<String> {
     pager.inject_keys(keys::ENTER).context("commit filter")?;
     pager
         .wait_for_text(ROW_LABEL, Duration::from_secs(20))
-        .context("Coding data sharing row visible")?;
+        .context("coding-data row visible")?;
     pager.update(Duration::from_millis(500));
     let screen = pager.screen_contents();
     screen
@@ -235,7 +240,7 @@ fn open_settings_and_grab_row_line(pager: &mut PtyHarness) -> Result<String> {
 /// Expand the focused row with `→` (Browse-mode `KeyCode::Right` inserts the
 /// focused key into `expanded_keys`) and wait for `reason` to render.
 /// Callers reach here from [`open_settings_and_grab_row_line`], which leaves
-/// the Coding data sharing row focused.
+/// the coding-data row focused.
 fn expand_focused_row(pager: &mut PtyHarness, reason: &str) -> Result<()> {
     pager.inject_keys(keys::RIGHT).context("expand row")?;
     pager.update(Duration::from_millis(300));

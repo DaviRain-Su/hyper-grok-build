@@ -3461,7 +3461,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SetCodingDataSharing { agent_id, opted_in, rollback_to_opted_in } => {
+        Effect::SetCodingDataSharing {
+            agent_id,
+            opted_in,
+            rollback_to_opted_in,
+            seq,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3484,6 +3489,7 @@ pub(crate) fn execute(
                                         agent_id,
                                         error: format!("malformed response: {e}"),
                                         rollback_to_opted_in,
+                                        seq,
                                     };
                                 }
                             };
@@ -3499,6 +3505,7 @@ pub(crate) fn execute(
                                     agent_id,
                                     error: msg,
                                     rollback_to_opted_in,
+                                    seq,
                                 };
                             }
                             let confirmed_opted_in = wrapper
@@ -3509,6 +3516,7 @@ pub(crate) fn execute(
                             TaskResult::CodingDataSharingUpdated {
                                 agent_id,
                                 opted_in: confirmed_opted_in,
+                                seq,
                             }
                         }
                         Err(e) => {
@@ -3516,6 +3524,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 error: format!("{e}"),
                                 rollback_to_opted_in,
+                                seq,
                             }
                         }
                     }

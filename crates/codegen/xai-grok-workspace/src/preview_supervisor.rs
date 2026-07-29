@@ -527,6 +527,81 @@ async fn scrape_activity_loop(
     }
 }
 
+// ── Preview-metrics scraper ────────────────────────────────────────────────
+
+const PREVIEW_METRICS_PATH: &str = "/__control/metrics";
+const PREVIEW_METRICS_PREFIX: &str = "preview_proxy_";
+const PREVIEW_METRICS_SCRAPE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn metrics_url(control_port: u16) -> String {
+    format!(
+        "http://{}:{control_port}{PREVIEW_METRICS_PATH}",
+        Ipv4Addr::LOCALHOST
+    )
+}
+
+/// Scrapes the proxy's loopback-only metrics and donates them via the hub pump.
+pub async fn supervise_preview_metrics(control_port: Option<u16>, shutdown: watch::Receiver<bool>) {
+    scrape_metrics_loop(
+        control_port.unwrap_or(DEFAULT_PREVIEW_CONTROL_PORT),
+        PREVIEW_METRICS_SCRAPE_INTERVAL,
+        shutdown,
+        |body| {
+            if let Some(sink) = xai_computer_hub_sdk::metric_donate::active_metrics_sink() {
+                sink.export_text_exposition(body, PREVIEW_METRICS_PREFIX);
+            }
+        },
+    )
+    .await;
+}
+
+async fn scrape_metrics_loop(
+    control_port: u16,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    mut donate: impl FnMut(&str),
+) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let url = metrics_url(control_port);
+    let client = match reqwest::Client::builder()
+        .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = %e, "preview-metrics scraper: HTTP client build failed; disabled");
+            return;
+        }
+    };
+    tracing::info!(%url, "starting preview-metrics scraper");
+
+    // Scrape-first: a short-lived sandbox must not exit with zero samples.
+    loop {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(body) => donate(&body),
+                Err(e) => {
+                    tracing::debug!(%url, error = %e, "preview-metrics scrape body read failed");
+                }
+            },
+            Ok(resp) => {
+                tracing::debug!(%url, status = resp.status().as_u16(), "preview-metrics scrape returned an error status");
+            }
+            // Proxy absent (disabled / starting / restarting): quiet no-op.
+            Err(e) if e.is_connect() || e.is_timeout() => {}
+            Err(e) => {
+                tracing::debug!(%url, error = %e, "preview-metrics scrape failed");
+            }
+        }
+        if sleep_or_shutdown(interval, &mut shutdown).await {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -713,6 +788,104 @@ mod tests {
     }
 
     #[test]
+    fn metrics_url_targets_the_loopback_control_metrics_path() {
+        assert_eq!(
+            metrics_url(6015),
+            "http://127.0.0.1:6015/__control/metrics",
+            "must match the proxy's control router metrics route"
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_scrape_loop_donates_the_body_immediately_and_stops_on_shutdown() {
+        const BODY: &str = "preview_proxy_active_ws_connections 3\n";
+        let port = serve_canned("HTTP/1.1 200 OK", BODY, true).await;
+        let donated = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (tx, rx) = watch::channel(false);
+        let sink = Arc::clone(&donated);
+        let handle = tokio::spawn(scrape_metrics_loop(
+            port,
+            // 1h interval: only the immediate first scrape can donate.
+            Duration::from_secs(3600),
+            rx,
+            move |body| sink.lock().unwrap().push(body.to_owned()),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !donated.lock().unwrap().is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first scrape must donate without waiting a full interval");
+        assert_eq!(vec![BODY.to_owned()], *donated.lock().unwrap());
+
+        tx.send(true).expect("receiver alive");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("metrics scrape loop must stop promptly on shutdown")
+            .expect("task should not panic");
+    }
+
+    #[tokio::test]
+    async fn metrics_scrape_loop_skips_error_responses_and_absent_proxy() {
+        let port = serve_canned("HTTP/1.1 500 Internal Server Error", "boom", true).await;
+        let donated = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = watch::channel(false);
+        let counter = Arc::clone(&donated);
+        let handle = tokio::spawn(scrape_metrics_loop(
+            port,
+            Duration::from_millis(5),
+            rx,
+            move |_| {
+                counter.fetch_add(1, SeqCst);
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(0, donated.load(SeqCst), "error responses must not donate");
+        tx.send(true).expect("receiver alive");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("must stop on shutdown")
+            .expect("no panic");
+
+        let donated = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = watch::channel(false);
+        let counter = Arc::clone(&donated);
+        let handle = tokio::spawn(scrape_metrics_loop(
+            reserved_closed_port().await,
+            Duration::from_millis(5),
+            rx,
+            move |_| {
+                counter.fetch_add(1, SeqCst);
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(0, donated.load(SeqCst), "an absent proxy must not donate");
+        tx.send(true).expect("receiver alive");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("must stop on shutdown")
+            .expect("no panic");
+    }
+
+    #[tokio::test]
+    async fn metrics_scrape_loop_returns_immediately_when_already_shut_down() {
+        let (_tx, rx) = watch::channel(true);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            scrape_metrics_loop(6015, Duration::from_millis(5), rx, |_| {
+                panic!("must not scrape after a pre-flipped shutdown")
+            }),
+        )
+        .await
+        .expect("a pre-flipped shutdown must return without scraping");
+    }
+
+    #[test]
     fn parse_activity_body_reads_stamp_and_rejects_bad_shapes() {
         assert_eq!(
             parse_activity_body(r#"{"last_activity_ms":1234}"#),
@@ -767,6 +940,15 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build client")
+    }
+
+    async fn reserved_closed_port() -> u16 {
+        let probe = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reserve");
+        let port = probe.local_addr().expect("addr").port();
+        drop(probe);
+        port
     }
 
     async fn serve_canned(status_line: &'static str, body: &'static str, repeat: bool) -> u16 {

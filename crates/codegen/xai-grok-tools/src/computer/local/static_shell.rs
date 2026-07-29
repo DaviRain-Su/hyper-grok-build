@@ -128,6 +128,18 @@ impl StaticShellSnapshot {
         let (state_in_read, state_in_write) = os_pipe()?;
         set_cloexec(&state_in_write)?;
 
+        // Copy $1 into a plain variable and clear the positional parameters
+        // (`builtin set --`) BEFORE eval'ing the user command: `source
+        // <script>` with no arguments makes the sourced script inherit the
+        // caller's positional parameters, so e.g. conda's `bin/activate`
+        // (which forwards "$@" to `conda activate`) would receive the entire
+        // wrapped command string as an environment name. Clearing them
+        // matches the plain `bash -c "<command>"` execution path, where $# is 0.
+        //
+        // The login snapshot can restore `allexport` (set -a), which would
+        // auto-export the temp variable into the user command's child
+        // processes — strip the export attribute post-assignment (inline
+        // `declare +x var=value` does NOT beat allexport).
         let wrapper = match self.shell {
             UnixShellKind::Bash => format!(
                 "snap=$(command cat <&3); builtin shopt -s extglob 2>/dev/null; \
@@ -135,7 +147,8 @@ impl StaticShellSnapshot {
                  builtin eval -- \"$snap\"; \
                  builtin export GROK_AGENT=1; \
                  builtin export PWD=\"$(builtin pwd)\"; {sudo_inject}{search_inject}\
-                 builtin eval \"$1\" 2>&1"
+                 __grok_user_cmd=\"$1\"; builtin declare +x __grok_user_cmd 2>/dev/null; builtin set --; \
+                 builtin eval \"$__grok_user_cmd\" 2>&1"
             ),
             UnixShellKind::Zsh => format!(
                 "snap=$(command cat <&3); \
@@ -144,7 +157,8 @@ impl StaticShellSnapshot {
                  builtin export GROK_AGENT=1; \
                  builtin export PWD=\"$(builtin pwd)\"; \
                  builtin setopt aliases 2>/dev/null; {sudo_inject}{search_inject}\
-                 builtin eval \"$1\" 2>&1"
+                 __grok_user_cmd=\"$1\"; builtin typeset +x __grok_user_cmd 2>/dev/null; builtin set --; \
+                 builtin eval \"$__grok_user_cmd\" 2>&1"
             ),
         };
 
@@ -307,5 +321,34 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).contains("PLAIN_OK"),
             "empty snapshot must degrade to a plain shell"
         );
+    }
+
+    /// Regression test: a script sourced WITHOUT arguments by the user command
+    /// must not see the wrapper's positional parameters ($1 = the whole
+    /// command string). Conda's `bin/activate` forwards "$@" to `conda
+    /// activate`, so a leak makes every `activate_conda`-prefixed command fail
+    /// with `EnvironmentLocationNotFound: Not a conda environment: <cwd>/<the
+    /// entire command string>`.
+    #[tokio::test]
+    async fn sourced_script_does_not_inherit_wrapper_positional_args() {
+        if !bash_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("activate_probe.sh");
+        std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
+
+        let output = run_static(
+            "",
+            &format!("source {} && echo AFTER_SOURCE_OK", probe.display()),
+        )
+        .await;
+        assert!(output.status.success(), "command failed: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("SOURCED_ARGC=0"),
+            "sourced script must see zero positional args, got: {stdout:?}"
+        );
+        assert!(stdout.contains("AFTER_SOURCE_OK"), "got: {stdout:?}");
     }
 }

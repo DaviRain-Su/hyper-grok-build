@@ -179,8 +179,12 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             SettingsKeyOutcome::Changed
         }
         // `d` reset: close picker, revert preview if applicable,
-        // then open the reset-confirm overlay.
-        KeyCode::Char('d') if key.modifiers.is_empty() => {
+        // then open the reset-confirm overlay. Consent choosers opt out of
+        // this entirely (no footer hint, no hidden shortcut) — reset stays
+        // reachable from the browse row.
+        KeyCode::Char('d')
+            if key.modifiers.is_empty() && !crate::settings::is_consent_chooser(setting_key) =>
+        {
             state.transition_to_browse();
             if supports_preview
                 && let SettingValue::Enum(orig) = &original_value
@@ -730,6 +734,14 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             match state.focused_setting() {
                 // Group rows have no scalar default to reset.
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Group { .. }) => {
+                    SettingsKeyOutcome::Unchanged
+                }
+                // A locked row isn't the user's to change, by `d` any more
+                // than by Enter (which `try_enter_picking_enum` refuses).
+                // The dispatch-time guard would catch it either way, but
+                // only after walking the user through a confirm dialog for
+                // a change that cannot happen.
+                Some((key, _meta)) if state.row_lock(key).is_some() => {
                     SettingsKeyOutcome::Unchanged
                 }
                 Some((key, _meta)) => SettingsKeyOutcome::Action(Action::OpenResetConfirm { key }),

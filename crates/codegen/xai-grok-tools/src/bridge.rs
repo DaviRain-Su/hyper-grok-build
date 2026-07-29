@@ -420,6 +420,16 @@ impl ToolBridge {
             .unwrap_or_default()
     }
 
+    /// Every skill name from session-start discovery
+    /// (see `SkillManager::discovery_snapshot_names`).
+    pub async fn skill_discovery_snapshot_names(&self) -> Vec<String> {
+        let registry = &*self.registry;
+        let res = registry.resources.lock().await;
+        res.get::<crate::types::skill_discovery_tracker::SkillManager>()
+            .map(|m| m.discovery_snapshot_names().to_vec())
+            .unwrap_or_default()
+    }
+
     /// Get the paths that have been reminded about.
     pub async fn agents_md_reminded_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
         let registry = &*self.registry;

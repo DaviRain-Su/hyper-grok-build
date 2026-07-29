@@ -29,6 +29,7 @@ use crate::types::requirements::{Expr, ToolRequirement};
 #[allow(unused_imports)]
 use crate::types::resources::SharedResources;
 use crate::types::tool::{ToolKind, ToolNamespace};
+use regex::Regex;
 use xai_tool_types::{SubagentCompletedOutput, SubagentIsolationMode, TaskToolInput};
 
 /// Default max nesting depth when [`MaxSubagentDepth`] is not injected.
@@ -62,14 +63,59 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     }
 
     fn description_template(&self) -> &str {
-        // The Task tool description for Grok Build is *never* taken from here.
-        // It is always supplied via `ToolConfig::with_description(...)` using
-        // the dynamically built string from `build_task_description()` in
-        // xai-grok-agent/src/builder.rs (HEADER + per-subagent blocks + FOOTER).
-        //
-        // This path is only hit by low-level ToolsetBuilder registration or
-        // direct calls to ToolMetadata::description_template in tests.
-        "<see build_task_description() in xai-grok-agent>"
+        // Grok Build normally supplies the description via
+        // `ToolConfig::with_description(...)` using `build_task_description()`
+        // in xai-grok-agent/src/builder.rs (live subagent roster). But a
+        // registration without an override must still ship a real
+        // description, never a placeholder: default to the built-in roster
+        // with templated tool/param names, resolved by the registry renderer
+        // at finalize time.
+        /// Wrap each `${{ tools.by_kind.X }}` token in an if/else so kinds
+        /// absent from the registry render as the bare kind name instead of
+        /// an empty slot ("read, , and plan"), mirroring the bare-kind
+        /// fallback of `BuiltinSubagent::render_tools`.
+        ///
+        /// These guards sit inline in the roster, so they use the
+        /// non-stripping `${% %}` form: `${%-` would eat the ", " before
+        /// each token and render "has access to:read,grep".
+        fn guard_kind_tokens(template: &str) -> String {
+            static TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+                Regex::new(r"\$\{\{\s*tools\.by_kind\.([a-z_]+)\s*\}\}").expect("valid regex")
+            });
+            TOKEN
+                .replace_all(template, |caps: &regex::Captures| {
+                    let kind = &caps[1];
+                    format!(
+                        "${{% if tools.by_kind.{kind} %}}${{{{ tools.by_kind.{kind} }}}}\
+                         ${{% else %}}{kind}${{% endif %}}"
+                    )
+                })
+                .into_owned()
+        }
+
+        static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let subagents: Vec<xai_tool_types::SubagentDescriptor> =
+                xai_tool_types::BUILTIN_SUBAGENTS
+                    .iter()
+                    .map(|b| xai_tool_types::SubagentDescriptor {
+                        name: b.name.to_owned(),
+                        description: b.description.to_owned(),
+                        tools: Some(guard_kind_tokens(b.tools_template)),
+                    })
+                    .collect();
+            xai_tool_types::build_task_description(
+                &subagents,
+                &xai_tool_types::TaskToolNaming {
+                    task_tool: "${{ tools.by_kind.task }}",
+                    subagent_type_param: "${{ params.task.subagent_type }}",
+                    run_in_background_param: "${{ params.task.run_in_background }}",
+                    resume_from_param: "${{ params.task.resume_from }}",
+                    background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
+                    isolation_param: "${{ params.task.isolation }}",
+                },
+            )
+        });
+        &DESC
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
@@ -101,7 +147,7 @@ impl xai_tool_runtime::Tool for TaskTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "task",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -392,12 +438,15 @@ impl xai_tool_runtime::Tool for TaskTool {
                 }
             });
 
-            let task_output_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ tools.by_kind.background_task_action }}",
-            )
-            .await
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            // `resolve_tool_name` (not a template render): a missing kind
+            // renders as empty-`Ok`, so a `Result` fallback never fires.
+            let task_output_name =
+                crate::types::template_renderer::TemplateRenderer::resolve_tool_name(
+                    &resources,
+                    crate::types::tool::ToolKind::BackgroundTaskAction,
+                )
+                .await
+                .unwrap_or_else(|| "get_task_output".to_string());
 
             return Ok(ToolOutput::Text(
                 xai_tool_types::format_subagent_started_background(
@@ -422,18 +471,32 @@ impl xai_tool_runtime::Tool for TaskTool {
         // still-running child — return a task_id to poll, like the background
         // branch above (the result arrives via auto-wake or a later poll).
         if result.backgrounded {
-            let task_output_name = crate::types::template_renderer::TemplateRenderer::resolve(
-                &resources,
-                "${{ tools.by_kind.background_task_action }}",
-            )
-            .await
-            .unwrap_or_else(|_| "get_command_or_subagent_output".to_string());
+            // `resolve_tool_name` (not a template render): a missing kind
+            // renders as empty-`Ok`, so a `Result` fallback never fires.
+            let task_output_name =
+                crate::types::template_renderer::TemplateRenderer::resolve_tool_name(
+                    &resources,
+                    crate::types::tool::ToolKind::BackgroundTaskAction,
+                )
+                .await
+                .unwrap_or_else(|| "get_task_output".to_string());
+            // Only promise a completion notification when the client
+            // actually delivers system reminders.
+            let notify_clause = if resources
+                .lock()
+                .await
+                .get::<crate::types::resources::SystemRemindersEnabled>()
+                .is_none_or(|e| e.0)
+            {
+                " — you will be notified when it completes"
+            } else {
+                ""
+            };
 
             return Ok(ToolOutput::Text(
                 format!(
                     "Subagent took longer than the foreground budget and was moved to the \
-                 background to keep the conversation responsive. It is still running — you \
-                 will be notified when it completes.\n\
+                 background to keep the conversation responsive. It is still running{notify_clause}.\n\
                  subagent_id: {id}\n\
                  type: {}\n\
                  description: {}\n\n\

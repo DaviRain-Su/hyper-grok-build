@@ -66,7 +66,7 @@ impl xai_tool_runtime::Tool for MemoryGetImpl {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "memory_get",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 
@@ -97,8 +97,11 @@ impl xai_tool_runtime::Tool for MemoryGetImpl {
         };
         let memory = memory.clone();
         tracing::info!(target: crate::types::memory_backend::MEMORY_LOG_TARGET,"MEMORY_GET: invoked");
+        // `from` is 1-based in the client schema (matching displayed line
+        // numbers); the backend expects a 0-based offset. 0 is treated as 1.
+        let from_zero_based = input.from.map(|f| f.saturating_sub(1));
         let content = memory
-            .get(&input.path, input.from, input.lines)
+            .get(&input.path, from_zero_based, input.lines)
             .map_err(|e| {
                 xai_tool_runtime::ToolError::execution(
                     xai_tool_protocol::ToolId::new("memory_get").expect("valid"),
@@ -106,7 +109,7 @@ impl xai_tool_runtime::Tool for MemoryGetImpl {
                 )
             })?;
         let total_lines = content.lines().count();
-        let first_line_num = input.from.unwrap_or(0) + 1;
+        let first_line_num = from_zero_based.unwrap_or(0) + 1;
         let numbered = format_with_line_numbers(&content, first_line_num);
         let output = format!(
             "**File:** {}\n**Lines:** {} (from: {}, limit: {})\n\n{}",
@@ -135,8 +138,8 @@ mod tests {
     /// actual position in the source file, not the slice position.
     #[test]
     fn test_format_offset_adjusts_line_numbers() {
-        // Simulates memory_get called with from=4 (0-based) — first displayed
-        // line should be labelled "5" (1-based).
+        // Simulates memory_get called with from=5 (1-based) — first displayed
+        // line should be labelled "5".
         let out = format_with_line_numbers("line five\nline six", 5);
         assert!(out.starts_with("5→line five"), "got: {out}");
         assert!(out.ends_with("6→line six"), "got: {out}");

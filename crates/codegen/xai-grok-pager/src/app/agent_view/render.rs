@@ -902,6 +902,11 @@ impl AgentView {
         } else {
             banner_height
         };
+        let banner_height = if privacy_banner {
+            banner_height.max(crate::views::privacy_banner::height(inner_width))
+        } else {
+            banner_height
+        };
         let tip_row_visible =
             self.ephemeral_tip_renderable(area.height) && self.ephemeral_tip.is_active();
         let banner_height = banner_height.max(u16::from(tip_row_visible));
@@ -2114,7 +2119,8 @@ impl AgentView {
             self.hit_watching_cue.clear();
             self.hit_plan_approval_status.clear();
         }
-        let privacy_banner_owns_slot = privacy_banner && layout.banner.height >= 2;
+        let privacy_banner_owns_slot =
+            privacy_banner && layout.banner.height >= crate::views::privacy_banner::MIN_HEIGHT;
         if !privacy_banner_owns_slot {
             self.privacy_banner.clear_hits();
         }
@@ -2123,14 +2129,17 @@ impl AgentView {
             self.hit_announcement_cta.clear();
             let rects = crate::views::privacy_banner::render(layout.banner, buf, &theme, mouse_pos);
             self.privacy_banner
-                .hit_accept
-                .set_unless_dropdown(Some(rects.accept), dropdown_open);
+                .hit_opt_in
+                .set_unless_dropdown(Some(rects.opt_in), dropdown_open);
             self.privacy_banner
-                .hit_customize
-                .set_unless_dropdown(Some(rects.customize), dropdown_open);
+                .hit_opt_out
+                .set_unless_dropdown(Some(rects.opt_out), dropdown_open);
             self.privacy_banner
-                .hit_legal
-                .set_unless_dropdown(Some(rects.legal), dropdown_open);
+                .hit_terms
+                .set_unless_dropdown(Some(rects.terms), dropdown_open);
+            self.privacy_banner
+                .hit_policy
+                .set_unless_dropdown(Some(rects.policy), dropdown_open);
         } else if let Some((ref msg, remaining)) = self.mode_switch_banner {
             self.hit_announcement_hide.clear();
             self.hit_announcement_cta.clear();

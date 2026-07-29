@@ -14,7 +14,7 @@
 //! and re-runs the full bootstrap when it is missing.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, Seek};
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -23,7 +23,8 @@ use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
-use super::search_fts::{SessionDoc, SessionSearchIndex, SessionSearchRow};
+use super::search_fts::{self, SessionDoc, SessionSearchIndex, SessionSearchRow};
+use super::search_recovery;
 use super::search_remote_sync;
 use super::{
     ContentPeek, PromptExtractEvent, RawLinePeek, RawParamsPeek, StorageAdapter,
@@ -39,33 +40,9 @@ const SEARCH_CONTENT_CHAR_LIMIT: usize = 200_000;
 const BOOTSTRAP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Configuration for bootstrap resource limits.
-///
-/// Phase 1-3 use hardcoded defaults via `BootstrapConfig::default()`.
-/// User-configurable overrides via `~/.grok/settings.json` are deferred
-/// to a follow-up.
-struct BootstrapConfig {
-    /// Max concurrent sessions being indexed (default: 4).
-    /// Used by the parallel bootstrap pipeline.
-    max_concurrent: usize,
-    /// Per-session timeout (default: 30 seconds).
-    /// Wraps the `spawn_blocking` await — if the timeout fires, the pipeline
-    /// moves on but the blocking task continues to completion.
-    per_session_timeout: Duration,
-    /// Max `updates.jsonl` size to index during bootstrap (default: 30 MB).
-    /// Sessions exceeding this are skipped and indexed incrementally later.
-    max_file_size: u64,
-}
-
-impl Default for BootstrapConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent: 4,
-            per_session_timeout: Duration::from_secs(30),
-            max_file_size: 30 * 1024 * 1024, // 30 MB
-        }
-    }
-}
+const BOOTSTRAP_MAX_CONCURRENT: usize = 4;
+const BOOTSTRAP_PER_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+const BOOTSTRAP_MAX_FILE_SIZE: u64 = 30 * 1024 * 1024;
 
 /// Pre-check: skip sessions with excessively large updates files.
 ///
@@ -125,8 +102,6 @@ enum SearchManagerCmd {
 struct SearchManagerState {
     workers: HashMap<PathBuf, mpsc::UnboundedSender<SearchIndexJob>>,
     bootstrapped: HashSet<PathBuf>,
-    #[expect(dead_code, reason = "carried for future use by worker tasks")]
-    progress: Arc<BootstrapProgress>,
 }
 
 /// Singleton that manages background session indexing.
@@ -135,8 +110,9 @@ struct SearchManagerState {
 ///
 /// TODO: When multiple grok processes run concurrently, they each have
 /// their own `SearchIndexManager` writing to the same SQLite database.
-/// WAL mode prevents corruption, but redundant work is done. Consider
-/// adding reindex claim coordination (like the memory system's
+/// WAL mode reduces corruption risk and [`search_fts`] self-heals an
+/// unusable file, but redundant work is still done. Consider adding
+/// reindex claim coordination (like the memory system's
 /// `try_claim_reindex()` / `release_claim()` pattern) if this becomes
 /// a problem.
 pub struct SearchIndexManager {
@@ -176,14 +152,12 @@ pub struct SearchIndexStatus {
 impl SearchIndexManager {
     fn start() -> Self {
         let progress = Arc::new(BootstrapProgress::default());
-        let progress_clone = progress.clone();
         let (tx, mut rx) = mpsc::unbounded_channel::<SearchManagerCmd>();
 
         tokio::spawn(async move {
             let mut state = SearchManagerState {
                 workers: HashMap::new(),
                 bootstrapped: HashSet::new(),
-                progress: progress_clone,
             };
             while let Some(cmd) = rx.recv().await {
                 match cmd {
@@ -284,6 +258,69 @@ fn sqlite_to_io_error(error: rusqlite::Error) -> io::Error {
     io::Error::other(format!("sqlite error: {error}"))
 }
 
+/// Rate-limits a repetitive log site: the first `cap` events go to `warn`, the
+/// rest to `debug`. Resets its budget whenever the search cache is healed, so a
+/// fresh cache starts logging loudly again instead of staying silent forever.
+struct HealAwareLogCounter {
+    count: AtomicU64,
+    epoch_seen: AtomicU64,
+    cap: u64,
+}
+
+impl HealAwareLogCounter {
+    const fn new(cap: u64) -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            epoch_seen: AtomicU64::new(0),
+            cap,
+        }
+    }
+
+    fn should_warn(&self, kind: &str) -> bool {
+        let epoch = search_recovery::current_epoch();
+        if self.epoch_seen.swap(epoch, Ordering::Relaxed) != epoch {
+            self.count.store(0, Ordering::Relaxed);
+        }
+        let n = self.count.fetch_add(1, Ordering::Relaxed);
+        if n < self.cap {
+            return true;
+        }
+        if n == self.cap {
+            tracing::warn!(cap = self.cap, "further {kind} will be logged at debug");
+        }
+        false
+    }
+}
+
+static INDEX_FAIL_LOG: HealAwareLogCounter = HealAwareLogCounter::new(8);
+static BOOTSTRAP_TIMEOUT_LOG: HealAwareLogCounter = HealAwareLogCounter::new(8);
+
+fn log_session_index_failure(session_id: &str, error: &io::Error, message: &str) {
+    if INDEX_FAIL_LOG.should_warn("index failures") {
+        tracing::warn!(error = %error, session_id = %session_id, "{message}");
+    } else {
+        tracing::debug!(error = %error, session_id = %session_id, "{message}");
+    }
+}
+
+fn log_bootstrap_timeout(session_id: &str, timeout_secs: u64) {
+    let msg = "session indexing timed out during bootstrap";
+    if BOOTSTRAP_TIMEOUT_LOG.should_warn("bootstrap timeouts") {
+        tracing::warn!(session_id = %session_id, timeout_secs, "{msg}");
+    } else {
+        tracing::debug!(session_id = %session_id, timeout_secs, "{msg}");
+    }
+}
+
+/// Open the index (self-heals unusable files) and run `op`, mapping errors
+/// to `io::Error` the way the rest of this module expects.
+fn with_search_index<R>(
+    db_path: &Path,
+    op: impl Fn(&SessionSearchIndex) -> Result<R, rusqlite::Error>,
+) -> io::Result<R> {
+    search_fts::with_index(db_path, op).map_err(sqlite_to_io_error)
+}
+
 /// Execute a session search query.
 ///
 /// On first call, triggers a background bootstrap that indexes all
@@ -306,6 +343,7 @@ pub async fn execute_search(
 
     SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
 
+    let epoch = search_recovery::CacheEpoch::now();
     let deadline = tokio::time::Instant::now() + BOOTSTRAP_WAIT_TIMEOUT;
     while SEARCH_INDEX_MANAGER
         .progress
@@ -325,22 +363,27 @@ pub async fn execute_search(
     let query_owned = query.to_string();
 
     let qr = tokio::task::spawn_blocking(move || {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-        index
-            .query(&query_owned, cwd.as_deref(), limit, offset, include_content)
-            .map_err(sqlite_to_io_error)
+        with_search_index(&db_path, |index| {
+            index.query(&query_owned, cwd.as_deref(), limit, offset, include_content)
+        })
     })
     .await
     .map_err(io::Error::other)??;
+
+    let healed = epoch.changed();
+    if healed {
+        SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
+    }
 
     Ok(SessionSearchResponse {
         results: qr.results,
         next_offset: qr.next_offset,
         total_estimate: qr.total_estimate,
-        bootstrapping: SEARCH_INDEX_MANAGER
-            .progress
-            .bootstrapping
-            .load(Ordering::Relaxed),
+        bootstrapping: healed
+            || SEARCH_INDEX_MANAGER
+                .progress
+                .bootstrapping
+                .load(Ordering::Relaxed),
     })
 }
 
@@ -466,10 +509,10 @@ async fn flush_ready(
     for key in ready {
         pending.remove(&key);
         if let Err(e) = upsert_by_key(root_dir, storage, &key).await {
-            tracing::warn!(
-                error = %e,
-                session_id = %key.session_id,
-                "failed upserting session in search index"
+            log_session_index_failure(
+                &key.session_id,
+                &e,
+                "failed upserting session in search index",
             );
         }
     }
@@ -526,21 +569,20 @@ async fn upsert_session(
         // Storage backend doesn't expose file paths — no content to index
         return Ok(UpsertOutcome::NoContent);
     };
-    let doc = build_session_doc(summary, content, bytes_read);
+    let doc = build_session_doc(summary, content);
     let db_path = search_db_path(root_dir);
 
     tokio::task::spawn_blocking(move || {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
+        with_search_index(&db_path, |index| {
+            if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
+                && existing_hash == doc.content_hash
+            {
+                return Ok(UpsertOutcome::Unchanged { bytes_read });
+            }
 
-        // Skip if content hasn't changed
-        if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
-            && existing_hash == doc.content_hash
-        {
-            return Ok(UpsertOutcome::Unchanged { bytes_read });
-        }
-
-        index.upsert_doc(&doc).map_err(sqlite_to_io_error)?;
-        Ok(UpsertOutcome::Indexed { bytes_read })
+            index.upsert_doc(&doc)?;
+            Ok(UpsertOutcome::Indexed { bytes_read })
+        })
     })
     .await
     .map_err(io::Error::other)?
@@ -550,15 +592,14 @@ async fn delete_session(root_dir: &Path, session_id: &str) -> io::Result<()> {
     let db_path = search_db_path(root_dir);
     let session_id = session_id.to_string();
     tokio::task::spawn_blocking(move || {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-        index.delete_doc(&session_id).map_err(sqlite_to_io_error)
+        with_search_index(&db_path, |index| index.delete_doc(&session_id))
     })
     .await
     .map_err(io::Error::other)?
 }
 
 async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Result<()> {
-    let config = BootstrapConfig::default();
+    let epoch = search_recovery::CacheEpoch::now();
     let progress = &SEARCH_INDEX_MANAGER.progress;
 
     // Reset progress counters (bootstrapping flag already set by bootstrap_once)
@@ -589,7 +630,7 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
     let mut skipped_large = 0u64;
     for (_, path) in &sessions {
         if let Some(updates_path) = path
-            && should_skip_session(updates_path, config.max_file_size)
+            && should_skip_session(updates_path, BOOTSTRAP_MAX_FILE_SIZE)
         {
             skipped_large += 1;
         }
@@ -605,7 +646,7 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
     // each acquiring a permit before doing the heavy I/O work.
     // max_concurrent (default 4) limits disk I/O contention and keeps
     // the tokio blocking thread pool available for other work.
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent.max(1)));
+    let semaphore = Arc::new(Semaphore::new(BOOTSTRAP_MAX_CONCURRENT.max(1)));
     let progress_arc = SEARCH_INDEX_MANAGER.progress.clone();
     let root_owned = root_dir.to_path_buf();
 
@@ -615,8 +656,8 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
         let sem = semaphore.clone();
         let progress = progress_arc.clone();
         let root = root_owned.clone();
-        let timeout_dur = config.per_session_timeout;
-        let max_file_size = config.max_file_size;
+        let timeout_dur = BOOTSTRAP_PER_SESSION_TIMEOUT;
+        let max_file_size = BOOTSTRAP_MAX_FILE_SIZE;
 
         join_set.spawn(async move {
             // Acquire semaphore permit — this provides backpressure,
@@ -641,19 +682,17 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
                 );
                 // Insert a title-only placeholder so title search still works;
                 // insert-if-absent so an existing (fuller) row is never touched.
-                let doc = build_session_doc(&summary, String::new(), 0);
+                let doc = build_session_doc(&summary, String::new());
                 let db_path = search_db_path(&root);
                 let title_only = tokio::task::spawn_blocking(move || {
-                    SessionSearchIndex::open_or_create(&db_path)
-                        .and_then(|index| index.insert_doc_if_absent(&doc))
-                        .map_err(sqlite_to_io_error)
+                    with_search_index(&db_path, |index| index.insert_doc_if_absent(&doc))
                 })
                 .await;
                 if let Err(e) = title_only.map_err(io::Error::other).and_then(|r| r) {
-                    tracing::warn!(
-                        error = %e,
-                        session_id = %session_id,
-                        "failed to write title-only index row for large session"
+                    log_session_index_failure(
+                        &session_id,
+                        &e,
+                        "failed to write title-only index row for large session",
                     );
                 }
                 progress.skipped.fetch_add(1, Ordering::Relaxed);
@@ -680,21 +719,21 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
                     return Ok(UpsertOutcome::NoContent);
                 };
 
-                let doc = build_session_doc(&summary, content, bytes_read);
+                let doc = build_session_doc(&summary, content);
                 let db_path = search_db_path(&root);
 
                 // Each task opens its own SessionSearchIndex connection.
                 // SQLite WAL mode handles concurrent readers + serialized writers.
                 match tokio::task::spawn_blocking(move || {
-                    let index =
-                        SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-                    if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
-                        && existing_hash == doc.content_hash
-                    {
-                        return Ok(UpsertOutcome::Unchanged { bytes_read });
-                    }
-                    index.upsert_doc(&doc).map_err(sqlite_to_io_error)?;
-                    Ok(UpsertOutcome::Indexed { bytes_read })
+                    with_search_index(&db_path, |index| {
+                        if let Ok(Some(existing_hash)) = index.get_content_hash(&doc.session_id)
+                            && existing_hash == doc.content_hash
+                        {
+                            return Ok(UpsertOutcome::Unchanged { bytes_read });
+                        }
+                        index.upsert_doc(&doc)?;
+                        Ok(UpsertOutcome::Indexed { bytes_read })
+                    })
                 })
                 .await
                 {
@@ -715,10 +754,10 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
                     UpsertOutcome::NoContent => {}
                 },
                 Ok(Err(e)) => {
-                    tracing::warn!(
-                        error = %e,
-                        session_id = %session_id,
-                        "failed to index session for search"
+                    log_session_index_failure(
+                        &session_id,
+                        &e,
+                        "failed to index session for search",
                     );
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
                     return;
@@ -726,11 +765,7 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
                 Err(_) => {
                     // Timeout expired — the spawn_blocking task continues to
                     // completion but the pipeline moves on to the next session.
-                    tracing::warn!(
-                        session_id = %session_id,
-                        timeout_secs = timeout_dur.as_secs(),
-                        "session indexing timed out during bootstrap"
-                    );
+                    log_bootstrap_timeout(&session_id, timeout_dur.as_secs());
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
@@ -749,17 +784,15 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
     // Prune orphaned entries
     let db_path = search_db_path(root_dir);
     tokio::task::spawn_blocking(move || -> io::Result<()> {
-        let index = SessionSearchIndex::open_or_create(&db_path).map_err(sqlite_to_io_error)?;
-        let indexed_ids = index
-            .all_indexed_session_ids()
-            .map_err(sqlite_to_io_error)?;
-
-        for id in indexed_ids {
-            if !expected_ids.contains(&id) {
-                let _ = index.delete_doc(&id);
+        with_search_index(&db_path, |index| {
+            let indexed_ids = index.all_indexed_session_ids()?;
+            for id in indexed_ids {
+                if !expected_ids.contains(&id) {
+                    let _ = index.delete_doc(&id);
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     })
     .await
     .map_err(io::Error::other)??;
@@ -776,11 +809,22 @@ async fn reindex_all(root_dir: &Path, storage: &dyn StorageAdapter) -> io::Resul
 
     progress.bootstrapping.store(false, Ordering::Release);
 
-    // Record bootstrap completion timestamp in the meta table.
-    // Used by remote sync to determine local index staleness.
     let db_path_meta = search_db_path(root_dir);
-    if let Err(e) = search_remote_sync::write_last_bootstrap_at(&db_path_meta) {
+    let mut needs_rebootstrap = epoch.changed();
+    if needs_rebootstrap {
+        tracing::warn!("session search cache healed during bootstrap; completion marker withheld");
+    } else if let Err(e) = search_remote_sync::write_last_bootstrap_at(&db_path_meta) {
         tracing::warn!(error = %e, "failed to write last_bootstrap_at metadata");
+    } else if epoch.changed() {
+        tracing::warn!("session search cache healed while writing completion marker; clearing it");
+        if let Err(e) = search_remote_sync::clear_last_bootstrap_at(&db_path_meta) {
+            tracing::warn!(error = %e, "failed to clear stale completion marker after heal");
+        }
+        needs_rebootstrap = true;
+    }
+
+    if needs_rebootstrap {
+        SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
     }
 
     Ok(())
@@ -1104,176 +1148,7 @@ fn collect_all_indexable_content_single_pass(updates_path: &Path) -> io::Result<
     Ok((joined, bytes_read))
 }
 
-/// Result of a delta content collection attempt.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Used once delta path is wired into upsert_session"
-    )
-)]
-enum DeltaResult {
-    /// New content extracted from the delta window.
-    Content {
-        /// Extracted indexable text from the new bytes.
-        text: String,
-        /// File size at open time — becomes the new `last_indexed_offset`.
-        file_size: u64,
-    },
-    /// The delta window contains a `rewind_marker`, so the caller must fall
-    /// back to a full re-read to rebuild prompt history correctly.
-    NeedsFullReread,
-}
-
-/// Collect indexable content from the *new* portion of `updates.jsonl`,
-/// starting at `offset` bytes.
-///
-/// Uses the same selective peek logic as [`collect_all_indexable_content_single_pass`]
-/// but operates only on the delta window. If a `rewind_marker` is encountered,
-/// returns [`DeltaResult::NeedsFullReread`] so the caller can fall back to a
-/// full re-read (rewind affects prompt history, which requires the full file).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Used once delta path is wired into upsert_session"
-    )
-)]
-fn collect_delta_content(updates_path: &Path, offset: u64) -> io::Result<DeltaResult> {
-    let mut file = std::fs::File::open(updates_path)?;
-    let file_size = file.metadata()?.len();
-
-    if file_size <= offset {
-        return Ok(DeltaResult::Content {
-            text: String::new(),
-            file_size,
-        });
-    }
-
-    file.seek(io::SeekFrom::Start(offset))?;
-    let reader = io::BufReader::new(file);
-
-    let mut user_texts: Vec<String> = Vec::new();
-    let mut assistant_texts: Vec<String> = Vec::new();
-    let mut current_assistant = String::new();
-    let mut tool_meta: Vec<String> = Vec::new();
-
-    let flush_assistant = |current: &mut String, texts: &mut Vec<String>| {
-        if !current.is_empty() {
-            let t = current.trim().to_string();
-            if !t.is_empty() {
-                texts.push(t);
-            }
-            current.clear();
-        }
-    };
-
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let (raw_params, is_xai) = if let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(trimmed)
-        {
-            let raw = env.params.map(|p| p.get()).unwrap_or(trimmed);
-            let xai = env.method == Some(XAI_SESSION_UPDATE_METHOD);
-            (raw, xai)
-        } else {
-            (trimmed, false)
-        };
-
-        let tag = serde_json::from_str::<RawParamsPeek<'_>>(raw_params)
-            .ok()
-            .and_then(|p| p.update)
-            .map(|u| u.session_update);
-
-        match tag {
-            Some(t) if is_xai && t == *REWIND_MARKER => {
-                return Ok(DeltaResult::NeedsFullReread);
-            }
-            Some(t) if !is_xai && t == *USER_MESSAGE_CHUNK => {
-                flush_assistant(&mut current_assistant, &mut assistant_texts);
-                if let Ok(peek) = serde_json::from_str::<UserContentPeek<'_>>(raw_params)
-                    && let Some(content) = peek.update.content
-                    && content.content_type == Some("text")
-                    && let Some(text) = content.text
-                    && content
-                        .meta
-                        .as_ref()
-                        .is_none_or(|m| m.bash_command.is_none())
-                    && peek
-                        .update
-                        .meta
-                        .as_ref()
-                        .is_none_or(|m| m.host_turn != Some(true))
-                {
-                    user_texts.push(text.into_owned());
-                }
-            }
-            Some("agent_message_chunk") if !is_xai => {
-                if let Ok(peek) = serde_json::from_str::<AgentContentPeek<'_>>(raw_params)
-                    && let Some(content) = peek.update.content
-                    && content.content_type == Some("text")
-                    && let Some(text) = content.text
-                    && !text.is_empty()
-                {
-                    if !current_assistant.is_empty() {
-                        current_assistant.push(' ');
-                    }
-                    current_assistant.push_str(&text);
-                }
-            }
-            Some("tool_call") if !is_xai => {
-                flush_assistant(&mut current_assistant, &mut assistant_texts);
-                if let Ok(peek) = serde_json::from_str::<ToolCallPeek<'_>>(raw_params) {
-                    if let Some(title) = peek.update.title
-                        && !title.is_empty()
-                    {
-                        tool_meta.push(title.into_owned());
-                    }
-                    if let Some(locs) = peek.update.locations {
-                        for loc in locs {
-                            if let Some(p) = loc.path
-                                && !p.is_empty()
-                            {
-                                tool_meta.push(p.into_owned());
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                flush_assistant(&mut current_assistant, &mut assistant_texts);
-            }
-        }
-    }
-
-    flush_assistant(&mut current_assistant, &mut assistant_texts);
-
-    let user_part = user_texts.join("\n\n");
-    let assistant_part = assistant_texts.join("\n");
-    let tool_part = tool_meta.join("\n");
-    let mut parts: Vec<&str> = Vec::new();
-    if !user_part.is_empty() {
-        parts.push(&user_part);
-    }
-    if !assistant_part.is_empty() {
-        parts.push(&assistant_part);
-    }
-    if !tool_part.is_empty() {
-        parts.push(&tool_part);
-    }
-    let text = parts.join("\n\n");
-
-    Ok(DeltaResult::Content { text, file_size })
-}
-
-fn build_session_doc(summary: &Summary, content: String, last_indexed_offset: u64) -> SessionDoc {
+fn build_session_doc(summary: &Summary, content: String) -> SessionDoc {
     let title = summary.display_title().to_owned();
 
     let mut hasher = blake3::Hasher::new();
@@ -1289,7 +1164,6 @@ fn build_session_doc(summary: &Summary, content: String, last_indexed_offset: u6
         title,
         content,
         content_hash,
-        last_indexed_offset,
     }
 }
 
@@ -1372,14 +1246,14 @@ mod tests {
     fn test_build_session_doc_hashes_content() {
         let summary = test_summary("test-session", "/workspace", "My session title");
 
-        let doc = build_session_doc(&summary, "prompt text".to_string(), 0);
+        let doc = build_session_doc(&summary, "prompt text".to_string());
         assert_eq!(doc.session_id, "test-session");
         assert_eq!(doc.title, "My session title");
         assert_eq!(doc.content, "prompt text");
         assert!(!doc.content_hash.is_empty());
 
         // Same content + same title → same hash
-        let doc2 = build_session_doc(&summary, "prompt text".to_string(), 0);
+        let doc2 = build_session_doc(&summary, "prompt text".to_string());
         assert_eq!(doc.content_hash, doc2.content_hash);
     }
 
@@ -1688,8 +1562,8 @@ mod tests {
         let new = test_summary("s1", "/workspace", "New title");
         let content = "same prompt text".to_string();
 
-        let doc_old = build_session_doc(&old, content.clone(), 0);
-        let doc_new = build_session_doc(&new, content, 0);
+        let doc_old = build_session_doc(&old, content.clone());
+        let doc_new = build_session_doc(&new, content);
 
         assert_ne!(
             doc_old.content_hash, doc_new.content_hash,
@@ -1701,22 +1575,12 @@ mod tests {
     fn test_build_session_doc_prefers_generated_title() {
         let mut summary = test_summary("s1", "/workspace", "session summary");
         summary.generated_title = Some("Generated Title".to_string());
-        let doc = build_session_doc(&summary, "content".to_string(), 0);
+        let doc = build_session_doc(&summary, "content".to_string());
         assert_eq!(doc.title, "Generated Title");
 
         summary.generated_title = Some(String::new());
-        let doc2 = build_session_doc(&summary, "content".to_string(), 0);
+        let doc2 = build_session_doc(&summary, "content".to_string());
         assert_eq!(doc2.title, "session summary");
-    }
-
-    // ── bootstrap config tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_bootstrap_config_defaults() {
-        let config = BootstrapConfig::default();
-        assert_eq!(config.max_concurrent, 4);
-        assert_eq!(config.per_session_timeout, Duration::from_secs(30));
-        assert_eq!(config.max_file_size, 30 * 1024 * 1024);
     }
 
     // ── should_skip_session tests ──────────────────────────────────────────
@@ -1806,140 +1670,6 @@ mod tests {
             bytes_read > 0,
             "bytes_read should be non-zero for non-empty file"
         );
-    }
-
-    // ── delta indexing tests ───────────────────────────────────────────────
-
-    /// Append new lines to an existing updates.jsonl file and return the
-    /// byte offset where the new content starts.
-    fn append_updates_jsonl(path: &Path, lines: &[String]) -> u64 {
-        use std::io::Write as _;
-        let offset = std::fs::metadata(path).unwrap().len();
-        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-        for line in lines {
-            writeln!(f, "{line}").unwrap();
-        }
-        offset
-    }
-
-    #[test]
-    fn test_delta_append_extracts_new_content() {
-        // Write initial content
-        let initial = vec![
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello world"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi there"}}"#,
-            ),
-        ];
-        let f = write_updates_jsonl(&initial);
-        let offset = std::fs::metadata(f.path()).unwrap().len();
-
-        // Append new content
-        let delta = vec![
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"second question"}}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"second answer"}}"#,
-            ),
-        ];
-        append_updates_jsonl(f.path(), &delta);
-
-        let result = collect_delta_content(f.path(), offset).unwrap();
-        match result {
-            DeltaResult::Content { text, file_size } => {
-                assert!(
-                    text.contains("second question"),
-                    "delta should contain new user prompt"
-                );
-                assert!(
-                    text.contains("second answer"),
-                    "delta should contain new assistant text"
-                );
-                assert!(
-                    !text.contains("hello world"),
-                    "delta should not contain pre-offset content"
-                );
-                assert!(
-                    file_size > offset,
-                    "file_size should be larger than the starting offset"
-                );
-            }
-            DeltaResult::NeedsFullReread => {
-                panic!("expected Content, got NeedsFullReread");
-            }
-        }
-    }
-
-    #[test]
-    fn test_delta_rewind_triggers_full_reread() {
-        let initial = vec![acp_update(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"first"}}"#,
-        )];
-        let f = write_updates_jsonl(&initial);
-        let offset = std::fs::metadata(f.path()).unwrap().len();
-
-        // Append a rewind marker in the delta window
-        let delta = vec![
-            xai_update(
-                r#"{"sessionUpdate":"rewind_marker","target_prompt_index":0,"created_at":"2024-01-01"}"#,
-            ),
-            acp_update(
-                r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"replacement"}}"#,
-            ),
-        ];
-        append_updates_jsonl(f.path(), &delta);
-
-        let result = collect_delta_content(f.path(), offset).unwrap();
-        assert!(
-            matches!(result, DeltaResult::NeedsFullReread),
-            "rewind in delta should trigger NeedsFullReread"
-        );
-    }
-
-    #[test]
-    fn test_delta_no_new_bytes() {
-        let lines = vec![acp_update(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}"#,
-        )];
-        let f = write_updates_jsonl(&lines);
-        let file_size = std::fs::metadata(f.path()).unwrap().len();
-
-        // Offset equals file size — no new bytes
-        let result = collect_delta_content(f.path(), file_size).unwrap();
-        match result {
-            DeltaResult::Content { text, .. } => {
-                assert!(text.is_empty(), "no new bytes should produce empty text");
-            }
-            DeltaResult::NeedsFullReread => {
-                panic!("expected Content with empty text, got NeedsFullReread");
-            }
-        }
-    }
-
-    #[test]
-    fn test_delta_truncation_detected() {
-        let lines = vec![acp_update(
-            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello world this is a long message"}}"#,
-        )];
-        let f = write_updates_jsonl(&lines);
-        let file_size = std::fs::metadata(f.path()).unwrap().len();
-
-        // Offset larger than file size — simulates truncation
-        let result = collect_delta_content(f.path(), file_size + 100).unwrap();
-        match result {
-            DeltaResult::Content { text, .. } => {
-                assert!(
-                    text.is_empty(),
-                    "offset beyond file size should produce empty text"
-                );
-            }
-            DeltaResult::NeedsFullReread => {
-                panic!("expected Content with empty text for truncation");
-            }
-        }
     }
 
     // ── bootstrap_once eager flag tests ────────────────────────────────────
@@ -2057,7 +1787,7 @@ mod tests {
         let db_path = search_db_path(tmp.path());
 
         let summary = test_summary("stub", "/ws", "");
-        let stub = build_session_doc(&summary, String::new(), 0);
+        let stub = build_session_doc(&summary, String::new());
         {
             let index = SessionSearchIndex::open_or_create(&db_path).unwrap();
             index.upsert_doc(&stub).unwrap();
@@ -2079,9 +1809,4 @@ mod tests {
             "the upgrade drop must clear stub rows so their stale hashes cannot block re-indexing"
         );
     }
-
-    // Note: tests for upsert_session_blocking (delta path, truncation
-    // fallback, rewind fallback, no-new-bytes skip) are deferred until
-    // the delta indexing is wired into upsert_session. The delta content
-    // collection function (collect_delta_content) is tested above.
 }

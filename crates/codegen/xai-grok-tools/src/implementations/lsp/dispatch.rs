@@ -111,10 +111,10 @@ async fn bootstrap_lsp(
         mgr.restartable_servers()
     };
     for name in restartable {
-        let mgr_clone = lsp_manager.clone();
-        tokio::spawn(crate::implementations::lsp::restart_monitor(
-            mgr_clone, name,
-        ));
+        // Hand the monitor a `Weak` so it never keeps the manager (and its
+        // language-server children) alive past the owning session.
+        let mgr_weak = Arc::downgrade(&lsp_manager);
+        tokio::spawn(crate::implementations::lsp::restart_monitor(mgr_weak, name));
     }
     Ok(())
 }

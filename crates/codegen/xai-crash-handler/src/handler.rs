@@ -1,7 +1,12 @@
-//! Cross-platform crash handler for fatal memory faults.
+//! Cross-platform crash handler for fatal memory faults and aborts.
 //!
-//! - **Unix**: SIGBUS/SIGSEGV via `sigaction(2)`.
+//! - **Unix**: SIGBUS/SIGSEGV/SIGABRT via `sigaction(2)`. SIGABRT matters
+//!   because release builds ship with `panic = "abort"`, so every Rust panic
+//!   terminates via `abort(3)` — without a SIGABRT handler those deaths leave
+//!   no crash report.
 //! - **Windows**: `EXCEPTION_ACCESS_VIOLATION` et al. via `SetUnhandledExceptionFilter`.
+//!   `abort()` does not go through the unhandled-exception filter, so SIGABRT
+//!   capture is Unix-only.
 //!
 //! Captures crash PC + frame-pointer chain. All handler operations are
 //! minimal (raw pointer reads, direct file I/O, atomics — no allocation).
@@ -275,11 +280,16 @@ mod imp {
         }
     }
 
-    /// Register a signal handler for SIGBUS and SIGSEGV.
+    /// Register a signal handler for SIGBUS, SIGSEGV, and SIGABRT.
+    ///
+    /// SIGABRT is hooked so `panic = "abort"` deaths (every Rust panic in
+    /// release builds) produce a crash report instead of a bare `Aborted`.
     ///
     /// Flags: `SA_SIGINFO | SA_ONSTACK | SA_RESETHAND`. `SA_RESETHAND`
     /// resets disposition to `SIG_DFL` after delivery, preventing recursive
-    /// faults in the handler from looping.
+    /// faults in the handler from looping. The handlers additionally restore
+    /// `SIG_DFL` and re-raise explicitly, so the process still terminates
+    /// with the original signal's semantics (exit status, core dumps).
     ///
     /// # Safety
     ///
@@ -295,6 +305,7 @@ mod imp {
 
             libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
             libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut());
         }
     }
 
@@ -424,7 +435,8 @@ mod imp {
         }
     }
 
-    /// Install a minimal SIGSEGV/SIGBUS handler that restores termios on crash.
+    /// Install a minimal SIGSEGV/SIGBUS/SIGABRT handler that restores termios
+    /// on crash.
     ///
     /// Does NOT write terminal escape codes — call
     /// [`enable_terminal_escape_restore`] after TUI modes are enabled.
@@ -486,8 +498,8 @@ mod imp {
         true
     }
 
-    /// Upgrade SIGSEGV/SIGBUS handlers to include terminal escape code
-    /// restoration. Call when TUI modes are enabled.
+    /// Upgrade SIGSEGV/SIGBUS/SIGABRT handlers to include terminal escape
+    /// code restoration. Call when TUI modes are enabled.
     pub fn enable_terminal_escape_restore() {
         unsafe {
             register_crash_signals(if CRASH_FD.load(Ordering::Relaxed) >= 0 {
@@ -498,7 +510,7 @@ mod imp {
         }
     }
 
-    /// Downgrade SIGSEGV/SIGBUS handlers to termios-only restoration.
+    /// Downgrade SIGSEGV/SIGBUS/SIGABRT handlers to termios-only restoration.
     /// Call when TUI modes are disabled.
     pub fn disable_terminal_escape_restore() {
         unsafe {
@@ -856,7 +868,7 @@ pub fn disable_terminal_escape_restore() {}
 mod tests {
     use std::sync::Mutex;
 
-    // SIGSEGV/SIGBUS handlers are process-global. Tests in this binary run on
+    // SIGSEGV/SIGBUS/SIGABRT handlers are process-global. Tests in this binary run on
     // parallel threads, so any two tests that install/read these handlers race.
     // Serialize them through this lock (poison-tolerant: a real assertion
     // failure in one test must not cascade into the other).
@@ -898,6 +910,18 @@ mod tests {
                 sa.sa_flags & libc::SA_ONSTACK,
                 0,
                 "SIGBUS handler must use alternate signal stack"
+            );
+
+            assert_eq!(libc::sigaction(libc::SIGABRT, std::ptr::null(), &mut sa), 0);
+            assert_ne!(
+                sa.sa_sigaction,
+                libc::SIG_DFL,
+                "SIGABRT handler should not be SIG_DFL after install"
+            );
+            assert_ne!(
+                sa.sa_flags & libc::SA_ONSTACK,
+                0,
+                "SIGABRT handler must use alternate signal stack"
             );
         }
     }

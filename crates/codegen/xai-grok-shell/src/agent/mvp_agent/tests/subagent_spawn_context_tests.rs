@@ -173,3 +173,30 @@ async fn subagent_spawn_context_inherits_parent_configured_cutoff() {
         "an unbounded parent must not hand a subagent a cutoff"
     );
 }
+
+/// A subagent inherits the parent's `process_scope`, so an owner enrolled through it stays visible via the child.
+/// End-to-end reaping is covered by the spine's `process_scope_reclaim` tests.
+#[tokio::test]
+async fn subagent_spawn_context_inherits_parent_process_scope() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("parent-process-scope");
+    let mut handle = make_test_handle("test-model", false, None);
+    let parent_scope = xai_tty_utils::ProcessScope::new();
+    handle.tool_context.process_scope = Some(parent_scope.clone());
+    agent.sessions.borrow_mut().insert(sid.clone(), handle);
+
+    // Hold an owner Arc in the parent scope so live_count == 1.
+    let owner = std::sync::Arc::new(xai_tty_utils::ProcessGroup::new().expect("process group"));
+    parent_scope.register(&owner);
+
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    let inherited = ctx
+        .process_scope
+        .expect("subagent context must inherit the parent's process scope");
+
+    assert_eq!(
+        inherited.live_count(),
+        1,
+        "the child sees the owner enrolled through the parent scope"
+    );
+}

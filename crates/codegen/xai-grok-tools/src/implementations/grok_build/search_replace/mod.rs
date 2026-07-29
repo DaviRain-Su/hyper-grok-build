@@ -50,7 +50,7 @@ impl SearchReplaceVersion {
         self == Self::Legacy0_4_10
     }
 }
-/// Full description with read-before-edit guidance (for non-concise toolset).
+/// Full description (for the non-concise toolset).
 ///
 /// Uses MiniJinja template placeholders with ToolKind-based keys:
 /// - `${{ tools.by_kind.read }}` — client-facing name for the Read tool
@@ -58,9 +58,17 @@ impl SearchReplaceVersion {
 /// - `${{ params.edit.replace_all }}` — client-facing param name
 pub(crate) const DESCRIPTION_FULL: &str = r#"Replace an exact string in a file.
 
-- Read the file with `${{ tools.by_kind.read }}` before editing it.
+${% if tools.by_kind.read -%}
 - `${{ tools.by_kind.read }}` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.
-- `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier)."#;
+${% endif -%}
+- `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
+- To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
+/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
+/// `empty_old_string_does_not_override` is enabled (opt-in; the default is the
+/// legacy overwrite behavior); `versioned_definition` strips it unless a
+/// config enables the guard.
+pub(crate) const EMPTY_OLD_STRING_GUARD_SENTENCE: &str =
+    " An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.";
 /// Input for the search_replace tool.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchReplaceInput {
@@ -89,15 +97,19 @@ fn default_true() -> bool {
 /// Configuration for the search_replace tool, stored as `Params<SearchReplaceParams>` in Resources.
 ///
 /// Replaces the old `SearchReplaceOptions` that was stored via `tool_options_as()`.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchReplaceParams {
     /// Deprecated runtime no-op, kept so configs still sending it deserialize under
     /// `deny_unknown_fields`. Still gates the config-time Read-tool requirement (`requires_expr`).
     #[serde(default)]
     pub skip_read_before_edit: bool,
-    /// Empty old string DOES not override the file unless its empty, by default we allow
-    /// empty old string to override the file content completely``
+    /// When true (opt-in), an empty `old_string` may only create a new file
+    /// or fill an empty one — it never silently overwrites an existing
+    /// non-empty file. Defaults to false (the legacy behavior): an empty
+    /// `old_string` replaces the file's entire contents. The served
+    /// description includes the guard sentence only when this is enabled
+    /// (see `versioned_definition`).
     #[serde(default)]
     pub empty_old_string_does_not_override: bool,
     /// When true, enable normalized-fallback matching for Unicode confusable
@@ -115,6 +127,16 @@ pub struct SearchReplaceParams {
     /// Default: `true`.
     #[serde(default = "default_true")]
     pub include_user_edit_hint: bool,
+}
+impl Default for SearchReplaceParams {
+    fn default() -> Self {
+        Self {
+            skip_read_before_edit: false,
+            empty_old_string_does_not_override: false,
+            unicode_normalized_fallback: false,
+            include_user_edit_hint: true,
+        }
+    }
 }
 register_resource!("grok_build", "SearchReplace", SearchReplaceParams);
 /// SearchReplace tool — new architecture.
@@ -337,7 +359,7 @@ async fn handle_new_file_creation(
     }
     if let Some(old_text) = old_text
         && file_exists
-        && empty_old_string_does_not_override
+        && !empty_old_string_does_not_override
     {
         notification_handle.send_file_written(FileWritten {
             tool_call_id: tool_call_id.to_string(),
@@ -762,6 +784,45 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
     fn description_template(&self) -> &str {
         DESCRIPTION_FULL
     }
+    /// Params-aware description: the "cannot overwrite" sentence in
+    /// [`DESCRIPTION_FULL`] only holds while `empty_old_string_does_not_override`
+    /// is enabled, so it is served only for configs that opt into the guard and
+    /// stripped by default (legacy overwrite behavior).
+    fn versioned_definition(
+        &self,
+        _contract_version: Option<&str>,
+        client_name: &str,
+        description_override: Option<&str>,
+        renderer: &TemplateRenderer,
+        param_map: &std::collections::HashMap<String, String>,
+        input_schema: &serde_json::Value,
+        effective_params: &serde_json::Value,
+    ) -> crate::types::definition::ToolDefinition {
+        let params: SearchReplaceParams =
+            serde_json::from_value(effective_params.clone()).unwrap_or_default();
+        let raw_desc = match description_override {
+            Some(d) => d.to_string(),
+            None if params.empty_old_string_does_not_override => {
+                self.description_template().to_string()
+            }
+            None => self
+                .description_template()
+                .replace(EMPTY_OLD_STRING_GUARD_SENTENCE, ""),
+        };
+        let description = renderer.render(&raw_desc).unwrap_or_else(|e| {
+            crate::types::template_renderer::strip_markers_on_render_failure(&raw_desc, &e)
+        });
+        let remapped_schema = if param_map.is_empty() {
+            input_schema.clone()
+        } else {
+            crate::util::remap::remap_schema_properties(input_schema, param_map)
+        };
+        crate::types::definition::ToolDefinition::function(
+            client_name,
+            Some(&description),
+            remapped_schema,
+        )
+    }
     fn emitted_notifications(&self) -> &'static [&'static str] {
         &["FileWritten"]
     }
@@ -800,7 +861,7 @@ impl xai_tool_runtime::Tool for SearchReplaceTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             "search_replace",
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
     fn capabilities(&self) -> xai_tool_protocol::ToolCapabilities {
@@ -868,6 +929,94 @@ mod tests {
             new_string: new_string.to_string(),
             replace_all: false,
         }
+    }
+    fn description_renderer() -> TemplateRenderer {
+        let edit_params = std::collections::HashMap::from([
+            ("old_string".to_string(), "old_string".to_string()),
+            ("new_string".to_string(), "new_string".to_string()),
+            ("replace_all".to_string(), "replace_all".to_string()),
+        ]);
+        TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::Read, "read_file".to_string())]),
+            std::collections::HashMap::from([(ToolKind::Edit, edit_params)]),
+        )
+    }
+    /// The strip in `versioned_definition` matches the template verbatim, so
+    /// the sentence must stay in sync with `DESCRIPTION_FULL`.
+    #[test]
+    fn overwrite_guard_sentence_stays_in_sync_with_template() {
+        assert!(DESCRIPTION_FULL.contains(EMPTY_OLD_STRING_GUARD_SENTENCE));
+    }
+    #[test]
+    fn overwrite_guard_sentence_is_conditional_on_param() {
+        use crate::types::tool_metadata::ToolMetadata;
+        let renderer = description_renderer();
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let param_map = std::collections::HashMap::new();
+        let default_def = ToolMetadata::versioned_definition(
+            &SearchReplaceTool,
+            None,
+            "search_replace",
+            None,
+            &renderer,
+            &param_map,
+            &schema,
+            &serde_json::json!({}),
+        );
+        let default_desc = default_def.function.description.unwrap();
+        assert!(
+            !default_desc.contains("cannot overwrite"),
+            "guard sentence must be absent by default (legacy overwrite behavior):\n{default_desc}"
+        );
+        assert!(
+            default_desc.contains("To create a new file"),
+            "create-file guidance must remain:\n{default_desc}"
+        );
+        let opt_in_def = ToolMetadata::versioned_definition(
+            &SearchReplaceTool,
+            None,
+            "search_replace",
+            None,
+            &renderer,
+            &param_map,
+            &schema,
+            &serde_json::json!({"empty_old_string_does_not_override": true}),
+        );
+        let opt_in_desc = opt_in_def.function.description.unwrap();
+        assert!(
+            opt_in_desc.contains("cannot overwrite an existing non-empty file"),
+            "guard sentence must appear when the guard is enabled:\n{opt_in_desc}"
+        );
+    }
+    #[test]
+    fn description_read_bullet_guarded_on_read_tool() {
+        use crate::types::tool_metadata::ToolMetadata;
+        let rendered = description_renderer()
+            .render(ToolMetadata::description_template(&SearchReplaceTool))
+            .unwrap();
+        assert!(
+            rendered.contains("read_file` prefixes each line") && !rendered.contains("${%"),
+            "read bullet must render with the resolved name:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("before editing it"),
+            "read-before-edit guidance must be gone:\n{rendered}"
+        );
+        let edit_params = std::collections::HashMap::from([
+            ("old_string".to_string(), "old_string".to_string()),
+            ("new_string".to_string(), "new_string".to_string()),
+            ("replace_all".to_string(), "replace_all".to_string()),
+        ]);
+        let no_read = TemplateRenderer::new(
+            std::collections::HashMap::new(),
+            std::collections::HashMap::from([(ToolKind::Edit, edit_params)]),
+        )
+        .render(ToolMetadata::description_template(&SearchReplaceTool))
+        .unwrap();
+        assert!(
+            !no_read.contains("prefixes each line") && !no_read.contains("- \n"),
+            "read bullet must vanish cleanly without a Read tool:\n{no_read}"
+        );
     }
     #[tokio::test]
     async fn basic_replacement() {
@@ -1270,11 +1419,34 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overrides_existing_file_by_default() {
+    async fn empty_old_string_overwrites_existing_file_by_default() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
         let resources = test_resources(tmp.path());
+        let input = make_input("existing.txt", "", "completely new content\n");
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(applied) => {
+                assert!(applied.tool_output_for_prompt.contains("has been created"));
+                let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
+                assert_eq!(content, "completely new content\n");
+            }
+            other => panic!("Expected EditsApplied, got {:?}", other),
+        }
+    }
+    #[tokio::test]
+    async fn empty_old_string_overrides_with_explicit_false() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(SearchReplaceParams {
+            empty_old_string_does_not_override: false,
+            ..Default::default()
+        }));
         let input = make_input("existing.txt", "", "completely new content\n");
         let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
             .await

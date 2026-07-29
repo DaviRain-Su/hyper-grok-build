@@ -36,7 +36,8 @@ use xai_grok_workspace_types::rpc::git::{
     GitCollectChangesResponse, GitCommitReq, GitCurrentCommitReq, GitDiffReq, GitDiffsData,
     GitDiscardReq, GitFilesReq, GitInfoData, GitInfoReq, GitMetadataReq, GitReadFilesData,
     GitResolveRootReq, GitStageContentReq, GitStageReq, GitStashReq, GitStatusExtReq,
-    GitStatusExtResponse, GitStatusReq, GitUnstageReq, StageData, VcsKind,
+    GitStatusExtResponse, GitStatusReq, GitSyncBaseReq, GitSyncBaseResult, GitUnstageReq,
+    StageData, VcsKind,
 };
 use xai_grok_workspace_types::rpc::hunks::{
     BulkHunkActionResponse, FileSummary, HunkActionResponse, HunkAllActionReq, HunkFileActionReq,
@@ -290,6 +291,12 @@ impl WorkspaceClient {
         &self,
         req: &GitCommitReq,
     ) -> Result<CommitResult, WorkspaceClientError> {
+        self.rpc(req).await
+    }
+    pub async fn git_sync_base(
+        &self,
+        req: &GitSyncBaseReq,
+    ) -> Result<GitSyncBaseResult, WorkspaceClientError> {
         self.rpc(req).await
     }
     pub async fn git_checkout(&self, req: &GitCheckoutReq) -> Result<(), WorkspaceClientError> {

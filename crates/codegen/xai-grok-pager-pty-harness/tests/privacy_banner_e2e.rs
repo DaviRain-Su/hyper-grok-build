@@ -1,9 +1,10 @@
 //! E2E: the coding-data privacy upsell banner — shown on the welcome screen
 //! for an opted-out OAuth user under the `privacy_notice_rollout` flag,
 //! persisting into the agent view, and acked (never re-shown) via both
-//! buttons: `[Customize in settings]` opens the settings chooser and stamps
-//! `[privacy].privacy_banner_acked`; `[Accept]` opts the user in through the
-//! shell's `PUT /privacy/coding-data-retention` round trip before acking.
+//! buttons: `[Opt out]` dismisses on the spot, stamping
+//! `[privacy].privacy_banner_acked` without waiting on the server; `[Opt in]`
+//! opts the user in through the shell's `PUT /privacy/coding-data-retention`
+//! round trip and acks only once that succeeds.
 //!
 //! Drives the real pager binary through a PTY against the shared mock
 //! inference server (isolated `$HOME`), with a seeded opted-out OAuth entry
@@ -27,20 +28,20 @@ use xai_grok_pager_pty_harness::{
 const ROWS: u16 = 50;
 const COLS: u16 = 120;
 const BANNER_TITLE: &str = "Help improve Grok";
-const CUSTOMIZE: &str = "[Customize in settings]";
-const ACCEPT: &str = "[Accept]";
+const OPT_OUT: &str = "[Opt out]";
+const OPT_IN: &str = "[Opt in]";
 const ACK: &str = "BANNERACK";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore] // opt-in: spawns the real pager binary in a PTY (CI runs with --ignored)
-async fn privacy_banner_welcome_customize_ack_persists() {
-    run_customize().await.expect("privacy banner customize e2e");
+async fn privacy_banner_welcome_opt_out_ack_persists() {
+    run_opt_out().await.expect("privacy banner opt-out e2e");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore] // opt-in: spawns the real pager binary in a PTY (CI runs with --ignored)
-async fn privacy_banner_persists_into_agent_view_and_accept_opts_in() {
-    run_accept().await.expect("privacy banner accept e2e");
+async fn privacy_banner_persists_into_agent_view_and_opt_in_shares() {
+    run_opt_in().await.expect("privacy banner opt-in e2e");
 }
 
 /// Rollout flag forced on (env override beats remote settings) and the
@@ -53,7 +54,7 @@ fn banner_env_ops() -> [EnvOp<'static>; 2] {
     ]
 }
 
-async fn run_customize() -> Result<()> {
+async fn run_opt_out() -> Result<()> {
     let content = ContentController::start()
         .await
         .context("start mock server")?;
@@ -66,29 +67,27 @@ async fn run_customize() -> Result<()> {
     let mut pager = spawn_pager(&binary, &content, project.path()).context("spawn pager")?;
     wait_for_banner(&mut pager)?;
     assert!(
-        pager.contains_text(ACCEPT),
-        "welcome banner is missing {ACCEPT}:\n{}",
+        pager.contains_text(OPT_IN),
+        "welcome banner is missing {OPT_IN}:\n{}",
         pager.screen_contents()
     );
 
-    click_text(&mut pager, CUSTOMIZE).context("click Customize")?;
+    click_text(&mut pager, OPT_OUT).context("click Opt out")?;
+
+    // Dismissal is local and immediate — it must not wait on the server, and
+    // must not detour into settings.
     pager
-        .wait_for_text("Coding data sharing", Duration::from_secs(20))
-        .context("settings chooser opened on Coding data sharing")?;
+        .wait_for_text_absent(BANNER_TITLE, Duration::from_secs(10))
+        .context("banner dismissed by [Opt out]")?;
     assert!(
-        pager.contains_text("Opt in") && pager.contains_text("Opt out"),
-        "chooser is missing the Opt in / Opt out choices:\n{}",
+        !pager.contains_text("Coding data,"),
+        "[Opt out] must answer the question, not open settings:\n{}",
         pager.screen_contents()
     );
 
-    // Customize acks immediately; the config write is async — poll for it.
+    // The config write is async — poll for it.
     wait_for_ack_on_disk(&mut pager, content.home(), Duration::from_secs(10))?;
 
-    // Close the chooser, then the settings list, then quit gracefully.
-    pager.inject_keys(keys::ESC).context("close chooser")?;
-    pager.update(Duration::from_millis(300));
-    pager.inject_keys(keys::ESC).context("close settings")?;
-    pager.update(Duration::from_millis(300));
     quit_via_double_ctrl_c(&mut pager)?;
     drop(pager);
 
@@ -110,7 +109,7 @@ async fn run_customize() -> Result<()> {
     Ok(())
 }
 
-async fn run_accept() -> Result<()> {
+async fn run_opt_in() -> Result<()> {
     let content = ContentController::start()
         .await
         .context("start mock server")?;
@@ -136,12 +135,12 @@ async fn run_accept() -> Result<()> {
         pager.screen_contents()
     );
 
-    click_text(&mut pager, ACCEPT).context("click Accept")?;
+    click_text(&mut pager, OPT_IN).context("click Opt in")?;
 
     // Ack only lands after the shell's PUT round trip confirms 2xx.
     pager
         .wait_for_text_absent(BANNER_TITLE, Duration::from_secs(20))
-        .context("banner disappeared after Accept")?;
+        .context("banner disappeared after [Opt in]")?;
     wait_for_ack_on_disk(&mut pager, content.home(), Duration::from_secs(10))?;
 
     let put_bodies: Vec<_> = content

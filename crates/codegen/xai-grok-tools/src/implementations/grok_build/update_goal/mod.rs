@@ -229,7 +229,7 @@ impl xai_tool_runtime::Tool for UpdateGoalTool {
     ) -> xai_tool_types::ToolDescription {
         xai_tool_types::ToolDescription::new(
             UPDATE_GOAL_TOOL_NAME,
-            crate::types::tool_metadata::ToolMetadata::description_template(self),
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
         )
     }
 

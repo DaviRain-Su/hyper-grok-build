@@ -291,8 +291,8 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(
     if let Some(key) = focus_key
         && state.focus_key(key)
     {
-        // Land directly on the setting's chooser page (e.g. the coding data
-        // sharing opt-in/out picker), not just the focused browse row.
+        // Try the chooser; a locked row keeps Browse (`try_enter_picking_enum`
+        // refuses when `row_lock` is set).
         state.try_enter_picking_enum();
     }
     agent.active_modal = Some(ActiveModal::Settings { state });

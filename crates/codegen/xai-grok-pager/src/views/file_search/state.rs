@@ -19,6 +19,14 @@ use super::context::{self, AtContext, normalize_display_path};
 /// Top-K results to request from the fuzzy matcher.
 const MATCHER_TOP_K: usize = 1000;
 
+/// Whether a new query should restart the daemon's directory walk.
+enum RestartWalk {
+    /// Reuse the current walk (query changed but hidden mode did not).
+    Keep,
+    /// Restart the walk, including or excluding hidden entries.
+    Restart { hidden: bool },
+}
+
 /// Replacement to apply to the prompt text after accepting a fuzzy result.
 #[derive(Debug, Clone)]
 pub struct FileSearchReplacement {
@@ -28,8 +36,19 @@ pub struct FileSearchReplacement {
     pub text: String,
     /// Where to place the cursor after replacement.
     pub cursor: usize,
-    /// Whether the @-context should be cleared (file accepted, not dir drill-down).
+    /// Whether the @-context should be cleared (an already-present directory was committed).
     pub dismiss: bool,
+}
+
+/// Build accepted directory replacement text: append `/` for drill-down and a
+/// trailing space when the token ends the prompt.
+fn accept_text(path: &str, at_end: bool) -> String {
+    let mut text = path.to_owned();
+    text.push('/');
+    if at_end {
+        text.push(' ');
+    }
+    text
 }
 
 /// File search state for @-completion.
@@ -38,8 +57,14 @@ pub struct FileSearchState {
     /// otherwise moved into its worker thread) so callers can introspect
     /// where `@`-completion is currently pointed.
     root: PathBuf,
-    /// Background fuzzy matcher daemon.
-    daemon: FuzzyFileMatcherDaemon,
+    /// Background fuzzy matcher daemon, built lazily on first @-use. Eager
+    /// construction spawns the nucleo pool and walker threads even in sessions
+    /// that never open @-search; deferring it moves that thread spawn, and its
+    /// EAGAIN risk, to first use rather than removing it.
+    daemon: Option<FuzzyFileMatcherDaemon>,
+    /// Test-only count of daemon builds, to prove reuse (no drop-and-rebuild).
+    #[cfg(test)]
+    daemon_builds: usize,
     /// Latest results snapshot from the daemon.
     results: FuzzyMatcherDaemonResults,
     /// Current @-context (if cursor is inside an @-token).
@@ -51,7 +76,13 @@ pub struct FileSearchState {
     hovered: Option<usize>,
     /// Scroll offset for the dropdown list.
     scroll_offset: usize,
-    /// Generation counter to prevent stale results from flickering in.
+    /// Floor for accepted result generations: the stale-result fence.
+    ///
+    /// Rises monotonically and is never lowered. Each new query bumps it (see
+    /// `start_query`); the daemon paces its own per-tick `generation`
+    /// independently, so `poll` drops any snapshot whose `generation` predates
+    /// the floor and, on accept, raises the floor to the accepted snapshot's
+    /// generation. This keeps matches from a prior query from flickering in.
     min_generation: usize,
     /// Directory being drilled into; keeps the @-token alive when its name has
     /// whitespace (`my dir`). Self-validating — applies only while the path matches.
@@ -63,7 +94,9 @@ impl FileSearchState {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_owned(),
-            daemon: FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new(root), MATCHER_TOP_K),
+            daemon: None,
+            #[cfg(test)]
+            daemon_builds: 0,
             results: FuzzyMatcherDaemonResults::default(),
             context: None,
             selected: 0,
@@ -74,24 +107,51 @@ impl FileSearchState {
         }
     }
 
-    /// Replace the underlying matcher with a new one rooted at `root`.
+    /// Point @-completion at a new tree (e.g. after worktree creation).
     ///
-    /// Used after worktree creation to point @-completion at the new tree.
+    /// Drops any built daemon; the next @-use rebuilds it lazily against `root`.
     pub fn retarget(&mut self, root: &Path) {
-        self.root = root.to_owned();
-        self.daemon = FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new(root), MATCHER_TOP_K);
-        self.results = FuzzyMatcherDaemonResults::default();
-        self.context = None;
-        self.selected = 0;
-        self.hovered = None;
-        self.scroll_offset = 0;
-        self.min_generation = 0;
-        self.drill_prefix = None;
+        *self = Self::new(root);
     }
 
     /// The directory the matcher currently walks (the `@`-completion root).
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The fuzzy matcher daemon, built lazily on first use.
+    ///
+    /// The first `@`-keystroke pays a one-time cost on the UI thread: building
+    /// the daemon spawns the nucleo matcher pool and the directory walker.
+    fn ensure_daemon(&mut self) -> &mut FuzzyFileMatcherDaemon {
+        if self.daemon.is_none() {
+            let daemon =
+                FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new(&self.root), MATCHER_TOP_K);
+            self.daemon = Some(daemon);
+            #[cfg(test)]
+            {
+                self.daemon_builds += 1;
+            }
+        }
+        self.daemon.as_mut().expect("daemon built above")
+    }
+
+    /// Point the daemon (building it if needed) at `query`, optionally restarting
+    /// the directory walk, then reset dropdown selection and scroll.
+    ///
+    /// The matcher never filters to directories only: a trailing `/` scopes the
+    /// query to a folder without hiding that folder's files.
+    fn start_query(&mut self, restart: RestartWalk, query: &str) {
+        let daemon = self.ensure_daemon();
+        if let RestartWalk::Restart { hidden } = restart {
+            daemon.restart_walk(hidden);
+        }
+        daemon.set_query(query, false);
+        // Advance the stale-result fence past the prior query (see `min_generation`).
+        self.min_generation += 1;
+        self.selected = 0;
+        self.hovered = None;
+        self.scroll_offset = 0;
     }
 
     // ── Visibility ──────────────────────────────────────────────────────
@@ -128,13 +188,7 @@ impl FileSearchState {
 
     /// Set the hovered index. Returns `true` if changed.
     pub fn set_hovered(&mut self, index: Option<usize>) -> bool {
-        let clamped = index.and_then(|i| {
-            if i < self.results.topk.len() {
-                Some(i)
-            } else {
-                None
-            }
-        });
+        let clamped = index.filter(|&i| i < self.results.topk.len());
         let changed = clamped != self.hovered;
         self.hovered = clamped;
         changed
@@ -162,15 +216,13 @@ impl FileSearchState {
             (None, Some(ctx)) => {
                 // Fresh `@` token is never a drill — drop any stale anchor.
                 self.drill_prefix = None;
-                // Entering @-mode: restart the directory walk.
-                self.daemon.restart_walk(ctx.is_hidden_mode());
-                // A trailing `/` scopes the query to a folder; it must not hide
-                // that folder's files, so never filter to directories only.
-                self.daemon.set_query(ctx.matcher_query(), false);
-                self.min_generation += 1;
-                self.selected = 0;
-                self.hovered = None;
-                self.scroll_offset = 0;
+                // Entering @-mode always restarts the walk.
+                self.start_query(
+                    RestartWalk::Restart {
+                        hidden: ctx.is_hidden_mode(),
+                    },
+                    ctx.matcher_query(),
+                );
             }
             (Some(old), Some(new)) => {
                 // Drop a stale anchor once the @-token's path content no longer
@@ -184,17 +236,15 @@ impl FileSearchState {
                 if anchor_stale {
                     self.drill_prefix = None;
                 }
-                // Staying in @-mode: check if hidden mode toggled (needs re-walk).
-                if old.is_hidden_mode() != new.is_hidden_mode() {
-                    self.daemon.restart_walk(new.is_hidden_mode());
-                }
-                self.daemon.set_query(new.matcher_query(), false);
-                self.min_generation += 1;
-                // Reset selection when query changes to avoid showing stale
-                // matches from an obscure position in the list.
-                self.selected = 0;
-                self.hovered = None;
-                self.scroll_offset = 0;
+                // Staying in @-mode only re-walks when hidden mode toggled.
+                let restart = if old.is_hidden_mode() != new.is_hidden_mode() {
+                    RestartWalk::Restart {
+                        hidden: new.is_hidden_mode(),
+                    }
+                } else {
+                    RestartWalk::Keep
+                };
+                self.start_query(restart, new.matcher_query());
             }
             (Some(_), None) => {
                 // Leaving @-mode: clear results and the drill anchor.
@@ -207,6 +257,9 @@ impl FileSearchState {
         }
 
         self.context = new_ctx;
+        // Both @-mode arms build the daemon via `start_query`, so an active
+        // context implies a built daemon.
+        debug_assert!(self.context.is_none() || self.daemon.is_some());
     }
 
     /// Clear the context (e.g., on Esc).
@@ -226,9 +279,12 @@ impl FileSearchState {
             return false;
         }
 
-        let results = self.daemon.get();
+        // Never build the daemon on the poll path: no daemon means no results yet.
+        let Some(daemon) = self.daemon.as_ref() else {
+            return false;
+        };
+        let results = daemon.get();
 
-        // Check if results actually changed (pointer comparison on Arc).
         if Arc::ptr_eq(&results.topk, &self.results.topk) {
             return false;
         }
@@ -239,7 +295,6 @@ impl FileSearchState {
             if results.generation >= self.min_generation {
                 self.min_generation = results.generation;
                 self.results = results;
-                // Clamp selection to new result count.
                 if !self.results.topk.is_empty() {
                     self.selected = self.selected.min(self.results.topk.len() - 1);
                 }
@@ -300,55 +355,51 @@ impl FileSearchState {
         self.results.topk.get(self.selected)
     }
 
-    /// Compute the text replacement for accepting the currently selected result.
+    /// Compute the text replacement for accepting the currently selected
+    /// directory (drill-down acceptance).
     ///
-    /// The `src` parameter is the full prompt text (needed to detect edge cases
-    /// like "replacement is a no-op" for directory drill-down).
-    pub fn try_replace(&mut self, src: &str) -> Option<FileSearchReplacement> {
+    /// Pure query. `dismiss` reports whether the caller should clear the
+    /// context: a directory whose `/`-append matches text already present is
+    /// committed (dismiss), otherwise the caller drills in and stays open. The
+    /// `src` parameter is the full prompt text, needed to detect that no-op
+    /// `/`-append.
+    pub fn try_replace(&self, src: &str) -> Option<FileSearchReplacement> {
         let ctx = self.context.as_ref()?;
         let res = self.results.topk.get(self.selected)?;
 
-        let path_str = res.path.to_string();
-        let mut text = normalize_display_path(&path_str).to_owned();
-
-        // Replace only the path portion of the @-token (preserving `@`
-        // and any hidden-mode `!` marker). See `AtContext::path_range`.
-        let range = ctx.path_range();
-
-        let mut cursor = range.start + text.len() + 1;
-        let dismiss;
-
-        if ctx.is_dir_mode() {
-            // Directory mode: append `/` and stay in completion for drill-down.
-            text = format!("{text}/");
-            if range.end <= src.len() && src[range.clone()] == text[..] {
-                // No-op replacement (same text already there) — treat as "done".
-                cursor += 1;
-                if range.end == src.len() {
-                    text = format!("{text} ");
-                }
-                dismiss = true;
-            } else {
-                dismiss = false; // Stay in completion mode (drill-down).
-            }
-        } else {
-            // File mode: append trailing space if at end of input.
-            if range.end == src.len() {
-                text = format!("{text} ");
-            }
-            dismiss = true;
+        // Dir-only contract: this always appends `/`, so it is valid only for a
+        // directory chosen in dir mode. Enforce it here so a file-selection
+        // caller can never emit `some/file.rs/`.
+        if !res.is_dir || !ctx.is_dir_mode() {
+            return None;
         }
 
-        if dismiss {
-            self.context = None;
-            self.drill_prefix = None;
+        // Replace only the path portion of the @-token (preserving `@` and any
+        // hidden-mode `!` marker). See `AtContext::path_range`.
+        let range = ctx.path_range();
+        let path = normalize_display_path(&res.path.to_string()).to_owned();
+        let at_end = range.end == src.len();
+
+        // A `/`-append that matches text already present commits the dir and
+        // dismisses; otherwise it drills in and stays open.
+        let no_op = src.get(range.clone()) == Some(accept_text(&path, false).as_str());
+        let text = accept_text(&path, no_op && at_end);
+
+        // Cursor sits just past the emitted text (after the trailing `/`).
+        let mut cursor = range.start + text.len();
+        // A committed dir that is not at the prompt end keeps its existing
+        // terminator (whitespace, `,`, or `;`, possibly multibyte; see
+        // `context::detect`); step past that one char so typing resumes after
+        // the directory.
+        if no_op && !at_end {
+            cursor += src[range.end..].chars().next().map_or(1, char::len_utf8);
         }
 
         Some(FileSearchReplacement {
-            range,
             text,
+            range,
             cursor,
-            dismiss,
+            dismiss: no_op,
         })
     }
 
@@ -365,14 +416,8 @@ impl FileSearchState {
     /// Test-only: install a fake context + results snapshot so tests can drive
     /// acceptance flows without spinning up the background fuzzy daemon.
     ///
-    /// **Mixing with daemon polling is unsupported.** This helper assigns
-    /// `generation = self.min_generation` without bumping `min_generation`,
-    /// which means a real daemon poll occurring after `set_test_state` could
-    /// deliver same-generation results that overwrite the seeded fake state
-    /// non-deterministically. Tests that use this helper must not also drive
-    /// real daemon polls; if a future test needs both, bump
-    /// `self.min_generation` here so any in-flight daemon results are
-    /// rejected.
+    /// Bumps `min_generation` past the seeded generation so any in-flight real
+    /// daemon poll is rejected and cannot clobber the seeded state.
     #[cfg(test)]
     pub(crate) fn set_test_state(
         &mut self,
@@ -387,6 +432,113 @@ impl FileSearchState {
             status: Default::default(),
             generation: self.min_generation,
         };
+        self.min_generation += 1;
         self.selected = selected;
+    }
+
+    /// Test-only observable state: whether the lazy daemon has been built yet.
+    #[cfg(test)]
+    pub(crate) fn daemon_is_built(&self) -> bool {
+        self.daemon.is_some()
+    }
+
+    /// Test-only observable state: how many times the lazy daemon has been built.
+    #[cfg(test)]
+    pub(crate) fn daemon_build_count(&self) -> usize {
+        self.daemon_builds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir_result(path: &str) -> FuzzyMatchResult {
+        FuzzyMatchResult {
+            path: nucleo::Utf32String::from(path),
+            is_dir: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn try_replace_commits_directory_already_present() {
+        // The selected dir's `/`-append already matches the token text, so
+        // acceptance commits (dismiss) rather than drilling.
+        let mut state = FileSearchState::new(Path::new("."));
+
+        // At the prompt end: append a trailing space so typing can continue.
+        let src = "@src/";
+        let ctx = context::detect(src, src.len()).expect("context");
+        state.set_test_state(ctx, vec![dir_result("src")], 0);
+        let r = state.try_replace(src).expect("replacement");
+        assert!(r.dismiss);
+        assert_eq!(r.range, 1..5);
+        assert_eq!(r.text, "src/ ");
+        assert_eq!(r.cursor, "@src/ ".len());
+
+        // Mid-prompt: no appended space; step past the existing terminator.
+        let src = "@src/ tail";
+        let ctx = context::detect(src, 5).expect("context");
+        state.set_test_state(ctx, vec![dir_result("src")], 0);
+        let r = state.try_replace(src).expect("replacement");
+        assert!(r.dismiss);
+        assert_eq!(r.text, "src/");
+        assert_eq!(r.cursor, 6);
+
+        // Mid-prompt with a multibyte terminator: step past the whole char.
+        let src = "@src/\u{a0}tail";
+        let ctx = context::detect(src, 5).expect("context");
+        state.set_test_state(ctx, vec![dir_result("src")], 0);
+        let r = state.try_replace(src).expect("replacement");
+        assert!(r.dismiss);
+        assert_eq!(r.text, "src/");
+        assert_eq!(r.cursor, 5 + '\u{a0}'.len_utf8());
+    }
+
+    #[test]
+    fn retarget_drops_built_daemon() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = FileSearchState::new(dir.path());
+        state.update_context("@alpha", "@alpha".len());
+        assert!(state.daemon_is_built());
+
+        state.retarget(Path::new(".."));
+        assert_eq!(state.root(), Path::new(".."));
+        assert!(!state.daemon_is_built());
+    }
+
+    #[test]
+    fn poll_does_not_build_daemon() {
+        let mut state = FileSearchState::new(Path::new("."));
+        // With no @-context, poll returns early and never touches the daemon.
+        assert!(!state.poll());
+        assert!(!state.daemon_is_built());
+
+        // With an @-context but an unbuilt daemon, poll must not force construction.
+        let ctx = context::detect("@foo", 4).expect("context");
+        state.set_test_state(ctx, Vec::new(), 0);
+        assert!(state.context().is_some());
+        assert!(!state.poll());
+        assert!(!state.daemon_is_built());
+    }
+
+    #[test]
+    fn daemon_is_built_lazily_on_first_use() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = FileSearchState::new(dir.path());
+        assert!(!state.daemon_is_built());
+
+        // The first @-search interaction builds the daemon lazily.
+        state.update_context("@alpha", "@alpha".len());
+        assert!(state.daemon_is_built());
+        assert!(state.context().is_some());
+
+        // A query edit stays in @-mode and reuses the same daemon: the build
+        // count stays at 1, proving no drop-and-rebuild.
+        assert_eq!(state.daemon_build_count(), 1);
+        state.update_context("@alpha_marker", "@alpha_marker".len());
+        assert!(state.daemon_is_built());
+        assert_eq!(state.daemon_build_count(), 1);
     }
 }
