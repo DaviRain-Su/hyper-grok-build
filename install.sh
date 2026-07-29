@@ -287,11 +287,22 @@ chmod 0755 "$TMP_DIR/hyper"
 
 # Optionally extract the installer-owned `bundled/` tree for resume-session
 # skills and related runtime assets packaged in the release archive.
+#
+# Only list *file* members for `tar -T`. Archives created with
+# `tar -C staging -czf archive .` store directories as names ending in `/`.
+# GNU tar (1.35) strips that trailing slash when matching `-T` names, fails
+# to find the directory entry, and then reports subsequent file members as
+# missing too — even though `tar -tz` listed them. Parent directories are
+# created automatically when the files are extracted.
 : > "$TMP_DIR/bundled.members"
 while IFS= read -r member; do
     case "$member" in
         bundled|bundled/*|./bundled|./bundled/*) ;;
         *) continue ;;
+    esac
+    # Directory members end with `/` in these archives; skip them.
+    case "$member" in
+        */) continue ;;
     esac
     case "$member" in
         *..*) err "archive $ASSET contains an unsafe bundled path: $member" ;;
