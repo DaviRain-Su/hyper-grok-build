@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>name</key>
+  <string>OMP Titanium</string>
+  <key>settings</key>
+  <array>
+    <dict>
+      <key>settings</key>
+      <dict>
+        <key>background</key><string>#151820</string>
+        <key>caret</key><string>#e8ecf4</string>
+        <key>foreground</key><string>#e8ecf4</string>
+        <key>invisibles</key><string>#2a3038</string>
+        <key>lineHighlight</key><string>#1f252d</string>
+        <key>selection</key><string>#0082b3</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Comments</string>
+      <key>scope</key><string>comment, punctuation.definition.comment, string.quoted.docstring</string>
+      <key>settings</key><dict><key>foreground</key><string>#6b7280</string><key>fontStyle</key><string>italic</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Keywords, storage, and operators</string>
+      <key>scope</key><string>keyword, storage, storage.type, storage.modifier, keyword.operator</string>
+      <key>settings</key><dict><key>foreground</key><string>#00b4ff</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Functions and methods</string>
+      <key>scope</key><string>entity.name.function, meta.function-call, variable.function, support.function, support.function.any-method</string>
+      <key>settings</key><dict><key>foreground</key><string>#00ff88</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Variables and attributes</string>
+      <key>scope</key><string>variable, entity.other.attribute-name</string>
+      <key>settings</key><dict><key>foreground</key><string>#e8ecf4</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Strings and inserted markup</string>
+      <key>scope</key><string>string, constant.other.symbol, markup.raw, markup.inserted</string>
+      <key>settings</key><dict><key>foreground</key><string>#d4c090</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Numbers and constants</string>
+      <key>scope</key><string>constant, constant.numeric, constant.language, variable.other.constant</string>
+      <key>settings</key><dict><key>foreground</key><string>#ffb347</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Types and classes</string>
+      <key>scope</key><string>entity.name.type, entity.name.class, support.type, support.class, storage.type.class</string>
+      <key>settings</key><dict><key>foreground</key><string>#00b4ff</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Tags and deleted markup</string>
+      <key>scope</key><string>entity.name.tag, markup.deleted, punctuation.definition.tag</string>
+      <key>settings</key><dict><key>foreground</key><string>#ff4757</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Punctuation</string>
+      <key>scope</key><string>punctuation, meta.brace, meta.delimiter</string>
+      <key>settings</key><dict><key>foreground</key><string>#9ca3b0</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Links and escapes</string>
+      <key>scope</key><string>markup.underline.link, string.regexp, constant.character.escape</string>
+      <key>settings</key><dict><key>foreground</key><string>#0082b3</string></dict>
+    </dict>
+    <dict>
+      <key>name</key><string>Invalid</string>
+      <key>scope</key><string>invalid, invalid.illegal</string>
+      <key>settings</key><dict><key>foreground</key><string>#ff4757</string><key>fontStyle</key><string>bold</string></dict>
+    </dict>
+  </array>
+  <key>uuid</key>
+  <string>7e451d67-7421-4c33-a1c4-cf8416bea60d</string>
+</dict>
+</plist>

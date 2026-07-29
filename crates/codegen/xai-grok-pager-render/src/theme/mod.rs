@@ -59,9 +59,11 @@ pub enum ThemeKind {
     Paper = 17,
     /// Base16 Default Dark by Chris Kempson.
     Base16DefaultDark = 18,
+    /// Oh My Pi's default Titanium palette.
+    Omp = 19,
 }
 
-/// The Hyper preset kinds, in catalog order (ten dark, three light).
+/// The Hyper preset kinds, in catalog order (eleven dark, three light).
 /// Shared by tests that exercise every compact-palette theme.
 const PRESET_KINDS: &[ThemeKind] = &[
     ThemeKind::Everforest,
@@ -77,6 +79,7 @@ const PRESET_KINDS: &[ThemeKind] = &[
     ThemeKind::CatppuccinLatte,
     ThemeKind::Paper,
     ThemeKind::Base16DefaultDark,
+    ThemeKind::Omp,
 ];
 
 /// The three light-polarity preset kinds. Callers that need to know a theme's
@@ -109,6 +112,7 @@ impl ThemeKind {
         ThemeKind::CatppuccinLatte,
         ThemeKind::Paper,
         ThemeKind::Base16DefaultDark,
+        ThemeKind::Omp,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -150,6 +154,7 @@ impl ThemeKind {
             Self::CatppuccinLatte => "catppuccin-latte",
             Self::Paper => "paper",
             Self::Base16DefaultDark => "base16-default-dark",
+            Self::Omp => "omp",
         }
     }
 
@@ -181,7 +186,8 @@ impl ThemeKind {
             | Self::SolarizedLight
             | Self::CatppuccinLatte
             | Self::Paper
-            | Self::Base16DefaultDark => true,
+            | Self::Base16DefaultDark
+            | Self::Omp => true,
         }
     }
 
@@ -213,6 +219,7 @@ impl ThemeKind {
             "base16" | "base16-dark" | "base16-default" | "base16-default-dark" => {
                 Some(Self::Base16DefaultDark)
             }
+            "omp" | "titanium" | "omp-titanium" => Some(Self::Omp),
             _ => None,
         }
     }
@@ -262,6 +269,7 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "catppuccin-latte" => "Catppuccin Latte",
         "paper" => "Paper",
         "base16-default-dark" => "Base16 Default Dark",
+        "omp" => "OMP Titanium",
         other => other,
     }
 }
@@ -406,6 +414,7 @@ impl Theme {
             ThemeKind::CatppuccinLatte => Self::catppuccin_latte(),
             ThemeKind::Paper => Self::paper(),
             ThemeKind::Base16DefaultDark => Self::base16_default_dark(),
+            ThemeKind::Omp => Self::omp(),
         };
         // Sample polarity pre-quantization — post-quantize `bg_base` may
         // land on a named/indexed entry whose luminance is host-palette-
@@ -802,9 +811,14 @@ mod tests {
 
         let theme = Theme::base16_default_dark();
         assert_eq!(theme.bg_base, Color::Rgb(0x18, 0x18, 0x18));
+        assert_eq!(theme.bg_dark, Color::Rgb(0x28, 0x28, 0x28));
         assert_eq!(theme.bg_light, Color::Rgb(0x28, 0x28, 0x28));
         assert_eq!(theme.bg_visual, Color::Rgb(0x38, 0x38, 0x38));
+        assert_eq!(theme.prompt_border, Color::Rgb(0x58, 0x58, 0x58));
+        assert_eq!(theme.prompt_border_active, Color::Rgb(0xb8, 0xb8, 0xb8));
         assert_eq!(theme.text_primary, Color::Rgb(0xd8, 0xd8, 0xd8));
+        assert_eq!(theme.text_secondary, Color::Rgb(0xb8, 0xb8, 0xb8));
+        assert_eq!(theme.gray, Color::Rgb(0x58, 0x58, 0x58));
         assert_eq!(theme.accent_error, Color::Rgb(0xab, 0x46, 0x42));
         assert_eq!(theme.accent_success, Color::Rgb(0xa1, 0xb5, 0x6c));
         assert_eq!(theme.accent_user, Color::Rgb(0x7c, 0xaf, 0xc2));
@@ -812,6 +826,31 @@ mod tests {
         assert!(ThemeKind::Base16DefaultDark.requires_truecolor());
         assert!(ThemeKind::ALL.contains(&ThemeKind::Base16DefaultDark));
         assert!(!LIGHT_PRESET_KINDS.contains(&ThemeKind::Base16DefaultDark));
+    }
+
+    #[test]
+    fn omp_has_stable_identity_and_titanium_palette() {
+        use ratatui::style::Color;
+
+        assert_eq!(ThemeKind::Omp as u8, 19);
+        for alias in ["omp", "titanium", "omp-titanium", "OMP"] {
+            assert_eq!(ThemeKind::from_name(alias), Some(ThemeKind::Omp));
+        }
+        assert_eq!(display_name_for_canonical("omp"), "OMP Titanium");
+
+        let theme = Theme::omp();
+        assert_eq!(theme.bg_base, Color::Rgb(21, 24, 32));
+        assert_eq!(theme.bg_dark, Color::Rgb(15, 18, 22));
+        assert_eq!(theme.text_primary, Color::Rgb(232, 236, 244));
+        assert_eq!(theme.text_secondary, Color::Rgb(156, 163, 176));
+        assert_eq!(theme.accent_user, Color::Rgb(0, 180, 255));
+        assert_eq!(theme.accent_success, Color::Rgb(0, 255, 136));
+        assert_eq!(theme.accent_error, Color::Rgb(255, 71, 87));
+        assert_eq!(theme.warning, Color::Rgb(255, 179, 71));
+        assert!(theme.is_dark());
+        assert!(ThemeKind::Omp.requires_truecolor());
+        assert!(ThemeKind::ALL.contains(&ThemeKind::Omp));
+        assert!(!LIGHT_PRESET_KINDS.contains(&ThemeKind::Omp));
     }
 
     #[test]
@@ -1162,6 +1201,7 @@ mod tests {
                 ThemeKind::CatppuccinLatte => Theme::catppuccin_latte(),
                 ThemeKind::Paper => Theme::paper(),
                 ThemeKind::Base16DefaultDark => Theme::base16_default_dark(),
+                ThemeKind::Omp => Theme::omp(),
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);
@@ -1333,6 +1373,9 @@ mod tests {
             ("rose-pine", ThemeKind::RosePineMoon),
             ("rosepine-moon", ThemeKind::RosePineMoon),
             ("rose-pine-moon", ThemeKind::RosePineMoon),
+            ("omp", ThemeKind::Omp),
+            ("titanium", ThemeKind::Omp),
+            ("omp-titanium", ThemeKind::Omp),
         ];
         for (name, expected) in cases {
             assert_eq!(

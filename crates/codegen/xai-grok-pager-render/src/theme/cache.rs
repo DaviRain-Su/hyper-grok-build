@@ -70,6 +70,7 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::CatppuccinLatte as u8 => ThemeKind::CatppuccinLatte,
         x if x == ThemeKind::Paper as u8 => ThemeKind::Paper,
         x if x == ThemeKind::Base16DefaultDark as u8 => ThemeKind::Base16DefaultDark,
+        x if x == ThemeKind::Omp as u8 => ThemeKind::Omp,
         _ => ThemeKind::GrokNight,
     }
 }
@@ -388,6 +389,33 @@ mod tests {
     fn cache_decodes_base16_default_dark_stable_id() {
         assert_eq!(theme_kind_from_u8(18), ThemeKind::Base16DefaultDark);
         assert_eq!(theme_kind_from_u8(u8::MAX), ThemeKind::GrokNight);
+    }
+
+    #[test]
+    fn cache_decodes_omp_stable_id() {
+        assert_eq!(theme_kind_from_u8(19), ThemeKind::Omp);
+        assert_eq!(theme_kind_from_u8(u8::MAX), ThemeKind::GrokNight);
+    }
+
+    #[test]
+    fn omp_config_name_resolves_as_initial_theme() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        reset_for_test();
+        crate::theme::color_support::force_level_for_test(Some(
+            crate::theme::color_support::ColorLevel::TrueColor,
+        ));
+
+        assert_eq!(
+            resolve_from_config(ThemeKind::from_name("omp"), false),
+            ThemeKind::Omp
+        );
+        assert_eq!(
+            resolve_from_config(ThemeKind::from_name("titanium"), false),
+            ThemeKind::Omp
+        );
+
+        crate::theme::color_support::force_level_for_test(None);
+        reset_for_test();
     }
 
     #[test]

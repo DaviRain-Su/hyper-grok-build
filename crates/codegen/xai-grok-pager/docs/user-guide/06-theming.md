@@ -6,7 +6,7 @@ Grok Build draws all TUI colors from a central theme. You can switch themes whil
 
 ## Available Themes
 
-Grok includes eighteen built-in themes, plus an `auto` option that follows your system appearance:
+Grok includes nineteen built-in themes, plus an `auto` option that follows your system appearance:
 
 | Theme | Config Names | Description | Truecolor Required |
 |-------|-------------|-------------|--------------------|
@@ -28,6 +28,7 @@ Grok includes eighteen built-in themes, plus an `auto` option that follows your 
 | **Catppuccin Latte** | `catppuccin-latte`, `latte` | Cool light gray-blue palette. | Yes |
 | **Paper** | `paper`, `sepia` | Warm sepia paper canvas. | Yes |
 | **Base16 Default Dark** | `base16-default-dark`, `base16-default`, `base16-dark`, `base16` | Canonical Base16 Default Dark palette by Chris Kempson. | Yes |
+| **OMP Titanium** | `omp`, `titanium`, `omp-titanium` | High-contrast titanium surfaces with electric-blue accents. | Yes |
 
 Theme names are case-insensitive. The `auto` option (alias `system`) is documented under [Auto Theme (System Appearance)](#auto-theme-system-appearance).
 

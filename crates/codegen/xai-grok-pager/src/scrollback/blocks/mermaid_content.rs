@@ -847,6 +847,7 @@ mod tests {
             ThemeKind::RosePineMoon,
             ThemeKind::OscuraMidnight,
             ThemeKind::Base16DefaultDark,
+            ThemeKind::Omp,
         ] {
             assert!(theme_is_dark(dark), "{dark:?} should be dark");
         }

@@ -1,8 +1,8 @@
 //! Hyper preset theme collection.
 //!
-//! Thirteen additional built-in themes, layered on top of the original five
+//! Fourteen additional built-in themes, layered on top of the original five
 //! (GrokNight / GrokDay / TokyoNight / RosePineMoon / OscuraMidnight). They
-//! are distinguished primarily by **background color** — ten dark canvases
+//! are distinguished primarily by **background color** — eleven dark canvases
 //! and three light ones — so users can pick a terminal mood at a glance.
 //!
 //! ## Why a shared builder
@@ -178,7 +178,7 @@ const fn build(p: Palette) -> Theme {
 }
 
 // ===========================================================================
-// Dark presets (9)
+// Dark presets (11)
 // ===========================================================================
 
 /// Everforest — soft, low-contrast forest greens.
@@ -359,29 +359,56 @@ const EMBER: Palette = Palette {
 
 /// Base16 Default Dark — the canonical Base16 dark palette by Chris Kempson.
 ///
-/// The Base16 scheme defines one canvas, three progressively lighter UI
-/// surfaces, four foreground levels, and eight semantic accents. The compact
-/// theme builder needs a separate sunken surface, so it keeps that slot on
-/// `base00`; raised and selected rows use `base01` and `base02` respectively.
+/// The neutral slots follow the Base16 styling guide directly: `base00` is
+/// the canvas, `base01` is the lighter/status surface, `base02` is selection,
+/// `base03` is muted chrome/comments, and `base04`/`base05` are secondary and
+/// primary foregrounds. The companion TextMate theme carries all sixteen
+/// slots, including the infrequently used `base06`, `base07`, and `base0F`.
 const BASE16_DEFAULT_DARK: Palette = Palette {
-    base: rgb(0x18, 0x18, 0x18),       // base00
-    surface: rgb(0x18, 0x18, 0x18),    // base00
-    elevated: rgb(0x28, 0x28, 0x28),   // base01
-    overlay: rgb(0x38, 0x38, 0x38),    // base02
-    border: rgb(0x38, 0x38, 0x38),     // base02
-    border_active: rgb(0x58, 0x58, 0x58), // base03
-    text: rgb(0xd8, 0xd8, 0xd8),       // base05
-    text_dim: rgb(0xb8, 0xb8, 0xb8),   // base04
-    muted: rgb(0x58, 0x58, 0x58),      // base03
-    subtle: rgb(0x38, 0x38, 0x38),     // base02
-    primary: rgb(0x7c, 0xaf, 0xc2),    // base0D
-    secondary: rgb(0xba, 0x8b, 0xaf),  // base0E
-    red: rgb(0xab, 0x46, 0x42),        // base08
-    green: rgb(0xa1, 0xb5, 0x6c),      // base0B
-    yellow: rgb(0xf7, 0xca, 0x88),     // base0A
-    blue: rgb(0x7c, 0xaf, 0xc2),       // base0D
-    cyan: rgb(0x86, 0xc1, 0xb9),       // base0C
-    orange: rgb(0xdc, 0x96, 0x56),     // base09
+    base: rgb(0x18, 0x18, 0x18),          // base00
+    surface: rgb(0x28, 0x28, 0x28),       // base01
+    elevated: rgb(0x28, 0x28, 0x28),      // base01
+    overlay: rgb(0x38, 0x38, 0x38),       // base02
+    border: rgb(0x58, 0x58, 0x58),        // base03
+    border_active: rgb(0xb8, 0xb8, 0xb8), // base04
+    text: rgb(0xd8, 0xd8, 0xd8),          // base05
+    text_dim: rgb(0xb8, 0xb8, 0xb8),      // base04
+    muted: rgb(0x58, 0x58, 0x58),         // base03
+    subtle: rgb(0x58, 0x58, 0x58),        // base03
+    primary: rgb(0x7c, 0xaf, 0xc2),       // base0D
+    secondary: rgb(0xba, 0x8b, 0xaf),     // base0E
+    red: rgb(0xab, 0x46, 0x42),           // base08
+    green: rgb(0xa1, 0xb5, 0x6c),         // base0B
+    yellow: rgb(0xf7, 0xca, 0x88),        // base0A
+    blue: rgb(0x7c, 0xaf, 0xc2),          // base0D
+    cyan: rgb(0x86, 0xc1, 0xb9),          // base0C
+    orange: rgb(0xdc, 0x96, 0x56),        // base09
+};
+
+/// OMP Titanium — high-contrast titanium surfaces with electric-blue accents.
+///
+/// Mirrors Oh My Pi's default dark theme: terminal-native bright text on a
+/// near-black blue-gray canvas, one strong cyan-blue navigation accent, and
+/// vivid green/red/amber semantic states.
+const OMP: Palette = Palette {
+    base: rgb(21, 24, 32),
+    surface: rgb(15, 18, 22),
+    elevated: rgb(31, 37, 45),
+    overlay: rgb(42, 48, 56),
+    border: rgb(42, 48, 56),
+    border_active: rgb(0, 180, 255),
+    text: rgb(232, 236, 244),
+    text_dim: rgb(156, 163, 176),
+    muted: rgb(107, 114, 128),
+    subtle: rgb(74, 80, 88),
+    primary: rgb(0, 180, 255),
+    secondary: rgb(212, 192, 144),
+    red: rgb(255, 71, 87),
+    green: rgb(0, 255, 136),
+    yellow: rgb(255, 179, 71),
+    blue: rgb(0, 180, 255),
+    cyan: rgb(0, 180, 255),
+    orange: rgb(212, 192, 144),
 };
 
 /// Midnight OLED — pure black for OLED panels, amber-forward accents.
@@ -525,6 +552,11 @@ impl Theme {
     /// Base16 Default Dark — canonical Base16 palette by Chris Kempson.
     pub const fn base16_default_dark() -> Self {
         build(BASE16_DEFAULT_DARK)
+    }
+
+    /// OMP Titanium — high-contrast blue-gray surfaces with electric-blue accents.
+    pub const fn omp() -> Self {
+        build(OMP)
     }
 
     /// Solarized Light — warm cream canvas (light).

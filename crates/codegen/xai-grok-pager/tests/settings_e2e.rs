@@ -2615,6 +2615,19 @@ fn pr4_theme_picker_esc_dispatches_revert_action() {
 /// choice N>0 gets caught.
 #[test]
 fn pr4_picker_dispatches_each_theme_settings_action_variant() {
+    let _theme_guard = xai_grok_pager::theme::cache::test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    xai_grok_pager::theme::color_support::force_level_for_test(Some(
+        xai_grok_pager::theme::color_support::ColorLevel::TrueColor,
+    ));
+    struct ColorLevelGuard;
+    impl Drop for ColorLevelGuard {
+        fn drop(&mut self) {
+            xai_grok_pager::theme::color_support::force_level_for_test(None);
+        }
+    }
+    let _color_level_guard = ColorLevelGuard;
     let reg = SettingsRegistry::defaults();
 
     for key in &["theme", "auto_dark_theme", "auto_light_theme"] {

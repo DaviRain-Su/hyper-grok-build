@@ -6,7 +6,7 @@ Grok Build 的 TUI 颜色统一来自一套中心主题。你可以在 Grok 运�
 
 ## 可用主题
 
-Grok 内置十八个主题，另有 `auto` 选项会跟随系统外观：
+Grok 内置十九个主题，另有 `auto` 选项会跟随系统外观：
 
 | 主题 | 配置名 | 说明 | 需要真彩色 |
 |-------|-------------|-------------|--------------------|
@@ -28,6 +28,7 @@ Grok 内置十八个主题，另有 `auto` 选项会跟随系统外观：
 | **Catppuccin Latte** | `catppuccin-latte`, `latte` | 冷调浅灰蓝色板。 | 是 |
 | **Paper** | `paper`, `sepia` | 暖色复古纸张画布。 | 是 |
 | **Base16 Default Dark** | `base16-default-dark`, `base16-default`, `base16-dark`, `base16` | Chris Kempson 的经典 Base16 Default Dark 色板。 | 是 |
+| **OMP Titanium** | `omp`, `titanium`, `omp-titanium` | 高对比钛金属表面与电光蓝强调色。 | 是 |
 
 主题名不区分大小写。`auto` 选项（别名 `system`）见 [自动主题（系统外观）](#auto-theme-system-appearance)。
 
