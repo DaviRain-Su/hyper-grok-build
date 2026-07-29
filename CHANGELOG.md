@@ -4,6 +4,9 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`api_backend = "codex_responses"`** (alias `codex-responses`) — OpenAI Responses wire with ChatGPT Codex dialect for custom models and third-party Codex reverse proxies (中转站). Enables system→`instructions`, strips temperature/top_p/max_output_tokens, and uses the OpenAiCodex adapter without requiring `openai-codex/*` OAuth catalog IDs.
+
 ## [0.2.114-r5] — 2026-07-29
 
 ### Fixed

@@ -47,9 +47,13 @@ impl BackendAdapter {
             AdapterKind::KimiCoding => Err(SamplingError::InvalidConfiguration(
                 "Kimi Coding adapter requires Chat Completions or Messages",
             )),
-            AdapterKind::OpenAiCodex if backend == ApiBackend::Responses => Ok(Self::OpenAiCodex),
+            AdapterKind::OpenAiCodex
+                if matches!(backend, ApiBackend::Responses | ApiBackend::CodexResponses) =>
+            {
+                Ok(Self::OpenAiCodex)
+            }
             AdapterKind::OpenAiCodex => Err(SamplingError::InvalidConfiguration(
-                "OpenAI Codex adapter requires the Responses backend",
+                "OpenAI Codex adapter requires the Responses or CodexResponses backend",
             )),
             AdapterKind::Nexus => Ok(Self::Nexus(backend)),
             AdapterKind::AnthropicClaude if backend == ApiBackend::Messages => {
@@ -112,14 +116,8 @@ impl BackendAdapter {
 
     /// Default endpoint for adapters backed by an existing wire protocol.
     pub fn endpoint_path(&self) -> Option<&'static str> {
-        self.wire_backend().map(|backend| match backend {
-            ApiBackend::ChatCompletions => "chat/completions",
-            ApiBackend::Responses => "responses",
-            ApiBackend::Messages => "messages",
-            ApiBackend::GoogleGenerateContent => "models/{model}:generateContent",
-            ApiBackend::BedrockConverseStream => "model/{model}/converse-stream",
-            ApiBackend::PiMessages => "messages",
-        })
+        self.wire_backend()
+            .map(|backend| backend.default_endpoint_path())
     }
 
     pub fn uses_kimi_dialect(&self) -> bool {
@@ -179,6 +177,12 @@ mod tests {
             .expect("Codex Responses adapter");
         assert!(codex.uses_openai_codex_dialect());
         assert_eq!(codex.endpoint_path(), Some("responses"));
+
+        let codex_proxy =
+            BackendAdapter::from_route(AdapterKind::OpenAiCodex, ApiBackend::CodexResponses)
+                .expect("CodexResponses backend with OpenAiCodex adapter");
+        assert!(codex_proxy.uses_openai_codex_dialect());
+        assert_eq!(codex_proxy.endpoint_path(), Some("responses"));
 
         assert!(
             BackendAdapter::from_route(AdapterKind::OpenAiCodex, ApiBackend::ChatCompletions)

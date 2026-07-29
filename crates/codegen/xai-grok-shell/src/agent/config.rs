@@ -4688,7 +4688,11 @@ pub struct ModelEntryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_key: Option<EnvKeys>,
     /// Which API backend to use for this model.
-    /// Values: "chat_completions" (default), "responses"
+    /// Values: `"chat_completions"` (default), `"responses"`, `"codex_responses"`
+    /// (alias `"codex-responses"`: Responses wire + ChatGPT Codex dialect for
+    /// official Codex or third-party Codex reverse proxies / 中转站),
+    /// `"messages"`, `"google_generate_content"`, `"bedrock_converse_stream"`,
+    /// `"pi_messages"`.
     #[serde(default)]
     pub api_backend: ApiBackend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6145,7 +6149,13 @@ pub fn sampling_config_for_model(
         remove_kimi_device_headers(&mut extra_headers);
     }
     let api_backend = info.api_backend.clone();
-    let adapter_kind = adapter_kind_for_model(model);
+    // Custom `api_backend = "codex_responses"` forces the Codex adapter even
+    // when the catalog id is not `openai-codex/*` (BYOK reverse proxies).
+    let adapter_kind = if api_backend.uses_codex_dialect() {
+        xai_grok_models::AdapterKind::OpenAiCodex
+    } else {
+        adapter_kind_for_model(model)
+    };
     // Kimi Code access tokens ~15m; re-resolve (and refresh) on every request
     // so a catalog stamp from login is never sent after expiry.
     let bearer_resolver = kimi_code_bearer_resolver_for_model(model)
@@ -6160,7 +6170,8 @@ pub fn sampling_config_for_model(
                     as SharedBearerResolver
             })
         });
-    let responses_codex_dialect = model_uses_openai_codex_oauth(model);
+    let responses_codex_dialect =
+        model_uses_openai_codex_oauth(model) || api_backend.uses_codex_dialect();
     let kimi_dialect = model_uses_kimi_request_dialect(model);
     let bedrock_profile = (adapter_kind == xai_grok_models::AdapterKind::BedrockConverseStream
         && credentials.api_key.is_none())
@@ -9268,6 +9279,50 @@ default = 42
             .expect("model should exist");
         assert_eq!(model.info.api_backend, ApiBackend::Responses);
     }
+
+    #[test]
+    fn parses_model_api_backend_codex_responses_snake_and_kebab() {
+        for backend in ["codex_responses", "codex-responses"] {
+            let raw = format!(
+                r#"
+                [model.codex-proxy]
+                model = "gpt-5.4"
+                base_url = "https://codex-proxy.example.com/v1"
+                context_window = 200000
+                api_key = "sk-test"
+                api_backend = "{backend}"
+                "#
+            );
+            let raw_config: toml::Value = toml::from_str(&raw).unwrap();
+            let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+            let resolved = resolve_model_list(&cfg, None);
+            let model = resolved.get("codex-proxy").expect("model should exist");
+            assert_eq!(
+                model.info.api_backend,
+                ApiBackend::CodexResponses,
+                "backend string {backend}"
+            );
+            let sampling = sampling_config_for_model(
+                model,
+                resolve_credentials(model, None),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(
+                sampling.responses_codex_dialect,
+                "codex dialect must be on for {backend}"
+            );
+            assert_eq!(
+                sampling.adapter_kind,
+                xai_grok_models::AdapterKind::OpenAiCodex,
+                "adapter for {backend}"
+            );
+            assert_eq!(sampling.api_backend, ApiBackend::CodexResponses);
+        }
+    }
+
     #[test]
     fn parses_model_api_backend_chat_completions() {
         let raw_config: toml::Value = toml::from_str(

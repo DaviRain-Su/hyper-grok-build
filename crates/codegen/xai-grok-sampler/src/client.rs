@@ -1226,11 +1226,12 @@ impl SamplingClient {
 
         // Preserve the two legacy dialect booleans while model/session plumbing
         // migrates to the registry's typed adapter metadata. An explicit
-        // adapter_kind always wins.
+        // adapter_kind always wins. `ApiBackend::CodexResponses` also forces
+        // the Codex dialect for third-party reverse proxies.
         let adapter_kind = if config.adapter_kind != xai_grok_sampling_types::AdapterKind::Standard
         {
             config.adapter_kind
-        } else if config.responses_codex_dialect {
+        } else if config.responses_codex_dialect || config.api_backend.uses_codex_dialect() {
             xai_grok_sampling_types::AdapterKind::OpenAiCodex
         } else if config.kimi_dialect {
             xai_grok_sampling_types::AdapterKind::KimiCoding
@@ -3252,7 +3253,7 @@ impl SamplingClient {
                     crate::stream::stream_chat_completions(raw, meta, request_id, idle_timeout);
                 crate::stream::collect_response(events).await
             }
-            ApiBackend::Responses => {
+            ApiBackend::Responses | ApiBackend::CodexResponses => {
                 let (raw, meta, doom_loop) = self.conversation_stream_responses(request).await?;
                 let events =
                     crate::stream::stream_responses(raw, meta, request_id, idle_timeout, doom_loop);

@@ -1205,6 +1205,18 @@ pub enum ApiBackend {
     ChatCompletions,
     /// Use the Responses API (/v1/responses)
     Responses,
+    /// OpenAI Responses wire (`/v1/responses`) with the ChatGPT Codex dialect.
+    ///
+    /// Same HTTP endpoint family as [`Self::Responses`], but the sampler applies
+    /// Codex-specific request shaping (system → `instructions`, strip
+    /// `temperature` / `top_p` / `max_output_tokens`, default text verbosity,
+    /// reasoning summary auto). Use this for official Codex OAuth *or*
+    /// third-party Codex-compatible reverse proxies (中转站) configured as
+    /// custom models with an API key.
+    ///
+    /// Config aliases: `codex_responses` (serde default) and `codex-responses`.
+    #[serde(alias = "codex-responses")]
+    CodexResponses,
     /// Use the Anthropic Messages API (/v1/messages)
     Messages,
     /// Use Google Gemini GenerateContent native REST API.
@@ -1220,7 +1232,32 @@ impl ApiBackend {
     /// tool calls. The Messages API does not (a schema there blocks tool use),
     /// so structured output there goes through the StructuredOutput tool.
     pub fn supports_native_schema(&self) -> bool {
-        matches!(self, Self::ChatCompletions | Self::Responses)
+        matches!(
+            self,
+            Self::ChatCompletions | Self::Responses | Self::CodexResponses
+        )
+    }
+
+    /// Wire protocol is the OpenAI Responses SSE API (including Codex dialect).
+    pub fn is_responses_wire(&self) -> bool {
+        matches!(self, Self::Responses | Self::CodexResponses)
+    }
+
+    /// Request body must use the ChatGPT Codex Responses dialect.
+    pub fn uses_codex_dialect(&self) -> bool {
+        matches!(self, Self::CodexResponses)
+    }
+
+    /// Default relative endpoint path for this backend (no leading slash).
+    pub fn default_endpoint_path(&self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses | Self::CodexResponses => "responses",
+            Self::Messages => "messages",
+            Self::GoogleGenerateContent => "models/{model}:generateContent",
+            Self::BedrockConverseStream => "model/{model}/converse-stream",
+            Self::PiMessages => "messages",
+        }
     }
 }
 

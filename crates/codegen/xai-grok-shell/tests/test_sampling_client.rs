@@ -1418,7 +1418,7 @@ async fn test_responses_backend_hits_responses_endpoint_not_chat_completions() {
 
     // Simulate the routing logic from acp_session.rs
     match client.api_backend() {
-        ApiBackend::Responses => {
+        ApiBackend::Responses | ApiBackend::CodexResponses => {
             let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")]);
             let (mut stream, _metadata, _) =
                 client.conversation_stream_responses(request).await.unwrap();
@@ -1468,7 +1468,7 @@ async fn test_chat_completions_backend_hits_chat_endpoint_not_responses() {
             let (mut stream, _metadata) = client.conversation_stream(request).await.unwrap();
             while stream.next().await.is_some() {}
         }
-        ApiBackend::Responses => {
+        ApiBackend::Responses | ApiBackend::CodexResponses => {
             panic!("Expected ChatCompletions backend but got Responses");
         }
         ApiBackend::Messages
