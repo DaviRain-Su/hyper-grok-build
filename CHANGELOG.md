@@ -4,6 +4,30 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r7] — 2026-07-31
+
+### Added
+- **`GROK_EXTRA_CA_BUNDLE`** — opt-in extra root CAs for corporate/proxy TLS (upstream `xai-grok-extra-ca`).
+- **ACP `session/list`** and richer headless tool-call streaming over ACP (upstream).
+- **`/undo`** slash alias for `/rewind` (upstream).
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `dd04f39` (monorepo `SOURCE_REV` `2a28b4a8…`): cancel all session subagents on stop, cheaper fullscreen resize on long sessions, PTY full process-tree reap, sleep/wake token-refresh hardening, settings enum picker keeps committed value until Enter, stop git worktree prune from dropping user registrations on resume, compaction tokenizer token counts, summarizer context-length recovery, hide `/usage` for external-auth deployments, and related shell/pager/worktree fixes.
+
+### Notes
+- This is community revision `0.2.114-r7`; it remains a normal GitHub Release so installers and `hyper update` treat it as latest.
+- Linux release binaries continue to target **glibc ≥ 2.17** via cargo-zigbuild.
+- Community multi-provider + `api_backend = "codex_responses"` paths are preserved through the merge.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r7
+```
+
+
 ## [0.2.114-r6] — 2026-07-30
 
 ### Added

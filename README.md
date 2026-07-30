@@ -99,7 +99,7 @@ hyper                # start the TUI
 Pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r6
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r7
 ```
 
 The installer verifies every download against the release’s `SHA256SUMS`,
@@ -203,7 +203,7 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for release notes. Known limitations:
 
 1. Set the root [`VERSION`](VERSION) file to the **monorepo lockstep client
    version** (same as `crates/codegen/xai-grok-pager/Cargo.toml` /
-   `xai-grok-version`, currently `0.2.114-r6`). CI compiles this into
+   `xai-grok-version`, currently `0.2.114-r7`). CI compiles this into
    `x-grok-client-version`; xAI rejects clients below **0.1.202** (HTTP 426).
    Do **not** invent a separate low marketing version (e.g. `0.1.0`).
 2. Commit on `dev` (or your release branch); update `CHANGELOG.md`.
@@ -221,14 +221,14 @@ Artifacts:
 
 | Asset | Example |
 | ----- | ------- |
-| macOS arm64 | `hyper-0.2.114-r6-aarch64-apple-darwin.tar.gz` |
-| macOS x86_64 | `hyper-0.2.114-r6-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 (glibc ≥2.17) | `hyper-0.2.114-r6-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 (glibc ≥2.17) | `hyper-0.2.114-r6-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `hyper-0.2.114-r6-x86_64-pc-windows-msvc.zip` |
+| macOS arm64 | `hyper-0.2.114-r7-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 | `hyper-0.2.114-r7-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc ≥2.17) | `hyper-0.2.114-r7-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 (glibc ≥2.17) | `hyper-0.2.114-r7-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `hyper-0.2.114-r7-x86_64-pc-windows-msvc.zip` |
 | Checksums | `SHA256SUMS` |
 
-The tag must match `VERSION` exactly (`v0.2.114-r6` ↔ `0.2.114-r6`) or the build fails.
+The tag must match `VERSION` exactly (`v0.2.114-r7` ↔ `0.2.114-r7`) or the build fails.
 
 ---
 
