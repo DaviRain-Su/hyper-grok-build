@@ -17,6 +17,7 @@ pub use crate::event::GateKind;
 pub struct RunContext<'a> {
     pub session_id: &'a str,
     pub workspace_root: &'a str,
+    pub process_scope: Option<xai_grok_tools::util::ProcessScope>,
 }
 
 /// Result of running a single hook (any handler type).

@@ -5,9 +5,10 @@
 //! [`ingest_client_entries()`] and writes on their behalf.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -130,11 +131,39 @@ pub struct ClientLogEntry {
 // Writer
 // ---------------------------------------------------------------------------
 
+/// How often a writer re-checks that its handle still refers to the file at
+/// `path`, and that the file is still under [`MAX_SIZE`].
+///
+/// Time-based rather than byte-based so a low-volume process detects a stale
+/// handle just as fast as a chatty one — a process logging one line a minute
+/// is precisely the one that would otherwise write into an unlinked inode for
+/// hours without noticing.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(2);
+
 struct LogWriter {
     file: File,
     path: PathBuf,
-    written: u64,
+    /// Identity of the inode this handle refers to, re-checked against the
+    /// path on the maintenance cadence. `None` on platforms with no cheap
+    /// stable file id, where only disappearance is detectable.
+    identity: Option<FileIdentity>,
+    last_maintenance: Instant,
+    /// Set when `path` stopped resolving to our inode **and** reopening it
+    /// failed. Writes are dropped while it is set.
+    ///
+    /// Continuing to append to the old descriptor would be the exact failure
+    /// this module was changed to end: bytes land in a file no reader can
+    /// find and no process will ever trim. Dropping them is not a loss —
+    /// those bytes were already unreadable — and it avoids growing an
+    /// invisible file on a disk that is quite possibly full, which is one of
+    /// the few ways the reopen fails in the first place. Cleared by the next
+    /// successful reopen, retried on the maintenance cadence.
+    detached: bool,
 }
+
+/// `(dev, ino)` on Unix. Enough to notice that the path now resolves to a
+/// different inode than the one we hold open.
+type FileIdentity = (u64, u64);
 
 static WRITER: LazyLock<Mutex<Option<LogWriter>>> = LazyLock::new(|| Mutex::new(open_writer()));
 
@@ -146,8 +175,34 @@ pub fn file_size(path: &std::path::Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Identity of whatever file currently lives at `path`, or `None` if nothing
+/// does. Compared against the identity captured at open time to detect that
+/// our descriptor has been orphaned by a rename or an unlink.
+#[cfg(unix)]
+fn path_identity(path: &std::path::Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+/// Windows has no comparably cheap stable id from a path stat, so this
+/// degrades to presence detection: a deleted log is still healed, a replaced
+/// one is not.
+#[cfg(not(unix))]
+fn path_identity(path: &std::path::Path) -> Option<FileIdentity> {
+    fs::metadata(path).ok().map(|_| (0, 0))
+}
+
 fn open_writer() -> Option<LogWriter> {
-    let path = log_path();
+    open_writer_at(log_path())
+}
+
+/// Open (creating if needed) a writer for an explicit path.
+///
+/// Split from [`open_writer`] so a writer re-points at **its own** path when
+/// healing a stale handle rather than re-resolving `$GROK_HOME` — which also
+/// makes the healing path testable against a temp directory.
+fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
     if let Some(parent) = path.parent()
         && let Err(e) = fs::create_dir_all(parent)
     {
@@ -161,14 +216,66 @@ fn open_writer() -> Option<LogWriter> {
 
     match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(file) => Some(LogWriter {
-            written: file_size(&path),
             file,
+            identity: path_identity(&path),
             path,
+            last_maintenance: Instant::now(),
+            detached: false,
         }),
         Err(e) => {
             tracing::warn!("[unified_log] failed to open log file: {e}");
             None
         }
+    }
+}
+
+impl LogWriter {
+    /// Re-point at the live file if ours was replaced or removed, and trim if
+    /// the file has grown past [`MAX_SIZE`].
+    ///
+    /// The size check reads the **real** file rather than a per-process byte
+    /// counter. A counter only sees this process's own writes, so several
+    /// writers sharing one log each believed they were far below the cap while
+    /// the file sailed past it — orphaned writers observed at 8.5 MB against a
+    /// 5 MB cap.
+    ///
+    /// Returns whether the handle is safe to write to: `false` once the file
+    /// has been replaced or removed and reopening it did not work, so the
+    /// caller drops the entry instead of appending it somewhere unreadable.
+    fn maintain(&mut self) -> bool {
+        if self.last_maintenance.elapsed() < MAINTENANCE_INTERVAL {
+            return !self.detached;
+        }
+        self.last_maintenance = Instant::now();
+
+        if path_identity(&self.path) != self.identity {
+            let Some(reopened) = open_writer_at(self.path.clone()) else {
+                // Warn on entering the state, not once per tick: a broken log
+                // directory would otherwise flood the diagnostic output an
+                // operator is trying to read.
+                if !self.detached {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        "[unified_log] log file replaced or removed and reopen failed; \
+                         dropping entries until it can be reopened"
+                    );
+                    self.detached = true;
+                }
+                return false;
+            };
+            *self = reopened;
+            return true;
+        }
+
+        // The path resolves to our inode again — either it always did, or a
+        // transient stat failure cleared.
+        self.detached = false;
+
+        if file_size(&self.path) >= MAX_SIZE {
+            let _ = self.file.flush();
+            trim_file(&self.path);
+        }
+        true
     }
 }
 
@@ -178,28 +285,12 @@ fn write_lines(lines: &[u8]) {
         Some(w) => w,
         None => return,
     };
-
-    let len = lines.len() as u64;
-    if let Err(e) = writer.file.write_all(lines) {
-        tracing::warn!("[unified_log] write failed: {e}");
+    if !writer.maintain() {
         return;
     }
-    writer.written += len;
 
-    // Trim under the lock to avoid a race where concurrent writers see stale
-    // state between drop + re-acquire. Trim is fast (~2.5 MB read+write) and
-    // this is a low-volume diagnostic log.
-    if writer.written >= MAX_SIZE {
-        let _ = writer.file.flush();
-        trim_file(&writer.path);
-        if let Ok(new_file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&writer.path)
-        {
-            writer.file = new_file;
-            writer.written = file_size(&writer.path);
-        }
+    if let Err(e) = writer.file.write_all(lines) {
+        tracing::warn!("[unified_log] write failed: {e}");
     }
 }
 
@@ -211,21 +302,89 @@ fn write_entry(entry: &LogEntry) {
     write_lines(&line);
 }
 
-/// Drop the oldest lines from the file, keeping roughly the last half.
+/// Drop the oldest lines from the file, keeping roughly the last half,
+/// **preserving the inode**.
 ///
-/// Uses write-to-temp + rename so a crash mid-trim cannot lose the entire log.
+/// Rewrites the retained tail at offset 0 and truncates to match. This must
+/// not go through temp + rename: every other process holds an `O_APPEND`
+/// descriptor on this inode, and swapping a fresh file in underneath them
+/// leaves each one appending to an unlinked inode that nothing can read and
+/// nothing will ever trim. That failure was silent and unbounded — a single
+/// developer machine accumulated roughly 26 MB across six orphaned inodes,
+/// several of them past the 5 MB cap, while the visible log held only what
+/// the most recent trimming process happened to write. The unified log was
+/// therefore blind during the incident it exists to explain.
+///
+/// Truncating in place trades the rename's crash-atomicity for the far more
+/// valuable property that concurrent writers keep working. A crash between
+/// the write and the `set_len` leaves the tail followed by stale bytes; for a
+/// line-delimited diagnostic log that costs at most a few garbled lines,
+/// against losing every sibling's output indefinitely.
+///
+/// A sibling appending *during* the rewrite may lose that one line to the
+/// truncation. The previous implementation lost every line written after the
+/// rename, forever.
+///
+/// The whole read-modify-write is held under an exclusive advisory lock on
+/// the log itself, because trimming in place is only safe for one process at
+/// a time — see the comment in the body.
+///
+/// Known limitation: a single line longer than half the file leaves no
+/// newline to cut at, and the trim is skipped rather than split that line.
+/// The log then stays over its cap until a shorter line arrives.
 pub fn trim_file(path: &std::path::Path) {
-    let Ok(data) = fs::read(path) else { return };
+    // One trimmer at a time, across processes. Writers decide on the real
+    // on-disk size, so when the log crosses the cap every process reaches
+    // this function inside the same maintenance window. Two of them
+    // interleaving a multi-megabyte rewrite at offset 0 would splice one
+    // tail into the other; worse, a trimmer that reads while another is
+    // mid-rewrite sees new-tail-over-old-head and computes its own tail from
+    // that. Temp + rename was no safer — every process used the same
+    // `unified.jsonl.tmp` — it was just rarer, because the old per-process
+    // byte counter meant one process did essentially all the trimming.
+    //
+    // `try_lock`, not `lock`: a contended trim is one somebody else is
+    // already doing, so there is nothing to wait for, and waiting would park
+    // this process's writer mutex on a foreign process's I/O.
+    //
+    // A trimmer that decided to trim just before another one finished will
+    // find a freshly halved file and halve it again. Losing another half of
+    // an over-budget diagnostic log is a far cheaper outcome than interleaved
+    // rewrites, so the size is deliberately not re-checked here: callers
+    // trim on their own terms and the unit tests trim small files directly.
+    let Ok(mut file) = OpenOptions::new().read(true).write(true).open(path) else {
+        return;
+    };
+    if file.try_lock().is_err() {
+        return;
+    }
+
+    let mut data = Vec::new();
+    if let Err(e) = file.read_to_end(&mut data) {
+        tracing::warn!("[unified_log] trim read failed: {e}");
+        return;
+    }
     let half = data.len() / 2;
     // Find the first newline after the halfway point so we don't split a line.
     let start = match data[half..].iter().position(|&b| b == b'\n') {
         Some(pos) => half + pos + 1,
         None => return,
     };
-    let tmp = path.with_extension("jsonl.tmp");
-    if fs::write(&tmp, &data[start..]).is_ok() {
-        let _ = fs::rename(&tmp, path);
+    let tail = &data[start..];
+
+    // Rewind rather than truncate-on-open: the tail is laid down over the
+    // head first, and only then is the file shortened, so the retained bytes
+    // are never absent from disk.
+    if file.rewind().is_err() {
+        return;
     }
+    if let Err(e) = file.write_all(tail) {
+        tracing::warn!("[unified_log] trim rewrite failed: {e}");
+        return;
+    }
+    let _ = file.set_len(tail.len() as u64);
+    let _ = file.flush();
+    // The lock is released when `file` drops.
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +562,288 @@ mod tests {
         assert_eq!(entry.msg, "hello");
         assert!(entry.sid.is_none());
         assert!(entry.ctx.is_none());
+    }
+
+    /// The reason this incident was undiagnosable: `trim_file` used to
+    /// temp+rename, which swaps the inode out from under every other process
+    /// holding an `O_APPEND` descriptor. Their writes then land in an
+    /// unlinked inode that no reader can ever see.
+    #[cfg(unix)]
+    #[test]
+    fn trim_file_preserves_the_inode_so_open_handles_survive() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let mut content = String::new();
+        for i in 0..10 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        fs::write(&path, &content).unwrap();
+        let before = fs::metadata(&path).unwrap().ino();
+
+        trim_file(&path);
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().ino(),
+            before,
+            "trim must rewrite in place; replacing the inode strands every \
+             sibling process's open log handle",
+        );
+    }
+
+    /// End-to-end version of the same property: a writer that opened the file
+    /// *before* a trim must still be able to append to the file a reader sees
+    /// afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn writes_from_a_handle_opened_before_trim_remain_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let mut content = String::new();
+        for i in 0..10 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        fs::write(&path, &content).unwrap();
+
+        // A sibling process's writer, opened before the trim happens.
+        let mut sibling = OpenOptions::new().append(true).open(&path).unwrap();
+
+        trim_file(&path);
+
+        sibling.write_all(b"after trim\n").unwrap();
+        sibling.flush().unwrap();
+
+        let visible = fs::read_to_string(&path).unwrap();
+        assert!(
+            visible.contains("after trim"),
+            "a handle opened before the trim must keep writing to the live \
+             file, got: {visible:?}",
+        );
+    }
+
+    /// `maintain` heals a writer whose file was replaced or deleted behind its
+    /// back — an older binary still doing temp+rename, an external `rm`, or a
+    /// `$TMPDIR` reaper.
+    #[cfg(unix)]
+    #[test]
+    fn maintain_reopens_after_the_file_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, b"original\n").unwrap();
+
+        let mut writer = LogWriter {
+            file: OpenOptions::new().append(true).open(&path).unwrap(),
+            identity: path_identity(&path),
+            path: path.clone(),
+            // Force the maintenance cadence to fire on the next call.
+            last_maintenance: Instant::now() - MAINTENANCE_INTERVAL,
+            detached: false,
+        };
+        let original_identity = writer.identity;
+
+        // Simulate an older binary's rename-based trim from another process.
+        let replacement = dir.path().join("replacement.jsonl");
+        fs::write(&replacement, b"replaced\n").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert_ne!(
+            path_identity(&path),
+            original_identity,
+            "test setup: the path must now resolve to a new inode",
+        );
+
+        assert!(
+            writer.maintain(),
+            "a writer that successfully re-pointed at the live file is writable",
+        );
+        writer.file.write_all(b"after replacement\n").unwrap();
+        writer.file.flush().unwrap();
+
+        let visible = fs::read_to_string(&path).unwrap();
+        assert!(
+            visible.contains("after replacement"),
+            "a writer whose file was replaced must re-point at the live file \
+             instead of writing into the orphaned inode, got: {visible:?}",
+        );
+        assert_eq!(
+            writer.identity,
+            path_identity(&path),
+            "the healed writer must track the new inode",
+        );
+    }
+
+    /// The same healing path for outright deletion, which is how a
+    /// `$TMPDIR` reaper (or a stray `rm`) silences a long-lived agent.
+    #[cfg(unix)]
+    #[test]
+    fn maintain_reopens_after_the_file_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, b"original\n").unwrap();
+
+        let mut writer = LogWriter {
+            file: OpenOptions::new().append(true).open(&path).unwrap(),
+            identity: path_identity(&path),
+            path: path.clone(),
+            last_maintenance: Instant::now() - MAINTENANCE_INTERVAL,
+            detached: false,
+        };
+
+        fs::remove_file(&path).unwrap();
+
+        assert!(
+            writer.maintain(),
+            "a writer that successfully re-pointed at the live file is writable",
+        );
+        writer.file.write_all(b"after deletion\n").unwrap();
+        writer.file.flush().unwrap();
+
+        let visible = fs::read_to_string(&path).expect("log must be recreated");
+        assert!(
+            visible.contains("after deletion"),
+            "a deleted log must be recreated rather than written into the \
+             void, got: {visible:?}",
+        );
+    }
+
+    /// The trim decision must read the real file, not a per-process counter:
+    /// with several writers sharing one log, each one's own byte count stays
+    /// far below the cap while the file sails past it.
+    #[cfg(unix)]
+    #[test]
+    fn maintain_trims_growth_this_process_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+
+        let mut writer = LogWriter {
+            file: OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            identity: path_identity(&path),
+            path: path.clone(),
+            last_maintenance: Instant::now() - MAINTENANCE_INTERVAL,
+            detached: false,
+        };
+
+        // Someone else fills the log past the cap; this writer wrote nothing.
+        let line = "x".repeat(1023);
+        let mut bulk = String::new();
+        while bulk.len() as u64 <= MAX_SIZE {
+            bulk.push_str(&line);
+            bulk.push('\n');
+        }
+        fs::write(&path, &bulk).unwrap();
+        // Rewriting the path in place keeps the inode, so the handle is fine.
+        assert_eq!(path_identity(&path), writer.identity);
+        assert!(file_size(&path) >= MAX_SIZE);
+
+        assert!(
+            writer.maintain(),
+            "trimming does not detach the writer; its handle stays usable",
+        );
+
+        assert!(
+            file_size(&path) < MAX_SIZE,
+            "a writer must trim on observed file size, not on its own \
+             write counter; size is now {}",
+            file_size(&path),
+        );
+    }
+
+    /// Trimming in place is only safe for one process at a time, and deciding
+    /// on the real file size means every writer reaches [`trim_file`] in the
+    /// same maintenance window once the log crosses the cap. A trimmer that
+    /// finds the log already being rewritten must leave it alone rather than
+    /// interleave a second rewrite at offset 0.
+    #[test]
+    fn trim_file_yields_to_a_concurrent_trimmer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let mut content = String::new();
+        for i in 0..10 {
+            content.push_str(&format!("line {i}\n"));
+        }
+        fs::write(&path, &content).unwrap();
+
+        // Stand in for another process midway through its own trim.
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        holder.lock().expect("test setup: exclusive lock");
+
+        trim_file(&path);
+
+        // Release before reading: the lock is mandatory on Windows.
+        drop(holder);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            content,
+            "a contended trim must be skipped, not interleaved with the \
+             rewrite already in progress",
+        );
+
+        // And it is only deferred, not lost: the next trim proceeds.
+        trim_file(&path);
+        assert!(fs::read_to_string(&path).unwrap().len() < content.len());
+    }
+
+    /// The reopen can itself fail — a log directory replaced by a file, a full
+    /// disk, exhausted descriptors. Appending to the old handle anyway would
+    /// reproduce the orphaning this module was changed to end, so the writer
+    /// drops entries until it can reach the real file again.
+    #[cfg(unix)]
+    #[test]
+    fn maintain_stops_writing_when_the_file_cannot_be_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        let path = log_dir.join("test.jsonl");
+        fs::write(&path, b"original\n").unwrap();
+
+        let mut writer = LogWriter {
+            file: OpenOptions::new().append(true).open(&path).unwrap(),
+            identity: path_identity(&path),
+            path: path.clone(),
+            last_maintenance: Instant::now() - MAINTENANCE_INTERVAL,
+            detached: false,
+        };
+
+        // Wipe the log's directory and put a regular file in its place, so
+        // the path no longer resolves to our inode *and* cannot be reopened.
+        fs::remove_dir_all(&log_dir).unwrap();
+        fs::write(&log_dir, b"not a directory\n").unwrap();
+
+        assert!(
+            !writer.maintain(),
+            "a writer that cannot reach the real log must report itself \
+             unwritable instead of appending into the orphaned inode",
+        );
+        assert!(
+            !writer.maintain(),
+            "and must stay unwritable between maintenance ticks, not just on \
+             the tick that discovered the problem",
+        );
+
+        // Healing: once the directory is back, the next tick reopens.
+        fs::remove_file(&log_dir).unwrap();
+        writer.last_maintenance = Instant::now() - MAINTENANCE_INTERVAL;
+        assert!(
+            writer.maintain(),
+            "the writer must recover as soon as the path is usable again",
+        );
+
+        writer.file.write_all(b"after recovery\n").unwrap();
+        writer.file.flush().unwrap();
+        let visible = fs::read_to_string(&path).unwrap();
+        assert!(
+            visible.contains("after recovery"),
+            "the recovered writer must be attached to the visible file, \
+             got: {visible:?}",
+        );
     }
 
     #[test]

@@ -1237,6 +1237,93 @@ async fn test_stdio_xcode_escaped_slash_methods_get_responses() {
     );
 }
 
+/// `grok agent stdio` must initiate shutdown and exit when its client closes
+/// stdin (EOF) — a dead parent means closed pipes, so this is the primary
+/// orphan guard on every platform (the Linux `PR_SET_PDEATHSIG` binding in
+/// `run_stdio_agent` additionally covers an agent wedged mid-turn that never
+/// reads stdin again). Guards the `spawn_stdin_line_reader` → stdin_closed →
+/// simplex-shutdown → `handle_io` completion chain end to end.
+#[tokio::test]
+#[ignore] // requires pre-built binary; run with --ignored
+async fn test_stdio_agent_exits_on_stdin_eof() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start mock server");
+    let mut sandbox = TestSandbox::builder().git().build();
+    sandbox.set_mock_url(server.url());
+
+    let mut cmd = tokio::process::Command::new(grok_binary());
+    cmd.args(["agent", "stdio"])
+        .current_dir(sandbox.workspace());
+    let mut process = TestProcess::spawn(
+        cmd,
+        &sandbox,
+        TestProcessConfig::new()
+            .label("grok agent stdio (eof)")
+            .stdin(TestStdin::Piped)
+            .stdout(TestOutput::Piped),
+    )
+    .expect("spawn grok agent stdio");
+
+    // Prove the agent is up and serving before the EOF (an exit during
+    // startup would trivially pass the wait below).
+    let mut stdin = process.take_stdin().expect("child stdin missing");
+    let stdout = process.take_stdout().expect("child stdout missing");
+    let mut reader = tokio::io::BufReader::new(stdout);
+    stdin
+        .write_all(
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"#,
+                r#""clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"#,
+                r#""_meta":{"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true},"#,
+                r#""clientType":"eof-test","clientVersion":"0.0.0"}}}"#,
+                "\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write initialize");
+    stdin.flush().await.expect("flush initialize");
+    let mut line = String::new();
+    tokio::time::timeout(scaled(Duration::from_secs(20)), reader.read_line(&mut line))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "no initialize response before EOF\nstderr:\n{}",
+                stderr_tail(&process.stderr_tail().text, 1200)
+            )
+        })
+        .expect("read initialize response");
+    assert!(
+        line.contains("\"result\""),
+        "initialize must respond with a result, got: {line}"
+    );
+
+    // Close the write end: the agent sees stdin EOF, exactly as when its
+    // parent dies and the inherited pipe closes.
+    drop(stdin);
+
+    // Exit path includes a bounded teardown (100ms simplex flush + 2s upload
+    // queue grace), so allow comfortably more than that.
+    let status = process
+        .wait_with_deadline(scaled(Duration::from_secs(30)))
+        .await
+        .expect("wait for agent exit")
+        .unwrap_or_else(|| {
+            panic!(
+                "grok agent stdio did not exit after stdin EOF\n{}",
+                process.diagnostic_summary()
+            )
+        });
+    assert!(
+        status.success(),
+        "agent should exit cleanly on stdin EOF, got {status:?}\nstderr:\n{}",
+        stderr_tail(&process.stderr_tail().text, 1200)
+    );
+}
+
 // ── Config test harness ─────────────────────────────────────────────────────
 
 /// Isolated headless run with a custom `~/.grok/`. Clean env (no leaked

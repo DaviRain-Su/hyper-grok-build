@@ -215,12 +215,14 @@ async fn run_external_auth_provider(
         "auth: running external auth provider"
     );
 
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.args(["-c", command])
-        .stdin(std::process::Stdio::null())
+    // `sh -c` on unix, `cmd /C` on Windows — a hardcoded `sh` cannot spawn on a
+    // default Windows install, and the spawn failure fell through to the
+    // built-in browser login instead of honoring `auth_provider_command`.
+    let mut cmd = crate::util::subprocess::shell_c(command);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .kill_on_drop(true);
-    // TODO: `kill_on_drop` SIGKILLs only the direct `sh` child; a provider that
+    // TODO: `kill_on_drop` SIGKILLs only the direct shell child; a provider that
     // backgrounds work (setsid / `&`) leaks the grandchild on shutdown-cancel.
     // Proper fix: pgid-kill via xai-tty-utils.
 

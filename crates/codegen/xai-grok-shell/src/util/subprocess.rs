@@ -51,11 +51,24 @@ pub(crate) fn git_bin() -> OsString {
     }
 }
 
-/// A `sh -c <script>` command: the portable shell escape hatch shared by the
-/// identity and auth providers.
-pub(crate) fn sh_c(script: &str) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.args(["-c", script]);
+/// Run a config-provided command string through the platform shell: `sh -c`
+/// on unix, `cmd /C` on Windows. The escape hatch shared by the auth
+/// providers and the identity command.
+///
+/// Windows has no `sh` on `PATH` in a default install, so hardcoding it made
+/// every one of those call sites fail to spawn — and where Git Bash *is*
+/// installed, `sh` eats the backslashes in a native path such as
+/// `C:\corp\auth.exe`. `cmd /C` runs `.exe` / `.cmd` / `.bat` directly and
+/// propagates the child's exit code, which the auth providers' "exit 0 =
+/// success" contract depends on (PowerShell's `-Command` does not).
+pub(crate) fn shell_c(script: &str) -> Command {
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut cmd = Command::new(shell);
+    cmd.args([flag, script]);
     cmd
 }
 
@@ -246,7 +259,7 @@ mod tests {
     use super::*;
 
     fn sh(script: &str) -> Command {
-        sh_c(script)
+        shell_c(script)
     }
 
     fn opts(label: &str) -> RunOptions<'_> {
@@ -257,6 +270,19 @@ mod tests {
     }
 
     const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// The command-string escape hatch must spawn on the host platform. A
+    /// hardcoded `sh` fails here on Windows, which silently downgraded
+    /// `auth_provider_command` to the built-in login. `echo hi` is valid in
+    /// both `sh -c` and `cmd /C`.
+    #[tokio::test]
+    async fn shell_c_spawns_on_this_platform() {
+        let out = run_detached_with_timeout(shell_c("echo hi"), TIMEOUT, opts("test shell_c"))
+            .await
+            .expect("the platform shell must be spawnable");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
 
     #[tokio::test]
     async fn large_stderr_is_streamed_and_capped() {

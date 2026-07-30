@@ -257,6 +257,13 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     let needs_remote =
         agent.is_writeback_storage() && agent.current_auth().is_some_and(|a| !a.is_zdr_team());
 
+    // Tear down any live actor first (cancel turn/subagents/bg tasks,
+    // process-scope kill, flush). Then wipe history so shutdown cannot
+    // rewrite the session directory after delete.
+    if agent.sessions.borrow().contains_key(&session_id) {
+        agent.teardown_live_session_before_delete(&session_id).await;
+    }
+
     // Shared delete: remote-first, then local disk + FTS eviction.
     // Mirrored by the `grok sessions delete <id>` CLI path.
     crate::session::persistence::delete_session_history(
@@ -272,15 +279,6 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         }
         acp::Error::internal_error().data(e.to_string())
     })?;
-
-    // If an in-memory live session exists for this id (e.g. the user
-    // deleted history for a session that is still open in another agent
-    // or the current one), shut it down and drop the MvpAgent bookkeeping
-    // so we don't leave a live actor whose on-disk/FTS state is gone.
-    if agent.sessions.borrow().contains_key(&session_id) {
-        agent.request_session_shutdown(&session_id);
-        agent.remove_session(&session_id);
-    }
 
     tracing::info!(session_id = %req.session_id, "Session deleted");
 

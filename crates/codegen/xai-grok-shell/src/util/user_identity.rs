@@ -6,7 +6,7 @@ use crate::util::subprocess::CommandLog;
 use crate::util::subprocess::RunOptions;
 use crate::util::subprocess::git_bin;
 use crate::util::subprocess::run_detached_with_timeout;
-use crate::util::subprocess::sh_c;
+use crate::util::subprocess::shell_c;
 use std::env;
 use std::time::Duration;
 use std::time::Instant;
@@ -151,7 +151,7 @@ async fn git_global_email() -> Option<String> {
 
 /// `None` on any failure; callers fall back to the declarative sources.
 async fn run_identity_command(command: &str) -> Option<ResolvedUserIdentity> {
-    let cmd = sh_c(command);
+    let cmd = shell_c(command);
     let output = run_detached_with_timeout(
         cmd,
         COMMAND_TIMEOUT,

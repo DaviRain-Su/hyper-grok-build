@@ -411,6 +411,11 @@ pub(crate) fn default_palette_entries(
             command: PaletteCommand::Home,
         },
         PaletteEntry {
+            label: crate::i18n::tr_or("palette.delete_session", "Delete This Session").into(),
+            shortcut: "/delete".into(),
+            command: PaletteCommand::SlashCommand("/delete".into()),
+        },
+        PaletteEntry {
             label: crate::i18n::tr_or("palette.resume_session", "Resume Session").into(),
             shortcut: "/resume".into(),
             command: PaletteCommand::SlashCommand("/resume".into()),

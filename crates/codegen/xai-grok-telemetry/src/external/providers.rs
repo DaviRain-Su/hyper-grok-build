@@ -41,20 +41,43 @@ impl std::fmt::Debug for DedicatedRuntime {
 }
 
 impl DedicatedRuntime {
-    fn new() -> Self {
+    fn new() -> Option<Self> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RuntimeCommand>();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+        let pump = move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("external OTEL gRPC runtime");
+            {
+                Ok(rt) => {
+                    let _ = ready_tx.send(true);
+                    rt
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "external OTEL gRPC runtime build failed; external telemetry disabled");
+                    let _ = ready_tx.send(false);
+                    return;
+                }
+            };
             rt.block_on(async move {
                 while let Some(future) = rx.recv().await {
                     tokio::spawn(future);
                 }
             });
-        });
-        Self { tx }
+        };
+        let spawned = std::thread::Builder::new()
+            .name("otel-external-rt".into())
+            .spawn(pump);
+        if let Err(e) = spawned {
+            tracing::error!(error = %e, "external OTEL gRPC runtime thread spawn failed; external telemetry disabled");
+            return None;
+        }
+        // Bounded: this runs on the startup path, and the host that refuses
+        // threads is the one least likely to schedule this one promptly.
+        match ready_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(true) => Some(Self { tx }),
+            _ => None,
+        }
     }
 
     fn run<T: Send + 'static>(
@@ -347,7 +370,9 @@ fn build_log_otlp_provider(
             )
         }
         OtlpTransport::Grpc => {
-            let runtime = DedicatedRuntime::new();
+            let Some(runtime) = DedicatedRuntime::new() else {
+                return Err(opentelemetry_otlp::ExporterBuildError::ThreadSpawnFailed);
+            };
             let exporter = exporter_builder.export(OtlpExportTransport::Grpc(&runtime))?;
             builder.with_log_processor(
                 RuntimeBatchLogProcessor::builder(
@@ -383,7 +408,9 @@ fn build_metric_otlp_provider(
             )
         }
         OtlpTransport::Grpc => {
-            let runtime = DedicatedRuntime::new();
+            let Some(runtime) = DedicatedRuntime::new() else {
+                return Err(opentelemetry_otlp::ExporterBuildError::ThreadSpawnFailed);
+            };
             let exporter = exporter_builder.export(OtlpExportTransport::Grpc(&runtime))?;
             builder.with_reader(
                 RuntimePeriodicReader::builder(

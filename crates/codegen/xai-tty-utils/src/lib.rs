@@ -141,6 +141,143 @@ pub fn detach_std_command(cmd: &mut std::process::Command) {
 }
 
 // ---------------------------------------------------------------------------
+// Parent-death binding — Linux PR_SET_PDEATHSIG
+// ---------------------------------------------------------------------------
+
+/// The `pre_exec` body for [`kill_on_parent_death_std`]: arm `PR_SET_PDEATHSIG`
+/// and close the classic pdeathsig race (parent died between `fork` and
+/// `prctl`, so the signal will never fire) by comparing `getppid()` against
+/// the pid captured at spawn time.
+///
+/// In debug builds this also enforces that the command was **armed on the
+/// thread that spawns it**: pdeathsig binds to the death of the spawning
+/// thread, so a cross-thread arm+spawn would silently bind the child to a
+/// different thread's lifetime than the arming site reasoned about. The
+/// guard returns `Err(EINVAL)` — surfaced by `spawn()` as an
+/// `InvalidInput` error — rather than panicking, because this closure runs
+/// post-fork where unwinding is not async-signal-safe;
+/// `io::Error::from_raw_os_error` is allocation-free.
+///
+/// # Safety
+///
+/// Must only be called inside a `pre_exec` hook (between `fork` and `exec`):
+/// it calls only async-signal-safe libc functions (`prctl`, `getppid`,
+/// `_exit`) and its error paths build errors via `from_raw_os_error` /
+/// `last_os_error` — never `io::Error::new`/`other`, which allocate. The
+/// debug-only thread guard reads `std::thread::current().id()` from the
+/// fork-copied TLS of the spawning thread; that handle is lazily created,
+/// so in the (rare) case the spawning thread never materialized it this
+/// can allocate — accepted for a debug-only misuse guard.
+#[cfg(target_os = "linux")]
+fn bind_to_parent_death(parent_pid: u32, armed_thread: std::thread::ThreadId) -> io::Result<()> {
+    // Post-fork, TLS is a copy of the SPAWNING thread's, so this observes
+    // which thread called `spawn()`.
+    if cfg!(debug_assertions) && std::thread::current().id() != armed_thread {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    // SAFETY: prctl(PR_SET_PDEATHSIG, …) only sets the calling process's
+    // parent-death signal; it reads/writes no caller memory.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // Parent already gone (pdeathsig can no longer fire): exit instead of
+    // orphaning. A reparented child sees a ppid different from the pid the
+    // spawn site captured.
+    // SAFETY: getppid/_exit are async-signal-safe and take no pointers.
+    if unsafe { libc::getppid() } as u32 != parent_pid {
+        unsafe { libc::_exit(0) };
+    }
+    Ok(())
+}
+
+/// Bind the child's lifetime to the spawning process: on Linux the kernel
+/// delivers `SIGTERM` to the child when the parent dies
+/// (`PR_SET_PDEATHSIG`), so helper processes cannot outlive a crashed or
+/// killed grok and pile up on shared hosts. No-op on non-Linux platforms
+/// (macOS and Windows have no pdeathsig equivalent).
+///
+/// **Caveat: pdeathsig binds to the death of the spawning *thread*, not
+/// the process — arm and `spawn()` on a thread that lives as long as the
+/// parent process.** Debug builds enforce arm-thread == spawn-thread: a
+/// mismatch fails the `spawn()` with `InvalidInput` (`EINVAL`).
+///
+/// **Opt-in.** Only use this for helpers that are useless without their
+/// parent (idle inhibitors, protocol children speaking over inherited
+/// pipes). Never apply it to processes designed to outlive the client —
+/// leader daemons, workspace servers, backgrounded user tasks.
+///
+/// Composable with [`detach_std_command`]: `pre_exec` hooks run in
+/// registration order, and `setsid`/`setpgid` do not clear the parent-death
+/// signal, so this can be applied before or after a `detach_*` helper.
+///
+/// Further Linux caveat: the kernel clears the setting across a
+/// setuid/setcap `execve`.
+pub fn kill_on_parent_death_std(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent_pid = std::process::id();
+        let armed_thread = std::thread::current().id();
+        // SAFETY: bind_to_parent_death calls only async-signal-safe libc
+        // functions and builds errors without allocating (see its docs for
+        // the debug-only TLS read). Satisfies the pre_exec contract.
+        unsafe {
+            cmd.pre_exec(move || bind_to_parent_death(parent_pid, armed_thread));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Bind the *current* process's lifetime to its parent: on Linux, arm
+/// `PR_SET_PDEATHSIG(SIGTERM)` so this process is terminated when the
+/// process that spawned it dies. No-op elsewhere.
+///
+/// This is the child-side variant of [`kill_on_parent_death_std`] for protocol
+/// servers whose parents are not spawned from this workspace (IDE clients,
+/// the agent SDKs, `grok-desktop` all spawn `grok agent … stdio`): the
+/// child arms the binding itself at startup instead of relying on every
+/// external spawner to.
+///
+/// Unlike the spawn-time helper there is no ppid race check: a direct
+/// parent at pid 1 is legitimate here (containers where the client is PID
+/// 1), so an already-dead parent is indistinguishable from that case. The
+/// caller's stdin-EOF handling covers the parent-died-before-arm race —
+/// dead parent means closed pipes.
+///
+/// The binding keys off the death of the **parent's thread that spawned
+/// this process** — a property of the spawner that the child can neither
+/// inspect nor enforce (unlike [`kill_on_parent_death_std`], whose debug guard
+/// runs in the spawner). External spawners that fork protocol children
+/// from short-lived worker threads will see the signal early; for the
+/// stdio entrypoints this is equivalent to the parent closing the pipes.
+///
+/// # Errors
+///
+/// Returns the `prctl` errno on Linux when the arm fails; the process then
+/// keeps its previous lifetime semantics (stdin-EOF only), so callers
+/// should log the failure. This crate stays logging-free by design —
+/// surfacing the result is the observable seam. Always `Ok(())` on
+/// non-Linux platforms (no-op).
+///
+/// **Opt-in.** Only call from entrypoints that are useless without the
+/// process that spawned them (e.g. stdio transports over inherited pipes).
+/// Never from daemons designed to outlive their spawner.
+pub fn kill_current_process_on_parent_death() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: prctl(PR_SET_PDEATHSIG, …) only sets the calling process's
+        // parent-death signal; it reads/writes no caller memory.
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Process group lifecycle
 // ---------------------------------------------------------------------------
 
@@ -642,6 +779,197 @@ mod tests {
     fn new_process_group_does_not_panic() {
         let mut cmd = tokio::process::Command::new("echo");
         new_process_group(&mut cmd);
+    }
+
+    #[test]
+    fn kill_on_parent_death_std_does_not_panic() {
+        let mut cmd = std::process::Command::new("echo");
+        kill_on_parent_death_std(&mut cmd);
+    }
+
+    /// Debug builds enforce the top-of-doc caveat that arming and spawning
+    /// happen on the same (long-lived) thread — pdeathsig binds to the
+    /// spawning thread's lifetime, so a cross-thread arm+spawn must fail
+    /// the spawn with `InvalidInput` (`EINVAL` from the pre_exec guard)
+    /// instead of silently binding to the wrong thread. The same-thread
+    /// happy path is covered by `armed_child_survives_while_parent_lives`.
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[test]
+    fn cross_thread_arming_fails_spawn_in_debug_builds() {
+        let mut cmd = std::thread::spawn(|| {
+            let mut cmd = std::process::Command::new("true");
+            kill_on_parent_death_std(&mut cmd);
+            cmd
+        })
+        .join()
+        .expect("arming thread");
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let error = cmd
+            .spawn()
+            .expect_err("cross-thread arm+spawn must fail in debug builds");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "expected the EINVAL thread guard, got: {error}"
+        );
+    }
+
+    // ── parent-death binding integration tests (Linux) ──────────
+    //
+    // The scenario needs a real intermediate parent process, so the test
+    // binary re-execs itself (the `stderr_redirect_roundtrip_subprocess`
+    // pattern): the driver spawns `pdeathsig_intermediate_entry`, which
+    // spawns a long-sleeping grandchild armed with the helper and exits;
+    // the driver then asserts the grandchild dies with it.
+
+    /// Env marker dispatching the re-exec'd test binary into the
+    /// intermediate-parent logic.
+    #[cfg(target_os = "linux")]
+    const PDEATHSIG_INTERMEDIATE_ENV: &str = "__XAI_TTY_UTILS_PDEATHSIG_INTERMEDIATE";
+
+    /// Intermediate parent: spawn the armed grandchild, report its pid on
+    /// stdout, linger briefly so the driver can observe it alive, then exit
+    /// (which must take the grandchild down via pdeathsig).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pdeathsig_intermediate_entry() {
+        if std::env::var_os(PDEATHSIG_INTERMEDIATE_ENV).is_none() {
+            return; // skip when not invoked as the re-exec'd intermediate
+        }
+
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("300")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // Composability under test: detach (setsid) plus parent-death
+        // binding on the same command, in the documented order.
+        detach_std_command(&mut cmd);
+        kill_on_parent_death_std(&mut cmd);
+        let child = cmd.spawn().expect("spawn armed grandchild");
+        println!("grandchild:{}", child.id());
+        // Do not reap: the grandchild must outlive this handle and die only
+        // via pdeathsig when this process exits.
+        std::mem::forget(child);
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+
+    /// A child spawned with [`kill_on_parent_death_std`] must not outlive
+    /// its parent: the kernel SIGTERMs it when the parent exits.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn armed_child_dies_when_parent_exits() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg("tests::pdeathsig_intermediate_entry")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(PDEATHSIG_INTERMEDIATE_ENV, "1")
+            // The intermediate is a fresh libtest run of exactly one filtered
+            // test. Strip Bazel's per-shard env so a `shard_count` build can't
+            // partition that single test into another shard (running zero
+            // tests), and drop any inherited filter.
+            .env_remove("TEST_SHARD_INDEX")
+            .env_remove("TEST_TOTAL_SHARDS")
+            .env_remove("TEST_SHARD_STATUS_FILE")
+            .env_remove("TESTBRIDGE_TEST_ONLY")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut intermediate = cmd.spawn().expect("spawn intermediate test process");
+
+        // Grandchild pid from the intermediate's stdout. Substring-match, not
+        // line-prefix parsing: with `--nocapture` libtest prints the
+        // `test tests::… ... ` header WITHOUT a trailing newline, so the
+        // reported pid shares its line with harness chrome.
+        let stdout = intermediate.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut seen: Vec<String> = Vec::new();
+        let grandchild_pid = loop {
+            use std::io::BufRead as _;
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .expect("read intermediate stdout");
+            assert_ne!(
+                n, 0,
+                "intermediate exited without reporting a grandchild; stdout seen: {seen:?}"
+            );
+            if let Some(idx) = line.find("grandchild:") {
+                let digits: String = line[idx + "grandchild:".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                break digits.parse::<i32>().unwrap_or_else(|e| {
+                    panic!("parse grandchild pid from {line:?}: {e}");
+                });
+            }
+            seen.push(line);
+        };
+
+        // `kill(pid, 0)` succeeds on zombies, and under a non-reaping
+        // subreaper (e.g. a test process-wrapper) the orphaned grandchild can
+        // linger as a zombie after the SIGTERM. Treat zombie as dead: the
+        // signal did its job.
+        let alive = |pid: i32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => false,
+            Ok(stat) => {
+                // Field 3 (state) is the first token after the last ')' —
+                // comm can itself contain ')'.
+                let state = stat
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.trim_start().chars().next());
+                state != Some('Z')
+            }
+        };
+        assert!(
+            alive(grandchild_pid),
+            "grandchild should be running while its parent is alive"
+        );
+
+        let status = intermediate.wait().expect("wait intermediate");
+        assert!(status.success(), "intermediate test run failed: {status:?}");
+
+        // Parent gone — the armed grandchild must be SIGTERMed by the kernel
+        // (orphan → reparent → reap → ESRCH). Poll with a deadline.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while alive(grandchild_pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            !alive(grandchild_pid),
+            "grandchild pid {grandchild_pid} outlived its parent despite \
+             kill_on_parent_death_std (PR_SET_PDEATHSIG not effective)"
+        );
+    }
+
+    /// The binding must be one-directional: a live parent keeps its armed
+    /// child alive (no false-positive from the ppid race check or from
+    /// composing with `detach_std_command`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn armed_child_survives_while_parent_lives() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        detach_std_command(&mut cmd);
+        kill_on_parent_death_std(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn armed child");
+
+        // The binding must not kill a child whose parent (this process) is
+        // alive and whose ppid matches the captured pid.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "armed child died even though its parent is still alive"
+        );
+        child.kill().expect("kill child");
+        child.wait().expect("reap child");
     }
 
     fn wsl_env(pairs: &[(&str, &str)]) -> HashMap<String, String> {

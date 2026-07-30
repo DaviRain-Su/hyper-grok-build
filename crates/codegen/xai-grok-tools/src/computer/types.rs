@@ -333,6 +333,11 @@ pub trait TerminalBackend: Send + Sync {
     }
 
     /// Wait for a background task to complete, with optional timeout.
+    ///
+    /// # Panics / overflow
+    /// Implementations may add `timeout` to `Instant::now()`. Callers must
+    /// bound `timeout` (e.g. via `capped_wait_timeout`) so the sum stays
+    /// representable; unbounded model `timeout_ms` can overflow.
     async fn wait_for_completion(
         &self,
         task_id: &str,

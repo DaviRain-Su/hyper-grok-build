@@ -134,6 +134,7 @@ pub(crate) fn jwt_tier_claim(jwt: &str) -> Option<String> {
             4 => "x_premium_plus",
             5 => "supergrok_heavy",
             6 => "supergrok_lite",
+            7 => "supergrok_plus",
             0 => "free",
             _ => return Some(tier.to_string()),
         }
@@ -178,6 +179,7 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
         "XPremiumPlus" => jwt_claim == "x_premium_plus",
         "SuperGrokPro" => jwt_claim == "supergrok_heavy",
         "SuperGrokLite" => jwt_claim == "supergrok_lite",
+        "SuperGrokPlus" => jwt_claim == "supergrok_plus",
         _ => jwt_claim.parse::<u64>().is_ok_and(|n| n != 0),
     }
 }
@@ -1777,10 +1779,9 @@ impl MvpAgent {
     /// Check whether the user has access via remote settings `allow_access`.
     ///
     /// Non-xAI auth (API keys, enterprise) always passes. For xAI OAuth2
-    /// users, reads `allow_access` from remote settings. When settings exist
-    /// but the field is absent/false, defaults to `false` (blocked); when
-    /// settings have not arrived yet (background fetch pending) the gate is
-    /// provisionally open and re-resolved on arrival.
+    /// users, reads `allow_access` from remote settings (explicit `false`
+    /// blocks; absent field fails open). When settings have not arrived yet
+    /// the gate is provisionally open and re-resolved on arrival.
     pub(super) async fn enforce_grok_code_access(&self, auth: &crate::auth::GrokAuth) {
         if !auth.is_xai_auth() {
             self.tier_allowed.set(true);
@@ -2005,18 +2006,7 @@ impl MvpAgent {
             .auth_manager
             .current()
             .map(|auth| {
-                let gate = if !self.tier_allowed.get() && gate.is_none() {
-                    let message = "A subscription is required.".to_string();
-                    Some(crate::auth::GateInfo {
-                        message,
-                        url: Some(
-                            "https://grok.com/supergrok?referrer=grok-build".to_string(),
-                        ),
-                        label: Some("Subscribe".to_string()),
-                    })
-                } else {
-                    gate
-                };
+                let gate = if self.tier_allowed.get() { None } else { gate };
                 let auth_meta = crate::auth::AuthMeta {
                     email: auth.email.clone(),
                     auth_mode: Some(format!("{:?}", auth.auth_mode)),
@@ -2636,19 +2626,11 @@ fn spawn_post_unblock_jwt_and_catalog_retry(
         }
     });
 }
-/// Resolve `allow_access` from remote settings.
-///
-/// Returns `true` only when remote settings explicitly set `allow_access: true`.
-/// Defaults to `false` (blocked) when settings are `None` or the field is
-/// absent — matching the `grok_build_access_gate` flag's server-side default.
-///
-/// Used by both `enforce_grok_code_access` (initial login gate) and
-/// `retry_subscription_check` (poller gate lift) to keep the decision in
-/// one place.
+/// `allow_access` from remote settings. Fail-open unless explicitly `false`.
 pub(crate) fn settings_allow_access(
     rs: Option<&crate::util::config::RemoteSettings>,
 ) -> bool {
-    rs.and_then(|s| s.allow_access).unwrap_or(false)
+    !matches!(rs.and_then(|s| s.allow_access), Some(false))
 }
 #[cfg(test)]
 mod tests;

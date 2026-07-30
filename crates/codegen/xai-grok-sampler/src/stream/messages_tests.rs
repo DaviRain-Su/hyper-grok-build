@@ -216,6 +216,8 @@ async fn tool_use_block_assembles_into_tool_call() {
             id: "call_xyz".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
+            // Set: a parser matching only the absent case must fail here.
+            cache_control: Some(xai_grok_sampling_types::messages::CacheControl::ephemeral()),
         },
     };
     let arg_delta_1 = MessageStreamEvent::ContentBlockDelta {
@@ -416,6 +418,7 @@ async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
             id: "call_refused".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
+            cache_control: None,
         },
     };
     let arg_delta = MessageStreamEvent::ContentBlockDelta {

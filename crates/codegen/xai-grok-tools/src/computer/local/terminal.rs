@@ -476,6 +476,12 @@ struct LocalTerminalActor {
     /// their own to avoid latching the global.
     scope: crate::util::ProcessScope,
 
+    /// Additional owner: the scope of the session that started this backend, so
+    /// closing the session reaps its commands without waiting for process exit.
+    /// Enrolling in both means whichever reaper fires first wins and the other
+    /// finds a dead group.
+    session_scope: Option<crate::util::ProcessScope>,
+
     /// Active processes: task_id -> ProcessState
     processes: HashMap<String, ProcessState>,
 
@@ -549,12 +555,14 @@ impl LocalTerminalActor {
         foreground_block_budget: Duration,
         output_file_cap: u64,
         scope: crate::util::ProcessScope,
+        session_scope: Option<crate::util::ProcessScope>,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
         Self {
             cmd_rx,
             cancel_token,
             scope,
+            session_scope,
             shell_env_policy,
             processes: HashMap::new(),
             completion_waiters: HashMap::new(),
@@ -1010,6 +1018,11 @@ impl LocalTerminalActor {
     ) -> std::sync::Arc<crate::util::ProcessGroup> {
         let group = std::sync::Arc::new(group);
         self.scope.register(&group);
+        if let Some(session_scope) = &self.session_scope {
+            // A closed session scope kills the group here, which is the point:
+            // a command racing session teardown must not survive it.
+            session_scope.register(&group);
+        }
         group
     }
 
@@ -1304,13 +1317,13 @@ impl LocalTerminalActor {
 
         // Register as a completion waiter and return control to the actor loop.
         let timeout = timeout.unwrap_or(Duration::from_secs(30));
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
         self.completion_waiters
             .entry(task_id)
             .or_default()
-            .push(CompletionWaiter {
-                reply,
-                deadline: Instant::now() + timeout,
-            });
+            .push(CompletionWaiter { reply, deadline });
 
         // Return immediately — actor loop resumes processing other commands.
     }
@@ -2144,6 +2157,7 @@ struct LocalTerminalConfig {
     login_shell_capture: bool,
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+    process_scope: Option<crate::util::ProcessScope>,
 }
 
 impl Default for LocalTerminalConfig {
@@ -2155,6 +2169,7 @@ impl Default for LocalTerminalConfig {
             login_shell_capture: true,
             search_shadows: SearchShadowConfig::default(),
             shell_env_policy: None,
+            process_scope: None,
         }
     }
 }
@@ -2191,15 +2206,6 @@ impl LocalTerminalBackend {
         })
     }
 
-    /// Create a new LocalTerminalBackend with both memory limits and persistent shell.
-    pub fn with_memory_limit_and_persistent_shell(config: CgroupMemoryConfig) -> Self {
-        Self::new_inner(LocalTerminalConfig {
-            memory_config: Some(config),
-            persistent_shell: true,
-            ..Default::default()
-        })
-    }
-
     /// Create a new LocalTerminalBackend using spawn_local (for single-threaded runtimes).
     ///
     /// `search_shadows` is the host-resolved `find`→`bfs` / `grep`→`ugrep` enable
@@ -2216,12 +2222,14 @@ impl LocalTerminalBackend {
         search_shadows: SearchShadowConfig,
         login_shell_capture: bool,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+        process_scope: Option<crate::util::ProcessScope>,
     ) -> Self {
         Self::new_inner(LocalTerminalConfig {
             use_spawn_local: true,
             login_shell_capture,
             search_shadows,
             shell_env_policy,
+            process_scope,
             ..Default::default()
         })
     }
@@ -2233,21 +2241,14 @@ impl LocalTerminalBackend {
     pub fn new_local_with_persistent_shell(
         search_shadows: SearchShadowConfig,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+        process_scope: Option<crate::util::ProcessScope>,
     ) -> Self {
         Self::new_inner(LocalTerminalConfig {
             use_spawn_local: true,
             persistent_shell: true,
             search_shadows,
             shell_env_policy,
-            ..Default::default()
-        })
-    }
-
-    /// Create a new LocalTerminalBackend using spawn_local with memory limits.
-    pub fn new_local_with_memory_limit(config: CgroupMemoryConfig) -> Self {
-        Self::new_inner(LocalTerminalConfig {
-            memory_config: Some(config),
-            use_spawn_local: true,
+            process_scope,
             ..Default::default()
         })
     }
@@ -2259,6 +2260,7 @@ impl LocalTerminalBackend {
     pub(crate) fn new_local_with_scope(
         search_shadows: SearchShadowConfig,
         scope: crate::util::ProcessScope,
+        session_scope: Option<crate::util::ProcessScope>,
     ) -> Self {
         Self::new_with_ttl(
             None,
@@ -2270,6 +2272,7 @@ impl LocalTerminalBackend {
             FOREGROUND_BLOCK_BUDGET,
             MAX_OUTPUT_FILE_BYTES,
             scope,
+            session_scope,
             None,
         )
     }
@@ -2288,6 +2291,7 @@ impl LocalTerminalBackend {
             MAX_OUTPUT_FILE_BYTES,
             crate::util::global_process_scope().clone(),
             None,
+            None,
         )
     }
 
@@ -2304,6 +2308,7 @@ impl LocalTerminalBackend {
             budget,
             MAX_OUTPUT_FILE_BYTES,
             crate::util::global_process_scope().clone(),
+            None,
             None,
         )
     }
@@ -2322,6 +2327,7 @@ impl LocalTerminalBackend {
             output_file_cap,
             crate::util::global_process_scope().clone(),
             None,
+            None,
         )
     }
 
@@ -2333,6 +2339,7 @@ impl LocalTerminalBackend {
             login_shell_capture,
             search_shadows,
             shell_env_policy,
+            process_scope,
         } = config;
         Self::new_with_ttl(
             memory_config,
@@ -2344,6 +2351,7 @@ impl LocalTerminalBackend {
             foreground_block_budget_from_env(),
             output_file_cap_from_env(),
             crate::util::global_process_scope().clone(),
+            process_scope,
             shell_env_policy,
         )
     }
@@ -2358,6 +2366,7 @@ impl LocalTerminalBackend {
         foreground_block_budget: Duration,
         output_file_cap: u64,
         scope: crate::util::ProcessScope,
+        session_scope: Option<crate::util::ProcessScope>,
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_SIZE);
@@ -2385,6 +2394,7 @@ impl LocalTerminalBackend {
                 foreground_block_budget,
                 output_file_cap,
                 scope,
+                session_scope,
                 shell_env_policy,
             );
             actor.run().await;
@@ -4564,6 +4574,7 @@ mod tests {
             let backend = LocalTerminalBackend::new_local_with_scope(
                 SearchShadowConfig::default(),
                 scope.clone(),
+                None,
             );
 
             let mut bg_req = make_request("sleep 120");
@@ -4595,6 +4606,41 @@ mod tests {
         });
     }
 
+    /// A session-scoped command stays enrolled in the base scope too, so the TUI
+    /// exit paths (which `kill_all()` only the process-global scope, and reach
+    /// `process::exit` without running `Drop`) still reap it.
+    #[test]
+    fn session_scoped_child_is_still_reaped_via_base_scope() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async {
+            let base = crate::util::ProcessScope::new();
+            let session = crate::util::ProcessScope::new();
+            let backend = LocalTerminalBackend::new_local_with_scope(
+                SearchShadowConfig::default(),
+                base.clone(),
+                Some(session),
+            );
+
+            let mut bg_req = make_request("sleep 120");
+            bg_req.tool_call_id = "bg-dual-scope".to_string();
+            let bg = backend
+                .run_background(bg_req)
+                .await
+                .expect("background spawn should succeed");
+
+            base.kill_all();
+
+            assert!(
+                poll_until_task_completed(&backend, &bg.task_id, Duration::from_secs(10)).await,
+                "base-scope kill_all did not reap a session-scoped child"
+            );
+        });
+    }
+
     /// Once a background child is reaped, the actor must drop its
     /// `Arc<ProcessGroup>` so the scope's `Weak` dies. The completed task lingers
     /// in `self.processes` for `COMPLETED_TASK_TTL`; if the actor kept the `Arc`
@@ -4612,6 +4658,7 @@ mod tests {
             let backend = LocalTerminalBackend::new_local_with_scope(
                 SearchShadowConfig::default(),
                 scope.clone(),
+                None,
             );
 
             // A brief sleep (not `true`): it must still be running when we read

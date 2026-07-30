@@ -1,15 +1,10 @@
-//! Leader soak: an in-process leader server fronting a REAL `MvpAgent`, hammered
-//! by churning `LeaderClient`s until a time budget expires. Asserts the leader
-//! neither leaks memory nor accumulates zombie clients, and that no response is
-//! ever dropped on a live-client send (`leader.response.send_failed`).
-//!
-//! Duration is bounded by `LEADER_SOAK_SECS` (default 10s so an ad-hoc
-//! `--ignored` run stays quick). RSS growth is bounded by
-//! `LEADER_SOAK_MAX_RSS_GROWTH_MB` (default 1024). On-demand today — no CI
-//! lane runs it; a real soak is the long form:
+//! Leader soak: a real `MvpAgent` behind an in-process leader, churned by
+//! clients until `LEADER_SOAK_SECS` expires. Each cycle closes its sessions,
+//! so the bounds measure what teardown reclaims.
 //!
 //! ```bash
-//! LEADER_SOAK_SECS=1200 cargo test -p xai-grok-shell --test test_leader_soak -- --ignored --nocapture
+//! LEADER_SOAK_SECS=1200 cargo test -p xai-grok-shell --features test-support \
+//!     --test test_leader_soak -- --ignored --nocapture
 //! ```
 
 #![cfg(unix)]
@@ -17,24 +12,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol as acp;
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
-use xai_acp_lib::{
-    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
-    LineBufferedRead,
-};
-use xai_grok_shell::agent::config::Config as AgentConfig;
-use xai_grok_shell::agent::mvp_agent::MvpAgent;
 use xai_grok_shell::leader::{
     ClientCapabilities, ClientMode, LeaderClient, LeaderServerControlState, LeaderServerMetadata,
     run_leader_server,
 };
 use xai_grok_test_support::resources::ResourceSnapshot;
-
-const SIMPLEX_BUF: usize = 8 * 1024 * 1024;
 
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
@@ -113,13 +97,13 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
     let sock_path = grok_home.path().join("leader-soak.sock");
     let soak_secs = env_u64("LEADER_SOAK_SECS", 10);
     let max_growth_mb = env_u64("LEADER_SOAK_MAX_RSS_GROWTH_MB", 1024);
+    let max_thread_growth = env_u64("LEADER_SOAK_MAX_THREAD_GROWTH", 64) as usize;
     let send_failed_before = send_failed_count();
 
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            // ── Leader server (survives client churn) ────────────────────
-            let (acp_tx, mut acp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let (acp_tx, acp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let cancel = CancellationToken::new();
             let client_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -152,70 +136,9 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                 .await;
             });
 
-            // ── Real agent behind it ──────────────────────────────────────
-            // Copied from `run_leader`'s agent-spawn + IPC/stdout bridge
-            // blocks in src/agent/app.rs (inside its LocalSet body); kept as
-            // a deliberate copy so production stays untouched. Second copy of
-            // the same wiring: xai-grok-pager/src/app/leader_cluster/mod.rs
-            // (`spawn_leader_generation`) — keep the two copies behaviorally
-            // identical.
-            let (agent_in_read, agent_in_write) = tokio::io::simplex(SIMPLEX_BUF);
-            let (agent_out_read, agent_out_write) = tokio::io::simplex(SIMPLEX_BUF);
-
-            tokio::task::spawn_local(async move {
-                let agent_config = AgentConfig::default();
-                let auth_manager = Arc::new(agent_config.create_auth_manager());
-                let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
-                let gateway = GatewaySender::new(gw_tx);
-                let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None)
-                    .expect("valid agent config");
-                let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
-                let (conn, handle_io) = acp::AgentSideConnection::new(
-                    agent,
-                    agent_out_write.compat_write(),
-                    incoming,
-                    |fut| {
-                        tokio::task::spawn_local(fut);
-                    },
-                );
-                tokio::task::spawn_local(
-                    GatewayReceiver::new(gw_rx, conn)
-                        .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-                        .run(),
-                );
-                let _ = handle_io.await;
-            });
-
-            // Leader → agent stdin.
-            tokio::task::spawn_local(async move {
-                let mut agent_in_write = agent_in_write;
-                while let Some(msg) = acp_rx.recv().await {
-                    if agent_in_write.write_all(msg.as_bytes()).await.is_err()
-                        || agent_in_write.write_all(b"\n").await.is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-            // Agent stdout → leader responses.
-            let response_tx_for_agent = response_tx.clone();
-            tokio::task::spawn_local(async move {
-                let mut reader = BufReader::new(agent_out_read);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            let msg = line.trim_end_matches(['\r', '\n']).to_string();
-                            if !msg.is_empty() {
-                                let _ = response_tx_for_agent.send(msg);
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
+            // Hold a sender for the whole soak: the leader's response channel
+            // must not close when the agent's output ends.
+            xai_grok_shell::leader::in_process::spawn_agent(acp_rx, response_tx.clone());
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             while !sock_path.exists() && tokio::time::Instant::now() < deadline {
@@ -223,7 +146,6 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             }
             assert!(sock_path.exists(), "leader socket never bound");
 
-            // ── One-time initialize + authenticate through the leader ────
             let mut bootstrap = LeaderClient::connect(
                 sock_path.clone(),
                 "soak-bootstrap",
@@ -247,14 +169,17 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             )
             .await;
 
+            eprintln!(
+                "[soak] budgets: {soak_secs}s, rss {max_growth_mb} MB, threads {max_thread_growth}"
+            );
             let rss_before = ResourceSnapshot::capture();
             let soak_deadline = tokio::time::Instant::now() + Duration::from_secs(soak_secs);
             let workdir_str = workdir.path().to_string_lossy().to_string();
             let mut cycles: u64 = 0;
             let mut turns: u64 = 0;
 
-            // ── Churn: 10 fresh clients per cycle, 2 sessions each, one
-            // scripted turn per session, then all disconnect ───────────────
+            // Each cycle: 10 fresh clients, 2 sessions each, one scripted
+            // turn per session, then all disconnect.
             while tokio::time::Instant::now() < soak_deadline {
                 cycles += 1;
                 let mut clients = Vec::new();
@@ -298,10 +223,22 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                         )
                         .await;
                         turns += 1;
+
+                        // Disconnecting leaves sessions resident for a
+                        // reconnect; `_` is the wire form for a custom method.
+                        let close_id = 300 + s;
+                        rpc(
+                            client,
+                            format!(
+                                r#"{{"jsonrpc":"2.0","id":{close_id},"method":"_x.ai/session/close","params":{{"sessionId":"{sid}"}}}}"#
+                            ),
+                            close_id,
+                            "x.ai/session/close",
+                        )
+                        .await;
                     }
                 }
 
-                // Churn: everyone disconnects; the roster must drain fully.
                 for client in clients {
                     client.cancel();
                 }
@@ -314,13 +251,39 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                     );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
+
+                // Linear in cycles is a leak; flattening is the allocator.
+                if let Some(rss) = ResourceSnapshot::capture().rss {
+                    eprintln!(
+                        "[soak] cycle {cycles}: rss {:.1} MB",
+                        rss as f64 / (1024.0 * 1024.0)
+                    );
+                }
+                if cycles == 1 {
+                    let snap = rpc(
+                        &mut bootstrap,
+                        r#"{"jsonrpc":"2.0","id":901,"method":"_x.ai/debug/agent","params":{}}"#
+                            .to_string(),
+                        901,
+                        "x.ai/debug/agent",
+                    )
+                    .await;
+                    eprintln!("[soak] registries after cycle 1: {}", snap["result"]["registries"]);
+                }
             }
 
+            let snap = rpc(
+                &mut bootstrap,
+                r#"{"jsonrpc":"2.0","id":902,"method":"_x.ai/debug/agent","params":{}}"#
+                    .to_string(),
+                902,
+                "x.ai/debug/agent",
+            )
+            .await;
+            eprintln!("[soak] registries at end: {}", snap["result"]["registries"]);
             eprintln!("[soak] {cycles} cycles, {turns} turns in {soak_secs}s budget");
             assert!(cycles > 0, "soak budget too small to complete one cycle");
 
-            // ── Convergence: only the bootstrap client remains, and the
-            // leader still serves a healthy round-trip ────────────────────
             assert_eq!(
                 client_count.load(std::sync::atomic::Ordering::Relaxed),
                 1,
@@ -337,14 +300,12 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             .await;
             assert!(resp["result"]["sessionId"].is_string());
 
-            // ── No response was ever dropped on a live-client send ────────
             assert_eq!(
                 send_failed_count(),
                 send_failed_before,
                 "leader.response.send_failed must not occur during the soak"
             );
 
-            // ── RSS bound ─────────────────────────────────────────────────
             let rss_after = ResourceSnapshot::capture();
             let growth = rss_after.growth_from(&rss_before);
             if let (Some(before), Some(after), Some(growth_bytes)) =
@@ -357,11 +318,28 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                     after as f64 / (1024.0 * 1024.0),
                 );
                 assert!(
-                    growth_mb < max_growth_mb as f64,
+                    growth_mb <= max_growth_mb as f64,
                     "leader RSS grew {growth_mb:.1} MB over the soak (bound {max_growth_mb} MB)"
                 );
             } else {
-                eprintln!("[soak] rss measurement unavailable on this platform; bound skipped");
+                panic!("memory sample unavailable; the soak cannot bound it");
+            }
+
+            // A missing sample means the probe failed, which would silently
+            // retire the nightly budget. Threads are Linux-only.
+            match growth.threads {
+                Some(thread_growth) => {
+                    eprintln!("[soak] threads: growth {thread_growth}");
+                    assert!(
+                        thread_growth <= max_thread_growth,
+                        "leader threads grew by {thread_growth} over the soak \
+                         (bound {max_thread_growth})"
+                    );
+                }
+                None if cfg!(target_os = "linux") => {
+                    panic!("thread growth sample unavailable; the soak cannot bound it")
+                }
+                None => {}
             }
 
             bootstrap.cancel();

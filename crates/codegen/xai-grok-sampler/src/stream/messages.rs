@@ -205,11 +205,7 @@ pub fn stream_messages<'a>(
                             };
                         }
                     }
-                    ContentBlock::ToolUse {
-                        id,
-                        name,
-                        input: _,
-                    } => {
+                    ContentBlock::ToolUse { id, name, .. } => {
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
                         block_to_tool_index.insert(index, tool_index);

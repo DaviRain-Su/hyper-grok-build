@@ -51,6 +51,8 @@
 //! }
 //! ```
 mod client;
+#[cfg(feature = "test-support")]
+pub mod in_process;
 mod lock;
 pub mod protocol;
 mod server;

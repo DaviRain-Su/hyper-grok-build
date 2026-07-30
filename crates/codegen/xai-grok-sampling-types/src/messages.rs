@@ -94,6 +94,14 @@ pub struct CacheControl {
     pub r#type: String, // "ephemeral"
 }
 
+impl CacheControl {
+    pub fn ephemeral() -> Self {
+        Self {
+            r#type: "ephemeral".to_owned(),
+        }
+    }
+}
+
 /// Content blocks used in both requests and responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -105,11 +113,15 @@ pub enum ContentBlock {
     },
     Image {
         source: ImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: String,

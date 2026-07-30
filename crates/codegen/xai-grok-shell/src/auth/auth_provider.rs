@@ -383,15 +383,7 @@ async fn mint_provider_token(
             cmd.args(args);
             cmd
         }
-        None => {
-            #[cfg(windows)]
-            let (shell, flag) = ("cmd", "/C");
-            #[cfg(not(windows))]
-            let (shell, flag) = ("sh", "-c");
-            let mut cmd = tokio::process::Command::new(shell);
-            cmd.args([flag, config.command.as_str()]);
-            cmd
-        }
+        None => crate::util::subprocess::shell_c(config.command.as_str()),
     };
     if let Some(ref dir) = cwd {
         cmd.current_dir(dir);

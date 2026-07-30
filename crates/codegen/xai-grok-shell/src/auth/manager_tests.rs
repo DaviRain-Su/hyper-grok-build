@@ -1396,6 +1396,145 @@ async fn refresh_chain_demotes_when_disk_rt_differs_even_if_at_expired() {
     );
 }
 
+/// Regression test for the multi-process logout incident.
+///
+/// This is the shape `OidcRefresher` actually emits in production: the tried
+/// credential is **fully attributed** (`tried_key` *and* `tried_refresh_token`
+/// are `Some`). The pre-existing demotion tests all built the outcome with
+/// `tried_key = None` — the external-binary shape — so they passed while the
+/// OIDC path was gated behind `tried_key.is_none()` and could never demote.
+///
+/// Scenario: a sibling rotated the RT while our token exchange was in flight,
+/// so the IdP rejected the RT we spent. That is a lost race, not a revoked
+/// session: it must demote to transient and leave the sibling's credential on
+/// disk untouched.
+#[tokio::test]
+async fn refresh_chain_demotes_when_attributed_tried_rt_differs_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    // We hold, and spend, the predecessor RT.
+    let tried = GrokAuth {
+        key: "tried-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-spent".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    mgr.hot_swap(tried.clone());
+
+    // A sibling already rotated: disk carries the successor RT. Its AT is
+    // expired too, so disk adoption cannot short-circuit the failure path —
+    // the demotion is the only thing standing between us and a wipe.
+    let sibling = GrokAuth {
+        key: "sibling-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-successor".into()),
+        expires_at: Some(Utc::now() - Duration::minutes(30)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    let mut store = AuthStore::new();
+    store.insert(scope, sibling);
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    struct AttributedRejection(GrokAuth);
+    #[async_trait::async_trait]
+    impl TokenRefresher for AttributedRejection {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            // Exactly what OidcRefresher builds on a 400 invalid_grant.
+            crate::auth::refresh::RefreshOutcome::permanent_for(
+                crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+                &self.0,
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(AttributedRejection(tried)));
+
+    let err = mgr
+        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Transient(_))),
+        "a rejected RT that disk has already rotated past is a lost race, \
+         not a revoked session; must demote to transient, got: {err:?}",
+    );
+    assert_eq!(
+        mgr.read_disk_auth().and_then(|a| a.refresh_token),
+        Some("rt-successor".into()),
+        "the sibling's successor RT must survive our rejection",
+    );
+    assert!(
+        mgr.permanent_failure().is_none(),
+        "demotion must not record a sticky verdict that locks out every \
+         sibling process until the user re-runs `grok login`",
+    );
+}
+
+/// The demotion must *not* fire when disk still holds the very RT that was
+/// just rejected: nobody rotated, the session really is dead, and holding on
+/// to a known-revoked credential would loop forever.
+#[tokio::test]
+async fn refresh_chain_still_discards_when_attributed_tried_rt_matches_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    let tried = GrokAuth {
+        key: "only-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-revoked".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        oidc_issuer: Some("https://issuer.example".into()),
+        oidc_client_id: Some("client-1".into()),
+        ..GrokAuth::test_default()
+    };
+    mgr.hot_swap(tried.clone());
+    let mut store = AuthStore::new();
+    store.insert(scope, tried.clone());
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    struct AttributedRejection(GrokAuth);
+    #[async_trait::async_trait]
+    impl TokenRefresher for AttributedRejection {
+        async fn refresh(
+            &self,
+            _reason: crate::auth::manager::RefreshReason,
+        ) -> crate::auth::refresh::RefreshOutcome {
+            crate::auth::refresh::RefreshOutcome::permanent_for(
+                crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+                &self.0,
+            )
+        }
+    }
+    mgr.set_refresher(Arc::new(AttributedRejection(tried)));
+
+    let err = mgr
+        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, AuthError::Refresh(RefreshTokenError::Permanent(_))),
+        "an un-rotated rejected RT is a genuinely dead session, got: {err:?}",
+    );
+    assert!(
+        mgr.permanent_failure().is_some(),
+        "a genuine revocation must still record a verdict",
+    );
+}
+
 /// Disk-first invalid_grant must not wipe an untried in-memory successor RT
 /// (mem-ahead-of-disk after a failed persist of a successful rotation).
 #[tokio::test]
@@ -2865,6 +3004,28 @@ async fn update_recovers_from_whitespace_only_auth_json() {
     assert!(on_disk.contains("ws-token"), "credential must be persisted");
 }
 
+// -- sibling-rotation comparison ------------------------------------------
+
+/// The demotion — and therefore whether a dozen processes keep their
+/// credentials — rests entirely on this comparison, so pin its three cases
+/// directly rather than only through the refresh chain.
+#[test]
+fn refresh_token_superseded_needs_a_successor_on_disk() {
+    assert!(
+        AuthManager::refresh_token_superseded(Some("rt-successor"), "rt-spent"),
+        "a different RT on disk is a sibling's successor: demote"
+    );
+    assert!(
+        !AuthManager::refresh_token_superseded(Some("rt-spent"), "rt-spent"),
+        "disk still holding the RT the IdP just rejected is a real revocation"
+    );
+    assert!(
+        !AuthManager::refresh_token_superseded(None, "rt-spent"),
+        "no RT on disk means there is no successor to fall back to, so the \
+         rejection must be honored rather than demoted into a retry loop"
+    );
+}
+
 // -- sibling_has_different_refresh_token ----------------------------------
 
 /// Expired disk AT with different RT is still treated as a sibling RT
@@ -2897,8 +3058,9 @@ async fn sibling_different_rt_with_expired_at_is_still_sibling() {
     store.insert(cfg.auth_scope(), successor);
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
+    let disk_rt = mgr.read_disk_auth().and_then(|a| a.refresh_token);
     assert!(
-        mgr.sibling_has_different_refresh_token(),
+        mgr.sibling_has_different_refresh_token(disk_rt.as_deref()),
         "different disk RT must demote even when the sibling AT is expired"
     );
 }
@@ -2931,8 +3093,9 @@ async fn sibling_different_rt_with_valid_at_is_treated_as_live() {
     store.insert(cfg.auth_scope(), sibling);
     write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
 
+    let disk_rt = mgr.read_disk_auth().and_then(|a| a.refresh_token);
     assert!(
-        mgr.sibling_has_different_refresh_token(),
+        mgr.sibling_has_different_refresh_token(disk_rt.as_deref()),
         "valid disk token with different RT must be treated as live sibling"
     );
 }

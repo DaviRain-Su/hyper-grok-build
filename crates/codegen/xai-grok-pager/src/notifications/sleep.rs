@@ -111,6 +111,13 @@ impl SleepInhibitor {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
         xai_tty_utils::detach_std_command(&mut cmd);
+        // The spawned process is the lock holder: `systemd-inhibit` keeps
+        // the idle-inhibit fd itself and runs `sleep infinity` as its child
+        // — it is the same pid `release()` SIGTERMs on a clean turn end.
+        // Bind that pid to us so a crashed/killed grok (SIGKILL,
+        // `panic=abort` SIGABRT — no Drop runs) can't leave an immortal
+        // inhibitor holding the lock and pid slots on shared hosts.
+        xai_tty_utils::kill_on_parent_death_std(&mut cmd);
         let result = cmd.spawn();
 
         match result {

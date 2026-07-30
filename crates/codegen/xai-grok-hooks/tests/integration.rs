@@ -72,6 +72,7 @@ async fn hook_deny_via_exit_code_only() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result =
@@ -101,6 +102,7 @@ async fn hook_fail_open_on_crash() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result =
@@ -134,6 +136,7 @@ async fn hook_fail_open_on_timeout() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result =
@@ -162,6 +165,7 @@ async fn matcher_filters_tool_name() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result = dispatcher::dispatch_pre_tool_use(
@@ -194,6 +198,7 @@ async fn non_blocking_dispatch() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let results = dispatcher::dispatch_non_blocking(
@@ -232,6 +237,7 @@ async fn first_deny_stops_chain() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result = dispatcher::dispatch_pre_tool_use(
@@ -264,6 +270,7 @@ async fn hook_receives_stdin_envelope() {
     let ctx = RunContext {
         session_id: "test-sess-123",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result =
@@ -288,6 +295,7 @@ async fn shell_pipe_command_works() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
 
     let pre_result =
@@ -419,6 +427,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
         let ctx = RunContext {
             session_id: "test",
             workspace_root: dir.path().to_str().unwrap(),
+            process_scope: None,
         };
 
         let results =
@@ -508,6 +517,7 @@ async fn runner_injected_vars_override_extra_env_at_spawn() {
     let ctx = RunContext {
         session_id: real_session,
         workspace_root: real_workspace,
+        process_scope: None,
     };
 
     let result =
@@ -628,6 +638,7 @@ async fn direct_exec_command_with_env_var_resolves_at_load_time() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
     let result =
         dispatcher::dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("read_file"), &ctx)
@@ -697,6 +708,7 @@ async fn http_hook_url_env_expansion_end_to_end() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
     let pre_result =
         dispatcher::dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("read_file"), &ctx)
@@ -779,6 +791,7 @@ async fn lenient_parsing_with_mixed_claude_events() {
     let ctx = RunContext {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
+        process_scope: None,
     };
     let result = dispatcher::dispatch_pre_tool_use(
         &registry,

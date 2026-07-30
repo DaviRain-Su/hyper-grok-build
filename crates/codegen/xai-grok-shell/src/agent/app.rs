@@ -294,6 +294,22 @@ pub async fn run_stdio_agent(
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
+    // A stdio agent is a protocol child speaking over pipes inherited from
+    // whoever spawned it (grok-desktop, IDE clients, the agent SDKs, a parent
+    // agent's subagent harness) — it is useless without that parent. stdin
+    // EOF already triggers shutdown below, but an agent wedged mid-turn (or
+    // under thread exhaustion) may never read stdin again; bind to parent
+    // death (Linux `PR_SET_PDEATHSIG(SIGTERM)`, no-op elsewhere) so the
+    // kernel reaps it instead of leaving an orphan accumulating pid slots on
+    // shared hosts. The leader entrypoint intentionally does NOT do this —
+    // it is designed to outlive its clients.
+    if let Err(error) = xai_tty_utils::kill_current_process_on_parent_death() {
+        tracing::warn!(
+            %error,
+            "failed to bind to parent death; agent will not die with its \
+             parent — stdin EOF remains the only cleanup"
+        );
+    }
     // Stamp binary version into unified log entries so zombie processes
     // are identifiable by version in diagnostic logs.
     xai_grok_telemetry::unified_log::set_version(xai_grok_version::VERSION);

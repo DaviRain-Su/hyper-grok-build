@@ -37,16 +37,9 @@ use std::time::Duration;
 
 use agent_client_protocol as acp;
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::task::JoinSet;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
-use xai_acp_lib::{
-    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
-    AcpClientRx, LineBufferedRead, acp_send,
-};
-use xai_grok_shell::agent::config::Config as AgentConfig;
-use xai_grok_shell::agent::mvp_agent::MvpAgent;
+use xai_acp_lib::{AcpClientRx, acp_send};
 use xai_grok_shell::leader::{
     ClientCapabilities as LeaderClientCapabilities, ClientMode, ConnectionStatus,
     LEADER_SOCKET_ENV, LeaderClient, LeaderEnvUrls, LeaderLock, LeaderReconnector,
@@ -63,7 +56,6 @@ use crate::acp::leader_bridge::bridge_channels;
 use crate::acp::model_state::ModelState;
 use crate::scrollback::block::RenderBlock;
 
-const SIMPLEX_BUF: usize = 8 * 1024 * 1024;
 const PUMP_TICK: Duration = Duration::from_millis(10);
 const TURN_BUDGET: Duration = Duration::from_secs(60);
 
@@ -358,7 +350,7 @@ impl PagerLeaderCluster {
     /// wire a fresh REAL agent behind it.
     async fn spawn_leader_generation(&mut self) {
         let _ = std::fs::remove_file(&self.sock_path);
-        let (acp_tx, mut acp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (acp_tx, acp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let cancel = CancellationToken::new();
         self.server_cancel = cancel.clone();
@@ -396,66 +388,10 @@ impl PagerLeaderCluster {
             .await;
         }));
 
-        // Real agent behind the server. Copied from `run_leader`'s
-        // agent-spawn + IPC/stdout bridge blocks in
-        // xai-grok-shell/src/agent/app.rs (inside its LocalSet body) — a
-        // deliberate copy so production stays untouched. Second copy of the
-        // same wiring: xai-grok-shell/tests/test_leader_soak.rs ("Real agent
-        // behind it" block) — keep the two copies behaviorally identical.
-        let (agent_in_read, agent_in_write) = tokio::io::simplex(SIMPLEX_BUF);
-        let (agent_out_read, agent_out_write) = tokio::io::simplex(SIMPLEX_BUF);
-
-        generation_tasks.push(tokio::task::spawn_local(async move {
-            let agent_config = AgentConfig::default();
-            let auth_manager = Arc::new(agent_config.create_auth_manager());
-            let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
-            let gateway = GatewaySender::new(gw_tx);
-            let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None)
-                .expect("valid agent config");
-            let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
-            let (conn, handle_io) = acp::AgentSideConnection::new(
-                agent,
-                agent_out_write.compat_write(),
-                incoming,
-                |fut| {
-                    tokio::task::spawn_local(fut);
-                },
-            );
-            tokio::task::spawn_local(
-                GatewayReceiver::new(gw_rx, conn)
-                    .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
-                    .run(),
-            );
-            let _ = handle_io.await;
-        }));
-
-        generation_tasks.push(tokio::task::spawn_local(async move {
-            let mut agent_in_write = agent_in_write;
-            while let Some(msg) = acp_rx.recv().await {
-                if agent_in_write.write_all(msg.as_bytes()).await.is_err()
-                    || agent_in_write.write_all(b"\n").await.is_err()
-                {
-                    break;
-                }
-            }
-        }));
-        generation_tasks.push(tokio::task::spawn_local(async move {
-            let mut reader = BufReader::new(agent_out_read);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let msg = line.trim_end_matches(['\r', '\n']).to_string();
-                        if !msg.is_empty() && response_tx.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        }));
+        generation_tasks.extend(xai_grok_shell::leader::in_process::spawn_agent(
+            acp_rx,
+            response_tx,
+        ));
         self.generation_tasks = generation_tasks;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

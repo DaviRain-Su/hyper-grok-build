@@ -212,6 +212,7 @@ Actions available from any screen.
 | Key | Alt Key | Action | Confirmation |
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
+| `Ctrl+\` | | Open or toggle the [Agent Dashboard](23-dashboard.md) | No |
 | `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes (double-press within 1000ms) |
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grok makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
@@ -236,6 +237,30 @@ Bindings that only fire on the welcome screen (before any agent session is open)
 | `Ctrl+Shift+I` | Dismiss the Claude import row (when available) |
 
 `Ctrl+W`, `Ctrl+I`, and `Ctrl+Shift+I` are only active on the welcome screen. `Ctrl+S` opens the session picker on both the welcome screen and inside an agent session (where it opens as a modal overlay, same as the `/resume` command). `Ctrl+Q` is the same global Quit binding documented above, not a welcome-specific handler.
+
+---
+
+## Agent Dashboard
+
+Bindings while the [Agent Dashboard](23-dashboard.md) is focused (`Ctrl+\` or `/dashboard`).
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `j` / `k` | Navigate agent rows (selecting a row opens peek) |
+| `Enter` | Open the selected agent, or send a typed peek reply / dispatch prompt |
+| `Ctrl+S` | Reply or dispatch **and** attach to that agent |
+| `Ctrl+/` | Toggle search / filter mode |
+| `Ctrl+R` | Rename the selected agent |
+| `Ctrl+T` | Pin / unpin |
+| `Ctrl+G` | Toggle grouping (state ↔ working directory) |
+| `Ctrl+X` | Stop a running turn, or press twice within 2s to close the session |
+| `Ctrl+O` | Toggle always-approve on the selected agent |
+| `Tab` | Toggle focus between the list and the dispatch / peek input |
+| `Esc` | Step back (cancel search → close peek → clear filter → unfocus → unselect → exit) |
+| `Ctrl+\` | Exit the dashboard (or return from an attached agent) |
+| `Ctrl+.` (alt: `?`) | Shortcuts cheatsheet |
+
+Details (peek vs dispatch, search prefixes, persistence): [Agent Dashboard](23-dashboard.md).
 
 ---
 

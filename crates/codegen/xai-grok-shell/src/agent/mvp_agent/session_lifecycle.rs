@@ -9,6 +9,30 @@ impl MvpAgent {
             let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
         }
     }
+    /// Hard-stop a live session before wiping its history.
+    ///
+    /// Cancels the turn (subagents + background tasks), shuts the actor down,
+    /// reaps process scope, then waits briefly for flush so delete can remove
+    /// the session directory without the actor rewriting it.
+    pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {
+        let Some(handle) = self.sessions.borrow().get(id).cloned() else {
+            return;
+        };
+        let _ = handle.cmd_tx.send(SessionCommand::Cancel {
+            cancel_subagents: true,
+            kill_background_tasks: true,
+            rewind_if_pristine: false,
+            trigger: Some("session_delete".into()),
+        });
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+        drop(handle);
+        let thread = self.session_threads.borrow_mut().remove(id);
+        self.remove_session_terminal(id, SessionLiveState::Completed);
+        if let Some(thread) = thread {
+            self.session_threads.borrow_mut().insert(id.clone(), thread);
+            self.drain_old_session_thread(id).await;
+        }
+    }
     /// Finalize the cloud session replica (fire-and-forget, "Hook 4").
     ///
     /// Marks the session **done** upstream, so this MUST only run on a genuine
@@ -438,9 +462,10 @@ impl MvpAgent {
             )
             .registry_counts()
             .await;
-        let (session_index_claims, require_gateway_sessions) = {
+        let (resident_resources, session_index_claims, require_gateway_sessions) = {
             let resident = self.resident_resources.borrow();
             (
+                resident.len(),
                 resident
                     .values()
                     .filter(|r| r.codebase_index.is_some())
@@ -449,6 +474,7 @@ impl MvpAgent {
             )
         };
         let retained = self.retained_resources.borrow();
+        let retained_resources = retained.len();
         let dispatch_locks = retained
             .values()
             .filter(|d| d.dispatch_lock.is_some())
@@ -465,6 +491,8 @@ impl MvpAgent {
         RegistrySnapshot {
             sessions: self.sessions.borrow().len(),
             session_threads: self.session_threads.borrow().len(),
+            resident_resources,
+            retained_resources,
             dispatch_locks,
             session_turn_numbers,
             permission_event_receivers,
@@ -489,6 +517,8 @@ impl MvpAgent {
 pub struct RegistrySnapshot {
     pub sessions: usize,
     pub session_threads: usize,
+    pub resident_resources: usize,
+    pub retained_resources: usize,
     pub dispatch_locks: usize,
     pub session_turn_numbers: usize,
     pub permission_event_receivers: usize,

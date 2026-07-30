@@ -448,7 +448,9 @@ impl AgentView {
         {
             let history = self.combined_prompt_history();
             let current_text = self.prompt.text().to_string();
-            if !history.is_empty() {
+            // Without a matcher thread the panel can never populate, and filling
+            // the composer would only be undone by the next Down/Enter.
+            if !history.is_empty() && self.prompt.history_search.is_available() {
                 self.prompt
                     .history_search
                     .activate_browse(&history, &current_text);

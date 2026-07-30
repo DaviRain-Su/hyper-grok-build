@@ -1093,27 +1093,49 @@ impl AuthManager {
         Some(auth)
     }
 
-    /// `true` when a sibling process has rotated the refresh token on
-    /// disk (disk RT differs from in-memory RT). Used by `refresh_chain`
-    /// to demote a `PermanentFailure` to transient so the sibling's
-    /// fresher token can be tried on the next attempt.
+    /// `true` when the refresh token on disk is present and differs from the
+    /// one we actually spent — i.e. a sibling process rotated the RT while our
+    /// exchange was in flight, so the rejection we just got is a lost race
+    /// rather than a revoked session.
+    ///
+    /// The single definition of "disk moved past the token we spent". Two
+    /// hand-rolled copies of this comparison is how the wrong one survived
+    /// long enough to log a dozen processes out at once.
+    ///
+    /// Takes an already-observed `disk_rt` rather than reading `auth.json`
+    /// itself, so one observation drives the decision, the unattributed
+    /// fallback, and the telemetry that explains them. A second read can catch
+    /// a *later* sibling write and produce a record that contradicts the
+    /// branch it documents — in the log whose whole purpose is post-incident
+    /// truth. Callers read under the auth file lock, so the observation
+    /// includes the sibling's committed write.
+    ///
+    /// Disk holding no RT is *not* divergence: there is no successor to fall
+    /// back to, so the rejection must be honored.
+    fn refresh_token_superseded(disk_rt: Option<&str>, spent_rt: &str) -> bool {
+        disk_rt.is_some_and(|disk_rt| disk_rt != spent_rt)
+    }
+
+    /// `true` when a sibling process has rotated the refresh token on disk
+    /// past the one in memory. Used by `refresh_chain` to demote a
+    /// `PermanentFailure` to transient so the sibling's fresher token can be
+    /// tried on the next attempt.
     ///
     /// Requires an in-memory RT: empty `inner` means the disk credential is
     /// the only candidate (not a multi-process rotation). Does **not**
     /// require a non-expired disk AT — a sibling may still hold a usable RT
     /// while its AT is buffer/hard-expired.
-    fn sibling_has_different_refresh_token(&self) -> bool {
-        let disk_auth = self.read_disk_auth();
-        let Some(ref disk) = disk_auth else {
-            return false;
-        };
-        let Some(disk_rt) = disk.refresh_token.as_deref() else {
-            return false;
-        };
-        let Some(mem_rt) = self.current_or_expired().and_then(|a| a.refresh_token) else {
-            return false;
-        };
-        mem_rt.as_str() != disk_rt
+    ///
+    /// Only a fallback for authorities that cannot report which RT they spent.
+    /// Attributed refreshers pass the token they actually sent to
+    /// [`Self::refresh_token_superseded`] directly; because
+    /// `resolve_refresh_credential` is disk-first, the RT actually sent is
+    /// usually the disk one, and comparing disk against *memory* then answers
+    /// `false` in precisely the case that needs the demotion.
+    fn sibling_has_different_refresh_token(&self, disk_rt: Option<&str>) -> bool {
+        self.current_or_expired()
+            .and_then(|a| a.refresh_token)
+            .is_some_and(|mem_rt| Self::refresh_token_superseded(disk_rt, &mem_rt))
     }
 
     /// Re-read `auth.json` from disk without updating in-memory state.
@@ -1836,7 +1858,11 @@ impl AuthManager {
                     Err(AuthError::transient_source(e))
                 }
             },
-            RefreshOutcome::PermanentFailure { error, tried_key } => {
+            RefreshOutcome::PermanentFailure {
+                error,
+                tried_key,
+                tried_refresh_token,
+            } => {
                 tracing::warn!(reason = ?error.reason, "auth.refresh.permanent_failure");
                 xai_grok_telemetry::unified_log::warn(
                     "auth.refresh.permanent_failure",
@@ -1864,10 +1890,42 @@ impl AuthManager {
                 if is_rtr {
                     let mem = self.current_or_expired();
                     let disk = self.read_disk_auth();
-                    // Unattributed + diverging RTs: demote without recording so
-                    // the next attempt can try the other side (no sticky lockout).
-                    if tried_key.is_none() && self.sibling_has_different_refresh_token() {
+                    // Diverging RTs mean a sibling rotated while we were in
+                    // flight: our RT was superseded, not revoked. Demote
+                    // without recording so the next attempt picks up the
+                    // sibling's token (no sticky lockout, no credential loss).
+                    //
+                    // When the refresher told us which RT it spent (every
+                    // in-tree OIDC path), compare disk against *that*. The
+                    // legacy disk-vs-memory heuristic is only a fallback for
+                    // unattributed authorities: it asks the wrong question,
+                    // because `resolve_refresh_credential` is disk-first, so
+                    // the RT actually spent is usually the disk one and the
+                    // comparison collapses to "false" exactly when it matters.
+                    //
+                    // Both arms and the log below read one `disk` observation.
+                    // Re-reading per use lets the decision and the line that
+                    // explains it disagree about what disk held.
+                    let disk_rt = disk.as_ref().and_then(|d| d.refresh_token.as_deref());
+                    let sibling_rotated = match tried_refresh_token.as_deref() {
+                        Some(tried_rt) => Self::refresh_token_superseded(disk_rt, tried_rt),
+                        None => {
+                            tried_key.is_none() && self.sibling_has_different_refresh_token(disk_rt)
+                        }
+                    };
+                    if sibling_rotated {
                         tracing::info!("auth: sibling-rotation detected; demoting to transient");
+                        xai_grok_telemetry::unified_log::info(
+                            "auth.refresh.sibling_rotation_demoted",
+                            None,
+                            Some(serde_json::json!({
+                                "reason": format!("{failed_reason:?}"),
+                                "tried_rt_prefix": tried_refresh_token
+                                    .as_deref()
+                                    .map(token_suffix),
+                                "disk_rt_prefix": disk_rt.map(token_suffix),
+                            })),
+                        );
                         return Err(AuthError::transient(format!(
                             "sibling-rotation: {failed_reason:?}"
                         )));
@@ -1933,7 +1991,13 @@ impl AuthManager {
     /// Re-read auth.json from disk and update the in-memory cache (used by the
     /// refresh chains). Non-destructive: only updates in-memory if disk has a
     /// different valid token (a sibling process wrote a fresher one).
-    pub(crate) fn pick_up_sibling_token(&self) {
+    ///
+    /// Returns `true` only when in-memory state was actually replaced, so
+    /// callers can log adoption truthfully instead of inferring it from
+    /// "we have a token now" — which is also true when our own token was fine
+    /// all along, and made the proactive-refresh log actively misleading when
+    /// reconstructing a rotation chain after an incident.
+    pub(crate) fn pick_up_sibling_token(&self) -> bool {
         let auth = match read_auth_json(&self.path) {
             Ok(map) => lookup_auth(&map, &self.scope),
             _ => None,
@@ -1953,7 +2017,9 @@ impl AuthManager {
                 })),
             );
             self.with_inner_write(|inner| *inner = Some(a.clone()));
+            return true;
         }
+        false
     }
 
     /// Check if a candidate auth has a different token than what's in memory.
@@ -2248,7 +2314,7 @@ impl AuthManager {
                 // already refreshed and wrote a valid token to disk.
                 // Combined with jitter, the first process to wake
                 // refreshes; later processes adopt the result here.
-                this.pick_up_sibling_token();
+                let adopted_from_sibling = this.pick_up_sibling_token();
                 if this.current().is_some() {
                     let adopted = this.current().map(|a| token_suffix(&a.key).to_owned());
                     let expires_at = this
@@ -2256,14 +2322,25 @@ impl AuthManager {
                         .read()
                         .as_ref()
                         .and_then(|a| a.expires_at.map(|e| e.to_rfc3339()));
-                    tracing::info!(
-                        "auth: proactive refresh skipped, adopted sibling token from disk"
-                    );
+                    // Distinguish "a sibling's token replaced ours" from "our
+                    // own token is still valid". Both skip the refresh, but
+                    // conflating them makes the log actively misleading when
+                    // reconstructing a rotation chain after an incident.
+                    if adopted_from_sibling {
+                        tracing::info!(
+                            "auth: proactive refresh skipped, adopted sibling token from disk"
+                        );
+                    } else {
+                        tracing::info!(
+                            "auth: proactive refresh skipped, in-memory token still valid"
+                        );
+                    }
                     xai_grok_telemetry::unified_log::info(
-                        "auth: proactive refresh adopted sibling token",
+                        "auth: proactive refresh skipped",
                         None,
                         Some(serde_json::json!({
-                            "adopted_key_prefix": adopted,
+                            "adopted_from_sibling": adopted_from_sibling,
+                            "key_prefix": adopted,
                             "expires_at": expires_at,
                         })),
                     );

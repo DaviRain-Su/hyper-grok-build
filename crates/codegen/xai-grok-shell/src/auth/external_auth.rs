@@ -5,7 +5,7 @@ use crate::util::subprocess::CommandLog;
 use crate::util::subprocess::RunError;
 use crate::util::subprocess::RunOptions;
 use crate::util::subprocess::run_detached_with_timeout;
-use crate::util::subprocess::sh_c;
+use crate::util::subprocess::shell_c;
 use std::time::Duration;
 
 /// Parse stdout into a session-credential `GrokAuth`.
@@ -55,7 +55,7 @@ const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) async fn run_external_refresh(command: &str) -> Option<GrokAuth> {
     tracing::info!(cmd = %command, timeout_secs = EXTERNAL_AUTH_REFRESH_TIMEOUT.as_secs(), "auth: running external auth provider (headless refresh)");
 
-    let mut cmd = sh_c(command);
+    let mut cmd = shell_c(command);
     cmd.env("GROK_AUTH_EXPIRED", "1");
     // Route through the group-killing runner so a provider that spawns helpers
     // is torn down as a unit on timeout.

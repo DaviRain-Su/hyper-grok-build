@@ -3,7 +3,7 @@
 //! Resuming a large session once OOM-killed the process under a cgroup cap.
 //!
 //! Run:
-//!   cargo test -p xai-grok-shell --features dhat-heap --test test_session_load_memory \
+//!   cargo test -p xai-grok-shell --features dhat-heap,test-support --test test_session_load_memory \
 //!       session_load_dhat_bounded_and_freed -- --ignored --nocapture
 
 #![cfg(unix)]

@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
+use xai_grok_tools::util::ProcessGroup;
 
 use crate::config::HookSpec;
 use crate::event::HookEventEnvelope;
@@ -17,6 +19,23 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Exit code that a blocking hook uses to signal an explicit deny (PreToolUse)
 /// or block (Stop/SubagentStop, with stderr as the feedback).
 const GATE_EXIT_CODE: i32 = 2;
+
+/// `None` when the group cannot be built, which only costs session reaping, so
+/// the hook still runs.
+fn hook_process_group(child: &tokio::process::Child) -> Option<Arc<ProcessGroup>> {
+    let mut group = ProcessGroup::new()
+        .inspect_err(
+            |e| tracing::warn!(pid = child.id(), error = %e, "hook: no process group; not reaped on session close"),
+        )
+        .ok()?;
+    group
+        .attach(child)
+        .inspect_err(
+            |e| tracing::warn!(pid = child.id(), error = %e, "hook: process group attach failed; not reaped on session close"),
+        )
+        .ok()?;
+    Some(Arc::new(group))
+}
 
 /// Run a single hook command.
 ///
@@ -166,6 +185,21 @@ pub async fn run_command_hook(
         }
     };
 
+    let mut hook_group = None;
+    if let Some(scope) = ctx.process_scope.as_ref()
+        && let Some(group) = hook_process_group(&child)
+    {
+        // A closed scope means the session is gone and `register` already killed
+        // the child, so stop rather than write stdin to a corpse.
+        if !scope.register(&group) {
+            return (
+                HookRunnerResult::Failed("session closed before the hook ran".to_string()),
+                start.elapsed(),
+            );
+        }
+        hook_group = Some(group);
+    }
+
     // Write stdin concurrently with draining output, under the timeout: a hook
     // that never reads stdin would otherwise block `write_all` on a full pipe
     // buffer, outside the deadline.
@@ -184,14 +218,18 @@ pub async fn run_command_hook(
 
     let elapsed = start.elapsed();
 
+    // killpg takes grandchildren that kill_on_drop would miss.
+    if !matches!(result, Ok(Ok(_)))
+        && let Some(group) = &hook_group
+    {
+        let _ = group.kill();
+    }
+
     match result {
-        Err(_) => {
-            // Timeout: kill_on_drop handles cleanup.
-            (
-                HookRunnerResult::Failed(format!("timed out after {}ms", spec.timeout_ms)),
-                elapsed,
-            )
-        }
+        Err(_) => (
+            HookRunnerResult::Failed(format!("timed out after {}ms", spec.timeout_ms)),
+            elapsed,
+        ),
         Ok(Err(e)) => (
             HookRunnerResult::Failed(format!("command execution failed: {e}")),
             elapsed,
@@ -907,6 +945,14 @@ mod tests {
         RunContext {
             session_id: "test-session",
             workspace_root: "/tmp",
+            process_scope: None,
+        }
+    }
+
+    fn make_scoped_ctx(scope: xai_grok_tools::util::ProcessScope) -> RunContext<'static> {
+        RunContext {
+            process_scope: Some(scope),
+            ..make_ctx()
         }
     }
 
@@ -1106,6 +1152,7 @@ mod tests {
         let ctx = RunContext {
             session_id: "test-session",
             workspace_root: &workspace,
+            process_scope: None,
         };
         let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
@@ -1380,6 +1427,72 @@ mod tests {
             matches!(result, HookRunnerResult::Success),
             "hook with parameter-expansion default must run, got {:?}",
             result
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_hook_session_close_reaps_whole_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("grandchild_alive");
+        // `& wait` keeps the leader alive while the grandchild outlives it, so
+        // only a group kill stops the marker being written.
+        let mut spec = make_shell_spec(&format!(
+            "sh -c 'sleep 2 && echo alive > {}' & wait",
+            marker.display()
+        ));
+        spec.timeout_ms = 60_000;
+        let envelope = make_envelope();
+        let scope = xai_grok_tools::util::ProcessScope::new();
+        let hook_scope = scope.clone();
+        let hook = tokio::spawn(async move {
+            run_command_hook(
+                &spec,
+                &envelope,
+                &make_scoped_ctx(hook_scope),
+                GateKind::Observe,
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        scope.kill_all();
+
+        tokio::time::timeout(Duration::from_secs(15), hook)
+            .await
+            .expect("kill_all must reap the enrolled hook, not leave it on its 60s timeout")
+            .expect("hook task join");
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "grandchild outlived session close, so the group was not killpg'd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_hook_fails_fast_when_scope_already_closed() {
+        let scope = xai_grok_tools::util::ProcessScope::new();
+        scope.kill_all();
+        let mut spec = make_shell_spec("sleep 600");
+        spec.timeout_ms = 60_000;
+
+        let (result, _) = tokio::time::timeout(
+            Duration::from_secs(15),
+            run_command_hook(
+                &spec,
+                &make_envelope(),
+                &make_scoped_ctx(scope),
+                GateKind::Observe,
+            ),
+        )
+        .await
+        .expect("a closed scope must fail the hook immediately, not run to its 60s timeout");
+
+        assert!(
+            matches!(result, HookRunnerResult::Failed(_)),
+            "got {result:?}"
         );
     }
 }

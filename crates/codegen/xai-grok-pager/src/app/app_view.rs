@@ -265,7 +265,7 @@ pub enum TickDemand {
 pub const SLOW_TICK_INTERVAL: Duration = Duration::from_millis(83);
 /// Welcome toast lifetime (wall clock, so the duration holds whether the
 /// event loop is ticking Slow or Fast).
-const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(4);
+const WELCOME_TOAST_DURATION: Duration = Duration::from_secs(2);
 /// Which prompt box in-flight voice dictation appends its finalized text to.
 /// Captured when recording **starts** so a trailing STT final still lands where
 /// the user was dictating, even if they navigate away — or toggle a dashboard
@@ -1211,8 +1211,16 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
     };
     chrono::Utc::now() >= next
 }
-/// Bottom-right toast overlay on the welcome screen (mirrors agent toast style).
-fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, msg: &str) {
+/// Welcome-screen toast overlay (mirrors agent toast style).
+///
+/// Prefer one row above the prompt, right-aligned to it. Fall back to
+/// the view bottom-right when no prompt rect is available (login / gate).
+fn paint_welcome_toast(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    msg: &str,
+    prompt_rect: Option<ratatui::layout::Rect>,
+) {
     let theme = crate::theme::Theme::current();
     let max_msg = (area.width as usize).saturating_sub(4);
     if max_msg == 0 || area.height == 0 {
@@ -1225,8 +1233,16 @@ fn paint_welcome_toast(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout:
         format!(" {}… ", truncated.trim_end())
     };
     let w = toast.chars().count() as u16;
-    let x = area.right().saturating_sub(w + 1);
-    let y = area.bottom().saturating_sub(1);
+    let (x, y) = if let Some(prompt) = prompt_rect.filter(|r| r.width > 0 && r.y > area.y) {
+        let max_x = area.right().saturating_sub(w).max(area.x);
+        let x = prompt.right().saturating_sub(w + 1).clamp(area.x, max_x);
+        (x, prompt.y.saturating_sub(1))
+    } else {
+        (
+            area.right().saturating_sub(w + 1),
+            area.bottom().saturating_sub(1),
+        )
+    };
     for (i, ch) in toast.chars().enumerate() {
         if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
             cell.set_char(ch);
@@ -2076,7 +2092,7 @@ impl AppView {
     ///
     /// From the dashboard, toasts route into the dispatch input's inline
     /// error slot. From an agent view the existing per-agent toast machinery
-    /// fires. On welcome, a bottom-right overlay for
+    /// fires. On welcome, an overlay above the prompt for
     /// [`WELCOME_TOAST_DURATION`].
     pub fn show_toast(&mut self, msg: &str) {
         match self.active_view {
@@ -4567,7 +4583,12 @@ impl AppView {
                         self.welcome_privacy_banner_policy_rect = result.privacy_banner_policy_rect;
                         self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
-                            paint_welcome_toast(f.buffer_mut(), view_area, msg);
+                            paint_welcome_toast(
+                                f.buffer_mut(),
+                                view_area,
+                                msg,
+                                self.welcome_prompt_rect,
+                            );
                         }
                         self.welcome_announcement.truncated = result.announcement_truncated;
                         self.welcome_announcement.rect = result.announcement_rect;

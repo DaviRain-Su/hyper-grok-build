@@ -34,6 +34,16 @@ fn event_value(event_name: &str) -> &str {
     event_name
 }
 
+/// Product-analytics `$insert_id`: unique per emit, ≤36 bytes, `[A-Za-z0-9-]`.
+///
+/// Do not put the event name in this field. The analytics sink truncates to 36
+/// chars and rejects most other characters; a name-prefixed id either collapses
+/// to a constant (long names → per-user same-second dedup) or is dropped and
+/// regenerated (shorter names with `:`). A bare UUID always validates.
+fn product_analytics_insert_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 #[derive(Clone)]
 pub struct TelemetryClient {
     mode: TelemetryMode,
@@ -114,6 +124,7 @@ impl TelemetryClient {
 fn normalize_tier(tier: &str) -> String {
     match tier {
         "SuperGrok Heavy" | "supergrok_heavy" => "supergrok_heavy",
+        "SuperGrok Plus" | "supergrok_plus" => "supergrok_plus",
         "SuperGrok" | "supergrok" => "supergrok",
         "SuperGrok Lite" | "supergrok_lite" => "supergrok_lite",
         "X Premium+" | "x_premium_plus" => "x_premium_plus",
@@ -236,7 +247,7 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
     // Mixpanel path
     if let Some(ref mixpanel) = client.mixpanel {
         let time_secs = chrono::Utc::now().timestamp();
-        let insert_id = format!("{event_name}:{request_id}:{time_secs}");
+        let insert_id = product_analytics_insert_id();
 
         // Convert serde_json::Map to HashMap for mixpanel
         let mut props: std::collections::HashMap<String, serde_json::Value> =
@@ -495,6 +506,8 @@ mod tests {
         assert_eq!(normalize_tier("X Premium+"), "x_premium_plus");
         assert_eq!(normalize_tier("X Premium"), "x_premium");
         assert_eq!(normalize_tier("SuperGrok Lite"), "supergrok_lite");
+        assert_eq!(normalize_tier("SuperGrok Plus"), "supergrok_plus");
+        assert_eq!(normalize_tier("supergrok_plus"), "supergrok_plus");
         // API key is a dedicated Mixpanel segment — never free.
         assert_eq!(normalize_tier("API Key"), "api_key");
         assert_eq!(normalize_tier("api_key"), "api_key");

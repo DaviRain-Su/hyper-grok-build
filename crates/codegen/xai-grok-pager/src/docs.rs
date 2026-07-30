@@ -186,6 +186,16 @@ pub static USER_GUIDE: &[Doc] = &[
         "Permissions and Safety",
         "Modes, authorization order, allow/ask/deny rules, matching, and hooks"
     ),
+    guide!(
+        "23-dashboard.md",
+        "Agent Dashboard",
+        "Live multi-session roster: peek, dispatch, pin, stop, and search"
+    ),
+    guide!(
+        "24-monitoring-usage.md",
+        "Monitoring Usage (External OpenTelemetry)",
+        "Export usage metrics to a customer OpenTelemetry collector"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they
