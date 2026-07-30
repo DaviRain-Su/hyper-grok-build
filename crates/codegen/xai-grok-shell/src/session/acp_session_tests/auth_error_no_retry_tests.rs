@@ -557,8 +557,12 @@ async fn proactive_refresh_makes_per_turn_refresh_a_cache_hit() {
             let cancel = tokio_util::sync::CancellationToken::new();
             am.start_proactive_refresh(cancel.clone());
 
-            // Wait for proactive task to fire.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Wait for the proactive task to fire; its first pass runs after
+            // PROACTIVE_MIN_SLEEP, so the window must exceed the floor.
+            tokio::time::sleep(
+                crate::auth::manager::PROACTIVE_MIN_SLEEP + std::time::Duration::from_millis(1000),
+            )
+            .await;
             assert!(
                 call_count.load(Ordering::SeqCst) >= 1,
                 "proactive task must have fired"

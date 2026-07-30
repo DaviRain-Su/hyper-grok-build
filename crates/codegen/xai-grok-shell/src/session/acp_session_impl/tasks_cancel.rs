@@ -176,17 +176,29 @@ async fn run_task(
 }
 
 impl SessionActor {
-    pub(super) fn cancel_running_turn_subagents(&self) {
-        let Some(parent_prompt_id) = self
-            .current_prompt_id
-            .lock()
-            .expect("current_prompt_id mutex poisoned")
-            .clone()
-        else {
-            return;
-        };
+    /// Turn-scoped: soft cancel / max-turns only (not user Stop).
+    /// `parent_prompt_id` is the authoritative turn id from the turn runner.
+    pub(super) fn cancel_running_turn_subagents(&self, parent_prompt_id: &str) {
+        self.cancel_subagents_for_prompt_id(parent_prompt_id);
+    }
 
-        self.cancel_subagents_for_prompt_id(&parent_prompt_id);
+    /// User Stop with cancel_subagents: all non-workflow session children.
+    /// Uses the session-bound backend API so cancel never wildcards other sessions.
+    pub(super) fn cancel_all_session_subagents(&self) {
+        if let Some(event_tx) = self.tool_context.subagent_event_tx.clone() {
+            use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
+            let backend = ChannelBackend::for_session(event_tx, self.session_id_string());
+            let _ = backend.request_cancel_parent_session(tokio::sync::oneshot::channel().0);
+        }
+    }
+
+    /// Re-open Task spawns for this session after a prior user Stop.
+    pub(super) fn open_subagent_spawn_admission(&self) {
+        if let Some(event_tx) = self.tool_context.subagent_event_tx.clone() {
+            use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
+            let backend = ChannelBackend::for_session(event_tx, self.session_id_string());
+            let _ = backend.open_spawn_admission();
+        }
     }
 
     fn cancel_subagents_for_prompt_id(&self, parent_prompt_id: &str) {
@@ -290,7 +302,18 @@ impl SessionActor {
         }
 
         if cancel_subagents {
-            self.cancel_running_turn_subagents();
+            // Abort the producer first so it cannot enqueue more TaskTool work
+            // after the ParentSession sweep. Keep the task slot for prompt-id
+            // attribution below; cleanup will take+abort again (idempotent).
+            {
+                let state = self.state.lock().await;
+                if let Some(task) = state.running_task.as_ref() {
+                    task.abort();
+                }
+            }
+            // Then cancel every non-workflow session child (incl. prior turns)
+            // and close spawn admission until the next turn opens it.
+            self.cancel_all_session_subagents();
         }
 
         // Don't count send-now/rewound cancels — they'd skew the cancel-rate signal.

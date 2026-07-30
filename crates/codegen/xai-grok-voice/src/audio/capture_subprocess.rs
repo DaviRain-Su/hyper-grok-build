@@ -87,6 +87,7 @@ fn spawn_helper(args: &[&str]) -> Result<(Child, ChildStdout), VoiceError> {
     // The helper must not share the pager's controlling TTY.
     xai_tty_utils::detach_std_command(&mut cmd);
 
+    #[allow(clippy::disallowed_methods)] // helper owned by the capture handle, killed on stop
     let mut child = cmd
         .spawn()
         .map_err(|e| VoiceError::Config(format!("spawn mic helper: {e}")))?;
@@ -334,6 +335,7 @@ mod tests {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
             xai_tty_utils::detach_std_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
             let mut child = cmd.spawn().expect("spawn sh");
             let stdout = child.stdout.take().expect("stdout");
             (child, stdout)
@@ -381,6 +383,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut child = cmd.spawn().expect("spawn sh");
         let stdout = child.stdout.take().expect("stdout");
         match handshake(child, stdout, "test capture") {

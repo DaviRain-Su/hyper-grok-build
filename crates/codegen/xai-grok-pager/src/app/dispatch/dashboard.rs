@@ -56,14 +56,23 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
     state.set_voice_visible(app.voice_mode_enabled);
     state.set_restricted_commands(&app.tier_restricted_commands);
     let billing = app.usage_visible;
+    let usage_cmd = !app.has_external_auth_provider;
     state
         .dispatch
         .slash_controller
         .set_billing_surface_visible(billing);
     state
+        .dispatch
+        .slash_controller
+        .set_usage_command_visible(usage_cmd);
+    state
         .peek_reply
         .slash_controller
         .set_billing_surface_visible(billing);
+    state
+        .peek_reply
+        .slash_controller
+        .set_usage_command_visible(usage_cmd);
     app.dashboard = Some(state);
 }
 
@@ -1270,9 +1279,10 @@ pub(super) fn dispatch_dashboard_dispatch(
 ///
 /// Offer / execute tri-state (matches completion's [`command_offered`]):
 ///   - **Unknown** token → [`dispatch_dashboard_dispatch`] (new session prompt).
-///   - **Registered, not offered** (session-scoped hidden on this surface,
-///     or `dashboard_only` off-dashboard) → clear dispatch + error toast;
-///     do **not** spawn with the slash text as the prompt.
+///   - **Registered, session-scoped** (hidden on this surface) → clear
+///     dispatch + error toast; do **not** spawn with the slash as a prompt.
+///   - **Registered, not visible** (auth/feature gate, e.g. `/usage` on
+///     external auth) → still `command.run` so the command owns the error.
 ///   - **Registered, offered** → MRU + `command.run` (e.g. `/model` /
 ///     `/plan` stage the next spawn).
 pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String) -> Vec<Effect> {
@@ -1350,14 +1360,16 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             // path so the text becomes a new session's prompt.
             return dispatch_dashboard_dispatch(app, text, /* attach */ false);
         };
-        // Registered but not offered on this surface (session-scoped
-        // hidden from the dropdown, or non-dashboard `dashboard_only`):
-        // error toast — never spawn a session whose first prompt is the
-        // slash text (that was worse than the old loud Action toasts).
+        // Registered but not offered on this surface:
+        //   - session-scoped → toast; never spawn with the slash as a prompt
+        //   - `visible() == false` (e.g. `/usage` on external auth) → still
+        //     `run()` so the command owns the refusal message
         if !dashboard
             .dispatch
             .slash_controller
             .is_command_offered(command.as_ref(), &app.models)
+            && command.session_scoped()
+            && !command.offered_when_session_less()
         {
             let name = command.name();
             if let Some(d) = app.dashboard.as_mut() {
@@ -1381,6 +1393,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             bundle_state: &app.bundle_state,
             screen_mode: app.screen_mode,
             billing_surface_visible: app.usage_visible,
+            usage_command_visible: !app.has_external_auth_provider,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
                 yolo_mode: app.default_yolo,

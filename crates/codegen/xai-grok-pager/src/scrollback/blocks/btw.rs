@@ -12,6 +12,7 @@ use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput
 use crate::theme::Theme;
 
 use super::markdown_content::MarkdownContent;
+use crate::appearance::AppearanceConfig;
 
 /// Block displaying a /btw side-question and its response.
 #[derive(Debug, Clone)]
@@ -80,7 +81,7 @@ impl BlockContent for BtwBlock {
         true
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 

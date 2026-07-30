@@ -1308,8 +1308,7 @@ impl SessionActor {
                     .await
                     .into_iter()
                     .collect();
-                let bridge_for_skills = self.agent.borrow().tool_bridge().clone();
-                let skills = bridge_for_skills.slash_skills().await;
+                let skills = self.slash_skills_for_resolve().await;
                 let edited_paths = self.chat_state_handle.get_agent_edited_paths().await;
                 let ctx = {
                     let bridge_tasks = self
@@ -2302,6 +2301,7 @@ mod inline_auto_compact_flow_tests {
             model_auth_memo: std::cell::RefCell::new(None),
             attribution_callback: None,
             auth_manager: None,
+            is_chat_kind: false,
             state,
             notifications: NotificationSender {
                 gateway: GatewaySender::new(gateway_tx),

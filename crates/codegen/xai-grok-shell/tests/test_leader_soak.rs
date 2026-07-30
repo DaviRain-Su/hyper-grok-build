@@ -9,6 +9,14 @@
 
 #![cfg(unix)]
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// Warmup so the window measures steady state, not first-session cost.
+#[cfg(feature = "dhat-heap")]
+const HEAP_WARMUP_CYCLES: u64 = 2;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +77,24 @@ async fn rpc(client: &mut LeaderClient, payload: String, id: u64, what: &str) ->
             return json;
         }
     }
+}
+
+/// Per-registry entry counts. `x.ai/debug/agent` answers under the extension
+/// envelope's own `result`, nested inside the JSON-RPC `result`.
+async fn registry_counts(client: &mut LeaderClient, id: u64) -> serde_json::Value {
+    let resp = rpc(
+        client,
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"_x.ai/debug/agent","params":{{}}}}"#),
+        id,
+        "x.ai/debug/agent",
+    )
+    .await;
+    let counts = resp["result"]["result"]["registries"].clone();
+    assert!(
+        counts.is_object(),
+        "x.ai/debug/agent returned no registries: {resp}"
+    );
+    counts
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -172,11 +198,14 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
             eprintln!(
                 "[soak] budgets: {soak_secs}s, rss {max_growth_mb} MB, threads {max_thread_growth}"
             );
+            #[cfg(feature = "dhat-heap")]
+            let mut heap_window: Option<(dhat::Profiler, dhat::HeapStats, u64)> = None;
             let rss_before = ResourceSnapshot::capture();
             let soak_deadline = tokio::time::Instant::now() + Duration::from_secs(soak_secs);
             let workdir_str = workdir.path().to_string_lossy().to_string();
             let mut cycles: u64 = 0;
             let mut turns: u64 = 0;
+            let mut baseline: Option<serde_json::Value> = None;
 
             // Each cycle: 10 fresh clients, 2 sessions each, one scripted
             // turn per session, then all disconnect.
@@ -252,6 +281,34 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
 
+                // An entry that never drains names itself here, one cycle
+                // after it leaks, while memory is still within its budget.
+                let counts = registry_counts(&mut bootstrap, 1000 + cycles).await;
+                assert_eq!(
+                    counts["sessions"], 0,
+                    "cycle {cycles}: sessions outlived their close: {counts}"
+                );
+                match baseline.as_ref() {
+                    None => baseline = Some(counts),
+                    Some(first) => assert_eq!(
+                        &counts, first,
+                        "cycle {cycles}: registry counts left their baseline"
+                    ),
+                }
+
+                #[cfg(feature = "dhat-heap")]
+                if cycles == HEAP_WARMUP_CYCLES {
+                    let profiler = dhat::Profiler::builder()
+                        // The 10-frame default never reaches our own code.
+                        .trim_backtraces(Some(48))
+                        .file_name(
+                            std::env::var("LEADER_SOAK_DHAT_OUT")
+                                .unwrap_or_else(|_| "dhat-leader-soak.json".to_string()),
+                        )
+                        .build();
+                    heap_window = Some((profiler, dhat::HeapStats::get(), cycles));
+                }
+
                 // Linear in cycles is a leak; flattening is the allocator.
                 if let Some(rss) = ResourceSnapshot::capture().rss {
                     eprintln!(
@@ -259,28 +316,29 @@ async fn leader_soak_churning_clients_no_leaks_no_zombies() {
                         rss as f64 / (1024.0 * 1024.0)
                     );
                 }
-                if cycles == 1 {
-                    let snap = rpc(
-                        &mut bootstrap,
-                        r#"{"jsonrpc":"2.0","id":901,"method":"_x.ai/debug/agent","params":{}}"#
-                            .to_string(),
-                        901,
-                        "x.ai/debug/agent",
-                    )
-                    .await;
-                    eprintln!("[soak] registries after cycle 1: {}", snap["result"]["registries"]);
-                }
             }
 
-            let snap = rpc(
-                &mut bootstrap,
-                r#"{"jsonrpc":"2.0","id":902,"method":"_x.ai/debug/agent","params":{}}"#
-                    .to_string(),
-                902,
-                "x.ai/debug/agent",
-            )
-            .await;
-            eprintln!("[soak] registries at end: {}", snap["result"]["registries"]);
+            // Retained heap is a leak; retained pages alone are the allocator.
+            #[cfg(feature = "dhat-heap")]
+            if let Some((profiler, before, start_cycle)) = heap_window.take() {
+                let after = dhat::HeapStats::get();
+                drop(profiler);
+                let measured = cycles.saturating_sub(start_cycle).max(1);
+                let net_bytes = after.curr_bytes as i64 - before.curr_bytes as i64;
+                let net_blocks = after.curr_blocks as i64 - before.curr_blocks as i64;
+                let per_cycle = net_bytes / measured as i64;
+                eprintln!(
+                    "[soak] heap over {measured} cycles: {net_bytes} bytes, {net_blocks} blocks \
+                     ({:.2} MB per cycle)",
+                    net_bytes as f64 / measured as f64 / (1024.0 * 1024.0)
+                );
+                let max_per_cycle = env_u64("LEADER_SOAK_MAX_HEAP_BYTES_PER_CYCLE", 4 << 20) as i64;
+                assert!(
+                    per_cycle <= max_per_cycle,
+                    "leader retained {per_cycle} heap bytes per cycle (bound {max_per_cycle})"
+                );
+            }
+
             eprintln!("[soak] {cycles} cycles, {turns} turns in {soak_secs}s budget");
             assert!(cycles > 0, "soak budget too small to complete one cycle");
 

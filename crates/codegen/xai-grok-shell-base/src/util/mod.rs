@@ -491,6 +491,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_process_by_pid_terminates_live_child() {
+        #[allow(clippy::disallowed_methods)]
         let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
@@ -547,6 +548,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kill_process_with_signal_sigkill_terminates_live_child() {
+        #[allow(clippy::disallowed_methods)]
         let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()

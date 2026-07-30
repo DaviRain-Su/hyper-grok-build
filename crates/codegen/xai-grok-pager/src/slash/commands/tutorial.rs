@@ -5,6 +5,7 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 
 /// Open the onboarding tutorial.
 pub struct TutorialCommand;
@@ -26,10 +27,12 @@ impl SlashCommand for TutorialCommand {
         "/tutorial"
     }
 
-    /// The tutorial overlay is full-TUI chrome; minimal mode has no modal
-    /// host, so the overlay would consume input invisibly. Gated off.
-    fn available_in_minimal(&self) -> bool {
-        false
+    /// Gated off rather than merely hidden: minimal has no modal host, so the
+    /// overlay's input intercept would freeze the session invisibly.
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+            why: "the tutorial overlay needs fullscreen",
+        })
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
@@ -56,13 +59,6 @@ mod tests {
     };
 
     #[test]
-    fn not_available_in_minimal() {
-        // Minimal mode can't render the overlay; the command must be gated
-        // off or the input intercept would freeze the session invisibly.
-        assert!(!TutorialCommand.available_in_minimal());
-    }
-
-    #[test]
     fn dispatches_open_tutorial() {
         let models = ModelState::default();
         let mut ctx = CommandExecCtx {
@@ -71,6 +67,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         };
         assert!(matches!(

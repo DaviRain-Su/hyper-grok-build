@@ -1006,6 +1006,7 @@ mod tests {
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", "exit 23"]);
         xai_tty_utils::detach_std_command(&mut command);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let mut child = command.spawn().expect("spawn observation fixture");
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while !process_has_exited_without_reap(child.id(), "observation fixture")

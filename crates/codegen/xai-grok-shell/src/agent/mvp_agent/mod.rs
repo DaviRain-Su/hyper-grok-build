@@ -186,6 +186,11 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
 fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
     None
 }
+fn resolve_session_computer_sessions(
+    _meta: Option<&acp::Meta>,
+) -> Result<Option<Vec<()>>, acp::Error> {
+    Ok(None)
+}
 pub(crate) struct SessionSpawnOptions<'a> {
     pub session_info: SessionInfo,
     pub cwd: AbsPathBuf,
@@ -218,6 +223,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
+    /// Sticky chat product kind for ACU / product skills sourcing.
+    pub is_chat_kind: bool,
 }
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -247,10 +254,31 @@ fn parse_session_kind(
         .and_then(|k| SessionKind::deserialize(k).ok())
         .unwrap_or(SessionKind::Build)
 }
-/// Hard-off in release builds: `kind: "chat"` meta is ignored and
-/// sessions stay on the local Build path.
+/// Whether meta requests chat kind (ignores whether the binary supports it).
+fn wants_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
+    matches!(
+        parse_session_kind(meta),
+        crate::session::unified_list::SessionKind::Chat
+    )
+}
+/// Chat-kind sessions are only active when the `chat` feature is compiled in.
 fn is_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
-    false
+    {
+        let _ = meta;
+        false
+    }
+}
+/// Fail closed when a client requests `kind: "chat"` on a build-only binary.
+fn reject_chat_kind_without_feature(meta: Option<&acp::Meta>) -> Result<(), acp::Error> {
+    {
+        if wants_chat_session_kind(meta) {
+            return Err(
+                acp::Error::invalid_params()
+                    .data("session kind \"chat\" requires a chat-enabled binary"),
+            );
+        }
+        Ok(())
+    }
 }
 fn chat_initial_model(
     is_chat_kind: bool,
@@ -355,6 +383,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
+        is_chat_kind: true,
     }
 }
 /// `_meta.noReplay` → skip gateway replay (client already has the transcript).

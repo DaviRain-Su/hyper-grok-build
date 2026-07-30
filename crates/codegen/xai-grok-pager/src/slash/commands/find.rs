@@ -6,6 +6,7 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 
 /// Open scrollback search via `/find`.
 pub struct FindCommand;
@@ -35,10 +36,10 @@ impl SlashCommand for FindCommand {
         Some("[text]")
     }
 
-    /// Minimal mode has no interactive scrollback pane to search — the
-    /// terminal's own search covers it (K7/§6.13). Gated off with a message.
-    fn available_in_minimal(&self) -> bool {
-        false
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+            why: "minimal has no scrollback pane — use your terminal's own search",
+        })
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -73,6 +74,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         }
     }
@@ -123,11 +125,5 @@ mod tests {
         assert!(cmd.takes_args());
         assert!(!cmd.args_required());
         assert_eq!(cmd.arg_placeholder(), Some("[text]"));
-    }
-
-    #[test]
-    fn not_available_in_minimal() {
-        // Native terminal search replaces in-app scrollback search in minimal.
-        assert!(!FindCommand.available_in_minimal());
     }
 }

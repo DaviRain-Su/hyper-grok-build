@@ -10,5 +10,5 @@ pub mod visibility;
 
 pub use auth_provider::{AuthCredentialProvider, CredentialSnapshot, StaticAuthCredentialProvider};
 #[cfg(feature = "middleware")]
-pub use retry_middleware::AuthRetryMiddleware;
+pub use retry_middleware::{AuthRetryMiddleware, StampedBearerSuffix, execute_with_stamp};
 pub use visibility::HttpAuth;

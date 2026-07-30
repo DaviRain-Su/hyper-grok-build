@@ -23,6 +23,8 @@ mod embedded_mode_boots_without_hanging_on_blocked_backend;
 mod initial_prompt_positional_auto_submits;
 #[path = "pty_e2e/input_echoes_at_idle_prompt.rs"]
 mod input_echoes_at_idle_prompt;
+#[path = "pty_e2e/plan_revise_empty_enter_does_not_approve.rs"]
+mod plan_revise_empty_enter_does_not_approve;
 #[path = "pty_e2e/renders_on_action.rs"]
 mod renders_on_action;
 #[path = "pty_e2e/requirements_version_failure_exits_2_with_guidance.rs"]

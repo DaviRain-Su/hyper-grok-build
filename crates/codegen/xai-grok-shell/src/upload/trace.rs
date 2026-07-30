@@ -1957,7 +1957,10 @@ mod tests {
         auth_manager.set_refresher(Arc::new(Counting(cc)));
         let cancel = tokio_util::sync::CancellationToken::new();
         auth_manager.start_proactive_refresh(cancel.clone());
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(
+            crate::auth::manager::PROACTIVE_MIN_SLEEP + std::time::Duration::from_millis(1000),
+        )
+        .await;
         assert!(call_count.load(std::sync::atomic::Ordering::SeqCst) >= 1);
         let count_after_proactive = call_count.load(std::sync::atomic::Ordering::SeqCst);
         let resolver = DynamicResolver {

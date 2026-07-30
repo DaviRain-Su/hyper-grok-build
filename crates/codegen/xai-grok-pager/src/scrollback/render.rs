@@ -431,7 +431,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             None
         };
         let renderer = EntryRenderer::new(entry, theme)
-            .with_appearance(appearance.clone())
+            .with_appearance_ref(appearance)
             .with_tick(tick)
             .with_skip_rows(skip_rows)
             .with_groupable(entry.block.is_groupable())
@@ -1041,7 +1041,7 @@ mod tests {
         let mut layouts: Vec<EntryLayoutInfo> = entries
             .iter()
             .map(|e| {
-                let renderer = EntryRenderer::new(e, &theme).with_appearance(appearance.clone());
+                let renderer = EntryRenderer::new(e, &theme).with_appearance_ref(appearance);
                 let height = renderer.desired_height(content_width);
                 EntryLayoutInfo {
                     height,

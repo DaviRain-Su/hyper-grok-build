@@ -1,0 +1,20 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-extra-ca"
+version = "0.1.0"
+edition.workspace = true
+description = "Opt-in extra TLS roots from GROK_EXTRA_CA_BUNDLE (validated DER cache + reqwest 0.12 adapters)"
+
+[dependencies]
+reqwest = { workspace = true }
+# Explicit pin (not `workspace = true`): the workspace rustls pin enables
+# aws-lc-rs. This crate only needs RootCertStore + PEM parse, so stay
+# default-features = false with `std` (enables pki-types/std for PEM).
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

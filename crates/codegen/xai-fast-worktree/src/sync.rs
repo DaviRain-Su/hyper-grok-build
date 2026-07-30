@@ -604,6 +604,7 @@ fn replay_staged_changes(
     //   <mode> SP <hex-hash> TAB <path> NUL
     if !staged_adds.is_empty() {
         use std::io::Write;
+        #[allow(clippy::disallowed_methods)] // git command, waited on below
         let mut child = git_command()
             .current_dir(worktree)
             .args(["update-index", "-z", "--index-info"])

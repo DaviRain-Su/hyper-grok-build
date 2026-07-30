@@ -819,7 +819,7 @@ pub struct AgentDefinition {
     pub isolation: Option<IsolationMode>,
     #[serde(default)]
     pub background: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_agent_color")]
     pub color: Option<AgentColor>,
     #[serde(default)]
     pub initial_prompt: Option<String>,
@@ -1105,11 +1105,13 @@ const _: () =
     Eq,
     Deserialize,
     serde::Serialize,
+    AsRefStr,
+    EnumString,
     IntoStaticStr,
     strum::EnumCount,
 )]
 #[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 pub enum AgentColor {
     Red,
     Blue,
@@ -1126,6 +1128,35 @@ impl AgentColor {
     ];
 }
 const _: () = assert!(AgentColor::VALID_VALUES.len() == <AgentColor as strum::EnumCount>::COUNT);
+/// Never fails: `color` is decorative, but a rejected value fails the whole
+/// frontmatter parse, and discovery skips agents that fail to parse — so a
+/// typo'd or hex color would silently make the agent unspawnable.
+///
+/// Frontmatter is only ever decoded by `serde_yaml`, so the intermediate value
+/// is captured as `serde_yaml::Value` (total for YAML — tagged scalars and
+/// maps with non-string keys included, which have no `serde_json::Value`
+/// form). Unrecognized values are dropped to `None` with a warning rather
+/// than mapped to a stand-in color the author never wrote.
+fn deserialize_agent_color<'de, D>(deserializer: D) -> Result<Option<AgentColor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::str::FromStr;
+    let Some(value) = Option::<serde_yaml::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let parsed = value
+        .as_str()
+        .and_then(|name| AgentColor::from_str(name.trim()).ok());
+    if parsed.is_none() {
+        tracing::warn!(
+            color = ?value,
+            valid = ?AgentColor::VALID_VALUES,
+            "unrecognized agent color, ignoring"
+        );
+    }
+    Ok(parsed)
+}
 /// Agent memory scope. Distinct from `storage::MemoryScope` (global-vs-workspace write target).
 #[derive(
     Debug,
@@ -2270,8 +2301,10 @@ description: Minimal agent
         }
         for color in AgentColor::VALID_VALUES {
             let c = format!("---\nname: t\ndescription: t\ncolor: {color}\n---\n");
-            assert!(
-                AgentDefinition::parse(&c).unwrap().color.is_some(),
+            let parsed = AgentDefinition::parse(&c).unwrap().color;
+            assert_eq!(
+                parsed.map(<&'static str>::from),
+                Some(*color),
                 "color: {color}"
             );
         }
@@ -2282,6 +2315,33 @@ description: Minimal agent
                 "memory: {memory}"
             );
         }
+    }
+    #[test]
+    fn unparseable_color_is_dropped_instead_of_dropping_the_agent() {
+        for (declared, expected) in [
+            ("Purple", Some(AgentColor::Purple)),
+            ("  CYAN  ", Some(AgentColor::Cyan)),
+            ("teal", None),
+            ("\"#ff0000\"", None),
+            ("chartreuse", None),
+            ("42", None),
+            ("[red, blue]", None),
+            ("!custom x", None),
+            ("{1: 2}", None),
+        ] {
+            let c = format!("---\nname: t\ndescription: t\ncolor: {declared}\n---\n");
+            let def = AgentDefinition::parse(&c)
+                .unwrap_or_else(|e| panic!("color {declared} must not fail the parse: {e}"));
+            assert_eq!(def.color, expected, "color: {declared}");
+            assert_eq!(def.name, "t");
+        }
+    }
+    #[test]
+    fn absent_or_null_color_stays_none() {
+        let def = AgentDefinition::parse("---\nname: t\ndescription: t\n---\n").unwrap();
+        assert!(def.color.is_none());
+        let def = AgentDefinition::parse("---\nname: t\ndescription: t\ncolor:\n---\n").unwrap();
+        assert!(def.color.is_none());
     }
     #[test]
     fn test_parse_missing_name() {

@@ -78,6 +78,7 @@ impl StaticShellSnapshot {
                 .kill_on_drop(true);
             crate::util::detach_command(&mut cmd);
             cmd.envs(crate::util::pager_env());
+            #[allow(clippy::disallowed_methods)] // probe killed on drop
             let mut child = cmd.spawn().ok()?;
 
             let mut stdout_buf = Vec::new();
@@ -268,6 +269,7 @@ mod tests {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         cmd.fd_mappings(prep.fd_mappings).unwrap();
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let child = cmd.spawn().unwrap();
         drop(cmd);
 

@@ -44,6 +44,20 @@ use xai_grok_tools::util::{ProcessGroup, ProcessScope};
 /// for callers that historically imported it from this module.
 pub use xai_grok_workspace_types::MCP_TOOL_NAME_DELIMITER;
 
+/// Reqwest 0.13 adapter over `xai_grok_extra_ca::extra_root_ders` (DER is version-neutral).
+fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    for der in xai_grok_extra_ca::extra_root_ders() {
+        match reqwest::Certificate::from_der(der) {
+            Ok(cert) => builder = builder.add_root_certificate(cert),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "GROK_EXTRA_CA_BUNDLE: validated DER rejected by reqwest 0.13; skipping cert"
+            ),
+        }
+    }
+    builder
+}
+
 /// Normalize an MCP server URL for comparison: strip trailing slashes.
 /// Must match the normalization the host's managed-config layer uses
 /// (e.g. shell's `session::managed_mcp::normalize_url`) so refresh
@@ -1148,6 +1162,24 @@ impl McpError {
     }
 }
 
+/// True when a failed refresh-token grant was a **network-level** failure
+/// that never reached the IdP (RT validity unknown, presumed good); IdP
+/// rejections and missing credentials stay terminal (escalate to browser).
+/// rmcp 2.1 collapses the error into `TokenRefreshFailed(String)`, so this
+/// anchors on the `oauth2` crate's stable `Display` texts via
+/// `starts_with` (an IdP error description can't spoof a match):
+/// `"Request failed"` = network, `"Failed to parse server response"` =
+/// non-OAuth 5xx/proxy bodies; `"Server returned error response: …"` does
+/// NOT match.
+pub(crate) fn mcp_refresh_failure_is_transient(err: &rmcp::transport::auth::AuthError) -> bool {
+    match err {
+        rmcp::transport::auth::AuthError::TokenRefreshFailed(msg) => {
+            msg.starts_with("Request failed") || msg.starts_with("Failed to parse server response")
+        }
+        _ => false,
+    }
+}
+
 /// True if an MCP error *message* indicates an auth rejection (vs. a transport
 /// drop, timeout, or protocol error), so host recovery can decide whether a
 /// credential re-fetch would help.
@@ -2037,6 +2069,7 @@ impl SafeTokioChildProcess {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        #[allow(clippy::disallowed_methods)] // enrolled in the session scope below
         let mut child = cmd.spawn()?;
         let stdin = child
             .stdin
@@ -2810,7 +2843,12 @@ impl McpClient {
     /// Tries in order:
     /// 1. Reload from disk (picks up tokens from background auth task)
     /// 2. Refresh via refresh_token grant
-    /// 3. Full browser-based OAuth flow
+    /// 3. Full browser-based OAuth flow — unless the refresh failure was a
+    ///    pure network failure ([`mcp_refresh_failure_is_transient`]): the
+    ///    stored refresh token is then still presumed valid, and opening a
+    ///    browser tab / re-running DCR for a Wi-Fi blip right after
+    ///    wake-from-sleep is both useless (the IdP is unreachable for the
+    ///    browser too) and destructive (it discards a working credential).
     pub async fn force_reauth(&self, force: bool) -> bool {
         let (Some(auth_mgr), Some(config)) = (&self.auth_manager, &self.http_config) else {
             return false;
@@ -2861,22 +2899,43 @@ impl McpClient {
         }
 
         // Try token refresh.
-        let refresh_ok = {
+        let refresh_result = {
             let mgr = auth_mgr.lock().await;
-            mgr.refresh_token().await.is_ok()
+            mgr.refresh_token().await
         };
 
-        if refresh_ok {
-            tracing::info!(
-                server = self.server_name.as_str(),
-                "Token refreshed successfully (no browser)"
-            );
-            self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
-                config: config.clone(),
-                auth_manager: auth_mgr.clone(),
-            }))
-            .await;
-            return true;
+        match refresh_result {
+            Ok(_) => {
+                tracing::info!(
+                    server = self.server_name.as_str(),
+                    "Token refreshed successfully (no browser)"
+                );
+                self.replace_state(ClientState::Pending(PendingTransport::HttpAuth {
+                    config: config.clone(),
+                    auth_manager: auth_mgr.clone(),
+                }))
+                .await;
+                return true;
+            }
+            // Transient (network never reached the IdP): fail the attempt
+            // instead of discarding a presumed-good credential — the retry
+            // paths re-run the refresh once the network is back. An explicit
+            // user trigger (`force`) still opens the browser.
+            Err(ref e) if !force && mcp_refresh_failure_is_transient(e) => {
+                tracing::warn!(
+                    server = self.server_name.as_str(),
+                    error = %e,
+                    "Token refresh failed transiently (network); skipping browser escalation"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::info!(
+                    server = self.server_name.as_str(),
+                    error = %e,
+                    "Token refresh failed terminally; falling back to browser auth"
+                );
+            }
         }
 
         // Full browser-based OAuth flow.
@@ -3416,12 +3475,11 @@ impl McpClient {
                     }
                 }
                 ensure_figma_user_agent(&mut headers, name, &config.url);
-                let http_client = reqwest::Client::builder()
-                    .default_headers(headers)
-                    .build()
-                    .map_err(|e| {
-                        McpError::ClientError(format!("Failed to build HTTP client: {e}"))
-                    })?;
+                let http_client = with_extra_root_certificates(
+                    reqwest::Client::builder().default_headers(headers),
+                )
+                .build()
+                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
                 // `AuthClient::new` wants an owned manager, but ours is shared
                 // (`Arc`) with the OAuth flow; the struct is non_exhaustive, so
                 // build with a throwaway manager and swap in the shared one.
@@ -3626,10 +3684,10 @@ impl McpClient {
             }
         }
         ensure_figma_user_agent(&mut headers, server_name, &config.url);
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+        let client =
+            with_extra_root_certificates(reqwest::Client::builder().default_headers(headers))
+                .build()
+                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
         let mcp_http_client =
             crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget);
         let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());

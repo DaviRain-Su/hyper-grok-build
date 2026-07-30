@@ -122,6 +122,7 @@ pub(crate) async fn run_detached_with_timeout(
     xai_grok_tools::util::detach_command(&mut cmd);
     cmd.envs(xai_grok_tools::util::pager_env());
 
+    #[allow(clippy::disallowed_methods)] // a process group is built for it below
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {

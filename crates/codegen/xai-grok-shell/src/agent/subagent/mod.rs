@@ -322,6 +322,17 @@ pub(crate) struct SubagentSpawnContext {
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
 }
 impl SubagentSpawnContext {
+    /// Would installing a live bearer resolver strip this subagent's only
+    /// credential? A wired resolver is the sampler's sole auth source, so
+    /// with no session key at spawn it must not displace a real fallback
+    /// key (env `XAI_API_KEY`). Keyed on the resolved config key, not the
+    /// session cache alone — the cache is empty in exactly the post-wake /
+    /// mid-refresh states the resolver targets, and gating on it would
+    /// freeze the subagent for life. Shared by all three resolver-wiring
+    /// paths so they cannot drift.
+    fn would_strip_fallback_key(&self, resolved_api_key: Option<&str>) -> bool {
+        self.auth.is_none() && resolved_api_key.is_some()
+    }
     /// Resolve `auto_compact_threshold_percent` for the subagent's actual
     /// model id (the one selected by `resolve_subagent_sampling_config`,
     /// not the parent's). Walks the same precedence as the main session's
@@ -680,13 +691,12 @@ async fn resolve_effective_model_config(
     }
     resolve_subagent_sampling_config(subagent_type, definition_model, ctx).await
 }
-/// Truncate an API key to a safe prefix for logging.
+/// Truncate an API key to a safe prefix for logging. Counts characters, not
+/// bytes: a configured key with a multi-byte character would panic a byte
+/// slice, and this only ever runs to build a log line.
 fn key_prefix(key: &Option<String>) -> String {
     match key {
-        Some(k) => {
-            let len = k.len().min(8);
-            k[..len].to_string()
-        }
+        Some(k) => k.chars().take(8).collect(),
         None => "<none>".to_string(),
     }
 }
@@ -717,6 +727,39 @@ fn log_subagent_model_resolution(
             "keys_match": keys_match,
         })),
     );
+}
+/// Session-token bearer resolver for a subagent config, over the parent's
+/// `AuthManager` (wire-valid only). Without it the subagent runs forever on
+/// the `api_key` frozen at spawn and 401s once the parent rotates the token.
+/// Gated exactly like the parent session's resolver
+/// (`auth_method::session_token_auth_gate`); all three subagent config paths
+/// go through this.
+fn session_bearer_resolver(
+    ctx: &SubagentSpawnContext,
+    byok: crate::agent::auth_method::ModelByok,
+    base_url: &str,
+) -> Option<xai_grok_sampler::SharedBearerResolver> {
+    use crate::agent::auth_method;
+    auth_method::session_token_auth_gate(
+        auth_method::is_session_based_method(&ctx.auth_method_id),
+        byok,
+        crate::util::is_xai_api_url(base_url),
+    )
+    .then(|| {
+        crate::auth::credential_provider::WireValidBearerResolver::shared(ctx.auth_manager.clone())
+    })
+}
+/// [`session_bearer_resolver`] for an inherited config, where only the model
+/// string is known: BYOK comes from the catalog memo.
+fn inherited_bearer_resolver(
+    ctx: &SubagentSpawnContext,
+    model: &str,
+    base_url: &str,
+) -> Option<xai_grok_sampler::SharedBearerResolver> {
+    let byok = crate::agent::config::resolve_model_auth_facts_and_provider(model)
+        .0
+        .byok;
+    session_bearer_resolver(ctx, byok, base_url)
 }
 /// Read the parent session's actual current sampling config.
 ///
@@ -804,6 +847,7 @@ async fn read_parent_sampling_config(
             }
             let fail_closed_ambiguous_oauth =
                 parent_model.is_none() && oauth_origin && oauth_platform.is_none();
+            let strip_guard = ctx.would_strip_fallback_key(creds.api_key.as_deref());
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: if kimi_oauth_active
                     || responses_codex_dialect
@@ -838,7 +882,7 @@ async fn read_parent_sampling_config(
                 user_id: ctx.sampling_config.user_id.clone(),
                 origin_client: ctx.sampling_config.origin_client.clone(),
                 attribution_callback: ctx.attribution_callback.clone(),
-                bearer_resolver,
+                bearer_resolver: if strip_guard { None } else { bearer_resolver },
                 supports_backend_search: ctx
                     .models_manager
                     .model_supports_backend_search(ctx.model_id.0.as_ref()),
@@ -889,6 +933,11 @@ async fn read_parent_sampling_config(
         })),
     );
     let mut fallback = ctx.sampling_config.clone();
+    fallback.bearer_resolver = if ctx.would_strip_fallback_key(fallback.api_key.as_deref()) {
+        None
+    } else {
+        inherited_bearer_resolver(ctx, &fallback.model, &fallback.base_url)
+    };
     fallback.supports_backend_search = ctx
         .models_manager
         .model_supports_backend_search(ctx.model_id.0.as_ref());
@@ -932,7 +981,7 @@ fn resolve_model_override_to_config(
     let mut credentials = resolve_credentials(&entry, session_key);
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
-    let config = sampling_config_for_model(
+    let mut config = sampling_config_for_model(
         &entry,
         credentials,
         ctx.alpha_test_key.clone(),
@@ -940,6 +989,21 @@ fn resolve_model_override_to_config(
         ctx.sampling_config.deployment_id.clone(),
         ctx.sampling_config.user_id.clone(),
     );
+    config.bearer_resolver = if !ctx.would_strip_fallback_key(config.api_key.as_deref())
+        && resolved_auth_type == xai_chat_state::AuthType::SessionToken
+    {
+        session_bearer_resolver(
+            ctx,
+            if entry.has_own_credentials() {
+                crate::agent::auth_method::ModelByok::Byok
+            } else {
+                crate::agent::auth_method::ModelByok::NotByok
+            },
+            &config.base_url,
+        )
+    } else {
+        None
+    };
     xai_grok_telemetry::unified_log::debug(
         "subagent resolve_model_override_to_config",
         None,

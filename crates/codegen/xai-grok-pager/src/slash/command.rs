@@ -12,6 +12,7 @@
 use crate::acp::model_state::ModelState;
 use crate::app::actions::Action;
 use crate::app::bundle::BundleState;
+use crate::slash::mode_support::ModeSupport;
 use agent_client_protocol as acp;
 
 /// Provisional scheduled task info for immediate display in the tasks pane.
@@ -148,6 +149,9 @@ pub struct AppCtx<'a> {
     pub has_session_announcements: bool,
     /// Consumer billing surface (`AppView::usage_visible`). Gates `/usage` subcommands.
     pub billing_surface_visible: bool,
+    /// Whether `/usage` is offered and executable. False for external-auth
+    /// deployments with no grok.com billing session.
+    pub usage_command_visible: bool,
     pub workflows_available: bool,
     /// Effective render mode of this process (gates `/minimal` and
     /// `/fullscreen` visibility). Same source of truth as
@@ -167,6 +171,9 @@ pub struct CommandExecCtx<'a> {
     pub(crate) screen_mode: crate::app::ScreenMode,
     /// Consumer billing surface (`AppView::usage_visible`). Gates `/usage` subcommands.
     pub billing_surface_visible: bool,
+    /// Whether `/usage` is offered and executable. False for external-auth
+    /// deployments with no grok.com billing session.
+    pub usage_command_visible: bool,
     /// Snapshot of the active agent's PAGER-owned settings, built at
     /// command-build time by the dispatcher. Slash commands like
     /// `/multiline` read this to compute `!current` and dispatch a
@@ -284,24 +291,26 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
-    /// Whether this command functions in the scrollback-native **minimal**
-    /// mode (`grok --minimal`).
+    /// Which render modes this command functions in.
     ///
-    /// Minimal mode deletes the interactive fullscreen scrollback pane, the
-    /// in-app mouse selection path, and the agent dashboard, handing scroll /
-    /// search / selection back to the terminal (K7). Commands that drive those
-    /// deleted surfaces — `/find`, `/dashboard` — have nothing to act on, so
-    /// the central dispatch gate refuses them with a "/<x> is not available in
-    /// minimal mode" message (committed as a system block). Clipboard helpers
-    /// like `/copy` stay available: they read scrollback state and do not need
-    /// the fullscreen pane.
+    /// Minimal mode (`grok --minimal`) deletes the interactive fullscreen
+    /// scrollback pane, the in-app mouse selection path, and the agent
+    /// dashboard, handing scroll / search / selection back to the terminal
+    /// (K7); a few commands exist only there, because the full TUI solves the
+    /// same problem with a pane or a chord. Declaring the mode here is the
+    /// single source for both behaviors: the command is hidden from every
+    /// completion surface in the modes it does not support (`command_offered`),
+    /// and a fully-typed invocation is refused with an actionable hint by the
+    /// central dispatch gate instead of running against a surface that does not
+    /// exist.
     ///
-    /// Defaults to `true` — a **denylist, not an allowlist**: the many
-    /// mode-agnostic commands keep working and new commands are available in
-    /// minimal by default (the mode is converging toward parity). Override to
-    /// `false` only for genuinely fullscreen-pane-dependent commands.
-    fn available_in_minimal(&self) -> bool {
-        true
+    /// Defaults to [`ModeSupport::Both`] — a **denylist, not an allowlist**:
+    /// the many mode-agnostic commands keep working and new commands are
+    /// available everywhere by default (minimal is converging toward parity).
+    /// Clipboard helpers like `/copy` stay `Both`: they read scrollback state
+    /// and do not need the fullscreen pane.
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::Both
     }
 
     /// Placeholder text shown in the prompt when args are empty.

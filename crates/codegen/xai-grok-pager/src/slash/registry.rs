@@ -14,6 +14,7 @@ use xai_grok_tools::implementations::skills::types::SkillScope;
 
 use super::acp_command::AcpSlashCommand;
 use super::command::SlashCommand;
+use super::mode_support::ModeSupport;
 
 fn client_collision_qualified_name(
     cmd: &agent_client_protocol::AvailableCommand,
@@ -154,13 +155,18 @@ impl CommandRegistry {
         hidden.insert("voice".to_string());
         // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
         hidden.insert("auto".to_string());
+        // `/share` starts menu-hidden (still dispatchable) until
+        // `set_share_visible(true)`. Menu-only so typed `/share` can
+        // surface a client disable message rather than PassThrough.
+        let mut menu_hidden = HashSet::new();
+        menu_hidden.insert("share".to_string());
         let mut reg = Self {
             commands: builtins,
             sources,
             key_to_index: HashMap::new(),
             triggers: Vec::new(),
             hidden,
-            menu_hidden: HashSet::new(),
+            menu_hidden,
             restricted: HashSet::new(),
             available_tools: None,
         };
@@ -212,6 +218,15 @@ impl CommandRegistry {
             .filter(|cmd| !self.hidden.contains(cmd.name()))
             .filter(|cmd| !self.restricted_match(cmd))
             .filter(|cmd| self.tools_satisfied(cmd))
+    }
+
+    /// Declared modes for `key` (canonical name or alias), unfiltered by any
+    /// runtime gate.
+    pub(crate) fn mode_support(&self, key: &str) -> ModeSupport {
+        self.commands
+            .iter()
+            .find(|cmd| cmd.name() == key || cmd.aliases().contains(&key))
+            .map_or(ModeSupport::Both, |cmd| cmd.mode_support())
     }
 
     /// Normalize a deny-list entry: trim, strip one leading `/`, lowercase.
@@ -368,10 +383,20 @@ impl CommandRegistry {
         self.available_tools = Some(tools);
     }
 
-    /// Show or hide the /share command.
-    /// When hidden, it won't appear in the dropdown or be executable.
+    /// Show or hide `/share` in the completion menu.
+    ///
+    /// Menu-only: when not visible the command is absent from dropdown /
+    /// triggers but still resolves via [`Self::get_for_dispatch`], so a
+    /// fully typed `/share` reaches the pager handler (e.g. temporary
+    /// client disable) instead of falling through as an unknown command.
     pub fn set_share_visible(&mut self, visible: bool) {
-        self.set_command_visible("share", visible);
+        self.hidden.remove("share");
+        if visible {
+            self.menu_hidden.remove("share");
+        } else {
+            self.menu_hidden.insert("share".to_string());
+        }
+        self.rebuild_triggers();
     }
 
     /// Show or hide the `/dashboard` command (feature-flag gating).
@@ -733,21 +758,27 @@ mod tests {
         });
         let mut registry = CommandRegistry::new(vec![share, other]);
 
-        // Default: /share is visible.
-        assert!(registry.get("share").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
-
-        // Hiding /share removes it from lookup and triggers.
-        registry.set_share_visible(false);
+        // Default: /share is menu-hidden (offered nowhere) but still dispatchable.
         assert!(registry.get("share").is_none());
+        assert!(
+            registry.get_for_dispatch("share").is_some(),
+            "typed /share must still resolve while menu-hidden"
+        );
         assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
+
+        // Revealing /share restores menu lookup and triggers.
+        registry.set_share_visible(true);
+        assert!(registry.get("share").is_some());
+        assert!(registry.get_for_dispatch("share").is_some());
+        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
         // Other commands are unaffected.
         assert!(registry.get("exit").is_some());
 
-        // Re-enabling restores it.
-        registry.set_share_visible(true);
-        assert!(registry.get("share").is_some());
-        assert!(registry.triggers().iter().any(|t| t.canonical == "share"));
+        // Hiding again is menu-only: no offer, typed path still works.
+        registry.set_share_visible(false);
+        assert!(registry.get("share").is_none());
+        assert!(registry.get_for_dispatch("share").is_some());
+        assert!(!registry.triggers().iter().any(|t| t.canonical == "share"));
     }
 
     #[test]
@@ -1205,9 +1236,9 @@ mod tests {
     /// unresolvable for dispatch, exactly like `get()`.
     #[test]
     fn get_for_dispatch_respects_hard_gates() {
-        // Hard-hidden by name (e.g. /dashboard default, /share toggle).
-        let share: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
-            name: "share",
+        // Hard-hidden by name (e.g. /dashboard default).
+        let dashboard: Arc<dyn SlashCommand> = Arc::new(DummyCommand {
+            name: "dashboard",
             aliases: &[],
         });
         // Tier-restricted.
@@ -1220,11 +1251,14 @@ mod tests {
             name: "loop",
             required: &["scheduler_create"],
         });
-        let mut reg = CommandRegistry::new(vec![share, usage, gated]);
-        reg.set_share_visible(false);
+        let mut reg = CommandRegistry::new(vec![dashboard, usage, gated]);
+        reg.set_dashboard_visible(false);
         reg.set_restricted_commands(&["usage".to_string()]);
 
-        assert!(reg.get_for_dispatch("share").is_none(), "hidden stays hard");
+        assert!(
+            reg.get_for_dispatch("dashboard").is_none(),
+            "hard-hidden stays hard"
+        );
         assert!(
             reg.get_for_dispatch("usage").is_none(),
             "restricted stays blocked (upsell path owns it)"

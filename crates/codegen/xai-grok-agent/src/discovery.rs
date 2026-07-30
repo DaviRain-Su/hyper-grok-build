@@ -395,14 +395,9 @@ fn all_subagents_with_plugins_and_home(
                     if path.extension().and_then(|e| e.to_str()) != Some("md") {
                         continue;
                     }
-                    // Use frontmatter-only parsing for untrusted plugins
-                    let def = if plugin.trusted {
-                        AgentDefinition::from_file(&path).ok()
-                    } else {
-                        AgentDefinition::from_file_frontmatter_only(&path).ok()
+                    let Some(def) = load_plugin_agent_definition(plugin, &path) else {
+                        continue;
                     };
-                    let Some(mut def) = def else { continue };
-                    def.plugin_name = Some(plugin.name.clone());
 
                     let qualified_name = format!("{}:{}", plugin.name, def.name);
 
@@ -477,17 +472,11 @@ fn by_name_in_cwd_with_plugins_and_home(
         {
             for agent_dir in &plugin.agent_dirs {
                 let agent_file = agent_dir.join(format!("{agent_name}.md"));
-                if agent_file.is_file() {
-                    let load_fn = if plugin.trusted {
-                        AgentDefinition::from_file
-                    } else {
-                        AgentDefinition::from_file_frontmatter_only
-                    };
-                    if let Ok(mut def) = load_fn(&agent_file) {
-                        def.plugin_name = Some(plugin_name.to_string());
-                        substitute_plugin_vars(&mut def, plugin);
-                        return Some(def);
-                    }
+                if agent_file.is_file()
+                    && let Some(mut def) = load_plugin_agent_definition(plugin, &agent_file)
+                {
+                    substitute_plugin_vars(&mut def, plugin);
+                    return Some(def);
                 }
             }
         }
@@ -506,13 +495,7 @@ fn by_name_in_cwd_with_plugins_and_home(
         }
         if matches.len() == 1 {
             let (plugin, agent_file) = &matches[0];
-            let load_fn = if plugin.trusted {
-                AgentDefinition::from_file
-            } else {
-                AgentDefinition::from_file_frontmatter_only
-            };
-            if let Ok(mut def) = load_fn(agent_file) {
-                def.plugin_name = Some(plugin.name.clone());
+            if let Some(mut def) = load_plugin_agent_definition(plugin, agent_file) {
                 substitute_plugin_vars(&mut def, plugin);
                 return Some(def);
             }
@@ -527,6 +510,37 @@ fn by_name_in_cwd_with_plugins_and_home(
     }
 
     None
+}
+
+/// Load one plugin-provided agent file, tagged with its owning plugin.
+///
+/// Untrusted plugins are parsed frontmatter-only so their prompt body never
+/// reaches the model before the plugin is trusted. A parse failure drops the
+/// agent from discovery entirely, so it is logged rather than swallowed.
+fn load_plugin_agent_definition(
+    plugin: &crate::plugins::LoadedPlugin,
+    path: &Path,
+) -> Option<AgentDefinition> {
+    let loaded = if plugin.trusted {
+        AgentDefinition::from_file(path)
+    } else {
+        AgentDefinition::from_file_frontmatter_only(path)
+    };
+    match loaded {
+        Ok(mut def) => {
+            def.plugin_name = Some(plugin.name.clone());
+            Some(def)
+        }
+        Err(e) => {
+            tracing::warn!(
+                plugin = %plugin.name,
+                path = %path.display(),
+                error = %e,
+                "Failed to parse plugin agent definition, skipping"
+            );
+            None
+        }
+    }
 }
 
 /// Expand `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` (and the Grok
@@ -1376,6 +1390,44 @@ mod tests {
             }
         );
         assert!(entries.iter().any(|e| e.name == "plugin-one:reviewer"));
+    }
+
+    #[test]
+    fn plugin_agent_with_unrecognized_color_is_still_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("workspace");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        let plugin_root = tempfile::tempdir().unwrap();
+        let plugin_agents = plugin_root.path().join("agents");
+        fs::create_dir_all(&plugin_agents).unwrap();
+        fs::write(
+            plugin_agents.join("painter.md"),
+            "---\nname: painter\ndescription: Plugin painter\ncolor: chartreuse\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let registry = make_plugin_registry("plugin-one", PluginScope::User, vec![plugin_agents]);
+        let entries = all_subagents_with_plugins_and_home(
+            &cwd,
+            &HashMap::new(),
+            Some(&registry),
+            Some(&home),
+            Some(&home.join(".grok")),
+        );
+        assert!(entries.iter().any(|e| e.name == "plugin-one:painter"));
+
+        let def = by_name_in_cwd_with_plugins_and_home(
+            "plugin-one:painter",
+            &cwd,
+            Some(&registry),
+            Some(&home),
+            Some(&home.join(".grok")),
+        )
+        .expect("agent must resolve despite the unrecognized color");
+        assert_eq!(def.color, None, "unrecognized color must be dropped");
     }
 
     #[test]

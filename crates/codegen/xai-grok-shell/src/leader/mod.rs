@@ -1732,6 +1732,7 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
         use windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP.0);
     }
+    #[allow(clippy::disallowed_methods)]
     let mut child = cmd
         .spawn()
         .map_err(|e| ConnectionError::SpawnFailed(e.to_string()))?;

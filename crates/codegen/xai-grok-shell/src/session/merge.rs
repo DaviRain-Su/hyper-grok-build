@@ -7,6 +7,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -66,11 +67,44 @@ pub(crate) struct SessionLanes {
     pub repo_urls: Vec<String>,
 }
 
+/// Which directories a cwd-scoped listing draws from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CwdScope {
+    /// The requested directory only.
+    Only,
+    /// Sibling worktrees of the same repo, plus remote sessions sharing its
+    /// git remote.
+    #[default]
+    WithSiblings,
+    /// `WithSiblings`, widening past the cwd when it holds no messaged session.
+    RelaxIfEmpty,
+}
+
+/// Spellings a session may be stored under, since clients supply their own
+/// path: as given and canonicalized, each without a trailing separator.
+pub(crate) fn cwd_match_keys(cwd: &str) -> Vec<String> {
+    let trimmed = cwd.trim_end_matches('/');
+    let mut keys = vec![trimmed.to_owned()];
+    if let Ok(real) = dunce::canonicalize(trimmed) {
+        let real = real.to_string_lossy().trim_end_matches('/').to_owned();
+        if real != keys[0] {
+            keys.push(real);
+        }
+    }
+    keys
+}
+
+/// Registry rows recorded under any other directory.
+pub(crate) fn retain_matching_cwd(remote: &mut Vec<SessionRecord>, keys: &[String]) {
+    remote.retain(|r| keys.iter().any(|k| r.cwd.trim_end_matches('/') == k));
+}
+
 /// Fetch sessions from both local storage and the remote registry,
 /// merge, dedup, and return a sorted list.
 pub async fn fetch_merged(
     client: Option<&SessionRegistryClient>,
     cwd: Option<&str>,
+    scope: CwdScope,
     query: Option<&str>,
     limit: usize,
 ) -> Vec<MergedSession> {
@@ -78,7 +112,7 @@ pub async fn fetch_merged(
         local,
         remote,
         repo_urls,
-    } = fetch_lanes(client, cwd, query, limit).await;
+    } = fetch_lanes(client, cwd, scope, query, limit).await;
     merge(remote, local, query, &repo_urls, limit)
 }
 
@@ -104,16 +138,29 @@ pub(crate) fn filter_summaries_by_repo(
 pub(crate) async fn fetch_lanes(
     client: Option<&SessionRegistryClient>,
     cwd: Option<&str>,
+    scope: CwdScope,
     query: Option<&str>,
     limit: usize,
 ) -> SessionLanes {
     let cwd_owned = cwd.map(String::from);
+    // `merge` truncates before any caller-side filter runs.
+    let exact_keys = match (scope, cwd_owned.as_deref()) {
+        (CwdScope::Only, Some(c)) => cwd_match_keys(c),
+        _ => Vec::new(),
+    };
 
     let local_fut = async {
         // Aggregate sessions from worktree sibling CWDs when possible
         let cwds = if let Some(ref c) = cwd_owned {
-            crate::session::worktree::candidate_worktree_cwds_for_same_repo(std::path::Path::new(c))
-                .unwrap_or_else(|_| vec![c.clone()])
+            match scope {
+                CwdScope::Only => exact_keys.clone(),
+                CwdScope::WithSiblings | CwdScope::RelaxIfEmpty => {
+                    crate::session::worktree::candidate_worktree_cwds_for_same_repo(
+                        std::path::Path::new(c),
+                    )
+                    .unwrap_or_else(|_| vec![c.clone()])
+                }
+            }
         } else {
             vec![]
         };
@@ -153,6 +200,9 @@ pub(crate) async fn fetch_lanes(
     };
 
     let repo_urls_fut = async {
+        if matches!(scope, CwdScope::Only) {
+            return Vec::new();
+        }
         cwd.map(|c| {
             xai_grok_workspace::session::git::resolve_normalized_remote_urls(std::path::Path::new(
                 c,
@@ -161,7 +211,17 @@ pub(crate) async fn fetch_lanes(
         .unwrap_or_default()
     };
 
-    let (local, remote, repo_urls) = tokio::join!(local_fut, remote_fut, repo_urls_fut);
+    let (mut local, mut remote, repo_urls) = tokio::join!(local_fut, remote_fut, repo_urls_fut);
+    // Every narrowing happens before `merge`, which truncates, and before the
+    // caller paginates: a row dropped later would leave a hole in a sized page.
+    if matches!(scope, CwdScope::Only) {
+        if exact_keys.is_empty() {
+            remote.retain(|r| Path::new(&r.cwd).is_absolute());
+        } else {
+            retain_matching_cwd(&mut remote, &exact_keys);
+        }
+        local.retain(|s| Path::new(&s.info.cwd).is_absolute());
+    }
     SessionLanes {
         local,
         remote,
@@ -414,6 +474,32 @@ mod tests {
             sandbox_profile: None,
             reasoning_effort: None,
         }
+    }
+
+    #[test]
+    fn cwd_keys_ignore_a_trailing_separator() {
+        assert_eq!(cwd_match_keys("/Users/me/xai/"), ["/Users/me/xai"]);
+    }
+
+    #[test]
+    fn retain_matching_cwd_keeps_only_the_requested_directory() {
+        let mut remote = vec![
+            SessionRecord {
+                cwd: "/Users/me/xai/".into(),
+                ..make_remote("a", "a", "2026-03-01T00:00:00Z")
+            },
+            SessionRecord {
+                cwd: "/Users/me/other".into(),
+                ..make_remote("b", "b", "2026-03-01T00:00:00Z")
+            },
+            SessionRecord {
+                cwd: String::new(),
+                ..make_remote("c", "c", "2026-03-01T00:00:00Z")
+            },
+        ];
+        retain_matching_cwd(&mut remote, &["/Users/me/xai".to_owned()]);
+        let ids: Vec<&str> = remote.iter().map(|r| r.session_id.as_str()).collect();
+        assert_eq!(ids, ["a"]);
     }
 
     fn make_remote(id: &str, summary: &str, updated: &str) -> SessionRecord {

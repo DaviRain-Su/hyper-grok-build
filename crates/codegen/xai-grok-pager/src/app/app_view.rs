@@ -692,16 +692,19 @@ pub struct AppView {
     pub tip: Option<String>,
     /// Whether to show the resolved model ID in /session-info output.
     pub show_resolved_model: bool,
-    /// Whether the `/share` slash command is available. Gated by
-    /// `RemoteSettings.sharing_enabled`; defaults to `false` when remote
-    /// settings are unavailable or the field is absent.
+    /// Whether the `/share` slash command is available. Currently forced off
+    /// while session share links are temporarily disabled in clients.
     pub sharing_enabled: bool,
     /// Whether the plugin marketplace CTA is enabled. Env `GROK_PLUGIN_CTA`
     /// overrides `RemoteSettings.plugin_cta` (remote settings); defaults to `false`.
     pub plugin_cta_enabled: bool,
     /// Consumer billing surface (credit fetches / warnings). False for team
-    /// and API-key auth. `/usage` itself stays available for session token/cost.
+    /// and API-key auth. `/usage` itself stays available for session token/cost
+    /// unless [`Self::has_external_auth_provider`].
     pub usage_visible: bool,
+    /// External `auth_provider_command` deployment.
+    /// No grok.com billing session exists; `/usage` and credit UI stay off.
+    pub has_external_auth_provider: bool,
     /// Slash commands denied for the current subscription tier
     /// ([`TIER_RESTRICTED_COMMANDS`] when the user is on the free / X Basic
     /// tier, empty otherwise). Recomputed by [`Self::apply_tier_restrictions`]
@@ -1211,47 +1214,6 @@ fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bo
     };
     chrono::Utc::now() >= next
 }
-/// Welcome-screen toast overlay (mirrors agent toast style).
-///
-/// Prefer one row above the prompt, right-aligned to it. Fall back to
-/// the view bottom-right when no prompt rect is available (login / gate).
-fn paint_welcome_toast(
-    buf: &mut ratatui::buffer::Buffer,
-    area: ratatui::layout::Rect,
-    msg: &str,
-    prompt_rect: Option<ratatui::layout::Rect>,
-) {
-    let theme = crate::theme::Theme::current();
-    let max_msg = (area.width as usize).saturating_sub(4);
-    if max_msg == 0 || area.height == 0 {
-        return;
-    }
-    let toast = if msg.chars().count() <= max_msg {
-        format!(" {msg} ")
-    } else {
-        let truncated: String = msg.chars().take(max_msg.saturating_sub(1)).collect();
-        format!(" {}… ", truncated.trim_end())
-    };
-    let w = toast.chars().count() as u16;
-    let (x, y) = if let Some(prompt) = prompt_rect.filter(|r| r.width > 0 && r.y > area.y) {
-        let max_x = area.right().saturating_sub(w).max(area.x);
-        let x = prompt.right().saturating_sub(w + 1).clamp(area.x, max_x);
-        (x, prompt.y.saturating_sub(1))
-    } else {
-        (
-            area.right().saturating_sub(w + 1),
-            area.bottom().saturating_sub(1),
-        )
-    };
-    for (i, ch) in toast.chars().enumerate() {
-        if let Some(cell) = buf.cell_mut((x + i as u16, y)) {
-            cell.set_char(ch);
-            cell.fg = theme.accent_user;
-            cell.bg = theme.bg_base;
-            cell.modifier = ratatui::prelude::Modifier::BOLD;
-        }
-    }
-}
 impl AppView {
     pub fn is_zdr_blocked(&self) -> bool {
         self.is_zdr && !self.zdr_access_enabled
@@ -1358,7 +1320,8 @@ impl AppView {
                 .subscription_tier
                 .as_deref()
                 .is_some_and(is_api_key_label);
-        self.usage_visible = meta.team_name.is_none() && !self.is_api_key_auth;
+        self.usage_visible =
+            meta.team_name.is_none() && !self.is_api_key_auth && !self.has_external_auth_provider;
         self.sync_billing_surface_to_agents();
         self.apply_tier_restrictions();
         if self.is_api_key_auth {
@@ -1372,23 +1335,34 @@ impl AppView {
             self.show_resolved_model = show;
         }
     }
-    /// Mirror [`Self::usage_visible`] onto every slash surface that can run
-    /// `/usage` (agents, welcome, dashboard dispatch / peek-reply).
+    /// Mirror billing + `/usage` gates onto every slash surface (agents,
+    /// welcome, dashboard dispatch / peek-reply).
     pub(crate) fn sync_billing_surface_to_agents(&mut self) {
-        let visible = self.usage_visible;
+        let billing = self.usage_visible;
+        let usage_cmd = !self.has_external_auth_provider;
         for agent in self.agents.values_mut() {
-            agent.set_billing_surface_visible(visible);
+            agent.set_billing_surface_visible(billing);
+            agent.set_usage_command_visible(usage_cmd);
         }
         self.welcome_prompt
             .slash_controller
-            .set_billing_surface_visible(visible);
+            .set_billing_surface_visible(billing);
+        self.welcome_prompt
+            .slash_controller
+            .set_usage_command_visible(usage_cmd);
         if let Some(dash) = self.dashboard.as_mut() {
             dash.dispatch
                 .slash_controller
-                .set_billing_surface_visible(visible);
+                .set_billing_surface_visible(billing);
+            dash.dispatch
+                .slash_controller
+                .set_usage_command_visible(usage_cmd);
             dash.peek_reply
                 .slash_controller
-                .set_billing_surface_visible(visible);
+                .set_billing_surface_visible(billing);
+            dash.peek_reply
+                .slash_controller
+                .set_usage_command_visible(usage_cmd);
         }
     }
     /// Force voice on for API-key sessions when only a remote rule left it off.
@@ -1588,6 +1562,7 @@ impl AppView {
             sharing_enabled: false,
             plugin_cta_enabled: false,
             usage_visible: true,
+            has_external_auth_provider: false,
             tier_restricted_commands: Vec::new(),
             leader_mode: false,
             credit_balance: None,
@@ -1699,6 +1674,7 @@ impl AppView {
     pub fn apply_tier_restrictions(&mut self) {
         let restricted = self.team_name.is_none()
             && !self.is_api_key_auth
+            && !self.has_external_auth_provider
             && is_restricted_tier(self.subscription_tier.as_deref());
         let names: Vec<String> = if restricted {
             TIER_RESTRICTED_COMMANDS
@@ -2109,13 +2085,14 @@ impl AppView {
             }
             ActiveView::AgentDashboard => {
                 if let Some(d) = self.dashboard.as_mut() {
-                    d.error_toast = Some(crate::glyphs::legacy_glyph_fallback(msg).into_owned());
+                    d.error_toast = Some(crate::glyphs::sanitize_toast_message(msg).into_owned());
                 }
             }
             ActiveView::Welcome => {
-                let msg = crate::glyphs::legacy_glyph_fallback(msg).into_owned();
-                self.welcome_toast =
-                    Some((msg, std::time::Instant::now() + WELCOME_TOAST_DURATION));
+                self.welcome_toast = Some((
+                    crate::glyphs::sanitize_toast_message(msg).into_owned(),
+                    std::time::Instant::now() + WELCOME_TOAST_DURATION,
+                ));
             }
         }
     }
@@ -4583,7 +4560,7 @@ impl AppView {
                         self.welcome_privacy_banner_policy_rect = result.privacy_banner_policy_rect;
                         self.welcome_changelog_cta_rect = result.changelog_cta_rect;
                         if let Some((ref msg, _)) = self.welcome_toast {
-                            paint_welcome_toast(
+                            crate::views::welcome::paint_welcome_toast(
                                 f.buffer_mut(),
                                 view_area,
                                 msg,
@@ -5830,6 +5807,22 @@ pub(crate) mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     #[test]
+    fn welcome_show_toast_scrubs_control_chars() {
+        let mut app = test_app();
+        assert!(matches!(app.active_view, ActiveView::Welcome));
+        app.show_toast("a\nb\rc\thttps://x.ai");
+        let toast = app
+            .welcome_toast
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .unwrap_or("");
+        assert!(
+            !toast.chars().any(|c| c.is_control()),
+            "control chars must be scrubbed at write: {toast:?}"
+        );
+        assert!(toast.contains("https://x.ai"), "{toast:?}");
+    }
+    #[test]
     fn parse_esc_ttl_bounds() {
         let default = PendingAction::ESC_DOUBLE_PRESS_TTL;
         assert_eq!(parse_esc_ttl(None), default);
@@ -6071,6 +6064,7 @@ pub(crate) mod tests {
             sharing_enabled: false,
             plugin_cta_enabled: false,
             usage_visible: true,
+            has_external_auth_provider: false,
             tier_restricted_commands: Vec::new(),
             leader_mode: true,
             credit_balance: None,
@@ -7357,6 +7351,22 @@ pub(crate) mod tests {
         agent.note_terminal_size((120, 50));
         assert!(agent.show_ephemeral_tip(tip(), &mut counts));
         assert_eq!(counts.get("t_seen"), Some(&2));
+    }
+    #[test]
+    fn external_auth_provider_keeps_billing_off_after_auth_meta() {
+        let mut app = test_app();
+        app.has_external_auth_provider = true;
+        app.usage_visible = false;
+        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        assert!(!app.usage_visible);
+        assert!(app.tier_restricted_commands.is_empty());
+        assert!(
+            !app.welcome_prompt
+                .slash_controller
+                .registry()
+                .is_restricted("usage")
+        );
+        assert!(!app.welcome_prompt.slash_controller.usage_command_visible());
     }
     #[test]
     fn apply_auth_meta_disables_billing_surface_for_team_users() {

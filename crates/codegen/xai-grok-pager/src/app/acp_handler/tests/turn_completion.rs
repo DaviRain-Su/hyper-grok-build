@@ -610,6 +610,97 @@
     }
 
     #[test]
+    fn chatty_send_now_cancelled_wake_is_markerless() {
+        // A wake with output cancelled by send-now must stay silent — same
+        // suppression the other three turn-end rails already apply.
+        use crate::app::agent_view::test_fixtures::count_turn_markers;
+
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif_with_cancel_trigger(
+                "sess-wake",
+                "task-completed-bg1",
+                "cancelled",
+                "send_now",
+            ),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before,
+            "a send-now cancelled chatty wake must push no marker"
+        );
+        assert_eq!(count_turn_markers(agent), 0);
+        assert!(
+            !matches!(
+                last_session_event(&agent.scrollback),
+                Some(SessionEvent::TurnCancelled { .. })
+            ),
+            "send_now must not surface as Turn cancelled by user"
+        );
+    }
+
+    #[test]
+    fn chatty_user_cancelled_wake_pushes_cancelled_marker() {
+        // Genuine cancel (Ctrl+C / Esc, no wire trigger) still shows the marker.
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "cancelled", false),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn foreign_send_now_arm_does_not_suppress_wake_cancel_marker() {
+        // A flag armed for a different (user) prompt must not eat this wake's
+        // genuine cancel marker, and must stay armed after close-out.
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .expect_send_now_cancel = Some("user-prompt-other".into());
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "cancelled", false),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCancelled { .. })
+        ));
+        assert_eq!(
+            agent.expect_send_now_cancel.as_deref(),
+            Some("user-prompt-other"),
+            "wake close-out must not clear a foreign send-now arm"
+        );
+    }
+
+    #[test]
     fn chatty_rate_limited_wake_closes_with_failure_marker() {
         let mut app = make_app_with_agent("sess-wake");
         let _ = handle(

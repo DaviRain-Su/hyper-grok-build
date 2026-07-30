@@ -52,14 +52,17 @@ pub(super) const DARK_WAKE_DEFER_MAX: StdDuration = StdDuration::from_secs(120);
 
 /// Upper bound on how long a `WillSleep` transition will hold the OS sleep
 /// acknowledgment waiting for in-flight IdP refreshes to drain (see
-/// [`AuthManager::set_system_sleep_imminent`]). Must stay inside the OS
-/// pre-sleep budgets — macOS allows ~30 s before `IOAllowPowerChange`; Linux
-/// logind's `InhibitDelayMaxSec` defaults to 5 s — so we pick a value
-/// comfortably under the smaller (Linux) budget; the inhibitor is released
-/// before logind force-sleeps regardless. A healthy refresh round-trip is
-/// ~1 s, so this is slack for a slow network, not the common path. Holding the
-/// machine awake a few extra seconds is a negligible cost next to the forced
-/// re-login a straddled refresh causes.
+/// [`AuthManager::set_system_sleep_imminent`]). Sized per platform to the OS
+/// pre-sleep budget: **macOS** allows ~30 s before `IOAllowPowerChange` is
+/// forced, so we use most of it — a straddled exchange can need ~15 s of
+/// awake time to complete (in-call retries included), and losing its response
+/// past the assumed ~60 s rotation grace revokes the token family (every
+/// session then demands `/login`). **Linux** logind's `InhibitDelayMaxSec`
+/// defaults to 5 s, so we stay under it. The hold releases the moment the
+/// in-flight count drains; a healthy round-trip is ~1 s.
+#[cfg(target_os = "macos")]
+pub(super) const SLEEP_ACK_MAX_WAIT: StdDuration = StdDuration::from_secs(20);
+#[cfg(not(target_os = "macos"))]
 pub(super) const SLEEP_ACK_MAX_WAIT: StdDuration = StdDuration::from_secs(3);
 
 /// When a gate was raised, captured on *two* clocks so the [`SLEEP_GATE_MAX`]
@@ -156,10 +159,20 @@ impl SleepGate {
         // Stale gate (missed/late wake). `sleep_straddle` = the monotonic clock
         // is still under the bound but real (wall-clock) time is not: the
         // machine slept through the gate without delivering a wake event. This
-        // is precisely the case the wall-clock arm was added to catch, so
-        // surface it explicitly to confirm the fix firing in the field.
+        // is precisely the case the wall-clock arm exists to catch, so surface
+        // it explicitly rather than folding it into the generic expiry.
         let sleep_straddle = mono < SLEEP_GATE_MAX;
-        *self.raised_at.write() = None;
+        {
+            // Re-check under the write lock: a `WillSleep` can raise a *fresh*
+            // gate between the read above and here, and clearing that one
+            // would start a refresh into the very suspend it announces.
+            let mut guard = self.raised_at.write();
+            match *guard {
+                Some(current) if current.mono == raise.mono => *guard = None,
+                Some(_fresh_raise) => return true,
+                None => return false,
+            }
+        }
         xai_grok_telemetry::unified_log::info(
             "auth.sleep.gate_cleared",
             None,
@@ -220,6 +233,9 @@ impl AuthManager {
             if !self.is_dark_wake() {
                 *self.dark_wake_defer_since.write() = None;
             }
+            // Re-arm the proactive-refresh loop; its monotonic timer did not
+            // advance during the suspend (see [`AuthManager::notify_wake`]).
+            self.notify_wake();
         }
     }
 
@@ -307,13 +323,24 @@ impl AuthManager {
     ///
     /// Scoped to processes that actively listen for power events (local /
     /// interactive): if the OS power listener was never started
-    /// (headless / datacenter), we skip the query — both because dark wake is
+    /// (headless / server), we skip the query — both because dark wake is
     /// not a concern there and because a screenless Mac can read as a permanent
     /// dark wake (no video capability), which would otherwise wedge refresh.
+    ///
+    /// `GROK_AUTH_FORCE_DARK_WAKE=1|0` forces the answer for testing (unset
+    /// = ask the OS), read **before** the `power_listener_started` check so
+    /// a headless run — which never starts the listener — can drive the
+    /// dark-wake paths against a real binary. Pair with
+    /// `GROK_AUTH_EARLY_INVALIDATION_SECS` for a seconds-long repro.
     pub(crate) fn is_dark_wake(&self) -> bool {
         #[cfg(test)]
         if let Some(forced) = *self.dark_wake_override.lock() {
             return forced;
+        }
+        match std::env::var("GROK_AUTH_FORCE_DARK_WAKE").ok().as_deref() {
+            Some("1") => return true,
+            Some("0") => return false,
+            _ => {}
         }
         if !self.power_listener_started.load(Ordering::Acquire) {
             return false;
@@ -335,16 +362,20 @@ impl AuthManager {
     /// deferring forever and logging the user out. A full wake clears the run
     /// (here, or eagerly in [`Self::set_system_sleep_imminent`]).
     pub(crate) fn should_defer_for_dark_wake(&self) -> bool {
-        if !self.is_dark_wake() {
+        // Sample the power state before taking the lock (it's an FFI read with
+        // no ordering relationship to the budget), then one write guard for the
+        // whole decision: a read-then-write would let two concurrent callers
+        // both start a run and restart the budget indefinitely.
+        let dark = self.is_dark_wake();
+        let mut run = self.dark_wake_defer_since.write();
+        if !dark {
             // Full wake (or no signal): end any deferral run in progress.
-            if self.dark_wake_defer_since.read().is_some() {
-                *self.dark_wake_defer_since.write() = None;
-            }
+            *run = None;
             return false;
         }
-        let Some(raise) = *self.dark_wake_defer_since.read() else {
+        let Some(raise) = *run else {
             // First deferral of this dark-wake run: start the budget clock.
-            *self.dark_wake_defer_since.write() = Some(GateRaise::now());
+            *run = Some(GateRaise::now());
             return true;
         };
         let (mono, wall) = raise.elapsed();
@@ -355,7 +386,8 @@ impl AuthManager {
         // still-continuous dark wake defers afresh (up to DARK_WAKE_DEFER_MAX)
         // before the next forced refresh, rather than abandoning deferral
         // entirely.
-        *self.dark_wake_defer_since.write() = None;
+        *run = None;
+        drop(run);
         xai_grok_telemetry::unified_log::warn(
             "auth.dark_wake.defer_budget_exhausted",
             None,
@@ -396,7 +428,7 @@ impl AuthManager {
 
     /// Start the OS power listener so sleep/wake drives the gate. Idempotent and
     /// a no-op where the listener is unavailable. Call only from local /
-    /// interactive entrypoints, never datacenter server/headless.
+    /// interactive entrypoints, never headless/server ones.
     pub fn start_system_power_listener(self: &Arc<Self>) {
         // Claim the one-time startup so concurrent/duplicate calls don't
         // double-register.

@@ -445,7 +445,7 @@ impl ScrollbackState {
         let (_, entry) = self.entries.get_index(entry_idx)?;
         let theme = Theme::current();
         let renderer = EntryRenderer::new(entry, &theme)
-            .with_appearance(self.appearance.clone())
+            .with_appearance_ref(&self.appearance)
             .with_cwd(self.cwd());
         let rows = u16::try_from(rows_into_entry).unwrap_or(u16::MAX);
         let logical_line = renderer.logical_line_of_rendered_row(area_width, rows);
@@ -482,7 +482,7 @@ impl ScrollbackState {
             };
             let theme = Theme::current();
             let renderer = EntryRenderer::new(entry, &theme)
-                .with_appearance(self.appearance.clone())
+                .with_appearance_ref(&self.appearance)
                 .with_cwd(self.cwd());
             let (starts, last_content_row) = renderer.logical_line_start_rows(area_width);
             let new_line_start = starts
@@ -671,7 +671,7 @@ impl ScrollbackState {
                 continue;
             };
             let renderer = EntryRenderer::new(entry, &theme)
-                .with_appearance(self.appearance.clone())
+                .with_appearance_ref(&self.appearance)
                 .with_cwd(cwd);
             cache.entries[idx].height = match inline_edit_height {
                 Some((edit_id, h)) if edit_id == *entry_id => h,
@@ -982,7 +982,7 @@ impl ScrollbackState {
             };
 
             let renderer = EntryRenderer::new(entry, &theme)
-                .with_appearance(self.appearance.clone())
+                .with_appearance_ref(&self.appearance)
                 .with_cwd(cwd);
             let new_height = match inline_edit_height {
                 Some((edit_id, h)) if edit_id == id => h,
@@ -1213,7 +1213,7 @@ impl ScrollbackState {
         };
 
         let renderer = EntryRenderer::new(new_entry, &theme)
-            .with_appearance(self.appearance.clone())
+            .with_appearance_ref(&self.appearance)
             .with_cwd(cwd);
         let height = renderer.desired_height(entry_area_width);
         let is_prompt = new_entry.block.is_user_prompt();
@@ -1313,7 +1313,7 @@ impl ScrollbackState {
         // they scroll in. gap_after is a placeholder (1), fixed up in pass 2.
         for entry in self.entries.values() {
             let renderer = EntryRenderer::new(entry, &theme)
-                .with_appearance(self.appearance.clone())
+                .with_appearance_ref(&self.appearance)
                 .with_cwd(self.cwd());
             let height = renderer.estimate_height(entry_area_width);
             cache.entries.push(EntryLayoutInfo {
@@ -2331,6 +2331,70 @@ mod tests {
         );
         // ...but the far history stays estimated (bounded, not O(history)).
         assert!(!measured_at(&state, 0), "far-above history left estimated");
+    }
+
+    #[test]
+    fn resize_defers_warm_above_until_the_width_settles() {
+        let _theme = pin_theme();
+        let mut state = ScrollbackState::new();
+        bulk_load_stubs(&mut state, 200);
+        state.begin_frame();
+        state.prepare_layout(80, 20);
+        let visible_top = state.first_visible_entry().unwrap();
+        assert!(
+            (0..visible_top).any(|i| measured_at(&state, i)),
+            "the initial layout still warms above the viewport"
+        );
+
+        for width in [79u16, 78, 77] {
+            state.begin_frame();
+            state.prepare_layout(width, 20);
+            let top = state.first_visible_entry().unwrap();
+            assert!(
+                !(0..top).any(|i| measured_at(&state, i)),
+                "width {width}: nothing above the viewport is measured mid-drag"
+            );
+        }
+
+        state.begin_frame();
+        state.prepare_layout(77, 20);
+        let top = state.first_visible_entry().unwrap();
+        assert!(
+            (0..top).any(|i| measured_at(&state, i)),
+            "the deferred warm-up runs once the width stops changing"
+        );
+    }
+
+    /// A fullscreen frame prepares layout twice whenever the timeline rail is
+    /// on, and the second pass sees an unchanged width.
+    #[test]
+    fn resize_defers_warm_above_across_a_frames_extra_layout_passes() {
+        let _theme = pin_theme();
+        let mut state = ScrollbackState::new();
+        bulk_load_stubs(&mut state, 200);
+        state.begin_frame();
+        state.prepare_layout(80, 20);
+        state.prepare_layout(80, 20);
+
+        for width in [79u16, 78, 77] {
+            state.begin_frame();
+            state.prepare_layout(width, 20);
+            state.prepare_layout(width, 20);
+            let top = state.first_visible_entry().unwrap();
+            assert!(
+                !(0..top).any(|i| measured_at(&state, i)),
+                "width {width}: the paint pass must not run the warm-up the \
+                 rail pass deferred"
+            );
+        }
+
+        state.begin_frame();
+        state.prepare_layout(77, 20);
+        let top = state.first_visible_entry().unwrap();
+        assert!(
+            (0..top).any(|i| measured_at(&state, i)),
+            "the deferred warm-up runs on the first frame after the drag"
+        );
     }
 
     #[test]

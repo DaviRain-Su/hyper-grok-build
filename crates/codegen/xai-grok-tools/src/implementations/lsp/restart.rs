@@ -32,11 +32,14 @@ async fn wait_for_crashed_lifecycle(
     }
 }
 
-/// Replays tracked documents and returns their URIs.
-fn replay_tracked_documents(
+/// Replays tracked documents, returning each URI with the document version its
+/// replay was sent as — what the manager needs to tell a verdict on the replay
+/// from a leftover one. Documents the fresh server was never told about are
+/// left out, so nothing waits on a verdict that was never asked for.
+pub(super) fn replay_tracked_documents(
     restarted_client: &mut LspClient,
     tracked_docs: &[(String, String)],
-) -> Vec<Url> {
+) -> Vec<(Url, i32)> {
     tracked_docs
         .iter()
         .filter_map(|(uri_str, lang_id)| {
@@ -45,8 +48,9 @@ fn replay_tracked_documents(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(uri_str));
             let content = std::fs::read_to_string(&path).ok()?;
-            restarted_client.notify_file_change(&path, &content, lang_id);
-            file_uri(&path).ok()
+            let uri = file_uri(&path).ok()?;
+            let version = restarted_client.notify_file_change(&path, &content, lang_id)?;
+            Some((uri, version))
         })
         .collect()
 }
@@ -102,15 +106,15 @@ async fn install_restarted_client(
     lsp_manager: &Arc<tokio::sync::Mutex<LspManager>>,
     server_name: &str,
     restarted_client: LspClient,
-    replayed_uris: Vec<Url>,
+    replayed_uris: Vec<(Url, i32)>,
 ) -> Result<(), LspClient> {
     let mut mgr = lsp_manager.lock().await;
     if mgr.shutting_down {
         return Err(restarted_client);
     }
     let lifecycle_id = restarted_client.lifecycle_id;
-    for uri in replayed_uris {
-        mgr.mark_uri_pending_diagnostics(server_name, lifecycle_id, uri);
+    for (uri, version) in replayed_uris {
+        mgr.mark_uri_pending_diagnostics(server_name, lifecycle_id, uri, version);
     }
     mgr.clients
         .insert(server_name.to_string(), restarted_client);

@@ -153,6 +153,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     std::mem::forget(dir);
                     Some(mgr)
                 },
+                is_chat_kind: false,
                 state,
                 notifications: NotificationSender {
                     gateway: GatewaySender::new(gateway_tx),

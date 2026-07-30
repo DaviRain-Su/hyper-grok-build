@@ -19,6 +19,22 @@ use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
+/// The verbatim wire string for a Messages API stop reason, before it collapses
+/// into the internal [`StopReason`]. Uses the enum's serde `snake_case`
+/// renaming so it cannot drift from the wire contract.
+fn messages_stop_reason_wire(sr: &messages::StopReason) -> String {
+    match serde_json::to_value(sr) {
+        Ok(serde_json::Value::String(s)) => s,
+        other => {
+            debug_assert!(
+                false,
+                "StopReason must serialize to a string, got {other:?}"
+            );
+            "end_turn".to_string()
+        }
+    }
+}
+
 /// Returns whether a Messages API event reflects real model progress
 /// rather than a liveness-only heartbeat (Ping).
 pub(crate) fn messages_event_has_meaningful_content(event: &MessageStreamEvent) -> bool {
@@ -99,6 +115,12 @@ pub fn stream_messages<'a>(
         let mut final_output_tokens: u32 = 0;
         let mut final_stop_reason: Option<StopReason> = None;
         let mut final_stop_message: Option<String> = None;
+        let mut final_message_id: Option<String> = None;
+        let mut final_raw_stop_reason: Option<String> = None;
+        // The provider's matched stop sequence (Messages `message_delta.stop_sequence`),
+        // set only on a `stop_sequence`-terminated turn; carried through so the
+        // headless `streaming-messages-json` consumer can echo it.
+        let mut final_stop_sequence: Option<String> = None;
 
         // Assistant-response accumulators (built up as ContentBlockStop
         // events fire). Reasoning is collected into a synthesized
@@ -152,10 +174,26 @@ pub fn stream_messages<'a>(
 
             match event {
                 MessageStreamEvent::MessageStart { message } => {
+                    final_message_id = Some(message.id.clone());
                     final_model = Some(message.model.clone());
                     final_input_tokens = message.usage.input_tokens;
                     final_cache_read_input_tokens = message.usage.cache_read_input_tokens;
                     final_cache_creation_input_tokens = message.usage.cache_creation_input_tokens;
+                    // Surface the real id/model/input-usage in order, before any
+                    // content, so partial-mode framing emits them on the real
+                    // `message_start` instead of a synthesized placeholder.
+                    yield SamplingEvent::ResponseStarted {
+                        request_id: request_id.clone(),
+                        message_id: message.id,
+                        model: message.model,
+                        input_tokens: u64::from(message.usage.input_tokens),
+                        cache_read_input_tokens: u64::from(
+                            message.usage.cache_read_input_tokens,
+                        ),
+                        cache_creation_input_tokens: u64::from(
+                            message.usage.cache_creation_input_tokens,
+                        ),
+                    };
                 }
 
                 MessageStreamEvent::ContentBlockStart {
@@ -237,7 +275,19 @@ pub fn stream_messages<'a>(
                             arguments_delta: None,
                         };
                     }
-                    _ => {} // Image / ToolResult are not expected in assistant streams.
+                    // Encrypted reasoning the model chose to redact. Deliberately
+                    // parse-only: the `RedactedThinking` wire variant exists so a
+                    // stream that includes one deserializes instead of failing the
+                    // whole event parse and discarding an already-streamed
+                    // response, but its opaque `data` blob is not surfaced as a
+                    // `SamplingEvent` — forwarding it to the headless reducer's
+                    // `redacted_thinking` block would need a new event threaded
+                    // through the deferred sampler→shell→reducer hop and handled by
+                    // every `SamplingEvent` consumer (TUI included), so it is not
+                    // wired. No consumer claims redacted_thinking support.
+                    ContentBlock::RedactedThinking { .. } => {}
+                    // Image / ToolResult are not expected in assistant streams.
+                    _ => {}
                 },
 
                 MessageStreamEvent::ContentBlockDelta { index, delta } => {
@@ -312,6 +362,15 @@ pub fn stream_messages<'a>(
                                 }
                             }
                             BlockType::Thinking => {
+                                // Surface the encrypted signature in order (at the
+                                // thinking block's stop) so partial-mode framing can
+                                // emit `signature_delta` before its `content_block_stop`.
+                                if !state.signature.is_empty() {
+                                    yield SamplingEvent::ReasoningCompleted {
+                                        request_id: request_id.clone(),
+                                        signature: state.signature.clone(),
+                                    };
+                                }
                                 if !state.thinking_acc.is_empty() || !state.signature.is_empty() {
                                     // Anthropic Messages API `Thinking` blocks uniquely
                                     // carry an encrypted `signature` distinct
@@ -358,6 +417,14 @@ pub fn stream_messages<'a>(
                     // the shell logs it when it surfaces a refusal.
                     if let Some(details) = delta.stop_details {
                         final_stop_message = details.explanation;
+                    }
+                    // Keep the exact wire string so consumers can echo it.
+                    final_raw_stop_reason =
+                        delta.stop_reason.as_ref().map(messages_stop_reason_wire);
+                    // The matched stop sequence rides the same terminal delta
+                    // (present only on a `stop_sequence` stop); carry it verbatim.
+                    if delta.stop_sequence.is_some() {
+                        final_stop_sequence = delta.stop_sequence.clone();
                     }
                     final_stop_reason = delta.stop_reason.map(|sr| match sr {
                         messages::StopReason::EndTurn => StopReason::Stop,
@@ -470,6 +537,7 @@ pub fn stream_messages<'a>(
                 total_tokens: total_prompt_tokens.saturating_add(final_output_tokens),
                 reasoning_tokens: 0,
                 cached_prompt_tokens: final_cache_read_input_tokens,
+                cache_creation_prompt_tokens: final_cache_creation_input_tokens,
             })
         } else {
             None
@@ -513,6 +581,9 @@ pub fn stream_messages<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals: Vec::new(),
             stop_message: final_stop_message,
+            message_id: final_message_id,
+            raw_stop_reason: final_raw_stop_reason,
+            stop_sequence: final_stop_sequence,
         };
 
         yield SamplingEvent::Completed {

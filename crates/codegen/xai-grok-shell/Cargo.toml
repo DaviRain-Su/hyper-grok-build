@@ -15,6 +15,7 @@ test-support = []
 default-bazel = ["test-support"]
 
 [dependencies]
+xai-grok-extra-ca = { workspace = true }
 dunce = { workspace = true }
 tonic-prost = { workspace = true, optional = true }
 agent-client-protocol = { workspace = true }

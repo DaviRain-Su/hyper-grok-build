@@ -144,6 +144,7 @@ where
     let max_matches = params.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
 
     let mut cmd = build_ripgrep_command(root, params);
+    #[allow(clippy::disallowed_methods)] // waited on below; killed when cancelled
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn ripgrep: {}", e))?;

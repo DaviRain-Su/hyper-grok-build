@@ -789,6 +789,7 @@ mod tests {
 
     /// Spawn a long-sleeping child to stand in for a predecessor process.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
     fn spawn_predecessor() -> Child {
         Command::new("sleep")
             .arg("300")
@@ -884,6 +885,7 @@ mod tests {
         // escalation can end it. It touches a marker once the trap is
         // installed so the test cannot signal it during bash startup.
         let trap_ready = dir.path().join("trap-ready");
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut child = Command::new("bash")
             .arg("-c")
             .arg(format!(

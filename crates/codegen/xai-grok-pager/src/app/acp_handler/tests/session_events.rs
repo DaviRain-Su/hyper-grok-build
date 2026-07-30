@@ -427,6 +427,13 @@
             Some("legacy_auth"),
             "Unauthorized (401) ... deprecated authentication method"
         ));
+        // auth_transient = the shell says the failure self-heals (refreshable
+        // credential, no sticky verdict — e.g. post-wake network gap). Even
+        // with a 401 in the message, the `/login` banner must not fire.
+        assert!(!is_reauthable_failure(
+            Some("auth_transient"),
+            "Unauthorized (401)\n\nAuthentication is temporarily unavailable"
+        ));
         // Unrelated failures must not be treated as re-authable.
         assert!(!is_reauthable_failure(
             Some("server_error"),

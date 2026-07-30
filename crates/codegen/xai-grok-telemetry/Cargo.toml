@@ -35,6 +35,7 @@ xai-grok-env = { workspace = true }
 xai-grok-secrets = { workspace = true }
 xai-mixpanel = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-grok-extra-ca = { workspace = true }
 xai-grok-sampler = { workspace = true }
 xai-token-estimation = { workspace = true }
 dirs = { workspace = true }

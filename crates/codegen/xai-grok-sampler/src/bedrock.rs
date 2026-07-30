@@ -1011,6 +1011,7 @@ pub fn stream_bedrock_converse(
                         total_tokens: prompt_tokens.saturating_add(output),
                         reasoning_tokens: 0,
                         cached_prompt_tokens: cache_read,
+                        cache_creation_prompt_tokens: cache_write,
                     });
                 },
                 _ => {
@@ -1082,7 +1083,7 @@ pub fn stream_bedrock_converse(
             ));
         }
         items.push(ConversationItem::Assistant(assistant));
-        let response = ConversationResponse { items, stop_reason: Some(stop_reason), usage, cost_usd_ticks: None, message_chunks_emitted: text_chunks, doom_loop_signals: Vec::new(), stop_message: None };
+        let response = ConversationResponse { items, stop_reason: Some(stop_reason), usage, cost_usd_ticks: None, message_chunks_emitted: text_chunks, doom_loop_signals: Vec::new(), stop_message: None, message_id: None, raw_stop_reason: None, stop_sequence: None };
         yield SamplingEvent::Completed { request_id, response: Box::new(response), metrics: InferenceLatencyStats { time_to_first_token_ms: first_token_at.map(|t| t.duration_since(start).as_millis() as u64), time_to_last_byte_ms: start.elapsed().as_millis() as u64, chunk_count: content_chunks as u32, attempts: 1, ..Default::default() } };
     }
 }

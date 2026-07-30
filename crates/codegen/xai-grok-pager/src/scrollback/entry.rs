@@ -55,6 +55,20 @@ impl EntryId {
     }
 }
 
+/// Saturates at `u16::MAX` so a multi-MB block cannot overflow `virtual_y`.
+fn wrapped_lines_from_widths(widths: &[u32], content_width: u16) -> u16 {
+    let cw = content_width.max(1) as usize;
+    let mut total: usize = 0;
+    for &w in widths {
+        let w = w as usize;
+        total += if w == 0 { 1 } else { w.div_ceil(cw) };
+        if total >= u16::MAX as usize {
+            return u16::MAX;
+        }
+    }
+    total.max(1) as u16
+}
+
 /// A scrollback entry: block content + display state.
 #[derive(Debug, Clone)]
 pub struct ScrollbackEntry {
@@ -116,6 +130,11 @@ pub struct ScrollbackEntry {
     /// same-width rebuild reuse the estimate instead of re-cloning the block's
     /// source text. Cleared by `invalidate_cache`.
     cached_estimate_lines: RefCell<Option<(u16, u16)>>,
+
+    /// Display width of each source line. Width-independent, so unlike every
+    /// other cache here it survives a resize — re-deriving it per width is what
+    /// made a resize cost O(total conversation bytes).
+    cached_line_widths: RefCell<Option<Vec<u32>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +200,7 @@ impl ScrollbackEntry {
             cached_output: RefCell::new(None),
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
+            cached_line_widths: RefCell::new(None),
         }
     }
 
@@ -212,6 +232,7 @@ impl ScrollbackEntry {
             cached_output: RefCell::new(None),
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
+            cached_line_widths: RefCell::new(None),
         }
     }
 
@@ -275,8 +296,14 @@ impl ScrollbackEntry {
         self.invalidate_cache();
     }
 
-    /// Invalidate cached output.
+    /// Invalidate cached output after a content change.
     pub fn invalidate_cache(&mut self) {
+        self.invalidate_width_caches();
+        *self.cached_line_widths.borrow_mut() = None;
+    }
+
+    /// Invalidate only the caches keyed by terminal width — the resize path.
+    pub fn invalidate_width_caches(&mut self) {
         *self.cached_output.borrow_mut() = None;
         *self.cached_truncated_height.borrow_mut() = None;
         *self.cached_estimate_lines.borrow_mut() = None;
@@ -308,6 +335,32 @@ impl ScrollbackEntry {
     /// Store the cheap height-estimate line count for `content_width`.
     pub fn store_estimate_lines(&self, content_width: u16, lines: u16) {
         *self.cached_estimate_lines.borrow_mut() = Some((content_width, lines));
+    }
+
+    /// Cheap wrapped-line estimate for the block's source text at
+    /// `content_width`.
+    ///
+    /// An APPROXIMATION: it ignores word boundaries, and for a markdown block
+    /// it reflects the last rendered view. On-screen entries are always
+    /// measured exactly, so nothing depends on it being right.
+    pub fn estimate_source_lines(&self, content_width: u16) -> u16 {
+        let mut slot = self.cached_line_widths.borrow_mut();
+        let widths = slot.get_or_insert_with(|| {
+            let Some(text) = self.block.searchable_text() else {
+                return Vec::new();
+            };
+            // Renderers drop a single trailing newline.
+            let text = text.strip_suffix('\n').unwrap_or(&text);
+            text.split('\n')
+                .map(|line| unicode_width::UnicodeWidthStr::width(line) as u32)
+                .collect()
+        });
+        wrapped_lines_from_widths(widths, content_width)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_line_widths(&self) -> bool {
+        self.cached_line_widths.borrow().is_some()
     }
 
     /// Whether this entry's laid-out output is cached. Lazy-layout tests use this
@@ -655,6 +708,45 @@ mod tests {
         assert!(!entry.is_running);
         assert!(matches!(entry.display_mode, DisplayMode::Expanded));
         assert!(!entry.display_mode_pinned);
+    }
+
+    #[test]
+    fn estimate_source_lines_is_the_per_line_ceiling_sum() {
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt(format!(
+            "{}\n\n{}",
+            "a".repeat(10),
+            "b".repeat(25)
+        )));
+        // width 10 → 1 + 1 + 3 = 5; width 5 → 2 + 1 + 5 = 8; width 100 → 3.
+        assert_eq!(entry.estimate_source_lines(10), 5);
+        assert_eq!(entry.estimate_source_lines(5), 8);
+        assert_eq!(entry.estimate_source_lines(100), 3);
+    }
+
+    #[test]
+    fn width_invalidation_keeps_the_line_profile_content_invalidation_drops_it() {
+        let mut entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello world"));
+        entry.estimate_source_lines(20);
+        assert!(entry.has_cached_line_widths());
+
+        entry.invalidate_width_caches();
+        assert!(
+            entry.has_cached_line_widths(),
+            "a width change must not drop the width-independent profile"
+        );
+
+        entry.invalidate_cache();
+        assert!(
+            !entry.has_cached_line_widths(),
+            "a content change must drop the profile"
+        );
+    }
+
+    #[test]
+    fn estimate_source_lines_without_searchable_text_is_one_line() {
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt(""));
+        assert!(entry.block.searchable_text().is_none());
+        assert_eq!(entry.estimate_source_lines(80), 1);
     }
 
     #[test]

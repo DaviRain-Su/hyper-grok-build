@@ -1,4 +1,5 @@
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::notifications::NotificationEvent;
@@ -38,33 +39,56 @@ fn execute_hook(
         }
     }
 
-    match cmd.spawn() {
-        Ok(mut child) => {
-            use wait_timeout::ChildExt;
-            match child.wait_timeout(timeout) {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    // Kill the entire process group, not just the direct child.
-                    #[cfg(unix)]
-                    {
-                        let pid = child.id() as i32;
-                        let _ = nix::sys::signal::killpg(
-                            nix::unistd::Pid::from_raw(pid),
-                            nix::sys::signal::Signal::SIGKILL,
-                        );
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = child.kill();
-                    }
-                    let _ = child.wait();
-                    tracing::warn!("hook timed out");
-                }
-                Err(e) => tracing::debug!(error = %e, command, "hook wait failed"),
+    #[allow(clippy::disallowed_methods)] // enrolled below, once the child exists
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::debug!(error = %e, command, "hook spawn failed");
+            return;
+        }
+    };
+
+    // Enrolled so a hook still running when the pager exits is reaped with it.
+    let group = attach_to_global_scope(&child);
+
+    use wait_timeout::ChildExt;
+    let waited = child.wait_timeout(timeout);
+    if !matches!(waited, Ok(Some(_))) {
+        // The enrollment ends with this function, so kill rather than orphan.
+        match &group {
+            Some(group) => {
+                let _ = group.kill();
+            }
+            None => {
+                let _ = child.kill();
             }
         }
-        Err(e) => tracing::debug!(error = %e, command, "hook spawn failed"),
+        let _ = child.wait();
     }
+    // Reaped, so the pid is released and its pgid can be recycled: the group
+    // handle must not outlive the child it names.
+    drop(group);
+    match waited {
+        Ok(Some(_)) => {}
+        Ok(None) => tracing::warn!("hook timed out"),
+        Err(e) => tracing::debug!(error = %e, command, "hook wait failed"),
+    }
+}
+
+/// `None` when the child could not be enrolled, which includes the scope
+/// having already closed and killed it.
+fn attach_to_global_scope(child: &std::process::Child) -> Option<Arc<xai_tty_utils::ProcessGroup>> {
+    let mut group = xai_tty_utils::ProcessGroup::new()
+        .inspect_err(|e| tracing::debug!(error = %e, "hook process group failed"))
+        .ok()?;
+    group
+        .attach_std(child)
+        .inspect_err(|e| tracing::debug!(error = %e, "hook process group attach failed"))
+        .ok()?;
+    let group = Arc::new(group);
+    xai_tty_utils::global_process_scope()
+        .register(&group)
+        .then_some(group)
 }
 
 pub fn run_hook(hook: &NotificationHook, event: &NotificationEvent) {

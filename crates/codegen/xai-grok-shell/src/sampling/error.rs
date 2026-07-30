@@ -321,6 +321,7 @@ mod tests {
                 total_tokens: 4,
                 reasoning_tokens: 0,
                 cached_prompt_tokens: 0,
+                cache_creation_prompt_tokens: 0,
             },
             None,
             Some(10),

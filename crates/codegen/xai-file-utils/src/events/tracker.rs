@@ -5,12 +5,21 @@ use std::time::Instant;
 use super::log::EventWriter;
 use super::types::{CancellationCategory, Event, RedirectKind, TurnOutcomeLabel};
 
+/// In-flight tool for cancel telemetry. Duration is the dispatch wall already
+/// measured, so cancel can reuse it instead of re-timing post-flight.
+#[derive(Debug, Clone)]
+struct ActiveTool {
+    tool_name: String,
+    tool_call_id: String,
+    dispatch_duration_ms: u64,
+}
+
 /// Per-session event state. `!Send` — lives on the session actor.
 /// Background tasks use `tracker.writer()` to get a `Clone + Send + Sync` handle.
 pub struct EventTracker {
     writer: EventWriter,
     turn_ended_emitted: Cell<bool>,
-    active_tool: RefCell<Option<(String, Instant)>>,
+    active_tool: RefCell<Option<ActiveTool>>,
     turn_tool_count: Cell<u32>,
     /// Cross-turn one-shot: the *fatal* user-interrupt cause that cancelled the
     /// most recent turn (set by the cancel paths), consumed by the *next* real
@@ -42,7 +51,7 @@ impl std::fmt::Debug for EventTracker {
             .field("writer", &self.writer)
             .field("turn_ended_emitted", &self.turn_ended_emitted.get())
             .field("turn_tool_count", &self.turn_tool_count.get())
-            .field("active_tool", &active_tool.as_ref().map(|(name, _)| name))
+            .field("active_tool", &*active_tool)
             .field(
                 "prior_interrupt_category",
                 &self.prior_interrupt_category.get(),
@@ -101,12 +110,21 @@ impl EventTracker {
         });
     }
 
-    /// Set the active tool for cancellation tracking and return the start instant.
-    pub fn tool_started(&self, tool_name: String) -> Instant {
-        let now = Instant::now();
-        *self.active_tool.borrow_mut() = Some((tool_name, now));
-        self.turn_tool_count.set(self.turn_tool_count.get() + 1);
-        now
+    /// Mark a tool as active for cancellation tracking.
+    ///
+    /// `dispatch_duration_ms` is the wall time already measured for this call, so
+    /// a cancel can report it rather than re-measure from post-flight.
+    pub fn tool_started(&self, tool_name: String, tool_call_id: String, dispatch_duration_ms: u64) {
+        let is_new = self.active_tool.borrow().is_none();
+        *self.active_tool.borrow_mut() = Some(ActiveTool {
+            tool_name,
+            tool_call_id,
+            dispatch_duration_ms,
+        });
+        // Re-entry (e.g. after reauth adds retry wall time) only refreshes duration.
+        if is_new {
+            self.turn_tool_count.set(self.turn_tool_count.get() + 1);
+        }
     }
 
     pub fn tool_count_this_turn(&self) -> u32 {
@@ -123,12 +141,17 @@ impl EventTracker {
 
     /// Cancel in-flight tool and emit `ToolCompleted(cancelled)`.
     /// Called from `cancel_running_task()` before `turn_ended`.
+    ///
+    /// A tool cancelled while still dispatching was never marked active, so it
+    /// gets no `tool_completed` row at all.
     pub fn cancel_active_tool(&self) {
-        if let Some((tool_name, start)) = self.active_tool.borrow_mut().take() {
+        if let Some(tool) = self.active_tool.borrow_mut().take() {
             self.emit(Event::ToolCompleted {
-                tool_name,
-                duration_ms: start.elapsed().as_millis() as u64,
+                tool_name: tool.tool_name,
+                duration_ms: tool.dispatch_duration_ms,
                 outcome: super::types::ToolOutcome::Cancelled,
+                tool_call_id: tool.tool_call_id,
+                source: super::types::ToolCompletedSource::Shell,
             });
         }
     }

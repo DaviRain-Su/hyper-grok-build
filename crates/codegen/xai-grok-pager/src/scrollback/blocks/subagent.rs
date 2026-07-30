@@ -18,6 +18,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::subagent::format_subagent_meta;
+use crate::appearance::AppearanceConfig;
 use crate::render::color::blend_color;
 use crate::render::line_utils::truncate_str;
 use crate::scrollback::block::BlockContent;
@@ -292,7 +293,7 @@ impl BlockContent for SubagentBlock {
         }
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 

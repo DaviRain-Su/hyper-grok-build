@@ -8,6 +8,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::appearance::AppearanceConfig;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput, DisplayMode};
 use crate::theme::Theme;
@@ -93,7 +94,7 @@ impl BlockContent for CreditLimitBlock {
         Some(AccentStyle::static_color(theme.warning))
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         true
     }
 

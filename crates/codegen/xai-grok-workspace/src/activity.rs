@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
-use xai_file_utils::events::{Event, EventWriter, ToolOutcome};
+use xai_file_utils::events::{Event, EventWriter, ToolCompletedSource, ToolOutcome};
 use xai_file_utils::queue::UploadQueueStats;
 use xai_tool_protocol::{ToolServerLifecycleStatus, ToolServerStatusPayload};
 
@@ -442,11 +442,13 @@ impl ActivityTracker {
         // captured writer handle keeps the file open). `duration_ms` is always
         // truthful because the start time is paired with the writer.
         if let Some((_, (started_ms, writer))) = self.call_started_ms.remove(call_id) {
-            let duration_ms = now.saturating_sub(started_ms);
+            // Workspace = hub/proxy hop; join package durations on shell rows (no source).
             writer.emit(Event::ToolCompleted {
                 tool_name,
-                duration_ms,
+                duration_ms: now.saturating_sub(started_ms),
                 outcome,
+                tool_call_id: call_id.to_owned(),
+                source: ToolCompletedSource::Workspace,
             });
         }
     }
@@ -1879,6 +1881,7 @@ mod tests {
         assert_eq!(events[1]["type"], "tool_completed");
         assert_eq!(events[1]["tool_name"], "read_file");
         assert_eq!(events[1]["outcome"], "success");
+        assert_eq!(events[1]["source"], "workspace");
         assert!(
             events[1]["duration_ms"].as_u64().is_some(),
             "ToolCompleted must carry a duration_ms"

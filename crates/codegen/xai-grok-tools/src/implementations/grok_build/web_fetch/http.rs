@@ -54,18 +54,20 @@ impl HttpClient {
     }
 
     fn build(params: &WebFetchParams) -> Result<reqwest::Client, WebFetchError> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(params.timeout_secs())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            // We manage redirects for SSRF.
-            .redirect(reqwest::redirect::Policy::none())
-            .pool_max_idle_per_host(2)
-            .pool_idle_timeout(std::time::Duration::from_secs(30))
-            .tcp_nodelay(true)
-            // Reduce size of incoming payloads.
-            .gzip(true)
-            .brotli(true)
-            .deflate(true);
+        let mut builder = xai_grok_extra_ca::with_extra_root_certificates(
+            reqwest::Client::builder()
+                .timeout(params.timeout_secs())
+                .connect_timeout(std::time::Duration::from_secs(10))
+                // We manage redirects for SSRF.
+                .redirect(reqwest::redirect::Policy::none())
+                .pool_max_idle_per_host(2)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .tcp_nodelay(true)
+                // Reduce size of incoming payloads.
+                .gzip(true)
+                .brotli(true)
+                .deflate(true),
+        );
 
         // Route all traffic through the egress proxy when configured.
         if let Some(ref endpoint) = params.proxy_endpoint {

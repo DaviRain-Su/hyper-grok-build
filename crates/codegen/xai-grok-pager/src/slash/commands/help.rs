@@ -55,6 +55,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Minimal,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         };
         assert!(matches!(

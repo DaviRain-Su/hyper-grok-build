@@ -761,6 +761,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             // Detach = new session (Ctrl+C isolation), not handle abandonment:
             // the child is still ours to wait() on.
             xai_grok_tools::util::detach_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // the caller owns the returned handle
             let child = cmd.spawn()?;
             Ok(Some(child))
         }
@@ -849,6 +850,7 @@ pub fn restart_grok() -> Result<()> {
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        #[allow(clippy::disallowed_methods)] // the relaunched CLI replaces this process
         let _ = cmd.spawn()?;
         std::process::exit(0);
     }

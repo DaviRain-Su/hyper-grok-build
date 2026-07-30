@@ -91,7 +91,7 @@ impl std::fmt::Debug for EventWriter {
 mod tests {
     use super::*;
     use crate::events::types::{
-        EVENT_SCHEMA_VERSION, Event, SessionRelationship, TurnOutcomeLabel,
+        EVENT_SCHEMA_VERSION, Event, SessionRelationship, ToolOutcome, TurnOutcomeLabel,
     };
 
     fn _assert_event_writer_is_send_sync_clone()
@@ -116,6 +116,13 @@ mod tests {
             redirect_kind: None,
         });
         writer.emit(Event::FirstToken);
+        writer.emit(Event::ToolCompleted {
+            tool_name: "bash".into(),
+            duration_ms: 1500,
+            outcome: ToolOutcome::Success,
+            tool_call_id: "call_xyz".into(),
+            source: crate::events::types::ToolCompletedSource::Shell,
+        });
         writer.emit(Event::TurnEnded {
             outcome: TurnOutcomeLabel::Completed,
             cancellation_category: None,
@@ -124,7 +131,7 @@ mod tests {
 
         let text = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
         let lines: Vec<&str> = text.trim().split('\n').collect();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
 
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["type"], "turn_started");
@@ -135,9 +142,19 @@ mod tests {
         assert_eq!(second["type"], "first_token");
 
         let third: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
-        assert_eq!(third["type"], "turn_ended");
-        assert_eq!(third["outcome"], "completed");
-        assert!(third.get("cancellation_category").is_none());
+        assert_eq!(third["type"], "tool_completed");
+        assert_eq!(third["tool_name"], "bash");
+        assert_eq!(third["duration_ms"], 1500);
+        assert_eq!(third["tool_call_id"], "call_xyz");
+        assert!(
+            third.get("source").is_none(),
+            "shell ToolCompleted must omit source"
+        );
+
+        let fourth: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        assert_eq!(fourth["type"], "turn_ended");
+        assert_eq!(fourth["outcome"], "completed");
+        assert!(fourth.get("cancellation_category").is_none());
     }
 
     #[test]

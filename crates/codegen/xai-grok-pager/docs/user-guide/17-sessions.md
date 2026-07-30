@@ -132,13 +132,14 @@ Alias: `/title`.
 
 ## The /rewind Command
 
-`/rewind` undoes recent changes by restoring files to their state at an earlier point in the conversation. Use it to recover from mistakes.
+`/rewind` (alias `/undo`) undoes recent changes by restoring files to their state at an earlier point in the conversation. Use it to recover from mistakes.
 
 ```
 /rewind
+/undo
 ```
 
-When you run `/rewind` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grok:
+When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grok:
 
 1. Shows a list of rewind points (one per user prompt)
 2. Lets you select which point to rewind to

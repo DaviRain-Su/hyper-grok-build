@@ -58,6 +58,10 @@ impl LogEntry {
     }
 }
 
+/// Requests kept for inspection; each holds a whole conversation, so an
+/// unbounded log outgrows what it is testing. `request_count` stays exact.
+const MAX_LOGGED_REQUESTS: usize = 1024;
+
 pub struct RequestLog {
     count: AtomicU32,
     entries: std::sync::Mutex<Vec<LogEntry>>,
@@ -80,7 +84,11 @@ impl RequestLog {
         headers: Vec<(String, String)>,
     ) {
         self.count.fetch_add(1, Ordering::SeqCst);
-        self.entries.lock().unwrap().push(LogEntry {
+        let mut entries = self.entries.lock().unwrap();
+        if entries.len() >= MAX_LOGGED_REQUESTS {
+            entries.remove(0);
+        }
+        entries.push(LogEntry {
             method: method.to_string(),
             path: path.to_string(),
             body: body.cloned(),

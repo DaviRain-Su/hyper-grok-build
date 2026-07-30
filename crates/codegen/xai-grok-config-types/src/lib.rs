@@ -151,7 +151,7 @@ pub struct WorktreeAutoGcSettings {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_age_by_kind: Option<std::collections::BTreeMap<String, WorktreeKindMaxAge>>,
-    /// Optional discovery rebuild + stale `.git/worktrees/` prune (default off).
+    /// Optional discovery rebuild + grok-scoped stale `.git/worktrees/` scrub (default off).
     #[serde(
         default,
         deserialize_with = "de_opt_bool_tolerant",

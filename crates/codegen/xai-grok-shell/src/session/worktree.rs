@@ -92,7 +92,11 @@ async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
             }
         }
         if let Ok(root) = find_git_root_from_path(std::path::Path::new(source_cwd)) {
-            let _ = xai_grok_workspace::session::git::git_cli(&root, &["worktree", "prune"]).await;
+            let wt_path = wt.to_path_buf();
+            let _ = tokio::task::spawn_blocking(move || {
+                xai_fast_worktree::remove_stale_worktree_registration(&root, &wt_path)
+            })
+            .await;
         }
     }
 }

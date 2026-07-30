@@ -1448,10 +1448,45 @@ If LSP tools are enabled but no usable server config is found, Grok emits a non-
 | `initializationOptions` | JSON passed during LSP initialize. |
 | `settings` | Configuration sent via workspace settings updates. |
 | `workspaceFolder` | Override workspace folder path sent to the server. |
+| `workspaceOpen` | Solution or projects to load, for servers that need to be told explicitly (see below). |
 | `startupTimeout` | Max startup wait in milliseconds before startup is considered failed. |
 | `shutdownTimeout` | Max graceful shutdown wait in milliseconds. |
 | `restartOnCrash` | Whether to restart the server after a crash. |
 | `maxRestarts` | Maximum restart attempts before giving up. |
+
+#### Telling a server which solution to load (`workspaceOpen`)
+
+Most servers work out what to analyze from the workspace folder. A few do not,
+and instead load their workspace through a protocol extension. The C# server
+(`Microsoft.CodeAnalysis.LanguageServer`, "Roslyn") is the notable one: on its
+own it treats every file as a loose "miscellaneous file" and reports no
+project-level diagnostics at all, until it is told to open a solution or a set
+of projects.
+
+```json
+{
+  "csharp": {
+    "command": "dotnet",
+    "args": [
+      "/path/to/Microsoft.CodeAnalysis.LanguageServer.dll",
+      "--stdio",
+      "--logLevel", "Warning",
+      "--extensionLogDirectory", "/tmp/roslyn-logs"
+    ],
+    "extensionToLanguage": { ".cs": "csharp" },
+    "workspaceOpen": { "solution": "MyApp.sln" },
+    "startupTimeout": 60000
+  }
+}
+```
+
+Use `"projects": ["src/App/App.csproj", "src/Lib/Lib.csproj"]` instead of
+`"solution"` when there is no solution file. Paths may be absolute or relative
+to the workspace root. Wrappers such as `roslyn-language-server` already send
+these notifications themselves, in which case `workspaceOpen` can be omitted.
+
+Note that `--logLevel` is required by that server, and that anything more
+verbose than `Warning` makes it stream every internal log line to the client.
 
 #### Installing language servers
 

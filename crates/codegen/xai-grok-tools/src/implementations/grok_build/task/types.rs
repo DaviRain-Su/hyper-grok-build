@@ -562,7 +562,10 @@ impl SubagentSnapshotStatus {
 #[derive(Debug, Clone)]
 pub enum SubagentCancelTarget {
     SubagentId(String),
+    /// Turn-scoped cancel (soft cancel / max-turns).
     ParentPromptId(String),
+    /// User Stop / Esc with cancel_subagents — prior-turn background too.
+    ParentSession,
     WorkflowRunId(String),
 }
 
@@ -856,6 +859,12 @@ pub enum SubagentEvent {
     Completions(SubagentCompletionsRequest),
     /// Discard a closed session's buffered completions and cancel its children.
     TeardownSession {
+        parent_session_id: String,
+    },
+    /// Re-open Task spawns for a parent session after a prior ParentSession stop.
+    /// Emitted at the start of each user turn so Stop's late-spawn gate does not
+    /// permanently block the next prompt.
+    OpenSpawnAdmission {
         parent_session_id: String,
     },
     Outstanding(SubagentOutstandingRequest),

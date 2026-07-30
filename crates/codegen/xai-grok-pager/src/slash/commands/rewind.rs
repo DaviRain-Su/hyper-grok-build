@@ -8,6 +8,10 @@ impl SlashCommand for RewindCommand {
         "rewind"
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["undo"]
+    }
+
     fn description(&self) -> &str {
         "Rewind to a previous turn"
     }

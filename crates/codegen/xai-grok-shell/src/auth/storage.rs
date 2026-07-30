@@ -13,7 +13,17 @@ use super::model::{
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
 /// The lock is released when the inner `File` is dropped (closing the FD).
+///
+/// Field order is load-bearing: `_heartbeat` drops before `_file`, so the
+/// heartbeat thread is stopped and joined while the flock is still held — a
+/// late heartbeat can never write holder info into a lock file a sibling has
+/// already re-acquired.
 pub(crate) struct AuthFileLock {
+    /// Periodic `PID:TS` re-writer (see `manager::lock::LockHeartbeat`).
+    /// `None` for short holds — non-blocking acquires and async acquires
+    /// below the refresh-sized budget — which never span an IdP exchange
+    /// and don't warrant a thread per acquisition.
+    pub(super) _heartbeat: Option<super::manager::lock::LockHeartbeat>,
     pub(super) _file: File,
 }
 

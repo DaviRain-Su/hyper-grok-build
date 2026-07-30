@@ -300,6 +300,9 @@ pub fn chat_mode_flag_conflict(
     }
     None
 }
+pub fn active_local_workspace() -> anyhow::Result<Option<()>> {
+    Ok(None)
+}
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
 ///
 /// The id skips disk/GCS resolution and flows to the gateway, but it is also

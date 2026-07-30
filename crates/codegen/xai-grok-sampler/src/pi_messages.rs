@@ -616,6 +616,7 @@ fn usage(u: Option<&PiUsage>) -> Option<TokenUsage> {
             total_tokens,
             reasoning_tokens: u.reasoning.unwrap_or(0),
             cached_prompt_tokens: u.cache_read,
+            cache_creation_prompt_tokens: 0,
         }
     })
 }
@@ -834,7 +835,7 @@ pub fn stream_pi_messages<'a>(
                     items.push(ConversationItem::Assistant(assistant));
                     let cost_usd_ticks = cost_usd_ticks(u.as_ref());
                     let token_usage = usage(u.as_ref());
-                    yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: Some(stop), usage: token_usage, cost_usd_ticks, message_chunks_emitted: text_chunks, doom_loop_signals: Vec::new(), stop_message: None }), metrics: InferenceLatencyStats::from_timestamps(start, &timestamps, Instant::now()) };
+                    yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: Some(stop), usage: token_usage, cost_usd_ticks, message_chunks_emitted: text_chunks, doom_loop_signals: Vec::new(), stop_message: None, message_id: None, raw_stop_reason: None, stop_sequence: None }), metrics: InferenceLatencyStats::from_timestamps(start, &timestamps, Instant::now()) };
                     break;
                 }
                 PiMessagesEvent::Error { reason, error_message, rewrite, .. } => {

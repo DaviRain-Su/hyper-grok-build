@@ -1158,8 +1158,8 @@ pub fn should_enable_pool(
 /// loop runs at most once per process.
 static CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
 
-/// Guard ensuring `git worktree prune` runs at most once per process.
-static PRUNE_ONCE: std::sync::Once = std::sync::Once::new();
+/// Guard ensuring stale pool registration removal runs at most once per process.
+static REGISTRATION_CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
 
 // Orphan adoption
 
@@ -1201,8 +1201,8 @@ pub fn take_adoptable_worktrees() -> Vec<AdoptableWorktree> {
 /// `new_session`, experiment fetch) may race to invoke this; only the
 /// first caller does the real work, the rest return instantly.
 ///
-/// `git worktree prune` is gated separately so the first caller that
-/// provides a `source_git_root` triggers it, even if the directory
+/// Stale registration removal is gated separately so the first caller
+/// that provides a `source_git_root` triggers it, even if the directory
 /// cleanup already ran from an earlier call with `None`.
 ///
 /// Multi-instance safe: iterates instance subdirectories under
@@ -1213,8 +1213,8 @@ pub fn take_adoptable_worktrees() -> Vec<AdoptableWorktree> {
 /// Three-step cleanup per dead instance:
 /// 1. `git worktree remove --force` each worktree in the dead instance dir.
 /// 2. Delete the instance directory from disk.
-/// 3. Run `git worktree prune` on the source repo as a safety net for any
-///    remaining stale registrations in `.git/worktrees/`.
+/// 3. Remove any remaining stale *pool-owned* registrations from the source
+///    repo's `.git/worktrees/` as a safety net.
 ///
 /// This is a **synchronous** function intended to be called via
 /// `tokio::task::spawn_blocking` so it runs on the thread pool and
@@ -1227,11 +1227,8 @@ pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
         *ADOPTABLE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(candidates);
     });
 
-    // Run `git worktree prune` at most once, when a git root is available.
-    // Skip prune when adoptable candidates exist — their backlinks still
-    // point to the old instance paths. Prune would remove the .git/worktrees/
-    // metadata entries that adoption needs. Prune only runs on the
-    // destroy-all path (zero candidates).
+    // Skip when adoptable candidates exist — adoption needs their
+    // .git/worktrees/ metadata entries.
     let has_adoptable = ADOPTABLE_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1241,25 +1238,20 @@ pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
     if has_adoptable {
         tracing::debug!(
             target: WORKTREE_POOL_LOG,
-            "CLEANUP_PRUNE_SKIP: skipping git worktree prune (adoptable candidates exist)"
+            "CLEANUP_PRUNE_SKIP: skipping stale registration removal (adoptable candidates exist)"
         );
     } else if let Some(git_root) = source_git_root {
         let root = git_root.to_path_buf();
-        PRUNE_ONCE.call_once(move || {
-            tracing::info!(
-                target: WORKTREE_POOL_LOG,
-                git_root = %root.display(),
-                "CLEANUP_PRUNE: running git worktree prune on source repo"
+        REGISTRATION_CLEANUP_ONCE.call_once(move || {
+            let removed = xai_fast_worktree::remove_stale_worktree_registrations_under(
+                &root,
+                &pool_base_directory(),
             );
-            let result = git_command()
-                .args(["worktree", "prune"])
-                .current_dir(&root)
-                .output();
             tracing::info!(
                 target: WORKTREE_POOL_LOG,
                 git_root = %root.display(),
-                success = result.as_ref().map(|o| o.status.success()).unwrap_or(false),
-                "CLEANUP_PRUNE_DONE: git worktree prune completed"
+                removed,
+                "CLEANUP_PRUNE_DONE: stale pool registration removal completed"
             );
         });
     }

@@ -72,7 +72,7 @@ struct AuthEntry {
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn default_auth_path() -> anyhow::Result<PathBuf> {
+pub fn default_auth_path() -> anyhow::Result<PathBuf> {
     let grok = xai_grok_config::user_grok_home()
         .ok_or_else(|| anyhow::anyhow!("no user grok home (set $GROK_HOME or $HOME)"))?;
     Ok(grok.join("auth.json"))
@@ -80,6 +80,11 @@ fn default_auth_path() -> anyhow::Result<PathBuf> {
 
 /// Read the active OIDC entry and its scope key. The key is threaded to the
 /// refresh write so rotation updates exactly the entry that was read.
+///
+/// When several OIDC entries qualify, pick the **latest `expires_at`** — the
+/// entry the shell is actively refreshing. The previous first-key selection
+/// was alphabetical and could rotate a *different principal's* RT chain than
+/// the one the user's sessions use.
 fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
     if !path.exists() {
         anyhow::bail!(
@@ -95,7 +100,14 @@ fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
 
     entries
         .into_iter()
-        .find(|(_, e)| e.refresh_token.is_some() && e.oidc_issuer.is_some())
+        .filter(|(_, e)| e.refresh_token.is_some() && e.oidc_issuer.is_some())
+        // Strictly-greater comparison: ties (including all-`None`) keep the
+        // first candidate in BTreeMap (alphabetical) order, so single-entry
+        // and legacy no-`expires_at` files behave exactly as before.
+        .fold(None::<(String, AuthEntry)>, |best, cand| match best {
+            Some(b) if cand.1.expires_at <= b.1.expires_at => Some(b),
+            _ => Some(cand),
+        })
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no OIDC auth entry found in {}. Run `grok login` first.",
@@ -134,22 +146,131 @@ fn build_oidc_provider(
         builder = builder.expires_at(exp);
     }
 
+    // The SDK invokes `on_refresh` inside its async refresh path, and the
+    // persist below blocks on a cross-process file lock — run it on its own
+    // thread so a contended lock never stalls the runtime.
     builder = builder.on_refresh(Arc::new(move |event: &RefreshEvent| {
-        if let Err(e) = write_refreshed_token(&auth_path, &scope_key, event) {
-            tracing::warn!(error = %e, "failed to persist refreshed token to auth.json");
-        }
+        let auth_path = auth_path.clone();
+        let scope_key = scope_key.clone();
+        let event = event.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = write_refreshed_token(&auth_path, &scope_key, &event) {
+                tracing::warn!(error = %e, "failed to persist refreshed token to auth.json");
+            }
+        });
     }));
 
     Ok(Arc::new(builder.build()))
 }
 
+/// How long [`lock_auth_file`] polls for the shared `auth.json.lock` before
+/// skipping the persist. Covers the shell's normal refresh hold (~1 s); its
+/// worst-case 45 s budget is deliberately not waited out — losing one persist
+/// is recoverable (see [`write_refreshed_token`]), stalling the persist thread
+/// for a minute is not worth it.
+const AUTH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// RAII flock on the sibling `auth.json.lock` — the same advisory lock every
+/// grok-shell `auth.json` writer takes. Polling `try_lock` rather than a
+/// blocking `flock` to bound the wait; never breaks a held lock (a stale
+/// holder here would be the shell mid-refresh, exactly the writer we must not
+/// race).
+struct AuthFileLockGuard {
+    _file: std::fs::File,
+}
+
+fn lock_auth_file(auth_json_path: &Path) -> Option<AuthFileLockGuard> {
+    use fs2::FileExt;
+    use std::io::Write;
+    let lock_path = auth_json_path.with_file_name("auth.json.lock");
+    let deadline = std::time::Instant::now() + AUTH_LOCK_TIMEOUT;
+    loop {
+        // The shell's stale-lock recovery breaks locks by unlink+recreate, so
+        // only a flock on the live inode counts (mirrors the shell's own
+        // acquire path). A dead inode falls through to the same deadline and
+        // sleep as a busy lock — retrying without them spins this thread for
+        // as long as the check keeps failing.
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            && file.try_lock_exclusive().is_ok()
+            && lock_inode_is_live(&file, &lock_path)
+        {
+            // Holder info (`PID:TS`) through the locked fd, so the shell can
+            // identify (and, if this process dies, break) our hold.
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = file.set_len(0);
+            let _ = write!(file, "{}:{ts}", std::process::id());
+            let _ = file.sync_all();
+            return Some(AuthFileLockGuard { _file: file });
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// `fstat(fd)` vs `stat(path)`: `false` when the locked file was concurrently
+/// unlinked and recreated (our flock would be on the dead inode).
+#[cfg(unix)]
+fn lock_inode_is_live(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(fd), Ok(p)) => fd.ino() == p.ino() && fd.dev() == p.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_inode_is_live(_file: &std::fs::File, _path: &Path) -> bool {
+    true
+}
+
 fn write_refreshed_token(path: &Path, scope_key: &str, event: &RefreshEvent) -> anyhow::Result<()> {
+    // Read-modify-write under the shared advisory lock. Writing unlocked here
+    // raced the shell's own refresh writer: whichever wrote second silently
+    // rolled back the other's freshly rotated refresh token on disk — a
+    // guaranteed future `invalid_grant` for every session sharing the file.
+    let Some(_lock) = lock_auth_file(path) else {
+        // The rotated token still serves this process from memory, so warn
+        // rather than fail — but disk now trails the IdP by one rotation, and
+        // a fresh process that picks it up will present a spent token.
+        tracing::warn!(
+            timeout = ?AUTH_LOCK_TIMEOUT,
+            "auth.json.lock busy; skipping refreshed-token persist (disk left one rotation behind)"
+        );
+        return Ok(());
+    };
+
     let content = std::fs::read_to_string(path)?;
     let mut raw: serde_json::Value = serde_json::from_str(&content)?;
 
     let Some(obj) = raw.get_mut(scope_key).and_then(|e| e.as_object_mut()) else {
         anyhow::bail!("auth entry '{scope_key}' not found while persisting refreshed token");
     };
+
+    // Never roll disk back to an older token. Each refresh persists on its own
+    // thread and a sibling shell writes the same file, so writes can arrive out
+    // of order; the loser would replace a live refresh token with a spent one
+    // and guarantee a future `invalid_grant`.
+    if let Some(new_expiry) = event.expires_at
+        && let Some(disk_expiry) = obj
+            .get("expires_at")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        && disk_expiry.with_timezone(&chrono::Utc) >= new_expiry
+    {
+        tracing::debug!("auth.json already holds a same-or-newer token; skipping persist");
+        return Ok(());
+    }
+
     obj.insert(
         "key".to_owned(),
         serde_json::Value::String(event.access_token.clone()),
@@ -416,6 +537,38 @@ mod tests {
         assert_eq!(updated["legacy"]["key"], "xai-old"); // untouched
     }
 
+    /// With several OIDC entries (personal + enterprise login), the one with
+    /// the latest `expires_at` wins — that's the entry the user's grok
+    /// sessions actively refresh. Alphabetical-order selection could adopt a
+    /// different principal's refresh token and rotate it out from under the
+    /// shell.
+    #[test]
+    fn read_auth_entry_prefers_latest_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(
+            dir.path(),
+            r#"{
+            "aaa-stale": { "key": "eyJ.a", "refresh_token": "rt-a", "oidc_issuer": "https://auth.x.ai", "expires_at": "2026-01-01T00:00:00Z" },
+            "zzz-active": { "key": "eyJ.z", "refresh_token": "rt-z", "oidc_issuer": "https://auth.x.ai", "expires_at": "2026-06-01T00:00:00Z" }
+        }"#,
+        );
+
+        let (key, entry) = read_auth_entry(&path).unwrap();
+        assert_eq!(key, "zzz-active", "latest expires_at must win");
+        assert_eq!(entry.refresh_token.as_deref(), Some("rt-z"));
+
+        // An entry with no expires_at never beats one with a timestamp.
+        let path = write_auth_json(
+            dir.path(),
+            r#"{
+            "aaa-with-expiry": { "key": "eyJ.a", "refresh_token": "rt-a", "oidc_issuer": "https://auth.x.ai", "expires_at": "2026-01-01T00:00:00Z" },
+            "zzz-no-expiry": { "key": "eyJ.z", "refresh_token": "rt-z", "oidc_issuer": "https://auth.x.ai" }
+        }"#,
+        );
+        let (key, _) = read_auth_entry(&path).unwrap();
+        assert_eq!(key, "aaa-with-expiry");
+    }
+
     #[test]
     fn write_refreshed_token_targets_exact_scope_key() {
         // Non-sorted order: refresh must update the read-selected key ("aaa"),
@@ -445,6 +598,32 @@ mod tests {
         assert_eq!(updated["aaa"]["refresh_token"], "rt-a-new");
         assert_eq!(updated["zzz"]["key"], "eyJ.z");
         assert_eq!(updated["zzz"]["refresh_token"], "rt-z");
+    }
+
+    /// Persists run on detached threads and race a sibling shell writing the
+    /// same file, so a late write must not replace a live refresh token with
+    /// the one it already rotated away.
+    #[test]
+    fn write_refreshed_token_does_not_roll_back_a_newer_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(
+            dir.path(),
+            r#"{
+            "oidc": { "key": "eyJ.newer", "refresh_token": "rt-newer", "oidc_issuer": "https://auth.x.ai", "expires_at": "2026-06-01T00:00:00Z" }
+        }"#,
+        );
+
+        let stale = RefreshEvent {
+            access_token: "eyJ.older".into(),
+            new_refresh_token: Some("rt-older".into()),
+            expires_at: Some("2026-05-01T00:00:00Z".parse().unwrap()),
+        };
+        write_refreshed_token(&path, "oidc", &stale).unwrap();
+
+        let updated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(updated["oidc"]["refresh_token"], "rt-newer");
+        assert_eq!(updated["oidc"]["key"], "eyJ.newer");
     }
 
     #[test]

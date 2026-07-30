@@ -303,6 +303,7 @@ impl AgentView {
             sharing_enabled: false,
             scheduler_background_loops: None,
             billing_surface_visible: false,
+            usage_command_visible: true,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             rewind_suppress_deadline: None,
@@ -922,6 +923,12 @@ impl AgentView {
             .slash_controller
             .set_billing_surface_visible(visible);
     }
+    pub fn set_usage_command_visible(&mut self, visible: bool) {
+        self.usage_command_visible = visible;
+        self.prompt
+            .slash_controller
+            .set_usage_command_visible(visible);
+    }
     /// Replace the restricted slash-command deny list in this agent's
     /// registry (e.g. `/usage` denied on the free / X Basic tiers). Deny
     /// wins over every `set_*_visible` gate.
@@ -949,6 +956,7 @@ impl AgentView {
         &mut self,
         sharing_enabled: bool,
         billing_surface_visible: bool,
+        usage_command_visible: bool,
         chat_mode: bool,
         screen_mode: crate::app::ScreenMode,
         announcements: &[xai_grok_announcements::RemoteAnnouncement],
@@ -956,6 +964,7 @@ impl AgentView {
     ) {
         self.set_sharing_enabled(sharing_enabled);
         self.set_billing_surface_visible(billing_surface_visible);
+        self.set_usage_command_visible(usage_command_visible);
         self.app_chat_mode = chat_mode;
         self.prompt.set_screen_mode(screen_mode);
         self.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());

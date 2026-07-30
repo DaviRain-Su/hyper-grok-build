@@ -22,11 +22,13 @@ mod hero_box;
 pub(crate) mod logo;
 mod menu;
 mod prompt;
+mod toast;
 mod top_bar;
 
 pub(crate) use logo::shimmer_frame;
 use logo::{logo_line_count, render_logo};
 use menu::render_menu;
+pub(crate) use toast::paint_welcome_toast;
 pub(crate) use top_bar::location_line_at;
 use top_bar::render_top_bar;
 

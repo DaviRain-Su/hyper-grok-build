@@ -46,15 +46,14 @@ pub(super) fn open_url_or_show(app: &mut AppView, url: &str) {
         return;
     }
 
-    use crate::app::link_opener::{OpenUrlResult, browser_unavailable_message, try_open_url};
+    use crate::app::link_opener::{OpenUrlResult, browser_unavailable_line, try_open_url};
     use crate::terminal::hyperlinks::SchemeFilter;
 
     match try_open_url(url, SchemeFilter::Standard) {
         OpenUrlResult::Opened | OpenUrlResult::RejectedScheme => {}
         OpenUrlResult::BrowserUnavailable => {
-            let _ = crate::clipboard::SystemClipboard::try_set(url);
-            // No scrollback on the welcome screen — toast carries the URL.
-            app.show_toast(&browser_unavailable_message(url));
+            let copied = crate::clipboard::SystemClipboard::try_set(url).reported_success();
+            app.show_toast(&browser_unavailable_line(url, copied));
         }
     }
 }

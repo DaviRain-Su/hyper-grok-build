@@ -139,14 +139,24 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: GrokAuth) {
     };
     let user_elapsed_ms = started.elapsed().as_millis() as u64;
 
-    // R-M-W file lock. On timeout, fall through to an unlocked write
-    // rather than drop the enrichment.
+    // R-M-W file lock. On timeout, drop the write rather than proceed
+    // unlocked: an unlocked R-M-W can silently revert a freshly rotated
+    // AT/RT on disk (a rolled-back RT is a future `invalid_grant` → forced
+    // re-login). Enrichment is cosmetic; it re-runs on the next refresh.
     let lock_started = std::time::Instant::now();
     let lock_guard = try_lock_auth_file_async(&manager.path, AUTH_LOCK_TIMEOUT).await;
     let lock_wait_ms = lock_started.elapsed().as_millis() as u64;
-    if lock_guard.is_none() {
-        tracing::warn!("auth: enrichment proceeding without auth.json.lock");
-    }
+    let Some(_lock_guard) = lock_guard else {
+        xai_grok_telemetry::unified_log::warn(
+            "auth update enrichment skipped",
+            None,
+            Some(serde_json::json!({
+                "reason": "lock_timeout",
+                "lock_wait_ms": lock_wait_ms,
+            })),
+        );
+        return;
+    };
 
     let Ok(mut map) = read_auth_json(&manager.path) else {
         xai_grok_telemetry::unified_log::warn(

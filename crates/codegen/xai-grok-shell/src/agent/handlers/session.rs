@@ -289,3 +289,59 @@ async fn handle_session_list(
         .to_ext_response()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
+
+/// Build sessions in exactly the requested directory. A page walk cannot reach
+/// past `over_fetch(limit)` rows per cwd: the local lane re-scans that window
+/// each page instead of seeking to the cursor.
+pub async fn handle_list_sessions(
+    agent: &MvpAgent,
+    args: acp::ListSessionsRequest,
+) -> Result<acp::ListSessionsResponse, acp::Error> {
+    use crate::session::unified_list;
+
+    // Kept in step with the capability, withheld under chat mode.
+    if crate::agent::chat_modes::process_chat_mode_enabled() {
+        return Err(acp::Error::method_not_found());
+    }
+
+    let additional_directories = args.additional_directories.len();
+    let cwd = args.cwd.map(|p| p.to_string_lossy().into_owned());
+    let mut req = unified_list::ListReq {
+        cwd: cwd.clone(),
+        cursor: args.cursor,
+        meta: args.meta.map(serde_json::Value::Object),
+        cwd_scope: unified_list::CwdScope::Only,
+        ..Default::default()
+    };
+    unified_list::force_kind(&mut req, unified_list::SessionKind::Build);
+
+    let registry_client = agent.session_registry_client();
+    let conversations_client = agent.conversations_client();
+    let result = unified_list::build_unified_list(
+        registry_client.as_ref(),
+        conversations_client.as_ref(),
+        req,
+    )
+    .await;
+
+    let meta = unified_list::acp_response_meta(&result);
+    // `CwdScope::Only` already dropped rows the schema cannot represent, so this
+    // conversion discards nothing and the page keeps the size it was given.
+    let sessions: Vec<acp::SessionInfo> = result
+        .rows
+        .into_iter()
+        .filter_map(|row| row.into_session_info().try_into().ok())
+        .collect();
+
+    tracing::debug!(
+        cwd = cwd.as_deref().unwrap_or("<all>"),
+        paged = result.next_cursor.is_some(),
+        returned = sessions.len(),
+        additional_directories,
+        "session/list"
+    );
+
+    Ok(acp::ListSessionsResponse::new(sessions)
+        .next_cursor(result.next_cursor)
+        .meta(meta))
+}

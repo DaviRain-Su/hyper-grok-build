@@ -410,11 +410,32 @@ pub(crate) fn stream_responses_tracked<'a>(
                 ResponseStreamEvent::ResponseWebSearchCallCompleted(_)
                 | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {}
 
+                // Code interpreter (server-side, like web/x search). Surface it
+                // the same way x_search is: a generic backend tool call that the
+                // shell renders as a client `tool_use` + `user` `tool_result`
+                // split (grok has no HostedTool::CodeInterpreter, so these events
+                // are latent under the current hosted-tool set). The started
+                // event fires on InProgress; the full payload (code + outputs)
+                // rides ResponseOutputItemDone(CodeInterpreterCall) below.
+                ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(ev) => {
+                    yield SamplingEvent::BackendToolCallStarted {
+                        request_id: request_id.clone(),
+                        call_id: ev.item_id.clone(),
+                        name: "code_interpreter".to_string(),
+                    };
+                }
+                // Interpreting/Completed carry no payload — the result arrives
+                // via ResponseOutputItemDone(CodeInterpreterCall) below.
+                ResponseStreamEvent::ResponseCodeInterpreterCallInterpreting(_)
+                | ResponseStreamEvent::ResponseCodeInterpreterCallCompleted(_) => {}
+
                 // OutputItemDone carries the full result for backend tools
                 // and (on ChatGPT Codex) the completed assistant message /
                 // function_call items. Codex often leaves
                 // `response.completed.output` empty, so we also stash items
                 // for the final ConversationResponse.
+                // For WebSearchCall this includes the query and source URLs.
+                // For CustomToolCall this includes x_search results.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
                     match &done_event.item {
                         rs::OutputItem::WebSearchCall(ws) => {
@@ -437,6 +458,19 @@ pub(crate) fn stream_responses_tracked<'a>(
                                 request_id: request_id.clone(),
                                 call_id: ct.id.clone(),
                                 name: "x_search".to_string(),
+                                result,
+                            };
+                        }
+                        // Code interpreter: the full call (code + outputs) rides
+                        // the done item. Surfaced under the shared "code_interpreter"
+                        // name (matching the Started event); the shell renders it via
+                        // the client `tool_use` + `user` `tool_result` split.
+                        rs::OutputItem::CodeInterpreterCall(ci) => {
+                            let result = serde_json::to_value(ci).ok();
+                            yield SamplingEvent::BackendToolCallCompleted {
+                                request_id: request_id.clone(),
+                                call_id: ci.id.clone(),
+                                name: "code_interpreter".to_string(),
                                 result,
                             };
                         }
@@ -548,6 +582,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             total_tokens: u.total_tokens,
             reasoning_tokens: u.output_tokens_details.reasoning_tokens,
             cached_prompt_tokens: u.input_tokens_details.cached_tokens,
+            cache_creation_prompt_tokens: 0,
         });
 
         let cost_usd_ticks = response
@@ -606,6 +641,9 @@ pub(crate) fn stream_responses_tracked<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals,
             stop_message: None, // not reported on the Responses API
+            message_id: None,   // no provider message id on the Responses API
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         yield SamplingEvent::Completed {
@@ -1060,6 +1098,67 @@ mod tests {
         .await;
 
         assert!(output_observed.load(Ordering::Relaxed));
+    }
+
+    /// A server-side code-interpreter run surfaces as a generic backend tool
+    /// call (started on InProgress, completed on OutputItemDone) named
+    /// "code_interpreter" — the same shape as x_search — so it is no longer
+    /// silently dropped from the event stream.
+    #[tokio::test]
+    async fn code_interpreter_forwards_backend_tool_call() {
+        let in_progress = rs::ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(
+            rs_types::ResponseCodeInterpreterCallInProgressEvent {
+                sequence_number: 0,
+                output_index: 0,
+                item_id: "ci-1".into(),
+            },
+        );
+        let done = rs::ResponseStreamEvent::ResponseOutputItemDone(
+            rs_types::ResponseOutputItemDoneEvent {
+                sequence_number: 1,
+                output_index: 0,
+                item: rs_types::OutputItem::CodeInterpreterCall(
+                    rs_types::CodeInterpreterToolCall {
+                        code: Some("print(1)".into()),
+                        container_id: "cont-1".into(),
+                        id: "ci-1".into(),
+                        outputs: None,
+                        status: rs_types::CodeInterpreterToolCallStatus::Completed,
+                    },
+                ),
+            },
+        );
+        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())]).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SamplingEvent::BackendToolCallStarted { call_id, name, .. }
+                    if call_id == "ci-1" && name == "code_interpreter"
+            )),
+            "expected a code_interpreter BackendToolCallStarted, got {events:?}"
+        );
+        let completed = events.iter().find_map(|e| match e {
+            SamplingEvent::BackendToolCallCompleted {
+                call_id,
+                name,
+                result,
+                ..
+            } if name == "code_interpreter" => Some((call_id.clone(), result.clone())),
+            _ => None,
+        });
+        let (call_id, result) = completed.expect("a code_interpreter BackendToolCallCompleted");
+        assert_eq!(call_id, "ci-1");
+        let result = result.expect("serialized code-interpreter payload");
+        assert_eq!(result["code"], "print(1)");
     }
 
     fn function_call_added_event(

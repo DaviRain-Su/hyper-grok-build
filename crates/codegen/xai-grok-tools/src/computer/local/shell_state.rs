@@ -314,6 +314,7 @@ impl ShellState {
         }
         crate::util::apply_shell_environment_policy(&mut cmd, shell_env_policy);
         cmd.envs(crate::util::pager_env());
+        #[allow(clippy::disallowed_methods)] // one-shot init run, waited on here
         let mut child = cmd.spawn().map_err(|e| {
             crate::computer::types::ComputerError::io(format!(
                 "failed to spawn {shell:?} for shell state init: {e}"
@@ -917,6 +918,7 @@ mod tests {
 
         cmd.fd_mappings(prep.fd_mappings).unwrap();
 
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let child = cmd.spawn().unwrap();
         // Drop cmd to release the FdMapping OwnedFds held in its pre_exec closure.
         // Without this, the parent keeps the write-end of the state-out pipe open,
@@ -974,6 +976,7 @@ mod tests {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         cmd.fd_mappings(prep.fd_mappings).unwrap();
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let child = cmd.spawn().unwrap();
         drop(cmd);
 

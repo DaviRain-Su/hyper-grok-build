@@ -285,6 +285,100 @@ extern "C" fn power_callback(
     }
 }
 
+// ── Power assertions ────────────────────────────────────────────────
+
+// `IOPMAssertionID` is a `uint32_t`; `kIOPMAssertionLevelOn` is 255 and
+// `kIOReturnSuccess` is 0 (IOPMLib.h / IOReturn.h).
+type IoPmAssertionId = u32;
+const K_IOPM_ASSERTION_LEVEL_ON: u32 = 255;
+const K_IO_RETURN_SUCCESS: i32 = 0;
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+/// Spelled out because `kIOPMAssertionTypePreventSystemSleep` is a
+/// `CFSTR(...)` macro, not an exported symbol — an `extern static` links
+/// and then aborts at load ("symbol not found in flat namespace"), which
+/// Linux CI can never catch. `PreventSystemSleep` is also the only type
+/// that keeps a machine resident in a dark wake
+/// (`PreventUserIdleSystemSleep` suppresses only *idle* sleep).
+const ASSERTION_TYPE_PREVENT_SYSTEM_SLEEP: &str = "PreventSystemSleep";
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionCreateWithName(
+        assertion_type: *const c_void,
+        assertion_level: u32,
+        assertion_name: *const c_void,
+        assertion_id: *mut IoPmAssertionId,
+    ) -> i32;
+    fn IOPMAssertionRelease(assertion_id: IoPmAssertionId) -> i32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFStringCreateWithBytes(
+        alloc: *const c_void,
+        bytes: *const u8,
+        num_bytes: isize,
+        encoding: u32,
+        is_external_representation: u8,
+    ) -> *const c_void;
+    fn CFRelease(cf: *const c_void);
+}
+
+/// Live `PreventSystemSleep` assertion, released on drop.
+#[derive(Debug)]
+pub(crate) struct Assertion(IoPmAssertionId);
+
+impl Drop for Assertion {
+    fn drop(&mut self) {
+        // SAFETY: the id came from a successful `IOPMAssertionCreateWithName`,
+        // this type is not `Clone`, and `drop` runs once — so the assertion is
+        // released exactly once. Releasing is what keeps a leaked assertion
+        // from pinning the machine awake.
+        unsafe { IOPMAssertionRelease(self.0) };
+    }
+}
+
+/// Create a `CFStringRef` from a Rust `&str`. Caller owns it and must `CFRelease`.
+fn cf_string(value: &str) -> *const c_void {
+    // SAFETY: pointer/length describe a valid UTF-8 slice, read only for the
+    // duration of the call — CF copies the bytes into the new string.
+    unsafe {
+        CFStringCreateWithBytes(
+            std::ptr::null(),
+            value.as_ptr(),
+            value.len() as isize,
+            K_CF_STRING_ENCODING_UTF8,
+            0,
+        )
+    }
+}
+
+pub(crate) fn hold_awake(reason: &str) -> Option<Assertion> {
+    let kind = cf_string(ASSERTION_TYPE_PREVENT_SYSTEM_SLEEP);
+    if kind.is_null() {
+        return None;
+    }
+    let name = cf_string(reason);
+    if name.is_null() {
+        // SAFETY: `kind` is a live CFStringRef we own.
+        unsafe { CFRelease(kind) };
+        return None;
+    }
+
+    let mut id: IoPmAssertionId = 0;
+    // SAFETY: both strings are live CFStringRefs and `id` is a valid
+    // out-pointer for the duration of the call.
+    let rc = unsafe { IOPMAssertionCreateWithName(kind, K_IOPM_ASSERTION_LEVEL_ON, name, &mut id) };
+    // The assertion retains what it needs; drop our references either way.
+    // SAFETY: we created both and have not released them yet.
+    unsafe {
+        CFRelease(name);
+        CFRelease(kind);
+    }
+    (rc == K_IO_RETURN_SUCCESS).then_some(Assertion(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

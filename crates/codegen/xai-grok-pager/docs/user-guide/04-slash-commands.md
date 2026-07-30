@@ -2,9 +2,9 @@
 
 Type `/` in the prompt to open the command menu. It fuzzy-matches as you type, and picking a command runs it immediately.
 
-Commands come from two places: **shell builtins**, handled by the agent backend (xai-grok-shell), and **pager builtins**, handled by the TUI frontend (xai-grok-pager). Both show up in the same menu, and any enabled skill with `user-invocable: true` appears there too.
+Commands come from two places: **shell builtins**, handled by the agent backend (xai-grok-shell), and **pager builtins**, handled by the pager frontend (xai-grok-pager). Both show up in the same menu, and any enabled skill with `user-invocable: true` appears there too.
 
-Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline.
+Every command below lists its aliases where it has them. A few commands only appear when a feature or session state enables them; those cases are called out inline. The menu is also filtered by render mode — see [`/minimal` and `/fullscreen`](#minimal-and-fullscreen).
 
 ---
 
@@ -47,9 +47,9 @@ Show session details — auth method, model, turn count, and context usage. Alia
 
 Branch the current session into a new agent, keeping history up to this point.
 
-### `/rewind`
+### `/rewind` (alias: `/undo`)
 
-Roll the conversation back to an earlier turn and discard everything after it.
+Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
 
 ### `/edit-prompt`
 
@@ -170,7 +170,9 @@ Toggle vim-style scrollback keys (`j`/`k`, `h`/`l`, `g`/`G`, `y`/`Y`, and so on)
 
 ### `/minimal` and `/fullscreen`
 
-Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to the standard alt-screen TUI. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+Reopen the current session in the other render mode. `/minimal` (offered while you're in fullscreen) switches to the experimental scrollback-native mode; `/fullscreen` (offered while you're in minimal; alias `/full`) switches back to standard fullscreen mode. Both relaunch the pager on the same conversation for this session only — they don't touch `config.toml`, and the relaunch banner reminds you how to switch back. The `--minimal` / `--fullscreen` CLI flags are session-scoped the same way. To make plain `grok` open in a given mode by default, use `/settings` → **Default screen mode** or set `[ui] screen_mode`.
+
+A handful of commands only work in one of the two modes, because the surface they drive doesn't exist in the other: `/find`, `/jump`, `/timeline`, `/theme`, `/tutorial`, `/workflows`, and `/dashboard` are fullscreen-only, while `/expand` and `/edit-prompt` are minimal-only. Those are hidden from the command menu and the palette in the mode they can't run in. If you type one out anyway, Grok says why — and points you at whichever is actually useful. When the other mode is the only way to get it, that's the mode switch: `/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` When this mode already does the job another way, it names that instead: `/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` Everything else works in both. Note that `--no-alt-screen` still counts as fullscreen here, so it keeps the fullscreen-only commands.
 
 ### `/voice`
 
@@ -233,13 +235,13 @@ Save a note to memory immediately, without waiting for an automatic summary.
 
 Open the extensions modal on the Hooks tab, where you can view loaded hooks, add or remove custom ones, and toggle them individually. The modal does not grant project trust — see [10-hooks.md](10-hooks.md) for the trust model.
 
-The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the TUI pager these are folded into the `/hooks` modal.
+The shell also advertises individual `/hooks-list`, `/hooks-trust`, `/hooks-add`, `/hooks-remove`, and `/hooks-untrust` commands; in the pager these are folded into the `/hooks` modal.
 
 ### `/plugins`
 
 Open the extensions modal on the Plugins tab to view installed plugins, install new ones from the marketplace, and manage trust.
 
-The shell additionally supports subcommands (`/plugins list`, `/plugins install <source>`, `/plugins uninstall <name>`, `/plugins update`, `/plugins reload`). In the TUI, the modal does the same work visually.
+The shell additionally supports subcommands (`/plugins list`, `/plugins install <source>`, `/plugins uninstall <name>`, `/plugins update`, `/plugins reload`). In the pager, the modal does the same work visually.
 
 ### `/marketplace`
 
@@ -340,7 +342,7 @@ Open the live workflows **run** dashboard — active and retained runs, not a ca
 
 ### `/theme`
 
-Switch the TUI color theme. Alias: `/t`.
+Switch the color theme. Alias: `/t`.
 
 ### `/feedback [message]`
 
@@ -372,7 +374,7 @@ View release notes for the current version. Alias: `/changelog`.
 
 ### `/docs`
 
-Browse the in-TUI How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
+Browse the built-in How-to Guides, open the online Build docs, or jump straight to a guide by title. Aliases: `/howto`, `/guides`.
 
 ```
 /docs

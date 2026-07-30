@@ -56,6 +56,35 @@ pub enum SamplingEvent {
         arguments_delta: Option<String>,
     },
 
+    /// The provider opened a response (Messages `message_start`). Carries the
+    /// real message id, model, and input-side token counts exactly as they
+    /// arrive on the wire, before any content. Surfaced in order so partial-mode
+    /// consumers can emit the real `message_start` id/usage instead of a
+    /// synthesized placeholder. Emitted by the Messages L2 transform only; the
+    /// Responses/Chat transforms lack these fields at stream open and emit
+    /// nothing here.
+    ///
+    /// `input_tokens` is the uncached prompt portion; the Anthropic Messages API
+    /// reports cache hits and writes in the separate `cache_read_input_tokens`
+    /// and `cache_creation_input_tokens` buckets, both known at `message_start`.
+    ResponseStarted {
+        request_id: RequestId,
+        message_id: String,
+        model: String,
+        input_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    },
+
+    /// The reasoning (thinking) block finished and its encrypted signature is
+    /// known (Messages thinking `content_block_stop`). Surfaced in order so
+    /// partial-mode consumers can emit `signature_delta` before the thinking
+    /// block's `content_block_stop`. Emitted by the Messages L2 transform only.
+    ReasoningCompleted {
+        request_id: RequestId,
+        signature: String,
+    },
+
     /// Streaming completed successfully.
     Completed {
         request_id: RequestId,

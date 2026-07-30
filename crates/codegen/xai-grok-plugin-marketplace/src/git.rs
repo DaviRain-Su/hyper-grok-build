@@ -295,6 +295,7 @@ fn fetch_cli_command(repo_dir: &Path, branch: Option<&str>) -> std::process::Com
 fn run_git_timed(cmd: &mut Command, what: &str, timeout: Duration) -> Result<(), String> {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
+    #[allow(clippy::disallowed_methods)] // git command, killed and reaped on timeout
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to run git {what}: {e}"))?;

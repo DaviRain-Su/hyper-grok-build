@@ -3049,6 +3049,27 @@ fn parse_session_kind_matrix() {
     assert_eq!(parse_session_kind(None), SessionKind::Build, "[none]");
 }
 #[test]
+fn reject_chat_kind_without_feature_errors_without_chat_feature() {
+    use serde_json::json;
+    assert!(
+        reject_chat_kind_without_feature(json!({"x.ai/session": {"kind": "chat"}}).as_object())
+            .is_err()
+    );
+    assert!(reject_chat_kind_without_feature(None).is_ok());
+    assert!(
+        reject_chat_kind_without_feature(
+            json!({ "x.ai/session" : { "kind" : "build" } }).as_object()
+        )
+        .is_ok()
+    );
+    assert!(!is_chat_session_kind(
+        json!({"x.ai/session": {"kind": "chat"}}).as_object()
+    ));
+    assert!(!is_chat_session_kind(
+        json!({ "x.ai/session" : { "kind" : "build" } }).as_object()
+    ));
+}
+#[test]
 fn chat_initial_model_matrix() {
     let cases: &[(&str, bool, Option<&str>, Option<&str>)] = &[
         ("chat_with_model", true, Some("grok-4.5"), Some("grok-4.5")),
@@ -3154,6 +3175,7 @@ fn chat_session_spawn_options_matches_thin_profile() {
         opts.persistence.is_noop(),
         "K10 thin profile must use PersistenceHandle::noop()"
     );
+    assert!(opts.is_chat_kind);
 }
 /// `remove_session` releases the workspace binding and drains the
 /// per-session side maps. Test agents default to `workspace_ops = None`,

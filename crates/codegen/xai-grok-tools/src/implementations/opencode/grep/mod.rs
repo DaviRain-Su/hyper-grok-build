@@ -185,6 +185,7 @@ impl xai_tool_runtime::Tool for GrepTool {
         cmd.stdin(Stdio::null());
 
         // Spawn.
+        #[allow(clippy::disallowed_methods)] // search helper, waited on below
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {

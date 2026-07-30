@@ -63,6 +63,10 @@ pub use discovery::{RebuildReport, discover_worktrees, rebuild_worktree_db};
 pub use git::checkout::{
     rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
 };
+pub use git::{
+    StaleWorktreeMatch, remove_stale_worktree_registration, remove_stale_worktree_registrations,
+    remove_stale_worktree_registrations_under,
+};
 pub use sync::{SourceDirtyState, SyncReport, WorktreeSync, collect_source_dirty_state};
 #[cfg(target_os = "linux")]
 pub use worktree::execute::cleanup_snapshot_git_state;

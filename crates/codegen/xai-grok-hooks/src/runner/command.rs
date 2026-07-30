@@ -156,6 +156,7 @@ pub async fn run_command_hook(
     // See the `runner_injected_vars_override_extra_env_at_spawn`
     // regression test in `tests/integration.rs` and the rustdoc on
     // `HookSpec::extra_env`.
+    #[allow(clippy::disallowed_methods)] // enrolled in the session scope below
     let mut child = match cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

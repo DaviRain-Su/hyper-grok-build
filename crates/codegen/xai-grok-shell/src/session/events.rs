@@ -7,7 +7,7 @@ pub(crate) use xai_file_utils::events::tracker::EventTracker;
 pub(crate) use xai_file_utils::events::types::{
     CancellationCategory, EVENT_SCHEMA_VERSION, Event, GoalClassifierVerdictTelemetry,
     GoalPauseReasonTelemetry, InterjectionSource, Phase, RedirectKind, SessionRelationship,
-    ToolOutcome, TurnOutcomeLabel,
+    ToolCompletedSource, ToolOutcome, TurnOutcomeLabel,
 };
 
 // ── Laziness detector (Layer 3) discriminator vocabulary ─────────────

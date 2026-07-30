@@ -7,6 +7,7 @@ pub mod conversations_client;
 pub mod pull;
 #[cfg(test)]
 mod pull_smoke_test;
+pub mod skills_client;
 pub mod sync;
 pub mod workspaces_client;
 
@@ -33,5 +34,9 @@ pub use conversations_client::{
     UpdateConversationBody,
 };
 pub use pull::{PullResult, pull_session_to_local};
+pub use skills_client::{
+    BundledSkill, CHAT_PRODUCT_META_KEY, CHAT_PRODUCT_META_VALUE, ListBundledSkillsResponse,
+    ListUserSkillsResponse, ProductSkillsCatalog, SkillsClient, SkillsError, UserSkill,
+};
 pub use sync::RemoteSync;
 pub use workspaces_client::{ListWorkspacesPage, Workspace, WorkspacesClient, WsError, WsQuery};

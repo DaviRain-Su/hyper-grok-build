@@ -576,6 +576,7 @@ pub fn stream_google_generate_content<'a>(
                     total_tokens: u.total_token_count.unwrap_or(0),
                     reasoning_tokens: u.thoughts_token_count.unwrap_or(0),
                     cached_prompt_tokens: u.cached_content_token_count.unwrap_or(0),
+            cache_creation_prompt_tokens: 0,
                 });
             }
             if let Some(c) = chunk.candidates.and_then(|mut v| v.drain(..).next()) {
@@ -627,7 +628,7 @@ pub fn stream_google_generate_content<'a>(
             model_fingerprint: None,
             reasoning_effort: None,
         }));
-        yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: finish, usage, cost_usd_ticks: None, message_chunks_emitted: msg_chunks, doom_loop_signals: Vec::new(), stop_message: None }), metrics: InferenceLatencyStats::from_timestamps(start, &chunk_timestamps, Instant::now()) };
+        yield SamplingEvent::Completed { request_id, response: Box::new(ConversationResponse { items, stop_reason: finish, usage, cost_usd_ticks: None, message_chunks_emitted: msg_chunks, doom_loop_signals: Vec::new(), stop_message: None, message_id: None, raw_stop_reason: None, stop_sequence: None }), metrics: InferenceLatencyStats::from_timestamps(start, &chunk_timestamps, Instant::now()) };
     }
 }
 

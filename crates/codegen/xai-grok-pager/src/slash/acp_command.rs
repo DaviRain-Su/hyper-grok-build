@@ -196,6 +196,7 @@ mod tests {
             bundle_state: &crate::app::bundle::BundleState::default(),
             screen_mode: crate::app::ScreenMode::Minimal,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         };
         match acp_cmd.run(&mut ctx, "fix the branch") {
@@ -322,6 +323,7 @@ mod tests {
             bundle_state: bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: false,
                 yolo_mode: false,

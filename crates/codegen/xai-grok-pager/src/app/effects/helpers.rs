@@ -342,12 +342,13 @@ impl SessionFlags {
         if meta.is_empty() { None } else { Some(meta) }
     }
 }
-/// Workspace-bind `_meta` keys forbidden on chat create/load: backend owns
-/// workspace for `kind=chat`; the client must not bind Direct/envId/attach.
+/// Workspace-bind `_meta` keys **always** forbidden on chat create/load.
+///
+/// `x.ai/cloud_existing_workspace` is intentionally omitted: scrub keeps it
+/// iff `x.ai/local_workspace.mode == "attach"`.
 pub(super) const CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS: &[&str] = &[
     "envId",
     "x.ai/cloud_server_id",
-    "x.ai/cloud_existing_workspace",
 ];
 /// Stamp `_meta["x.ai/session"].kind = "chat"` and strip Build `agentProfile` (K12).
 pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
@@ -355,13 +356,32 @@ pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
     obj.insert("x.ai/session".into(), serde_json::json!({ "kind": "chat" }));
     obj.remove("agentProfile");
 }
+/// Shared chat create/load/worktree meta finalize: kind + local stamp + scrub.
+pub(super) fn finalize_chat_session_meta(
+    meta: &mut Option<acp::Meta>,
+    is_chat_path: bool,
+    #[allow(unused_variables)]
+    session_flags: &SessionFlags,
+) {
+    if !is_chat_path {
+        return;
+    }
+    apply_chat_kind_meta(meta);
+    scrub_chat_workspace_bind_meta(meta);
+}
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
+///
+/// Narrow scrub exception: keep `x.ai/cloud_existing_workspace` when local
+/// intent is attach. Never keep `envId` or Direct hub `x.ai/cloud_server_id`.
 pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
     let Some(obj) = meta.as_mut() else {
         return;
     };
     for key in CHAT_FORBIDDEN_WORKSPACE_BIND_KEYS {
         obj.remove(*key);
+    }
+    {
+        obj.remove("x.ai/cloud_existing_workspace");
     }
 }
 /// Metadata returned from effect execution so the event loop can patch

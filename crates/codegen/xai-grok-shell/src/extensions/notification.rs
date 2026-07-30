@@ -150,7 +150,8 @@ impl PromptUsage {
             output_tokens,
             total_tokens: _, // derived from input + output
             cached_read_tokens,
-            reasoning_tokens: _, // subset of output_tokens
+            cache_creation_tokens, // subset of input_tokens on the wire
+            reasoning_tokens: _,   // subset of output_tokens
             model_calls,
             api_duration_ms: _, // timing, not tokens
             cost_usd_ticks: _,  // cost without usage cannot occur
@@ -161,6 +162,7 @@ impl PromptUsage {
             && input_tokens == 0
             && output_tokens == 0
             && cached_read_tokens == 0
+            && cache_creation_tokens == 0
             && self.model_usage.is_empty()
     }
 }
@@ -178,6 +180,10 @@ pub struct PromptUsageModel {
     pub total_tokens: u64,
     #[serde(default)]
     pub cached_read_tokens: u64,
+    /// Cache-creation prompt tokens, folded into `input_tokens` on the ACP wire
+    /// but projected as a disjoint bucket in the headless shape.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
     #[serde(default)]
     pub reasoning_tokens: u64,
     #[serde(default)]
@@ -228,6 +234,23 @@ impl SubagentUsageInfo {
     }
 }
 
+/// One model call's token usage: the four Messages API `message.usage` fields
+/// (`input_tokens` is the uncached prompt portion) plus `reasoning_tokens`.
+/// Distinct from [`PromptUsageModel`], which sums the whole prompt.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResponseUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+}
+
 impl From<&xai_chat_state::UsageTotals> for PromptUsageModel {
     fn from(t: &xai_chat_state::UsageTotals) -> Self {
         // Exhaustive destructure: a new ledger field cannot silently miss the
@@ -236,6 +259,7 @@ impl From<&xai_chat_state::UsageTotals> for PromptUsageModel {
             input_tokens,
             output_tokens,
             cached_read_tokens,
+            cache_creation_tokens,
             reasoning_tokens,
             model_calls,
             api_duration_ms,
@@ -247,6 +271,7 @@ impl From<&xai_chat_state::UsageTotals> for PromptUsageModel {
             output_tokens,
             total_tokens: t.total_tokens(),
             cached_read_tokens,
+            cache_creation_tokens,
             reasoning_tokens,
             model_calls,
             api_duration_ms,
@@ -289,8 +314,9 @@ pub fn uncached_input_tokens(full_input: u64, cached_read: u64) -> u64 {
 
 /// Project usage onto a headless result object.
 ///
-/// - `usage.input_tokens` = uncached (`full − cache_read`); identity
-///   `uncached + cache_read + output = total_tokens`.
+/// - `usage.input_tokens` = uncached (`full − cache_read − cache_creation`), so
+///   the three prompt buckets are disjoint; identity
+///   `input_tokens + cache_read + cache_creation + output = total_tokens`.
 /// - Omits all cost floats when partial or incomplete (absence ≠ free).
 /// - Incomplete with no tokens emits only `usage_is_incomplete` (no zero usage object).
 /// - `modelUsage` rows are a reduced external-compat schema (camelCase; no reasoning/duration).
@@ -307,6 +333,7 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
         output_tokens,
         total_tokens,
         cached_read_tokens,
+        cache_creation_tokens,
         reasoning_tokens,
         model_calls: _,     // totals-level; headless carries num_turns instead
         api_duration_ms: _, // dropped: not part of the frozen headless shape
@@ -315,8 +342,10 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
         cost_missing_calls: _, // internal partiality count; the flag suffices
     } = usage.totals;
     result["usage"] = serde_json::json!({
-        "input_tokens": uncached_input_tokens(input_tokens, cached_read_tokens),
+        "input_tokens": uncached_input_tokens(input_tokens, cached_read_tokens)
+            .saturating_sub(cache_creation_tokens),
         "cache_read_input_tokens": cached_read_tokens,
+        "cache_creation_input_tokens": cache_creation_tokens,
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning_tokens,
         "total_tokens": total_tokens,
@@ -344,6 +373,7 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
                 output_tokens,
                 total_tokens: _, // derivable per row
                 cached_read_tokens,
+                cache_creation_tokens,
                 reasoning_tokens: _, // dropped: reduced per-model schema
                 model_calls,
                 api_duration_ms: _, // dropped: reduced per-model schema
@@ -352,9 +382,11 @@ pub fn project_result_usage(result: &mut serde_json::Value, usage: &PromptUsage)
                 cost_missing_calls: _,
             } = *m;
             let mut entry = serde_json::json!({
-                "inputTokens": uncached_input_tokens(input_tokens, cached_read_tokens),
+                "inputTokens": uncached_input_tokens(input_tokens, cached_read_tokens)
+                    .saturating_sub(cache_creation_tokens),
                 "outputTokens": output_tokens,
                 "cacheReadInputTokens": cached_read_tokens,
+                "cacheCreationInputTokens": cache_creation_tokens,
                 "modelCalls": model_calls,
             });
             if !hide_costs
@@ -1032,6 +1064,60 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<PromptUsage>,
     },
+    /// One model response opened (Messages `message_start`), carrying the real
+    /// message id, model, and input-side token counts. Rides the buffered chunk
+    /// rail so it is ordered AHEAD of this response's agent chunks: headless
+    /// partial-mode framing consumes it to emit the real `message_start` id and
+    /// input usage instead of a synthesized placeholder / zero-seeded usage.
+    /// Messages backend only; other backends never emit it (the reducer keeps
+    /// its placeholder fallback there).
+    ///
+    /// `input_tokens` is the uncached prompt portion; `cache_read_input_tokens`
+    /// and `cache_creation_input_tokens` are the separate prompt-side cache
+    /// buckets, both known at `message_start` on the Messages backend.
+    ResponseStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default)]
+        input_tokens: u64,
+        #[serde(default)]
+        cache_read_input_tokens: u64,
+        #[serde(default)]
+        cache_creation_input_tokens: u64,
+    },
+    /// This response's reasoning (thinking) block finished; carries its
+    /// encrypted signature. Rides the buffered chunk rail so it is ordered right
+    /// AFTER this response's thought chunks (and before its text): headless
+    /// partial-mode framing consumes it to emit `signature_delta` before the
+    /// thinking block's `content_block_stop`, in order. Messages backend only.
+    ReasoningCompleted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// One completed model response, so headless can emit a Messages API
+    /// assistant frame per response. Ordered with the response's chunks; a tool
+    /// loop emits several. The durable outcome rides `TurnCompleted`.
+    ResponseCompleted {
+        /// Provider message id (Messages `message.id`), when reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// Verbatim wire stop reason (`end_turn`, `tool_use`, …), when reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<ResponseUsage>,
+        /// Reasoning signature (encrypted content) for this response's thinking.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        /// The provider's matched stop sequence (Messages API
+        /// `message.stop_sequence`), present only when the model stopped on a
+        /// configured stop sequence; `None` otherwise. Headless
+        /// `streaming-messages-json` stamps it onto the assistant frame.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_sequence: Option<String>,
+    },
     /// Catch-all for unrecognized session update types.
     /// Allows forward/backward compatibility when variants are added or removed.
     /// All fields from the unrecognized variant are discarded during deserialization.
@@ -1117,8 +1203,12 @@ pub enum RetryState {
 /// `legacy_auth` is intentionally excluded: those failures carry their own
 /// detailed migration guidance (`grok logout` / `grok login`) in the
 /// message, so we surface that verbatim instead of the generic prompt.
+///
+/// `auth_transient` is excluded for the opposite reason: the shell emits it
+/// only when the failure self-heals (see `AuthManager::requires_manual_reauth`)
+/// and the message already says it recovers on its own — no `/login` banner.
 pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
-    if error_type == Some("legacy_auth") {
+    if matches!(error_type, Some("legacy_auth") | Some("auth_transient")) {
         return false;
     }
     error_type == Some("auth") || message.contains("Unauthorized (401)")

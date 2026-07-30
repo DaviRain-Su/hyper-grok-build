@@ -201,23 +201,26 @@ impl VideoGenClient {
             Ok::<(), xai_tool_runtime::ToolError>(())
         })?;
 
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to build HTTP client: {e}"
-                ))
-            })?;
+        let http = xai_grok_extra_ca::with_extra_root_certificates(
+            reqwest::Client::builder().default_headers(headers),
+        )
+        .build()
+        .map_err(|e| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to build HTTP client: {e}"
+            ))
+        })?;
 
-        let download_http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to build download client: {e}"
-                ))
-            })?;
+        let download_http = xai_grok_extra_ca::with_extra_root_certificates(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS)),
+        )
+        .build()
+        .map_err(|e| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to build download client: {e}"
+            ))
+        })?;
 
         Ok(Self {
             http,

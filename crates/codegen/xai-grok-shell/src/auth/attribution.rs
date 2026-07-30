@@ -4,8 +4,9 @@
 //! actually sent on the wire (the `Authorization` value for OAI-compat
 //! backends, `x-api-key` for Anthropic Messages, the API proxy
 //! `Authorization` header for storage / feedback / registry /
-//! idle-resume) with the live
-//! [`AuthManager::current_api_key`] value. The two sinks are:
+//! idle-resume) with the manager's in-memory token
+//! ([`AuthManager::current_or_expired`] -- hard-expired tokens stay
+//! visible, since most 401s arrive exactly then). The two sinks are:
 //!
 //! 1. [`xai_grok_telemetry::unified_log::warn`] for the local
 //!    `~/.grok/logs/unified.jsonl` file (best-effort; ships to GCS
@@ -20,14 +21,18 @@
 //! ```text
 //! {
 //!   "sent_key_prefix": "<last 12 chars of bearer the client sent, or """>,
-//!   "current_key_prefix": "<last 12 chars of AuthManager::current_api_key()>",
+//!   "current_key_prefix": "<last 12 chars of the held token (current or
+//!                         expired), or null when the manager is empty>",
 //!   "mint_age_seconds": <i64; current time minus auth.create_time, or -1>,
-//!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now,
-//!                                 or 0 when no current token>,
+//!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now
+//!                                 (negative once expired), or 0 when the
+//!                                 manager is empty>,
 //!   "consumer": "OaiCompatClient.<endpoint>" | "StorageClient.<op>"
 //!             | "FeedbackClient.<op>" | "SessionRegistryClient.<op>"
 //!             | "IdleResumeModelRefresh",
-//!   "is_stale_snapshot": <bool; true iff sent_prefix differs from a *known* current_prefix>
+//!   "is_stale_snapshot": <bool; true iff a bearer was actually sent AND it
+//!                        differs from the held token -- "sent nothing"
+//!                        (fail-closed) and "held nothing" are both false>
 //! }
 //! ```
 //!
@@ -298,12 +303,11 @@ pub(crate) fn record_consumer_401(
 ///   expires_at_seconds_from_now, consumer, is_stale_snapshot)`.
 ///
 /// `sent_bearer` is the bearer that was sent on the wire (the
-/// `Authorization` value with `"Bearer "` already stripped, or the
-/// `x-api-key` value for Anthropic Messages backends), OR a 12-char
-/// prefix of same -- the sampler boundary always passes a prefix
-/// here, the non-sampler shell sites pass full bearers and rely on
-/// the [`compute_attribution_payload`] truncation. `None` is fine;
-/// the prefix becomes the empty string.
+/// `Authorization` value with `"Bearer "` stripped, or `x-api-key`), OR
+/// its 12-char tail fragment -- the sampler and middleware boundaries
+/// pass tails; a caller holding the full bearer may rely on the
+/// [`compute_attribution_payload`] truncation. `None` becomes the empty
+/// string, meaning "no bearer was sent."
 ///
 /// `consumer` should be one of the canonical strings used by the
 /// per-client wrappers, e.g. `"OaiCompatClient.chat_completions_stream"`,
@@ -375,15 +379,13 @@ pub(crate) fn record_auth_401(
 /// directly without reaching into `unified_log`'s file writer or the
 /// tracing layer.
 ///
-/// This function performs **exactly one** read-side acquisition of
-/// [`AuthManager`]'s internal `RwLock` -- it calls
-/// [`AuthManager::current`] once and derives both `current_key_prefix`
-/// and the mint/expiry fields from the resulting `GrokAuth`.
+/// Reads [`AuthManager::current_or_expired`] -- NOT `current()`, which is
+/// `None` by construction in the hard-expired window most 401s land in
+/// and would blank every field this event exists to fill.
 ///
-/// `is_stale_snapshot` is `true` only when the live `current()` token
-/// differs from the bearer the client sent. When `current()` returns
-/// `None` (the manager has no active token), the result is `false`:
-/// absence of a live token is "no evidence of staleness," not stale.
+/// `is_stale_snapshot` is `true` only when a bearer was actually sent
+/// and it differs from the held token; "sent nothing" (fail-closed) and
+/// "held nothing" (empty manager) are both `false`.
 fn compute_attribution_payload(
     auth_manager: &AuthManager,
     consumer: &str,
@@ -398,24 +400,26 @@ fn compute_attribution_payload(
     // query can break down on this).
     let sent_prefix = sent_bearer.map(token_suffix).unwrap_or("");
 
-    // Single read-lock acquisition: pull the live `GrokAuth` (or
-    // `None`) once and derive every other field from it.
-    let current_auth = auth_manager.current();
+    // One read; `current_or_expired` keeps the hard-expired token visible
+    // (see the fn doc).
+    let current_auth = auth_manager.current_or_expired();
     let current_prefix_owned: Option<String> = current_auth
         .as_ref()
         .map(|a| token_suffix(&a.key).to_string());
 
-    // None current means "no evidence of staleness," not stale --
-    // the downstream stale-vs-live split should only count
-    // true-positive staleness (sent bearer differs from a known live
-    // bearer).
-    let is_stale_snapshot = match current_prefix_owned.as_deref() {
-        Some(c) => sent_prefix != c,
-        None => false,
+    // True-positive staleness only: a bearer was sent AND differs from
+    // the held token. "Sent nothing" is the fail-closed path (in sync,
+    // credential dead); "held nothing" is no evidence -- neither is stale.
+    let is_stale_snapshot = match (sent_prefix, current_prefix_owned.as_deref()) {
+        ("", _) => false,
+        (_, None) => false,
+        (sent, Some(held)) => sent != held,
     };
 
     // Mint-age + expiry come from the same `current_auth` we already
-    // read; sentinels `-1 / 0` when the manager has no current token.
+    // read; sentinels `-1 / 0` when the manager holds nothing. For a
+    // hard-expired token these report true age and (negative)
+    // time-past-expiry: how long the bearer was dead at the 401.
     //
     // TODO: mirror the full External-with-ttl branch from
     // `AuthManager::is_token_expired` (uses
@@ -553,6 +557,92 @@ mod tests {
         assert!(payload_field(&payload, "current_key_prefix").is_null());
         assert_eq!(payload_field(&payload, "mint_age_seconds"), -1);
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 0);
+    }
+
+    /// Test helper: a token minted 2h ago that hard-expired 1h ago --
+    /// the in-memory state during the exact window most 401s occur in
+    /// (`current()` is `None`, `expired_auth()` is `Some`).
+    fn hard_expired_auth(key: &str) -> GrokAuth {
+        GrokAuth {
+            key: key.to_string(),
+            create_time: Utc::now() - Duration::hours(2),
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+            ..GrokAuth::test_default()
+        }
+    }
+
+    /// A consumer sends the very token the manager holds, hard-expired:
+    /// NOT stale (in sync; the token itself is dead). The held token and
+    /// real age fields must stay visible -- `current()` used to blank them.
+    #[test]
+    fn hard_expired_held_token_sent_is_not_stale() {
+        let (_dir, am) = empty_auth_manager();
+        let sent = "expired-token-1234567890abcdef";
+        am.hot_swap(hard_expired_auth(sent));
+        assert!(am.current().is_none(), "hard-expired precondition");
+
+        let payload = compute_attribution_payload(&am, "Test.expired", Some(sent));
+
+        assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
+        assert_eq!(
+            payload_field(&payload, "current_key_prefix"),
+            "567890abcdef",
+            "the held token must stay visible even when hard-expired"
+        );
+        let mint = payload_field(&payload, "mint_age_seconds")
+            .as_i64()
+            .unwrap();
+        assert!(
+            (7195..=7210).contains(&mint),
+            "mint_age_seconds should be ~7200 for a 2h-old token, got {mint}"
+        );
+        let expires = payload_field(&payload, "expires_at_seconds_from_now")
+            .as_i64()
+            .unwrap();
+        assert!(
+            (-3610..=-3590).contains(&expires),
+            "expires_at_seconds_from_now should be ~-3600 for a token dead 1h, got {expires}"
+        );
+    }
+
+    /// The fail-closed path: a hard-expired token is held, and the
+    /// wire-valid-only resolver correctly put NO bearer on the wire.
+    /// Not a stale snapshot -- the consumer did the right thing; the
+    /// credential is dead. Absorbing this into the stale bucket would
+    /// bury the true-positive split the field exists for.
+    #[test]
+    fn nothing_sent_with_hard_expired_held_token_is_not_stale() {
+        let (_dir, am) = empty_auth_manager();
+        am.hot_swap(hard_expired_auth("held-but-not-sent"));
+
+        let payload = compute_attribution_payload(&am, "Test.fail_closed", None);
+
+        assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), "");
+        assert_eq!(
+            payload_field(&payload, "current_key_prefix"),
+            "but-not-sent",
+            "the held token must stay visible for diagnosis"
+        );
+    }
+
+    /// A consumer sends an OLDER bearer than the (hard-expired) one the
+    /// manager holds: a true stale snapshot, and it must be flagged even
+    /// though `current()` is `None` in this window.
+    #[test]
+    fn stale_snapshot_detected_against_hard_expired_held_token() {
+        let (_dir, am) = empty_auth_manager();
+        am.hot_swap(hard_expired_auth("held-token-different"));
+        assert!(am.current().is_none(), "hard-expired precondition");
+
+        let payload =
+            compute_attribution_payload(&am, "Test.expired_stale", Some("frozen-at-spawn-copy"));
+
+        assert_eq!(payload_field(&payload, "is_stale_snapshot"), true);
+        assert_eq!(
+            payload_field(&payload, "current_key_prefix"),
+            "en-different"
+        );
     }
 
     /// Two-branch fallback: legacy token (no `expires_at`) uses

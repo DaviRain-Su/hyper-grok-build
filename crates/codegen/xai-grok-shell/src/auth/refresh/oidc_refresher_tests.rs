@@ -1363,7 +1363,7 @@ fn transient_blip_budget_is_scoped_to_the_credential() {
     // Accrue blips up to just under the escalation threshold on credential A.
     for _ in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES - 1 {
         assert!(matches!(
-            refresher.record_transient_failure("blip".into(), key_a.clone()),
+            refresher.record_transient_failure("blip".into(), key_a.clone(), false),
             RefreshOutcome::TransientFailure { .. }
         ));
     }
@@ -1371,9 +1371,47 @@ fn transient_blip_budget_is_scoped_to_the_credential() {
     // Credential B's first blip must stay transient, not escalate to permanent.
     assert!(
         matches!(
-            refresher.record_transient_failure("blip".into(), Some("cred-b".to_owned())),
+            refresher.record_transient_failure("blip".into(), Some("cred-b".to_owned()), false),
             RefreshOutcome::TransientFailure { .. }
         ),
         "a fresh credential must not inherit a prior credential's blip count",
+    );
+}
+
+/// Network-unreachable failures (DNS/connect/timeout — the post-wake offline
+/// window) must never consume the escalation budget: no amount of them may
+/// produce a `PermanentFailure` ("Run `grok login`") verdict, because they
+/// prove nothing about the credential. Counted failures accrued before or
+/// after are unaffected (the budget is neither consumed nor reset).
+#[test]
+fn network_unreachable_blips_never_escalate() {
+    let refresher = OidcRefresher::new(Arc::new(EmptySnapshot));
+    let key = Some("cred-a".to_owned());
+
+    // Far more unreachable blips than the budget: all stay transient.
+    for _ in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES * 3 {
+        assert!(
+            matches!(
+                refresher.record_transient_failure("wifi down".into(), key.clone(), true),
+                RefreshOutcome::TransientFailure { .. }
+            ),
+            "a network-unreachable failure must never escalate to permanent",
+        );
+    }
+
+    // The budget was not consumed: counted (IdP-reaching) blips still get the
+    // full threshold before escalating.
+    for _ in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES - 1 {
+        assert!(matches!(
+            refresher.record_transient_failure("5xx".into(), key.clone(), false),
+            RefreshOutcome::TransientFailure { .. }
+        ));
+    }
+    assert!(
+        matches!(
+            refresher.record_transient_failure("5xx".into(), key.clone(), false),
+            RefreshOutcome::PermanentFailure { .. }
+        ),
+        "counted blips must still escalate at the threshold",
     );
 }

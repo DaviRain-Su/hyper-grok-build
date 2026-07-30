@@ -37,6 +37,18 @@ use crate::appearance::AppearanceConfig;
 use crate::render::Renderable;
 use crate::theme::Theme;
 
+/// Lifecycle of a scroll-up warm-up that a resize postponed until the width
+/// settles. Settling is measured in FRAMES, not `prepare_layout` calls: one
+/// frame prepares layout several times, so a call-based rule would run the
+/// warm-up during the very resize that deferred it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DeferredWarmAbove {
+    #[default]
+    Idle,
+    Deferred,
+    Armed,
+}
+
 /// Unified scrollback state for the v3 pager.
 #[derive(Debug)]
 pub struct ScrollbackState {
@@ -174,6 +186,8 @@ pub struct ScrollbackState {
     /// of an O(n) full rebuild.
     gaps_may_be_dirty: bool,
 
+    warm_above: DeferredWarmAbove,
+
     /// Last observed [`ffmpeg_available`](crate::inline_media_ffmpeg::ffmpeg_available).
     /// A false→true flip (user installs ffmpeg mid-session) must rebuild the
     /// layout so reserved heights match the now-full-size posters — otherwise a
@@ -246,6 +260,7 @@ impl ScrollbackState {
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
             gaps_may_be_dirty: false,
+            warm_above: DeferredWarmAbove::Idle,
             ffmpeg_available_snapshot: false,
             expanded_groups: HashSet::new(),
             generation: 0,
@@ -1578,9 +1593,11 @@ impl ScrollbackState {
                     None
                 };
 
-            if width != self.last_width {
+            let width_changed = width != self.last_width;
+            let resized = width_changed && self.last_width != 0;
+            if width_changed {
                 for entry in self.entries.values_mut() {
-                    entry.invalidate_cache();
+                    entry.invalidate_width_caches();
                 }
                 self.last_width = width;
             }
@@ -1599,7 +1616,16 @@ impl ScrollbackState {
             self.settle_visible_measurements(width);
             // Pre-measure a few pages above the bottom so the first scroll-up is
             // glitch-free (no-op unless bottom-pinned).
-            self.warm_measure_pages_above(width);
+            //
+            // Warming three off-screen pages on every event of a drag, only
+            // to throw the work away at the next width, profiled as the single
+            // largest cost of a resize — hence the deferral.
+            if resized {
+                self.warm_above = DeferredWarmAbove::Deferred;
+            } else {
+                self.warm_above = DeferredWarmAbove::Idle;
+                self.warm_measure_pages_above(width);
+            }
             self.dirty_heights.clear();
             self.gaps_may_be_dirty = false;
             return true;
@@ -1645,6 +1671,7 @@ impl ScrollbackState {
             // A scroll/content change may have brought estimated entries into
             // view (e.g. streaming while scrolled up); measure them exactly.
             self.settle_visible_measurements(width);
+            self.run_pending_warm_above(width);
             return !changes.is_empty();
         }
 
@@ -1662,7 +1689,24 @@ impl ScrollbackState {
         // Scroll-up (no dirty heights) reveals estimated off-screen entries —
         // this is the on-demand measurement path for plain scrolling.
         self.settle_visible_measurements(width);
+        self.run_pending_warm_above(width);
         false
+    }
+
+    /// Mark the start of a frame that will draw this scrollback. Hosts must
+    /// call this once per frame; it is the only signal of a frame boundary
+    /// [`DeferredWarmAbove`] has.
+    pub fn begin_frame(&mut self) {
+        if self.warm_above == DeferredWarmAbove::Deferred {
+            self.warm_above = DeferredWarmAbove::Armed;
+        }
+    }
+
+    fn run_pending_warm_above(&mut self, width: u16) {
+        if self.warm_above == DeferredWarmAbove::Armed {
+            self.warm_above = DeferredWarmAbove::Idle;
+            self.warm_measure_pages_above(width);
+        }
     }
 
     /// Invalidate caches if width changed.

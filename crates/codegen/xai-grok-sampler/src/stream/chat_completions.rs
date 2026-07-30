@@ -294,6 +294,9 @@ pub fn stream_chat_completions<'a>(
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals: Vec::new(),
             stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
         };
 
         yield SamplingEvent::Completed {

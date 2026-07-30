@@ -676,6 +676,38 @@ impl SessionActor {
         self.send_xai_notification_with_extra_meta(update, None)
             .await;
     }
+    /// Build the per-response boundary update, projecting the response's usage
+    /// into the Messages API `message.usage` shape (uncached `input_tokens`).
+    pub(super) fn response_completed_update(
+        &self,
+        response: &xai_grok_sampling_types::ConversationResponse,
+    ) -> XaiSessionUpdate {
+        let usage =
+            response
+                .usage
+                .as_ref()
+                .map(|u| crate::extensions::notification::ResponseUsage {
+                    input_tokens: u64::from(
+                        u.prompt_tokens
+                            .saturating_sub(u.cached_prompt_tokens)
+                            .saturating_sub(u.cache_creation_prompt_tokens),
+                    ),
+                    output_tokens: u64::from(u.completion_tokens),
+                    cache_read_input_tokens: u64::from(u.cached_prompt_tokens),
+                    cache_creation_input_tokens: u64::from(u.cache_creation_prompt_tokens),
+                    reasoning_tokens: u64::from(u.reasoning_tokens),
+                });
+        let signature = response
+            .reasoning_items()
+            .find_map(|r| r.encrypted_content.clone());
+        XaiSessionUpdate::ResponseCompleted {
+            message_id: response.message_id.clone(),
+            stop_reason: response.raw_stop_reason.clone(),
+            usage,
+            signature,
+            stop_sequence: response.stop_sequence.clone(),
+        }
+    }
     /// [`Self::send_xai_notification`] with caller-supplied `_meta` keys merged
     /// into the standard eventId/timestamp meta. Caller keys win on collision.
     #[tracing::instrument(skip_all)]

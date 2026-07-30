@@ -2,7 +2,11 @@
 
 use std::sync::Arc;
 
-/// Bearer prefix length shared across crate boundaries.
+/// Bearer-fragment length shared across crate boundaries. The fragment
+/// is the **last** N characters (the tail): JWT session bearers all share
+/// the same base64 header, so only the tail distinguishes tokens. Mirrors
+/// `token_suffix` in xai-grok-shell, which the shell's 401-attribution
+/// event compares this fragment against.
 pub const SENT_BEARER_PREFIX_LEN: usize = 12;
 
 /// Which tool endpoint produced the 401.
@@ -36,30 +40,30 @@ pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
 pub type SharedAttributionCallback = Arc<dyn Auth401AttributionCallback>;
 
 /// Record a 401 attribution event if a callback is wired. Truncates
-/// the bearer to [`SENT_BEARER_PREFIX_LEN`] before crossing the
-/// trait boundary.
+/// the bearer to its [`SENT_BEARER_PREFIX_LEN`]-char tail before
+/// crossing the trait boundary, so only the fragment is materialized
+/// as an owned copy.
 pub(crate) fn emit_401(
     callback: Option<&SharedAttributionCallback>,
     consumer: ToolConsumer,
     sent_bearer: Option<&str>,
 ) {
     if let Some(cb) = callback {
-        let prefix = sent_bearer.map(|s| truncate_to_prefix(s.to_string()));
+        let prefix = sent_bearer.map(|s| tail_fragment(s).to_string());
         cb.record_401(consumer, prefix.as_deref());
     }
 }
 
-/// Truncate a bearer string to the first [`SENT_BEARER_PREFIX_LEN`]
-/// characters. Used by tool clients before passing the bearer across
-/// the [`Auth401AttributionCallback`] boundary.
-///
-/// Bearer tokens are ASCII (per the `Authorization` header grammar)
-/// so the byte index is always a char boundary; this function uses
-/// `String::truncate` which would otherwise panic on a non-boundary
-/// cut.
-pub(crate) fn truncate_to_prefix(mut bearer: String) -> String {
-    bearer.truncate(SENT_BEARER_PREFIX_LEN.min(bearer.len()));
-    bearer
+/// Last [`SENT_BEARER_PREFIX_LEN`] characters of a bearer (see the
+/// constant's doc for why the tail, not the head). Used by tool clients
+/// before passing the bearer across the [`Auth401AttributionCallback`]
+/// boundary. Counts chars from the end, so it cannot panic on a
+/// non-char-boundary cut for non-ASCII input.
+pub(crate) fn tail_fragment(s: &str) -> &str {
+    match s.char_indices().rev().nth(SENT_BEARER_PREFIX_LEN - 1) {
+        Some((i, _)) => &s[i..],
+        None => s,
+    }
 }
 
 #[cfg(test)]
@@ -67,30 +71,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_to_prefix_long_string_cuts_at_12() {
+    fn tail_fragment_semantics() {
+        // The tail, not the head: heads are shared across xai keys/JWTs.
         assert_eq!(
-            truncate_to_prefix("xai-key-aaaaaaaaaaaaaaaaaaa".to_string()),
-            "xai-key-aaaa"
+            tail_fragment("xai-key-aaaaaaaaaaadistinct1"),
+            "aaadistinct1"
         );
-    }
-
-    #[test]
-    fn truncate_to_prefix_short_string_unchanged() {
-        assert_eq!(truncate_to_prefix("abc".to_string()), "abc");
-    }
-
-    #[test]
-    fn truncate_to_prefix_exact_12_unchanged() {
-        assert_eq!(
-            truncate_to_prefix("123456789012".to_string()),
-            "123456789012"
-        );
-        assert_eq!(truncate_to_prefix("123456789012".to_string()).len(), 12);
-    }
-
-    #[test]
-    fn truncate_to_prefix_empty_unchanged() {
-        assert_eq!(truncate_to_prefix(String::new()), "");
+        assert_eq!(tail_fragment("abc"), "abc");
+        assert_eq!(tail_fragment(""), "");
+        assert_eq!(tail_fragment("123456789012"), "123456789012");
+        // 13 multi-byte chars: a byte-index cut would land mid-char.
+        assert_eq!(tail_fragment("ééééééééééééé"), "éééééééééééé");
     }
 
     #[test]

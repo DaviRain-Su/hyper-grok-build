@@ -203,6 +203,7 @@ fn dispatch_load_session_ungated(
     agent_mut.apply_app_scoped_gates(
         app.sharing_enabled,
         app.usage_visible,
+        !app.has_external_auth_provider,
         app.chat_mode,
         app.screen_mode,
         &app.active_announcements,
@@ -862,6 +863,7 @@ pub(in crate::app::dispatch) fn dispatch_load_session_with_restore(
         agent.apply_app_scoped_gates(
             app.sharing_enabled,
             app.usage_visible,
+            !app.has_external_auth_provider,
             app.chat_mode,
             app.screen_mode,
             &app.active_announcements,

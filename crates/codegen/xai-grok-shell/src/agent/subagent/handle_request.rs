@@ -1161,6 +1161,7 @@ pub(crate) async fn run_shell_child(
         } else {
             None
         },
+        false,
     )
     .await;
     let (child_handle, mut permission_rx, _system_prompt, child_thread) = match spawn_result {

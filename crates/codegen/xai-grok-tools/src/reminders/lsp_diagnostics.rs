@@ -37,7 +37,7 @@ impl Reminder for LspDiagnosticsReminder {
 
         // Drain any pending diagnostics (from this or previous edits).
         if let Some(summary) = lsp
-            .drain_diagnostics(std::time::Duration::from_millis(500))
+            .drain_diagnostics(crate::implementations::lsp::DIAGNOSTICS_DRAIN_TIMEOUT)
             .await
         {
             return vec![summary.text];

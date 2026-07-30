@@ -257,6 +257,7 @@ fn spawn_recorder_with_args(recorder: Recorder, args: &[String]) -> Result<Child
     // setsid detach via the sanctioned helper (workspace subprocess rule): the
     // recorder writes to a pipe and must not share the pager's controlling TTY.
     xai_tty_utils::detach_std_command(&mut cmd);
+    #[allow(clippy::disallowed_methods)] // recorder owned by the capture handle, killed on stop
     let mut child = cmd
         .spawn()
         .map_err(|e| VoiceError::Config(format!("failed to start {}: {e}", recorder.program())))?;

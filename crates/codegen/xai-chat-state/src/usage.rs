@@ -33,6 +33,7 @@ pub struct UsageTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_read_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub reasoning_tokens: u64,
     pub model_calls: u64,
     pub api_duration_ms: u64,
@@ -52,6 +53,7 @@ impl UsageTotals {
             input_tokens: u64::from(usage.prompt_tokens),
             output_tokens: u64::from(usage.completion_tokens),
             cached_read_tokens: u64::from(usage.cached_prompt_tokens),
+            cache_creation_tokens: u64::from(usage.cache_creation_prompt_tokens),
             reasoning_tokens: u64::from(usage.reasoning_tokens),
             model_calls: 1,
             api_duration_ms: api_duration_ms.unwrap_or(0),
@@ -73,6 +75,7 @@ impl UsageTotals {
             input_tokens,
             output_tokens,
             cached_read_tokens,
+            cache_creation_tokens,
             reasoning_tokens,
             model_calls,
             api_duration_ms,
@@ -82,6 +85,9 @@ impl UsageTotals {
         self.input_tokens = self.input_tokens.saturating_add(*input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(*output_tokens);
         self.cached_read_tokens = self.cached_read_tokens.saturating_add(*cached_read_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(*cache_creation_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(*reasoning_tokens);
         self.model_calls = self.model_calls.saturating_add(*model_calls);
         self.api_duration_ms = self.api_duration_ms.saturating_add(*api_duration_ms);
@@ -157,6 +163,7 @@ mod tests {
             total_tokens: 999_999,
             reasoning_tokens: 0,
             cached_prompt_tokens: 0,
+            cache_creation_prompt_tokens: 0,
         }
     }
 

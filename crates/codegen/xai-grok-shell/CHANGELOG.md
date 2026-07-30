@@ -1,5 +1,36 @@
 # Changelog
 
+# 0.2.116 — 2026-07-30
+
+## Features
+
+- **Headless streaming output** now includes tool calls, results, and usage when using `--output-format streaming-json`.
+- **New `/undo` slash command** restores files and chat to an earlier turn, same as `/rewind`.
+- **Slash commands** are now correctly hidden or refused in minimal or fullscreen mode based on their declared support.
+
+## Bug Fixes
+
+- **Fixed repeated forced re-logins** after laptop sleep or network hiccups during token refresh.
+- **Suppressed spurious history load warnings** on draft conversations that have no server history yet.
+- **Settings enum pickers** now keep the selected radio button on the current value until you press Enter.
+- **Deep-linked settings** such as `/privacy` now close the settings modal on Esc or Enter instead of returning to the list.
+
+
+# 0.2.115 — 2026-07-29
+
+## Bug Fixes
+
+- **Fixed chat history corruption** that could duplicate tool results or cause later 400 errors after repeated identical tool calls.
+- **Fixed infinite redirect loops** in embedded previews when the browser blocks the required cookie.
+- **Improved the action-stationarity nudge message** to avoid incorrectly claiming tool results were identical.
+- **Fixed external auth provider commands** (`auth_provider_command`) not working on Windows.
+- **Fixed incorrect 'Turn cancelled by user' messages** shown on internal send-now wake turns.
+- **Fixed language server crashes** (e.g. Roslyn on every edit) and missing C# diagnostics; improved diagnostics reliability for other servers.
+
+## Performance
+
+- **Improved prompt caching** for long conversations, reducing repeated billing on growing transcripts.
+
 # 0.2.114 — 2026-07-29
 
 ## Features

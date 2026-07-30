@@ -242,6 +242,7 @@ async fn run_external_auth_provider(
     xai_grok_tools::util::detach_command(&mut cmd);
     cmd.envs(xai_grok_tools::util::pager_env());
 
+    #[allow(clippy::disallowed_methods)] // auth provider child; see the process-group note above
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to start auth provider `{command}`: {e}"))?;

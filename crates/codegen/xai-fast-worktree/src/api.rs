@@ -1975,6 +1975,7 @@ pub mod gc {
         #[test]
         fn is_pid_alive_false_for_reaped_child() {
             // A fully reaped child's pid is gone (ESRCH) and must read as dead.
+            #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
             let mut child = std::process::Command::new("true")
                 .spawn()
                 .expect("spawn `true`");

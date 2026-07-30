@@ -901,6 +901,7 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .envs(xai_tty_utils::pager_env());
         xai_tty_utils::detach_std_command(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test reaps it
         let child = cmd.spawn().expect("spawn fake persistent leader");
         let pid = child.id();
         let tree = TestProcessTree::try_attach(pid, "fake persistent leader")

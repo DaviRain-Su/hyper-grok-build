@@ -66,6 +66,7 @@ fn validate_with_ops(
         .stderr(Stdio::null())
         .envs(xai_tty_utils::pager_env());
     xai_tty_utils::detach_std_command(&mut command);
+    #[allow(clippy::disallowed_methods)] // config validator, waited on with a timeout
     let mut child = command
         .spawn()
         .map_err(|source| ManagedConfigError::Validation {

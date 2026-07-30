@@ -1405,6 +1405,8 @@ pub struct AgentView {
     pub scheduler_background_loops: Option<bool>,
     /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
     pub billing_surface_visible: bool,
+    /// Whether `/usage` is offered. Mirrors `!AppView::has_external_auth_provider`.
+    pub usage_command_visible: bool,
     /// Input flight recorder — rolling buffer of recent key events.
     /// Dumped to file via Esc→d combo for debugging.
     pub(crate) input_log: crate::input_log::InputRingBuffer,
@@ -2033,6 +2035,10 @@ pub(super) fn apply_settings_outcome(
         }
         SettingsKeyOutcome::Action(a) => InputOutcome::Action(a),
         SettingsKeyOutcome::ActionPair(a, b) => InputOutcome::ActionPair(a, b),
+        SettingsKeyOutcome::ActionThenClose(a) => {
+            agent.active_modal = None;
+            InputOutcome::Action(a)
+        }
         SettingsKeyOutcome::Changed => InputOutcome::Changed,
         SettingsKeyOutcome::Unchanged => InputOutcome::Unchanged,
     }

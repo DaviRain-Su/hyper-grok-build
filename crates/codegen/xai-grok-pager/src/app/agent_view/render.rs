@@ -730,6 +730,7 @@ impl AgentView {
             #[cfg(feature = "codex-live")]
             live_visualizer,
         } = app_params;
+        self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,

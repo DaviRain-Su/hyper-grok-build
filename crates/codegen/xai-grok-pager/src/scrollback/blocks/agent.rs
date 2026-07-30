@@ -5,6 +5,7 @@ use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput};
 
 use super::markdown_content::MarkdownContent;
 use super::mermaid_content::{self, MermaidContent};
+use crate::appearance::AppearanceConfig;
 
 /// Block displaying an agent message with streaming markdown support.
 ///
@@ -208,7 +209,7 @@ impl BlockContent for AgentMessageBlock {
         None
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 

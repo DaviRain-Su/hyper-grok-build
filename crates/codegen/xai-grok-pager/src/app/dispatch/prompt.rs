@@ -569,6 +569,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 bundle_state: &app.bundle_state,
                 screen_mode: app.screen_mode,
                 billing_surface_visible: app.usage_visible,
+                usage_command_visible: !app.has_external_auth_provider,
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
@@ -625,15 +626,15 @@ pub(super) fn dispatch_send_prompt_inner(
                     });
                 }
                 if let Some(command) = command {
-                    if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
-                        // Central minimal gate: commands that drive the deleted
-                        // fullscreen pane / dashboard (/find, /dashboard, …)
-                        // have nothing to act on in scrollback-native mode.
-                        // Surface a friendly system block instead of running them.
-                        CommandResult::Message(format!(
-                            "/{} is not available in minimal mode",
-                            invocation.token
-                        ))
+                    // Central screen-mode gate. Such a command is already
+                    // filtered out of every completion surface, but it stays
+                    // resolvable so a fully-typed invocation earns a hint that
+                    // names the way out instead of leaking to the model.
+                    if let Some(refusal) = command
+                        .mode_support()
+                        .refusal(invocation.token, ctx.screen_mode)
+                    {
+                        CommandResult::Message(refusal)
                     } else {
                         agent
                             .prompt

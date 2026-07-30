@@ -25,6 +25,7 @@ pub fn pbcopy(text: &str) -> Result<()> {
     let mut cmd = Command::new("pbcopy");
     cmd.stdin(Stdio::piped());
     xai_tty_utils::detach_std_command(&mut cmd);
+    #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
     let mut child = cmd.spawn().context("spawn pbcopy")?;
     child
         .stdin
@@ -52,6 +53,7 @@ pub fn pbcopy(text: &str) -> Result<()> {
     ])
     .stdin(Stdio::piped());
     xai_tty_utils::detach_std_command(&mut cmd);
+    #[allow(clippy::disallowed_methods)] // short-lived clipboard helper, waited on below
     let mut child = cmd.spawn().context("spawn powershell Set-Clipboard")?;
     child
         .stdin

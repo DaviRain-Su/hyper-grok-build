@@ -24,8 +24,7 @@ impl AgentView {
     /// is replaced; [`Self::sticky_toast`] is preserved and returns after this
     /// expires or is dismissed.
     pub fn show_toast(&mut self, msg: &str) {
-        let msg = crate::glyphs::legacy_glyph_fallback(msg).into_owned();
-        self.toast = Some((msg, 90));
+        self.toast = Some((crate::glyphs::sanitize_toast_message(msg).into_owned(), 90));
     }
 
     /// Show an ephemeral tip in the banner row above the prompt, gated by the
@@ -224,7 +223,7 @@ impl AgentView {
     /// Set or clear the sticky status banner (process-wide indicators should
     /// use [`Self::set_sticky_toast_recursive`] on every agent view).
     pub fn set_sticky_toast(&mut self, msg: Option<&str>) {
-        self.sticky_toast = msg.map(|m| crate::glyphs::legacy_glyph_fallback(m).into_owned());
+        self.sticky_toast = msg.map(|m| crate::glyphs::sanitize_toast_message(m).into_owned());
     }
 
     /// Propagate sticky status to this view and every nested subagent view.
@@ -237,8 +236,10 @@ impl AgentView {
 
     /// Show a toast with an explicit tick duration.
     pub fn show_toast_ticks(&mut self, msg: &str, ticks: u8) {
-        let msg = crate::glyphs::legacy_glyph_fallback(msg).into_owned();
-        self.toast = Some((msg, ticks));
+        self.toast = Some((
+            crate::glyphs::sanitize_toast_message(msg).into_owned(),
+            ticks,
+        ));
     }
 
     /// Message currently drawn in the toast slot: transient wins while active,
@@ -418,5 +419,39 @@ mod mouse_off_banner_tests {
         view.set_sticky_toast(Some("Reconnecting"));
         view.active_pane = AgentPane::Prompt;
         assert_eq!(view.active_toast_message().as_deref(), Some("Reconnecting"));
+    }
+
+    #[test]
+    fn show_toast_scrubs_control_chars() {
+        let mut view = make_running_agent();
+        view.show_toast("a\nb\rc\thttps://x.ai");
+        let msg = view.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+        assert!(
+            !msg.chars().any(char::is_control),
+            "show_toast must scrub controls: {msg:?}"
+        );
+        assert!(msg.contains("https://x.ai"), "{msg:?}");
+    }
+
+    #[test]
+    fn show_toast_ticks_scrubs_control_chars() {
+        let mut view = make_running_agent();
+        view.show_toast_ticks("x\ny\tz", 10);
+        let msg = view.toast.as_ref().map(|(m, _)| m.as_str()).unwrap_or("");
+        assert!(
+            !msg.chars().any(char::is_control),
+            "show_toast_ticks must scrub controls: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn set_sticky_toast_scrubs_control_chars() {
+        let mut view = make_running_agent();
+        view.set_sticky_toast(Some("sticky\nline"));
+        let msg = view.sticky_toast.as_deref().unwrap_or("");
+        assert!(
+            !msg.chars().any(char::is_control),
+            "sticky toast must scrub controls: {msg:?}"
+        );
     }
 }

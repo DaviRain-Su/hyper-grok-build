@@ -15,6 +15,7 @@ use crate::scrollback::types::{
 const USER_PROMPT_BODY_RANGE: u16 = 0;
 /// Max visible lines when a user prompt is collapsed.
 const COLLAPSED_MAX_LINES: usize = 3;
+use crate::appearance::AppearanceConfig;
 use crate::theme::Theme;
 
 /// Drop invalid token ranges (replay meta is untrusted): out of bounds, not
@@ -488,8 +489,8 @@ impl BlockContent for UserPromptBlock {
         ctx.appearance.scrollback.blocks.prompt.bg
     }
 
-    fn has_vpad(&self, ctx: &BlockContext) -> bool {
-        ctx.appearance.scrollback.blocks.prompt.vpad && !ctx.appearance.prompt.compact
+    fn has_vpad_for(&self, appearance: &AppearanceConfig) -> bool {
+        appearance.scrollback.blocks.prompt.vpad && !appearance.prompt.compact
     }
 
     fn has_raw_mode(&self) -> bool {

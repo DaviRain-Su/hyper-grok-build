@@ -340,6 +340,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         agent.apply_app_scoped_gates(
             app.sharing_enabled,
             app.usage_visible,
+            !app.has_external_auth_provider,
             app.chat_mode,
             app.screen_mode,
             &app.active_announcements,
@@ -781,6 +782,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         agent.apply_app_scoped_gates(
             app.sharing_enabled,
             app.usage_visible,
+            !app.has_external_auth_provider,
             app.chat_mode,
             app.screen_mode,
             &app.active_announcements,

@@ -2,6 +2,7 @@
 
 use ratatui::text::{Line, Span};
 
+use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput, Selectable};
@@ -72,7 +73,7 @@ impl BlockContent for SystemMessageBlock {
         None // System messages have no accent
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false // System messages are compact
     }
 

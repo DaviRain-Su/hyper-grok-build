@@ -13,6 +13,7 @@ use crate::theme::Theme;
 
 use super::markdown_content::MarkdownContent;
 use super::quote_bar::QuoteBarStrip;
+use crate::appearance::AppearanceConfig;
 
 /// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord
 /// literally instead of going through the keybinding registry. Resolve the
@@ -468,7 +469,7 @@ impl BlockContent for ThinkingBlock {
         false
     }
 
-    fn has_vpad(&self, _ctx: &BlockContext) -> bool {
+    fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {
         false
     }
 

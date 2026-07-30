@@ -116,6 +116,18 @@ pub trait CompactionItemBuilder: CompactionItem + Clone {
     /// it for other roles, but implementations should return
     /// `Some(self.clone())` for them to keep the contract total.
     fn strip_tool_content(&self) -> Option<Self>;
+
+    /// Truncate this item's payload for **summarizer input** to roughly
+    /// `max_tokens` (grok-build style: `max_bytes = max_tokens * 4`, prefix
+    /// clip). Used by FullReplace fit for oversized tool results and
+    /// emergency tail shrink. Default: clone unchanged.
+    ///
+    /// Prefer tool-result text; keep structural fields (ids, names). Drop
+    /// large sidecars when present.
+    fn truncate_payload_for_compaction(&self, max_tokens: u32) -> Self {
+        let _ = max_tokens;
+        self.clone()
+    }
 }
 
 /// Write seam for the full-replace **assembler**
@@ -179,5 +191,8 @@ impl<T: CompactionItemBuilder> CompactionItemBuilder for std::sync::Arc<T> {
     }
     fn strip_tool_content(&self) -> Option<Self> {
         (**self).strip_tool_content().map(std::sync::Arc::new)
+    }
+    fn truncate_payload_for_compaction(&self, max_tokens: u32) -> Self {
+        std::sync::Arc::new((**self).truncate_payload_for_compaction(max_tokens))
     }
 }

@@ -437,21 +437,24 @@ impl FeedbackClient {
         }
     }
 
-    fn record_401_attribution_if_needed(&self, response: &reqwest::Response, op: &str) {
+    fn record_401_attribution_if_needed(
+        &self,
+        response: &reqwest::Response,
+        stamp: Option<&xai_grok_auth::StampedBearerSuffix>,
+        op: &str,
+    ) {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && let Some(am) = self.credentials.auth_manager()
         {
-            let bearer_prefix = self
-                .credentials
-                .deployment_key
-                .as_deref()
-                .or(self.credentials.user_token.as_deref());
+            // Attribute what the middleware stamped, never a re-resolved or
+            // constructor-time credential (see `StampedBearerSuffix`).
+            // `None` = the request went out with no bearer.
             crate::auth::attribution::record_consumer_401(
                 am.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::FeedbackClient,
                 op,
-                bearer_prefix,
+                stamp.map(|s| s.0.as_str()),
             );
         }
     }
@@ -517,9 +520,11 @@ impl FeedbackClient {
     ) -> Result<T> {
         let request = xai_file_utils::trace_context::inject_trace_context_into_request(request);
         let req = request.build().context(context)?;
-        let response = self.client.execute(req).await.context(context)?;
+        let (response, stamp) = xai_grok_auth::execute_with_stamp(&self.client, req)
+            .await
+            .context(context)?;
 
-        self.record_401_attribution_if_needed(&response, context);
+        self.record_401_attribution_if_needed(&response, stamp.as_ref(), context);
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             tracing::debug!("{context} rejected (403), skipping");
@@ -549,9 +554,11 @@ impl FeedbackClient {
     async fn send_empty(&self, request: RequestBuilder, context: &'static str) -> Result<()> {
         let request = xai_file_utils::trace_context::inject_trace_context_into_request(request);
         let req = request.build().context(context)?;
-        let response = self.client.execute(req).await.context(context)?;
+        let (response, stamp) = xai_grok_auth::execute_with_stamp(&self.client, req)
+            .await
+            .context(context)?;
 
-        self.record_401_attribution_if_needed(&response, context);
+        self.record_401_attribution_if_needed(&response, stamp.as_ref(), context);
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             tracing::debug!("{context} rejected (403), skipping");

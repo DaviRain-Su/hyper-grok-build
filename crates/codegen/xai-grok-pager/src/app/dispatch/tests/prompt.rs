@@ -3077,7 +3077,7 @@ fn slash_and_exit_input_does_not_trigger_project_picker() {
     assert!(!input_can_trigger_project_picker("   "));
 }
 
-// ── Minimal-mode slash gate tests ───────────────────────────────────
+// ── Screen-mode slash gate tests ────────────────────────────────────
 
 /// Returns true if any system block in agent 0's scrollback contains
 /// `needle`. Avoids `last_system_text`'s "last block must be System" panic
@@ -3105,20 +3105,52 @@ fn minimal_mode_blocks_fullscreen_pane_slash_command() {
         before + 1,
         "the gate should commit exactly one system block"
     );
+    let refusal = last_system_text(&app, AgentId(0));
     assert!(
-        last_system_text(&app, AgentId(0)).contains("not available in minimal mode"),
-        "got: {:?}",
-        last_system_text(&app, AgentId(0))
+        refusal.starts_with("/find isn't available in minimal mode"),
+        "got: {refusal:?}"
+    );
+    assert!(
+        refusal.contains("Run /fullscreen"),
+        "the refusal must name the way out, got: {refusal:?}"
     );
 }
 
+#[test]
+fn fullscreen_mode_blocks_minimal_only_slash_command() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Fullscreen;
+    let effects = dispatch_send_prompt(&mut app, "/expand".to_string());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let refusal = last_system_text(&app, AgentId(0));
+    assert_eq!(
+        refusal,
+        "/expand isn't available in fullscreen mode — press Tab to focus the scrollback, \
+         then → on the block."
+    );
+}
+
+#[test]
+fn mode_switcher_in_its_own_mode_says_you_are_already_there() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    let effects = dispatch_send_prompt(&mut app, "/minimal".to_string());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(
+        last_system_text(&app, AgentId(0)),
+        "You're already in minimal mode."
+    );
+}
+
+/// Inline (`--no-alt-screen`) is a full TUI, so fullscreen-only commands run
+/// there — the gate keys off "is minimal", not "is `ScreenMode::Fullscreen`".
 #[test]
 fn non_minimal_mode_allows_fullscreen_pane_slash_command() {
     let mut app = test_app_with_agent();
     app.screen_mode = crate::app::ScreenMode::Inline;
     let _ = dispatch_send_prompt(&mut app, "/find foo".to_string());
     assert!(
-        !scrollback_has_system_text(&app, AgentId(0), "not available in minimal mode"),
+        !scrollback_has_system_text(&app, AgentId(0), "isn't available"),
         "the gate must not fire outside minimal mode"
     );
 }
@@ -3130,7 +3162,7 @@ fn minimal_mode_allows_mode_agnostic_slash_command() {
     // `/help` is a minimal-native command (opens the command palette).
     let _ = dispatch_send_prompt(&mut app, "/help".to_string());
     assert!(
-        !scrollback_has_system_text(&app, AgentId(0), "not available in minimal mode"),
+        !scrollback_has_system_text(&app, AgentId(0), "isn't available"),
         "denylist default must keep mode-agnostic commands available"
     );
 }

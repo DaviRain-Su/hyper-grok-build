@@ -550,7 +550,7 @@ impl SessionActor {
             &vendor_homes,
             Some(&workspace_root),
         );
-        let skills = bridge.slash_skills().await;
+        let skills = self.slash_skills_for_resolve().await;
         let mcp_servers = self.gather_mcp_servers(cwd).await;
         let shell = resolve_session_shell();
         let today_local = chrono::Local::now().date_naive();

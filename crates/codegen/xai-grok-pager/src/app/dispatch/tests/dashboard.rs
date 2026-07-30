@@ -1688,6 +1688,41 @@ fn dashboard_does_not_advertise_or_dispatch_doctor() {
         assert_eq!(dashboard.error_toast.as_deref(), Some(expected.as_str()));
     }
 }
+/// External-auth hides `/usage` via `visible()`, not session-scope. Typed
+/// `/usage` on the dashboard must refuse with the command's message, not
+/// claim it only works in a session.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_hidden_for_external_auth() {
+    let mut app = three_agent_app();
+    app.has_external_auth_provider = true;
+    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+    open_dashboard(&mut app);
+    let before = app.agents.len();
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "must not enqueue spawn effects");
+    assert_eq!(app.agents.len(), before, "must not add an agent");
+    assert_eq!(app.dashboard.as_ref().unwrap().dispatch.text(), "");
+    let toast = app
+        .dashboard
+        .as_ref()
+        .unwrap()
+        .error_toast
+        .as_deref()
+        .expect("error toast for gated /usage");
+    assert!(
+        toast.contains("/usage is not available"),
+        "unexpected toast: {toast}"
+    );
+    assert!(
+        !toast.contains("only works in a session"),
+        "must not mis-label /usage as session-scoped: {toast}"
+    );
+    assert!(
+        !toast.contains("SuperGrok"),
+        "must not upsell billing on external auth: {toast}"
+    );
+}
 /// Session-scoped Action builtins must not spawn an agent whose first
 /// prompt is the slash text (registered + not offered → error toast).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]

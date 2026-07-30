@@ -6,23 +6,22 @@
 # TODO: remove after https://github.com/hyperium/tonic/issues/2253 fixed.
 large-error-threshold = 256
 
-# Ban raw canonicalize: on Windows, std/tokio canonicalize return verbatim
-# `\\?\C:\...` paths that break external tools (git rejects them as clone
-# destinations), leak into model prompt context, and poison path-equality
-# keys. Use `dunce::canonicalize` (identical to std on Unix/macOS; strips the
-# verbatim prefix on Windows when safely representable). For async contexts
-# in xai-grok-tools, use the blessed helpers in `crate::util::fs`.
+# Ban raw canonicalize: on Windows it returns verbatim `\\?\C:\...` paths that
+# break external tools, leak into prompts, and poison path-equality keys.
+# `dunce::canonicalize` keeps the verbatim form for paths it cannot simplify
+# (over 260 chars, device names), so containment checks there fail closed.
 #
-# Caveat: dunce keeps the verbatim form for paths it cannot safely simplify
-# (notably > 260 chars or reserved device names), so prefix checks between two
-# independently canonicalized paths can mismatch on Windows for very long
-# paths (containment checks then fail closed).
+# Ban raw child-process spawning: an unenrolled child outlives the session that
+# started it, while an enrolled one dies with its scope. Allow with a reason
+# where a child is waited on or deliberately detached.
 #
-# Enforcement boundary: this ban is applied by the per-crate cargo clippy
-# presubmits only — the Bazel lint aspect pins the repo-root //:clippy.toml,
-# so Bazel-only crates (currently xai-coding-env) need manual vigilance.
+# Enforced by `cargo clippy` and `just lint-rs`. The Bazel lint aspect pins the
+# repo-root config instead, so crates this file does not reach carry a
+# crate-level allow.
 disallowed-methods = [
     { path = "std::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
     { path = "std::path::Path::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use dunce::canonicalize" },
     { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use xai_grok_tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
+    { path = "std::process::Command::spawn", reason = "an unenrolled child outlives its session; use xai_tty_utils::ProcessScope::enroll" },
+    { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use xai_tty_utils::ProcessScope::enroll" },
 ]

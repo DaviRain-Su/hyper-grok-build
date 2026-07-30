@@ -204,9 +204,7 @@ pub(crate) fn execute(
             #[allow(unused_mut)]
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
-            if is_chat_path {
-                apply_chat_kind_meta(&mut meta);
-            }
+            finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -300,13 +298,11 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             let mut meta = session_flags.to_meta();
-            if chat_kind || session_flags.chat_mode {
-                meta.get_or_insert_with(acp::Meta::new)
-                    .insert(
-                        "x.ai/session".into(),
-                        serde_json::json!({ "kind": "chat" }),
-                    );
-            }
+            finalize_chat_session_meta(
+                &mut meta,
+                chat_kind || session_flags.chat_mode,
+                session_flags,
+            );
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -582,10 +578,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
-            if is_chat_path {
-                apply_chat_kind_meta(&mut meta);
-                scrub_chat_workspace_bind_meta(&mut meta);
-            }
+            finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
             if let Some(true) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("x.ai/restore_code".into(), serde_json::Value::Bool(true));

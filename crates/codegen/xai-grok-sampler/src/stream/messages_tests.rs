@@ -58,6 +58,7 @@ fn message_delta_with_stop(stop: messages::StopReason) -> MessageStreamEvent {
     MessageStreamEvent::MessageDelta {
         delta: MessageDeltaBody {
             stop_reason: Some(stop),
+            stop_sequence: None,
             stop_details: None,
         },
         usage: MessageDeltaUsage {
@@ -75,6 +76,7 @@ fn message_delta_refusal_with_explanation(explanation: &str) -> MessageStreamEve
     MessageStreamEvent::MessageDelta {
         delta: MessageDeltaBody {
             stop_reason: Some(messages::StopReason::Refusal),
+            stop_sequence: None,
             stop_details: Some(messages::StopDetails {
                 r#type: Some("refusal".to_string()),
                 category: Some("frontier_llm".to_string()),
@@ -141,6 +143,10 @@ async fn text_block_assembles_into_completed_response() {
             assert_eq!(a.content.as_ref(), "Hello, world!");
             assert_eq!(a.model_id.as_deref(), Some("messages-compatible-model"));
             assert_eq!(response.stop_reason, Some(StopReason::Stop));
+            // Provider message id and the verbatim wire stop reason survive
+            // onto the response (collapsed `stop_reason` loses the string).
+            assert_eq!(response.message_id.as_deref(), Some("msg_1"));
+            assert_eq!(response.raw_stop_reason.as_deref(), Some("end_turn"));
             let u = response.usage.as_ref().expect("usage extracted");
             assert_eq!(u.prompt_tokens, 10);
             assert_eq!(u.completion_tokens, 5);
@@ -206,6 +212,61 @@ async fn thinking_block_emits_reasoning_channel_and_preserved_in_response() {
         }
         other => panic!("expected Completed, got {other:?}"),
     }
+}
+
+/// `thinking(sig1) → text → thinking(sig2)` must surface each thinking block's
+/// OWN signature, in order, on its own `ReasoningCompleted` (emitted at that
+/// block's stop) — so the per-index signature reaches the headless reducer and
+/// each block keeps its own signature rather than collapsing to one.
+#[tokio::test]
+async fn multiple_thinking_blocks_emit_per_block_signatures_in_order() {
+    let thinking_block = |index: u32, text: &str, sig: &str| {
+        vec![
+            Ok(MessageStreamEvent::ContentBlockStart {
+                index,
+                content_block: ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: String::new(),
+                },
+            }),
+            Ok(MessageStreamEvent::ContentBlockDelta {
+                index,
+                delta: StreamDelta::ThinkingDelta {
+                    thinking: text.into(),
+                },
+            }),
+            Ok(MessageStreamEvent::ContentBlockDelta {
+                index,
+                delta: StreamDelta::SignatureDelta {
+                    signature: sig.into(),
+                },
+            }),
+            Ok(block_stop(index)),
+        ]
+    };
+    let mut events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![Ok(message_start())];
+    events.extend(thinking_block(0, "first", "sig-1"));
+    events.push(Ok(text_block_start(1)));
+    events.push(Ok(text_delta(1, "interlude")));
+    events.push(Ok(block_stop(1)));
+    events.extend(thinking_block(2, "second", "sig-2"));
+    events.push(Ok(MessageStreamEvent::MessageStop));
+
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    let sigs: Vec<&str> = evs
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::ReasoningCompleted { signature, .. } => Some(signature.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sigs,
+        vec!["sig-1", "sig-2"],
+        "each thinking block emits its own signature in order"
+    );
 }
 
 #[tokio::test]
@@ -574,6 +635,7 @@ fn message_delta_with_cache(
     MessageStreamEvent::MessageDelta {
         delta: MessageDeltaBody {
             stop_reason: Some(messages::StopReason::EndTurn),
+            stop_sequence: None,
             stop_details: None,
         },
         usage: MessageDeltaUsage {
@@ -621,6 +683,7 @@ async fn prompt_tokens_sums_all_three_anthropic_buckets() {
 
     assert_eq!(usage.prompt_tokens, 100 + 5000 + 200);
     assert_eq!(usage.cached_prompt_tokens, 5000);
+    assert_eq!(usage.cache_creation_prompt_tokens, 200);
     assert_eq!(usage.completion_tokens, 7);
     assert_eq!(usage.total_tokens, 100 + 5000 + 200 + 7);
 }
@@ -638,6 +701,7 @@ async fn message_delta_cache_fields_override_message_start() {
 
     assert_eq!(usage.prompt_tokens, 10 + 900 + 50);
     assert_eq!(usage.cached_prompt_tokens, 900);
+    assert_eq!(usage.cache_creation_prompt_tokens, 50);
     assert_eq!(usage.completion_tokens, 4);
 }
 

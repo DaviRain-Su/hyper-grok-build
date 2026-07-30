@@ -12,7 +12,13 @@ pub(crate) enum OidcRefreshResult {
     /// Terminal error from the IdP, already classified into a reason.
     TerminalError { reason: RefreshTokenFailedReason },
     /// Non-terminal failure (discovery failed, network error, etc.)
-    Failed,
+    ///
+    /// `network_unreachable` is `true` when the failure never reached the IdP
+    /// (DNS resolution, TCP connect, request timeout) — the canonical shape
+    /// of the first seconds after wake-from-sleep. Such failures prove
+    /// nothing about the credential, so `OidcRefresher`'s transient →
+    /// permanent escalation budget must not count them.
+    Failed { network_unreachable: bool },
 }
 
 /// Classify an OAuth2 `error` code as a terminal refresh failure. `None` means
@@ -26,10 +32,61 @@ pub(super) fn classify_terminal(error_code: &str) -> Option<RefreshTokenFailedRe
     }
 }
 
-/// `oauth2-provider` refresh-token rotation-grace window (ms). Only a clock
-/// divergence past this bound is flagged as a suspected suspend-straddle, since
-/// a longer suspend can turn a lost refresh response into a revoked RT.
+/// Conservative client-side bound (ms) on how long an IdP may still accept a
+/// refresh token it has already rotated. A clock divergence past this bound
+/// means the exchange straddled a suspend long enough that a lost response can
+/// no longer be recovered by re-presenting the old RT.
 const ROTATION_GRACE_MS: u64 = 60_000;
+
+/// Dual-clock suspend probe around an IdP exchange: the monotonic clock
+/// pauses during suspend and the wall clock does not, so their divergence
+/// measures time suspended since [`Self::start`]. Feeds `suspended_ms`
+/// telemetry and stops in-call retries once a straddle exceeds the rotation
+/// grace — re-sending the RT then trips the IdP's reuse detection and
+/// revokes a successor a sibling may hold.
+pub(super) struct SuspendProbe {
+    mono: std::time::Instant,
+    wall: chrono::DateTime<chrono::Utc>,
+}
+
+impl SuspendProbe {
+    pub(super) fn start() -> Self {
+        Self {
+            mono: std::time::Instant::now(),
+            wall: chrono::Utc::now(),
+        }
+    }
+
+    /// `(monotonic_ms, wall_ms)` elapsed since [`Self::start`].
+    fn elapsed_ms(&self) -> (u64, u64) {
+        let mono_ms = self.mono.elapsed().as_millis() as u64;
+        let wall_ms = (chrono::Utc::now() - self.wall).num_milliseconds().max(0) as u64;
+        (mono_ms, wall_ms)
+    }
+
+    /// Milliseconds the machine spent suspended since [`Self::start`].
+    pub(super) fn suspended_ms(&self) -> u64 {
+        let (mono_ms, wall_ms) = self.elapsed_ms();
+        wall_ms.saturating_sub(mono_ms)
+    }
+
+    /// `true` once the exchange has straddled a suspend past the rotation
+    /// grace.
+    pub(super) fn straddled_past_grace(&self) -> bool {
+        self.suspended_ms() > ROTATION_GRACE_MS
+    }
+}
+
+/// `true` when `err`'s chain shows the request never reached the server:
+/// DNS failure, TCP connect failure, or timeout. Used to mark
+/// [`OidcRefreshResult::Failed::network_unreachable`].
+fn is_network_unreachable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|re| re.is_connect() || re.is_timeout())
+    })
+}
 
 /// Exchange a refresh_token for fresh tokens at the IdP. Pure data return, no
 /// `AuthManager` mutations; the caller (`OidcRefresher`) routes the result
@@ -57,13 +114,19 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
         );
     }
     let Some(refresh_tok) = auth.refresh_token.as_ref() else {
-        return OidcRefreshResult::Failed;
+        return OidcRefreshResult::Failed {
+            network_unreachable: false,
+        };
     };
     let Some(issuer) = auth.oidc_issuer.as_ref() else {
-        return OidcRefreshResult::Failed;
+        return OidcRefreshResult::Failed {
+            network_unreachable: false,
+        };
     };
     let Some(client_id) = auth.oidc_client_id.as_ref() else {
-        return OidcRefreshResult::Failed;
+        return OidcRefreshResult::Failed {
+            network_unreachable: false,
+        };
     };
 
     crate::unified_log::info(
@@ -72,35 +135,31 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
         Some(serde_json::json!({ "issuer": issuer, "client_id": client_id })),
     );
 
-    // Suspend probe: the monotonic clock pauses while the machine is asleep
-    // but the wall clock does not, so a large divergence around the IdP call
-    // means the process was suspended mid-refresh — the exact condition that
-    // can revoke the refresh token (response lost across sleep).
-    let started_mono = std::time::Instant::now();
-    let started_wall = chrono::Utc::now();
+    // A large mono/wall divergence around the IdP call means the process was
+    // suspended mid-refresh — the condition that can revoke the refresh token
+    // (response lost across sleep). See [`SuspendProbe`].
+    let probe = SuspendProbe::start();
     let timing = || {
-        let mono_ms = started_mono.elapsed().as_millis() as u64;
-        let wall_ms = (chrono::Utc::now() - started_wall)
-            .num_milliseconds()
-            .max(0) as u64;
-        let suspended_ms = wall_ms.saturating_sub(mono_ms);
+        let (mono_ms, wall_ms) = probe.elapsed_ms();
         (
             mono_ms,
             wall_ms,
-            suspended_ms,
-            suspended_ms > ROTATION_GRACE_MS,
+            probe.suspended_ms(),
+            probe.straddled_past_grace(),
         )
     };
 
     let discovery = match discover(issuer).await {
         Ok(d) => d,
         Err(e) => {
+            let network_unreachable = is_network_unreachable(&e);
             let (mono_ms, wall_ms, suspended_ms, suspected_suspend) = timing();
             crate::unified_log::error(
                 "oidc try_refresh_pure discovery failed",
                 None,
                 Some(serde_json::json!({
                     "error": format!("{e:#}"),
+                    "network_unreachable": network_unreachable,
                     "mono_ms": mono_ms,
                     "wall_ms": wall_ms,
                     "suspended_ms": suspended_ms,
@@ -110,7 +169,9 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
             if suspected_suspend {
                 emit_suspend_spanned("discovery_failed", suspended_ms);
             }
-            return OidcRefreshResult::Failed;
+            return OidcRefreshResult::Failed {
+                network_unreachable,
+            };
         }
     };
     let tokens = match refresh_tokens(
@@ -158,6 +219,7 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
                 OidcError::TokenRefreshHttp { status, .. } => Some(*status),
                 _ => None,
             });
+            let network_unreachable = is_network_unreachable(&e);
             let (mono_ms, wall_ms, suspended_ms, suspected_suspend) = timing();
             crate::unified_log::error(
                 "oidc try_refresh_pure token exchange failed",
@@ -166,6 +228,7 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
                     "error": e.to_string(),
                     "client_id": client_id,
                     "http_status": http_status,
+                    "network_unreachable": network_unreachable,
                     "mono_ms": mono_ms,
                     "wall_ms": wall_ms,
                     "suspended_ms": suspended_ms,
@@ -182,7 +245,9 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
             if suspected_suspend {
                 emit_suspend_spanned("transient_failed", suspended_ms);
             }
-            return OidcRefreshResult::Failed;
+            return OidcRefreshResult::Failed {
+                network_unreachable,
+            };
         }
     };
 

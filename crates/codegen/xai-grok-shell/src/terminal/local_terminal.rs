@@ -72,6 +72,7 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
         // (e.g. GPG pinentry) cannot open /dev/tty and corrupt the TUI.
         xai_grok_tools::util::detach_command(&mut cmd);
 
+        #[allow(clippy::disallowed_methods)] // killed on the request timeout, direct child only
         let mut child = cmd
             .spawn()
             .map_err(|e| TerminalError::Other(format!("Failed to start shell: {e}")))?;

@@ -4208,31 +4208,28 @@ mod tests {
         }
     }
 
-    /// `extract_sent_bearer` strips the `"Bearer "` prefix off
-    /// `Authorization` for OpenAI-completions backends and truncates the
-    /// remaining bearer to the cross-crate prefix length.
+    /// `post()` strips the `"Bearer "` scheme prefix off `Authorization`
+    /// and captures the tail fragment (see `SENT_BEARER_PREFIX_LEN`).
     #[test]
-    fn extract_sent_bearer_strips_bearer_prefix_for_openai_compat() {
+    fn post_captures_bearer_tail_for_openai_compat() {
         let cfg = SamplerConfig {
             api_key: Some("test-bearer-1234567890".to_string()),
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let bearer = client.extract_sent_bearer();
-        // Bearer is truncated at the crate boundary -- callers
-        // downstream of this method only ever see the prefix.
-        assert_eq!(bearer.as_deref(), Some("test-bearer-"));
+        let (_builder, bearer) = client.post("https://example.test/v1/chat/completions");
+        assert_eq!(bearer.as_deref(), Some("r-1234567890"));
         assert_eq!(
             bearer.as_deref().map(str::len),
             Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
         );
     }
 
-    /// `extract_sent_bearer` reads `x-api-key` for Anthropic Messages API
-    /// and truncates the value to the cross-crate prefix length.
+    /// `post()` captures `x-api-key` for Messages-API backends and keeps
+    /// the value's tail fragment.
     #[test]
-    fn extract_sent_bearer_reads_x_api_key_for_messages() {
+    fn post_captures_x_api_key_tail_for_messages() {
         let cfg = SamplerConfig {
             api_key: Some("anthropic-key-abc123".to_string()),
             api_backend: ApiBackend::Messages,
@@ -4240,24 +4237,68 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let bearer = client.extract_sent_bearer();
-        assert_eq!(bearer.as_deref(), Some("anthropic-ke"));
+        let (_builder, bearer) = client.post("https://example.test/v1/messages");
+        assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
         assert_eq!(
             bearer.as_deref().map(str::len),
             Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
         );
     }
 
-    /// `extract_sent_bearer` returns `None` when no auth header is set.
+    /// `post()` captures `None` when the request carries no auth header.
     #[test]
-    fn extract_sent_bearer_returns_none_when_no_header() {
+    fn post_captures_none_when_no_header() {
         let cfg = SamplerConfig {
             api_key: None,
             api_backend: ApiBackend::ChatCompletions,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        assert!(client.extract_sent_bearer().is_none());
+        let (_builder, bearer) = client.post("https://example.test/v1/chat/completions");
+        assert!(bearer.is_none());
+    }
+
+    /// The race this design closes: a 401 triggers a recovery that rotates
+    /// the resolver, so a record-time re-read attributes a bearer the
+    /// rejected request never carried. The attributed fragment must be the
+    /// one captured when the request was built.
+    #[test]
+    fn post_capture_is_immune_to_resolver_rotation_after_build() {
+        #[derive(Debug)]
+        struct RotatingResolver(std::sync::Mutex<String>);
+        impl crate::config::BearerResolver for RotatingResolver {
+            fn current_bearer(&self) -> Option<String> {
+                Some(self.0.lock().unwrap().clone())
+            }
+        }
+
+        let resolver = std::sync::Arc::new(RotatingResolver(std::sync::Mutex::new(
+            "rejected-token-oldtail1".to_string(),
+        )));
+        let cfg = SamplerConfig {
+            api_key: None,
+            api_backend: ApiBackend::Responses,
+            bearer_resolver: Some(resolver.clone()),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+
+        let (_builder, sent_at_build) = client.post("https://example.test/v1/responses");
+        // The 401 kicks recovery; the resolver rotates before the callback runs.
+        *resolver.0.lock().unwrap() = "fresh-token-newtail99".to_string();
+
+        assert_eq!(
+            sent_at_build.as_deref(),
+            Some("ken-oldtail1"),
+            "attribution must describe the bearer the rejected request carried"
+        );
+        // A record-time re-read (the pre-fix behavior) would report the
+        // rotated token instead:
+        assert_eq!(
+            client.current_sent_bearer_prefix().as_deref(),
+            Some("en-newtail99"),
+            "sanity: the build-time capture and a live re-read now differ"
+        );
     }
 
     #[test]
@@ -4433,27 +4474,10 @@ mod tests {
         assert!(request.headers().get(AUTHORIZATION).is_none());
     }
 
-    /// Bearers shorter than the prefix length pass through unchanged.
-    /// Defensive against the truncation logic inadvertently widening
-    /// short bearers (no panics, no zero-padding).
+    /// The callback receives the `post()`-captured fragment only — the
+    /// full bearer never crosses the crate boundary.
     #[test]
-    fn extract_sent_bearer_short_bearer_passes_through_unchanged() {
-        let cfg = SamplerConfig {
-            api_key: Some("abc".to_string()),
-            api_backend: ApiBackend::ChatCompletions,
-            ..minimal_config()
-        };
-        let client = SamplingClient::new(cfg).expect("client should build");
-        assert_eq!(client.extract_sent_bearer().as_deref(), Some("abc"));
-    }
-
-    /// `record_401_attribution` invokes the wired callback with the
-    /// expected `consumer` and the truncated bearer prefix that the
-    /// wire would carry. The key assertion is that the callback
-    /// receives the prefix only -- the full bearer never crosses the
-    /// crate boundary.
-    #[test]
-    fn record_401_attribution_invokes_callback_with_extracted_bearer() {
+    fn record_401_attribution_invokes_callback_with_captured_bearer() {
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let cfg = SamplerConfig {
@@ -4475,9 +4499,7 @@ mod tests {
             calls[0].0,
             crate::attribution::SamplingConsumer::ChatCompletionsStream
         );
-        // Prefix-only -- the `extra-tail` portion of the bearer is
-        // dropped by `extract_sent_bearer` before the callback fires.
-        assert_eq!(calls[0].1.as_deref(), Some("the-bearer-1"));
+        assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
             Some(crate::attribution::SENT_BEARER_PREFIX_LEN),

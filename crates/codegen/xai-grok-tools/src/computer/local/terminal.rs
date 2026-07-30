@@ -702,6 +702,7 @@ impl LocalTerminalActor {
             }
         }
 
+        #[allow(clippy::disallowed_methods)] // attached to a process group below
         let child = cmd.spawn().map_err(|e| {
             ComputerError::io_with_kind(format!("spawn shell in {}: {e}", cwd.display()), e.kind())
         })?;
@@ -822,6 +823,7 @@ impl LocalTerminalActor {
             }
         }
 
+        #[allow(clippy::disallowed_methods)] // attached to a process group below
         let child = cmd.spawn().map_err(|e| {
             ComputerError::io_with_kind(
                 format!("spawn shell in {}: {e}", prep.cwd.display()),
@@ -2943,6 +2945,7 @@ async fn capture_login_env() -> HashMap<String, String> {
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
         cmd.envs(crate::util::pager_env());
+        #[allow(clippy::disallowed_methods)] // probe killed on drop
         let mut child = cmd.spawn().ok()?;
 
         let mut stdout_buf = Vec::new();
@@ -3191,11 +3194,13 @@ fn spawn_shell_command(
     #[cfg(unix)]
     let mut group = crate::util::ProcessGroup::new()?;
     #[cfg(unix)]
+    #[allow(clippy::disallowed_methods)] // attached to the process group built above
     let child = cmd.spawn().map_err(|e| {
         std::io::Error::new(e.kind(), format!("spawn shell in {}: {e}", cwd.display()))
     })?;
 
     #[cfg(not(unix))]
+    #[allow(clippy::disallowed_methods)] // attached to the process group built in this block
     let (child, mut group) = {
         let group = crate::util::ProcessGroup::new()?;
         let mut cmd = build_cmd(true);

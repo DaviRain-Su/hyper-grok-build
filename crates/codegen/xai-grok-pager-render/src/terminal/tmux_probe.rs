@@ -42,6 +42,7 @@ fn run_tmux_bounded(
     timeout: Duration,
 ) -> Result<TmuxCommandOutput, String> {
     let mut command = build_tmux_command(command);
+    #[allow(clippy::disallowed_methods)] // bounded probe, waited on with a timeout
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to run tmux: {error}"))?;

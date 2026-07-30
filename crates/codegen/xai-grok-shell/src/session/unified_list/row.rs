@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use agent_client_protocol as acp;
 use serde::Serialize;
 
 use super::envelope::{FacetMap, SessionKind, SessionMetaEnvelope};
@@ -147,6 +150,35 @@ pub struct SessionInfo {
     pub meta: RowMeta,
 }
 
+/// The ACP schema types `cwd` as an absolute path, so a row without one has no
+/// representation there.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CwdNotAbsolute;
+
+impl TryFrom<SessionInfo> for acp::SessionInfo {
+    type Error = CwdNotAbsolute;
+
+    fn try_from(info: SessionInfo) -> Result<Self, Self::Error> {
+        if !PathBuf::from(&info.cwd).is_absolute() {
+            return Err(CwdNotAbsolute);
+        }
+        let SessionInfo {
+            session_id,
+            cwd,
+            title,
+            updated_at,
+            meta,
+        } = info;
+        let meta = super::to_meta(serde_json::to_value(&meta));
+        Ok(
+            acp::SessionInfo::new(acp::SessionId::new(session_id), PathBuf::from(cwd))
+                .title(title)
+                .updated_at(updated_at)
+                .meta(meta),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +212,34 @@ mod tests {
 
         let bare = serde_json::to_value(row.into_session_info()).unwrap();
         assert_eq!(bare["sessionId"], "conv_abc123");
+    }
+
+    #[test]
+    fn acp_conversion_preserves_the_row() {
+        let merged = MergedSession {
+            session_id: "sess_abc123".into(),
+            summary: "Implement session list API".into(),
+            updated_at: "2026-10-29T14:22:15Z".into(),
+            cwd: "/Users/me/xai".into(),
+            ..MergedSession::default()
+        };
+        let info = merged_session_to_row(merged, facet_registry()).into_session_info();
+        let row = serde_json::to_value(&info).unwrap();
+        let acp_row =
+            serde_json::to_value(acp::SessionInfo::try_from(info).expect("absolute cwd")).unwrap();
+
+        assert_eq!(row, acp_row);
+    }
+
+    #[test]
+    fn acp_conversion_rejects_a_row_without_an_absolute_cwd() {
+        let merged = MergedSession {
+            session_id: "sess_remote".into(),
+            cwd: String::new(),
+            ..MergedSession::default()
+        };
+        let info = merged_session_to_row(merged, facet_registry()).into_session_info();
+        assert_eq!(acp::SessionInfo::try_from(info), Err(CwdNotAbsolute));
     }
 
     #[test]

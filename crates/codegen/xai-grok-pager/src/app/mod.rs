@@ -2021,6 +2021,12 @@ mod tests {
         assert!(try_parse_pager(&["grok-pager", "--chat"]).is_err());
     }
     #[test]
+    fn cli_local_workspace_flags_rejected_without_feature() {
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace-attach=srv"]).is_err());
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace"]).is_err());
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace-cwd=/tmp"]).is_err());
+    }
+    #[test]
     fn chat_mode_leader_guard_truth_table() {
         assert!(session_startup::chat_mode_conflicts_with_leader(true, true));
         assert!(!session_startup::chat_mode_conflicts_with_leader(

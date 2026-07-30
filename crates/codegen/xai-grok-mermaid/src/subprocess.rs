@@ -98,6 +98,7 @@ pub fn run_with_timeout(
 /// race. It is transient and clears within milliseconds, so retry a few times
 /// with a short backoff. (No-op on the steady-state path; only the failing
 /// transient case changes behaviour.)
+#[allow(clippy::disallowed_methods)] // the caller owns the reap
 fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
     const MAX_ATTEMPTS: u32 = 5;
     let mut attempt = 0;
@@ -273,6 +274,7 @@ mod tests {
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
         let mut cmd = detached(cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut child = cmd.spawn().expect("spawn sleep");
         let pid = child.id() as libc::pid_t;
 

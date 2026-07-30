@@ -370,6 +370,7 @@ mod tests {
             output_tokens: output,
             total_tokens: input + output,
             cached_read_tokens: 0,
+            cache_creation_tokens: 0,
             reasoning_tokens: 0,
             model_calls: 1,
             api_duration_ms: 1_000,

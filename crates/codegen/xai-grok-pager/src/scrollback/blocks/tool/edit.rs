@@ -34,6 +34,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::Style as SyntectStyle;
 
 use super::TOOL_HEADER_RANGE;
+use crate::appearance::AppearanceConfig;
 use crate::diff::{DiffHunk, diff_hunks_to_patch};
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{
@@ -1381,8 +1382,8 @@ impl BlockContent for EditToolCallBlock {
         ctx.appearance.scrollback.blocks.edit.accent_bg
     }
 
-    fn has_vpad(&self, ctx: &BlockContext) -> bool {
-        ctx.appearance.scrollback.blocks.edit.vpad
+    fn has_vpad_for(&self, appearance: &AppearanceConfig) -> bool {
+        appearance.scrollback.blocks.edit.vpad
     }
 
     fn background(&self, ctx: &BlockContext) -> BlockBackground {

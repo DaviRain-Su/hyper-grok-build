@@ -314,6 +314,7 @@ async fn supervise_loop<F>(
     let mut step = 0u32;
     while !*shutdown.borrow() {
         let started = Instant::now();
+        #[allow(clippy::disallowed_methods)] // supervised preview child, killed on drop
         let spawned = make_command().and_then(|mut cmd| cmd.kill_on_drop(true).spawn());
         let mut child = match spawned {
             Ok(child) => child,

@@ -991,6 +991,33 @@ pub(super) fn xai_turn_completed_notif(
         std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
     )
 }
+/// Live `TurnCompleted` stamped with `_meta.cancelTrigger` (send-now / ctrl_c).
+pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
+    session_id: &str,
+    prompt_id: &str,
+    stop_reason: &str,
+    cancel_trigger: &str,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: XaiSessionUpdate::TurnCompleted {
+            prompt_id: prompt_id.into(),
+            stop_reason: stop_reason.into(),
+            agent_result: None,
+            usage: None,
+        },
+        meta: Some(
+            serde_json::json!({
+                "isReplay": false,
+                "cancelTrigger": cancel_trigger,
+            }),
+        ),
+    };
+    acp::ExtNotification::new(
+        "x.ai/session/update",
+        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+    )
+}
 /// A live durable `TurnCompleted`, optionally stamped with the shell
 /// completion clock (`agentTimestampMs`) the wake marker's elapsed reads.
 pub(super) fn xai_wake_turn_completed_notif(

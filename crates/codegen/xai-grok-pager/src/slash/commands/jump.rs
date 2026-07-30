@@ -1,5 +1,6 @@
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 
 pub struct JumpCommand;
 
@@ -16,10 +17,10 @@ impl SlashCommand for JumpCommand {
         true
     }
 
-    /// Minimal mode has no interactive scrollback pane to scroll — the
-    /// terminal's own scrollback covers it (same gate as `/find`).
-    fn available_in_minimal(&self) -> bool {
-        false
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::FullscreenOnly(Remedy::SwitchMode {
+            why: "minimal scrolls with your terminal's native scrollback",
+        })
     }
 
     fn usage(&self) -> &str {
@@ -58,6 +59,7 @@ mod tests {
             bundle_state: &DEFAULT_BUNDLE_STATE,
             screen_mode: crate::app::ScreenMode::Fullscreen,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: PagerLocalSnapshot::default(),
         };
         let result = JumpCommand.run(&mut ctx, "");
@@ -65,11 +67,5 @@ mod tests {
             result,
             CommandResult::Action(Action::JumpShowPicker)
         ));
-    }
-
-    #[test]
-    fn not_available_in_minimal() {
-        // Native terminal scrollback replaces in-app scrolling in minimal.
-        assert!(!JumpCommand.available_in_minimal());
     }
 }

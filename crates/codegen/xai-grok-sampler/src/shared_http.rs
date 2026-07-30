@@ -11,7 +11,7 @@
 //! Wire-level behavior (connection reuse, header isolation, pool-less http1
 //! fallback, kill switch) is pinned by the `shared_http_wire` and
 //! `shared_http_kill_switch` integration binaries, which own their process
-//! environment.
+//! environment. Extra roots: `GROK_EXTRA_CA_BUNDLE` via `xai_grok_extra_ca`.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -83,16 +83,18 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(pool_max_idle)
-        .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
-        .connect_timeout(Duration::from_secs(connect_timeout_secs))
-        .tcp_nodelay(true)
-        // HTTP/2 keep-alive: ping every 15s, timeout after 5s.
-        .http2_keep_alive_interval(Duration::from_secs(15))
-        .http2_keep_alive_timeout(Duration::from_secs(5))
-        .http2_keep_alive_while_idle(true)
-        .build()
+    xai_grok_extra_ca::with_extra_root_certificates(
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(pool_max_idle)
+            .pool_idle_timeout(Duration::from_secs(pool_idle_timeout_secs))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .tcp_nodelay(true)
+            // HTTP/2 keep-alive: ping every 15s, timeout after 5s.
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(5))
+            .http2_keep_alive_while_idle(true),
+    )
+    .build()
 }
 
 /// Build a `reqwest::Client` constrained to HTTP/1.1 with pooling disabled.
@@ -103,13 +105,15 @@ fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(0)
-        .pool_idle_timeout(Duration::from_secs(0))
-        .connect_timeout(Duration::from_secs(connect_timeout_secs))
-        .tcp_nodelay(true)
-        .http1_only()
-        .build()
+    xai_grok_extra_ca::with_extra_root_certificates(
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .pool_idle_timeout(Duration::from_secs(0))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .tcp_nodelay(true)
+            .http1_only(),
+    )
+    .build()
 }
 
 #[cfg(test)]

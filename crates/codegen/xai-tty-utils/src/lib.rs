@@ -42,6 +42,9 @@ use std::io;
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};
 
+/// How long a shell gets to forward a hangup to its jobs before it is killed.
+pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub mod runtime;
 
 // ---------------------------------------------------------------------------
@@ -367,6 +370,9 @@ pub struct ProcessGroup {
     leader: Option<ProcessGroupId>,
     #[cfg(windows)]
     job: windows::Win32::Foundation::HANDLE,
+    /// Set for a shell that owns a terminal, whose job-control children only
+    /// die if the shell is asked to hang up first.
+    hangup_first: bool,
 }
 
 #[cfg(windows)]
@@ -378,7 +384,10 @@ impl ProcessGroup {
     pub fn new() -> io::Result<Self> {
         #[cfg(unix)]
         {
-            Ok(Self { leader: None })
+            Ok(Self {
+                leader: None,
+                hangup_first: false,
+            })
         }
         #[cfg(windows)]
         {
@@ -410,7 +419,10 @@ impl ProcessGroup {
                 return Err(io::Error::other(format!("SetInformationJobObject: {e}")));
             }
 
-            Ok(Self { job })
+            Ok(Self {
+                job,
+                hangup_first: false,
+            })
         }
     }
 
@@ -477,6 +489,33 @@ impl ProcessGroup {
         {
             self.terminate_job(1)
         }
+    }
+
+    /// Ask an interactive shell to hang up. Its job-control children each live
+    /// in their own process group, which no `killpg` here reaches, but a shell
+    /// forwards the hangup to them before it exits.
+    pub fn hangup(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.killpg_unix(nix::sys::signal::Signal::SIGHUP)?;
+            // A stopped shell cannot forward the hangup until it resumes.
+            self.killpg_unix(nix::sys::signal::Signal::SIGCONT)
+        }
+        #[cfg(windows)]
+        {
+            Ok(())
+        }
+    }
+
+    /// Whether teardown should hang this group up before killing it. Never on
+    /// Windows, where the hangup is a no-op and the Job Object takes the tree.
+    pub fn wants_hangup(&self) -> bool {
+        cfg!(unix) && self.hangup_first
+    }
+
+    /// Mark this group as a terminal-owning shell. See [`Self::hangup`].
+    pub fn hang_up_before_kill(&mut self) {
+        self.hangup_first = true;
     }
 
     #[cfg(unix)]
@@ -806,6 +845,7 @@ mod tests {
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let error = cmd
             .spawn()
             .expect_err("cross-thread arm+spawn must fail in debug builds");
@@ -848,6 +888,7 @@ mod tests {
         // binding on the same command, in the documented order.
         detach_std_command(&mut cmd);
         kill_on_parent_death_std(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let child = cmd.spawn().expect("spawn armed grandchild");
         println!("grandchild:{}", child.id());
         // Do not reap: the grandchild must outlive this handle and die only
@@ -879,6 +920,7 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut intermediate = cmd.spawn().expect("spawn intermediate test process");
 
         // Grandchild pid from the intermediate's stdout. Substring-match, not
@@ -959,6 +1001,7 @@ mod tests {
             .stderr(std::process::Stdio::null());
         detach_std_command(&mut cmd);
         kill_on_parent_death_std(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut child = cmd.spawn().expect("spawn armed child");
 
         // The binding must not kill a child whose parent (this process) is

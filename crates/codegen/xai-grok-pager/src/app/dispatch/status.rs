@@ -11,37 +11,10 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 
-/// Toggle YOLO mode (auto-approve all permissions).
-///
-/// When turning ON: auto-approve all currently queued permissions and
-/// restore the stashed prompt. Future incoming permissions will be
-/// auto-approved in `handle_permission_request`.
-///
-/// Share the current session via a public URL.
-///
-/// Produces Effect::ShareSession which spawns an async ACP ext request.
-/// On completion, TaskResult::ShareSessionComplete shows the URL in scrollback.
+/// Temporary kill switch: client share links are disabled.
 pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
-    if !app.sharing_enabled {
-        app.show_toast("Sharing is disabled");
-        return vec![];
-    }
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        // No active session — error should have been caught by slash command,
-        // but guard here just in case.
-        return vec![];
-    };
-
-    vec![Effect::ShareSession {
-        agent_id: id,
-        session_id,
-    }]
+    app.show_toast("Session sharing is temporarily disabled");
+    vec![]
 }
 
 /// Show session info: fetch via x.ai/session/info and display in scrollback.

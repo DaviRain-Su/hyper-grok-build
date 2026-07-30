@@ -54,6 +54,8 @@ pub enum SettingsKeyOutcome {
     /// Used by `d`-reset-in-picker to revert preview before opening
     /// the reset-confirm overlay.
     ActionPair(Action, Action),
+    /// Close the modal and dispatch `Action` (deep-link Esc revert or Enter commit).
+    ActionThenClose(Action),
     /// Internal state mutation, no action.
     Changed,
     /// No-op.
@@ -210,6 +212,10 @@ pub struct SettingsModalState {
     /// `rows` in Browse, `picker_choice_rects` in PickingEnum,
     /// always `None` in EditingValue.
     pub hover_row: Option<usize>,
+    /// When true, Esc/Enter from `PickingEnum` close the modal instead of
+    /// returning to Browse. Set by deep-link open (`OpenSettingsFocus`
+    /// / `/privacy`); cleared on leave from the picker.
+    pub close_on_picker_exit: bool,
 }
 
 impl SettingsModalState {
@@ -248,6 +254,7 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
+            close_on_picker_exit: false,
         }
     }
 
@@ -507,6 +514,7 @@ impl SettingsModalState {
         self.hover_row = None;
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
+        self.close_on_picker_exit = false;
     }
 
     pub fn focus_filter(&mut self) {

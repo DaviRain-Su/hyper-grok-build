@@ -51,11 +51,12 @@ pub(crate) fn build_blocking_client(
     std::thread::Builder::new()
         .name("otlp-client-build".into())
         .spawn(move || {
-            reqwest::blocking::Client::builder()
-                .timeout(timeout)
-                .build()
-                .map(BlockingOtlpClient)
-                .map_err(|e| format!("building blocking OTLP HTTP client: {e}"))
+            xai_grok_extra_ca::with_extra_root_certificates_blocking(
+                reqwest::blocking::Client::builder().timeout(timeout),
+            )
+            .build()
+            .map(BlockingOtlpClient)
+            .map_err(|e| format!("building blocking OTLP HTTP client: {e}"))
         })
         .map_err(|e| format!("spawning OTLP client builder thread: {e}"))?
         .join()

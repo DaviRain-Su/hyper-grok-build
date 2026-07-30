@@ -339,6 +339,14 @@ impl acp::Agent for MvpAgent {
                     ),
                 );
                 has_cached_token = true;
+            } else if !self.auth_manager.requires_manual_reauth() {
+                tracing::info!("auth: silent refresh failed transiently; advertising cached_token");
+                xai_grok_telemetry::unified_log::info(
+                    "auth: initialize() silent refresh failed transiently, keeping cached_token",
+                    None,
+                    None,
+                );
+                has_cached_token = true;
             } else {
                 tracing::warn!(
                     "auth: token expired, silent refresh failed - re-authentication required"
@@ -482,6 +490,11 @@ impl acp::Agent for MvpAgent {
         } else {
             self.model_state(None)
         };
+        let session_capabilities = if crate::agent::chat_modes::process_chat_mode_enabled() {
+            acp::SessionCapabilities::new()
+        } else {
+            acp::SessionCapabilities::new().list(acp::SessionListCapabilities::new())
+        };
         Ok(
             acp::InitializeResponse::new(acp::ProtocolVersion::V1)
                 .agent_capabilities(
@@ -509,7 +522,8 @@ impl acp::Agent for MvpAgent {
                         )
                         .mcp_capabilities(
                             acp::McpCapabilities::new().http(true).sse(true),
-                        ),
+                        )
+                        .session_capabilities(session_capabilities),
                 )
                 .auth_methods(auth_methods)
                 .meta({
@@ -724,7 +738,44 @@ impl acp::Agent for MvpAgent {
                         }
                     }
                 }
-                let Some(auth) = self.auth_manager.current() else {
+                if self.auth_manager.current().is_none()
+                    && self.auth_manager.is_expired()
+                {
+                    let am = self.auth_manager.clone();
+                    let refresh = tokio::spawn(async move { am.auth().await });
+                    match tokio::time::timeout(
+                            crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+                            refresh,
+                        )
+                        .await
+                    {
+                        Ok(Ok(Ok(_))) => {}
+                        outcome => {
+                            tracing::debug!(
+                            timed_out = outcome.is_err(),
+                            "auth: cached_token pre-check refresh did not produce a token (yet)"
+                        )
+                        }
+                    }
+                }
+                let resolved = self
+                    .auth_manager
+                    .current()
+                    .or_else(|| {
+                        if self.auth_manager.is_expired()
+                            && !self.auth_manager.requires_manual_reauth()
+                        {
+                            xai_grok_telemetry::unified_log::info(
+                                "auth cached_token: accepting expired-but-refreshable session",
+                                None,
+                                None,
+                            );
+                            self.auth_manager.current_or_expired()
+                        } else {
+                            None
+                        }
+                    });
+                let Some(auth) = resolved else {
                     let message = if self.auth_manager.is_expired() {
                         "Session expired, re-authentication required"
                     } else {
@@ -1250,6 +1301,7 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
+        reject_chat_kind_without_feature(arguments.meta.as_ref())?;
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
         let init = self
             .initialize_request
@@ -1280,9 +1332,9 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
         #[allow(unused_variables)]
-        let session_computer_sessions = parse_session_computer_sessions(
+        let session_computer_sessions = resolve_session_computer_sessions(
             arguments.meta.as_ref(),
-        );
+        )?;
         let is_chat_kind = is_chat_session_kind(arguments.meta.as_ref());
         let session_yolo_mode = arguments
             .meta
@@ -1527,6 +1579,7 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd: None,
+                        is_chat_kind: false,
                     }
             };
             self.spawn_and_register_session(init, spawn_opts).await
@@ -1678,6 +1731,7 @@ impl acp::Agent for MvpAgent {
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let _load_guard = self.begin_session_load(&arguments.session_id);
+        reject_chat_kind_without_feature(arguments.meta.as_ref())?;
         self.sweep_dead_sessions();
         self.drain_old_session_thread(&arguments.session_id).await;
         tracing::debug!("Received load session request {arguments:?}");
@@ -1884,9 +1938,9 @@ impl acp::Agent for MvpAgent {
             session_yolo_mode,
         );
         #[allow(unused_variables)]
-        let session_computer_sessions = parse_session_computer_sessions(
+        let session_computer_sessions = resolve_session_computer_sessions(
             request_meta.as_ref(),
-        );
+        )?;
         let restore_code_requested = request_meta
             .as_ref()
             .and_then(|m| m.get("x.ai/restore_code"))
@@ -2089,6 +2143,7 @@ impl acp::Agent for MvpAgent {
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
                         prompt_display_cwd,
+                        is_chat_kind: false,
                     },
                 )
                 .await?;
@@ -2483,6 +2538,12 @@ impl acp::Agent for MvpAgent {
             });
         }
         Ok(response)
+    }
+    async fn list_sessions(
+        &self,
+        args: acp::ListSessionsRequest,
+    ) -> Result<acp::ListSessionsResponse, acp::Error> {
+        crate::agent::handlers::session::handle_list_sessions(self, args).await
     }
     #[tracing::instrument(
         name = "agent.prompt",

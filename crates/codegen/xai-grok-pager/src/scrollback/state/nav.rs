@@ -1092,7 +1092,7 @@ impl ScrollbackState {
         let theme = Theme::current();
         let entry_area_width = self.entry_area_width(self.last_width);
         EntryRenderer::new(entry, &theme)
-            .with_appearance(self.appearance.clone())
+            .with_appearance_ref(&self.appearance)
             .with_cwd(self.cwd())
             .rendered_row_of_logical_line(entry_area_width, line_in_entry)
     }

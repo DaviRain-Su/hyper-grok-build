@@ -614,6 +614,9 @@ pub(crate) struct SessionActor {
     /// this handle. `None` for tests / BYOK that don't need refresh
     /// or the attribution emit.
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
+    /// Session sticky from `session/new` / `session/load` `_meta` chat kind.
+    /// Chat-kind ACU/list sources product REST skills, never Build disk skills.
+    pub(crate) is_chat_kind: bool,
     pub(crate) state: TokioMutex<State>,
     /// Notification transport: gateway, persistence channel, replay buffer.
     pub(crate) notifications: NotificationSender,

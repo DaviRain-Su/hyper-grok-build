@@ -185,8 +185,10 @@ impl WorkspaceControl {
     /// Wire the hub credential to the leader's shared `AuthManager` (sole
     /// owner of refresh + persistence).
     pub fn set_auth_manager(&self, auth_manager: Arc<AuthManager>) {
-        self.auth
-            .send_replace(Some(Arc::new(LeaderAuthProvider { auth_manager })));
+        self.auth.send_replace(Some(Arc::new(LeaderAuthProvider {
+            auth_manager,
+            refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })));
     }
 }
 impl std::fmt::Debug for WorkspaceControl {
@@ -200,6 +202,11 @@ impl std::fmt::Debug for WorkspaceControl {
 /// current token at each connect/reconnect; never writes auth.json.
 struct LeaderAuthProvider {
     auth_manager: Arc<AuthManager>,
+    /// One background refresh at a time. `current()` is called by a reconnect
+    /// loop that can spin fast while offline; `refresh_lock` would serialize
+    /// those tasks but not collapse them, so each queued one would still issue
+    /// its own IdP call once the previous released.
+    refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 impl std::fmt::Debug for LeaderAuthProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -208,9 +215,34 @@ impl std::fmt::Debug for LeaderAuthProvider {
 }
 impl AuthProvider for LeaderAuthProvider {
     fn current(&self) -> AuthCredential {
-        let token = self
-            .auth_manager
-            .current_or_expired()
+        use std::sync::atomic::Ordering;
+        let cached = self.auth_manager.current();
+        if cached.is_none()
+            && self.auth_manager.is_expired()
+            && self
+                .refresh_in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            struct ClaimGuard(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for ClaimGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+            let guard = ClaimGuard(Arc::clone(&self.refresh_in_flight));
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let am = Arc::clone(&self.auth_manager);
+                handle.spawn(async move {
+                    let _guard = guard;
+                    if let Err(e) = am.auth().await {
+                        tracing::debug!(error = %e, "leader hub auth: background refresh failed");
+                    }
+                });
+            }
+        }
+        let token = cached
+            .or_else(|| self.auth_manager.current_or_expired())
             .map(|a| a.key)
             .unwrap_or_default();
         AuthCredential::bearer(token)
@@ -963,7 +995,7 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         profile_formats: manager.profile_formats().to_vec(),
     }
 }
-const PROD_COMPUTER_HUB_URL: &str = "wss://computer-hub.grok.com/v1/tools";
+use crate::env::PROD_COMPUTER_HUB_WS_URL as PROD_COMPUTER_HUB_URL;
 const WORKSPACE_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 fn workspace_err(message: impl Into<String>) -> ControlError {
     ControlError {

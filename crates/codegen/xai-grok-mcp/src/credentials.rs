@@ -121,22 +121,12 @@ impl McpCredentialStore {
         self.save_to(&path)
     }
 
-    /// Atomically insert a credential and save — safe for concurrent use.
-    ///
-    /// Instead of the caller doing `insert_rmcp` + `save_default` (which races
-    /// with other processes), this method:
-    /// 1. Acquires a file lock on `mcp_credentials.json.lock`
-    /// 2. Reloads the store from disk (picks up other processes' writes)
-    /// 3. Inserts the new entry
-    /// 4. Saves atomically (temp + rename)
-    /// 5. Updates `self` with the merged result
-    /// 6. Releases the lock
-    pub fn insert_and_save(
-        &mut self,
-        server_name: &str,
-        server_url: &url::Url,
-        creds: rmcp::transport::auth::StoredCredentials,
-    ) -> Result<()> {
+    /// Read-modify-write the **default** store under the cross-process
+    /// `mcp_credentials.json.lock` flock: reload from disk (merging concurrent
+    /// writers), apply `mutate`, save atomically, and update `self` with the
+    /// merged result. On flock failure (non-EINTR error, or non-Unix), falls
+    /// back to mutating `self` and saving best-effort — the pre-lock behavior.
+    fn locked_mutate_and_save(&mut self, mutate: &dyn Fn(&mut Self)) -> Result<()> {
         let path = Self::default_path().ok_or_else(|| {
             McpCredentialError::Other("no user grok home (set $GROK_HOME or $HOME)".into())
         })?;
@@ -165,14 +155,14 @@ impl McpCredentialStore {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue; // Retry on EINTR.
                 }
-                // Lock failed for another reason — fall back to non-atomic insert.
-                self.insert_rmcp(server_name, server_url, creds);
+                // Lock failed for another reason — fall back to non-atomic write.
+                mutate(self);
                 return self.save_to(&path);
             }
 
             // Reload from disk under lock to merge with concurrent writes.
             let mut fresh = Self::load_from(&path).unwrap_or_default();
-            fresh.insert_rmcp(server_name, server_url, creds);
+            mutate(&mut fresh);
             fresh.save_to(&path)?;
             *self = fresh;
 
@@ -182,11 +172,36 @@ impl McpCredentialStore {
         #[cfg(not(unix))]
         {
             // No flock on non-unix — best-effort.
-            self.insert_rmcp(server_name, server_url, creds);
+            mutate(self);
             self.save_to(&path)?;
         }
 
         Ok(())
+    }
+
+    /// Locked insert ([`Self::locked_mutate_and_save`]) with a freshness
+    /// guard: skipped when the disk entry is strictly newer by
+    /// `token_received_at` (see [`disk_entry_is_newer`]) — otherwise a slow
+    /// writer (canonically a refresh suspended across system sleep that
+    /// completes after wake) rolls the stored refresh token back to a
+    /// rotated-out value (`invalid_grant` on its next use).
+    pub fn insert_and_save(
+        &mut self,
+        server_name: &str,
+        server_url: &url::Url,
+        creds: rmcp::transport::auth::StoredCredentials,
+    ) -> Result<()> {
+        let key = Self::key(server_name, server_url);
+        self.locked_mutate_and_save(&move |store: &mut Self| {
+            if disk_entry_is_newer(store.entries.get(&key), &creds) {
+                tracing::info!(
+                    key = key.as_str(),
+                    "mcp credentials: skipping stale save (disk entry is newer)"
+                );
+                return;
+            }
+            store.entries.insert(key.clone(), creds.clone());
+        })
     }
 
     /// Save to a specific path.
@@ -277,6 +292,18 @@ impl McpCredentialStore {
         self.entries.remove(&Self::key(server_name, server_url));
     }
 
+    /// Remove a server's credentials and persist, under the cross-process
+    /// file lock (reload-merge → remove → atomic save). The locked
+    /// counterpart of [`Self::remove`] + [`Self::save_default`] for callers
+    /// that persist the removal — an unlocked whole-file rewrite can drop
+    /// other processes' concurrent writes for unrelated servers.
+    pub fn remove_and_save(&mut self, server_name: &str, server_url: &Url) -> Result<()> {
+        let key = Self::key(server_name, server_url);
+        self.locked_mutate_and_save(&move |store: &mut Self| {
+            store.entries.remove(&key);
+        })
+    }
+
     /// Remove all credentials for a server by name (any URL).
     pub fn remove_by_server_name(&mut self, server_name: &str) -> usize {
         let prefix = format!("{server_name}:");
@@ -293,6 +320,23 @@ impl McpCredentialStore {
     /// Default path: `$GROK_HOME/mcp_credentials.json`.
     fn default_path() -> Option<PathBuf> {
         Some(xai_grok_config::user_grok_home()?.join(CREDENTIALS_FILENAME))
+    }
+}
+
+/// `true` when the on-disk `existing` entry is strictly newer than the
+/// `incoming` credentials by `token_received_at` — the [`Self::insert_and_save`]
+/// freshness guard. Missing timestamps on either side compare as "not newer"
+/// (the write proceeds), preserving pre-guard behavior for expiry-less tokens.
+fn disk_entry_is_newer(
+    existing: Option<&rmcp::transport::auth::StoredCredentials>,
+    incoming: &rmcp::transport::auth::StoredCredentials,
+) -> bool {
+    match (
+        existing.and_then(|e| e.token_received_at),
+        incoming.token_received_at,
+    ) {
+        (Some(existing), Some(incoming)) => existing > incoming,
+        _ => false,
     }
 }
 
@@ -353,10 +397,13 @@ impl rmcp::transport::auth::CredentialStore for McpCredentialStoreAdapter {
         let name = self.server_name.clone();
         let url = self.server_url.clone();
         tokio::task::spawn_blocking(move || {
+            // Under the same flock as `insert_and_save`: this is a whole-file
+            // read-modify-write, and an unlocked snapshot here could silently
+            // drop *other servers'* entries written concurrently by another
+            // process (their just-rotated refresh tokens with them).
             let mut store = McpCredentialStore::load_default().unwrap_or_default();
-            store.remove(&name, &url);
             store
-                .save_default()
+                .remove_and_save(&name, &url)
                 .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))
         })
         .await
@@ -543,5 +590,77 @@ mod tests {
         let _ = McpCredentialStore::load_from(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The `insert_and_save` freshness guard: a save older (by
+    /// `token_received_at`) than the on-disk entry must be skipped.
+    #[test]
+    fn stale_save_does_not_clobber_newer_disk_entry() {
+        // `StoredCredentials` is #[non_exhaustive]; construct via `new` and
+        // set the (public) timestamp field afterwards.
+        let mut older = test_stored_creds("c");
+        older.token_received_at = Some(1_000);
+        let mut newer = test_stored_creds("c");
+        newer.token_received_at = Some(2_000);
+        let no_ts = test_stored_creds("c");
+
+        assert!(
+            disk_entry_is_newer(Some(&newer), &older),
+            "older incoming vs newer disk → skip the write"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&older), &newer),
+            "newer incoming vs older disk → write proceeds"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&older), &older),
+            "equal timestamps → write proceeds (idempotent re-save)"
+        );
+        assert!(
+            !disk_entry_is_newer(None, &older),
+            "no disk entry → write proceeds"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&newer), &no_ts),
+            "timestamp-less incoming keeps pre-guard behavior (writes)"
+        );
+        assert!(
+            !disk_entry_is_newer(Some(&no_ts), &older),
+            "timestamp-less disk entry keeps pre-guard behavior (writes)"
+        );
+    }
+
+    /// The refresh-failure classifier that gates browser escalation
+    /// (`force_reauth`): network-level failures — the `oauth2` crate's
+    /// `Display` for request/parse errors — are transient; IdP rejections and
+    /// missing-credential states stay terminal (escalate, as before).
+    #[test]
+    fn refresh_failure_transient_classification() {
+        use crate::servers::mcp_refresh_failure_is_transient;
+        use rmcp::transport::auth::AuthError;
+
+        // oauth2 RequestTokenError::Request renders exactly "Request failed".
+        assert!(mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed("Request failed".into())
+        ));
+        // 5xx/proxy bodies that aren't OAuth JSON parse-fail.
+        assert!(mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed("Failed to parse server response".into())
+        ));
+
+        // IdP rejections carry the RFC 6749 code → terminal.
+        assert!(!mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed(
+                "Server returned error response: invalid_grant: token revoked".into()
+            )
+        ));
+        // No refresh token at all → only the browser flow can help.
+        assert!(!mcp_refresh_failure_is_transient(
+            &AuthError::TokenRefreshFailed("No refresh token available".into())
+        ));
+        // Empty credential store → interactive auth required.
+        assert!(!mcp_refresh_failure_is_transient(
+            &AuthError::AuthorizationRequired
+        ));
     }
 }

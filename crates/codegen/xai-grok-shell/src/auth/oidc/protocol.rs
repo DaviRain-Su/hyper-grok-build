@@ -515,6 +515,7 @@ async fn refresh_tokens_with_timeout(
         principal_id = ?principal_id,
         "OIDC: refreshing token"
     );
+    let probe = super::refresh::SuspendProbe::start();
     (|| {
         refresh_tokens_once_with_timeout(
             token_endpoint,
@@ -526,7 +527,23 @@ async fn refresh_tokens_with_timeout(
         )
     })
     .retry(refresh_retry_policy())
-    .when(is_transient_refresh_error)
+    .when(move |err: &anyhow::Error| {
+        if !is_transient_refresh_error(err) {
+            return false;
+        }
+        if probe.straddled_past_grace() {
+            crate::unified_log::warn(
+                "auth.refresh.retry_suppressed_suspend",
+                None,
+                Some(serde_json::json!({
+                    "suspended_ms": probe.suspended_ms(),
+                    "error": err.to_string(),
+                })),
+            );
+            return false;
+        }
+        true
+    })
     .await
 }
 /// One unretried POST to `token_endpoint`. One deadline covers connect,

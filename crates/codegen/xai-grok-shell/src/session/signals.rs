@@ -66,12 +66,20 @@ pub struct ToolOutcome {
 }
 
 /// Per-tool execution duration for a single invocation.
+///
+/// Written into `turn_result.json` via `SessionSignalsDelta.tool_durations_this_turn`
+/// so downstream analytics can join wall time to a specific tool call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDuration {
     /// Tool name (e.g. "bash", "read_file", "search_replace")
     pub tool_name: String,
-    /// Execution wall-clock time in milliseconds
+    /// Join key (`missing-call-id-{batch_idx}` if the model omitted one). Empty on legacy packages.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_call_id: String,
+    /// Dispatch wall-clock ms (start → result ready), including lock wait and
+    /// in-dispatch auth retries. A managed-MCP reauth retry adds its second
+    /// attempt here; the reauth handshake wait itself is excluded.
     pub duration_ms: u64,
 }
 
@@ -449,8 +457,12 @@ pub enum SignalEvent {
     RecordToolSuccess(String),
     /// Record a tool failure (tool returned error) with the tool name
     RecordToolFailure(String),
-    /// Record a tool execution duration
-    RecordToolDuration { tool_name: String, duration_ms: u64 },
+    /// Record a tool execution duration (dispatch wall clock).
+    RecordToolDuration {
+        tool_name: String,
+        tool_call_id: String,
+        duration_ms: u64,
+    },
 
     // === Error Events ===
     /// Record a general error (sampling, network, etc.)
@@ -658,10 +670,16 @@ impl SessionSignalsHandle {
             .send(SignalEvent::RecordToolFailure(tool_name.into()));
     }
 
-    /// Record a tool execution duration in milliseconds.
-    pub fn record_tool_duration(&self, tool_name: impl Into<String>, duration_ms: u64) {
+    /// Record a tool execution duration in milliseconds (dispatch wall clock).
+    pub fn record_tool_duration(
+        &self,
+        tool_name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        duration_ms: u64,
+    ) {
         let _ = self.tx.send(SignalEvent::RecordToolDuration {
             tool_name: tool_name.into(),
+            tool_call_id: tool_call_id.into(),
             duration_ms,
         });
     }
@@ -1248,10 +1266,12 @@ impl SessionSignalsActor {
                 }
                 SignalEvent::RecordToolDuration {
                     tool_name,
+                    tool_call_id,
                     duration_ms,
                 } => {
                     self.tool_durations_this_turn.push(ToolDuration {
                         tool_name,
+                        tool_call_id,
                         duration_ms,
                     });
                 }
@@ -3126,6 +3146,48 @@ mod tests {
             "After overflow fallback, duration should be near 0, got {}",
             snapshot.session_duration_seconds
         );
+
+        handle.shutdown();
+        actor_handle.await.unwrap();
+    }
+
+    #[test]
+    fn tool_duration_serializes_camel_case_with_call_id() {
+        let d = ToolDuration {
+            tool_name: "run_terminal_command".into(),
+            tool_call_id: "call_abc".into(),
+            duration_ms: 4_720,
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["toolName"], "run_terminal_command");
+        assert_eq!(v["toolCallId"], "call_abc");
+        assert_eq!(v["durationMs"], 4720);
+    }
+
+    #[test]
+    fn tool_duration_deserializes_legacy_without_call_id() {
+        let v = serde_json::json!({
+            "toolName": "bash",
+            "durationMs": 12
+        });
+        let d: ToolDuration = serde_json::from_value(v).unwrap();
+        assert_eq!(d.tool_name, "bash");
+        assert!(d.tool_call_id.is_empty());
+        assert_eq!(d.duration_ms, 12);
+    }
+
+    #[tokio::test]
+    async fn record_tool_duration_includes_call_id_in_turn_delta() {
+        let (handle, actor) = SessionSignalsActor::new();
+        let actor_handle = tokio::spawn(actor.run());
+
+        handle.record_tool_duration("bash", "call_1", 5_000);
+        let snap = handle.take_turn_end_snapshot().await.unwrap();
+        assert_eq!(snap.delta.tool_durations_this_turn.len(), 1);
+        let td = &snap.delta.tool_durations_this_turn[0];
+        assert_eq!(td.tool_name, "bash");
+        assert_eq!(td.tool_call_id, "call_1");
+        assert_eq!(td.duration_ms, 5_000);
 
         handle.shutdown();
         actor_handle.await.unwrap();

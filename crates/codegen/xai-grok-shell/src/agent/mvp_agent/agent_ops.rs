@@ -36,6 +36,25 @@ fn should_warn_missing_session(ctx: MissingSessionCtx) -> bool {
     }
 }
 impl MvpAgent {
+    /// Announce a session's new title over ACP. ACP scopes `session/update` to
+    /// sessions the client established, and a rename can name a history row it
+    /// never loaded, so the liveness check belongs here rather than at each
+    /// call site.
+    pub(crate) fn notify_session_info_update(
+        &self,
+        session_id: &agent_client_protocol::SessionId,
+        title: &str,
+    ) {
+        if self.sessions.borrow().contains_key(session_id) {
+            self.gateway
+                .forward_fire_and_forget(
+                    crate::session::summary::session_info_update(
+                        session_id.clone(),
+                        title,
+                    ),
+                );
+        }
+    }
     pub fn reload_skills_all_sessions(&self) -> usize {
         let session_ids: Vec<agent_client_protocol::SessionId> = self
             .sessions
@@ -3323,6 +3342,7 @@ impl MvpAgent {
             session_yolo_mode,
             session_auto_mode,
             prompt_display_cwd,
+            is_chat_kind,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
         reject_direct_hub_cloud_meta(session_meta)?;
@@ -4078,6 +4098,7 @@ impl MvpAgent {
                     None,
                     max_turns,
                     None,
+                    is_chat_kind,
                 )
                 .await?
         };

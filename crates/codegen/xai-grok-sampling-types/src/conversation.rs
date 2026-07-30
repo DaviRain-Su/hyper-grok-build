@@ -901,13 +901,15 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     pub total_tokens: u32,
     pub reasoning_tokens: u32,
-    /// Prompt tokens served from cache.
-    /// - OpenAI: `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens`.
-    /// - Anthropic Messages: `usage.cache_read_input_tokens`. Cache writes
-    ///   (`cache_creation_input_tokens`, billed at ~1.25x) are NOT counted here; they are folded
-    ///   into `prompt_tokens` instead.
+    /// Prompt tokens served from cache (the cache-hit subset of `prompt_tokens`).
+    /// OpenAI: `prompt_tokens_details.cached_tokens`. Messages: `cache_read_input_tokens`.
     #[serde(default)]
     pub cached_prompt_tokens: u32,
+    /// Prompt tokens written to cache this call (Messages `cache_creation_input_tokens`,
+    /// billed at ~1.25x). Part of `prompt_tokens` but distinct from cache reads; 0 on
+    /// backends without a cache-write signal.
+    #[serde(default)]
+    pub cache_creation_prompt_tokens: u32,
 }
 
 impl TokenUsage {
@@ -934,6 +936,7 @@ impl From<Usage> for TokenUsage {
                 .as_ref()
                 .map_or(0, |d| d.reasoning_tokens),
             cached_prompt_tokens,
+            cache_creation_prompt_tokens: 0,
         }
     }
 }
@@ -976,6 +979,17 @@ pub struct ConversationResponse {
     /// the wire (Messages `message_delta.stop_details.explanation`); `None`
     /// otherwise and on backends that don't report one.
     pub stop_message: Option<String>,
+    /// Provider message id (Messages `message.id`); `None` on backends that do
+    /// not carry one (OAI Chat Completions / Responses).
+    pub message_id: Option<String>,
+    /// Verbatim wire stop reason before it collapses into [`StopReason`]
+    /// (e.g. `end_turn`, `tool_use`, `pause_turn`); `None` when unreported.
+    pub raw_stop_reason: Option<String>,
+    /// The provider's matched stop sequence (Messages API
+    /// `message_delta.stop_sequence`), present only when the model stopped on a
+    /// configured stop sequence; `None` otherwise and on backends that do not
+    /// report one (OAI Chat Completions / Responses).
+    pub stop_sequence: Option<String>,
 }
 
 /// Normalize a wire cost-ticks value at capture.
@@ -3605,7 +3619,10 @@ fn mark_message_cache_breakpoint(msg: &mut crate::messages::Message) -> bool {
                     | ContentBlock::ToolResult { cache_control, .. }
                     | ContentBlock::Image { cache_control, .. }
                     | ContentBlock::ToolUse { cache_control, .. } => cache_control,
-                    ContentBlock::Thinking { .. } => continue,
+                    // Thinking / redacted reasoning never carry a cache breakpoint.
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
+                        continue
+                    }
                 };
                 *cache_control = Some(CacheControl::ephemeral());
                 return true;

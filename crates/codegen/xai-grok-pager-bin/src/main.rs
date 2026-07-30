@@ -2381,6 +2381,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 yolo: launch_yolo.yolo,
                 trust: args.trust,
                 output_format: args.output_format,
+                include_partial_messages: args.include_partial_messages,
                 json_schema,
                 model: args.model,
                 rules: args.rules,

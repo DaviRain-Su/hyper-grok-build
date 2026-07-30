@@ -28,6 +28,22 @@ const MCP_OAUTH_CLIENT_NAME: &str = "Grok";
 /// a login completed in another window or process.
 const CREDENTIAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Overall budget for one interactive browser consent flow (waiting for the
+/// loopback callback / disk poll after opening the browser). Mirrors the main
+/// grok.com login's 10-minute callback budget. Without a bound, an abandoned
+/// browser tab left the leader parked in its `select!` forever — holding both
+/// the in-process watch channel and the cross-process `mcp_auth_*.lock`, so
+/// every other session blocked indefinitely on the same server's auth.
+const BROWSER_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long a follower waits for the cross-process auth lock before giving up
+/// on dedup and proceeding with its own flow. Slightly above
+/// [`BROWSER_AUTH_TIMEOUT`] so a legitimately-slow leader (user reading the
+/// consent screen) finishes first and the follower reuses its token.
+#[cfg(unix)]
+const AUTH_LOCK_WAIT: std::time::Duration =
+    BROWSER_AUTH_TIMEOUT.saturating_add(std::time::Duration::from_secs(60));
+
 // ---------------------------------------------------------------------------
 // Two-layer dedup: prevents duplicate browser tabs both within one process
 // (multiple async tasks / sessions) and across separate processes (leader
@@ -185,31 +201,49 @@ async fn authenticate_with_fs_lock(
         }
     };
 
+    // Bounded, non-blocking poll instead of an unbounded `flock(LOCK_EX)`:
+    // the leader can legitimately hold this lock for minutes (user consent),
+    // but an abandoned/wedged leader must not park followers forever. On
+    // timeout we fall back to running our own flow (same as lock-acquisition
+    // failure), which the token-changed re-check below keeps from producing a
+    // duplicate consent when the leader did finish.
     let lock_file = tokio::task::spawn_blocking(move || {
         use std::os::unix::io::AsRawFd;
         let fd = lock_file.as_raw_fd();
+        let deadline = std::time::Instant::now() + AUTH_LOCK_WAIT;
         loop {
-            if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 return Some(lock_file);
             }
             let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
+            match err.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                _ => return None,
             }
-            return None;
         }
     })
     .await
     .ok()
     .flatten();
 
-    let Some(_lock_guard) = lock_file else {
-        tracing::warn!("Failed to acquire auth lock; proceeding without cross-process dedup");
-        return run_browser_auth_flow(server_name, server_url, auth_manager, byo_config).await;
-    };
+    if lock_file.is_none() {
+        tracing::warn!("Timed out waiting for auth lock; re-checking the store before a new flow");
+    }
+    // On timeout: proceed unlocked; the token-changed re-check below
+    // dedups a leader that finished just past our deadline.
+    let _lock_guard = lock_file;
 
-    // We hold the lock. Reload from disk and check if another process
-    // wrote a DIFFERENT token while we waited (not just any token).
+    // Reload from disk and check whether another process wrote a DIFFERENT
+    // token while we waited (not just any token). This runs on the timeout
+    // path too: a leader whose token exchange finished just past our deadline
+    // has already written fresh tokens, and opening a second consent browser
+    // would be strictly worse than this unlocked best-effort read.
     {
         let mut mgr = auth_manager.lock().await;
         if let Ok(true) = mgr.initialize_from_store().await {
@@ -435,6 +469,22 @@ async fn run_browser_auth_flow(
                 server = server_name,
                 "Fresh tokens detected on disk from another auth flow; skipping callback wait"
             );
+        }
+        // Abandoned consent: bound the wait so this leader releases the
+        // in-process watch and the cross-process `mcp_auth_*.lock` instead of
+        // wedging every future auth attempt for this server (see
+        // `BROWSER_AUTH_TIMEOUT`).
+        _ = tokio::time::sleep(BROWSER_AUTH_TIMEOUT) => {
+            callback_server.abort();
+            tracing::warn!(
+                server = server_name,
+                timeout_secs = BROWSER_AUTH_TIMEOUT.as_secs(),
+                "OAuth consent timed out (browser flow abandoned?)"
+            );
+            return Err(format!(
+                "OAuth consent timed out after {}s; re-run authentication to try again",
+                BROWSER_AUTH_TIMEOUT.as_secs()
+            ));
         }
     }
 

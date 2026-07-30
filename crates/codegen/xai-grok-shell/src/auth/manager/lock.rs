@@ -23,6 +23,79 @@ use crate::unified_log;
 /// Maximum age (seconds) of a lock holder before it is considered stuck.
 const STALE_LOCK_TIMEOUT_SECS: u64 = 60;
 
+/// How long a **live** holder must stay stale under re-observation of fresh
+/// *awake* time before a waiter may break its lock. Staleness is wall-clock,
+/// which keeps counting through a suspend — at wake every lock held across
+/// it reads "stuck ≥ 60 s" even though its (alive) holder re-dates itself
+/// within one [`LOCK_HEARTBEAT_INTERVAL`]. Breaking at wake+0 s double-spends
+/// the refresh token the holder already sent, revoking the token family.
+/// Dead holders (PID gone) are still broken immediately.
+const STUCK_LIVE_CONFIRM_DELAY: StdDuration = StdDuration::from_secs(12);
+
+/// Cadence of holder-info rewrites while a lock is held (see [`LockHeartbeat`]).
+pub(crate) const LOCK_HEARTBEAT_INTERVAL: StdDuration = StdDuration::from_secs(5);
+
+// A woken live holder must always re-date itself (≤ one heartbeat interval,
+// plus scheduling slack) before a waiter's confirmation window elapses.
+const _: () = assert!(
+    STUCK_LIVE_CONFIRM_DELAY.as_millis() >= 2 * LOCK_HEARTBEAT_INTERVAL.as_millis(),
+    "confirmation delay must comfortably exceed one heartbeat interval"
+);
+const _: () = assert!(
+    LOCK_HEARTBEAT_INTERVAL.as_secs() < STALE_LOCK_TIMEOUT_SECS,
+    "a heartbeating holder must never age past the stale threshold"
+);
+// Refresh-sized callers must keep both a meaningful Phase-2 wait after the
+// Phase-3 confirmation reservation ([`phase2_budget`]) and the heartbeat
+// (the `timeout >= REFRESH_LOCK_TIMEOUT` gate in
+// [`try_lock_auth_file_async_with`]).
+const _: () = assert!(
+    super::REFRESH_LOCK_TIMEOUT.as_millis() >= 2 * STUCK_LIVE_CONFIRM_DELAY.as_millis(),
+    "the refresh lock budget must comfortably exceed the confirmation delay"
+);
+
+/// Background thread that re-dates the lock file's holder info (`PID:TS`)
+/// every [`LOCK_HEARTBEAT_INTERVAL`] while an [`AuthFileLock`] is held, so a
+/// holder suspended across sleep stops reading as "stuck" within one
+/// interval of waking. Writes through a `try_clone`d FD (same open file
+/// description; flock unaffected); Drop stops and joins the thread.
+pub(crate) struct LockHeartbeat {
+    stop: std::sync::mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LockHeartbeat {
+    fn spawn(mut file: File, interval: StdDuration) -> Self {
+        let (stop, ticks) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::Builder::new()
+            .name("auth-lock-heartbeat".into())
+            .spawn(move || {
+                // Timeout = keep beating; Ok(()) or Disconnected = stop.
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    ticks.recv_timeout(interval)
+                {
+                    if let Err(e) = write_holder_info(&mut file) {
+                        // Best-effort: a failed rewrite leaves the previous
+                        // holder info in place; the waiter-side confirmation
+                        // delay still protects a live holder.
+                        tracing::debug!(error = %e, "auth lock: heartbeat rewrite failed");
+                    }
+                }
+            })
+            .ok();
+        Self { stop, handle }
+    }
+}
+
+impl Drop for LockHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 // ── Holder-info helpers ──────────────────────────────────────────────
 
 /// Write `PID:UNIX_TIMESTAMP` into the lock file so waiters can detect
@@ -138,20 +211,45 @@ fn unidentified_holder_is_stale(file: &File, why: &str) -> bool {
     }
 }
 
-/// Read the lock file content and return `true` when the current holder
-/// is stale: process dead, holding longer than [`STALE_LOCK_TIMEOUT_SECS`],
-/// or unidentifiable (empty/garbage holder info) with an mtime past the
-/// stale threshold.
-fn is_holder_stale(file: &mut File) -> bool {
+/// Classification of the current lock holder, driving how aggressively a
+/// waiter may break the lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HolderState {
+    /// Holder process is gone — its flock died with it; break immediately.
+    Dead,
+    /// Alive but holder info (or mtime, when unidentifiable) is past
+    /// [`STALE_LOCK_TIMEOUT_SECS`]: genuinely wedged, or just woke from a
+    /// suspend and hasn't re-dated yet. Breakable only per
+    /// [`StuckLivePolicy`].
+    StuckLive,
+    /// Holder looks healthy — wait.
+    Alive,
+}
+
+/// Read the lock file content and classify the current holder: process dead,
+/// live-but-stale (holder info older than [`STALE_LOCK_TIMEOUT_SECS`], or
+/// unidentifiable holder info with an mtime past the threshold), or alive.
+fn holder_state(file: &mut File) -> HolderState {
     let mut content = String::new();
     if file.seek(io::SeekFrom::Start(0)).is_err() || file.read_to_string(&mut content).is_err() {
-        return unidentified_holder_is_stale(file, "holder info unreadable");
+        return if unidentified_holder_is_stale(file, "holder info unreadable") {
+            // No PID to probe: we cannot distinguish dead from suspended, so
+            // classify as stuck-live and let the confirmation-delay policy
+            // decide (the pre-heartbeat behavior broke these immediately).
+            HolderState::StuckLive
+        } else {
+            HolderState::Alive
+        };
     }
     let Some((holder_pid, holder_ts)) = parse_holder_info(&content) else {
-        return unidentified_holder_is_stale(
+        return if unidentified_holder_is_stale(
             file,
             &format!("holder info unparseable (raw={content:?})"),
-        );
+        ) {
+            HolderState::StuckLive
+        } else {
+            HolderState::Alive
+        };
     };
 
     // Process dead?
@@ -161,7 +259,7 @@ fn is_holder_stale(file: &mut File) -> bool {
             None,
             Some(serde_json::json!({ "holder_pid": holder_pid, "holder_ts": holder_ts })),
         );
-        return true;
+        return HolderState::Dead;
     }
 
     // Process stuck (holding > STALE_LOCK_TIMEOUT_SECS)?
@@ -173,17 +271,17 @@ fn is_holder_stale(file: &mut File) -> bool {
     if age > STALE_LOCK_TIMEOUT_SECS {
         unified_log::info(
             &format!(
-                "auth lock: holder pid={holder_pid} appears stuck (age={age}s > {STALE_LOCK_TIMEOUT_SECS}s), breaking stale lock"
+                "auth lock: holder pid={holder_pid} appears stuck (age={age}s > {STALE_LOCK_TIMEOUT_SECS}s)"
             ),
             None,
             Some(
                 serde_json::json!({ "holder_pid": holder_pid, "age_secs": age, "threshold_secs": STALE_LOCK_TIMEOUT_SECS }),
             ),
         );
-        return true;
+        return HolderState::StuckLive;
     }
 
-    false
+    HolderState::Alive
 }
 
 // ── Single-iteration acquire logic ───────────────────────────────────
@@ -200,11 +298,23 @@ enum LockAttempt {
     Failed,
 }
 
+/// How a lock attempt treats a holder that is alive but stale
+/// ([`HolderState::StuckLive`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StuckLivePolicy {
+    /// Never break a live holder on first sight — at wake every suspended
+    /// holder reads stale (see [`STUCK_LIVE_CONFIRM_DELAY`]).
+    Wait,
+    /// The caller re-observed the holder still stale after the confirmation
+    /// delay of awake time: genuinely wedged — break.
+    Break,
+}
+
 /// Execute one iteration of the acquire loop.
 ///
 /// `lock_path` is the resolved path to `auth.json.lock` — computed once
 /// by the caller to avoid re-deriving it on every poll iteration.
-fn try_acquire_once(lock_path: &Path) -> LockAttempt {
+fn try_acquire_once(lock_path: &Path, stuck_live: StuckLivePolicy) -> LockAttempt {
     // Step 1: open (create if missing) auth.json.lock
     let mut file = match OpenOptions::new()
         .read(true)
@@ -273,7 +383,22 @@ fn try_acquire_once(lock_path: &Path) -> LockAttempt {
 
         // Step 4: EWOULDBLOCK — lock is held by someone else.
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-            if is_holder_stale(&mut file) {
+            let breakable = match holder_state(&mut file) {
+                HolderState::Dead => true,
+                HolderState::StuckLive => match stuck_live {
+                    StuckLivePolicy::Break => true,
+                    StuckLivePolicy::Wait => {
+                        unified_log::info(
+                            "auth lock: holder live but stale; deferring break until after the blocking wait",
+                            None,
+                            None,
+                        );
+                        false
+                    }
+                },
+                HolderState::Alive => false,
+            };
+            if breakable {
                 match std::fs::remove_file(lock_path) {
                     Ok(()) => LockAttempt::StaleUnlinked,
                     Err(e) => {
@@ -388,7 +513,42 @@ pub(crate) fn try_lock_auth_file_nonblocking(auth_json_path: &Path) -> Option<Au
         );
         // Still hold the flock — proceed.
     }
-    Some(AuthFileLock { _file: file })
+    // No heartbeat: these advisory holds are millisecond-scale cleanup
+    // writes, not IdP exchanges worth protecting across a suspend.
+    Some(AuthFileLock {
+        _heartbeat: None,
+        _file: file,
+    })
+}
+
+/// Wrap a freshly flocked `file` in the RAII guard, optionally with the
+/// heartbeat attached (heartbeat-less if the FD cannot be cloned).
+/// `with_heartbeat` is `false` for short advisory holds: they don't span an
+/// IdP exchange (no double-spend to protect) and run several times per
+/// second, so a thread per acquisition is real overhead — same reasoning as
+/// [`try_lock_auth_file_nonblocking`].
+fn locked(file: File, with_heartbeat: bool) -> AuthFileLock {
+    if !with_heartbeat {
+        return AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+    }
+    let heartbeat = match file.try_clone() {
+        Ok(clone) => Some(LockHeartbeat::spawn(clone, LOCK_HEARTBEAT_INTERVAL)),
+        Err(e) => {
+            unified_log::warn(
+                &format!("auth lock: failed to clone FD for heartbeat: {e}"),
+                None,
+                None,
+            );
+            None
+        }
+    };
+    AuthFileLock {
+        _heartbeat: heartbeat,
+        _file: file,
+    }
 }
 
 /// Acquire the `auth.json.lock` file lock with three phases:
@@ -399,14 +559,47 @@ pub(crate) fn try_lock_auth_file_nonblocking(auth_json_path: &Path) -> Option<Au
 ///    thread, wrapped in `tokio::time::timeout`.  The kernel's flock
 ///    wait queue is FIFO: when the holder releases, exactly one waiter
 ///    wakes.  Zero CPU while waiting.
-/// 3. **Stale fallback** — on timeout, try one non-blocking acquire
-///    with stale-lock detection (dead PID / age > 60 s).  Breaks the
-///    stale lock via unlink and retries.
+/// 3. **Stale fallback** — after the blocking wait, break a dead holder
+///    immediately; a live-but-stale one only after re-observing it still
+///    stale across [`STUCK_LIVE_CONFIRM_DELAY`] of fresh awake time
+///    (skipped when `timeout` is below the delay).
+///
+/// `timeout` is the total budget: Phase 2's wait is shortened by
+/// [`phase2_budget`] so the function returns within ~`timeout`, never
+/// `timeout + STUCK_LIVE_CONFIRM_DELAY`. The guard carries the holder
+/// heartbeat only for refresh-sized budgets (see [`locked`]).
 pub(crate) async fn try_lock_auth_file_async(
     auth_json_path: &Path,
     timeout: StdDuration,
 ) -> Option<AuthFileLock> {
+    try_lock_auth_file_async_with(auth_json_path, timeout, STUCK_LIVE_CONFIRM_DELAY).await
+}
+
+/// Phase-2 (blocking-wait) budget: the total `timeout` minus a reservation
+/// for Phase 3's confirmation sleep, so total wall time stays within the
+/// caller's budget. Budgets below the delay never confirm, so they keep
+/// everything for Phase 2.
+fn phase2_budget(timeout: StdDuration, confirm_delay: StdDuration) -> StdDuration {
+    if timeout >= confirm_delay {
+        timeout - confirm_delay
+    } else {
+        timeout
+    }
+}
+
+/// [`try_lock_auth_file_async`] with the stuck-live confirmation delay
+/// injectable, so tests exercise the Phase-3 policy without production-sized
+/// waits. `confirm_delay` must exceed the heartbeat interval to keep the
+/// double-spend guarantee (the production constant is const-asserted).
+async fn try_lock_auth_file_async_with(
+    auth_json_path: &Path,
+    timeout: StdDuration,
+    confirm_delay: StdDuration,
+) -> Option<AuthFileLock> {
     let lock_path = auth_json_path.with_file_name("auth.json.lock");
+    // Heartbeat only for holds that may span an IdP exchange; see
+    // [`locked`] for why short advisory holds skip it.
+    let with_heartbeat = timeout >= super::REFRESH_LOCK_TIMEOUT;
 
     unified_log::debug(
         &format!(
@@ -419,17 +612,21 @@ pub(crate) async fn try_lock_auth_file_async(
         ),
     );
 
-    // Phase 1: instant non-blocking try.
-    match try_acquire_once(&lock_path) {
-        LockAttempt::Acquired(file) => return Some(AuthFileLock { _file: file }),
+    // Phase 1: instant non-blocking try (StuckLivePolicy::Wait — see
+    // STUCK_LIVE_CONFIRM_DELAY; dead holders are still broken).
+    match try_acquire_once(&lock_path, StuckLivePolicy::Wait) {
+        LockAttempt::Acquired(file) => return Some(locked(file, with_heartbeat)),
         LockAttempt::Failed => return None,
         LockAttempt::StaleUnlinked | LockAttempt::Busy => { /* fall through to Phase 2 */ }
     }
 
-    // Phase 2: blocking flock via spawn_blocking + timeout.
+    // Phase 2: blocking flock via spawn_blocking + timeout. The wait is
+    // capped at `phase2_budget` (not the full `timeout`) so Phase 3's
+    // confirmation sleep fits inside the caller's total budget.
     // Retry loop handles the rare inode-mismatch race (a third process
     // unlinked the lock file between our open and our flock).
-    let deadline = tokio::time::Instant::now() + timeout;
+    let wait_budget = phase2_budget(timeout, confirm_delay);
+    let deadline = tokio::time::Instant::now() + wait_budget;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining == StdDuration::ZERO {
@@ -445,7 +642,7 @@ pub(crate) async fn try_lock_auth_file_async(
 
         match result {
             // Blocking flock succeeded, inode matches.
-            Ok(Ok(Ok(file))) => return Some(AuthFileLock { _file: file }),
+            Ok(Ok(Ok(file))) => return Some(locked(file, with_heartbeat)),
             // Inode mismatch — retry from the top of the loop.
             Ok(Ok(Err(_inode_err))) => continue,
             // spawn_blocking panicked — give up.
@@ -455,24 +652,45 @@ pub(crate) async fn try_lock_auth_file_async(
         }
     }
 
-    // Phase 3: stale-lock recovery (last resort).
-    // The blocking flock timed out, meaning the holder is likely stuck.
-    // Try non-blocking flock + stale detection (dead PID / age > 60 s).
+    // Phase 3: stale-lock recovery (last resort). Dead holders break
+    // immediately; a live-but-stale one only after re-observation across
+    // `confirm_delay` of *fresh awake* time — Phase 2's monotonic wait may
+    // have elapsed before a suspend, leaving a woken holder no awake time
+    // to heartbeat. tokio's timer pauses during suspend, so the sleep below
+    // measures awake time by construction.
     unified_log::warn(
         &format!(
             "auth lock: blocking flock timed out after {}ms, trying stale recovery",
-            timeout.as_millis()
+            wait_budget.as_millis()
         ),
         None,
-        Some(
-            serde_json::json!({ "path": lock_path.display().to_string(), "timeout_ms": timeout.as_millis() as u64 }),
-        ),
+        Some(serde_json::json!({
+            "path": lock_path.display().to_string(),
+            "timeout_ms": timeout.as_millis() as u64,
+            "phase2_budget_ms": wait_budget.as_millis() as u64,
+        })),
     );
+    let mut saw_stuck_live = false;
     for _ in 0..2 {
-        match try_acquire_once(&lock_path) {
-            LockAttempt::Acquired(file) => return Some(AuthFileLock { _file: file }),
-            LockAttempt::StaleUnlinked => continue, // unlinked stale lock, retry once
-            LockAttempt::Busy | LockAttempt::Failed => break,
+        match try_acquire_once(&lock_path, StuckLivePolicy::Wait) {
+            LockAttempt::Acquired(file) => return Some(locked(file, with_heartbeat)),
+            LockAttempt::StaleUnlinked => continue, // dead holder broken; retry
+            LockAttempt::Busy => {
+                saw_stuck_live = true; // alive-fresh or stuck-live; confirm below
+                break;
+            }
+            LockAttempt::Failed => break,
+        }
+    }
+
+    if saw_stuck_live && timeout >= confirm_delay {
+        tokio::time::sleep(confirm_delay).await;
+        for _ in 0..2 {
+            match try_acquire_once(&lock_path, StuckLivePolicy::Break) {
+                LockAttempt::Acquired(file) => return Some(locked(file, with_heartbeat)),
+                LockAttempt::StaleUnlinked => continue,
+                LockAttempt::Busy | LockAttempt::Failed => break,
+            }
         }
     }
 
@@ -637,7 +855,11 @@ mod tests {
         write!(file, "{dead_pid}:9999999999").unwrap();
         file.sync_all().unwrap();
 
-        assert!(is_holder_stale(&mut file), "dead PID should be stale");
+        assert_eq!(
+            holder_state(&mut file),
+            HolderState::Dead,
+            "dead PID should classify as Dead (immediately breakable)"
+        );
     }
 
     #[cfg(unix)]
@@ -655,8 +877,9 @@ mod tests {
 
         write_holder_info(&mut file).unwrap();
 
-        assert!(
-            !is_holder_stale(&mut file),
+        assert_eq!(
+            holder_state(&mut file),
+            HolderState::Alive,
             "live process with recent timestamp should not be stale"
         );
     }
@@ -683,7 +906,112 @@ mod tests {
         write!(file, "{our_pid}:{old_ts}").unwrap();
         file.sync_all().unwrap();
 
-        assert!(is_holder_stale(&mut file));
+        assert_eq!(
+            holder_state(&mut file),
+            HolderState::StuckLive,
+            "live PID with old timestamp classifies StuckLive, not immediately breakable"
+        );
+    }
+
+    /// The suspend-straddle double-spend guard end-to-end: a LIVE holder whose
+    /// holder info is stale (the on-disk state every suspended holder shows at
+    /// wake) must NOT be broken by the instant path, and a short-timeout
+    /// waiter (below the confirmation delay) must give up rather than break.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stuck_live_holder_not_broken_at_first_sight() {
+        let dir = TempDir::new().unwrap();
+        let path = auth_json_path(&dir);
+        let lock_path = path.with_file_name("auth.json.lock");
+
+        // Hold the flock on a separate FD, with holder info backdated past
+        // the stale threshold — a live process that "slept" 200 s.
+        let mut holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock_exclusive().unwrap();
+        let old_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 200;
+        write!(holder, "{}:{old_ts}", std::process::id()).unwrap();
+        holder.sync_all().unwrap();
+
+        // Instant path: must classify Busy (defer), not unlink.
+        assert!(
+            matches!(
+                try_acquire_once(&lock_path, StuckLivePolicy::Wait),
+                LockAttempt::Busy
+            ),
+            "live-but-stale holder must be Busy under Wait policy"
+        );
+        assert!(lock_path.exists(), "lock file must not be unlinked");
+
+        // Full acquire with a timeout below the confirmation delay: gives up
+        // (None) instead of breaking the live holder.
+        let got = try_lock_auth_file_async(&path, StdDuration::from_millis(300)).await;
+        assert!(
+            got.is_none(),
+            "short-timeout waiter must not break a live-but-stale holder"
+        );
+        assert!(lock_path.exists(), "lock file must survive the failed wait");
+
+        // Break policy (the post-confirmation Phase 3 path) does break it.
+        match try_acquire_once(&lock_path, StuckLivePolicy::Break) {
+            LockAttempt::StaleUnlinked => {}
+            _ => panic!("Break policy must unlink the confirmed-stuck holder"),
+        }
+    }
+
+    /// The heartbeat keeps a held lock's holder info fresh: after an interval
+    /// elapses the `PID:TS` timestamp is re-dated (fresh wall-clock ts), so a
+    /// waiter classifying the holder sees `Alive`, not `StuckLive`. Uses a
+    /// short interval — the production cadence only changes how often, not
+    /// whether, the rewrite happens.
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_refreshes_holder_info() {
+        let dir = TempDir::new().unwrap();
+        let lock_path = dir.path().join("auth.json.lock");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock_path)
+            .unwrap();
+
+        // Backdated holder info: what a waiter sees at wake from a long
+        // suspend (ts as old as the sleep).
+        let old_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 200;
+        write!(file, "{}:{old_ts}", std::process::id()).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(holder_state(&mut file), HolderState::StuckLive);
+
+        let hb = LockHeartbeat::spawn(file.try_clone().unwrap(), StdDuration::from_millis(20));
+
+        // Within a few intervals the holder must have re-dated itself.
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
+        loop {
+            if holder_state(&mut file) == HolderState::Alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "heartbeat never re-dated the holder info"
+            );
+            std::thread::sleep(StdDuration::from_millis(10));
+        }
+        drop(hb); // stops + joins the heartbeat thread
     }
 
     #[cfg(unix)]
@@ -759,6 +1087,95 @@ mod tests {
     }
 
     // ── Async tests against the production code path ─────────────────
+
+    #[test]
+    fn phase2_budget_reserves_confirmation_delay() {
+        let confirm = StdDuration::from_secs(12);
+        // Refresh-sized budget: Phase 2 gives up the confirmation slice.
+        assert_eq!(
+            phase2_budget(StdDuration::from_secs(45), confirm),
+            StdDuration::from_secs(33)
+        );
+        // Budget below the delay: Phase 3 never confirms, so Phase 2
+        // keeps everything.
+        assert_eq!(
+            phase2_budget(StdDuration::from_secs(10), confirm),
+            StdDuration::from_secs(10)
+        );
+        // Boundary: equal budget reserves the whole thing for Phase 3.
+        assert_eq!(phase2_budget(confirm, confirm), StdDuration::ZERO);
+    }
+
+    /// Heartbeat attaches only to refresh-sized holds (the ones that span
+    /// an IdP exchange); short advisory holds must not spawn a thread per
+    /// acquisition.
+    #[tokio::test]
+    async fn heartbeat_attached_only_for_refresh_sized_budgets() {
+        let dir = TempDir::new().unwrap();
+        let path = auth_json_path(&dir);
+
+        let short = try_lock_auth_file_async(&path, crate::auth::manager::AUTH_LOCK_TIMEOUT)
+            .await
+            .expect("uncontended acquire");
+        assert!(
+            short._heartbeat.is_none(),
+            "an AUTH_LOCK_TIMEOUT-sized hold must not carry a heartbeat"
+        );
+        drop(short);
+
+        let refresh = try_lock_auth_file_async(&path, crate::auth::manager::REFRESH_LOCK_TIMEOUT)
+            .await
+            .expect("uncontended acquire");
+        assert!(
+            refresh._heartbeat.is_some(),
+            "a REFRESH_LOCK_TIMEOUT-sized hold must carry the heartbeat"
+        );
+    }
+
+    /// The caller's `timeout` is the TOTAL budget: a live-but-stale holder
+    /// forces the full Phase-2 wait + Phase-3 confirmation, and the sum
+    /// must still land within the budget (pre-fix: `timeout + confirm`,
+    /// ~57 s on a 45 s request).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn total_wait_stays_within_timeout_budget() {
+        let dir = TempDir::new().unwrap();
+        let path = auth_json_path(&dir);
+        let lock_path = path.with_file_name("auth.json.lock");
+
+        // Live-but-stale holder on a separate FD (same-process flock on a
+        // different open file description contends like a sibling).
+        let mut holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.try_lock_exclusive().unwrap();
+        let old_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 200;
+        write!(holder, "{}:{old_ts}", std::process::id()).unwrap();
+        holder.sync_all().unwrap();
+
+        let timeout = StdDuration::from_millis(900);
+        let confirm = StdDuration::from_millis(400);
+        let start = tokio::time::Instant::now();
+        // The holder is our own live PID, so the Break re-observation
+        // unlinks and acquires (same shape as the wedged-holder test).
+        let lock = try_lock_auth_file_async_with(&path, timeout, confirm).await;
+        let elapsed = start.elapsed();
+        assert!(lock.is_some(), "wedged holder must be broken");
+        // Generous slack for CI scheduling, but well under the pre-fix
+        // floor of timeout + confirm (1300 ms).
+        assert!(
+            elapsed < timeout + StdDuration::from_millis(250),
+            "total wait must stay within the caller's budget, took {elapsed:?}"
+        );
+    }
 
     #[tokio::test]
     async fn test_async_acquire_release_basic() {
@@ -909,6 +1326,7 @@ mod tests {
 
         let exe = std::env::current_exe().expect("current_exe");
         let spec = format!("{}|{mode}|{age_secs}", lock_path.to_str().unwrap());
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut child = std::process::Command::new(exe)
             .env("GROK_TEST_LOCK_HOLDER", spec)
             .args([
@@ -946,8 +1364,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_async_real_stale_holder_broken_by_old_timestamp() {
-        // Child holds flock with timestamp 120s in the past. Parent
-        // detects stale via timestamp, unlinks, acquires on fresh inode.
+        // Wedged LIVE holder (stale holder info, never heartbeats):
+        // breakable, but only via the Phase-3 still-stale re-observation —
+        // never on first sight. Short confirm delay injected for speed.
         let dir = TempDir::new().unwrap();
         let path = auth_json_path(&dir);
         let lock_path = path.with_file_name("auth.json.lock");
@@ -957,14 +1376,21 @@ mod tests {
 
         assert!(is_process_alive(child_pid));
 
-        let start = tokio::time::Instant::now();
-        let lock = try_lock_auth_file_async(&path, StdDuration::from_secs(5)).await;
-        let elapsed = start.elapsed();
-
-        assert!(lock.is_some(), "should break stale lock held by child");
+        // Budget below the confirmation delay: no break.
+        let confirm = StdDuration::from_millis(400);
+        let lock =
+            try_lock_auth_file_async_with(&path, StdDuration::from_millis(100), confirm).await;
         assert!(
-            elapsed < StdDuration::from_secs(2),
-            "stale break should be near-instant, took {elapsed:?}"
+            lock.is_none(),
+            "short-budget waiter must not break a live-but-stale holder"
+        );
+
+        // Budget at/above the delay: still stale after re-observation → break.
+        let lock =
+            try_lock_auth_file_async_with(&path, StdDuration::from_millis(500), confirm).await;
+        assert!(
+            lock.is_some(),
+            "wedged live holder must be breakable after the confirmation wait"
         );
 
         // Verify our PID was written to the NEW lock file.
@@ -982,10 +1408,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_async_breaks_old_empty_lock_held_by_live_holder() {
-        // Regression: a LIVE process holding the flock on an EMPTY lock
-        // file (no `PID:TS`) used to be "alive forever", wedging refresh.
-        // With the mtime fallback an old empty lock is broken even though
-        // the holder process is still running.
+        // Regression: a LIVE process holding the flock on an EMPTY lock file
+        // (no `PID:TS`) used to be "alive forever", wedging refresh. Old
+        // empty locks classify StuckLive (an unidentifiable holder can't be
+        // distinguished from one that just woke), so the break goes through
+        // the Phase-3 confirmation re-observation.
         let dir = TempDir::new().unwrap();
         let path = auth_json_path(&dir);
         let lock_path = path.with_file_name("auth.json.lock");
@@ -994,15 +1421,10 @@ mod tests {
             spawn_lock_holder_subprocess(&lock_path, "empty", STALE_LOCK_TIMEOUT_SECS + 30);
         assert!(is_process_alive(child.id()));
 
-        let start = tokio::time::Instant::now();
-        let lock = try_lock_auth_file_async(&path, StdDuration::from_secs(5)).await;
-        let elapsed = start.elapsed();
-
+        let confirm = StdDuration::from_millis(400);
+        let lock =
+            try_lock_auth_file_async_with(&path, StdDuration::from_millis(500), confirm).await;
         assert!(lock.is_some(), "should break old empty lock held by child");
-        assert!(
-            elapsed < StdDuration::from_secs(2),
-            "stale break should be near-instant, took {elapsed:?}"
-        );
 
         // The fresh lock file must carry our parseable holder info.
         let content = std::fs::read_to_string(&lock_path).unwrap();
@@ -1117,6 +1539,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_real_is_process_alive_with_spawned_child() {
+        #[allow(clippy::disallowed_methods)] // test fixture; the test kills it
         let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()

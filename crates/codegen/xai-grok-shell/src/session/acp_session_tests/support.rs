@@ -244,6 +244,7 @@ pub(crate) async fn create_test_actor_ex(
         model_auth_memo: std::cell::RefCell::new(None),
         attribution_callback: None,
         auth_manager: None,
+        is_chat_kind: false,
         state,
         notifications: NotificationSender {
             gateway: GatewaySender::new(gateway_tx),

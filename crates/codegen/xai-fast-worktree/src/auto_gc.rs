@@ -1,7 +1,7 @@
 //! Throttled automatic worktree GC (feature `metadata`).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -9,7 +9,6 @@ use crate::CleanupReport;
 use crate::api::gc::{GcOptions, GcReport, age_path_enabled, gc_worktrees};
 use crate::db::{ListFilter, WorktreeDb, WorktreeKind, now_epoch_secs, resolve_grok_home};
 use crate::discovery::{RebuildReport, rebuild_worktree_db};
-use crate::git::checkout::git_command;
 
 pub const META_LAST_AUTO_GC_AT: &str = "last_auto_gc_at";
 /// Independent throttle stamp for optional DB rebuild (not shared with GC).
@@ -58,7 +57,7 @@ pub struct WorktreeAutoGcLayer {
     pub dry_run: Option<bool>,
     pub include_orphan_snapshots: Option<bool>,
     pub max_age_by_kind: BTreeMap<WorktreeKind, Option<u64>>,
-    /// Optional discovery rebuild + stale `.git/worktrees/` prune (default off).
+    /// Optional discovery rebuild + grok-scoped stale `.git/worktrees/` scrub (default off).
     pub include_rebuild: Option<bool>,
     /// Independent rebuild throttle; absent ⇒ 24h.
     pub rebuild_min_interval_secs: Option<u64>,
@@ -459,7 +458,7 @@ pub fn maybe_auto_gc(db: &WorktreeDb, auto_opts: &AutoGcOptions) -> Result<AutoG
 
     let (overlay, btrfs) = run_orphan_cleaners(dry_run, auto_opts.include_orphan_snapshots);
 
-    // Prune each full pass when opted in (cheap vs discovery; not rebuild-throttled).
+    // Scrub each full pass when opted in (cheap vs discovery; not rebuild-throttled).
     let stale_registrations_cleaned = if include_rebuild && !dry_run {
         prune_stale_git_worktree_registrations(&prune_repos)
     } else {
@@ -633,63 +632,27 @@ fn collect_source_repos_for_prune(db: &WorktreeDb) -> BTreeSet<PathBuf> {
         .collect()
 }
 
+/// Scrub stale grok-owned registrations from each known source repo,
+/// scoped to worktrees under the grok home to prove ownership (see
+/// [`crate::git::remove_stale_worktree_registrations`] for why a blanket
+/// `git worktree prune` is unsafe here).
 fn prune_stale_git_worktree_registrations(repos: &BTreeSet<PathBuf>) -> u64 {
+    let Ok(grok_home) = resolve_grok_home() else {
+        tracing::warn!("auto worktree registration scrub skipped: grok home unresolved");
+        return 0;
+    };
     let cleaned: u64 = repos
         .iter()
         .filter(|repo| repo.is_dir())
-        .map(|repo| prune_stale_registrations_in_repo(repo))
+        .map(|repo| crate::git::remove_stale_worktree_registrations_under(repo, &grok_home))
         .fold(0u64, u64::saturating_add);
     if cleaned > 0 {
         tracing::info!(
             stale_registrations_cleaned = cleaned,
-            "auto worktree stale git registrations pruned"
+            "auto worktree stale git registrations scrubbed"
         );
     }
     cleaned
-}
-
-fn count_git_worktree_registrations(git_worktrees_dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(git_worktrees_dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .count() as u64
-}
-
-fn prune_stale_registrations_in_repo(source_repo: &Path) -> u64 {
-    let git_worktrees = source_repo.join(".git").join("worktrees");
-    let before = count_git_worktree_registrations(&git_worktrees);
-
-    let output = git_command()
-        .args(["worktree", "prune"])
-        .current_dir(source_repo)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let after = count_git_worktree_registrations(&git_worktrees);
-            before.saturating_sub(after)
-        }
-        Ok(o) => {
-            tracing::warn!(
-                source_repo = %source_repo.display(),
-                status = %o.status,
-                stderr = %String::from_utf8_lossy(&o.stderr),
-                "git worktree prune failed"
-            );
-            0
-        }
-        Err(e) => {
-            tracing::warn!(
-                source_repo = %source_repo.display(),
-                error = %e,
-                "git worktree prune failed to spawn"
-            );
-            0
-        }
-    }
 }
 
 fn run_orphan_cleaners(
@@ -735,6 +698,7 @@ pub fn maybe_auto_gc_default() -> Result<AutoGcReport> {
 mod tests {
     use super::*;
     use crate::db::{WorktreeRecord, WorktreeStatus};
+    use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2093,6 +2057,48 @@ mod tests {
             report.stale_registrations_cleaned
         );
         assert!(count_regs(&repo) < before);
+    }
+
+    #[test]
+    fn prune_keeps_foreign_registrations_outside_grok_home() {
+        let _g = env_guard();
+        clear_auto_gc_env();
+        let fx = crate::db::GrokHomeFixture::new();
+        let db = WorktreeDb::open(&fx.home).unwrap();
+        let repo = fx.home.join("foreign-src");
+
+        let user_dir = tempfile::TempDir::new().unwrap();
+        let user_wt = user_dir.path().join("user-wt");
+        plant_stale_git_worktree(&repo, &user_wt);
+        let before = count_regs(&repo);
+        assert!(before >= 1);
+
+        let tracked = fx.home.join("foreign-tracked");
+        std::fs::create_dir_all(&tracked).unwrap();
+        let mut rec = make_rec("fk-t", tracked, WorktreeKind::Session, now_epoch_secs());
+        rec.source_repo = repo.clone();
+        db.register(&rec).unwrap();
+
+        let report = maybe_auto_gc(
+            &db,
+            &AutoGcOptions {
+                min_interval_secs: 0,
+                include_orphan_snapshots: false,
+                include_rebuild: true,
+                rebuild_min_interval_secs: 0,
+                ..AutoGcOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            report.stale_registrations_cleaned, 0,
+            "foreign registrations must never be scrubbed"
+        );
+        assert_eq!(
+            count_regs(&repo),
+            before,
+            "user registrations outside grok home must survive"
+        );
     }
 
     #[test]

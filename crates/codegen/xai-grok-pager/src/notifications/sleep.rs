@@ -118,6 +118,7 @@ impl SleepInhibitor {
         // `panic=abort` SIGABRT — no Drop runs) can't leave an immortal
         // inhibitor holding the lock and pid slots on shared hosts.
         xai_tty_utils::kill_on_parent_death_std(&mut cmd);
+        #[allow(clippy::disallowed_methods)] // bound by kill-on-parent-death; released each turn
         let result = cmd.spawn();
 
         match result {

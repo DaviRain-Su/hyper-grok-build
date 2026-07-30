@@ -41,14 +41,3 @@ impl SlashCommand for BtwCommand {
         CommandResult::Action(Action::SendBtw(args.trim().to_string()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::slash::command::SlashCommand;
-
-    #[test]
-    fn available_in_minimal_by_default() {
-        assert!(BtwCommand.available_in_minimal());
-    }
-}

@@ -285,6 +285,7 @@ pub(crate) fn exec_screen_mode_relaunch(session_id: &str, want_minimal: bool) ->
         // reader competes with the child for console records and swallows its
         // first keystrokes.
         std::thread::sleep(std::time::Duration::from_millis(150));
+        #[allow(clippy::disallowed_methods)] // the parent waits and exits with its status
         let mut child = cmd.spawn()?;
         let status = child.wait()?;
         std::process::exit(status.code().unwrap_or(0));

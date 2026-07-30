@@ -290,9 +290,11 @@ impl Default for BackendClient {
 }
 impl BackendClient {
     fn build_default_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(DEFAULT_TIMEOUT)
+        xai_grok_extra_ca::with_extra_root_certificates(
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(DEFAULT_TIMEOUT),
+            )
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to build backend HTTP client; falling back to shared client");

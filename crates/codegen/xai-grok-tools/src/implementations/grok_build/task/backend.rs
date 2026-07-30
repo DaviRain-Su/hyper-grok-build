@@ -163,6 +163,46 @@ impl ChannelBackend {
         response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
     }
 
+    /// User Stop: cancel all non-workflow children for this parent session.
+    ///
+    /// Requires [`Self::for_session`]; unbound backends return `NotFound` and
+    /// do not broadcast a wildcard cancel.
+    pub async fn cancel_parent_session(&self) -> SubagentCancelOutcome {
+        let (respond_to, response_rx) = oneshot::channel();
+        if !self.request_cancel_parent_session(respond_to) {
+            return SubagentCancelOutcome::NotFound;
+        }
+        response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
+    }
+
+    /// Fire-and-forget ParentSession cancel used by the shell Stop path.
+    /// Returns false when the backend is unbound or the channel is closed.
+    pub fn request_cancel_parent_session(
+        &self,
+        respond_to: oneshot::Sender<SubagentCancelOutcome>,
+    ) -> bool {
+        let Some(parent_session_id) = self.parent_session_id() else {
+            return false;
+        };
+        self.tx
+            .send(SubagentEvent::Cancel(SubagentCancelRequest {
+                parent_session_id: Some(parent_session_id),
+                target: SubagentCancelTarget::ParentSession,
+                respond_to,
+            }))
+            .is_ok()
+    }
+
+    /// Re-open Task spawns after a prior ParentSession stop (start of next turn).
+    pub fn open_spawn_admission(&self) -> bool {
+        let Some(parent_session_id) = self.parent_session_id() else {
+            return false;
+        };
+        self.tx
+            .send(SubagentEvent::OpenSpawnAdmission { parent_session_id })
+            .is_ok()
+    }
+
     pub async fn inspect(&self, id: &str) -> Option<SubagentInspection> {
         let (respond_to, response_rx) = oneshot::channel();
         self.tx

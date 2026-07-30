@@ -202,13 +202,37 @@ impl SessionActor {
         }
         skill_count
     }
+    /// Skills used for slash resolve, mid-turn interjection expansion, and
+    /// prompt skill listings. Same source as ACU: product REST for chat-kind
+    /// (TTL-cached; never disk), `SkillManager` for Build.
+    pub(crate) async fn slash_skills_for_resolve(
+        &self,
+    ) -> Vec<xai_grok_tools::implementations::skills::types::SkillInfo> {
+        match slash_commands::acu_skill_source(self.is_chat_kind) {
+            slash_commands::AcuSkillSource::Product => Vec::new(),
+            slash_commands::AcuSkillSource::Disk => {
+                let bridge = self.tool_bridge_handle();
+                bridge.slash_skills().await
+            }
+        }
+    }
     /// Send `AvailableCommandsUpdate` to the client.
     ///
-    /// Reads the current slash-command skill list from the tools layer
-    /// (`SkillManager`), NOT from `PromptContext`.
+    /// Chat-kind sessions advertise the product Skills REST catalog (same
+    /// source as `list_commands(kind=chat)`). Build sessions read disk skills
+    /// from the tools layer (`SkillManager`). Chat never falls back to disk.
+    /// Product REST failure (or missing auth) reuses the shared last-successful
+    /// product catalog (same as `list_commands(kind=chat)`); if none exists yet,
+    /// advertises builtins only (never invents product skill names, never disk).
+    /// Empty product success still advertises builtins.
     pub(super) async fn send_available_commands_update(&self) {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let skills = bridge.slash_skills().await;
+        let skills = match slash_commands::acu_skill_source(self.is_chat_kind) {
+            slash_commands::AcuSkillSource::Product => {
+                return;
+            }
+            slash_commands::AcuSkillSource::Disk => bridge.slash_skills().await,
+        };
         let tool_names: Vec<String> = bridge
             .tool_definitions()
             .await
@@ -220,14 +244,12 @@ impl SessionActor {
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
-        if commands.is_empty() {
-            return;
-        }
         let meta = Some(slash_commands::build_tools_meta(&tool_names));
         tracing::info!(
             session_id = %self.session_info.id.0,
             command_count = commands.len(),
             tool_count = tool_names.len(),
+            is_chat_kind = self.is_chat_kind,
             "Advertising available slash commands",
         );
         self.send_update(
@@ -366,7 +388,6 @@ impl SessionActor {
             threshold_secs = Self::IDLE_REFRESH_THRESHOLD_SECS,
             "Session resumed after idle — refreshing model metadata from cli-chat-proxy"
         );
-        let creds = self.chat_state_handle.get_credentials().await;
         let Some(ref am) = self.auth_manager else {
             tracing::debug!("No auth manager available for model metadata refresh");
             return;
@@ -403,20 +424,28 @@ impl SessionActor {
                 crate::http::process_client_mode(),
             )
             .timeout(std::time::Duration::from_secs(5));
-        let response = match request.send().await {
+        let built = match request.build() {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to fetch models for idle refresh");
+                tracing::warn!(error = %e, "Failed to build idle-refresh models request");
                 return;
             }
         };
+        let (response, stamp) =
+            match xai_grok_auth::execute_with_stamp(&middleware_client, built).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to fetch models for idle refresh");
+                    return;
+                }
+            };
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             crate::auth::attribution::record_consumer_401(
                 am,
                 None,
                 crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
                 "",
-                creds.api_key.as_deref(),
+                stamp.as_ref().map(|s| s.0.as_str()),
             );
         }
         let result = if !response.status().is_success() {

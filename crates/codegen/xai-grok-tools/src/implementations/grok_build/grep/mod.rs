@@ -826,6 +826,7 @@ async fn prepare_grep(
     crate::util::detach_command(&mut cmd);
     cmd.stdin(Stdio::null());
 
+    #[allow(clippy::disallowed_methods)] // search helper, waited on below
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

@@ -1,5 +1,7 @@
 //! EntryRenderer - renders a ScrollbackEntry using composed wrappers.
 
+use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::path::Path;
 
 use ratatui::buffer::Buffer;
@@ -23,7 +25,10 @@ const WAVE_SPEED: f32 = 0.15;
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
-    appearance: AppearanceConfig,
+    /// Deliberately NOT eagerly `AppearanceConfig::default()`: that conversion
+    /// reads `Theme::current()` and quantizes every color, and profiling a
+    /// resize showed it running once per entry only to be overwritten.
+    appearance: OnceCell<Cow<'a, AppearanceConfig>>,
     tick: u64,
     /// Number of rows to skip from the top of the entry.
     ///
@@ -82,7 +87,7 @@ impl<'a> EntryRenderer<'a> {
         Self {
             entry,
             theme,
-            appearance: AppearanceConfig::default(),
+            appearance: OnceCell::new(),
             tick: 0,
             skip_rows: 0,
             groupable: false,
@@ -147,8 +152,21 @@ impl<'a> EntryRenderer<'a> {
     }
 
     pub fn with_appearance(mut self, appearance: AppearanceConfig) -> Self {
-        self.appearance = appearance;
+        self.appearance = OnceCell::from(Cow::Owned(appearance));
         self
+    }
+
+    ///
+    /// Preferred inside the O(history) layout loops, which would otherwise
+    /// clone the config once per entry.
+    pub fn with_appearance_ref(mut self, appearance: &'a AppearanceConfig) -> Self {
+        self.appearance = OnceCell::from(Cow::Borrowed(appearance));
+        self
+    }
+
+    fn appearance(&self) -> &AppearanceConfig {
+        self.appearance
+            .get_or_init(|| Cow::Owned(AppearanceConfig::default()))
     }
 
     pub fn with_tick(mut self, tick: u64) -> Self {
@@ -219,7 +237,7 @@ impl<'a> EntryRenderer<'a> {
     fn render_group_header(&self, area: Rect, buf: &mut Buffer) {
         use crate::scrollback::state::verb_group::GroupHeaderLabel;
 
-        let layout_cfg = &self.appearance.scrollback.layout;
+        let layout_cfg = &self.appearance().scrollback.layout;
         let accent_w = if self.hide_accent {
             0
         } else {
@@ -233,7 +251,7 @@ impl<'a> EntryRenderer<'a> {
         ])
         .areas(area);
 
-        let display_cfg = &self.appearance.scrollback.display;
+        let display_cfg = &self.appearance().scrollback.display;
         let bg = self.theme.bg_base;
 
         // Verb-group header: aggregated "Verb N noun" label with run-state
@@ -254,7 +272,7 @@ impl<'a> EntryRenderer<'a> {
                 let brightness = theme::wave_brightness(
                     self.tick,
                     self.skip_rows,
-                    self.appearance.animation.wave_rows,
+                    self.appearance().animation.wave_rows,
                     WAVE_SPEED,
                 );
                 let color = blend_color(bg, self.theme.accent_tool, brightness)
@@ -337,8 +355,8 @@ impl<'a> EntryRenderer<'a> {
     /// When [`Self::hide_accent`] is set the accent column is reclaimed, so
     /// chrome is just the block pads (typically zeroed in minimal mode).
     pub fn chrome_width(&self) -> u16 {
-        let pads = self.appearance.scrollback.layout.block_pad_left
-            + self.appearance.scrollback.layout.block_pad_right;
+        let pads = self.appearance().scrollback.layout.block_pad_left
+            + self.appearance().scrollback.layout.block_pad_right;
         if self.hide_accent {
             pads
         } else {
@@ -367,7 +385,7 @@ impl<'a> EntryRenderer<'a> {
     /// When > 0, content is wrapped at `content_width - reserved` so text
     /// never collides with the timestamp overlay.
     fn timestamp_reserved(&self) -> u16 {
-        if self.appearance.show_timestamps && self.should_show_timestamp() {
+        if self.appearance().show_timestamps && self.should_show_timestamp() {
             10 // max short format: "  12:30 PM"
         } else {
             0
@@ -377,7 +395,7 @@ impl<'a> EntryRenderer<'a> {
     fn accent(&self, content_width: u16) -> Option<AccentStyle> {
         let mut ctx = self
             .entry
-            .context(content_width, &self.appearance, self.cwd);
+            .context(content_width, self.appearance(), self.cwd);
         ctx.is_selected = self.is_selected;
         self.entry.block.accent(&ctx)
     }
@@ -404,7 +422,7 @@ impl<'a> EntryRenderer<'a> {
             .saturating_sub(self.chrome_width())
             .saturating_sub(self.timestamp_reserved());
         self.entry
-            .ensure_truncated_height_cached(content_width, &self.appearance, self.cwd)
+            .ensure_truncated_height_cached(content_width, self.appearance(), self.cwd)
     }
 
     /// Extra rows to reserve for inline media preview (images/video poster).
@@ -465,10 +483,7 @@ impl<'a> EntryRenderer<'a> {
         {
             1
         } else {
-            match self.entry.block.searchable_text() {
-                Some(text) => estimate_wrapped_line_count(&text, content_width),
-                None => 1,
-            }
+            self.entry.estimate_source_lines(content_width)
         };
         self.entry.store_estimate_lines(content_width, lines);
         lines
@@ -479,10 +494,7 @@ impl<'a> EntryRenderer<'a> {
     /// ceiling can't overflow and corrupt `virtual_y` / `total_height`. Shared by
     /// `desired_height` and `estimate_height` so the assembly stays canonical.
     fn assemble_height(&self, content_width: u16, content_lines: u16) -> u16 {
-        let ctx = self
-            .entry
-            .context(content_width, &self.appearance, self.cwd);
-        let vpad: u16 = if self.entry.block.has_vpad(&ctx) {
+        let vpad: u16 = if self.entry.block.has_vpad_for(self.appearance()) {
             2
         } else {
             0
@@ -518,14 +530,14 @@ impl<'a> EntryRenderer<'a> {
         // `cached_output_ref` must come after it.
         let ctx = self
             .entry
-            .context(content_width, &self.appearance, self.cwd);
+            .context(content_width, self.appearance(), self.cwd);
         let vpad_top: u16 = if self.entry.block.has_vpad(&ctx) {
             1
         } else {
             0
         };
         self.entry
-            .ensure_cached(content_width, &self.appearance, false, self.cwd);
+            .ensure_cached(content_width, self.appearance(), false, self.cwd);
         let output = self.entry.cached_output_ref();
         let starts = output
             .lines
@@ -605,32 +617,6 @@ fn fill_bg_spaces(buf: &mut Buffer, rect: Rect, bg: ratatui::style::Color) {
     }
 }
 
-/// Estimate the wrapped line count for raw `text` at a given content width.
-///
-/// Uses DISPLAY width (`unicode_width`), not byte length. A deliberately cheap
-/// approximation: it ignores word boundaries and works from RAW source, so it may
-/// be larger or smaller than the exact rendered height. Correctness never relies
-/// on it — on-screen entries are always measured exactly.
-fn estimate_wrapped_line_count(text: &str, content_width: u16) -> u16 {
-    let cw = content_width.max(1) as usize;
-    // Renderers drop a single trailing newline; match that so trailing-`\n`
-    // source doesn't estimate one row too many.
-    let text = text.strip_suffix('\n').unwrap_or(text);
-    let mut total: usize = 0;
-    for line in text.split('\n') {
-        let display_width = unicode_width::UnicodeWidthStr::width(line);
-        total += if display_width == 0 {
-            1
-        } else {
-            display_width.div_ceil(cw)
-        };
-        if total >= u16::MAX as usize {
-            return u16::MAX;
-        }
-    }
-    total.max(1) as u16
-}
-
 impl Renderable for EntryRenderer<'_> {
     fn desired_height(&self, width: u16) -> u16 {
         if self.thinking_hidden() {
@@ -643,7 +629,7 @@ impl Renderable for EntryRenderer<'_> {
         // affects styling (e.g., UserPrompt prefix color), not line count, so
         // the non-selected cached output gives the correct height.
         self.entry
-            .ensure_cached(content_width, &self.appearance, false, self.cwd);
+            .ensure_cached(content_width, self.appearance(), false, self.cwd);
         // Clamp the line count: a pathologically large block could exceed u16.
         let content_lines = self.entry.cached_output_ref().len().min(u16::MAX as usize) as u16;
         self.assemble_height(content_width, content_lines)
@@ -685,7 +671,7 @@ impl Renderable for EntryRenderer<'_> {
             (area, self.skip_rows)
         };
 
-        let layout_cfg = &self.appearance.scrollback.layout;
+        let layout_cfg = &self.appearance().scrollback.layout;
         // Minimal (`hide_accent`): reclaim the accent column so content is
         // flush-left. Fullscreen keeps the 1-col gutter even when a block has
         // no painted accent (so columns stay aligned across entry types).
@@ -708,7 +694,7 @@ impl Renderable for EntryRenderer<'_> {
         // for edit blocks) that was previously thrown away.
         let mut ctx = self
             .entry
-            .context(content_area.width, &self.appearance, self.cwd);
+            .context(content_area.width, self.appearance(), self.cwd);
         ctx.is_selected = self.is_selected;
         // Minimal mode blends committed/tail blocks with the real terminal
         // background; suppress the block's own band (keeps accents + per-line
@@ -811,7 +797,7 @@ impl Renderable for EntryRenderer<'_> {
             .is_some_and(|hd| hd.has_content());
         let use_collapsed_accent =
             self.groupable && self.entry.display_mode == DisplayMode::Collapsed && !has_hook_lines;
-        let display_cfg = &self.appearance.scrollback.display;
+        let display_cfg = &self.appearance().scrollback.display;
 
         if accent.is_none() {
             // No accent: clear the accent column so stale content from
@@ -835,7 +821,7 @@ impl Renderable for EntryRenderer<'_> {
             } else if accent_style.animated {
                 // Animated accents: wave effect (running blocks)
                 let bg = bg_color.unwrap_or(self.fallback_bg());
-                let wave_rows = self.appearance.animation.wave_rows;
+                let wave_rows = self.appearance().animation.wave_rows;
 
                 for row in 0..accent_area.height {
                     let y = accent_area.y + row;
@@ -877,7 +863,7 @@ impl Renderable for EntryRenderer<'_> {
         let ts_reserved = self.timestamp_reserved();
         let text_width = content_area.width.saturating_sub(ts_reserved);
         self.entry
-            .ensure_cached(text_width, &self.appearance, self.is_selected, self.cwd);
+            .ensure_cached(text_width, self.appearance(), self.is_selected, self.cwd);
         let cached_ref = self.entry.cached_output_ref();
         let output: &BlockOutput = &cached_ref;
         let has_vpad = self.entry.block.has_vpad(&ctx);
@@ -946,7 +932,7 @@ impl Renderable for EntryRenderer<'_> {
         // Short format (h:mm AM/PM) by default; expands to full format
         // (HH:mm:ss | MMM DD) when the mouse hovers over the timestamp area.
         // Gated on appearance.show_timestamps (toggled via /timestamps).
-        if self.appearance.show_timestamps
+        if self.appearance().show_timestamps
             && content_skip == 0
             && !output.is_empty()
             && self.should_show_timestamp()
@@ -1008,7 +994,7 @@ impl Renderable for EntryRenderer<'_> {
                 if style.animated {
                     // Animated bullet: wave effect synced with accent
                     let bg = bg_color.unwrap_or(self.fallback_bg());
-                    let wave_rows = self.appearance.animation.wave_rows;
+                    let wave_rows = self.appearance().animation.wave_rows;
                     let brightness = theme::wave_brightness(self.tick, 0, wave_rows, WAVE_SPEED);
                     let animated_color =
                         blend_color(bg, style.color, brightness).unwrap_or(style.color);
@@ -1188,7 +1174,7 @@ mod tests {
     /// for `width`, derived from the renderer geometry so tests self-adjust to
     /// the default layout padding instead of hard-coding column numbers.
     fn gutter_band(renderer: &EntryRenderer, width: u16) -> std::ops::Range<u16> {
-        let content_right = width - renderer.appearance.scrollback.layout.block_pad_right;
+        let content_right = width - renderer.appearance().scrollback.layout.block_pad_right;
         (content_right - renderer.timestamp_reserved())..content_right
     }
 
@@ -1568,7 +1554,7 @@ mod tests {
         let height = renderer.desired_height(width);
         let area = Rect::new(0, 0, width, height);
         let content_left =
-            HorizontalLayout::ACCENT + renderer.appearance.scrollback.layout.block_pad_left;
+            HorizontalLayout::ACCENT + renderer.appearance().scrollback.layout.block_pad_left;
         let ghost_x = gutter_band(&renderer, width).start + 2;
 
         // Clean render: find the code row by its token, capture its background.
@@ -1759,8 +1745,8 @@ mod tests {
     #[test]
     fn estimate_wrapped_line_count_saturates_at_u16_max() {
         // > u16::MAX source lines must cap, not overflow the running total.
-        let many = "\n".repeat(70_000);
-        assert_eq!(estimate_wrapped_line_count(&many, 80), u16::MAX);
+        let entry = ScrollbackEntry::new(RenderBlock::user_prompt("\n".repeat(70_000)));
+        assert_eq!(entry.estimate_source_lines(80), u16::MAX);
     }
 
     #[test]

@@ -353,6 +353,18 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
+        if !is_commenting
+            && key.code == KeyCode::Char('a')
+            && key.modifiers.is_empty()
+            && self.prompt.text().trim().is_empty()
+            && !self.prompt.file_search_visible()
+            && self
+                .plan_approval_view
+                .as_ref()
+                .is_some_and(|pav| pav.comments.is_empty())
+        {
+            return self.approve_plan();
+        }
         match self.prompt.route_enter(key) {
             EnterOutcome::NewlineInserted => return InputOutcome::Changed,
             EnterOutcome::Submit => {
@@ -370,7 +382,8 @@ impl AgentView {
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Prompt);
                 if prompt_focused {
                     if text.trim().is_empty() && !has_comments {
-                        return self.approve_plan();
+                        self.show_toast("Type revision notes, or press a to approve.");
+                        return InputOutcome::Changed;
                     }
                     let freeform = if text.trim().is_empty() {
                         None
@@ -870,5 +883,113 @@ mod plan_chip_tests {
             a_on.handle_scrollback_key(&down, &registry),
             InputOutcome::Action(Action::SelectNext)
         ));
+    }
+}
+#[cfg(test)]
+mod plan_approval_enter_tests {
+    use super::test_fixtures::make_agent;
+    use super::*;
+    use crate::views::plan_approval_view::PlanApprovalFocus;
+    fn enter_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+    fn agent_with_revise_prompt() -> AgentView {
+        let mut agent = make_agent();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::ExitPlanModeExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-1".into(),
+            plan_content: Some("# Plan\n\n## Step 1\nDo something".into()),
+        };
+        let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        );
+        pav.focus = PlanApprovalFocus::Prompt;
+        agent.plan_approval_view = Some(pav);
+        agent.prompt.set_text("");
+        agent
+    }
+    #[test]
+    fn empty_enter_on_revise_prompt_does_not_approve() {
+        let mut agent = agent_with_revise_prompt();
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "empty Enter must leave plan approval open"
+        );
+        assert_eq!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Type revision notes, or press a to approve.")
+        );
+    }
+    #[test]
+    fn enter_with_revision_text_requests_changes() {
+        let mut agent = agent_with_revise_prompt();
+        agent.prompt.set_text("please use auth middleware");
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(agent.plan_approval_view.is_none());
+        assert_eq!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+    }
+    #[test]
+    fn empty_enter_with_pending_comments_still_requests_changes() {
+        let mut agent = agent_with_revise_prompt();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.comments.push(PlanComment {
+                id: 1,
+                line_range: 0..1,
+                text: "nit".into(),
+            });
+        }
+        let outcome = agent.handle_plan_feedback_key(&enter_key());
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(agent.plan_approval_view.is_none());
+        assert_eq!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+    }
+    #[test]
+    fn a_on_empty_revise_prompt_approves() {
+        let mut agent = agent_with_revise_prompt();
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let outcome = agent.handle_plan_feedback_key(&a);
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(agent.plan_approval_view.is_none(), "`a` must approve");
+        assert_ne!(
+            agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Plan revision sent.")
+        );
+    }
+    #[test]
+    fn a_with_pending_comments_does_not_approve() {
+        let mut agent = agent_with_revise_prompt();
+        if let Some(ref mut pav) = agent.plan_approval_view {
+            pav.comments.push(PlanComment {
+                id: 1,
+                line_range: 0..1,
+                text: "nit".into(),
+            });
+        }
+        let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let _ = agent.handle_plan_feedback_key(&a);
+        assert!(
+            agent.plan_approval_view.is_some(),
+            "`a` with pending comments must type, not approve"
+        );
+        assert_eq!(agent.prompt.text(), "a");
     }
 }

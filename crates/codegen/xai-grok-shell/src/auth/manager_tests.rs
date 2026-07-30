@@ -1176,13 +1176,10 @@ async fn proactive_refresh_backs_off_on_permanent_failure() {
     let cancel = CancellationToken::new();
     mgr.start_proactive_refresh(cancel.clone());
 
-    // Give the loop ample time to observe the failure and back off.
-    // The 300ms window is two orders of magnitude shorter than the
-    // 5-minute BACKOFF_INTERVAL, so a backed-off loop completes at
-    // most a couple of iterations: the initial pass that records the
-    // permanent failure, optionally a few re-check passes if the
-    // executor races, then sleeps for `BACKOFF_INTERVAL`.
-    tokio::time::sleep(StdDuration::from_millis(300)).await;
+    // Window: past the PROACTIVE_MIN_SLEEP-delayed first pass, yet two
+    // orders of magnitude under BACKOFF_INTERVAL — a backed-off loop
+    // completes at most a couple of iterations in it.
+    tokio::time::sleep(PROACTIVE_MIN_SLEEP + StdDuration::from_millis(500)).await;
 
     let iterations = mgr.proactive_iteration_count();
     let after_failure = call_count.load(Ordering::SeqCst);
@@ -1289,7 +1286,9 @@ async fn proactive_refresh_and_consumer_see_fresh_token_end_to_end() {
 
     let cancel = CancellationToken::new();
     mgr.start_proactive_refresh(cancel.clone());
-    tokio::time::sleep(StdDuration::from_millis(500)).await;
+    // The loop's first pass runs after PROACTIVE_MIN_SLEEP (1 s), so the
+    // observation window must comfortably exceed the floor.
+    tokio::time::sleep(PROACTIVE_MIN_SLEEP + StdDuration::from_millis(1000)).await;
 
     assert!(call_count.load(Ordering::SeqCst) >= 1);
     assert_eq!(mgr.get_valid_token().await.unwrap(), "fresh-token");
@@ -2068,8 +2067,8 @@ fn compute_proactive_sleep_sleep_gated_returns_backoff() {
     });
     assert_eq!(
         compute_proactive_sleep(&mgr),
-        StdDuration::from_secs(0),
-        "precondition: ungated expired refreshable token yields a 0 sleep"
+        PROACTIVE_MIN_SLEEP,
+        "precondition: ungated expired refreshable token yields the floor sleep"
     );
 
     mgr.set_system_sleep_imminent(true);
@@ -2080,10 +2079,10 @@ fn compute_proactive_sleep_sleep_gated_returns_backoff() {
     );
 }
 
-/// Dark wake -> BACKOFF_INTERVAL even for a refreshable token past its expiry.
-/// `refresh_chain` defers every attempt during a dark wake (to avoid an IdP
-/// refresh straddling an unsignaled re-sleep), so the proactive loop must back
-/// off rather than spin at `sleep_dur=0`.
+/// Dark wake -> BACKOFF_INTERVAL while a wire-valid token can still be served:
+/// `refresh_chain` defers that case, so the loop must back off rather than spin
+/// at `sleep_dur=0` against the deferral. Once nothing usable can be served the
+/// deferral stops and so does the backoff — both arms are asserted below.
 #[test]
 fn compute_proactive_sleep_dark_wake_returns_backoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -2092,19 +2091,20 @@ fn compute_proactive_sleep_dark_wake_returns_backoff() {
         call_count: Arc::new(AtomicU32::new(0)),
         delay: StdDuration::from_millis(0),
     }));
-    // Refreshable OidcSession past the early-invalidation boundary: without
-    // the dark-wake gate this returns 0 (would busy-loop).
+    // Wire-valid but past the early-invalidation boundary: renewal is due, and
+    // `refresh_chain` will defer it in dark wake — so the loop must back off
+    // rather than busy-loop against that deferral.
     mgr.hot_swap(GrokAuth {
         key: "oidc".into(),
         auth_mode: AuthMode::Oidc,
         refresh_token: Some("rt".into()),
-        expires_at: Some(Utc::now() - Duration::hours(1)),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
         ..GrokAuth::test_default()
     });
     assert_eq!(
         compute_proactive_sleep(&mgr),
-        StdDuration::from_secs(0),
-        "precondition: non-dark-wake expired refreshable token yields a 0 sleep"
+        PROACTIVE_MIN_SLEEP,
+        "precondition: renewal due outside dark wake yields the floor sleep"
     );
 
     mgr.set_dark_wake_for_test(true);
@@ -2114,12 +2114,19 @@ fn compute_proactive_sleep_dark_wake_returns_backoff() {
         "dark wake must back the proactive loop off instead of busy-looping"
     );
 
-    // Returning to a full wake re-enables immediate refresh.
-    mgr.set_dark_wake_for_test(false);
+    // Hard-expired: `refresh_chain` no longer defers, so backing off here would
+    // strand the session for a full interval.
+    mgr.hot_swap(GrokAuth {
+        key: "oidc".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
     assert_eq!(
         compute_proactive_sleep(&mgr),
-        StdDuration::from_secs(0),
-        "full wake must allow the refresh to proceed again"
+        PROACTIVE_MIN_SLEEP,
+        "dark wake must not delay recovery when no usable token can be served"
     );
 }
 
@@ -2161,10 +2168,11 @@ fn compute_proactive_sleep_refreshable_no_expiry_returns_backoff() {
     assert_eq!(compute_proactive_sleep(&mgr), BACKOFF_INTERVAL);
 }
 
-/// Refreshable type + `Some(past)` and gates pass -> sleep_dur = 0
-/// (refresh now). This is the "happy path" the gates don't block.
+/// Refreshable type + `Some(past)` and gates pass -> the floor sleep
+/// (refresh on the next pass; floored so the adopt/skip fast paths can't
+/// spin). This is the "happy path" the gates don't block.
 #[test]
-fn compute_proactive_sleep_refreshable_past_expiry_returns_zero() {
+fn compute_proactive_sleep_refreshable_past_expiry_returns_floor() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     mgr.set_refresher(Arc::new(CountingRefresher {
@@ -2179,7 +2187,7 @@ fn compute_proactive_sleep_refreshable_past_expiry_returns_zero() {
         ..GrokAuth::test_default()
     });
     assert_eq!(mgr.token_type(), TokenType::OidcSession);
-    assert_eq!(compute_proactive_sleep(&mgr), StdDuration::from_secs(0));
+    assert_eq!(compute_proactive_sleep(&mgr), PROACTIVE_MIN_SLEEP);
 }
 
 /// Refreshable type + `Some(future)` and gates pass -> sleep_dur ~=
@@ -4213,20 +4221,32 @@ async fn sleep_deferred_refresh_is_transient_no_kpi_no_verdict() {
     );
 }
 
+/// Dark wake defers a refresh only while a *wire-valid* token can still be
+/// served — then the deferral costs nothing but latency.
 #[tokio::test]
-async fn dark_wake_defers_refresh_without_calling_idp() {
+async fn dark_wake_defers_refresh_while_a_live_token_can_be_served() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    mgr.hot_swap(expired_oidc());
+    // Inside the early-invalidation buffer: due for renewal (`current()` is
+    // None, so `refresh_chain` proceeds) but still accepted on the wire.
+    mgr.hot_swap(GrokAuth {
+        key: "live-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
+        ..GrokAuth::test_default()
+    });
     let call_count = Arc::new(AtomicU32::new(0));
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: call_count.clone(),
         delay: StdDuration::from_millis(0),
     }));
-
     mgr.set_dark_wake_for_test(true);
 
-    let err = mgr.auth().await.unwrap_err();
+    let err = mgr
+        .refresh_chain(TokenType::OidcSession, RefreshReason::PreRequest)
+        .await
+        .unwrap_err();
     assert!(
         matches!(
             err,
@@ -4237,18 +4257,65 @@ async fn dark_wake_defers_refresh_without_calling_idp() {
     assert_eq!(
         call_count.load(Ordering::SeqCst),
         0,
-        "the IdP refresher must NOT be called during a dark wake (the refresh \
-         token must not be sent into a possible re-sleep)"
+        "with a live token to serve, the refresh token must not be sent into a \
+         possible re-sleep"
     );
+}
 
-    // Returning to a full wake lets the refresh proceed and reach the IdP.
-    mgr.set_dark_wake_for_test(false);
-    assert_eq!(mgr.auth().await.unwrap().key, "fresh-token");
+/// The inverse, and the one field logs caught: with **no** usable token, a
+/// dark-wake deferral guarantees the caller 401s instead of merely delaying it.
+/// A machine doing background work with the lid shut (leader mode + subagents)
+/// accumulated hundreds of 401s across hours of continuous dark wake while
+/// every recovery refresh was deferred. Refresh must proceed in that state.
+#[tokio::test]
+async fn dark_wake_does_not_defer_when_no_usable_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(expired_oidc());
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr.set_dark_wake_for_test(true);
+
     assert_eq!(
-        call_count.load(Ordering::SeqCst),
-        1,
-        "after a full wake the refresher must be invoked"
+        mgr.auth().await.unwrap().key,
+        "fresh-token",
+        "an expired credential in dark wake must still be refreshed"
     );
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+/// A 401 recovery is never deferred for dark wake: the server already rejected
+/// what we hold, so deferring can only prolong the failure.
+#[tokio::test]
+async fn dark_wake_does_not_defer_server_rejected_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "rejected-but-unexpired".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
+        ..GrokAuth::test_default()
+    });
+    let call_count = Arc::new(AtomicU32::new(0));
+    mgr.set_refresher(Arc::new(CountingRefresher {
+        call_count: call_count.clone(),
+        delay: StdDuration::from_millis(0),
+    }));
+    mgr.set_dark_wake_for_test(true);
+
+    assert_eq!(
+        mgr.refresh_chain(TokenType::OidcSession, RefreshReason::ServerRejected)
+            .await
+            .unwrap()
+            .key,
+        "fresh-token",
+        "ServerRejected recovery must reach the IdP even in dark wake"
+    );
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
 
 /// A machine stuck reporting a *continuous* dark wake (e.g. an interactive Mac
@@ -4260,7 +4327,15 @@ async fn dark_wake_defers_refresh_without_calling_idp() {
 async fn dark_wake_defer_forces_refresh_after_max() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    mgr.hot_swap(expired_oidc());
+    // Wire-valid but due for renewal, so the deferral path (and its budget) is
+    // the thing under test — a hard-expired token is never deferred at all.
+    mgr.hot_swap(GrokAuth {
+        key: "live-key".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-old".into()),
+        expires_at: Some(Utc::now() + Duration::minutes(2)),
+        ..GrokAuth::test_default()
+    });
     let call_count = Arc::new(AtomicU32::new(0));
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: call_count.clone(),
@@ -4332,17 +4407,51 @@ fn dark_wake_defer_budget_survives_powered_on_during_dark_wake() {
 }
 
 /// The `power_listener_started` guard in `is_dark_wake` must short-circuit to
-/// `false` when no OS power listener was started (headless / datacenter), so
+/// `false` when no OS power listener was started (headless / server), so
 /// those processes never treat the OS power state as a dark wake. Exercises the
 /// guard directly (no dark-wake override installed).
 #[test]
+#[serial_test::serial(force_dark_wake_env)] // reads GROK_AUTH_FORCE_DARK_WAKE
 fn is_dark_wake_false_when_power_listener_not_started() {
+    let _unset = xai_grok_test_support::EnvGuard::unset("GROK_AUTH_FORCE_DARK_WAKE");
     let dir = tempfile::tempdir().unwrap();
     let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
     assert!(
         !mgr.is_dark_wake(),
         "is_dark_wake must be false when the power listener was never started"
     );
+}
+
+/// `GROK_AUTH_FORCE_DARK_WAKE` forces the dark-wake answer for manual and
+/// integration testing — read BEFORE the `power_listener_started` check,
+/// because a headless run never starts the listener and the override
+/// exists precisely so such a run can drive the dark-wake paths against a
+/// real binary.
+#[test]
+#[serial_test::serial(force_dark_wake_env)]
+fn is_dark_wake_env_override_forces_both_states() {
+    use xai_grok_test_support::EnvGuard;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
+    // Precondition: no power listener, so without the override this is
+    // unconditionally false.
+    {
+        let _g = EnvGuard::set("GROK_AUTH_FORCE_DARK_WAKE", "1");
+        assert!(
+            mgr.is_dark_wake(),
+            "=1 must force dark wake even without a power listener"
+        );
+    }
+    {
+        let _g = EnvGuard::set("GROK_AUTH_FORCE_DARK_WAKE", "0");
+        assert!(!mgr.is_dark_wake(), "=0 must force full wake");
+    }
+    {
+        // Unrecognized values fall through to the OS query (listener not
+        // started here, so false) rather than picking a state.
+        let _g = EnvGuard::set("GROK_AUTH_FORCE_DARK_WAKE", "yes");
+        assert!(!mgr.is_dark_wake(), "non-1/0 values must not force a state");
+    }
 }
 
 #[tokio::test]
@@ -4763,4 +4872,103 @@ async fn manual_auth_emits_only_for_user_facing_source() {
         .next()
         .await;
     assert!(api.manual_auth_last_token().is_none());
+}
+
+// ── requires_manual_reauth: transient-vs-terminal authority ─────────
+
+/// A refreshable credential with no sticky verdict must NOT demand a manual
+/// `/login` — this is the authority the sampler consults before painting the
+/// pager's re-auth banner, and the post-wake network gap must classify as
+/// self-healing.
+#[tokio::test]
+async fn requires_manual_reauth_false_for_refreshable_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "expired-at".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-live".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+    mgr.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "expired AT with a live RT and no verdict must be self-healing"
+    );
+
+    // A recoverable verdict (escalated `Other` — e.g. post-wake blips) still
+    // self-heals after its TTL, so it must not demand manual re-auth either.
+    record_permanent_failure(&mgr, crate::auth::error::RefreshTokenFailedReason::Other);
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "a recoverable Other verdict must not demand /login"
+    );
+}
+
+/// A sticky `RefreshTokenRejected` verdict (IdP revoked the RT) is fixable
+/// only by `/login`; likewise a manager with no refresh authority at all.
+#[tokio::test]
+async fn requires_manual_reauth_true_for_sticky_verdict_and_no_refresher() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "expired-at".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("rt-dead".into()),
+        expires_at: Some(Utc::now() - Duration::hours(1)),
+        ..GrokAuth::test_default()
+    });
+
+    // No refresher configured: nothing can silently heal the session.
+    assert!(
+        mgr.requires_manual_reauth(),
+        "no refresh authority must demand /login"
+    );
+
+    mgr.set_refresher(Arc::new(FailingRefresher {
+        call_count: Arc::new(AtomicU32::new(0)),
+    }));
+    record_permanent_failure(
+        &mgr,
+        crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected,
+    );
+    assert!(
+        mgr.requires_manual_reauth(),
+        "a sticky RefreshTokenRejected verdict must demand /login"
+    );
+}
+
+// ── proactive_failure_backoff ────────────────────────────────────────
+
+/// The proactive loop's failure backoff: zero before any failure (schedule is
+/// purely expiry-driven), grows with consecutive failures, and is capped so a
+/// long outage still retries at the regular cadence. Guards against the
+/// zero-delay spin that burned the OIDC escalation budget while post-wake
+/// Wi-Fi was still associating.
+#[test]
+fn proactive_failure_backoff_shape() {
+    assert_eq!(
+        crate::auth::manager::proactive_failure_backoff(0),
+        std::time::Duration::ZERO,
+        "no failures → no extra delay"
+    );
+    let b1 = crate::auth::manager::proactive_failure_backoff(1);
+    assert!(
+        b1 >= std::time::Duration::from_secs(5) && b1 < std::time::Duration::from_secs(9),
+        "first failure backs off ~5s (plus jitter), got {b1:?}"
+    );
+    let b3 = crate::auth::manager::proactive_failure_backoff(3);
+    assert!(
+        b3 >= std::time::Duration::from_secs(20) && b3 < std::time::Duration::from_secs(24),
+        "third failure backs off ~20s (plus jitter), got {b3:?}"
+    );
+    let huge = crate::auth::manager::proactive_failure_backoff(u32::MAX);
+    assert!(
+        huge <= BACKOFF_INTERVAL + std::time::Duration::from_secs(3),
+        "backoff must cap at BACKOFF_INTERVAL (+jitter), got {huge:?}"
+    );
 }

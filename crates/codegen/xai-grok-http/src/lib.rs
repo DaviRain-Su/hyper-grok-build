@@ -24,7 +24,8 @@
 //! a fresh client per `SamplingClient`.
 //!
 //! TLS root certificates are warmed at process start via
-//! `warm_async_http_client()` (in `mvp_agent.rs`).
+//! `warm_async_http_client()` (in `mvp_agent.rs`). Optional extra roots:
+//! `GROK_EXTRA_CA_BUNDLE` via `xai_grok_extra_ca` (see env-var registry).
 
 use std::sync::OnceLock;
 
@@ -320,16 +321,18 @@ pub fn shared_client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
             let _timer = startup_timer!("startup.http_client_build");
-            reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .user_agent(process_user_agent_string())
-                .pool_idle_timeout(std::time::Duration::from_secs(30))
-                .http2_keep_alive_interval(std::time::Duration::from_secs(20))
-                .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
-                .http2_keep_alive_while_idle(true)
-                .tcp_keepalive(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build shared HTTP client")
+            xai_grok_extra_ca::with_extra_root_certificates(
+                reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(30))
+                    .user_agent(process_user_agent_string())
+                    .pool_idle_timeout(std::time::Duration::from_secs(30))
+                    .http2_keep_alive_interval(std::time::Duration::from_secs(20))
+                    .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+                    .http2_keep_alive_while_idle(true)
+                    .tcp_keepalive(std::time::Duration::from_secs(30)),
+            )
+            .build()
+            .expect("failed to build shared HTTP client")
         })
         .clone()
 }
@@ -362,19 +365,21 @@ pub fn shared_upload_client() -> reqwest::Client {
     static UPLOAD_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     UPLOAD_CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
-                // Force HTTP/1.1: batch_upload multipart bodies are silently
-                // dropped when an HTTP/2 connection degrades (GOAWAY, flow-control
-                // exhaustion). Because all streams share one connection, a single
-                // bad connection causes every subsequent request to arrive with
-                // Content-Length: 0, producing thousands of 400s until the process
-                // restarts. HTTP/1.1 isolates failures to individual connections.
-                .http1_only()
-                .pool_max_idle_per_host(2)
-                .pool_idle_timeout(std::time::Duration::from_secs(10))
-                .user_agent(process_user_agent_string())
-                .build()
-                .expect("failed to build shared upload HTTP client")
+            xai_grok_extra_ca::with_extra_root_certificates(
+                reqwest::Client::builder()
+                    // Force HTTP/1.1: batch_upload multipart bodies are silently
+                    // dropped when an HTTP/2 connection degrades (GOAWAY, flow-control
+                    // exhaustion). Because all streams share one connection, a single
+                    // bad connection causes every subsequent request to arrive with
+                    // Content-Length: 0, producing thousands of 400s until the process
+                    // restarts. HTTP/1.1 isolates failures to individual connections.
+                    .http1_only()
+                    .pool_max_idle_per_host(2)
+                    .pool_idle_timeout(std::time::Duration::from_secs(10))
+                    .user_agent(process_user_agent_string()),
+            )
+            .build()
+            .expect("failed to build shared upload HTTP client")
         })
         .clone()
 }
@@ -387,11 +392,13 @@ pub fn shared_upload_client() -> reqwest::Client {
 /// Fallible: build can fail under fd/TLS pressure; the caller must not
 /// panic on error (fallback policy lives at the call site).
 pub(crate) fn fresh_http1_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .http1_only()
-        .pool_max_idle_per_host(0)
-        .user_agent(process_user_agent_string())
-        .build()
+    xai_grok_extra_ca::with_extra_root_certificates(
+        reqwest::Client::builder()
+            .http1_only()
+            .pool_max_idle_per_host(0)
+            .user_agent(process_user_agent_string()),
+    )
+    .build()
 }
 
 /// Joins an error's `source()` chain into one string. A `reqwest::Error`'s `Display`
@@ -543,14 +550,16 @@ pub fn shared_startup_blocking_client() -> reqwest::blocking::Client {
     BLOCKING_CLIENT
         .get_or_init(|| {
             let _timer = startup_timer!("startup.http_blocking_client_build");
-            reqwest::blocking::Client::builder()
-                .connect_timeout(STARTUP_FETCH_TIMEOUT)
-                .timeout(STARTUP_FETCH_TIMEOUT)
-                .user_agent(process_user_agent_string())
-                .pool_idle_timeout(std::time::Duration::from_secs(30))
-                .tcp_keepalive(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build shared blocking HTTP client")
+            xai_grok_extra_ca::with_extra_root_certificates_blocking(
+                reqwest::blocking::Client::builder()
+                    .connect_timeout(STARTUP_FETCH_TIMEOUT)
+                    .timeout(STARTUP_FETCH_TIMEOUT)
+                    .user_agent(process_user_agent_string())
+                    .pool_idle_timeout(std::time::Duration::from_secs(30))
+                    .tcp_keepalive(std::time::Duration::from_secs(30)),
+            )
+            .build()
+            .expect("failed to build shared blocking HTTP client")
         })
         .clone()
 }

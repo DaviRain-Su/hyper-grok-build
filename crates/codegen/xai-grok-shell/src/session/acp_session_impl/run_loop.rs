@@ -1806,8 +1806,7 @@ pub(super) async fn run_session(
                                 .send((availability.workflows, availability.workflow_management));
                         }
                         SessionCommand::ListAvailableCommands { respond_to } => {
-                            let bridge = session.agent.borrow().tool_bridge().clone();
-                            let skills = bridge.slash_skills().await;
+                            let skills = session.slash_skills_for_resolve().await;
                             let tool_names = session.registered_tool_names().await;
                             let has_runs = !session.workflow_tracker().await.lock().list().is_empty();
                             let availability =

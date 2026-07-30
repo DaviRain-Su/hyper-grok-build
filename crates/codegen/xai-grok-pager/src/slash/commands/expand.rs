@@ -10,6 +10,7 @@
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
+use crate::slash::{ModeSupport, Remedy};
 
 /// Re-print the last collapsed/truncated block, fully expanded (minimal mode).
 pub struct ExpandCommand;
@@ -31,15 +32,13 @@ impl SlashCommand for ExpandCommand {
         "/expand"
     }
 
+    fn mode_support(&self) -> ModeSupport {
+        ModeSupport::MinimalOnly(Remedy::UseInstead(
+            "press Tab to focus the scrollback, then → on the block",
+        ))
+    }
+
     fn run(&self, ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        // Expansion is meaningful only in minimal mode — the full-TUI scrollback
-        // pane folds/unfolds blocks in place (the `e` / `Ctrl+E` chords) and has
-        // no print-once committed history to re-print.
-        if !ctx.screen_mode.is_minimal() {
-            return CommandResult::Message(
-                "/expand is only available in minimal mode (--minimal)".to_string(),
-            );
-        }
         if ctx.session_id.is_none() {
             return CommandResult::Error("No active session".to_string());
         }
@@ -75,6 +74,7 @@ mod tests {
             session_id,
             bundle_state: &DEFAULT_BUNDLE_STATE,
             billing_surface_visible: true,
+            usage_command_visible: true,
             screen_mode,
             pager_state: PagerLocalSnapshot::default(),
         }
@@ -89,17 +89,6 @@ mod tests {
             ExpandCommand.run(&mut c, ""),
             CommandResult::Action(Action::MinimalExpandLast)
         ));
-    }
-
-    #[test]
-    fn non_minimal_returns_message() {
-        let models = ModelState::default();
-        let sid = agent_client_protocol::SessionId::from("s1".to_string());
-        let mut c = ctx(&models, Some(&sid), crate::app::ScreenMode::Fullscreen);
-        match ExpandCommand.run(&mut c, "") {
-            CommandResult::Message(msg) => assert!(msg.contains("minimal")),
-            other => panic!("expected Message, got {other:?}"),
-        }
     }
 
     #[test]
