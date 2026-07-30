@@ -4,8 +4,26 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.114-r6] — 2026-07-30
+
 ### Added
 - **`api_backend = "codex_responses"`** (alias `codex-responses`) — OpenAI Responses wire with ChatGPT Codex dialect for custom models and third-party Codex reverse proxies (中转站). Enables system→`instructions`, strips temperature/top_p/max_output_tokens, and uses the OpenAiCodex adapter without requiring `openai-codex/*` OAuth catalog IDs.
+- **Delete current session** — `/delete` and palette entry to remove the active session (upstream).
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `500129c` (monorepo `SOURCE_REV` `6372e41d…`): Messages backend transcript cache, session bash/hook reaping, doom-loop recovery default-on, clamped-wait model feedback, stationarity nudge delivery fixes, platform-shell auth provider commands (Windows), shorter monitor tool stdout, UUID analytics insert IDs, thread-starvation startup fix, project forking-settings toggle, coding-data consent tracking, access-gate fail-open, Agent Dashboard user guide, and multi-process credential / session-log hardening.
+
+### Notes
+- This is community revision `0.2.114-r6`; it remains a normal GitHub Release so installers and `hyper update` treat it as latest.
+- Linux release binaries continue to target **glibc ≥ 2.17** via cargo-zigbuild.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.114-r6
+```
 
 ## [0.2.114-r5] — 2026-07-29
 
