@@ -174,7 +174,9 @@ mod tests {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
         match NexusCommand.run(&mut ctx, "clear") {
-            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key, .. }) => {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform, api_key, ..
+            }) => {
                 assert_eq!(platform, "nexus");
                 assert!(api_key.is_empty());
             }

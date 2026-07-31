@@ -20,6 +20,7 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
         ConversationItem::ToolResult(_) => "tool_result",
         ConversationItem::BackendToolCall(_) => "backend_tool_call",
         ConversationItem::Reasoning(_) => "reasoning",
+        ConversationItem::Compaction(_) => "compaction",
     }
 }
 
@@ -333,6 +334,7 @@ impl ChatStateActor {
                     xai_grok_sampling_types::reasoning_item_text(r).len()
                         + r.encrypted_content.as_deref().map(str::len).unwrap_or(0)
                 }
+                ConversationItem::Compaction(compaction) => compaction.encrypted_content.len(),
             })
             .sum()
     }

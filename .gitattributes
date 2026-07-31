@@ -1,0 +1,3 @@
+# Preserve vendored Opus sources verbatim; upstream contains intentional
+# whitespace that should not fail repository-level diff checks.
+/third_party/audiopus_sys/opus/** -whitespace

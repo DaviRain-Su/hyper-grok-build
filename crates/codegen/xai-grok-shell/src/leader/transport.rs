@@ -276,7 +276,7 @@ mod windows_impl {
 
         #[test]
         fn pipe_name_is_bounded() {
-            let long_path = "/".to_owned() + &"a".repeat(500);
+            let long_path = format!("/{}", "a".repeat(500));
             let name = path_to_pipe_name(Path::new(&long_path));
             // \\.\pipe\grok-leader- (20 chars) + 16 hex chars = 36 total
             assert!(name.len() <= 256, "pipe name too long: {}", name.len());

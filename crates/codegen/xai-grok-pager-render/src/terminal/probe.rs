@@ -10,6 +10,7 @@
 //!   portable re-injection exists (TIOCSTI is blocked); accepted loss.
 
 use std::io::Write;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// Bounds the reply buffer against terminals that stream without a terminator.

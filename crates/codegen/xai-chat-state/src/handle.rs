@@ -165,9 +165,9 @@ impl ChatStateHandle {
 
     /// Update the sampling config (e.g., model switch).
     pub fn update_sampling_config(&self, config: SamplingConfig) {
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::UpdateSamplingConfig { config });
+        let _ = self.cmd_tx.send(ChatStateCommand::UpdateSamplingConfig {
+            config: Box::new(config),
+        });
     }
 
     /// Track that the agent edited a file path.

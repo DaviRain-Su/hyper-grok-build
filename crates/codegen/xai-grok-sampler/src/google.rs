@@ -280,7 +280,9 @@ pub fn build_request(
                 });
                 entry.parts.push(function_response);
             }
-            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
+            ConversationItem::Reasoning(_)
+            | ConversationItem::BackendToolCall(_)
+            | ConversationItem::Compaction(_) => {}
         }
     }
     flush_pending(&mut pending_function_responses, &mut contents);
@@ -336,10 +338,10 @@ pub fn build_request(
 }
 
 fn flush_pending(pending: &mut Option<GoogleContent>, contents: &mut Vec<GoogleContent>) {
-    if let Some(content) = pending.take() {
-        if !content.parts.is_empty() {
-            contents.push(content);
-        }
+    if let Some(content) = pending.take()
+        && !content.parts.is_empty()
+    {
+        contents.push(content);
     }
 }
 
@@ -693,6 +695,12 @@ impl VertexAdcTokenProvider {
     }
 }
 
+impl Default for VertexAdcTokenProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn apply_google_auth_headers(
     headers: &mut HeaderMap,
     api_key: Option<&str>,
@@ -704,10 +712,10 @@ pub fn apply_google_auth_headers(
         if let Ok(v) = HeaderValue::from_str(key) {
             headers.insert(HeaderName::from_static("x-goog-api-key"), v);
         }
-    } else if let Some(bearer) = bearer {
-        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {bearer}")) {
-            headers.insert(AUTHORIZATION, v);
-        }
+    } else if let Some(bearer) = bearer
+        && let Ok(v) = HeaderValue::from_str(&format!("Bearer {bearer}"))
+    {
+        headers.insert(AUTHORIZATION, v);
     }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));

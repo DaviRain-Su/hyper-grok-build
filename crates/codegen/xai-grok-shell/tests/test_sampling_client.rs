@@ -1398,6 +1398,13 @@ async fn test_api_backend_getter_returns_configured_value() {
 
     let client_chat = create_test_client("http://localhost/v1", ApiBackend::ChatCompletions);
     assert_eq!(client_chat.api_backend(), ApiBackend::ChatCompletions);
+
+    let client_codex = create_test_client("http://localhost/v1", ApiBackend::CodexResponses);
+    assert_eq!(client_codex.api_backend(), ApiBackend::Responses);
+    assert_eq!(
+        client_codex.configured_api_backend(),
+        ApiBackend::CodexResponses
+    );
 }
 
 #[tokio::test]
@@ -1427,7 +1434,8 @@ async fn test_responses_backend_hits_responses_endpoint_not_chat_completions() {
         ApiBackend::ChatCompletions => {
             panic!("Expected Responses backend but got ChatCompletions");
         }
-        ApiBackend::Messages
+        ApiBackend::CodexResponses
+        | ApiBackend::Messages
         | ApiBackend::GoogleGenerateContent
         | ApiBackend::BedrockConverseStream
         | ApiBackend::PiMessages => {
@@ -1471,7 +1479,8 @@ async fn test_chat_completions_backend_hits_chat_endpoint_not_responses() {
         ApiBackend::Responses | ApiBackend::CodexResponses => {
             panic!("Expected ChatCompletions backend but got Responses");
         }
-        ApiBackend::Messages
+        ApiBackend::CodexResponses
+        | ApiBackend::Messages
         | ApiBackend::GoogleGenerateContent
         | ApiBackend::BedrockConverseStream
         | ApiBackend::PiMessages => {

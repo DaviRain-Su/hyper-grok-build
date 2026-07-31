@@ -48,9 +48,7 @@ pub(crate) fn sticky_permanent_failure(
 ) -> Option<String> {
     let key = (family, fingerprint_refresh_token(refresh_token));
     let mut map = STICKY.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(verdict) = map.get(&key) else {
-        return None;
-    };
+    let verdict = map.get(&key)?;
     if verdict.recorded_at.elapsed() >= STICKY_TTL {
         map.remove(&key);
         return None;

@@ -16,7 +16,9 @@ use xai_grok_pager_pty_harness::{PtyHarness, pager_binary};
 
 fn main() -> anyhow::Result<()> {
     let lang = std::env::args().nth(1).unwrap_or_else(|| "en".into());
-    let out_path = std::env::args().nth(2).unwrap_or_else(|| "/tmp/shot.json".into());
+    let out_path = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "/tmp/shot.json".into());
 
     let home = tempfile::tempdir()?;
     let grok_home = home.path().join(".grok");

@@ -245,9 +245,9 @@ impl SessionActor {
         let chat_history_for_artifact = items.clone();
         // Main-turn tool specs: tools serialize into the cached token prefix.
         let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
+        let tools = self.turn_base_tool_specs(&tool_defs).await;
         // Mirror the main turn's hosted tools so a recap can't search past the active cutoff.
-        let hosted_tools = self.hosted_tools_for_turn();
+        let hosted_tools = self.hosted_tools_for_turn().await;
         let request = ConversationRequest {
             items,
             tools,

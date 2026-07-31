@@ -946,8 +946,7 @@ pub(crate) struct SessionActor {
     /// WASM extension runtime rebuilt from trusted, enabled plugins that ship
     /// `extension.wasm` (see `docs/design-wasm-extensions.md`). Single-threaded
     /// session actor: `RefCell` is sufficient.
-    pub(crate) extension_runtime:
-        std::cell::RefCell<xai_grok_extension_runtime::ExtensionRuntime>,
+    pub(crate) extension_runtime: std::cell::RefCell<xai_grok_extension_runtime::ExtensionRuntime>,
     /// Client tool names this session registered on the shared ToolBridge
     /// (session-scoped unregister; see Oracle review).
     pub(crate) wasm_registered_tools: std::cell::RefCell<Vec<String>>,
@@ -1392,9 +1391,6 @@ fn load_prompt_context_from_dir(
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/wasm_extension_e2e_tests.rs"]
-mod wasm_extension_e2e_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
 #[cfg(test)]
@@ -1403,6 +1399,9 @@ mod support;
 #[cfg(test)]
 #[path = "acp_session_tests/usage_categories_tests.rs"]
 mod usage_categories_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/wasm_extension_e2e_tests.rs"]
+mod wasm_extension_e2e_tests;
 #[cfg(test)]
 mod managed_gateway_descriptor_tests {
     use super::*;

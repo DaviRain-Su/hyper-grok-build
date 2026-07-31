@@ -19,9 +19,7 @@ pub(crate) fn enabled_patterns() -> Vec<String> {
 /// Reject invalid glob syntax (same engine as shell config validation).
 pub(crate) fn validate_glob_pattern(pattern: &str) -> Result<(), String> {
     Glob::new(pattern).map(|_| ()).map_err(|e| {
-        format!(
-            "invalid glob pattern '{pattern}': {e}. Use * and ? wildcards (and [...] classes)."
-        )
+        format!("invalid glob pattern '{pattern}': {e}. Use * and ? wildcards (and [...] classes).")
     })
 }
 
@@ -144,11 +142,7 @@ pub(crate) fn adjacent_in_cycle(
         .and_then(|c| list.iter().position(|id| id == c))
         .unwrap_or(if reverse { 0 } else { list.len() - 1 });
     let next = if reverse {
-        if idx == 0 {
-            list.len() - 1
-        } else {
-            idx - 1
-        }
+        if idx == 0 { list.len() - 1 } else { idx - 1 }
     } else {
         (idx + 1) % list.len()
     };
@@ -168,9 +162,10 @@ mod tests {
         let mut models = ModelState::default();
         for id in ids {
             let model_id = mid(id);
-            models
-                .available
-                .insert(model_id.clone(), acp::ModelInfo::new(model_id, id.to_string()));
+            models.available.insert(
+                model_id.clone(),
+                acp::ModelInfo::new(model_id, id.to_string()),
+            );
         }
         models.current = current.map(mid);
         models
@@ -189,7 +184,11 @@ mod tests {
         assert!(matches_enabled(&["a?c".into()], "abc", "abc"));
         assert!(!matches_enabled(&["a?c".into()], "abbc", "abbc"));
         assert!(matches_enabled(&["*".into()], "anything", "anything"));
-        assert!(matches_enabled(&["grok-[34]*".into()], "grok-4.5", "grok-4.5"));
+        assert!(matches_enabled(
+            &["grok-[34]*".into()],
+            "grok-4.5",
+            "grok-4.5"
+        ));
         assert!(!matches_enabled(&["grok-[34]*".into()], "grok-2", "grok-2"));
     }
 

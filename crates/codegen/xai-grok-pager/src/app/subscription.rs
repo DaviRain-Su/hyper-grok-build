@@ -147,10 +147,7 @@ impl AppView {
         // Kimi, …). A SuperGrok *consumer* paywall must not lock the whole TUI
         // — users should keep working by switching model / credentials. Team /
         // enterprise gates still apply.
-        if cfg!(feature = "community-build")
-            && self.team_name.is_none()
-            && !self.is_api_key_auth
-        {
+        if cfg!(feature = "community-build") && self.team_name.is_none() && !self.is_api_key_auth {
             crate::unified_log::info(
                 "subscription.gate.ignored_community_build",
                 None,

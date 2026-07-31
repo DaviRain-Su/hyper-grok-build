@@ -309,10 +309,10 @@ async fn persist_ack_waits_for_disk_flush_before_success_inner() {
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-        extension_runtime: std::cell::RefCell::new(
-            xai_grok_extension_runtime::ExtensionRuntime::new(),
-        ),
-        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+                extension_runtime: std::cell::RefCell::new(
+                    xai_grok_extension_runtime::ExtensionRuntime::new(),
+                ),
+                wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
                 events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),
@@ -805,10 +805,10 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 hook_load_errors: std::cell::RefCell::new(Vec::new()),
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
-        extension_runtime: std::cell::RefCell::new(
-            xai_grok_extension_runtime::ExtensionRuntime::new(),
-        ),
-        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+                extension_runtime: std::cell::RefCell::new(
+                    xai_grok_extension_runtime::ExtensionRuntime::new(),
+                ),
+                wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
                 events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),

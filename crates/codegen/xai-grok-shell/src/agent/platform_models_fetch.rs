@@ -491,10 +491,10 @@ pub(crate) fn platform_wire_model_to_entry(
         env_key,
         // Official Pi kimi-coding uses anthropic-messages; open platforms stay
         // on OpenAI-compatible chat completions.
-        api_backend: if platform == PlatformId::KimiCode {
-            ApiBackend::Messages
-        } else {
-            ApiBackend::ChatCompletions
+        api_backend: match platform {
+            PlatformId::KimiCode => ApiBackend::Messages,
+            PlatformId::OpenAiCodex => ApiBackend::Responses,
+            _ => ApiBackend::ChatCompletions,
         },
         request_compat: None,
         endpoint_path: None,
@@ -528,7 +528,7 @@ pub(crate) fn platform_wire_model_to_entry(
         hidden: false,
         // Subscription requires OAuth stamp; open platforms are API-key ready.
         supported_in_api: !platform.uses_oauth(),
-        supports_backend_search: false,
+        supports_backend_search: platform == PlatformId::OpenAiCodex,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,

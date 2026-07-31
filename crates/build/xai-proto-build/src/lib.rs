@@ -166,10 +166,7 @@ impl XaiProtoBuilder {
             }
 
             let output = fs::read_to_string(&dep_path).with_context(|| {
-                format!(
-                    "read protoc --dependency_out file {}",
-                    dep_path.display()
-                )
+                format!("read protoc --dependency_out file {}", dep_path.display())
             })?;
 
             // protoc writes: `<descriptor_set_out>: dep1 dep2 \` then

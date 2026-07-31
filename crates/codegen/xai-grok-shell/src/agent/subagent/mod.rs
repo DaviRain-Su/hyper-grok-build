@@ -790,7 +790,7 @@ async fn read_parent_sampling_config(
             let same_baseline_route = ctx.sampling_config.model == cfg.model
                 && ctx.sampling_config.base_url.trim_end_matches('/')
                     == cfg.base_url.trim_end_matches('/');
-            let (bearer_resolver, responses_codex_dialect, kimi_dialect) = match parent_model {
+            let (bearer_resolver, codex_oauth_active, kimi_dialect) = match parent_model {
                 Some(model) => (
                     crate::agent::config::kimi_code_bearer_resolver_for_model(model).or_else(
                         || crate::agent::config::openai_codex_bearer_resolver_for_model(model),
@@ -821,6 +821,10 @@ async fn read_parent_sampling_config(
                         || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url),
                 ),
             };
+            let responses_codex_dialect = cfg.api_backend
+                == crate::sampling::ApiBackend::CodexResponses
+                || cfg.adapter_kind == xai_grok_models::AdapterKind::OpenAiCodex
+                || codex_oauth_active;
             let kimi_oauth_active = parent_model
                 .map(crate::agent::config::model_uses_kimi_code_oauth)
                 .unwrap_or(oauth_platform == Some(xai_grok_models::PlatformId::KimiCode));
@@ -839,7 +843,9 @@ async fn read_parent_sampling_config(
             );
             crate::agent::config::align_oauth_headers_with_platform(
                 &mut extra_headers,
-                oauth_platform,
+                oauth_platform.filter(|platform| {
+                    *platform != xai_grok_models::PlatformId::OpenAiCodex || codex_oauth_active
+                }),
                 &cfg.base_url,
             );
             if oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) && !kimi_oauth_active {
@@ -849,10 +855,7 @@ async fn read_parent_sampling_config(
                 parent_model.is_none() && oauth_origin && oauth_platform.is_none();
             let strip_guard = ctx.would_strip_fallback_key(creds.api_key.as_deref());
             let inherited = xai_grok_sampler::SamplerConfig {
-                api_key: if kimi_oauth_active
-                    || responses_codex_dialect
-                    || fail_closed_ambiguous_oauth
-                {
+                api_key: if kimi_oauth_active || codex_oauth_active || fail_closed_ambiguous_oauth {
                     None
                 } else {
                     creds.api_key

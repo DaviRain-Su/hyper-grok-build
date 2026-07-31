@@ -210,11 +210,7 @@ impl PluginRegistry {
                 .as_ref()
                 .map(|r| r.capabilities.clone())
                 .unwrap_or_default();
-            let runtime_gate_fail = dp
-                .manifest
-                .runtime
-                .as_ref()
-                .and_then(|r| r.gate_fail);
+            let runtime_gate_fail = dp.manifest.runtime.as_ref().and_then(|r| r.gate_fail);
             let runtime_wasm = dp.runtime_wasm.clone();
             let has_runtime = runtime_wasm.is_some();
 
@@ -696,7 +692,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-            runtime: None,
+                runtime: None,
             },
             id: PluginId::new(scope, &root, name),
             root: root.clone(),

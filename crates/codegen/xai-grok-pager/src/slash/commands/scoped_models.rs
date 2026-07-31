@@ -57,7 +57,11 @@ impl SlashCommand for ScopedModelsCommand {
         // Partial verb.
         let items: Vec<ArgItem> = verb_items()
             .into_iter()
-            .filter(|i| i.insert_text.to_lowercase().starts_with(&first.to_lowercase()))
+            .filter(|i| {
+                i.insert_text
+                    .to_lowercase()
+                    .starts_with(&first.to_lowercase())
+            })
             .collect();
         if items.is_empty() { None } else { Some(items) }
     }
@@ -156,10 +160,7 @@ impl SlashCommand for ScopedModelsCommand {
             ));
         }
 
-        CommandResult::Error(format!(
-            "Unknown subcommand '{verb}'.\n{}",
-            Self.usage()
-        ))
+        CommandResult::Error(format!("Unknown subcommand '{verb}'.\n{}", Self.usage()))
     }
 }
 

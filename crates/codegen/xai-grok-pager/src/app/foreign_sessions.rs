@@ -803,11 +803,7 @@ mod tests {
                 "cursor",
                 "/resume-cursor native-id",
             ),
-            (
-                ForeignPickerSource::Omp,
-                "omp",
-                "/resume-omp native-id",
-            ),
+            (ForeignPickerSource::Omp, "omp", "/resume-omp native-id"),
         ] {
             assert_eq!(source.picker_source(), wire);
             assert_eq!(source.resume_prompt("native-id"), prompt);
@@ -855,11 +851,7 @@ mod tests {
                 ForeignSessionSource::CursorCli,
                 "cursor",
             ),
-            (
-                ForeignSessionTool::Omp,
-                ForeignSessionSource::OmpCli,
-                "omp",
-            ),
+            (ForeignSessionTool::Omp, ForeignSessionSource::OmpCli, "omp"),
         ] {
             let entry = map_summary(ForeignSessionSummary {
                 tool,

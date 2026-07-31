@@ -758,7 +758,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-            runtime: None,
+                runtime: None,
             },
             id: PluginId::new(scope, &root, plugin_name),
             root: root.clone(),
@@ -1349,7 +1349,14 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["general-purpose", "explore", "plan", "oracle", "xdotcom", "test-agent"]
+            vec![
+                "general-purpose",
+                "explore",
+                "plan",
+                "oracle",
+                "xdotcom",
+                "test-agent"
+            ]
         );
     }
 
@@ -1558,6 +1565,9 @@ mod tests {
         let toggle = HashMap::from([("test-agent".to_string(), false)]);
         let entries = all_subagents_with_home(tmp.path(), &toggle, None, None);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["general-purpose", "explore", "plan", "oracle", "xdotcom"]);
+        assert_eq!(
+            names,
+            vec!["general-purpose", "explore", "plan", "oracle", "xdotcom"]
+        );
     }
 }

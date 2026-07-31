@@ -10,7 +10,7 @@ use super::support::*;
 use super::*;
 use std::path::PathBuf;
 use xai_grok_extension_api::{Capability, ExtensionSpec, GateFailMode};
-use xai_grok_extension_runtime::{wat_to_wasm, ExtensionRuntime};
+use xai_grok_extension_runtime::{ExtensionRuntime, wat_to_wasm};
 use xai_grok_tools::registry::types::ToolConfig;
 
 fn fixture_wasm() -> Option<PathBuf> {
@@ -220,7 +220,10 @@ async fn session_actor_registers_and_unregisters_wasm_tools() {
             assert_eq!(owned.len(), n);
             for name in owned.iter() {
                 assert!(name.starts_with("wasm_"));
-                assert!(bridge.tool_kind(name).is_some(), "missing on bridge: {name}");
+                assert!(
+                    bridge.tool_kind(name).is_some(),
+                    "missing on bridge: {name}"
+                );
             }
 
             let dropped =
@@ -320,12 +323,8 @@ async fn run_stop_gate_wasm_stop_once() {
         eprintln!("skip: no sdk-stop-once/extension.wasm");
         return;
     };
-    let Some(rt) = load_runtime_from_path(
-        "sdk-stop-once",
-        wasm,
-        vec![Capability::StopGate],
-        None,
-    ) else {
+    let Some(rt) = load_runtime_from_path("sdk-stop-once", wasm, vec![Capability::StopGate], None)
+    else {
         return;
     };
     let local = tokio::task::LocalSet::new();

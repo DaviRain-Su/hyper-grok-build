@@ -426,7 +426,7 @@ fn is_suppressed_profile_agent_dir(agent_dir: &Path, home: &Path, config_name: &
     let inherited = home
         .join(config_name)
         .join("profiles")
-        .join(pi_profile.as_ref() as &str)
+        .join(pi_profile)
         .join("agent");
     agent_dir == inherited
 }

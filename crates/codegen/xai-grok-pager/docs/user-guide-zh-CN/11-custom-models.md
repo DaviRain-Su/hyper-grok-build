@@ -55,15 +55,18 @@ default = "grok-build"
 
 ## 支持的 API 后端
 
-Grok 支持三种 API 后端。在 `[model.*]` 配置中设置 `api_backend`，以选择模型使用的协议：
+Grok 支持四种 API 后端。在 `[model.*]` 配置中设置 `api_backend`，以选择模型使用的协议：
 
 | 值 | API | 默认 |
 |-------|-----|---------|
 | `"chat_completions"` | OpenAI Chat Completions（`/v1/chat/completions`） | 是 |
 | `"responses"` | OpenAI Responses（`/v1/responses`） | |
+| `"codex_responses"` | OpenAI Codex 兼容 Responses（`/v1/responses`） | |
 | `"messages"` | Anthropic Messages（`/v1/messages`） | |
 
 省略 `api_backend` 时，Grok 使用 `chat_completions`。
+
+`codex_responses` 复用 Responses 传输，并启用 Codex 请求形态（instructions、reasoning、缓存、流式响应和工具默认值）。它面向实现 Codex Responses 方言的 BYOK 提供商，仍使用该提供商自己的 API key 与请求头，不会切换到 ChatGPT OAuth。输入时也接受 `codex-responses` 别名，但保存和序列化时使用规范值 `codex_responses`。压缩会优先调用 Codex 的 unary `POST /v1/responses/compact` 端点并持久化其不透明 replacement history；提供商明确返回不支持该端点（例如 404 或 405）时会自动降级为本地摘要压缩。部分中转站会以 `503` 明确报告没有可用的 `-openai-compact` 模型通道，这种情况同样会降级；认证、额度、限流和其他服务端故障仍会作为错误显示。
 
 若需发送提供商专用的认证或版本请求头 —— 例如 Anthropic 的 `x-api-key` —— 请使用下文所述的 `extra_headers` 字段。Grok 会将这些请求头原样附加到发往该端点的每次请求。
 
@@ -81,7 +84,7 @@ name = "Display Name"                     # Shown in the model picker
 description = "Model description"          # Optional description
 api_key = "sk-..."                        # API key for this provider (optional)
 env_key = "XAI_API_KEY"                   # Env var holding the API key (optional; string or array)
-api_backend = "chat_completions"          # "chat_completions", "responses", or "messages"
+api_backend = "chat_completions"          # chat_completions、responses、codex_responses 或 messages
 temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
@@ -201,6 +204,24 @@ api_backend = "responses"
 env_key = "OPENAI_API_KEY"
 ```
 
+### Codex 兼容 Responses（BYOK）
+
+当提供商实现 Codex Responses 请求方言时，使用 `codex_responses`：
+
+```toml
+[model_providers.codex-gateway]
+base_url = "https://codex-provider.example/v1"
+env_key = "CODEX_PROVIDER_API_KEY"
+api_backend = "codex_responses"
+
+[model.codex-byok]
+model = "gpt-5-codex"
+name = "Codex (BYOK)"
+model_provider = "codex-gateway"
+```
+
+该后端默认令 `supports_backend_search = true`，并发送 Responses 原生 `web_search` 工具，绝不会发送 xAI 专用的 `x_search`。若需关闭，可在提供商或模型上显式设置 `supports_backend_search = false`。
+
 ### Ollama（本地 / 云端）
 
 通过 [Ollama](https://ollama.ai) 运行模型 —— 可用云服务，也可用本地实例。
@@ -319,7 +340,7 @@ web_search = "grok-4.20-multi-agent"
 export GROK_WEB_SEARCH_MODEL="grok-4.20-multi-agent"
 ```
 
-若将 web 搜索指向自定义模型，还需要对应的 `[model.*]` 条目，以便 Grok 能够访问。服务端（“backend”）web 搜索仅在模型设置 `supports_backend_search = true`（且构建启用了 backend search）时运行；它不依赖 `api_backend`：
+若将本地 `web_search` function 指向自定义模型，还需要对应的 `[model.*]` 条目，以便 Grok 能够访问。提供商托管的（“backend”）搜索与之独立：它只会在 Responses 兼容后端、模型支持该能力且 backend tools 已启用时运行：
 
 ```toml
 [models]
@@ -329,6 +350,8 @@ web_search = "my-custom-model"
 model = "my-custom-model"
 supports_backend_search = true
 ```
+
+对于 `api_backend = "codex_responses"`，该能力默认开启；显式的 `supports_backend_search = false` 优先。`disable_web_search` 是本地搜索和提供商托管搜索共同的最终关闭开关。
 
 ---
 

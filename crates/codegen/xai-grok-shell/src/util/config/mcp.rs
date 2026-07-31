@@ -890,7 +890,7 @@ pub async fn save_mcp_server_config_at(
     }
 
     let toml_str = toml::to_string_pretty(&root)?;
-    super::persist::atomic_write_string(&path, &toml_str)?;
+    super::persist::atomic_write_string(path, &toml_str)?;
     Ok(())
 }
 

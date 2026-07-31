@@ -259,31 +259,32 @@ pub(crate) fn parse_authorization_input(input: &str, flow_state: &str) -> Option
         return None;
     }
     // Full redirect URL form.
-    if let Ok(url) = url::Url::parse(trimmed) {
-        if url.scheme() == "http" || url.scheme() == "https" {
-            let mut code = None;
-            let mut state = None;
-            for (k, v) in url.query_pairs() {
-                match k.as_ref() {
-                    "code" => code = Some(v.into_owned()),
-                    "state" => state = Some(v.into_owned()),
-                    _ => {}
-                }
+    if let Ok(url) = url::Url::parse(trimmed)
+        && (url.scheme() == "http" || url.scheme() == "https")
+    {
+        let mut code = None;
+        let mut state = None;
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "code" => code = Some(v.into_owned()),
+                "state" => state = Some(v.into_owned()),
+                _ => {}
             }
-            if let (Some(code), Some(state)) = (code, state)
-                && !code.is_empty()
-                && state == flow_state
-            {
-                return Some((code, state));
-            }
-            return None;
         }
+        if let (Some(code), Some(state)) = (code, state)
+            && !code.is_empty()
+            && state == flow_state
+        {
+            return Some((code, state));
+        }
+        return None;
     }
     // `code#state` fragment shape.
-    if let Some((code, state)) = trimmed.split_once('#') {
-        if !code.is_empty() && state == flow_state {
-            return Some((code.to_owned(), state.to_owned()));
-        }
+    if let Some((code, state)) = trimmed.split_once('#')
+        && !code.is_empty()
+        && state == flow_state
+    {
+        return Some((code.to_owned(), state.to_owned()));
     }
     None
 }

@@ -690,8 +690,9 @@ async fn recap_request_rides_parent_prompt_cache() {
                 Some(actor.session_info.id.to_string().as_str()),
                 "prompt_cache_key must be the parent session id for sticky routing"
             );
-            let main_turn_specs =
-                actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
+            let main_turn_specs = actor
+                .turn_base_tool_specs(&actor.prepare_tool_definitions().await)
+                .await;
             assert!(!main_turn_specs.is_empty(), "test env must expose tools");
             let tools = body["tools"].as_array().expect("tools must be present");
             assert_eq!(
@@ -767,8 +768,9 @@ async fn recap_request_sends_hosted_tools_under_backend_search() {
                 "recap must send the main turn's hosted tools: {tools:?}"
             );
             // Function tools must still match the main turn's specs exactly.
-            let main_turn_specs =
-                actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
+            let main_turn_specs = actor
+                .turn_base_tool_specs(&actor.prepare_tool_definitions().await)
+                .await;
             assert!(!main_turn_specs.is_empty(), "test env must expose tools");
             let function_tools = tools
                 .iter()

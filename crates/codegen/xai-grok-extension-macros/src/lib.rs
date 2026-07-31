@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
 use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
@@ -187,7 +187,10 @@ fn process_function(
                     if hook_marker.replace((kind, attribute.span())).is_some() {
                         push_error(
                             errors,
-                            Error::new(attribute.span(), "a function may have only one `hyper_hook` marker"),
+                            Error::new(
+                                attribute.span(),
+                                "a function may have only one `hyper_hook` marker",
+                            ),
                         );
                     }
                 }
@@ -199,7 +202,10 @@ fn process_function(
                     if tool_marker.replace((args, attribute.span())).is_some() {
                         push_error(
                             errors,
-                            Error::new(attribute.span(), "a function may have only one `hyper_tool` marker"),
+                            Error::new(
+                                attribute.span(),
+                                "a function may have only one `hyper_tool` marker",
+                            ),
                         );
                     }
                 }
@@ -227,10 +233,7 @@ fn process_function(
             push_error(errors, error);
         }
         if let Some((_, first_span)) = hooks.get(&kind) {
-            let mut error = Error::new(
-                marker_span,
-                format!("duplicate `{}` hook", kind.name()),
-            );
+            let mut error = Error::new(marker_span, format!("duplicate `{}` hook", kind.name()));
             error.combine(Error::new(*first_span, "first hook declared here"));
             push_error(errors, error);
         } else {
@@ -253,7 +256,10 @@ fn process_function(
         }
         let name_value = name.value();
         if let Some(first_span) = tool_names.get(&name_value) {
-            let mut error = Error::new(marker_span, format!("duplicate Hyper tool name `{name_value}`"));
+            let mut error = Error::new(
+                marker_span,
+                format!("duplicate Hyper tool name `{name_value}`"),
+            );
             error.combine(Error::new(*first_span, "first tool declared here"));
             push_error(errors, error);
         } else {
@@ -298,7 +304,8 @@ fn parse_tool_attribute(attribute: &Attribute) -> syn::Result<ToolArgs> {
             schema = Some(meta.value()?.parse::<LitStr>()?);
             Ok(())
         } else {
-            Err(meta.error("unknown `hyper_tool` option; expected `name`, `description`, or `schema`"))
+            Err(meta
+                .error("unknown `hyper_tool` option; expected `name`, `description`, or `schema`"))
         }
     })?;
 
@@ -364,7 +371,10 @@ fn validate_common_signature(signature: &Signature) -> syn::Result<()> {
         return Err(Error::new(token.span(), "Hyper handlers cannot be `async`"));
     }
     if let Some(token) = signature.unsafety {
-        return Err(Error::new(token.span(), "Hyper handlers cannot be `unsafe`"));
+        return Err(Error::new(
+            token.span(),
+            "Hyper handlers cannot be `unsafe`",
+        ));
     }
     if let Some(abi) = &signature.abi {
         return Err(Error::new(
@@ -411,8 +421,7 @@ fn is_str_reference(ty: &Type) -> bool {
 fn is_named_type(ty: &Type, expected: &str) -> bool {
     match ty {
         Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-            path.path.segments[0].ident == expected
-                && path.path.segments[0].arguments.is_empty()
+            path.path.segments[0].ident == expected && path.path.segments[0].arguments.is_empty()
         }
         Type::Group(group) => is_named_type(&group.elem, expected),
         Type::Paren(paren) => is_named_type(&paren.elem, expected),
@@ -529,14 +538,10 @@ fn generate_exports(
     }
 }
 
-fn hook_call_or_zero(
-    hooks: &HashMap<HookKind, (Ident, Span)>,
-    kind: HookKind,
-) -> TokenStream2 {
-    hooks.get(&kind).map_or_else(
-        || quote!(0i32),
-        |(function, _)| quote!(#function()),
-    )
+fn hook_call_or_zero(hooks: &HashMap<HookKind, (Ident, Span)>, kind: HookKind) -> TokenStream2 {
+    hooks
+        .get(&kind)
+        .map_or_else(|| quote!(0i32), |(function, _)| quote!(#function()))
 }
 
 fn optional_hook_export(
@@ -564,10 +569,10 @@ fn generate_tool_exports(sdk: &TokenStream2, tools: &[Tool]) -> TokenStream2 {
     let metadata = tools.iter().map(|tool| {
         let name = &tool.name;
         let description = &tool.description;
-        let schema = tool
-            .schema
-            .as_ref()
-            .map_or_else(|| quote!(#sdk::EMPTY_OBJECT_SCHEMA), |schema| quote!(#schema));
+        let schema = tool.schema.as_ref().map_or_else(
+            || quote!(#sdk::EMPTY_OBJECT_SCHEMA),
+            |schema| quote!(#schema),
+        );
         quote!((#name, #description, #schema),)
     });
     let invoke = tools.iter().map(|tool| {

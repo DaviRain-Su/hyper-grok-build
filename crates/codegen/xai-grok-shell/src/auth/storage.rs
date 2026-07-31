@@ -1768,7 +1768,12 @@ mod write_fallback_tests {
 
         write_auth_json(&link, &sample_store()).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(read_key(&target).as_deref(), Some("secret-key"));
     }
 

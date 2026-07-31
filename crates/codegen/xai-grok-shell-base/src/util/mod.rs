@@ -323,11 +323,7 @@ fn macos_process_image_path(pid: u32) -> Option<String> {
     let n = n as usize;
     let end = buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
     let path = std::str::from_utf8(&buf[..end]).ok()?.to_owned();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+    if path.is_empty() { None } else { Some(path) }
 }
 
 /// Whether a process image path / Linux cmdline identifies a product binary.
@@ -527,9 +523,7 @@ mod tests {
             "/home/u/.hyper/bin/hyper\0leader\0kill"
         ));
         // Later argv tokens must NOT match (false-positive vector).
-        assert!(!process_image_looks_like_product(
-            "/usr/bin/sleep\0hyper"
-        ));
+        assert!(!process_image_looks_like_product("/usr/bin/sleep\0hyper"));
         assert!(!process_image_looks_like_product(
             "/bin/cat\0/home/u/.hyper/bin/secret"
         ));

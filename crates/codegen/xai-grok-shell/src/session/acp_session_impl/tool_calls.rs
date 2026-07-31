@@ -1137,10 +1137,8 @@ impl SessionActor {
                 tool_input_json: raw_input.to_string(),
             };
             let wasm_result = ext_rt.dispatch_pre_tool_use(&pre_in).await;
-            if let xai_grok_extension_runtime::PreToolDecision::Deny {
-                extension,
-                reason,
-            } = wasm_result.decision
+            if let xai_grok_extension_runtime::PreToolDecision::Deny { extension, reason } =
+                wasm_result.decision
             {
                 let m = ext_rt.metrics();
                 tracing::warn!(
@@ -2878,6 +2876,29 @@ impl SessionActor {
                             .status(Some(status))
                             .title(Some(title))
                             .raw_output(result),
+                    )),
+                    None,
+                )
+                .await;
+            }
+            SamplingEvent::BackendToolCallFailed {
+                call_id,
+                name,
+                error,
+                ..
+            } => {
+                self.signals_handle().record_tool_failure(&name);
+                let (title, _kind, _raw_input) = backend_tool_display(&name);
+                self.send_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(Arc::from(call_id.as_str())),
+                        acp::ToolCallUpdateFields::new()
+                            .status(Some(acp::ToolCallStatus::Failed))
+                            .title(Some(title))
+                            .content(Some(vec![acp::ToolCallContent::from(
+                                acp::ContentBlock::Text(acp::TextContent::new(error.clone())),
+                            )]))
+                            .raw_output(Some(serde_json::json!({"error": error}))),
                     )),
                     None,
                 )

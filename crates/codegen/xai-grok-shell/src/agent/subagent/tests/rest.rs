@@ -1865,6 +1865,7 @@ async fn read_parent_sampling_config_uses_catalog_platform_on_shared_oauth_proxy
     let mut codex = test_model_entry("gpt-5.1-codex");
     codex.info.id = Some("openai-codex/gpt-5.1-codex".to_string());
     codex.info.base_url = proxy.to_string();
+    codex.platform_oauth_active = true;
     let mut models = indexmap::IndexMap::new();
     models.insert("auto".to_string(), codex);
     let mut ctx = ctx_with_parent_chat_state("auto", "gpt-5.1-codex", "auto", models);
@@ -1890,6 +1891,45 @@ async fn read_parent_sampling_config_uses_catalog_platform_on_shared_oauth_proxy
     assert!(config.extra_headers.contains_key("originator"));
     assert!(!config.extra_headers.contains_key("anthropic-version"));
     assert!(!config.extra_headers.contains_key("X-Msh-Device-Id"));
+}
+
+#[tokio::test]
+async fn read_parent_sampling_config_keeps_codex_byok_credentials() {
+    use xai_grok_models::AdapterKind;
+    use xai_grok_sampling_types::ApiBackend;
+
+    let mut codex = test_model_entry("gpt-codex");
+    codex.info.id = Some("codex-byok".to_string());
+    codex.info.base_url = "https://codex-provider.example/v1".to_string();
+    codex.info.api_backend = ApiBackend::CodexResponses;
+    codex.api_key = Some("sk-codex-byok".to_string());
+    let mut models = indexmap::IndexMap::new();
+    models.insert("codex-byok".to_string(), codex);
+
+    let mut ctx = ctx_with_parent_chat_state("codex-byok", "gpt-codex", "auto", models);
+    let parent = spawn_test_parent_chat_state_at(
+        "gpt-codex",
+        "https://codex-provider.example/v1",
+    );
+    let mut sampling = parent.get_sampling_config().await.unwrap();
+    sampling.api_backend = ApiBackend::CodexResponses;
+    sampling.adapter_kind = AdapterKind::OpenAiCodex;
+    parent.update_sampling_config(sampling);
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("sk-codex-byok".to_string()),
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(model_id.0.as_ref(), "codex-byok");
+    assert_eq!(config.api_backend, ApiBackend::CodexResponses);
+    assert_eq!(config.adapter_kind, AdapterKind::OpenAiCodex);
+    assert_eq!(config.api_key.as_deref(), Some("sk-codex-byok"));
+    assert!(config.bearer_resolver.is_none());
+    assert!(config.responses_codex_dialect);
+    assert!(!config.extra_headers.contains_key("OpenAI-Beta"));
+    assert!(!config.extra_headers.contains_key("originator"));
 }
 
 #[tokio::test]

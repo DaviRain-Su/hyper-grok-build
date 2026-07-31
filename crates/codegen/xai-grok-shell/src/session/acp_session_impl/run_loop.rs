@@ -612,7 +612,7 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::GetToolOverrides { respond_to } => {
-                            let _ = respond_to.send(session.effective_tool_overrides());
+                            let _ = respond_to.send(session.effective_tool_overrides().await);
                         }
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
@@ -1700,7 +1700,7 @@ pub(super) async fn run_session(
                             // never drift from the parent turn's tool list. Excludes
                             // the structured-output tool (the turn appends that later).
                             let defs = session.prepare_tool_definitions_inner().await;
-                            let specs = session.turn_base_tool_specs(&defs);
+                            let specs = session.turn_base_tool_specs(&defs).await;
                             let _ = respond_to.send(specs);
                         }
                         SessionCommand::SetClientHooks { hooks } => {

@@ -21,7 +21,8 @@ use reqwest::header::{
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::pi_messages::PiMessagesEvent;
 use xai_grok_sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
@@ -47,6 +48,270 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 const RESPONSES_AUXILIARY_EVENT_TYPES: [&str; 2] = ["keepalive", "response.metadata"];
+const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
+const CODEX_TURN_STATE_CACHE_CAPACITY: usize = 256;
+
+/// `(provider route, session id, turn id)`. The provider route is deliberately
+/// query-free so credentials embedded in query parameters never enter the
+/// process-wide cache.
+type CodexTurnKey = (String, String, String);
+type CodexTurnStateCache = Arc<Mutex<HashMap<CodexTurnKey, String>>>;
+type CodexCompactUnsupportedCache = Arc<Mutex<HashSet<String>>>;
+
+fn shared_codex_turn_state_cache() -> CodexTurnStateCache {
+    static CACHE: std::sync::OnceLock<CodexTurnStateCache> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+fn shared_codex_compact_unsupported_cache() -> CodexCompactUnsupportedCache {
+    static CACHE: std::sync::OnceLock<CodexCompactUnsupportedCache> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| Arc::new(Mutex::new(HashSet::new())))
+        .clone()
+}
+
+fn compact_endpoint_is_unsupported(status: reqwest::StatusCode, message: &str) -> bool {
+    if matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::METHOD_NOT_ALLOWED
+            | reqwest::StatusCode::NOT_IMPLEMENTED
+    ) {
+        return true;
+    }
+    let message = message.to_ascii_lowercase();
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        // Some Codex-compatible relays report a missing compact-model route as
+        // a 503 even though their ordinary Responses route remains healthy.
+        // Keep this narrow so transient and generic server failures still
+        // surface instead of being hidden by local compaction.
+        return message.contains("no available channel") && message.contains("-openai-compact");
+    }
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let names_endpoint = message.contains("endpoint")
+        || message.contains("route")
+        || message.contains("responses/compact");
+    let says_missing = message.contains("not found")
+        || message.contains("unknown")
+        || message.contains("not support")
+        || message.contains("unsupported endpoint")
+        || message.contains("unsupported route");
+    names_endpoint && says_missing
+}
+
+fn json_header(value: &serde_json::Value, name: &str) -> Option<String> {
+    value.as_object()?.iter().find_map(|(key, value)| {
+        if !key.eq_ignore_ascii_case(name) {
+            return None;
+        }
+        match value {
+            serde_json::Value::String(value) => Some(value.clone()),
+            serde_json::Value::Array(values) => values
+                .first()
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        }
+    })
+}
+
+fn codex_event_turn_state(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    (value.get("type").and_then(serde_json::Value::as_str) == Some("response.metadata")).then(
+        || {
+            value
+                .get("headers")
+                .and_then(|headers| json_header(headers, X_CODEX_TURN_STATE_HEADER))
+        },
+    )?
+}
+
+fn codex_event_response_model(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    value
+        .pointer("/response/headers")
+        .and_then(|headers| {
+            json_header(headers, "openai-model").or_else(|| json_header(headers, "x-openai-model"))
+        })
+        .or_else(|| {
+            value.get("headers").and_then(|headers| {
+                json_header(headers, "openai-model")
+                    .or_else(|| json_header(headers, "x-openai-model"))
+            })
+        })
+        .filter(|model| !model.is_empty())
+}
+
+fn take_codex_turn_state(cache: &CodexTurnStateCache, key: &CodexTurnKey) -> Option<String> {
+    let mut cache = cache.lock().ok()?;
+    cache.retain(|(route, session_id, turn_id), _| {
+        route != &key.0 || session_id != &key.1 || turn_id == &key.2
+    });
+    cache.get(key).cloned()
+}
+
+fn cache_codex_turn_state(cache: &CodexTurnStateCache, key: &CodexTurnKey, value: String) {
+    if value.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = cache.lock() {
+        // A turn-state token is scoped to exactly one user turn. Discard an
+        // older token for the same provider/session before recording the new
+        // one. Identical Hyper session ids can safely target two providers.
+        cache.retain(|(route, session_id, turn_id), _| {
+            route != &key.0 || session_id != &key.1 || turn_id == &key.2
+        });
+        if cache.len() >= CODEX_TURN_STATE_CACHE_CAPACITY
+            && !cache.contains_key(key)
+            && let Some(evicted) = cache.keys().next().cloned()
+        {
+            cache.remove(&evicted);
+        }
+        cache.insert(key.clone(), value);
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CodexTerminalEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+    response: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CodexTerminalError {
+    code: Option<String>,
+    message: Option<String>,
+}
+
+fn codex_retry_after_seconds(code: Option<&str>, message: Option<&str>) -> Option<u64> {
+    if code != Some("rate_limit_exceeded") {
+        return None;
+    }
+    let words: Vec<&str> = message?.split_whitespace().collect();
+    let marker = words.windows(3).position(|window| {
+        window[0].eq_ignore_ascii_case("try")
+            && window[1].eq_ignore_ascii_case("again")
+            && window[2].eq_ignore_ascii_case("in")
+    })?;
+    let raw_value = words
+        .get(marker + 3)?
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.');
+    let split = raw_value
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .unwrap_or(raw_value.len());
+    let (number, suffix) = raw_value.split_at(split);
+    let unit = if suffix.is_empty() {
+        words.get(marker + 4).copied().unwrap_or_default()
+    } else {
+        suffix
+    };
+    let numeric = number.parse::<f64>().ok()?;
+    let unit = unit
+        .trim_matches(|ch: char| !ch.is_ascii_alphabetic())
+        .to_ascii_lowercase();
+    let seconds = if unit == "ms" {
+        numeric / 1000.0
+    } else {
+        numeric
+    };
+    // Hyper's cross-process error contract stores whole seconds. Preserve a
+    // sub-second retry as zero (immediate retry) rather than stretching e.g.
+    // Codex's 28ms hint into a full second; round longer fractional delays up.
+    Some(if seconds < 1.0 {
+        0
+    } else {
+        seconds.ceil().clamp(0.0, 120.0) as u64
+    })
+}
+
+/// Match the current codex-rs terminal-event policy while translating it to
+/// Hyper's existing status/retry contract. This is Codex-only; the strict
+/// Responses route continues through async-openai unchanged.
+fn codex_terminal_error(data: &str) -> Option<SamplingError> {
+    let event: CodexTerminalEnvelope = serde_json::from_str(data).ok()?;
+    if event.kind == "response.incomplete" {
+        let reason = event
+            .response
+            .as_ref()
+            .and_then(|response| response.pointer("/incomplete_details/reason"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        if reason == "max_output_tokens" {
+            return Some(SamplingError::MaxTokensTruncation);
+        }
+        return Some(SamplingError::Api {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Incomplete response returned, reason: {reason}"),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(true),
+        });
+    }
+    if event.kind != "response.failed" {
+        return None;
+    }
+
+    let error = event
+        .response
+        .as_ref()
+        .and_then(|response| response.get("error"))
+        .and_then(|error| serde_json::from_value::<CodexTerminalError>(error.clone()).ok());
+    let code = error.as_ref().and_then(|error| error.code.as_deref());
+    let supplied_message = error.as_ref().and_then(|error| error.message.as_deref());
+    let default_message = code.unwrap_or("response.failed event received");
+    let message = supplied_message
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or(default_message)
+        .to_string();
+
+    let (status, should_retry, message) = match code {
+        Some("context_length_exceeded") => (
+            reqwest::StatusCode::BAD_REQUEST,
+            Some(false),
+            format!("context_length_exceeded: {message}"),
+        ),
+        Some("insufficient_quota" | "usage_not_included") => {
+            (reqwest::StatusCode::PAYMENT_REQUIRED, Some(false), message)
+        }
+        Some("invalid_prompt" | "bio_policy") => {
+            (reqwest::StatusCode::BAD_REQUEST, Some(false), message)
+        }
+        Some("cyber_policy") => (
+            reqwest::StatusCode::FORBIDDEN,
+            Some(false),
+            if supplied_message.is_some_and(|message| !message.trim().is_empty()) {
+                message
+            } else {
+                "This request has been flagged for possible cybersecurity risk.".to_string()
+            },
+        ),
+        Some("rate_limit_exceeded") => {
+            (reqwest::StatusCode::TOO_MANY_REQUESTS, Some(true), message)
+        }
+        Some("server_is_overloaded" | "slow_down") => (
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            Some(true),
+            message,
+        ),
+        _ => (
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            Some(true),
+            message,
+        ),
+    };
+    Some(SamplingError::Api {
+        status,
+        retry_after_secs: codex_retry_after_seconds(code, supplied_message),
+        message,
+        model_metadata: None,
+        should_retry,
+    })
+}
 
 /// Return whether an SSE frame is an out-of-band Responses API event.
 ///
@@ -260,6 +525,117 @@ const RESPONSES_KNOWN_EVENT_TYPES: [&str; 49] = [
     "error",
 ];
 
+/// Response SSE shapes differ between the public/xAI Responses API and Codex
+/// providers. The latter intentionally permits sparse lifecycle envelopes,
+/// matching the loose parser used by the official Codex CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponsesWireDialect {
+    Strict,
+    Codex,
+}
+
+/// Fill fields required by async-openai's full `Response` type when a Codex
+/// provider emits the sparse lifecycle envelopes accepted by codex-rs.
+///
+/// Only missing fields are synthesized. In particular, `response.id` remains
+/// required so a malformed terminal event cannot silently complete a turn.
+fn normalize_codex_response_event(value: &mut serde_json::Value, requested_model: &str) {
+    let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let lifecycle_status = match event_type {
+        "response.created" | "response.in_progress" => Some("in_progress"),
+        "response.completed" => Some("completed"),
+        "response.failed" => Some("failed"),
+        "response.incomplete" => Some("incomplete"),
+        "response.queued" => Some("queued"),
+        _ => None,
+    };
+
+    let Some(event) = value.as_object_mut() else {
+        return;
+    };
+    event
+        .entry("sequence_number")
+        .or_insert(serde_json::Value::from(0));
+    let Some(status) = lifecycle_status else {
+        return;
+    };
+    let top_level_model = event.get("headers").and_then(|headers| {
+        json_header(headers, "openai-model").or_else(|| json_header(headers, "x-openai-model"))
+    });
+    let Some(response) = event
+        .get_mut("response")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    response
+        .entry("created_at")
+        .or_insert(serde_json::Value::from(0));
+    let event_model = response
+        .get("headers")
+        .and_then(|headers| {
+            json_header(headers, "openai-model").or_else(|| json_header(headers, "x-openai-model"))
+        })
+        .or(top_level_model)
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| requested_model.to_string());
+    if response
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        response.insert("model".to_string(), serde_json::Value::String(event_model));
+    }
+    response
+        .entry("object")
+        .or_insert(serde_json::Value::String("response".to_string()));
+    response
+        .entry("output")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    response
+        .entry("status")
+        .or_insert(serde_json::Value::String(status.to_string()));
+
+    // Codex-compatible relays sometimes include aggregate usage but omit the
+    // detail objects required by async-openai. Preserve supplied counters and
+    // default only absent fields, as the official Codex parser does.
+    let Some(usage) = response
+        .get_mut("usage")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    usage
+        .entry("input_tokens")
+        .or_insert(serde_json::Value::from(0));
+    usage
+        .entry("output_tokens")
+        .or_insert(serde_json::Value::from(0));
+    usage
+        .entry("total_tokens")
+        .or_insert(serde_json::Value::from(0));
+
+    let input_details = usage
+        .entry("input_tokens_details")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(input_details) = input_details.as_object_mut() {
+        input_details
+            .entry("cached_tokens")
+            .or_insert(serde_json::Value::from(0));
+    }
+    let output_details = usage
+        .entry("output_tokens_details")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(output_details) = output_details.as_object_mut() {
+        output_details
+            .entry("reasoning_tokens")
+            .or_insert(serde_json::Value::from(0));
+    }
+}
+
 /// Deserialize a Responses API SSE event, with a fallback for xAI-specific
 /// tool types (e.g., `x_search`) that `async_openai` can't parse.
 ///
@@ -289,8 +665,34 @@ const RESPONSES_KNOWN_EVENT_TYPES: [&str; 49] = [
 /// `ResponseUsage` unchanged so billing telemetry stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
-fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
-    let first_err = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
+#[cfg(test)]
+fn deserialize_response_event(
+    data: &str,
+    dialect: ResponsesWireDialect,
+) -> Result<Option<rs::ResponseStreamEvent>> {
+    deserialize_response_event_for_model(data, dialect, "")
+}
+
+fn deserialize_response_event_for_model(
+    data: &str,
+    dialect: ResponsesWireDialect,
+    requested_model: &str,
+) -> Result<Option<rs::ResponseStreamEvent>> {
+    let mut normalized_value =
+        match dialect {
+            ResponsesWireDialect::Strict => None,
+            ResponsesWireDialect::Codex => serde_json::from_str::<serde_json::Value>(data)
+                .ok()
+                .map(|mut value| {
+                    normalize_codex_response_event(&mut value, requested_model);
+                    value
+                }),
+        };
+    let first_result = match normalized_value.as_ref() {
+        Some(value) => serde_json::from_value::<rs::ResponseStreamEvent>(value.clone()),
+        None => serde_json::from_str::<rs::ResponseStreamEvent>(data),
+    };
+    let first_err = match first_result {
         Ok(mut event) => {
             apply_terminal_event_overrides(&mut event, data);
             return Ok(Some(event));
@@ -299,7 +701,10 @@ fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEve
     };
 
     // Try sanitizing: parse as Value, drop what async-openai can't model, retry.
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) else {
+    let Some(mut value) = normalized_value
+        .take()
+        .or_else(|| serde_json::from_str::<serde_json::Value>(data).ok())
+    else {
         tracing::error!(
             error = %first_err,
             raw_data = %data,
@@ -373,18 +778,33 @@ fn deserialize_response_event(data: &str) -> Result<Option<rs::ResponseStreamEve
 /// surface as [`ResponsesStreamItem::Heartbeat`] so the layer-2 idle detector
 /// sees server liveness instead of a starved stream. API errors are surfaced
 /// as `SamplingError`; malformed known events stay strict and fatal.
+#[cfg(test)]
 fn decode_responses_sse_frame(
     event_name: &str,
     data: &str,
+    dialect: ResponsesWireDialect,
+) -> std::result::Result<ResponsesStreamItem, SamplingError> {
+    decode_responses_sse_frame_for_model(event_name, data, dialect, "")
+}
+
+fn decode_responses_sse_frame_for_model(
+    event_name: &str,
+    data: &str,
+    dialect: ResponsesWireDialect,
+    requested_model: &str,
 ) -> std::result::Result<ResponsesStreamItem, SamplingError> {
     if is_responses_auxiliary_event(event_name, data) {
         return Ok(ResponsesStreamItem::Heartbeat);
     }
 
-    if let Some(stream_error) = try_parse_stream_error(data) {
+    if dialect == ResponsesWireDialect::Codex
+        && let Some(terminal_error) = codex_terminal_error(data)
+    {
+        Err(terminal_error)
+    } else if let Some(stream_error) = try_parse_stream_error(data) {
         Err(stream_error)
     } else {
-        match deserialize_response_event(data) {
+        match deserialize_response_event_for_model(data, dialect, requested_model) {
             Ok(Some(event)) => Ok(ResponsesStreamItem::Event(event)),
             Ok(None) => Ok(ResponsesStreamItem::Heartbeat),
             Err(err) => Err(err),
@@ -522,6 +942,22 @@ fn stamp_responses_prompt_cache_key(request: &mut CreateResponseWrapper) {
     }
 }
 
+/// Match `openai/codex` provider detection for Azure Responses endpoints.
+/// Azure requires `store: true`; ordinary OpenAI and compatible relays use
+/// stateless `store: false` together with encrypted reasoning replay.
+fn is_azure_responses_endpoint(base_url: &str) -> bool {
+    let base_url = base_url.to_ascii_lowercase();
+    const AZURE_MARKERS: [&str; 6] = [
+        "openai.azure.",
+        "cognitiveservices.azure.",
+        "aoai.azure.",
+        "azure-api.",
+        "azurefd.",
+        "windows.net/openai",
+    ];
+    AZURE_MARKERS.iter().any(|marker| base_url.contains(marker))
+}
+
 /// Apply the ChatGPT Codex backend dialect to a Responses API request.
 ///
 /// Mirrors official Pi `openai-codex-responses.ts` request building:
@@ -532,6 +968,9 @@ fn stamp_responses_prompt_cache_key(request: &mut CreateResponseWrapper) {
 /// - `text.verbosity` defaults to `low` (Pi default) unless a text format
 ///   (e.g. structured output) is already set.
 fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
+    // Raw tool entries are reserved for xAI extensions such as `x_search`.
+    // Codex providers accept the native Responses `web_search` tool only.
+    request.extra_tool_entries.clear();
     if let rs::InputParam::Items(items) = &mut request.inner.input {
         let mut system_texts: Vec<String> = Vec::new();
         items.retain(|item| {
@@ -565,6 +1004,13 @@ fn apply_codex_dialect(request: &mut CreateResponseWrapper) {
     // Pi sends `reasoning.summary: "auto"` (the shared default is `concise`).
     if let Some(reasoning) = request.inner.reasoning.as_mut() {
         reasoning.summary = Some(rs::ReasoningSummary::Auto);
+    }
+    // Codex serializes both fields on every request, even when tools is empty.
+    if request.inner.tool_choice.is_none() {
+        request.inner.tool_choice = Some(rs::ToolChoiceParam::Mode(rs::ToolChoiceOptions::Auto));
+    }
+    if request.inner.parallel_tool_calls.is_none() {
+        request.inner.parallel_tool_calls = Some(true);
     }
     // ChatGPT Codex backend rejects parameters the public Responses API allows
     // (verified live against chatgpt.com/backend-api/codex/responses):
@@ -659,6 +1105,64 @@ fn patch_codex_reasoning_effort_wire(
                     .or_insert_with(|| serde_json::Value::String("auto".into()));
             }
         }
+    }
+}
+
+fn patch_codex_request_body(
+    body: &mut serde_json::Value,
+    request: &CreateResponseWrapper,
+    reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+) {
+    strip_codex_unsupported_body_fields(body);
+    patch_codex_reasoning_effort_wire(body, reasoning_effort);
+    // Codex's canonical request struct always serializes `tools`, including
+    // an empty array. Some relays validate that fixed request shape.
+    if body.get("tools").is_none() {
+        body["tools"] = serde_json::Value::Array(Vec::new());
+    }
+
+    // `async-openai::CreateResponse` predates Codex's client_metadata. Send
+    // only stable identities Hyper owns; do not fabricate installation,
+    // window, attestation, or first-party product metadata.
+    let mut metadata = serde_json::Map::new();
+    if let Some(session_id) = request
+        .x_grok_session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+    }
+    if let Some(thread_id) = request
+        .x_grok_conv_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            request
+                .x_grok_session_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+        })
+    {
+        metadata.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String(thread_id.to_string()),
+        );
+    }
+    if let Some(turn_id) = request
+        .x_grok_turn_idx
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert(
+            "turn_id".to_string(),
+            serde_json::Value::String(turn_id.to_string()),
+        );
+    }
+    if !metadata.is_empty() {
+        body["client_metadata"] = serde_json::Value::Object(metadata);
     }
 }
 
@@ -903,6 +1407,15 @@ pub struct SamplingClient {
     /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
     endpoint: EndpointTemplate,
     google_adc: Arc<crate::google::VertexAdcTokenProvider>,
+    /// Sticky-routing tokens returned by Codex providers. The shared cache is
+    /// keyed by provider route + session + user turn so HTTP client rebuilds
+    /// retain the token, while a new turn or different provider can never
+    /// replay an older route's state.
+    codex_turn_state: CodexTurnStateCache,
+    /// Provider routes that explicitly rejected `/responses/compact`. Shared
+    /// across rebuilt clients so automatic compaction does not probe the same
+    /// unsupported relay on every turn.
+    codex_compact_unsupported: CodexCompactUnsupportedCache,
 }
 
 impl std::fmt::Debug for SamplingClient {
@@ -926,6 +1439,7 @@ struct ClientDefaults {
     temperature: Option<f32>,
     top_p: Option<f32>,
     adapter: BackendAdapter,
+    configured_api_backend: ApiBackend,
     request_compat: Option<RequestCompat>,
     endpoint_path: Option<String>,
     auth_scheme: AuthScheme,
@@ -937,6 +1451,7 @@ struct ClientDefaults {
     bedrock_request_metadata: IndexMap<String, String>,
     bedrock_headers: IndexMap<String, String>,
     bedrock_profile: Option<String>,
+    compact_timeout: std::time::Duration,
 }
 
 impl ClientDefaults {
@@ -1247,6 +1762,7 @@ impl SamplingClient {
             temperature: config.temperature,
             top_p: config.top_p,
             adapter,
+            configured_api_backend: config.api_backend,
             request_compat: config.request_compat,
             endpoint_path: config.endpoint_path,
             auth_scheme: config.auth_scheme,
@@ -1256,6 +1772,9 @@ impl SamplingClient {
             bedrock_request_metadata: config.bedrock_request_metadata,
             bedrock_headers: config.bedrock_headers,
             bedrock_profile: config.bedrock_profile,
+            compact_timeout: std::time::Duration::from_secs(
+                config.idle_timeout_secs.unwrap_or(300).saturating_mul(4),
+            ),
         };
 
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
@@ -1270,6 +1789,8 @@ impl SamplingClient {
             header_injector: config.header_injector,
             endpoint,
             google_adc: Arc::new(crate::google::VertexAdcTokenProvider::new()),
+            codex_turn_state: shared_codex_turn_state_cache(),
+            codex_compact_unsupported: shared_codex_compact_unsupported_cache(),
         })
     }
 
@@ -1285,6 +1806,12 @@ impl SamplingClient {
             .wire_backend()
             .expect("SamplingClient rejects unimplemented native adapters")
             .clone()
+    }
+
+    /// Configured route identity before provider adapters normalize it to a
+    /// shared wire protocol.
+    pub fn configured_api_backend(&self) -> ApiBackend {
+        self.defaults.configured_api_backend.clone()
     }
 
     /// POST with default headers. A live resolver is evaluated exactly once;
@@ -2144,6 +2671,9 @@ impl SamplingClient {
 
         if self.defaults.adapter.uses_openai_codex_dialect() {
             apply_codex_dialect(request);
+            if is_azure_responses_endpoint(&self.base_url) {
+                request.inner.store = Some(true);
+            }
         }
 
         Ok(())
@@ -2157,6 +2687,11 @@ impl SamplingClient {
         &self,
         mut request: CreateResponseWrapper,
     ) -> Result<rs::Response> {
+        if self.defaults.adapter.uses_openai_codex_dialect() {
+            return Err(SamplingError::InvalidConfiguration(
+                "Codex Responses requires the streaming Responses API path",
+            ));
+        }
         self.apply_response_defaults(&mut request)?;
 
         let x_grok_conv_id = request.x_grok_conv_id.as_deref().unwrap_or_default();
@@ -2196,13 +2731,6 @@ impl SamplingClient {
             .is_some_and(|compat| !compat.supports_strict_mode)
         {
             Self::strip_strict_tool_fields(&mut request_body);
-        }
-        if self.defaults.adapter.uses_openai_codex_dialect() {
-            // ChatGPT Codex backend rejects non-stream requests:
-            // `{"detail":"Stream must be set to true"}`.
-            request_body["stream"] = serde_json::json!(true);
-            strip_codex_unsupported_body_fields(&mut request_body);
-            patch_codex_reasoning_effort_wire(&mut request_body, self.defaults.reasoning_effort);
         }
         let (http_request, sent_bearer_prefix) = self.post(self.endpoint("responses"));
         let mut http_request = self.apply_responses_session_affinity(
@@ -2362,8 +2890,7 @@ impl SamplingClient {
         // otherwise — which our error parser used to collapse to a generic 400.
         request_body["stream"] = serde_json::json!(true);
         if self.defaults.adapter.uses_openai_codex_dialect() {
-            strip_codex_unsupported_body_fields(&mut request_body);
-            patch_codex_reasoning_effort_wire(&mut request_body, self.defaults.reasoning_effort);
+            patch_codex_request_body(&mut request_body, &request, self.defaults.reasoning_effort);
         }
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
@@ -2371,13 +2898,47 @@ impl SamplingClient {
             .defaults
             .doom_loop_recovery
             .map(crate::doom_loop::DoomLoopSignalCollector::new);
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("responses"));
+        let responses_endpoint = self.endpoint("responses");
+        let codex_route = responses_endpoint
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(responses_endpoint.as_str())
+            .trim_end_matches('/')
+            .to_string();
+        let (http_request, sent_bearer_prefix) = self.post(responses_endpoint);
+        let codex_turn_key = self
+            .defaults
+            .adapter
+            .uses_openai_codex_dialect()
+            .then_some(codex_route)
+            .and_then(|route| {
+                request
+                    .x_grok_session_id
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .zip(
+                        request
+                            .x_grok_turn_idx
+                            .as_deref()
+                            .filter(|value| !value.is_empty()),
+                    )
+                    .map(|(session_id, turn_id)| {
+                        (route, session_id.to_string(), turn_id.to_string())
+                    })
+            });
         let mut http_request = self
             .apply_responses_session_affinity(
                 grok_headers.apply(http_request),
                 request.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        if self.defaults.adapter.uses_openai_codex_dialect()
+            && let Some(turn_state) = codex_turn_key
+                .as_ref()
+                .and_then(|key| take_codex_turn_state(&self.codex_turn_state, key))
+        {
+            http_request = http_request.header(X_CODEX_TURN_STATE_HEADER, turn_state);
+        }
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
             http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
@@ -2446,6 +3007,27 @@ impl SamplingClient {
         }
 
         let model_metadata = extract_model_metadata(response.headers());
+        let response_model = response
+            .headers()
+            .get("openai-model")
+            .or_else(|| response.headers().get("x-openai-model"))
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let response_turn_state = response
+            .headers()
+            .get(X_CODEX_TURN_STATE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if let (Some(key), Some(turn_state)) = (codex_turn_key.as_ref(), response_turn_state) {
+            cache_codex_turn_state(&self.codex_turn_state, key, turn_state);
+        }
+        let responses_wire_dialect =
+            if self.defaults.configured_api_backend == ApiBackend::CodexResponses {
+                ResponsesWireDialect::Codex
+            } else {
+                ResponsesWireDialect::Strict
+            };
 
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -2466,6 +3048,8 @@ impl SamplingClient {
         let event_stream = byte_stream.eventsource();
 
         let doom_loop_for_stream = doom_loop.clone();
+        let codex_turn_state_for_stream = self.codex_turn_state.clone();
+        let mut requested_model_for_stream = response_model.unwrap_or_else(|| model_id.clone());
 
         // Absorbed frames (doom-loop check events) and auxiliary frames both
         // surface as heartbeats: they carry no model output but prove server
@@ -2490,6 +3074,18 @@ impl SamplingClient {
                             data = %data,
                         );
 
+                        if responses_wire_dialect == ResponsesWireDialect::Codex
+                            && let Some(response_model) = codex_event_response_model(data)
+                        {
+                            requested_model_for_stream = response_model;
+                        }
+                        if responses_wire_dialect == ResponsesWireDialect::Codex
+                            && let (Some(key), Some(turn_state)) =
+                                (codex_turn_key.as_ref(), codex_event_turn_state(data))
+                        {
+                            cache_codex_turn_state(&codex_turn_state_for_stream, key, turn_state);
+                        }
+
                         // Intercept the non-standard doom-loop event before
                         // typed deserialization; async-openai's event enum
                         // does not know it and would fail to parse it. With
@@ -2503,7 +3099,12 @@ impl SamplingClient {
                         if swallow {
                             Ok(ResponsesStreamItem::Heartbeat)
                         } else {
-                            decode_responses_sse_frame(&event.event, data)
+                            decode_responses_sse_frame_for_model(
+                                &event.event,
+                                data,
+                                responses_wire_dialect,
+                                &requested_model_for_stream,
+                            )
                         }
                     }
                     Err(e) => {
@@ -2866,13 +3467,18 @@ impl SamplingClient {
         // endpoint/backend switch merely because they reused the same slug.
         request.reasoning_model_identity = Some(ReasoningModelIdentity::new(
             request.model.clone().unwrap_or_default(),
-            self.api_backend(),
+            self.configured_api_backend(),
             &self.base_url,
         ));
 
         // Production always stamps route metadata from SamplerConfig so bare
         // model-name/URL matching cannot reshape third-party payloads.
         request.kimi_dialect = Some(self.defaults.adapter.uses_kimi_dialect());
+        if self.defaults.adapter.uses_openai_codex_dialect() {
+            request.hosted_tools.retain(|tool| {
+                matches!(tool, xai_grok_sampling_types::HostedTool::WebSearch { .. })
+            });
+        }
         request.request_compat = self.defaults.request_compat.clone();
         if request.bedrock_request_metadata.is_empty() {
             request.bedrock_request_metadata = self.defaults.bedrock_request_metadata.clone();
@@ -3136,6 +3742,233 @@ impl SamplingClient {
         }
 
         self.create_response_stream(wrapper).await
+    }
+
+    /// Compact Codex Responses history through the provider's unary
+    /// `/responses/compact` endpoint.
+    ///
+    /// `Ok(None)` means the provider explicitly does not implement the
+    /// endpoint and the caller may fall back to local summary compaction.
+    /// Authentication, quota, rate-limit, transport, and server failures stay
+    /// as errors so fallback cannot hide a real provider problem or duplicate
+    /// a paid request.
+    pub async fn compact_conversation(
+        &self,
+        mut request: ConversationRequest,
+        instructions: String,
+    ) -> Result<Option<Vec<xai_grok_sampling_types::ConversationItem>>> {
+        if self.defaults.configured_api_backend != ApiBackend::CodexResponses {
+            return Err(SamplingError::InvalidConfiguration(
+                "remote compact requires api_backend = codex-responses",
+            ));
+        }
+        self.apply_conversation_defaults(&mut request)?;
+        let route_identity = request.reasoning_model_identity.clone();
+        let x_grok_conv_id = request.x_grok_conv_id.clone();
+        let x_grok_req_id = request.x_grok_req_id.clone();
+        let x_grok_session_id = request.x_grok_session_id.clone();
+        let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+        let x_grok_agent_id = request.x_grok_agent_id.clone();
+        let x_grok_deployment_id = request.x_grok_deployment_id.clone();
+        let x_grok_user_id = request.x_grok_user_id.clone();
+
+        let mut wrapper = CreateResponseWrapper::new((&request).into());
+        wrapper.x_grok_conv_id = x_grok_conv_id;
+        wrapper.x_grok_req_id = x_grok_req_id;
+        wrapper.x_grok_session_id = x_grok_session_id;
+        wrapper.x_grok_turn_idx = x_grok_turn_idx;
+        wrapper.x_grok_agent_id = x_grok_agent_id;
+        wrapper.x_grok_deployment_id = x_grok_deployment_id;
+        wrapper.x_grok_user_id = x_grok_user_id;
+        self.apply_response_defaults(&mut wrapper)?;
+
+        let mut normal_body =
+            serde_json::to_value(&wrapper.inner).map_err(SamplingError::Serialization)?;
+        xai_grok_sampling_types::patch_reasoning_text_types(&mut normal_body);
+        patch_codex_reasoning_effort_wire(&mut normal_body, self.defaults.reasoning_effort);
+        if self
+            .defaults
+            .responses_compat()
+            .is_some_and(|compat| !compat.supports_strict_mode)
+        {
+            Self::strip_strict_tool_fields(&mut normal_body);
+        }
+
+        let mut compact_body = serde_json::Map::new();
+        let model = normal_body
+            .get("model")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::String(self.defaults.model.clone()));
+        compact_body.insert("model".into(), model);
+        compact_body.insert(
+            "input".into(),
+            normal_body
+                .get("input")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        );
+        let resolved_instructions = if instructions.trim().is_empty() {
+            normal_body
+                .get("instructions")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("You are a helpful assistant.")
+                .to_string()
+        } else {
+            instructions
+        };
+        compact_body.insert(
+            "instructions".into(),
+            serde_json::Value::String(resolved_instructions),
+        );
+        compact_body.insert(
+            "tools".into(),
+            normal_body
+                .get("tools")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        );
+        compact_body.insert("parallel_tool_calls".into(), serde_json::Value::Bool(true));
+        for field in ["reasoning", "service_tier", "prompt_cache_key", "text"] {
+            if let Some(value) = normal_body.get(field).filter(|value| !value.is_null()) {
+                compact_body.insert(field.to_string(), value.clone());
+            }
+        }
+        let compact_body = serde_json::Value::Object(compact_body);
+
+        let endpoint = self.endpoint.url_for_path("responses/compact");
+        let route = endpoint
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(endpoint.as_str())
+            .trim_end_matches('/')
+            .to_string();
+        if self
+            .codex_compact_unsupported
+            .lock()
+            .is_ok_and(|cache| cache.contains(&route))
+        {
+            return Ok(None);
+        }
+        let model_id = compact_body
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let grok_headers = GrokRequestHeaders {
+            conv_id: wrapper.x_grok_conv_id.as_deref().unwrap_or_default(),
+            req_id: wrapper.x_grok_req_id.as_deref().unwrap_or_default(),
+            model_id,
+            session_id: wrapper.x_grok_session_id.as_deref().unwrap_or_default(),
+            turn_idx: wrapper.x_grok_turn_idx.as_deref(),
+            agent_id: wrapper.x_grok_agent_id.as_deref().unwrap_or_default(),
+            deployment_id: wrapper.x_grok_deployment_id.as_deref(),
+            user_id: wrapper.x_grok_user_id.as_deref(),
+        };
+        let codex_turn_key = wrapper
+            .x_grok_session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .zip(
+                wrapper
+                    .x_grok_turn_idx
+                    .as_deref()
+                    .filter(|value| !value.is_empty()),
+            )
+            .map(|(session_id, turn_id)| {
+                // Share state with the ordinary Responses endpoint: compact is
+                // a continuation inside the same Codex turn.
+                let responses_route = self
+                    .endpoint
+                    .url_for_path("responses")
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches('/')
+                    .to_string();
+                (responses_route, session_id.to_string(), turn_id.to_string())
+            });
+        let (http_request, sent_bearer_prefix) = self.post(endpoint.clone());
+        let mut http_request = self
+            .apply_responses_session_affinity(
+                grok_headers.apply(http_request),
+                wrapper.x_grok_session_id.as_deref(),
+            )
+            .header(ACCEPT, HeaderValue::from_static("application/json"))
+            .timeout(self.defaults.compact_timeout);
+        if let Some(turn_state) = codex_turn_key
+            .as_ref()
+            .and_then(|key| take_codex_turn_state(&self.codex_turn_state, key))
+        {
+            http_request = http_request.header(X_CODEX_TURN_STATE_HEADER, turn_state);
+        }
+        let built_request = http_request
+            .json(&compact_body)
+            .build()
+            .map_err(SamplingError::Http)?;
+        Self::log_request_headers(&built_request, "responses/compact");
+        let response = self.http.execute(built_request).await?;
+        let status = response.status();
+        let model_metadata = extract_model_metadata(response.headers());
+        let retry_after_secs = extract_retry_after(response.headers());
+        let should_retry = extract_should_retry(response.headers());
+        let response_turn_state = response
+            .headers()
+            .get(X_CODEX_TURN_STATE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            let message = user_facing_api_error_message(status, bytes.as_ref());
+            if compact_endpoint_is_unsupported(status, &message) {
+                if let Ok(mut cache) = self.codex_compact_unsupported.lock() {
+                    cache.insert(route);
+                }
+                tracing::info!(status = %status, "Codex remote compact unsupported; using local fallback");
+                return Ok(None);
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.record_401_attribution(
+                    crate::attribution::SamplingConsumer::Responses,
+                    sent_bearer_prefix.as_deref(),
+                );
+                return Err(SamplingError::Auth(format!(
+                    "Unauthorized (401) from {endpoint}: {message}"
+                )));
+            }
+            return Err(SamplingError::Api {
+                status,
+                message,
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+            });
+        }
+        if let (Some(key), Some(turn_state)) = (codex_turn_key.as_ref(), response_turn_state) {
+            cache_codex_turn_state(&self.codex_turn_state, key, turn_state);
+        }
+        let response: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
+        let output = response.get("output").cloned().ok_or_else(|| {
+            SamplingError::Serialization(<serde_json::Error as serde::de::Error>::custom(
+                "Codex compact response is missing output",
+            ))
+        })?;
+        let items = xai_grok_sampling_types::codex_compact_output_to_conversation_items(
+            output,
+            route_identity,
+        );
+        if !items.iter().any(|item| {
+            matches!(
+                item,
+                xai_grok_sampling_types::ConversationItem::Compaction(_)
+            )
+        }) {
+            return Err(SamplingError::Serialization(
+                <serde_json::Error as serde::de::Error>::custom(
+                    "Codex compact response contains no compaction item",
+                ),
+            ));
+        }
+        Ok(Some(items))
     }
 
     /// Send a conversation request using the Responses API (non-streaming).
@@ -3477,6 +4310,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_builtin_codex_keeps_responses_identity() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Responses,
+            adapter_kind: xai_grok_sampling_types::AdapterKind::OpenAiCodex,
+            ..minimal_config()
+        })
+        .unwrap();
+        assert_eq!(client.api_backend(), ApiBackend::Responses);
+        assert_eq!(client.configured_api_backend(), ApiBackend::Responses);
+
+        let mut request = ConversationRequest {
+            model: Some("builtin-codex".into()),
+            ..Default::default()
+        };
+        client.apply_conversation_defaults(&mut request).unwrap();
+        assert_eq!(
+            request.reasoning_model_identity,
+            Some(ReasoningModelIdentity::new(
+                "builtin-codex",
+                ApiBackend::Responses,
+                "https://example.test",
+            ))
+        );
+    }
+
     /// Verify the serialized shape of StreamingChatRequest matches the
     /// expected wire format: all ChatCompletionRequest fields flattened at
     /// top level, plus `stream: true` and `stream_options.include_usage: true`.
@@ -3575,6 +4434,146 @@ mod tests {
         );
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn codex_responses_keeps_native_web_search_and_sets_tool_defaults() {
+        use xai_grok_sampling_types::{ConversationRequest, HostedTool, ToolSpec};
+
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::CodexResponses,
+            ..minimal_config()
+        })
+        .unwrap();
+        let mut request = ConversationRequest::from_items(vec![
+            xai_grok_sampling_types::ConversationItem::system("you are codex"),
+            xai_grok_sampling_types::ConversationItem::user("search the web"),
+        ])
+        .with_tools(vec![ToolSpec {
+            name: "read_file".into(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+        }]);
+        request.hosted_tools = vec![
+            HostedTool::WebSearch { options: None },
+            HostedTool::XSearch { options: None },
+        ];
+
+        client.apply_conversation_defaults(&mut request).unwrap();
+        assert_eq!(
+            request.hosted_tools,
+            vec![HostedTool::WebSearch { options: None }]
+        );
+        let extra_tools = xai_grok_sampling_types::extra_tool_entries(&request.hosted_tools);
+        let mut wrapper = CreateResponseWrapper::new((&request).into());
+        wrapper.extra_tool_entries = extra_tools;
+        client.apply_response_defaults(&mut wrapper).unwrap();
+        let body = serde_json::to_value(&wrapper.inner).unwrap();
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+        let tools = body["tools"].as_array().expect("Codex tools array");
+        assert!(tools.iter().any(|tool| tool["type"] == "web_search"));
+        assert!(tools.iter().any(|tool| tool["type"] == "function"));
+        assert!(tools.iter().all(|tool| tool["type"] != "x_search"));
+        assert!(wrapper.extra_tool_entries.is_empty());
+    }
+
+    #[test]
+    fn codex_request_without_tools_keeps_fixed_defaults_and_client_metadata() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::CodexResponses,
+            ..minimal_config()
+        })
+        .unwrap();
+        let request =
+            ConversationRequest::from_items(vec![xai_grok_sampling_types::ConversationItem::user(
+                "hello",
+            )]);
+        let mut wrapper = CreateResponseWrapper::new((&request).into());
+        wrapper.x_grok_session_id = Some("session-123".into());
+        wrapper.x_grok_conv_id = Some("thread-456".into());
+        wrapper.x_grok_turn_idx = Some("turn-7".into());
+        client.apply_response_defaults(&mut wrapper).unwrap();
+
+        let mut body = serde_json::to_value(&wrapper.inner).unwrap();
+        patch_codex_request_body(&mut body, &wrapper, client.defaults.reasoning_effort);
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["tools"], serde_json::json!([]));
+        assert_eq!(body["client_metadata"]["session_id"], "session-123");
+        assert_eq!(body["client_metadata"]["thread_id"], "thread-456");
+        assert_eq!(body["client_metadata"]["turn_id"], "turn-7");
+    }
+
+    #[test]
+    fn codex_azure_store_matches_official_cli_while_relays_remain_stateless() {
+        for base_url in [
+            "https://foo.openai.azure.com/openai",
+            "https://foo.cognitiveservices.azure.cn/openai",
+            "https://foo.aoai.azure.com/openai",
+            "https://foo.openai.azure-api.net/openai",
+            "https://foo.z01.azurefd.net/openai",
+            "https://foo.windows.net/openai",
+        ] {
+            let client = SamplingClient::new(SamplerConfig {
+                base_url: base_url.into(),
+                api_backend: ApiBackend::CodexResponses,
+                ..minimal_config()
+            })
+            .unwrap();
+            let mut wrapper = CreateResponseWrapper::default();
+            client.apply_response_defaults(&mut wrapper).unwrap();
+            assert_eq!(wrapper.inner.store, Some(true), "{base_url}");
+        }
+
+        let relay = SamplingClient::new(SamplerConfig {
+            base_url: "https://relay.example/v1".into(),
+            api_backend: ApiBackend::CodexResponses,
+            ..minimal_config()
+        })
+        .unwrap();
+        let mut wrapper = CreateResponseWrapper::default();
+        relay.apply_response_defaults(&mut wrapper).unwrap();
+        assert_eq!(wrapper.inner.store, Some(false));
+    }
+
+    #[test]
+    fn strict_responses_does_not_inject_codex_client_metadata() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::Responses,
+            ..minimal_config()
+        })
+        .unwrap();
+        let request =
+            ConversationRequest::from_items(vec![xai_grok_sampling_types::ConversationItem::user(
+                "hello",
+            )]);
+        let mut wrapper = CreateResponseWrapper::new((&request).into());
+        wrapper.x_grok_session_id = Some("session-123".into());
+        wrapper.x_grok_turn_idx = Some("turn-7".into());
+        client.apply_response_defaults(&mut wrapper).unwrap();
+
+        let body = serde_json::to_value(&wrapper.inner).unwrap();
+        assert!(body.get("client_metadata").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_responses_non_streaming_fails_before_http() {
+        let client = SamplingClient::new(SamplerConfig {
+            api_backend: ApiBackend::CodexResponses,
+            ..minimal_config()
+        })
+        .unwrap();
+        let error = client
+            .create_response(CreateResponseWrapper::default())
+            .await
+            .expect_err("Codex non-streaming must fail fast");
+        assert!(matches!(error, SamplingError::InvalidConfiguration(_)));
+        assert!(error.to_string().contains("requires the streaming"));
     }
 
     #[test]
@@ -4631,7 +5630,11 @@ mod tests {
     #[test]
     fn decode_responses_sse_frame_maps_auxiliary_events_to_heartbeats() {
         for event_type in RESPONSES_AUXILIARY_EVENT_TYPES {
-            let named = decode_responses_sse_frame(event_type, r#"{"side_band":true}"#);
+            let named = decode_responses_sse_frame(
+                event_type,
+                r#"{"side_band":true}"#,
+                ResponsesWireDialect::Strict,
+            );
             assert!(
                 matches!(named, Ok(ResponsesStreamItem::Heartbeat)),
                 "event: {event_type} should surface as a heartbeat"
@@ -4643,7 +5646,7 @@ mod tests {
                 "metadata": { "request_id": "req_test" }
             })
             .to_string();
-            let data_only = decode_responses_sse_frame("", &payload);
+            let data_only = decode_responses_sse_frame("", &payload, ResponsesWireDialect::Strict);
             assert!(
                 matches!(data_only, Ok(ResponsesStreamItem::Heartbeat)),
                 "type: {event_type} should surface as a heartbeat"
@@ -4665,7 +5668,7 @@ mod tests {
         .to_string();
 
         let Ok(ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseOutputTextDelta(event))) =
-            decode_responses_sse_frame("", &payload)
+            decode_responses_sse_frame("", &payload, ResponsesWireDialect::Strict)
         else {
             panic!("a normal text delta containing auxiliary names must be preserved");
         };
@@ -4679,6 +5682,7 @@ mod tests {
         let decoded = decode_responses_sse_frame(
             "",
             r#"{"type":"response.future_semantic_event","sequence_number":9}"#,
+            ResponsesWireDialect::Strict,
         );
         assert!(matches!(decoded, Ok(ResponsesStreamItem::Heartbeat)));
     }
@@ -4694,7 +5698,7 @@ mod tests {
             "item": { "type": "brand_new_item_kind", "id": "item_1" }
         })
         .to_string();
-        let decoded = decode_responses_sse_frame("", &payload);
+        let decoded = decode_responses_sse_frame("", &payload, ResponsesWireDialect::Strict);
         assert!(matches!(decoded, Ok(ResponsesStreamItem::Heartbeat)));
     }
 
@@ -4706,8 +5710,294 @@ mod tests {
         let decoded = decode_responses_sse_frame(
             "",
             r#"{"type":"response.output_text.delta","sequence_number":9}"#,
+            ResponsesWireDialect::Strict,
         );
         assert!(matches!(decoded, Err(SamplingError::Serialization(_))));
+    }
+
+    fn codex_failed_event(code: &str, message: Option<&str>) -> String {
+        serde_json::json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": code,
+                    "message": message,
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn assert_codex_terminal_api_error(
+        payload: &str,
+        expected_status: reqwest::StatusCode,
+        expected_retry: bool,
+        expected_delay: Option<u64>,
+    ) {
+        let Some(SamplingError::Api {
+            status,
+            retry_after_secs,
+            should_retry,
+            ..
+        }) = codex_terminal_error(payload)
+        else {
+            panic!("expected a Codex terminal API error");
+        };
+        assert_eq!(status, expected_status);
+        assert_eq!(should_retry, Some(expected_retry));
+        assert_eq!(retry_after_secs, expected_delay);
+    }
+
+    #[test]
+    fn codex_terminal_failures_match_official_retry_policy() {
+        for code in ["context_length_exceeded", "invalid_prompt", "bio_policy"] {
+            assert_codex_terminal_api_error(
+                &codex_failed_event(code, Some("fatal request")),
+                reqwest::StatusCode::BAD_REQUEST,
+                false,
+                None,
+            );
+        }
+        for code in ["insufficient_quota", "usage_not_included"] {
+            assert_codex_terminal_api_error(
+                &codex_failed_event(code, Some("quota failure")),
+                reqwest::StatusCode::PAYMENT_REQUIRED,
+                false,
+                None,
+            );
+        }
+        assert_codex_terminal_api_error(
+            &codex_failed_event("cyber_policy", None),
+            reqwest::StatusCode::FORBIDDEN,
+            false,
+            None,
+        );
+        for code in ["server_is_overloaded", "slow_down"] {
+            assert_codex_terminal_api_error(
+                &codex_failed_event(code, Some("try later")),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                true,
+                None,
+            );
+        }
+        assert_codex_terminal_api_error(
+            &codex_failed_event("future_server_failure", Some("unknown")),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            true,
+            None,
+        );
+    }
+
+    #[test]
+    fn codex_rate_limit_retry_delay_parses_official_message_forms() {
+        for (message, seconds) in [
+            ("Please try again in 28ms.", 0),
+            ("Please try again in 1.898s.", 2),
+            ("Rate limit exceeded. Try again in 35 seconds.", 35),
+        ] {
+            assert_codex_terminal_api_error(
+                &codex_failed_event("rate_limit_exceeded", Some(message)),
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                true,
+                Some(seconds),
+            );
+        }
+    }
+
+    #[test]
+    fn codex_incomplete_max_tokens_uses_existing_truncation_signal() {
+        let max_tokens = r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#;
+        assert!(matches!(
+            codex_terminal_error(max_tokens),
+            Some(SamplingError::MaxTokensTruncation)
+        ));
+
+        let other = r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}"#;
+        assert_codex_terminal_api_error(
+            other,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            true,
+            None,
+        );
+    }
+
+    #[test]
+    fn strict_responses_does_not_apply_codex_terminal_error_mapping() {
+        let payload = codex_failed_event("context_length_exceeded", Some("too long"));
+        let decoded = decode_responses_sse_frame("", &payload, ResponsesWireDialect::Strict);
+        assert!(!matches!(
+            decoded,
+            Err(SamplingError::Api {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn codex_turn_state_cache_is_route_and_turn_scoped() {
+        let cache: CodexTurnStateCache = Arc::new(Mutex::new(HashMap::new()));
+        let route_a = "https://provider-a.test/v1/responses".to_string();
+        let route_b = "https://provider-b.test/v1/responses".to_string();
+        let a_turn_1 = (route_a.clone(), "session".into(), "turn-1".into());
+        let a_turn_2 = (route_a, "session".into(), "turn-2".into());
+        let b_turn_1 = (route_b, "session".into(), "turn-1".into());
+
+        cache_codex_turn_state(&cache, &a_turn_1, "state-a1".into());
+        cache_codex_turn_state(&cache, &b_turn_1, "state-b1".into());
+        assert_eq!(
+            take_codex_turn_state(&cache, &a_turn_1).as_deref(),
+            Some("state-a1")
+        );
+        assert_eq!(
+            take_codex_turn_state(&cache, &b_turn_1).as_deref(),
+            Some("state-b1")
+        );
+
+        cache_codex_turn_state(&cache, &a_turn_2, "state-a2".into());
+        assert_eq!(
+            take_codex_turn_state(&cache, &a_turn_2).as_deref(),
+            Some("state-a2")
+        );
+        assert!(
+            !cache
+                .lock()
+                .expect("turn state cache")
+                .contains_key(&a_turn_1)
+        );
+        assert_eq!(
+            take_codex_turn_state(&cache, &b_turn_1).as_deref(),
+            Some("state-b1")
+        );
+    }
+
+    #[test]
+    fn codex_responses_accepts_sparse_completed_event() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.completed","response":{"id":"resp1"}}"#,
+            ResponsesWireDialect::Codex,
+        )
+        .expect("Codex sparse completion should parse");
+        let ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseCompleted(event)) = decoded
+        else {
+            panic!("expected ResponseCompleted");
+        };
+        assert_eq!(event.sequence_number, 0);
+        assert_eq!(event.response.id, "resp1");
+        assert_eq!(event.response.created_at, 0);
+        assert_eq!(event.response.object, "response");
+        assert_eq!(event.response.model, "");
+        assert_eq!(event.response.status, rs::Status::Completed);
+        assert!(event.response.output.is_empty());
+    }
+
+    #[test]
+    fn strict_responses_rejects_sparse_completed_event() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.completed","response":{"id":"resp1"}}"#,
+            ResponsesWireDialect::Strict,
+        );
+        assert!(matches!(decoded, Err(SamplingError::Serialization(_))));
+    }
+
+    #[test]
+    fn codex_responses_still_requires_response_id() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.completed","response":{}}"#,
+            ResponsesWireDialect::Codex,
+        );
+        assert!(matches!(decoded, Err(SamplingError::Serialization(_))));
+    }
+
+    #[test]
+    fn codex_responses_accepts_sparse_created_event() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.created","response":{"id":"resp1"}}"#,
+            ResponsesWireDialect::Codex,
+        )
+        .expect("Codex sparse created event should parse");
+        let ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseCreated(event)) = decoded
+        else {
+            panic!("expected ResponseCreated");
+        };
+        assert_eq!(event.sequence_number, 0);
+        assert_eq!(event.response.status, rs::Status::InProgress);
+    }
+
+    #[test]
+    fn codex_responses_defaults_sparse_usage_details() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.completed","response":{"id":"resp1","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}"#,
+            ResponsesWireDialect::Codex,
+        )
+        .expect("Codex sparse usage should parse");
+        let ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseCompleted(event)) = decoded
+        else {
+            panic!("expected ResponseCompleted");
+        };
+        let usage = event.response.usage.expect("usage should be retained");
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.total_tokens, 5);
+        assert_eq!(usage.input_tokens_details.cached_tokens, 0);
+        assert_eq!(usage.output_tokens_details.reasoning_tokens, 0);
+    }
+
+    #[test]
+    fn codex_responses_defaults_sequence_number_on_output_events() {
+        let decoded = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.output_text.delta","item_id":"item1","output_index":0,"content_index":0,"delta":"OK"}"#,
+            ResponsesWireDialect::Codex,
+        )
+        .expect("Codex output event without sequence number should parse");
+        let ResponsesStreamItem::Event(rs::ResponseStreamEvent::ResponseOutputTextDelta(event)) =
+            decoded
+        else {
+            panic!("expected ResponseOutputTextDelta");
+        };
+        assert_eq!(event.sequence_number, 0);
+        assert_eq!(event.delta, "OK");
+    }
+
+    #[tokio::test]
+    async fn codex_text_delta_then_sparse_completed_finishes_turn() {
+        let delta = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.output_text.delta","sequence_number":1,"item_id":"item1","output_index":0,"content_index":0,"delta":"OK"}"#,
+            ResponsesWireDialect::Codex,
+        )
+        .expect("text delta should parse");
+        let completed = decode_responses_sse_frame(
+            "",
+            r#"{"type":"response.completed","response":{"id":"resp1"}}"#,
+            ResponsesWireDialect::Codex,
+        )
+        .expect("sparse completion should parse");
+        let raw = futures_util::StreamExt::boxed(futures_util::stream::iter(vec![
+            Ok(delta),
+            Ok(completed),
+        ]));
+        let events = futures_util::StreamExt::collect::<Vec<_>>(crate::stream::stream_responses(
+            raw,
+            None,
+            crate::types::RequestId::from("codex-sparse-test"),
+            std::time::Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last() {
+            Some(crate::events::SamplingEvent::Completed { response, .. }) => {
+                assert_eq!(response.assistant_text(), "OK");
+            }
+            other => panic!("expected successful completion, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4798,7 +6088,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse)
+        let event = deserialize_response_event(sse, ResponsesWireDialect::Strict)
             .expect("parse")
             .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
@@ -4838,7 +6128,7 @@ mod tests {
             )
         };
 
-        let event = deserialize_response_event(&make(78))
+        let event = deserialize_response_event(&make(78), ResponsesWireDialect::Strict)
             .expect("parse")
             .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
@@ -4854,7 +6144,7 @@ mod tests {
         );
 
         // The REST mapper backfills 0 for unbilled requests: no stash.
-        let event = deserialize_response_event(&make(0))
+        let event = deserialize_response_event(&make(0), ResponsesWireDialect::Strict)
             .expect("parse")
             .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
@@ -4886,7 +6176,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse)
+        let event = deserialize_response_event(sse, ResponsesWireDialect::Strict)
             .expect("parse")
             .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
@@ -4925,7 +6215,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse)
+        let event = deserialize_response_event(sse, ResponsesWireDialect::Strict)
             .expect("parse")
             .expect("event present");
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
@@ -4948,7 +6238,7 @@ mod tests {
             "delta": "hello",
             "logprobs": []
         }"#;
-        let event = deserialize_response_event(sse)
+        let event = deserialize_response_event(sse, ResponsesWireDialect::Strict)
             .expect("non-terminal event parses")
             .expect("event present");
         assert!(matches!(

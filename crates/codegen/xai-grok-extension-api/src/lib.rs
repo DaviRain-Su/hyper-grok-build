@@ -108,16 +108,18 @@ impl WasmToolDescriptor {
     pub fn client_name_for_session(&self, session_key: Option<&str>) -> String {
         let ext = sanitize_tool_token(&self.extension);
         let name = sanitize_tool_token(&self.name);
-        match session_key.map(short_session_token).filter(|s| !s.is_empty()) {
+        match session_key
+            .map(short_session_token)
+            .filter(|s| !s.is_empty())
+        {
             Some(sk) => format!("wasm_{sk}_{ext}_{name}"),
             None => format!("wasm_{ext}_{name}"),
         }
     }
 
     pub fn parsed_schema(&self) -> serde_json::Value {
-        serde_json::from_str(&self.input_schema_json).unwrap_or_else(|_| {
-            serde_json::json!({"type": "object", "properties": {}})
-        })
+        serde_json::from_str(&self.input_schema_json)
+            .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}))
     }
 }
 

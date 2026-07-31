@@ -45,9 +45,8 @@ pub mod loop_cmd;
 pub mod mcps;
 pub mod model;
 pub mod multiline;
-pub mod nexus;
-pub mod scoped_models;
 pub mod new;
+pub mod nexus;
 pub mod personas;
 pub mod plan;
 pub mod plugin;
@@ -61,6 +60,7 @@ pub mod remember;
 pub mod rename;
 pub mod resume;
 pub mod rewind;
+pub mod scoped_models;
 pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
@@ -90,9 +90,7 @@ pub(crate) fn oauth_login_logout_hint(
 ) -> (&'static str, &'static str) {
     match platform {
         xai_grok_models::PlatformId::OpenAiCodex => ("/login openai", "grok logout --openai"),
-        xai_grok_models::PlatformId::AnthropicClaude => {
-            ("/login claude", "grok logout --claude")
-        }
+        xai_grok_models::PlatformId::AnthropicClaude => ("/login claude", "grok logout --claude"),
         _ => ("/login kimi", "grok logout --kimi"),
     }
 }

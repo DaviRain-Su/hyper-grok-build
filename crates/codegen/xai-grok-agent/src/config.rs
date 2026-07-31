@@ -742,7 +742,13 @@ impl BuiltinAgentName {
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan, Self::Oracle, Self::Xdotcom]
+        &[
+            Self::GeneralPurpose,
+            Self::Explore,
+            Self::Plan,
+            Self::Oracle,
+            Self::Xdotcom,
+        ]
     }
 }
 /// Portable agent identity — parsed from .grok/agents/*.md.

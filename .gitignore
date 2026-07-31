@@ -1,11 +1,13 @@
-/target
+# Rust build outputs
+/target/
 **/target/
-/target-base16/
-/target-resume-omp/
-/target-session-compat/
-/target-symlink-fix/
-/target-user-test/
+/target-*/
+
+# Compiler and interpreter caches
 **/*.rs.bk
 **/__pycache__/
 **/*.pyc
+
+# OS metadata
 .DS_Store
+Thumbs.db

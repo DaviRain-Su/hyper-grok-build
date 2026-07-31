@@ -138,6 +138,14 @@ pub enum SamplingEvent {
         /// For web search: `{"query": "...", "sources": [{"url": "..."}, ...]}`
         result: Option<serde_json::Value>,
     },
+
+    /// A backend-hosted tool call ended without a usable result.
+    BackendToolCallFailed {
+        request_id: RequestId,
+        call_id: String,
+        name: String,
+        error: String,
+    },
 }
 
 /// Serializable mirror of [`SamplingError`].

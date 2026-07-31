@@ -34,6 +34,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
+#[cfg(not(target_os = "windows"))]
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -479,6 +480,7 @@ pub struct PlaybackStream {
 
 enum Teardown {
     /// A subprocess player (Linux/macOS helper): kill + reap on stop.
+    #[cfg(not(target_os = "windows"))]
     Child(Option<Child>),
     /// Windows cpal: the stream is moved into the bridge thread and dropped
     /// when the bridge exits (the sample source drops). The variant carries
@@ -545,6 +547,7 @@ impl PlaybackStream {
         self.queue.stop();
         // Platform teardown.
         match &mut self.teardown {
+            #[cfg(not(target_os = "windows"))]
             Teardown::Child(child) => {
                 if let Some(child) = child.as_mut() {
                     // Close stdin first so the player flushes, then kill to
@@ -902,14 +905,7 @@ where
                     return;
                 }
                 let mut rs = resampler.lock();
-                fill_cpal_output(
-                    out,
-                    &queue,
-                    &mut rs,
-                    source_rate,
-                    stream_rate,
-                    channels,
-                );
+                fill_cpal_output(out, &queue, &mut rs, source_rate, stream_rate, channels);
             },
             |err| tracing::warn!(error = %err, "live speaker playback stream error"),
             None,
@@ -963,9 +959,9 @@ fn fill_cpal_output<T>(
     } else {
         resampler.last_out.clamp(-1.0, 1.0)
     };
-    for frame_idx in 0..total_frames {
+    for (frame_idx, mono_sample) in mono.iter().enumerate() {
         let sample = if frame_idx < written {
-            mono[frame_idx].clamp(-1.0, 1.0)
+            mono_sample.clamp(-1.0, 1.0)
         } else {
             hold
         };
@@ -1420,14 +1416,7 @@ where
                     out.fill(T::from_sample(0.0));
                     return;
                 };
-                fill_cpal_output(
-                    out,
-                    &queue,
-                    &mut rs,
-                    source_rate,
-                    stream_rate,
-                    channels,
-                );
+                fill_cpal_output(out, &queue, &mut rs, source_rate, stream_rate, channels);
             },
             |err| tracing::warn!(error = %err, "speaker helper stream error"),
             None,
@@ -1468,7 +1457,10 @@ mod tests {
 
     #[test]
     fn speaker_helper_status_parses_ready_bare() {
-        assert_eq!(parse_speaker_helper_status_line("READY"), Some(Ok(String::new())));
+        assert_eq!(
+            parse_speaker_helper_status_line("READY"),
+            Some(Ok(String::new()))
+        );
         assert_eq!(
             parse_speaker_helper_status_line("READY\n"),
             Some(Ok(String::new()))

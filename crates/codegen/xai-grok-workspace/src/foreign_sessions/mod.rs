@@ -412,9 +412,7 @@ mod tests {
                     now - Duration::from_secs(2),
                 )
             },
-            |_, _, _| -> RecentProbe<RecentCandidate> {
-                panic!("disabled omp store touched")
-            },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         )
         .unwrap();
         assert_eq!(winner.tool, ForeignSessionTool::Codex);
@@ -448,9 +446,7 @@ mod tests {
                     now,
                 )
             },
-            |_, _, _| -> RecentProbe<RecentCandidate> {
-                panic!("disabled omp store touched")
-            },
+            |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
         )
         .unwrap();
         assert_eq!(tied.tool, ForeignSessionTool::Claude);
@@ -524,9 +520,7 @@ mod tests {
                 |_, _, _| -> RecentProbe<RecentCandidate> {
                     panic!("disabled cursor store touched")
                 },
-                |_, _, _| -> RecentProbe<RecentCandidate> {
-                    panic!("disabled omp store touched")
-                },
+                |_, _, _| -> RecentProbe<RecentCandidate> { panic!("disabled omp store touched") },
             )
             .is_none()
         );
