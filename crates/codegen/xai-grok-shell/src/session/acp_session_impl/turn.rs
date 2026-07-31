@@ -1552,7 +1552,10 @@ impl SessionActor {
         }
     }
 
-    /// One agent round: Hypercore when capable, else legacy with recovery.
+    /// One agent round: **Hypercore primary**, legacy secondary with recovery.
+    ///
+    /// P6 policy: do not delete `process_conversation_turn`; keep it as the
+    /// per-round fallback when Hypercore is disabled or errors.
     async fn run_one_agent_round(
         self: &Arc<Self>,
         prompt_id: &str,
@@ -1561,7 +1564,8 @@ impl SessionActor {
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
     ) -> Result<TurnOutcome, acp::Error> {
-        if super::hypercore_turn::should_use_hypercore_turn(user_text) {
+        let decision = super::hypercore_turn::hypercore_path_decision(user_text);
+        if decision.uses_hypercore() {
             match self
                 .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone())
                 .await
@@ -1569,7 +1573,17 @@ impl SessionActor {
                 Ok(outcome) => {
                     tracing::info!(
                         session_id = %self.session_info.id.0,
-                        "hypercore turn round succeeded"
+                        path = "hypercore",
+                        "agent round succeeded"
+                    );
+                    xai_grok_telemetry::unified_log::info(
+                        "shell.turn.path",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "path": "hypercore",
+                            "prompt_id": prompt_id,
+                            "ok": true,
+                        })),
                     );
                     return Ok(outcome);
                 }
@@ -1579,8 +1593,34 @@ impl SessionActor {
                         error = %e,
                         "hypercore turn failed; falling back to legacy for this round"
                     );
+                    xai_grok_telemetry::unified_log::warn(
+                        "shell.turn.path",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "path": "legacy",
+                            "reason": "hypercore_error",
+                            "prompt_id": prompt_id,
+                            "error": e.to_string(),
+                        })),
+                    );
                 }
             }
+        } else {
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                path = "legacy",
+                reason = decision.as_str(),
+                "agent round using legacy path"
+            );
+            xai_grok_telemetry::unified_log::info(
+                "shell.turn.path",
+                Some(self.session_info.id.0.as_ref()),
+                Some(serde_json::json!({
+                    "path": "legacy",
+                    "reason": decision.as_str(),
+                    "prompt_id": prompt_id,
+                })),
+            );
         }
         self.process_conversation_turn_with_recovery(
             prompt_id,
@@ -1978,6 +2018,12 @@ impl SessionActor {
             parent_agent_id = tracing::field::Empty,
         )
     )]
+    /// Legacy full agent loop (tools / compact / recovery details).
+    ///
+    /// **Secondary path (P6):** preferred entry is Hypercore via
+    /// [`Self::run_one_agent_round`]. This remains for `HYPERCORE_TURN=0` and
+    /// per-round fallback on Hypercore errors — do not delete without a long
+    /// canary.
     async fn process_conversation_turn(
         self: &Arc<Self>,
         req_id: &str,

@@ -1,14 +1,16 @@
-//! Feature-flagged turn path via Hypercore + [`ShellHyperHost`].
+//! **Primary** agent turn path via Hypercore + [`ShellHyperHost`] (P6).
 //!
-//! **Default on** (`HYPERCORE_TURN`). P3: shell tool loop. P4: `json_schema`
-//! structured output (native + StructuredOutput tool) and shell outer loop
-//! (goal / stop_gate) around each Hypercore round.
+//! Default on (`HYPERCORE_TURN`). Tools (P3), `json_schema` (P4), shell outer
+//! loop / goal / stop_gate (P4), compact continue (P5), and independent
+//! subagent sessions (P5) all share this path.
 //!
 //! - `HYPERCORE_TURN=0` — force legacy always
 //! - `HYPERCORE_TOOLS=0` — disable tool loop (plain only with `HYPERCORE_PLAIN=1`)
 //! - `HYPERCORE_PLAIN=1` — force plain Hypercore (no tools in the request)
 //!
-//! On Hypercore failure the outer loop falls back to legacy for that round.
+//! On Hypercore failure the outer loop falls back to
+//! `process_conversation_turn` for that round only. Legacy is **retained** as
+//! a safety net (not deleted in P6).
 
 use super::*;
 use std::sync::Arc;
@@ -74,21 +76,55 @@ pub(super) fn hypercore_tool_loop_ready() -> bool {
     true
 }
 
-/// Whether this prompt should enter the Hypercore path for a round.
+/// Why a round uses Hypercore or stays on legacy (for logs / tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HypercorePathDecision {
+    /// Enter Hypercore for this round.
+    Use,
+    /// `HYPERCORE_TURN=0` (or equivalent).
+    DisabledByEnv,
+    /// Empty user text — cannot open a core turn.
+    EmptyPrompt,
+    /// Tools disabled and plain not forced.
+    ToolsDisabledNeedsPlain,
+}
+
+impl HypercorePathDecision {
+    /// Stable reason string for telemetry / logs.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Use => "hypercore",
+            Self::DisabledByEnv => "legacy_env_disabled",
+            Self::EmptyPrompt => "legacy_empty_prompt",
+            Self::ToolsDisabledNeedsPlain => "legacy_tools_off",
+        }
+    }
+
+    pub(super) fn uses_hypercore(self) -> bool {
+        matches!(self, Self::Use)
+    }
+}
+
+/// Decide Hypercore vs legacy for one prompt round.
 ///
-/// Empty prompt → no. Tool loop ready → yes. Else only `HYPERCORE_PLAIN=1`.
-/// `json_schema` is allowed (P4).
-pub(super) fn should_use_hypercore_turn(prompt: &str) -> bool {
+/// Empty prompt → legacy. Tool loop ready → Hypercore. Else only
+/// `HYPERCORE_PLAIN=1` takes plain Hypercore. `json_schema` is allowed (P4).
+pub(super) fn hypercore_path_decision(prompt: &str) -> HypercorePathDecision {
     if !hypercore_plain_turn_enabled() {
-        return false;
+        return HypercorePathDecision::DisabledByEnv;
     }
     if prompt.trim().is_empty() {
-        return false;
+        return HypercorePathDecision::EmptyPrompt;
     }
-    if hypercore_tool_loop_ready() {
-        return true;
+    if hypercore_tool_loop_ready() || hypercore_plain_forced() {
+        return HypercorePathDecision::Use;
     }
-    hypercore_plain_forced()
+    HypercorePathDecision::ToolsDisabledNeedsPlain
+}
+
+/// Whether this prompt should enter the Hypercore path for a round.
+pub(super) fn should_use_hypercore_turn(prompt: &str) -> bool {
+    hypercore_path_decision(prompt).uses_hypercore()
 }
 
 /// Max mid-turn compact→continue restarts inside one Hypercore prompt.
@@ -883,6 +919,49 @@ mod tests {
         let _ = should_use_hypercore_turn("hi");
         assert!(!should_use_hypercore_turn(""));
         assert!(!should_use_hypercore_turn("   "));
+    }
+
+    #[test]
+    fn path_decision_empty_prompt() {
+        assert_eq!(
+            hypercore_path_decision(""),
+            HypercorePathDecision::EmptyPrompt
+        );
+        assert_eq!(
+            hypercore_path_decision("  \n"),
+            HypercorePathDecision::EmptyPrompt
+        );
+        assert!(!hypercore_path_decision("").uses_hypercore());
+    }
+
+    #[test]
+    fn path_decision_reasons_are_stable() {
+        assert_eq!(HypercorePathDecision::Use.as_str(), "hypercore");
+        assert_eq!(
+            HypercorePathDecision::DisabledByEnv.as_str(),
+            "legacy_env_disabled"
+        );
+        assert_eq!(
+            HypercorePathDecision::EmptyPrompt.as_str(),
+            "legacy_empty_prompt"
+        );
+        assert_eq!(
+            HypercorePathDecision::ToolsDisabledNeedsPlain.as_str(),
+            "legacy_tools_off"
+        );
+    }
+
+    #[test]
+    fn full_seed_keeps_trailing_user() {
+        let conv = vec![
+            ConversationItem::user("u"),
+            ConversationItem::assistant("a"),
+            ConversationItem::user("tail"),
+        ];
+        let full = conversation_to_full_seed_items(&conv);
+        assert_eq!(full.len(), 3);
+        assert_eq!(full[2].role, "user");
+        assert_eq!(full[2].content, "tail");
     }
 
     #[test]

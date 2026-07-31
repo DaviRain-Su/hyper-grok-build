@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **Accepted · Phase 0+1 已落地；ShellHyperHost 已接入骨架** |
+| 状态 | **Accepted · 本机主路径 P0–P6 已落地；CF/edge 仍后置** |
 | 日期 | 2026-07-31 |
 | 动机 | 从完整 Hyper CLI/TUI 中抽出可复用的会话核心，支撑本机、Cloudflare Durable Objects、以及未来其它 edge/server host，而不要求「整包 Hyper 上云」 |
 | 对标 | [nanocodex PR #75](https://github.com/gakonst/nanocodex/pull/75)（host-managed transport）+ [PR #76](https://github.com/gakonst/nanocodex/pull/76)（Cloudflare DO） |
@@ -446,30 +446,26 @@ docs/
 | 存储 | `{grok_home}/hypercore/<session_id>/`（与 NativeHost 同布局） |
 | 流 | 复用 `xai_hyper_core::native::open_model_stream_from_sampler_config` |
 | 工厂 | `SessionActor::shell_hypercore_host()` |
-| 旁路 turn | `HYPERCORE_TURN` 默认 on；**P3：默认走 Hypercore + shell `execute_tool_calls`** |
+| 主路径 turn | **P6：** Hypercore 默认；`process_conversation_turn` 仅作回退 |
 | Host API | **v2**：`ToolDefinition`、`ModelChunk::ToolCall`、`list_tools`、`ChatMessage` tool 字段 |
-| Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools`；snapshot **v2** |
-| Native 桥 | **P2 partial**：`Completed` 提取 tool_calls；tools/json_schema → `ConversationRequest` |
-| Shell 工具 | **P3 done**：`prepare_tool_definitions` → core；batch invoker → `execute_tool_calls` |
-| json_schema / outer | **P4 done**：native schema + StructuredOutput tool；goal/stop outer loop |
+| Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools` / `continue_turn_with_tools`；snapshot **v2** |
+| Native 桥 | tools/json_schema → `ConversationRequest`；`Completed` 提取 tool_calls |
+| Shell 工具 | `prepare_tool_definitions` → core；batch → `execute_tool_calls` |
+| json_schema / outer | native + StructuredOutput；`run_turn_outer_loop`（goal/stop） |
+| Compact | pre-seed + mid-turn overflow → `continue_turn_with_tools` |
 
-**开关：**
+**开关：** 见 [hypercore-ops.md](hypercore-ops.md)。
 
 ```bash
 # 默认：Hypercore 主路径 + shell 真工具环
 hyper
 
-# 强制全程 legacy
+# 强制全程 legacy（金丝雀 / 排障）
 export HYPERCORE_TURN=0
-hyper
-
-# 关工具环（仅 plain；需 HYPERCORE_PLAIN=1 才走 Hypercore，否则 legacy）
-export HYPERCORE_TOOLS=0
-export HYPERCORE_PLAIN=1
 hyper
 ```
 
-**映射：** `CoreEvent::AssistantDelta` → ACP `AgentMessageChunk`；assistant 写回 `chat_state`。
+**映射：** `CoreEvent::AssistantDelta` → ACP `AgentMessageChunk`；assistant / tools 写回 `chat_state`。
 
 ### 迁移阶段（shell 路径）
 
@@ -477,36 +473,36 @@ hyper
 |------|------|------|
 | **P0** | **done** | Host/Core 类型：tools、ToolCall chunk、snapshot v2 |
 | **P1** | **done** | Core 多步 tool loop + `MockHost::with_echo_tool` |
-| **P2** | **partial** | Native 流提取 tool_calls + tools 进 sampler request |
-| **P3** | **done** | `submit_turn_with_tools` + shell `execute_tool_calls`；`hypercore_tool_loop_ready` 默认 true |
-| **P4** | **done** | json_schema（native + StructuredOutput）+ `run_turn_outer_loop` |
-| **P5** | **done** | subagent 自动独立 core；pre-seed/mid-turn compact + continue；memory/recap 有意留 shell |
-| **P6** | todo | 文档收口；可选删 legacy 主路径 |
+| **P2** | **done** | Native 流提取 tool_calls + tools/json_schema 进 sampler |
+| **P3** | **done** | `submit_turn_with_tools` + shell `execute_tool_calls` |
+| **P4** | **done** | json_schema + `run_turn_outer_loop` |
+| **P5** | **done** | subagent 独立 core；compact continue |
+| **P6** | **done** | 主路径收口、文档/遥测、**保留** legacy 回退（不删） |
 
-### 尚未迁入 Hypercore 的路径（gap）
+### 有意不进 Core 的路径
 
-| 路径 | 现状 | 入口 |
-|------|------|------|
-| **Shell 真工具 / MCP** | **P3 done** via `submit_turn_with_tools` → `execute_tool_calls` | — |
-| **json_schema 主路径** | **P4 done**（native / StructuredOutput） | — |
-| **Subagent / spawn** | **P5 done**（同 `SessionActor` 路径，独立 `session_id` / hypercore 目录） | — |
-| **Compaction** | **P5 done**（pre-seed auto-compact、model-switch、工具后 overflow → compact → `continue_turn_with_tools`） | — |
-| **Memory dream / recap / laziness** | 有意留 shell 旁路 sampler | 非目标（可薄封装） |
-| **双 transcript** | chat_state 权威 + hypercore snapshot | 渐进统一 |
-| **Cloudflare / 远端 Host** | Phase 2 后置 | — |
+| 路径 | 策略 |
+|------|------|
+| **Memory dream / recap / laziness** | shell 旁路 sampler |
+| **Legacy `process_conversation_turn`** | `HYPERCORE_TURN=0` 或 Hypercore 错误时的 **安全网**（P6 明确不删） |
+| **双 transcript** | `chat_state` 权威；`~/.grok/hypercore/<id>/` 旁路 snapshot |
+| **Cloudflare / 远端 Host** | 原 Phase 2，仍后置 |
+
+### P6 验收（本机）
+
+1. 默认 headless 工具 turn 日志含 `path=hypercore` / `shell.turn.path`  
+2. `HYPERCORE_TURN=0` 时 `path=legacy`  
+3. `json_schema` headless 返回 `structuredOutput`  
+4. 子 agent 使用独立 `session_id` 目录  
+5. Hypercore 失败时同 round 回退 legacy  
 
 ## 12. 下一步（执行顺序）
 
 1. ~~**评审本文** → status 改为 Accepted~~ **done**  
-2. ~~**开 M0：** `xai-hyper-host` + `xai-hyper-core` 骨架 + mock 测试~~ **done**  
-3. ~~**M1 / Phase 1：** sampler + disk `NativeHost` + `hypercore-demo`~~ **done**  
-4. ~~**Shell 作为 HyperHost + plain turn + 安全门控**~~ **done**  
-5. ~~**P0/P1：** Host API v2 + Core tool loop（Mock）~~ **done**  
-6. ~~**P3：** shell 真工具环~~ **done**  
-7. ~~**P4：** json_schema + shell outer loop~~ **done**  
-8. ~~**P5：** subagent 独立 core + compact~~ **done**  
-9. **P6：** 文档收口、可选删 legacy 主路径；CF 后置  
-10. 不把完整 TUI/PTY 逻辑塞进 core。
+2. ~~**M0 / M1 / Shell host / P0–P6 本机主路径**~~ **done**  
+3. **可选金丝雀：** 生产观察 `shell.turn.path` 后再考虑删 legacy  
+4. **CF / edge Host（原 Phase 2）** 后置  
+5. 不把完整 TUI/PTY 逻辑塞进 core。
 
 ---
 

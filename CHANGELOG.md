@@ -4,6 +4,20 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Hypercore primary agent path (P0–P6)** — default chat/agent turns run through
+  `xai-hyper-core` + `ShellHyperHost` with shell `execute_tool_calls`,
+  `json_schema` (native + StructuredOutput), goal/stop outer loop, subagent
+  isolation under `~/.grok/hypercore/<session_id>/`, and mid-turn compact
+  continue. Ops: [docs/hypercore-ops.md](docs/hypercore-ops.md).
+- **Env switches:** `HYPERCORE_TURN` (default on; `0` = full legacy),
+  `HYPERCORE_TOOLS`, `HYPERCORE_PLAIN` (and `GROK_*` aliases).
+- **Telemetry:** `shell.turn.path` (`hypercore` vs `legacy` + reason).
+
+### Notes
+- Legacy `process_conversation_turn` is **kept** as a per-round safety net; set
+  `HYPERCORE_TURN=0` to force it. Not deleted in P6.
+
 ## [0.2.114-r7] — 2026-07-31
 
 ### Added

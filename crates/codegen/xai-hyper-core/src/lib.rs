@@ -951,4 +951,42 @@ mod tests {
         assert!(out.events.iter().any(|e| matches!(e, CoreEvent::ToolCall { .. })));
         assert!(out.events.iter().any(|e| matches!(e, CoreEvent::ToolResult { .. })));
     }
+
+    #[tokio::test]
+    async fn continue_turn_without_user_append() {
+        let host = MockHost::new();
+        let mut core = HyperCore::restore_or_new(host.clone(), "cont-sess", CoreConfig::default())
+            .await
+            .unwrap();
+        // Pretend chat already has user+assistant history (post-compact seed).
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("user", "earlier"),
+                TranscriptItem::text("assistant", "reply"),
+                TranscriptItem::text("user", "now continue"),
+            ],
+            1,
+        );
+        let before = core.items().len();
+        let out = core
+            .continue_turn_with_tools(
+                "t-cont",
+                "now continue",
+                Some(Vec::new()),
+                None,
+                |_text, calls| async move {
+                    // No tools expected from mock echo without with_echo_tool.
+                    assert!(calls.is_empty());
+                    ToolBatchResult::Continue(vec![])
+                },
+            )
+            .await
+            .expect("continue");
+        assert!(!out.replayed);
+        assert!(out.assistant_text.contains("now continue") || !out.assistant_text.is_empty());
+        // No extra user row — only assistant appended.
+        assert_eq!(core.items().len(), before + 1);
+        assert_eq!(core.items().last().unwrap().role, "assistant");
+        assert_eq!(host.model_stream_opens(), 1);
+    }
 }
