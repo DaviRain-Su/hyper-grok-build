@@ -1,0 +1,21 @@
+[package]
+name = "xai-hyper-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Hypercore session/turn engine (Phase 0: mock model only)."
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+xai-hyper-host = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -65,6 +65,8 @@ members = [
     "crates/codegen/xai-grok-workspace-client",
     "crates/codegen/xai-grok-workspace-types",
     "crates/codegen/xai-hooks-plugins-types",
+    "crates/codegen/xai-hyper-core",
+    "crates/codegen/xai-hyper-host",
     "crates/codegen/xai-hunk-tracker",
     "crates/codegen/xai-mixpanel",
     "crates/codegen/xai-prompt-queue",
@@ -335,6 +337,8 @@ xai-grok-version = { path = "crates/codegen/xai-grok-version" }
 xai-grok-workspace = { path = "crates/codegen/xai-grok-workspace" }
 xai-grok-workspace-types = { path = "crates/codegen/xai-grok-workspace-types" }
 xai-hooks-plugins-types = { path = "crates/codegen/xai-hooks-plugins-types" }
+xai-hyper-core = { path = "crates/codegen/xai-hyper-core" }
+xai-hyper-host = { path = "crates/codegen/xai-hyper-host" }
 xai-interjection-core = { path = "crates/common/xai-interjection-core" }
 xai-mixpanel = { path = "crates/codegen/xai-mixpanel" }
 xai-prompt-queue = { path = "crates/codegen/xai-prompt-queue" }
