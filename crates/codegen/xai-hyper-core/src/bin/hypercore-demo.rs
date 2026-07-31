@@ -85,6 +85,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .submit_turn(TurnRequest {
                 turn_id: turn_id.clone(),
                 text,
+                json_schema: None,
+                tools: None,
             })
             .await
         {

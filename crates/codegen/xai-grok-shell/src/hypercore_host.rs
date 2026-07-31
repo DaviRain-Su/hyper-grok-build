@@ -3,8 +3,11 @@
 //! Holds a live [`SamplerConfig`] (credentials + model route from the session)
 //! and persists core snapshots under `{grok_home}/hypercore/`.
 //!
-//! This does **not** yet replace `handle_prompt`; it is the host surface the
-//! session can hand to [`xai_hyper_core::HyperCore`] on a feature-flagged path.
+//! Session turns use Hypercore by default (`HYPERCORE_TURN=0` forces legacy).
+//! Tool execution for agent turns goes through
+//! [`HyperCore::submit_turn_with_tools`] + shell `execute_tool_calls` (P3),
+//! not [`HyperHost::invoke_tool`] on this host (still unsupported for native
+//! host-only demos).
 //!
 //! See `docs/design-hypercore.md` § existing-shell integration.
 
@@ -173,9 +176,17 @@ mod tests {
             .await
             .unwrap();
 
-        let mut core = HyperCore::restore_or_new(host.clone(), session, CoreConfig::default())
-            .await
-            .unwrap();
+        let mut core = HyperCore::restore_or_new(
+            host.clone(),
+            session,
+            CoreConfig {
+                model: "test-model".into(),
+                max_messages: 64,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(core.completed_turns(), 1);
 
         let opens_before = host.model_stream_opens();
@@ -183,6 +194,8 @@ mod tests {
             .submit_turn(TurnRequest {
                 turn_id: "t1".into(),
                 text: "hi".into(),
+                json_schema: None,
+                tools: None,
             })
             .await
             .unwrap();
@@ -214,6 +227,8 @@ mod tests {
                 turn_id: "t".into(),
                 model: "m".into(),
                 messages: vec![],
+                tools: vec![],
+                json_schema: None,
             })
             .await;
         let err = match result {

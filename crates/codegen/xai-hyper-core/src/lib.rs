@@ -6,6 +6,7 @@
 //! - Phase 0: [`mock::MockHost`] echo stream (always available).
 //! - Phase 1: [`native::NativeHost`] (feature `native`, default) — disk
 //!   snapshots under `~/.grok/hypercore/` + real model stream via sampler.
+//! - Phase 3 types: multi-step tool loop via `list_tools` / `invoke_tool`.
 //!
 //! See `docs/design-hypercore.md`.
 
@@ -20,12 +21,18 @@ pub mod native;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use xai_hyper_host::{
-    ChatMessage, HostError, HyperHost, ModelChunk, ModelStreamRequest, SessionId, TerminalTurnRecord,
-    TurnId,
+    ChatMessage, ChatToolCall, HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk,
+    ModelStreamRequest, SessionId, TerminalTurnRecord, ToolDefinition, TurnId,
 };
 
-/// Snapshot schema version (JSON). Bump when breaking snapshot shape.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// Snapshot schema version (JSON).
+///
+/// - v1: plain role+content items
+/// - v2: optional tool_calls / tool_call_id on items
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+
+/// Default max model→tool→model steps inside one user turn.
+pub const DEFAULT_MAX_TOOL_STEPS: u32 = 64;
 
 /// Core-side errors.
 #[derive(Debug, Error)]
@@ -39,6 +46,9 @@ pub enum CoreError {
     /// Invalid client input.
     #[error("invalid: {0}")]
     Invalid(String),
+    /// Tool loop exceeded [`CoreConfig::max_tool_steps`].
+    #[error("tool loop limit exceeded ({0})")]
+    ToolLoopLimit(u32),
     /// Other.
     #[error("{0}")]
     Message(String),
@@ -50,8 +60,15 @@ pub enum CoreError {
 pub struct CoreConfig {
     /// Logical model id passed to the host.
     pub model: String,
-    /// Max transcript messages kept (system + user/assistant). Soft cap.
+    /// Max transcript messages kept (system + user/assistant/tool). Soft cap.
     pub max_messages: usize,
+    /// Max model/tool iterations per user turn.
+    #[serde(default = "default_max_tool_steps")]
+    pub max_tool_steps: u32,
+}
+
+fn default_max_tool_steps() -> u32 {
+    DEFAULT_MAX_TOOL_STEPS
 }
 
 impl Default for CoreConfig {
@@ -59,17 +76,49 @@ impl Default for CoreConfig {
         Self {
             model: "mock-echo".into(),
             max_messages: 256,
+            max_tool_steps: DEFAULT_MAX_TOOL_STEPS,
         }
     }
 }
 
 /// Client turn request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnRequest {
     /// Idempotent turn id (client-generated).
     pub turn_id: TurnId,
     /// User text.
     pub text: String,
+    /// Optional structured-output JSON Schema for this turn.
+    pub json_schema: Option<serde_json::Value>,
+    /// Tools for this turn. `None` → [`HyperHost::list_tools`]. `Some(vec![])` → no tools.
+    pub tools: Option<Vec<ToolDefinition>>,
+}
+
+/// Result of a shell/host tool batch for one model step.
+#[derive(Debug, Clone)]
+pub enum ToolBatchResult {
+    /// Apply tool results and sample the model again.
+    Continue(Vec<HostToolResult>),
+    /// Apply tool results and **end** the user turn (no further model call).
+    ///
+    /// Used for structured-output acceptance, permission cancel, etc.
+    Finish(Vec<HostToolResult>),
+}
+
+/// One tool invocation recorded on a completed turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TurnToolCall {
+    /// Call id.
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// Arguments JSON string.
+    pub arguments: String,
+    /// Whether the host reported success.
+    pub ok: bool,
+    /// Result content.
+    pub content: String,
 }
 
 /// Outcome of [`HyperCore::submit_turn`].
@@ -77,10 +126,12 @@ pub struct TurnRequest {
 pub struct TurnOutcome {
     /// Turn id.
     pub turn_id: TurnId,
-    /// Full assistant text for this turn.
+    /// Full final assistant text for this turn (last assistant text segment).
     pub assistant_text: String,
     /// `true` if this was a terminal replay (no new model call).
     pub replayed: bool,
+    /// Tools invoked during this turn (empty on plain / replay).
+    pub tools_called: Vec<TurnToolCall>,
     /// Events emitted during the turn (order preserved).
     pub events: Vec<CoreEvent>,
 }
@@ -106,6 +157,28 @@ pub enum CoreEvent {
         /// UTF-8 chunk.
         text: String,
     },
+    /// Model requested a tool call.
+    ToolCall {
+        /// Turn id.
+        turn_id: TurnId,
+        /// Call id.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// Arguments JSON string.
+        arguments: String,
+    },
+    /// Host finished executing a tool.
+    ToolResult {
+        /// Turn id.
+        turn_id: TurnId,
+        /// Call id.
+        call_id: String,
+        /// Success flag.
+        ok: bool,
+        /// Result payload.
+        content: String,
+    },
     /// Turn finished and committed.
     TurnCommitted {
         /// Turn id.
@@ -124,14 +197,47 @@ pub enum CoreEvent {
     },
 }
 
-/// One transcript row in the Phase 0 snapshot.
+/// Tool call stored on an assistant transcript row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TranscriptToolCall {
+    /// Call id.
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// Arguments JSON string.
+    pub arguments: String,
+}
+
+/// One transcript row in the session snapshot.
+///
+/// v1 snapshots only had `role` + `content`; v2 adds optional tool fields
+/// (serde defaults keep v1 readable).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TranscriptItem {
-    /// Role.
+    /// Role: system / user / assistant / tool.
     pub role: String,
-    /// Text.
+    /// Text content.
     pub content: String,
+    /// Assistant tool calls (v2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<TranscriptToolCall>,
+    /// Tool result → call id (v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl TranscriptItem {
+    /// Plain text row.
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
 }
 
 /// Durable session snapshot (JSON).
@@ -199,6 +305,7 @@ impl<H: HyperHost> HyperCore<H> {
             config: CoreConfig {
                 model,
                 max_messages: config.max_messages,
+                max_tool_steps: config.max_tool_steps,
             },
             items,
             completed_turns,
@@ -222,7 +329,7 @@ impl<H: HyperHost> HyperCore<H> {
 
     /// Replace in-memory transcript (not persisted until the next successful commit).
     ///
-    /// Used by the shell bypass to seed context from `chat_state` before
+    /// Used by the shell to seed context from `chat_state` before
     /// [`Self::submit_turn`] appends the current user message.
     pub fn seed_transcript(&mut self, items: Vec<TranscriptItem>, completed_turns: u64) {
         self.items = items;
@@ -243,8 +350,54 @@ impl<H: HyperHost> HyperCore<H> {
         serde_json::to_vec(&snap).map_err(|e| CoreError::Snapshot(e.to_string()))
     }
 
-    /// Submit a user turn. Replays terminal records for the same `turn_id`.
-    pub async fn submit_turn(&mut self, req: TurnRequest) -> Result<TurnOutcome, CoreError> {
+    /// Submit a user turn using [`HyperHost::invoke_tool`] for tool execution.
+    ///
+    /// Requires `H: Clone` so the host can be invoked without conflicting with
+    /// `&mut self` during the tool loop.
+    pub async fn submit_turn(&mut self, req: TurnRequest) -> Result<TurnOutcome, CoreError>
+    where
+        H: Clone,
+    {
+        let host = self.host.clone();
+        self.submit_turn_with_tools(req, |_assistant_text, calls| {
+            let host = host.clone();
+            async move {
+                let mut out = Vec::with_capacity(calls.len());
+                for call in calls {
+                    let result = match host.invoke_tool(call.clone()).await {
+                        Ok(r) => r,
+                        Err(e) => HostToolResult {
+                            call_id: call.id,
+                            ok: false,
+                            content: format!("tool error: {e}"),
+                        },
+                    };
+                    out.push(result);
+                }
+                ToolBatchResult::Continue(out)
+            }
+        })
+        .await
+    }
+
+    /// Submit a user turn with a **batch** tool invoker (shell path).
+    ///
+    /// `invoke_batch(assistant_text, calls)` receives the intermediate assistant
+    /// text for this model step plus every tool call, and returns
+    /// [`ToolBatchResult::Continue`] (sample again) or
+    /// [`ToolBatchResult::Finish`] (end the user turn after applying results).
+    ///
+    /// When the model emits tool calls, runs model→tools→model until `end_turn`,
+    /// `Finish`, or [`CoreConfig::max_tool_steps`].
+    pub async fn submit_turn_with_tools<F, Fut>(
+        &mut self,
+        req: TurnRequest,
+        mut invoke_batch: F,
+    ) -> Result<TurnOutcome, CoreError>
+    where
+        F: FnMut(String, Vec<HostToolCall>) -> Fut,
+        Fut: std::future::Future<Output = ToolBatchResult>,
+    {
         let turn_id = req.turn_id.trim().to_string();
         let text = req.text.trim().to_string();
         if turn_id.is_empty() {
@@ -278,6 +431,7 @@ impl<H: HyperHost> HyperCore<H> {
                 turn_id,
                 assistant_text: term.assistant_text,
                 replayed: true,
+                tools_called: Vec::new(),
                 events,
             });
         }
@@ -292,82 +446,195 @@ impl<H: HyperHost> HyperCore<H> {
         ];
 
         // Append user message for this turn (not yet committed until success).
-        self.items.push(TranscriptItem {
-            role: "user".into(),
-            content: text.clone(),
-        });
+        let user_len_before = self.items.len();
+        self.items.push(TranscriptItem::text("user", text.clone()));
         self.trim_messages();
 
-        let messages: Vec<ChatMessage> = self
-            .items
-            .iter()
-            .map(|i| ChatMessage {
-                role: i.role.clone(),
-                content: i.content.clone(),
-            })
-            .collect();
-
-        let stream_req = ModelStreamRequest {
-            session_id: self.session_id.clone(),
-            turn_id: turn_id.clone(),
-            model: self.config.model.clone(),
-            messages,
+        let tools = match req.tools {
+            Some(t) => t,
+            None => self.host.list_tools().await?,
         };
+        let max_steps = self.config.max_tool_steps.max(1);
+        let mut tools_called: Vec<TurnToolCall> = Vec::new();
+        let mut final_assistant = String::new();
+        let mut stop_reason: Option<String> = None;
 
-        let mut stream = match self.host.open_model_stream(stream_req).await {
-            Ok(s) => s,
-            Err(e) => {
-                // Roll back uncommitted user message.
-                self.items.pop();
-                let err = e.to_string();
-                events.push(CoreEvent::TurnFailed {
-                    turn_id: turn_id.clone(),
-                    error: err.clone(),
-                });
-                return Err(CoreError::Host(e));
-            }
-        };
+        for step in 0..max_steps {
+            let messages: Vec<ChatMessage> = self
+                .items
+                .iter()
+                .map(transcript_to_chat_message)
+                .collect();
 
-        let mut assistant = String::new();
-        let mut stop_reason = None;
-        loop {
-            match stream.next_chunk().await {
-                Ok(Some(ModelChunk::TextDelta(delta))) => {
-                    if !delta.is_empty() {
-                        assistant.push_str(&delta);
-                        events.push(CoreEvent::AssistantDelta {
-                            turn_id: turn_id.clone(),
-                            text: delta,
-                        });
-                    }
-                }
-                Ok(Some(ModelChunk::Done { stop_reason: sr })) => {
-                    stop_reason = sr;
-                    break;
-                }
-                Ok(None) => break,
+            let stream_req = ModelStreamRequest {
+                session_id: self.session_id.clone(),
+                turn_id: turn_id.clone(),
+                model: self.config.model.clone(),
+                messages,
+                tools: tools.clone(),
+                json_schema: req.json_schema.clone(),
+            };
+
+            let mut stream = match self.host.open_model_stream(stream_req).await {
+                Ok(s) => s,
                 Err(e) => {
-                    self.items.pop();
+                    self.items.truncate(user_len_before);
+                    let err = e.to_string();
                     events.push(CoreEvent::TurnFailed {
                         turn_id: turn_id.clone(),
-                        error: e.to_string(),
+                        error: err.clone(),
                     });
                     return Err(CoreError::Host(e));
                 }
+            };
+
+            let mut assistant = String::new();
+            let mut pending_calls: Vec<TranscriptToolCall> = Vec::new();
+            let mut step_stop: Option<String> = None;
+
+            loop {
+                match stream.next_chunk().await {
+                    Ok(Some(ModelChunk::TextDelta(delta))) => {
+                        if !delta.is_empty() {
+                            assistant.push_str(&delta);
+                            events.push(CoreEvent::AssistantDelta {
+                                turn_id: turn_id.clone(),
+                                text: delta,
+                            });
+                        }
+                    }
+                    Ok(Some(ModelChunk::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })) => {
+                        events.push(CoreEvent::ToolCall {
+                            turn_id: turn_id.clone(),
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                        });
+                        pending_calls.push(TranscriptToolCall {
+                            id,
+                            name,
+                            arguments,
+                        });
+                    }
+                    Ok(Some(ModelChunk::Done { stop_reason: sr })) => {
+                        step_stop = sr;
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        self.items.truncate(user_len_before);
+                        events.push(CoreEvent::TurnFailed {
+                            turn_id: turn_id.clone(),
+                            error: e.to_string(),
+                        });
+                        return Err(CoreError::Host(e));
+                    }
+                }
+            }
+
+            if pending_calls.is_empty() {
+                // End turn: plain assistant text.
+                self.items.push(TranscriptItem {
+                    role: "assistant".into(),
+                    content: assistant.clone(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                });
+                self.trim_messages();
+                final_assistant = assistant;
+                stop_reason = step_stop.or_else(|| Some("end_turn".into()));
+                break;
+            }
+
+            // Assistant row with tool calls (may include partial text).
+            self.items.push(TranscriptItem {
+                role: "assistant".into(),
+                content: assistant.clone(),
+                tool_calls: pending_calls.clone(),
+                tool_call_id: None,
+            });
+            self.trim_messages();
+            if !assistant.is_empty() {
+                final_assistant = assistant.clone();
+            }
+
+            let host_calls: Vec<HostToolCall> = pending_calls
+                .iter()
+                .map(|call| HostToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: parse_tool_args(&call.arguments),
+                })
+                .collect();
+            let batch = invoke_batch(assistant, host_calls).await;
+            let (results, finish_after) = match batch {
+                ToolBatchResult::Continue(r) => (r, false),
+                ToolBatchResult::Finish(r) => (r, true),
+            };
+
+            // Align results to calls (pad / truncate defensively).
+            for (idx, call) in pending_calls.iter().enumerate() {
+                let result = results.get(idx).cloned().unwrap_or_else(|| HostToolResult {
+                    call_id: call.id.clone(),
+                    ok: false,
+                    content: "tool invoker returned no result for this call".into(),
+                });
+                let result = if result.call_id.is_empty() {
+                    HostToolResult {
+                        call_id: call.id.clone(),
+                        ..result
+                    }
+                } else {
+                    result
+                };
+                events.push(CoreEvent::ToolResult {
+                    turn_id: turn_id.clone(),
+                    call_id: result.call_id.clone(),
+                    ok: result.ok,
+                    content: result.content.clone(),
+                });
+                tools_called.push(TurnToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                    ok: result.ok,
+                    content: result.content.clone(),
+                });
+                self.items.push(TranscriptItem {
+                    role: "tool".into(),
+                    content: result.content,
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some(call.id.clone()),
+                });
+                self.trim_messages();
+            }
+
+            if finish_after {
+                stop_reason = step_stop.or_else(|| Some("end_turn".into()));
+                break;
+            }
+
+            // If this was the last allowed step and we still had tools, error.
+            if step + 1 >= max_steps {
+                self.items.truncate(user_len_before);
+                events.push(CoreEvent::TurnFailed {
+                    turn_id: turn_id.clone(),
+                    error: format!("tool loop limit exceeded ({max_steps})"),
+                });
+                return Err(CoreError::ToolLoopLimit(max_steps));
             }
         }
 
-        self.items.push(TranscriptItem {
-            role: "assistant".into(),
-            content: assistant.clone(),
-        });
-        self.trim_messages();
         self.completed_turns = self.completed_turns.saturating_add(1);
 
         let terminal = TerminalTurnRecord {
             turn_id: turn_id.clone(),
             request_text: text,
-            assistant_text: assistant.clone(),
+            assistant_text: final_assistant.clone(),
             stop_reason: stop_reason.clone(),
         };
         let snapshot = self.export_snapshot()?;
@@ -383,8 +650,9 @@ impl<H: HyperHost> HyperCore<H> {
 
         Ok(TurnOutcome {
             turn_id,
-            assistant_text: assistant,
+            assistant_text: final_assistant,
             replayed: false,
+            tools_called,
             events,
         })
     }
@@ -400,6 +668,31 @@ impl<H: HyperHost> HyperCore<H> {
             }
         }
     }
+}
+
+fn transcript_to_chat_message(i: &TranscriptItem) -> ChatMessage {
+    ChatMessage {
+        role: i.role.clone(),
+        content: i.content.clone(),
+        tool_calls: i
+            .tool_calls
+            .iter()
+            .map(|t| ChatToolCall {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                arguments: t.arguments.clone(),
+            })
+            .collect(),
+        tool_call_id: i.tool_call_id.clone(),
+    }
+}
+
+fn parse_tool_args(arguments: &str) -> serde_json::Value {
+    let t = arguments.trim();
+    if t.is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(t).unwrap_or_else(|_| serde_json::json!({ "raw": arguments }))
 }
 
 fn decode_snapshot(bytes: &[u8]) -> Result<SessionSnapshot, CoreError> {
@@ -430,6 +723,7 @@ mod tests {
             CoreConfig {
                 model: "mock-echo".into(),
                 max_messages: 32,
+                max_tool_steps: 8,
             },
         )
         .await
@@ -443,6 +737,8 @@ mod tests {
             .submit_turn(TurnRequest {
                 turn_id: turn_id.clone(),
                 text: "hello core".into(),
+                json_schema: None,
+                tools: None,
             })
             .await
             .expect("first turn");
@@ -470,6 +766,8 @@ mod tests {
             .submit_turn(TurnRequest {
                 turn_id: turn_id.clone(),
                 text: "hello core".into(),
+                json_schema: None,
+                tools: None,
             })
             .await
             .expect("replay");
@@ -492,12 +790,16 @@ mod tests {
         core.submit_turn(TurnRequest {
             turn_id: "t1".into(),
             text: "one".into(),
+            json_schema: None,
+            tools: None,
         })
         .await
         .unwrap();
         core.submit_turn(TurnRequest {
             turn_id: "t2".into(),
             text: "two".into(),
+            json_schema: None,
+            tools: None,
         })
         .await
         .unwrap();
@@ -517,6 +819,8 @@ mod tests {
             .submit_turn(TurnRequest {
                 turn_id: "  ".into(),
                 text: "x".into(),
+                json_schema: None,
+                tools: None,
             })
             .await
             .unwrap_err();
@@ -533,6 +837,8 @@ mod tests {
         core.submit_turn(TurnRequest {
             turn_id: "t".into(),
             text: "ping".into(),
+            json_schema: None,
+            tools: None,
         })
         .await
         .unwrap();
@@ -541,5 +847,48 @@ mod tests {
         assert_eq!(snap.schema_version, SNAPSHOT_SCHEMA_VERSION);
         assert_eq!(snap.session_id, "s4");
         assert_eq!(snap.completed_turns, 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_v1_still_loads() {
+        let host = MockHost::new();
+        let v1 = br#"{"schema_version":1,"session_id":"s-v1","items":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}],"completed_turns":1,"model":"m","extensions":{}}"#;
+        host.commit_snapshot("s-v1", v1, None).await.unwrap();
+        let core = HyperCore::restore_or_new(host, "s-v1", CoreConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(core.completed_turns(), 1);
+        assert_eq!(core.items().len(), 2);
+        assert!(core.items()[0].tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_loop_with_mock_echo_tool() {
+        let host = MockHost::with_echo_tool();
+        let mut core = HyperCore::restore_or_new(host.clone(), "tool-sess", CoreConfig::default())
+            .await
+            .unwrap();
+
+        let out = core
+            .submit_turn(TurnRequest {
+                turn_id: "t-tool".into(),
+                text: "please use the tool".into(),
+                json_schema: None,
+                tools: None,
+            })
+            .await
+            .expect("tool turn");
+
+        assert!(!out.replayed);
+        assert_eq!(out.tools_called.len(), 1);
+        assert_eq!(out.tools_called[0].name, "echo");
+        assert!(out.tools_called[0].ok);
+        assert!(out.assistant_text.contains("tool done"));
+        // user + assistant(tool_calls) + tool result + final assistant
+        assert!(core.items().len() >= 4);
+        // Two model opens: first requests tool, second final text
+        assert_eq!(host.model_stream_opens(), 2);
+        assert!(out.events.iter().any(|e| matches!(e, CoreEvent::ToolCall { .. })));
+        assert!(out.events.iter().any(|e| matches!(e, CoreEvent::ToolResult { .. })));
     }
 }

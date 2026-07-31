@@ -5,10 +5,10 @@ use xai_grok_tools::implementations::grok_build::LoopFireMode;
 /// Synthetic tool the model calls to return its schema-constrained final answer
 /// on backends that can't constrain output natively (Messages API). Intercepted
 /// in the loop, never executed as a real tool.
-const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
+pub(crate) const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
-const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
+pub(crate) const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -24,7 +24,7 @@ enum StructuredOutputStep {
 /// turn. Returns the value on success, or a human-readable error (surfaced to
 /// the model on retry and to the client as `structuredOutputError`). A `validator`
 /// of `Err` means the user's schema itself was invalid.
-fn validate_structured_output(
+pub(crate) fn validate_structured_output(
     validator: &Result<jsonschema::Validator, String>,
     raw: &str,
 ) -> Result<serde_json::Value, String> {
@@ -866,47 +866,17 @@ impl SessionActor {
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
-        // Hypercore plain-chat bypass (HYPERCORE_TURN=1). No tools/MCP; falls
-        // back to the legacy turn loop on any failure.
-        let result = if super::hypercore_turn::hypercore_plain_turn_enabled()
-            && json_schema.is_none()
-            && !prompt_text_for_hook.trim().is_empty()
-        {
-            match self
-                .run_hypercore_plain_turn(prompt_id, prompt_text_for_hook.trim())
-                .await
-            {
-                Ok(outcome) => {
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        "hypercore plain turn succeeded"
-                    );
-                    Ok(outcome)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %self.session_info.id.0,
-                        error = %e,
-                        "hypercore plain turn failed; falling back to legacy path"
-                    );
-                    self.run_legacy_conversation_turn_loop(
-                        prompt_id,
-                        trace_gcs_config,
-                        artifact_tracker,
-                        json_schema,
-                    )
-                    .await
-                }
-            }
-        } else {
-            self.run_legacy_conversation_turn_loop(
+        // Outer loop (goal / stop_gate) always shell-side. Each round uses
+        // Hypercore when enabled (incl. json_schema since P4), else legacy.
+        let result = self
+            .run_turn_outer_loop(
                 prompt_id,
+                prompt_text_for_hook.trim(),
                 trace_gcs_config,
                 artifact_tracker,
                 json_schema,
             )
-            .await
-        };
+            .await;
         let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
         let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
         xai_grok_telemetry::unified_log::info(
@@ -1500,13 +1470,13 @@ impl SessionActor {
             }
         }
     }
-    /// Legacy multi-round conversation loop (tools, goals, stop gates).
+    /// Shell outer loop: goal continuation + stop gate around each agent round.
     ///
-    /// Extracted so the Hypercore plain-turn bypass can fall back without
-    /// duplicating the loop body.
-    async fn run_legacy_conversation_turn_loop(
+    /// Each round is Hypercore (when enabled) or legacy `process_conversation_turn`.
+    async fn run_turn_outer_loop(
         self: &Arc<Self>,
         prompt_id: &str,
+        user_text: &str,
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
@@ -1514,6 +1484,10 @@ impl SessionActor {
         let mut round_trace = trace_gcs_config;
         let mut round_artifact = artifact_tracker;
         let mut stop_continuations_this_turn: u32 = 0;
+        // First outer-loop round uses the original user text for Hypercore seed
+        // stripping; goal/stop continuations inject new user rows that Hypercore
+        // must see as the current turn text.
+        let mut round_user_text = user_text.to_string();
         loop {
             if self.goal_harness_enabled() {
                 let goal_loop_active = self.goal_tracker.lock().status()
@@ -1521,8 +1495,9 @@ impl SessionActor {
                 self.set_goal_loop_active_resource(goal_loop_active).await;
             }
             let round = self
-                .process_conversation_turn_with_recovery(
+                .run_one_agent_round(
                     prompt_id,
+                    &round_user_text,
                     round_trace.take(),
                     round_artifact.take(),
                     json_schema.clone(),
@@ -1557,6 +1532,7 @@ impl SessionActor {
                     self.run_goal_round_end_legacy().await
                 };
                 if let GoalRoundDecision::Continue(directive) = decision {
+                    round_user_text = directive.clone();
                     self.inject_goal_continuation_message(directive).await;
                     continue;
                 }
@@ -1568,11 +1544,51 @@ impl SessionActor {
                 StopGateDecision::AllowStop => break round,
                 StopGateDecision::KeepWorking { feedback } => {
                     stop_continuations_this_turn += 1;
+                    round_user_text = feedback.clone();
                     self.chat_state_handle
                         .push_user_message(ConversationItem::stop_hook_feedback(feedback));
                 }
             }
         }
+    }
+
+    /// One agent round: Hypercore when capable, else legacy with recovery.
+    async fn run_one_agent_round(
+        self: &Arc<Self>,
+        prompt_id: &str,
+        user_text: &str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<TurnOutcome, acp::Error> {
+        if super::hypercore_turn::should_use_hypercore_turn(user_text) {
+            match self
+                .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone())
+                .await
+            {
+                Ok(outcome) => {
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        "hypercore turn round succeeded"
+                    );
+                    return Ok(outcome);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        error = %e,
+                        "hypercore turn failed; falling back to legacy for this round"
+                    );
+                }
+            }
+        }
+        self.process_conversation_turn_with_recovery(
+            prompt_id,
+            trace_gcs_config,
+            artifact_tracker,
+            json_schema,
+        )
+        .await
     }
 
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.

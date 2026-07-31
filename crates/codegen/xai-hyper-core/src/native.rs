@@ -16,7 +16,7 @@ use xai_grok_sampler::{
     ApiBackend, RequestId, SamplerConfig, SamplingChannel, SamplingClient, SamplingEvent,
     stream_chat_completions, stream_messages, stream_responses,
 };
-use xai_grok_sampling_types::{ConversationItem, ConversationRequest};
+use xai_grok_sampling_types::{ConversationItem, ConversationRequest, ToolCall, ToolSpec};
 use xai_hyper_host::{
     HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream, ModelStreamRequest,
     TerminalTurnRecord,
@@ -172,14 +172,27 @@ pub fn open_model_stream_from_sampler_config(
     let items: Vec<ConversationItem> = req
         .messages
         .iter()
-        .filter_map(|m| match m.role.as_str() {
-            "system" => Some(ConversationItem::system(m.content.clone())),
-            "user" => Some(ConversationItem::user(m.content.clone())),
-            "assistant" => Some(ConversationItem::assistant(m.content.clone())),
-            _ => None,
+        .filter_map(chat_message_to_conversation_item)
+        .collect();
+    let tool_specs: Vec<ToolSpec> = req
+        .tools
+        .iter()
+        .map(|t| ToolSpec {
+            name: t.name.clone(),
+            description: if t.description.is_empty() {
+                None
+            } else {
+                Some(t.description.clone())
+            },
+            parameters: t.input_schema.clone(),
         })
         .collect();
-    let request = ConversationRequest::from_items(items).with_model(model);
+    let mut request = ConversationRequest::from_items(items)
+        .with_model(model)
+        .with_tools(tool_specs);
+    if let Some(schema) = req.json_schema {
+        request = request.with_json_schema(schema);
+    }
 
     let (tx, rx) = mpsc::channel::<Result<ModelChunk, HostError>>(64);
     tokio::spawn(async move {
@@ -188,6 +201,40 @@ pub fn open_model_stream_from_sampler_config(
         }
     });
     Ok(Box::new(ChannelModelStream { rx }))
+}
+
+fn chat_message_to_conversation_item(m: &xai_hyper_host::ChatMessage) -> Option<ConversationItem> {
+    match m.role.as_str() {
+        "system" => Some(ConversationItem::system(m.content.clone())),
+        "user" => Some(ConversationItem::user(m.content.clone())),
+        "assistant" => {
+            if m.tool_calls.is_empty() {
+                Some(ConversationItem::assistant(m.content.clone()))
+            } else {
+                let calls: Vec<ToolCall> = m
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCall {
+                        id: std::sync::Arc::<str>::from(tc.id.as_str()),
+                        name: tc.name.clone(),
+                        arguments: std::sync::Arc::<str>::from(tc.arguments.as_str()),
+                    })
+                    .collect();
+                let mut item = ConversationItem::assistant_tool_calls(calls);
+                if let ConversationItem::Assistant(ref mut a) = item
+                    && !m.content.is_empty()
+                {
+                    a.content = std::sync::Arc::<str>::from(m.content.as_str());
+                }
+                Some(item)
+            }
+        }
+        "tool" => {
+            let call_id = m.tool_call_id.as_deref().unwrap_or("");
+            Some(ConversationItem::tool_result(call_id, m.content.clone()))
+        }
+        _ => None,
+    }
 }
 
 #[async_trait]
@@ -320,10 +367,25 @@ where
                 }
             }
             SamplingEvent::Completed { response, .. } => {
-                let stop = response
-                    .raw_stop_reason
-                    .clone()
-                    .or_else(|| Some("end_turn".into()));
+                // Emit complete tool calls from the aggregated response (P2).
+                for tc in response.tool_calls() {
+                    let chunk = ModelChunk::ToolCall {
+                        id: tc.id.to_string(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.to_string(),
+                    };
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                let stop = if !response.tool_calls().is_empty() {
+                    Some("tool_calls".into())
+                } else {
+                    response
+                        .raw_stop_reason
+                        .clone()
+                        .or_else(|| Some("end_turn".into()))
+                };
                 let _ = tx.send(Ok(ModelChunk::Done { stop_reason: stop })).await;
                 return Ok(());
             }
@@ -333,6 +395,7 @@ where
                     .await;
                 return Err(HostError::Transport(error.message));
             }
+            // ToolCallDelta: wait for Completed aggregation (avoids partial JSON).
             _ => {}
         }
     }
@@ -453,6 +516,8 @@ mod tests {
             .submit_turn(TurnRequest {
                 turn_id: "t1".into(),
                 text: "hi".into(),
+                json_schema: None,
+                tools: None,
             })
             .await
             .unwrap();
