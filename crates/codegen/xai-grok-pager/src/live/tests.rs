@@ -393,8 +393,10 @@ fn visualizer_phase_update() {
 
 #[test]
 fn visualizer_phase_no_redraw_on_same_phase() {
-    let mut vis = LiveVisualizerState::default();
-    vis.phase = LivePhase::Connected;
+    let mut vis = LiveVisualizerState {
+        phase: LivePhase::Connected,
+        ..Default::default()
+    };
     let needs_draw = vis.apply_event(&LiveEvent::Phase(LivePhase::Connected));
     assert!(!needs_draw);
 }
@@ -1026,8 +1028,10 @@ fn omp_finish_transcript_preserves_longer_current_starting_with_final() {
     // final text (the active incremental build may be ahead of the finalized
     // snapshot).
     use crate::live::state::{RoleTurnState, merge_finish_transcript};
-    let mut turn = RoleTurnState::default();
-    turn.active = true;
+    let mut turn = RoleTurnState {
+        active: true,
+        ..Default::default()
+    };
     // The active current is longer and starts_with the final snapshot.
     let merged = merge_finish_transcript("Hello world, done.", "Hello world", &mut turn);
     assert_eq!(merged, "Hello world, done.");
@@ -1138,8 +1142,10 @@ fn omp_finish_transcript_shorter_final_replaces_when_current_not_prefix() {
     // `#finishTranscript`: when the current does NOT start_with the final text,
     // the finalized text replaces the current (establish the final).
     use crate::live::state::{RoleTurnState, merge_finish_transcript};
-    let mut turn = RoleTurnState::default();
-    turn.active = true;
+    let mut turn = RoleTurnState {
+        active: true,
+        ..Default::default()
+    };
     // Current "response" does not start_with "final response".
     let merged = merge_finish_transcript("response", "final response", &mut turn);
     assert_eq!(merged, "final response");
@@ -1154,10 +1160,12 @@ fn visualizer_wide_renders_all_rows() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    let mut state = LiveVisualizerState::default();
-    state.phase = LivePhase::Connected;
-    state.level = 0.5;
-    state.user_transcript = "test transcript".to_string();
+    let state = LiveVisualizerState {
+        phase: LivePhase::Connected,
+        level: 0.5,
+        user_transcript: "test transcript".to_string(),
+        ..Default::default()
+    };
 
     let area = Rect::new(0, 0, 80, VISUALIZER_HEIGHT);
     let mut buf = Buffer::empty(area);
@@ -1183,11 +1191,13 @@ fn visualizer_narrow_renders_transcript_and_footer() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    let mut state = LiveVisualizerState::default();
-    state.phase = LivePhase::Connected;
-    state.level = 0.5;
-    state.user_transcript = "narrow test".to_string();
-    state.muted = true;
+    let state = LiveVisualizerState {
+        phase: LivePhase::Connected,
+        level: 0.5,
+        user_transcript: "narrow test".to_string(),
+        muted: true,
+        ..Default::default()
+    };
 
     let area = Rect::new(0, 0, 30, VISUALIZER_NARROW_HEIGHT);
     let mut buf = Buffer::empty(area);
@@ -1531,11 +1541,13 @@ fn visualizer_speaking_threshold_is_omp_0_015() {
     use ratatui::layout::Rect;
 
     fn status_text(level: f64, muted: bool, delegation_active: bool) -> String {
-        let mut state = LiveVisualizerState::default();
-        state.phase = LivePhase::Connected;
-        state.level = level;
-        state.muted = muted;
-        state.delegation_active = delegation_active;
+        let state = LiveVisualizerState {
+            phase: LivePhase::Connected,
+            level,
+            muted,
+            delegation_active,
+            ..Default::default()
+        };
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
         crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, 5), &state);
         // The footer is the last row; collect its non-space symbols.
@@ -1574,9 +1586,11 @@ fn visualizer_muted_shows_unmute_hint() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    let mut state = LiveVisualizerState::default();
-    state.phase = LivePhase::Connected;
-    state.muted = true;
+    let state = LiveVisualizerState {
+        phase: LivePhase::Connected,
+        muted: true,
+        ..Default::default()
+    };
 
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, VISUALIZER_HEIGHT));
     crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, VISUALIZER_HEIGHT), &state);
@@ -1600,9 +1614,11 @@ fn visualizer_unmuted_shows_mute_hint() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    let mut state = LiveVisualizerState::default();
-    state.phase = LivePhase::Connected;
-    state.muted = false;
+    let state = LiveVisualizerState {
+        phase: LivePhase::Connected,
+        muted: false,
+        ..Default::default()
+    };
 
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, VISUALIZER_HEIGHT));
     crate::live::visualizer::render(&mut buf, Rect::new(0, 0, 80, VISUALIZER_HEIGHT), &state);

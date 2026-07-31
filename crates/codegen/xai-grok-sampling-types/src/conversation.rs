@@ -3775,7 +3775,7 @@ fn mark_message_cache_breakpoint(msg: &mut crate::messages::Message) -> bool {
                     | ContentBlock::ToolUse { cache_control, .. } => cache_control,
                     // Thinking / redacted reasoning never carry a cache breakpoint.
                     ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
-                        continue
+                        continue;
                     }
                 };
                 *cache_control = Some(CacheControl::ephemeral());

@@ -683,13 +683,9 @@ impl SessionActor {
         } else if use_bearer_resolver {
             (
                 creds.api_key,
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| {
-                        crate::auth::credential_provider::WireValidBearerResolver::shared(
-                            am.clone(),
-                        )
-                    }),
+                self.auth_manager.as_ref().map(|am| {
+                    crate::auth::credential_provider::WireValidBearerResolver::shared(am.clone())
+                }),
             )
         } else {
             (creds.api_key, None)

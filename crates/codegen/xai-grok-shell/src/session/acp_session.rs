@@ -94,14 +94,14 @@ pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
+#[path = "acp_session_impl/hypercore_turn.rs"]
+mod hypercore_turn;
 #[path = "acp_session_impl/interjection.rs"]
 mod interjection;
 #[path = "acp_session_impl/tool_calls.rs"]
 mod tool_calls;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
-#[path = "acp_session_impl/hypercore_turn.rs"]
-mod hypercore_turn;
 #[path = "acp_session_impl/workflow.rs"]
 mod workflow_run;
 pub(crate) use interjection::*;

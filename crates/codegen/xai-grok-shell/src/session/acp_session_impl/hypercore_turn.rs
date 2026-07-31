@@ -200,12 +200,9 @@ impl SessionActor {
             );
         }
 
-        let tools = self.hypercore_prepare_host_tools(
-            structured_output_tool,
-            json_schema.as_ref(),
-            &session_id,
-        )
-        .await;
+        let tools = self
+            .hypercore_prepare_host_tools(structured_output_tool, json_schema.as_ref(), &session_id)
+            .await;
 
         let req_json_schema = if structured_output_native {
             json_schema.clone()
@@ -236,9 +233,7 @@ impl SessionActor {
                 },
             )
             .await
-            .map_err(|e| {
-                acp::Error::internal_error().data(format!("hypercore restore: {e}"))
-            })?;
+            .map_err(|e| acp::Error::internal_error().data(format!("hypercore restore: {e}")))?;
 
             let conversation = self.chat_state_handle.get_conversation().await;
             let seeded = if is_continuation {
@@ -247,10 +242,7 @@ impl SessionActor {
             } else {
                 conversation_to_seed_items(&conversation, user_text)
             };
-            let completed = seeded
-                .iter()
-                .filter(|i| i.role == "assistant")
-                .count() as u64;
+            let completed = seeded.iter().filter(|i| i.role == "assistant").count() as u64;
             core.seed_transcript(seeded, completed);
 
             let turn_id = if is_continuation {
@@ -295,8 +287,7 @@ impl SessionActor {
 
                     if structured_output_tool
                         && let Some(validator) = structured_output_validator.as_ref()
-                    {
-                        if let Some(batch) = self
+                        && let Some(batch) = self
                             .hypercore_try_structured_output_batch(
                                 &calls,
                                 &assistant_text,
@@ -306,9 +297,8 @@ impl SessionActor {
                                 abort,
                             )
                             .await
-                        {
-                            return batch;
-                        }
+                    {
+                        return batch;
                     }
 
                     match self
@@ -550,10 +540,7 @@ impl SessionActor {
                         "Call StructuredOutput alone, exactly once, after all other tools finish.",
                     ));
             }
-            match self
-                .hypercore_execute_tool_batch_prepared(real)
-                .await
-            {
+            match self.hypercore_execute_tool_batch_prepared(real).await {
                 Ok(mut results) => {
                     // Prepend SO soft results so Core alignment still works if
                     // we returned full order — better rebuild full order:
@@ -616,7 +603,10 @@ impl SessionActor {
             Err(err) => err.clone(),
         };
         self.chat_state_handle
-            .push_tool_result(ConversationItem::tool_result(so.id.clone(), content.clone()));
+            .push_tool_result(ConversationItem::tool_result(
+                so.id.clone(),
+                content.clone(),
+            ));
         *structured_from_tool.borrow_mut() = Some(validated.clone());
 
         let tools_called = vec![so_name.to_string()];

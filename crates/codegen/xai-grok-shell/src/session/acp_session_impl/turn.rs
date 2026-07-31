@@ -836,11 +836,9 @@ impl SessionActor {
             let ext_rt = self.extension_runtime.borrow().clone();
             if !ext_rt.is_empty() {
                 let d = ext_rt
-                    .dispatch_before_agent_start(
-                        &xai_grok_extension_api::BeforeAgentStartIn {
-                            prompt: prompt_text_for_hook.clone(),
-                        },
-                    )
+                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
+                        prompt: prompt_text_for_hook.clone(),
+                    })
                     .await;
                 if let Some(ctx) = d.out.inject_context.as_deref() {
                     self.push_system_reminder(ctx);

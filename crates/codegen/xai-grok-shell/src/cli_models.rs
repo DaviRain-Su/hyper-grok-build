@@ -114,14 +114,15 @@ mod tests {
     fn isolate_auth_sources() -> (tempfile::TempDir, Vec<EnvGuard>) {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("no-auth.json");
-        let mut guards = Vec::new();
-        guards.push(EnvGuard::unset(XAI_API_KEY_ENV_VAR));
-        guards.push(EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR));
-        guards.push(EnvGuard::unset("GROK_AUTH"));
-        guards.push(EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap()));
-        guards.push(EnvGuard::unset("GROK_DEPLOYMENT_KEY"));
-        guards.push(EnvGuard::unset("GROK_WS_ORIGIN"));
-        guards.push(EnvGuard::unset("GROK_DISABLE_API_KEY_AUTH"));
+        let mut guards = vec![
+            EnvGuard::unset(XAI_API_KEY_ENV_VAR),
+            EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR),
+            EnvGuard::unset("GROK_AUTH"),
+            EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap()),
+            EnvGuard::unset("GROK_DEPLOYMENT_KEY"),
+            EnvGuard::unset("GROK_WS_ORIGIN"),
+            EnvGuard::unset("GROK_DISABLE_API_KEY_AUTH"),
+        ];
         guards.extend(unset_all_byok_platform_api_key_envs());
         (dir, guards)
     }

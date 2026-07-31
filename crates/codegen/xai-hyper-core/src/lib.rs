@@ -524,11 +524,8 @@ impl<H: HyperHost> HyperCore<H> {
         let mut stop_reason: Option<String> = None;
 
         for step in 0..max_steps {
-            let messages: Vec<ChatMessage> = self
-                .items
-                .iter()
-                .map(transcript_to_chat_message)
-                .collect();
+            let messages: Vec<ChatMessage> =
+                self.items.iter().map(transcript_to_chat_message).collect();
 
             let stream_req = ModelStreamRequest {
                 session_id: self.session_id.clone(),
@@ -756,8 +753,8 @@ fn parse_tool_args(arguments: &str) -> serde_json::Value {
 }
 
 fn decode_snapshot(bytes: &[u8]) -> Result<SessionSnapshot, CoreError> {
-    let snap: SessionSnapshot = serde_json::from_slice(bytes)
-        .map_err(|e| CoreError::Snapshot(format!("json: {e}")))?;
+    let snap: SessionSnapshot =
+        serde_json::from_slice(bytes).map_err(|e| CoreError::Snapshot(format!("json: {e}")))?;
     if snap.schema_version == 0 || snap.schema_version > SNAPSHOT_SCHEMA_VERSION {
         return Err(CoreError::Snapshot(format!(
             "unsupported schema_version {}",
@@ -810,14 +807,16 @@ mod tests {
         assert_eq!(core.items().len(), 2);
         assert!(matches!(
             out.events.last(),
-            Some(CoreEvent::TurnCommitted { replayed: false, .. })
+            Some(CoreEvent::TurnCommitted {
+                replayed: false,
+                ..
+            })
         ));
 
         // Fresh core from same host storage.
-        let mut core2 =
-            HyperCore::restore_or_new(host.clone(), session, CoreConfig::default())
-                .await
-                .expect("restore");
+        let mut core2 = HyperCore::restore_or_new(host.clone(), session, CoreConfig::default())
+            .await
+            .expect("restore");
         assert_eq!(core2.completed_turns(), 1);
         assert_eq!(core2.items().len(), 2);
 
@@ -948,8 +947,16 @@ mod tests {
         assert!(core.items().len() >= 4);
         // Two model opens: first requests tool, second final text
         assert_eq!(host.model_stream_opens(), 2);
-        assert!(out.events.iter().any(|e| matches!(e, CoreEvent::ToolCall { .. })));
-        assert!(out.events.iter().any(|e| matches!(e, CoreEvent::ToolResult { .. })));
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ToolCall { .. }))
+        );
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::ToolResult { .. }))
+        );
     }
 
     #[tokio::test]

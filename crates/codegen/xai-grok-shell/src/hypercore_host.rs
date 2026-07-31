@@ -235,10 +235,7 @@ mod tests {
             Ok(_) => panic!("expected credential error"),
             Err(e) => e,
         };
-        assert!(
-            err.to_string().contains("no api_key"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().contains("no api_key"), "unexpected: {err}");
         assert_eq!(host.model_stream_opens(), 0);
     }
 }

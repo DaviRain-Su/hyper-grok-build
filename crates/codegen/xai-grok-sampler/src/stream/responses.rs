@@ -1628,7 +1628,9 @@ mod tests {
                 ),
             },
         );
-        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())]).boxed();
+        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())])
+            .map(|event| event.map(ResponsesStreamItem::Event))
+            .boxed();
         let events = collect(stream_responses(
             raw,
             None,

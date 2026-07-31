@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use xai_hyper_host::{
-    HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream, ModelStreamRequest,
-    TerminalTurnRecord, ToolDefinition,
+    HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream,
+    ModelStreamRequest, TerminalTurnRecord, ToolDefinition,
 };
 
 #[derive(Debug, Default)]
@@ -162,10 +162,11 @@ impl HyperHost for MockHost {
             .expect("snapshots")
             .insert(session_id.to_string(), snapshot.to_vec());
         if let Some(t) = terminal {
-            self.inner.terminals.lock().expect("terminals").insert(
-                (session_id.to_string(), t.turn_id.clone()),
-                t.clone(),
-            );
+            self.inner
+                .terminals
+                .lock()
+                .expect("terminals")
+                .insert((session_id.to_string(), t.turn_id.clone()), t.clone());
         }
         Ok(())
     }

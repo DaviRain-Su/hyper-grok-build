@@ -1434,8 +1434,7 @@ async fn test_responses_backend_hits_responses_endpoint_not_chat_completions() {
         ApiBackend::ChatCompletions => {
             panic!("Expected Responses backend but got ChatCompletions");
         }
-        ApiBackend::CodexResponses
-        | ApiBackend::Messages
+        ApiBackend::Messages
         | ApiBackend::GoogleGenerateContent
         | ApiBackend::BedrockConverseStream
         | ApiBackend::PiMessages => {
@@ -1479,8 +1478,7 @@ async fn test_chat_completions_backend_hits_chat_endpoint_not_responses() {
         ApiBackend::Responses | ApiBackend::CodexResponses => {
             panic!("Expected ChatCompletions backend but got Responses");
         }
-        ApiBackend::CodexResponses
-        | ApiBackend::Messages
+        ApiBackend::Messages
         | ApiBackend::GoogleGenerateContent
         | ApiBackend::BedrockConverseStream
         | ApiBackend::PiMessages => {
