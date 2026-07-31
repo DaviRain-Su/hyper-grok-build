@@ -6,6 +6,7 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
         let mut new_models = ModelState::from(Some(model_state));
+        new_models.reload_config_on_model_command = app.models.reload_config_on_model_command;
         // Model refreshes replace the native catalog. Preserve provider models
         // added by the ACP router (e.g. Codex subscription models) so `/model`
         // does not lose them mid-run.

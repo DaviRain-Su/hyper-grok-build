@@ -88,6 +88,8 @@ impl Drop for EnvVarGuard {
 /// theme tests that reset the cache on exit.
 ///
 /// Usage: `let _theme = crate::test_util::pin_theme();` at the top of a test.
+// The guard's tuple field is intentionally only held for its Drop behavior.
+#[allow(dead_code)]
 pub struct PinnedThemeGuard(std::sync::MutexGuard<'static, ()>);
 
 /// Pin the theme cache to GrokNight until the returned guard drops.

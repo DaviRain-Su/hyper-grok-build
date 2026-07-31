@@ -518,12 +518,13 @@ async fn initialize(
         .unwrap_or(false);
 
     // Parse model state from response meta
-    let models: ModelState = resp
+    let mut models: ModelState = resp
         .meta
         .as_ref()
         .and_then(|m| m.get("modelState"))
         .and_then(|v| serde_json::from_value::<acp::SessionModelState>(v.clone()).ok())
         .into();
+    models.reload_config_on_model_command = is_grok_shell;
 
     // Parse available commands from response meta (shell builtins + skills).
     // These seed the slash command registry so autocomplete works immediately.

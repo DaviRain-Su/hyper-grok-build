@@ -206,8 +206,12 @@ pub(crate) fn execute(
             let is_chat_path = chat_kind || session_flags.chat_mode;
             finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
             if let Some(ref mid) = model_id {
-                meta.get_or_insert_with(acp::Meta::new)
-                    .insert("modelId".into(), serde_json::json!(mid.0));
+                let meta = meta.get_or_insert_with(acp::Meta::new);
+                meta.insert("modelId".into(), serde_json::json!(mid.0));
+                meta.insert(
+                    xai_grok_shell::agent::config::RELOAD_MODEL_CONFIG_META_KEY.into(),
+                    true.into(),
+                );
             }
             if let Some(ref sid) = preferred_session_id {
                 meta.get_or_insert_with(acp::Meta::new)
@@ -304,8 +308,12 @@ pub(crate) fn execute(
                 session_flags,
             );
             if let Some(ref mid) = model_id {
-                meta.get_or_insert_with(acp::Meta::new)
-                    .insert("modelId".into(), serde_json::json!(mid.0));
+                let meta = meta.get_or_insert_with(acp::Meta::new);
+                meta.insert("modelId".into(), serde_json::json!(mid.0));
+                meta.insert(
+                    xai_grok_shell::agent::config::RELOAD_MODEL_CONFIG_META_KEY.into(),
+                    true.into(),
+                );
             }
             if load_session_id.is_none() && let Some(ref sid) = preferred_session_id {
                 meta.get_or_insert_with(acp::Meta::new)
@@ -1837,23 +1845,25 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let meta = effort
-                        .map(|eff| {
-                            use xai_grok_shell::sampling::types::{
-                                REASONING_EFFORT_META_KEY, reasoning_effort_meta_value,
-                            };
-                            let mut m = acp::Meta::new();
-                            m.insert(
-                                REASONING_EFFORT_META_KEY.to_string(),
-                                reasoning_effort_meta_value(eff),
-                            );
-                            m
-                        });
+                    let mut meta = acp::Meta::new();
+                    meta.insert(
+                        xai_grok_shell::agent::config::RELOAD_MODEL_CONFIG_META_KEY.into(),
+                        true.into(),
+                    );
+                    if let Some(eff) = effort {
+                        use xai_grok_shell::sampling::types::{
+                            REASONING_EFFORT_META_KEY, reasoning_effort_meta_value,
+                        };
+                        meta.insert(
+                            REASONING_EFFORT_META_KEY.to_string(),
+                            reasoning_effort_meta_value(eff),
+                        );
+                    }
                     let req = acp::SetSessionModelRequest::new(
                             session_id,
                             model_id.clone(),
                         )
-                        .meta(meta);
+                        .meta(Some(meta));
                     let result = acp_send(req, &tx)
                         .await
                         .map(|_| ())

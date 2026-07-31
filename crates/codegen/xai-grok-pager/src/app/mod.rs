@@ -43,6 +43,7 @@ mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
 mod modals;
+pub(crate) mod model_config_reload;
 mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;

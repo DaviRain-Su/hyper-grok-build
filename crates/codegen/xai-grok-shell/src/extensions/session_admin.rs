@@ -548,10 +548,23 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// in-place. Prefetched (API) and default models are NOT re-fetched -- only
 /// BYOK entries from config are updated.
 fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
+    let count = reload_models_from_disk(agent)?;
+    ExtMethodResult::success(serde_json::json!({ "models": count }))
+        .to_ext_response()
+        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+}
+
+/// Apply the current effective `config.toml` model sections to the live model
+/// manager. Shared by the file-watcher endpoint and explicit model-selection
+/// requests so `/model` does not depend on watcher timing.
+pub(crate) fn reload_models_from_disk(agent: &MvpAgent) -> Result<usize, acp::Error> {
     let disk_config = crate::config::load_effective_config()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
+        .map_err(|e| acp::Error::internal_error().data(e))?;
+    toml_config
+        .validate_model_filters()
         .map_err(|e| acp::Error::internal_error().data(e))?;
 
     // Merge TOML-derived model fields into the agent's in-memory config so
@@ -569,6 +582,10 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         let mut agent_config = agent.cfg.borrow_mut();
         agent_config.models = toml_config.models.clone();
         agent_config.config_models = toml_config.config_models.clone();
+        agent_config.auth_providers = toml_config.auth_providers.clone();
+        agent_config.model_providers = toml_config.model_providers.clone();
+        agent_config.platforms = toml_config.platforms.clone();
+        agent_config.config_warnings = toml_config.config_warnings.clone();
         agent_config.web_search_model = overrides.web_search;
         agent_config.session_summary_model = overrides.session_summary;
         agent_config.image_description_model = overrides.image_description;
@@ -587,9 +604,7 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
 
     let count = agent.models_manager.models().len();
     tracing::info!(count, "model list reloaded from config.toml");
-    ExtMethodResult::success(serde_json::json!({ "models": count }))
-        .to_ext_response()
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))
+    Ok(count)
 }
 
 // internal/reload_models_cache

@@ -917,7 +917,9 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             agent.scrollback.remove_entry(placeholder_id);
         }
         if let Some(m) = new_models {
+            let reload_config = app.models.reload_config_on_model_command;
             app.models = Some(m).into();
+            app.models.reload_config_on_model_command = reload_config;
             agent.session.models = app.models.clone();
         }
         let deferred = crate::app::dispatch::session::lifecycle::apply_deferred_model_switch(

@@ -72,6 +72,9 @@ pub struct ModelState {
     pub available: IndexMap<acp::ModelId, acp::ModelInfo>,
     pub current: Option<acp::ModelId>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// This catalog came from an initialized ACP agent and may be refreshed
+    /// from the effective config when the user invokes `/model`.
+    pub reload_config_on_model_command: bool,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of
     /// reading from the current model's metadata. Used for subagent
@@ -378,6 +381,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     available: models,
                     current: current_model,
                     reasoning_effort,
+                    reload_config_on_model_command: false,
                     context_window_override: None,
                 }
             })
