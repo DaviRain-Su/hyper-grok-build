@@ -480,7 +480,7 @@ hyper
 | **P2** | **partial** | Native 流提取 tool_calls + tools 进 sampler request |
 | **P3** | **done** | `submit_turn_with_tools` + shell `execute_tool_calls`；`hypercore_tool_loop_ready` 默认 true |
 | **P4** | **done** | json_schema（native + StructuredOutput）+ `run_turn_outer_loop` |
-| **P5** | todo | subagent 独立 core；compact；旁路 memory/recap **有意留 shell** |
+| **P5** | **done** | subagent 自动独立 core；pre-seed/mid-turn compact + continue；memory/recap 有意留 shell |
 | **P6** | todo | 文档收口；可选删 legacy 主路径 |
 
 ### 尚未迁入 Hypercore 的路径（gap）
@@ -489,7 +489,8 @@ hyper
 |------|------|------|
 | **Shell 真工具 / MCP** | **P3 done** via `submit_turn_with_tools` → `execute_tool_calls` | — |
 | **json_schema 主路径** | **P4 done**（native / StructuredOutput） | — |
-| **Subagent / spawn** | 独立 session turn | P5 |
+| **Subagent / spawn** | **P5 done**（同 `SessionActor` 路径，独立 `session_id` / hypercore 目录） | — |
+| **Compaction** | **P5 done**（pre-seed auto-compact、model-switch、工具后 overflow → compact → `continue_turn_with_tools`） | — |
 | **Memory dream / recap / laziness** | 有意留 shell 旁路 sampler | 非目标（可薄封装） |
 | **双 transcript** | chat_state 权威 + hypercore snapshot | 渐进统一 |
 | **Cloudflare / 远端 Host** | Phase 2 后置 | — |
@@ -503,8 +504,9 @@ hyper
 5. ~~**P0/P1：** Host API v2 + Core tool loop（Mock）~~ **done**  
 6. ~~**P3：** shell 真工具环~~ **done**  
 7. ~~**P4：** json_schema + shell outer loop~~ **done**  
-8. **P5/P6：** subagent、compact、文档；CF 后置  
-9. 不把完整 TUI/PTY 逻辑塞进 core。
+8. ~~**P5：** subagent 独立 core + compact~~ **done**  
+9. **P6：** 文档收口、可选删 legacy 主路径；CF 后置  
+10. 不把完整 TUI/PTY 逻辑塞进 core。
 
 ---
 

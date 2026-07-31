@@ -392,7 +392,7 @@ impl<H: HyperHost> HyperCore<H> {
     pub async fn submit_turn_with_tools<F, Fut>(
         &mut self,
         req: TurnRequest,
-        mut invoke_batch: F,
+        invoke_batch: F,
     ) -> Result<TurnOutcome, CoreError>
     where
         F: FnMut(String, Vec<HostToolCall>) -> Fut,
@@ -436,21 +436,85 @@ impl<H: HyperHost> HyperCore<H> {
             });
         }
 
+        self.run_model_tool_loop(
+            turn_id,
+            text.clone(),
+            req.tools,
+            req.json_schema,
+            Some(text),
+            invoke_batch,
+        )
+        .await
+    }
+
+    /// Continue model→tool steps **without** appending a new user message.
+    ///
+    /// Used after mid-turn compaction: reseed from chat_state, then keep
+    /// sampling until end_turn. `turn_id` must be unique (e.g. `{prompt}-c{n}`)
+    /// so terminal idempotency does not collide with the pre-compact segment.
+    pub async fn continue_turn_with_tools<F, Fut>(
+        &mut self,
+        turn_id: impl Into<String>,
+        request_text: impl Into<String>,
+        tools: Option<Vec<ToolDefinition>>,
+        json_schema: Option<serde_json::Value>,
+        invoke_batch: F,
+    ) -> Result<TurnOutcome, CoreError>
+    where
+        F: FnMut(String, Vec<HostToolCall>) -> Fut,
+        Fut: std::future::Future<Output = ToolBatchResult>,
+    {
+        let turn_id = turn_id.into().trim().to_string();
+        let request_text = request_text.into();
+        if turn_id.is_empty() {
+            return Err(CoreError::Invalid("turn_id must be non-empty".into()));
+        }
+        self.run_model_tool_loop(
+            turn_id,
+            request_text,
+            tools,
+            json_schema,
+            None,
+            invoke_batch,
+        )
+        .await
+    }
+
+    /// Shared model→tool loop for [`Self::submit_turn_with_tools`] and
+    /// [`Self::continue_turn_with_tools`].
+    async fn run_model_tool_loop<F, Fut>(
+        &mut self,
+        turn_id: String,
+        request_text: String,
+        tools: Option<Vec<ToolDefinition>>,
+        json_schema: Option<serde_json::Value>,
+        append_user: Option<String>,
+        mut invoke_batch: F,
+    ) -> Result<TurnOutcome, CoreError>
+    where
+        F: FnMut(String, Vec<HostToolCall>) -> Fut,
+        Fut: std::future::Future<Output = ToolBatchResult>,
+    {
         let mut events = vec![
             CoreEvent::Status {
-                text: "turn started".into(),
+                text: if append_user.is_some() {
+                    "turn started".into()
+                } else {
+                    "turn continued".into()
+                },
             },
             CoreEvent::TurnStarted {
                 turn_id: turn_id.clone(),
             },
         ];
 
-        // Append user message for this turn (not yet committed until success).
-        let user_len_before = self.items.len();
-        self.items.push(TranscriptItem::text("user", text.clone()));
-        self.trim_messages();
+        let rollback_len = self.items.len();
+        if let Some(user_text) = append_user {
+            self.items.push(TranscriptItem::text("user", user_text));
+            self.trim_messages();
+        }
 
-        let tools = match req.tools {
+        let tools = match tools {
             Some(t) => t,
             None => self.host.list_tools().await?,
         };
@@ -472,13 +536,13 @@ impl<H: HyperHost> HyperCore<H> {
                 model: self.config.model.clone(),
                 messages,
                 tools: tools.clone(),
-                json_schema: req.json_schema.clone(),
+                json_schema: json_schema.clone(),
             };
 
             let mut stream = match self.host.open_model_stream(stream_req).await {
                 Ok(s) => s,
                 Err(e) => {
-                    self.items.truncate(user_len_before);
+                    self.items.truncate(rollback_len);
                     let err = e.to_string();
                     events.push(CoreEvent::TurnFailed {
                         turn_id: turn_id.clone(),
@@ -526,7 +590,7 @@ impl<H: HyperHost> HyperCore<H> {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        self.items.truncate(user_len_before);
+                        self.items.truncate(rollback_len);
                         events.push(CoreEvent::TurnFailed {
                             turn_id: turn_id.clone(),
                             error: e.to_string(),
@@ -537,7 +601,6 @@ impl<H: HyperHost> HyperCore<H> {
             }
 
             if pending_calls.is_empty() {
-                // End turn: plain assistant text.
                 self.items.push(TranscriptItem {
                     role: "assistant".into(),
                     content: assistant.clone(),
@@ -550,7 +613,6 @@ impl<H: HyperHost> HyperCore<H> {
                 break;
             }
 
-            // Assistant row with tool calls (may include partial text).
             self.items.push(TranscriptItem {
                 role: "assistant".into(),
                 content: assistant.clone(),
@@ -576,7 +638,6 @@ impl<H: HyperHost> HyperCore<H> {
                 ToolBatchResult::Finish(r) => (r, true),
             };
 
-            // Align results to calls (pad / truncate defensively).
             for (idx, call) in pending_calls.iter().enumerate() {
                 let result = results.get(idx).cloned().unwrap_or_else(|| HostToolResult {
                     call_id: call.id.clone(),
@@ -618,9 +679,8 @@ impl<H: HyperHost> HyperCore<H> {
                 break;
             }
 
-            // If this was the last allowed step and we still had tools, error.
             if step + 1 >= max_steps {
-                self.items.truncate(user_len_before);
+                self.items.truncate(rollback_len);
                 events.push(CoreEvent::TurnFailed {
                     turn_id: turn_id.clone(),
                     error: format!("tool loop limit exceeded ({max_steps})"),
@@ -633,7 +693,7 @@ impl<H: HyperHost> HyperCore<H> {
 
         let terminal = TerminalTurnRecord {
             turn_id: turn_id.clone(),
-            request_text: text,
+            request_text,
             assistant_text: final_assistant.clone(),
             stop_reason: stop_reason.clone(),
         };
