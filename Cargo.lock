@@ -17149,6 +17149,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-hyper-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "xai-hyper-host",
+]
+
+[[package]]
+name = "xai-hyper-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "xai-interjection-core"
 version = "0.1.0"
 dependencies = [
