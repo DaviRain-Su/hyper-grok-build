@@ -1,16 +1,20 @@
-//! Hypercore session / turn engine (Phase 0).
+//! Hypercore session / turn engine.
 //!
 //! Owns conversation state and turn orchestration. All I/O goes through
 //! [`xai_hyper_host::HyperHost`].
 //!
-//! Phase 0 ships a [`mock::MockHost`] and echo model stream only — no real
-//! sampler and no dependency on pager/shell.
+//! - Phase 0: [`mock::MockHost`] echo stream (always available).
+//! - Phase 1: [`native::NativeHost`] (feature `native`, default) — disk
+//!   snapshots under `~/.grok/hypercore/` + real model stream via sampler.
 //!
 //! See `docs/design-hypercore.md`.
 
 #![deny(missing_docs)]
 
 pub mod mock;
+
+#[cfg(feature = "native")]
+pub mod native;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

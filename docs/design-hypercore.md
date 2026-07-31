@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **Accepted · Phase 0 已落地**（`xai-hyper-host` / `xai-hyper-core` + MockHost） |
+| 状态 | **Accepted · Phase 0+1 已落地**（MockHost + NativeHost + `hypercore-demo`） |
 | 日期 | 2026-07-31 |
 | 动机 | 从完整 Hyper CLI/TUI 中抽出可复用的会话核心，支撑本机、Cloudflare Durable Objects、以及未来其它 edge/server host，而不要求「整包 Hyper 上云」 |
 | 对标 | [nanocodex PR #75](https://github.com/gakonst/nanocodex/pull/75)（host-managed transport）+ [PR #76](https://github.com/gakonst/nanocodex/pull/76)（Cloudflare DO） |
@@ -240,35 +240,27 @@ impl<H: HyperHost> HyperCore<H> {
 
 ---
 
-### Phase 1 — 可聊天的 native core（真实模型）
+### Phase 1 — 可聊天的 native core（真实模型） ✅
 
 **目标：** 本机 tokio host 上真实完成多 turn 流式对话 + 磁盘快照。
 
 | 交付物 | 说明 |
 |--------|------|
-| 接入 `xai-grok-sampler`（feature 裁剪） | 至少 `chat_completions` 或 `responses` 一条路径 |
-| `NativeHost` | 从 env / `auth.json` 读 key（仅 host）；写 `~/.grok/hypercore/<session>/` |
-| CLI 或 example binary | `hypercore-demo`：stdin 多轮，打印 delta |
-| 幂等 terminal turn 文件 | 对齐 nanocodex「重放不重复打模型」 |
-| 基础截断 | 超窗时丢最旧非 system（完整 compaction 后置） |
+| 接入 `xai-grok-sampler`（feature `native`） | `chat_completions` / `responses` / `codex_responses` / `messages` |
+| `NativeHost` | env / `auth.json` 读 key；`~/.grok/hypercore/<session>/` |
+| CLI | `hypercore-demo`：stdin 多轮，流式打印 delta |
+| 幂等 terminal turn 文件 | `terminals/<turn_id>.json` |
+| 基础截断 | `max_messages` 丢最旧非 system |
 
 **明确不做：** PTY、MCP、子 agent、插件、TUI。
 
 **验收：**
 
-1. 连续 3 轮真实模型对话；  
-2. 进程退出后 `restore` 仍保留历史；  
-3. 重复同一 `turn_id` 不产生第二次上游请求（可用 mock server 断言）。
+1. 连续 3 轮真实模型对话 — 用 `hypercore-demo` + `XAI_API_KEY` 手测；  
+2. 进程退出后 `restore` 仍保留历史 — demo 重启会打印 restored turns；  
+3. 重复同一 `turn_id` 不二次开流 — 单测 `native_disk_snapshot_and_terminal_idempotent`。
 
-**工期量级：** 约 2–6 周（取决于从 shell 抽采样路径的粘连程度）。
-
-**风险与缓解：**
-
-| 风险 | 缓解 |
-|------|------|
-| sampler 与 shell config 缠死 | 先只支持 env key + 显式 model/base_url |
-| ConversationItem 过重 | core 用精简 DTO，边界转换 |
-| 双栈分叉 | 文档规定「新能力优先进 core host 接口」 |
+**实现注记：** core 仍用精简 `TranscriptItem`；host 打开流时再转成 `ConversationRequest`。
 
 ---
 
@@ -448,9 +440,9 @@ docs/
 
 1. ~~**评审本文** → status 改为 Accepted~~ **done**  
 2. ~~**开 M0：** `xai-hyper-host` + `xai-hyper-core` 骨架 + mock 测试~~ **done**  
-3. **M1 / Phase 1：** 接 sampler 最小路径 + disk `NativeHost` + `hypercore-demo` CLI。  
+3. ~~**M1 / Phase 1：** sampler + disk `NativeHost` + `hypercore-demo`~~ **done**  
 4. **M2 / Phase 2：** 优先 **RemoteSidecarHost + CF Worker 路由**（2B-lite）；并行评估 2B-full 体积。  
-5. 不在 M1 引入 GUI 或完整 shell 依赖。
+5. 不在 M2 前把完整 shell/TUI 绑进 core。
 
 ---
 

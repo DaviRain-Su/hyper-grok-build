@@ -17153,10 +17153,15 @@ name = "xai-hyper-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dirs 5.0.1",
+ "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "xai-grok-sampler",
+ "xai-grok-sampling-types",
  "xai-hyper-host",
 ]
 
