@@ -446,17 +446,17 @@ docs/
 | 存储 | `{grok_home}/hypercore/<session_id>/`（与 NativeHost 同布局） |
 | 流 | 复用 `xai_hyper_core::native::open_model_stream_from_sampler_config` |
 | 工厂 | `SessionActor::shell_hypercore_host()` |
-| 尚未做 | 替换 `handle_prompt`；`invoke_tool` 仍 unsupported |
+| 旁路 turn | `HYPERCORE_TURN=1` → `run_hypercore_plain_turn`；失败回退 legacy |
+| 尚未做 | 工具/`invoke_tool`；默认开启（仍 opt-in env） |
 
-**用法草图（后续 PR）：**
+**启用：**
 
-```rust
-let host = session.shell_hypercore_host().await;
-let mut core = HyperCore::restore_or_new(host, session_id, CoreConfig { model, .. }).await?;
-let out = core.submit_turn(TurnRequest { turn_id, text }).await?;
-// map CoreEvent → ACP AgentMessageChunk
+```bash
+export HYPERCORE_TURN=1   # 或 GROK_HYPERCORE_TURN=1
+hyper   # 正常 TUI；纯文本 turn 走 HyperCore
 ```
 
+**映射：** `CoreEvent::AssistantDelta` → ACP `AgentMessageChunk`；assistant 写回 `chat_state`。
 ## 12. 下一步（执行顺序）
 
 1. ~~**评审本文** → status 改为 Accepted~~ **done**  

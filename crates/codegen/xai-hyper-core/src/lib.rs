@@ -220,6 +220,16 @@ impl<H: HyperHost> HyperCore<H> {
         self.completed_turns
     }
 
+    /// Replace in-memory transcript (not persisted until the next successful commit).
+    ///
+    /// Used by the shell bypass to seed context from `chat_state` before
+    /// [`Self::submit_turn`] appends the current user message.
+    pub fn seed_transcript(&mut self, items: Vec<TranscriptItem>, completed_turns: u64) {
+        self.items = items;
+        self.completed_turns = completed_turns;
+        self.trim_messages();
+    }
+
     /// Encode current state as snapshot bytes.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, CoreError> {
         let snap = SessionSnapshot {

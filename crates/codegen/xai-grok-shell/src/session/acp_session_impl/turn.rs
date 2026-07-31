@@ -866,69 +866,46 @@ impl SessionActor {
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
-        let result = {
-            let mut round_trace = trace_gcs_config;
-            let mut round_artifact = artifact_tracker;
-            let mut stop_continuations_this_turn: u32 = 0;
-            loop {
-                if self.goal_harness_enabled() {
-                    let goal_loop_active = self.goal_tracker.lock().status()
-                        == Some(crate::session::goal_tracker::GoalStatus::Active);
-                    self.set_goal_loop_active_resource(goal_loop_active).await;
+        // Hypercore plain-chat bypass (HYPERCORE_TURN=1). No tools/MCP; falls
+        // back to the legacy turn loop on any failure.
+        let result = if super::hypercore_turn::hypercore_plain_turn_enabled()
+            && json_schema.is_none()
+            && !prompt_text_for_hook.trim().is_empty()
+        {
+            match self
+                .run_hypercore_plain_turn(prompt_id, prompt_text_for_hook.trim())
+                .await
+            {
+                Ok(outcome) => {
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        "hypercore plain turn succeeded"
+                    );
+                    Ok(outcome)
                 }
-                let round = self
-                    .process_conversation_turn_with_recovery(
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        error = %e,
+                        "hypercore plain turn failed; falling back to legacy path"
+                    );
+                    self.run_legacy_conversation_turn_loop(
                         prompt_id,
-                        round_trace.take(),
-                        round_artifact.take(),
-                        json_schema.clone(),
+                        trace_gcs_config,
+                        artifact_tracker,
+                        json_schema,
                     )
-                    .await;
-                if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                    break round;
-                }
-                if matches!(
-                    round,
-                    Ok(TurnOutcome::Completed {
-                        refusal: Some(_),
-                        ..
-                    })
-                ) {
-                    self.auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Infra,
-                        "The model provider refused this goal round. Use /goal resume to retry."
-                            .to_string(),
-                    )
-                    .await;
-                    break round;
-                }
-                let goal_active = laziness_injection_active(
-                    self.goal_harness_enabled(),
-                    self.goal_tracker.lock().status(),
-                );
-                if goal_active {
-                    let decision = if self.goal_runs_on_workflow_engine() {
-                        self.run_goal_round_end().await
-                    } else {
-                        self.run_goal_round_end_legacy().await
-                    };
-                    if let GoalRoundDecision::Continue(directive) = decision {
-                        self.inject_goal_continuation_message(directive).await;
-                        continue;
-                    }
-                }
-                match self
-                    .run_stop_gate(prompt_id, stop_continuations_this_turn)
                     .await
-                {
-                    StopGateDecision::AllowStop => break round,
-                    StopGateDecision::KeepWorking { feedback } => {
-                        stop_continuations_this_turn += 1;
-                        self.chat_state_handle
-                            .push_user_message(ConversationItem::stop_hook_feedback(feedback));
-                    }
                 }
             }
+        } else {
+            self.run_legacy_conversation_turn_loop(
+                prompt_id,
+                trace_gcs_config,
+                artifact_tracker,
+                json_schema,
+            )
+            .await
         };
         let turn_duration_ms = turn_timer.elapsed().as_millis() as u64;
         let handle_prompt_elapsed_ms = handle_prompt_start.elapsed().as_millis() as u64;
@@ -1523,6 +1500,81 @@ impl SessionActor {
             }
         }
     }
+    /// Legacy multi-round conversation loop (tools, goals, stop gates).
+    ///
+    /// Extracted so the Hypercore plain-turn bypass can fall back without
+    /// duplicating the loop body.
+    async fn run_legacy_conversation_turn_loop(
+        self: &Arc<Self>,
+        prompt_id: &str,
+        trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
+        artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<TurnOutcome, acp::Error> {
+        let mut round_trace = trace_gcs_config;
+        let mut round_artifact = artifact_tracker;
+        let mut stop_continuations_this_turn: u32 = 0;
+        loop {
+            if self.goal_harness_enabled() {
+                let goal_loop_active = self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                self.set_goal_loop_active_resource(goal_loop_active).await;
+            }
+            let round = self
+                .process_conversation_turn_with_recovery(
+                    prompt_id,
+                    round_trace.take(),
+                    round_artifact.take(),
+                    json_schema.clone(),
+                )
+                .await;
+            if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+                break round;
+            }
+            if matches!(
+                round,
+                Ok(TurnOutcome::Completed {
+                    refusal: Some(_),
+                    ..
+                })
+            ) {
+                self.auto_pause_goal_if_active_with_message(
+                    crate::session::goal_tracker::GoalPauseReason::Infra,
+                    "The model provider refused this goal round. Use /goal resume to retry."
+                        .to_string(),
+                )
+                .await;
+                break round;
+            }
+            let goal_active = laziness_injection_active(
+                self.goal_harness_enabled(),
+                self.goal_tracker.lock().status(),
+            );
+            if goal_active {
+                let decision = if self.goal_runs_on_workflow_engine() {
+                    self.run_goal_round_end().await
+                } else {
+                    self.run_goal_round_end_legacy().await
+                };
+                if let GoalRoundDecision::Continue(directive) = decision {
+                    self.inject_goal_continuation_message(directive).await;
+                    continue;
+                }
+            }
+            match self
+                .run_stop_gate(prompt_id, stop_continuations_this_turn)
+                .await
+            {
+                StopGateDecision::AllowStop => break round,
+                StopGateDecision::KeepWorking { feedback } => {
+                    stop_continuations_this_turn += 1;
+                    self.chat_state_handle
+                        .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                }
+            }
+        }
+    }
+
     /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
     ///
     /// Agents with a `completion_requirement` in their definition require the model
