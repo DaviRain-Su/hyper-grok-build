@@ -11,6 +11,7 @@
 
 #![deny(missing_docs)]
 
+pub mod disk_store;
 pub mod mock;
 
 #[cfg(feature = "native")]

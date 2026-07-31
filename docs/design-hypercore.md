@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 |----|------|
-| 状态 | **Accepted · Phase 0+1 已落地**（MockHost + NativeHost + `hypercore-demo`） |
+| 状态 | **Accepted · Phase 0+1 已落地；ShellHyperHost 已接入骨架** |
 | 日期 | 2026-07-31 |
 | 动机 | 从完整 Hyper CLI/TUI 中抽出可复用的会话核心，支撑本机、Cloudflare Durable Objects、以及未来其它 edge/server host，而不要求「整包 Hyper 上云」 |
 | 对标 | [nanocodex PR #75](https://github.com/gakonst/nanocodex/pull/75)（host-managed transport）+ [PR #76](https://github.com/gakonst/nanocodex/pull/76)（Cloudflare DO） |
@@ -436,13 +436,35 @@ docs/
 
 ---
 
+
+## 11b. Existing shell 作为 HyperHost（本机集成，非 CF）
+
+| 项 | 内容 |
+|----|------|
+| 模块 | `xai_grok_shell::hypercore_host::ShellHyperHost` |
+| 凭证/路由 | 持有 session 的完整 `SamplerConfig`（`reconstruct_full_config`） |
+| 存储 | `{grok_home}/hypercore/<session_id>/`（与 NativeHost 同布局） |
+| 流 | 复用 `xai_hyper_core::native::open_model_stream_from_sampler_config` |
+| 工厂 | `SessionActor::shell_hypercore_host()` |
+| 尚未做 | 替换 `handle_prompt`；`invoke_tool` 仍 unsupported |
+
+**用法草图（后续 PR）：**
+
+```rust
+let host = session.shell_hypercore_host().await;
+let mut core = HyperCore::restore_or_new(host, session_id, CoreConfig { model, .. }).await?;
+let out = core.submit_turn(TurnRequest { turn_id, text }).await?;
+// map CoreEvent → ACP AgentMessageChunk
+```
+
 ## 12. 下一步（执行顺序）
 
 1. ~~**评审本文** → status 改为 Accepted~~ **done**  
 2. ~~**开 M0：** `xai-hyper-host` + `xai-hyper-core` 骨架 + mock 测试~~ **done**  
 3. ~~**M1 / Phase 1：** sampler + disk `NativeHost` + `hypercore-demo`~~ **done**  
-4. **M2 / Phase 2：** 优先 **RemoteSidecarHost + CF Worker 路由**（2B-lite）；并行评估 2B-full 体积。  
-5. 不在 M2 前把完整 shell/TUI 绑进 core。
+4. **Shell 作为 HyperHost（进行中）** — `ShellHyperHost` + `SessionActor::shell_hypercore_host()`；下一步 feature-flag 接一条无工具 chat turn。  
+5. **M2 / Phase 2：** CF 等非本机 host（**后置**）。  
+6. 不把完整 TUI/PTY 逻辑塞进 core。
 
 ---
 

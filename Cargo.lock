@@ -16677,6 +16677,8 @@ dependencies = [
  "xai-grok-workspace",
  "xai-hooks-plugins-types",
  "xai-hunk-tracker",
+ "xai-hyper-core",
+ "xai-hyper-host",
  "xai-interjection-core",
  "xai-prompt-queue",
  "xai-sqlite-journal",

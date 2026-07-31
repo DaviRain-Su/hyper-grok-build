@@ -1205,7 +1205,10 @@ mod scope_lock_tests {
             .open(lock_path)
             .unwrap();
         file.lock_exclusive().unwrap();
-        let file_lock = AuthFileLock { _file: file };
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
         let candidate = GrokAuth {
             key: "fresh-kimi-access".to_string(),
             refresh_token: Some("fresh-kimi-refresh".to_string()),
@@ -1244,7 +1247,10 @@ mod scope_lock_tests {
             .open(&lock_path)
             .unwrap();
         file.lock_exclusive().unwrap();
-        let file_lock = AuthFileLock { _file: file };
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
 
         let sibling = GrokAuth {
             key: "sibling-radius-access".to_string(),
@@ -1297,7 +1303,10 @@ mod scope_lock_tests {
             .open(&lock_path)
             .unwrap();
         file.lock_exclusive().unwrap();
-        let file_lock = AuthFileLock { _file: file };
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
 
         let existing = GrokAuth {
             key: "sibling-access".to_string(),
@@ -1373,7 +1382,10 @@ mod scope_lock_tests {
             .open(&lock_path)
             .unwrap();
         file.lock_exclusive().unwrap();
-        let file_lock = AuthFileLock { _file: file };
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
 
         let existing = GrokAuth {
             key: "sibling-copilot-access".to_string(),
@@ -1418,7 +1430,10 @@ mod scope_lock_tests {
             .open(&lock_path)
             .unwrap();
         file.lock_exclusive().unwrap();
-        let file_lock = AuthFileLock { _file: file };
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
         std::fs::remove_file(&lock_path).unwrap();
         File::create(&lock_path).unwrap();
         let candidate = GrokAuth {

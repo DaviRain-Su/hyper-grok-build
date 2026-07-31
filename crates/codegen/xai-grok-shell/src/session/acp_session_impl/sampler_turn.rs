@@ -918,6 +918,15 @@ impl SessionActor {
     /// newly issued session token. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
+    /// Build a [`crate::hypercore_host::ShellHyperHost`] from the session's live
+    /// sampling config (after a token refresh). Does not change the turn path;
+    /// callers can hand this to [`xai_hyper_core::HyperCore`].
+    pub(crate) async fn shell_hypercore_host(&self) -> crate::hypercore_host::ShellHyperHost {
+        self.refresh_token_if_expired().await;
+        let cfg = self.reconstruct_full_config().await;
+        crate::hypercore_host::ShellHyperHost::under_grok_home(cfg, xai_grok_config::grok_home())
+    }
+
     pub(crate) async fn prepare_sampler_for_turn(&self) {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;

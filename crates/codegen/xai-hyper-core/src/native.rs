@@ -1,6 +1,9 @@
 //! Phase 1 native host: disk snapshots under `~/.grok/hypercore/` + real model stream.
 //!
 //! Credentials stay on the host (env / `auth.json`). They never enter core snapshots.
+//!
+//! [`open_model_stream_from_sampler_config`] is also used by the shell's
+//! [`ShellHyperHost`](crate-level doc in xai-grok-shell) so stream bridging stays in one place.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +21,8 @@ use xai_hyper_host::{
     HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream, ModelStreamRequest,
     TerminalTurnRecord,
 };
+
+use crate::disk_store::HypercoreSessionStore;
 
 const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
 const DEFAULT_MODEL: &str = "grok-4";
@@ -72,14 +77,17 @@ impl NativeHostConfig {
 #[derive(Debug, Clone)]
 pub struct NativeHost {
     config: NativeHostConfig,
+    store: HypercoreSessionStore,
     stream_opens: std::sync::Arc<AtomicU64>,
 }
 
 impl NativeHost {
     /// Create a host with the given config (does not require a key until stream open).
     pub fn new(config: NativeHostConfig) -> Self {
+        let store = HypercoreSessionStore::new(config.grok_home.join("hypercore"));
         Self {
             config,
+            store,
             stream_opens: std::sync::Arc::new(AtomicU64::new(0)),
         }
     }
@@ -91,7 +99,7 @@ impl NativeHost {
 
     /// Root directory for this host's sessions: `{grok_home}/hypercore`.
     pub fn hypercore_root(&self) -> PathBuf {
-        self.config.grok_home.join("hypercore")
+        self.store.root().to_path_buf()
     }
 
     /// How many model streams have been opened (tests / demo stats).
@@ -102,20 +110,6 @@ impl NativeHost {
     /// Effective model id from config.
     pub fn model(&self) -> &str {
         &self.config.model
-    }
-
-    fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.hypercore_root().join(sanitize_session_id(session_id))
-    }
-
-    fn snapshot_path(&self, session_id: &str) -> PathBuf {
-        self.session_dir(session_id).join("snapshot.json")
-    }
-
-    fn terminal_path(&self, session_id: &str, turn_id: &str) -> PathBuf {
-        self.session_dir(session_id)
-            .join("terminals")
-            .join(format!("{}.json", sanitize_session_id(turn_id)))
     }
 
     fn resolved_api_key(&self) -> Result<String, HostError> {
@@ -152,6 +146,50 @@ impl ModelStream for ChannelModelStream {
     }
 }
 
+/// Open a model stream from a fully-built [`SamplerConfig`] (credentials included).
+///
+/// Used by [`NativeHost`] and by the shell's `ShellHyperHost` so streaming logic
+/// is not duplicated.
+pub fn open_model_stream_from_sampler_config(
+    mut sampler_cfg: SamplerConfig,
+    req: ModelStreamRequest,
+) -> Result<Box<dyn ModelStream>, HostError> {
+    let model = if req.model.is_empty() {
+        sampler_cfg.model.clone()
+    } else {
+        req.model.clone()
+    };
+    if !model.is_empty() {
+        sampler_cfg.model = model.clone();
+    }
+    if matches!(sampler_cfg.api_backend, ApiBackend::CodexResponses) {
+        sampler_cfg.responses_codex_dialect = true;
+    }
+    let api_backend = sampler_cfg.api_backend.clone();
+    let client = SamplingClient::new(sampler_cfg)
+        .map_err(|e| HostError::Transport(format!("SamplingClient::new: {e}")))?;
+
+    let items: Vec<ConversationItem> = req
+        .messages
+        .iter()
+        .filter_map(|m| match m.role.as_str() {
+            "system" => Some(ConversationItem::system(m.content.clone())),
+            "user" => Some(ConversationItem::user(m.content.clone())),
+            "assistant" => Some(ConversationItem::assistant(m.content.clone())),
+            _ => None,
+        })
+        .collect();
+    let request = ConversationRequest::from_items(items).with_model(model);
+
+    let (tx, rx) = mpsc::channel::<Result<ModelChunk, HostError>>(64);
+    tokio::spawn(async move {
+        if let Err(e) = drive_sampler_stream(client, api_backend, request, tx.clone()).await {
+            let _ = tx.send(Err(e)).await;
+        }
+    });
+    Ok(Box::new(ChannelModelStream { rx }))
+}
+
 #[async_trait]
 impl HyperHost for NativeHost {
     async fn open_model_stream(
@@ -165,12 +203,11 @@ impl HyperHost for NativeHost {
         } else {
             req.model.clone()
         };
-        let base_url = self.config.base_url.clone();
         let api_backend = self.config.api_backend.clone();
 
         let mut sampler_cfg = SamplerConfig {
             api_key: Some(api_key),
-            base_url: base_url.clone(),
+            base_url: self.config.base_url.clone(),
             model: model.clone(),
             api_backend: api_backend.clone(),
             context_window: 131_072,
@@ -178,34 +215,14 @@ impl HyperHost for NativeHost {
             client_version: Some(env!("CARGO_PKG_VERSION").into()),
             ..Default::default()
         };
-        // Codex dialect for reverse-proxy Responses if selected.
         if matches!(api_backend, ApiBackend::CodexResponses) {
             sampler_cfg.responses_codex_dialect = true;
         }
 
-        let client = SamplingClient::new(sampler_cfg)
-            .map_err(|e| HostError::Transport(format!("SamplingClient::new: {e}")))?;
-
-        let items: Vec<ConversationItem> = req
-            .messages
-            .iter()
-            .filter_map(|m| match m.role.as_str() {
-                "system" => Some(ConversationItem::system(m.content.clone())),
-                "user" => Some(ConversationItem::user(m.content.clone())),
-                "assistant" => Some(ConversationItem::assistant(m.content.clone())),
-                _ => None,
-            })
-            .collect();
-        let request = ConversationRequest::from_items(items).with_model(model);
-
-        let (tx, rx) = mpsc::channel::<Result<ModelChunk, HostError>>(64);
-        tokio::spawn(async move {
-            if let Err(e) = drive_sampler_stream(client, api_backend, request, tx.clone()).await {
-                let _ = tx.send(Err(e)).await;
-            }
-        });
-
-        Ok(Box::new(ChannelModelStream { rx }))
+        open_model_stream_from_sampler_config(sampler_cfg, ModelStreamRequest {
+            model,
+            ..req
+        })
     }
 
     async fn commit_snapshot(
@@ -214,45 +231,13 @@ impl HyperHost for NativeHost {
         snapshot: &[u8],
         terminal: Option<&TerminalTurnRecord>,
     ) -> Result<(), HostError> {
-        let dir = self.session_dir(session_id);
-        tokio::fs::create_dir_all(&dir)
+        self.store
+            .commit_snapshot(session_id, snapshot, terminal)
             .await
-            .map_err(|e| HostError::Io(format!("mkdir {}: {e}", dir.display())))?;
-        let snap_path = self.snapshot_path(session_id);
-        let tmp = snap_path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, snapshot)
-            .await
-            .map_err(|e| HostError::Io(format!("write {}: {e}", tmp.display())))?;
-        tokio::fs::rename(&tmp, &snap_path)
-            .await
-            .map_err(|e| HostError::Io(format!("rename snapshot: {e}")))?;
-
-        if let Some(term) = terminal {
-            let tdir = dir.join("terminals");
-            tokio::fs::create_dir_all(&tdir)
-                .await
-                .map_err(|e| HostError::Io(format!("mkdir terminals: {e}")))?;
-            let tpath = self.terminal_path(session_id, &term.turn_id);
-            let bytes = serde_json::to_vec_pretty(term)
-                .map_err(|e| HostError::Io(format!("serialize terminal: {e}")))?;
-            let ttmp = tpath.with_extension("json.tmp");
-            tokio::fs::write(&ttmp, &bytes)
-                .await
-                .map_err(|e| HostError::Io(format!("write terminal: {e}")))?;
-            tokio::fs::rename(&ttmp, &tpath)
-                .await
-                .map_err(|e| HostError::Io(format!("rename terminal: {e}")))?;
-        }
-        Ok(())
     }
 
     async fn load_snapshot(&self, session_id: &str) -> Result<Option<Vec<u8>>, HostError> {
-        let path = self.snapshot_path(session_id);
-        match tokio::fs::read(&path).await {
-            Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(HostError::Io(format!("read {}: {e}", path.display()))),
-        }
+        self.store.load_snapshot(session_id).await
     }
 
     async fn load_terminal_turn(
@@ -260,16 +245,7 @@ impl HyperHost for NativeHost {
         session_id: &str,
         turn_id: &str,
     ) -> Result<Option<TerminalTurnRecord>, HostError> {
-        let path = self.terminal_path(session_id, turn_id);
-        match tokio::fs::read(&path).await {
-            Ok(b) => {
-                let rec = serde_json::from_slice(&b)
-                    .map_err(|e| HostError::Io(format!("parse terminal: {e}")))?;
-                Ok(Some(rec))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(HostError::Io(format!("read {}: {e}", path.display()))),
-        }
+        self.store.load_terminal_turn(session_id, turn_id).await
     }
 
     async fn invoke_tool(&self, _call: HostToolCall) -> Result<HostToolResult, HostError> {
@@ -436,18 +412,6 @@ fn parse_api_backend(raw: &str) -> ApiBackend {
     }
 }
 
-fn sanitize_session_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,10 +459,5 @@ mod tests {
         assert!(out.replayed);
         assert_eq!(out.assistant_text, "hello");
         assert_eq!(host.model_stream_opens(), opens_before);
-    }
-
-    #[test]
-    fn sanitize_strips_path_chars() {
-        assert_eq!(sanitize_session_id("../evil/id"), "___evil_id");
     }
 }

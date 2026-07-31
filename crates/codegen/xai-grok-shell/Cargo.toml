@@ -23,6 +23,8 @@ anyhow = { workspace = true }
 xai-grok-announcements = { workspace = true }
 xai-prompt-queue = { workspace = true }
 xai-grok-version = { workspace = true }
+xai-hyper-host = { workspace = true }
+xai-hyper-core = { workspace = true, features = ["native"] }
 
 async-openai = { workspace = true }
 async-trait = { workspace = true }

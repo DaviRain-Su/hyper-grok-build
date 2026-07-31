@@ -24,6 +24,8 @@ pub use xai_grok_shell_base::env;
 pub mod extensions;
 pub use xai_grok_workspace::foreign_sessions;
 pub mod heap_profile;
+/// Shell-backed Hypercore host (`ShellHyperHost`).
+pub mod hypercore_host;
 pub use xai_grok_http as http;
 pub mod inspect;
 pub mod instrumentation;
