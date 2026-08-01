@@ -920,7 +920,7 @@ fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &st
     let mut seen_names = HashSet::new();
     let mut found_binary = false;
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index)?;
+        let entry = archive.by_index(index)?;
         let path = Path::new(entry.name());
         let name = normalized_root_entry(path)?;
         if entry.is_dir() && name.is_none() {

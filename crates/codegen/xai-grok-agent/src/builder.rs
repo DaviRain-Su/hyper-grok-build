@@ -88,9 +88,9 @@ pub struct AgentBuilder {
     state_path: Option<PathBuf>,
     memory_backend: Option<Arc<dyn xai_grok_tools::types::memory_backend::MemoryBackend>>,
     web_search_config: xai_grok_tools::implementations::web_search::WebSearchConfig,
-    /// When true, web search and X search are sent as native server-side
-    /// tools for execution by the agentic sampler, instead of being
-    /// registered as local Function tools.
+    /// When true, web search and X search are available as native server-side
+    /// tool candidates. The session projects these candidates onto the active
+    /// provider on every request; local web-search credentials are unrelated.
     backend_search: bool,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
@@ -1030,7 +1030,6 @@ impl AgentBuilder {
             }
         }
         let use_backend_search = self.backend_search;
-        let web_search_enabled = self.web_search_config.is_enabled();
         let tool_bridge = ToolBridge::finalize_builder(
             tool_bridge_builder,
             tool_config,
@@ -1198,7 +1197,7 @@ impl AgentBuilder {
         }
         let mut hosted_tools = Vec::new();
         if use_backend_search {
-            if web_search_enabled && definition.hosted_tool_allowed("web_search") {
+            if definition.hosted_tool_allowed("web_search") {
                 hosted_tools.push(xai_grok_sampling_types::HostedTool::WebSearch { options: None });
             }
             if definition.hosted_tool_allowed("x_search") {
@@ -2505,17 +2504,17 @@ mod tests {
             "expected XSearch hosted tool, got: {hosted:?}"
         );
     }
-    /// XSearch is added unconditionally when backend search is on;
-    /// WebSearch requires the web-search config.
+    /// Hosted WebSearch belongs to the inference provider, so it does not
+    /// require credentials for the local `web_search` function tool.
     #[tokio::test]
-    async fn hosted_tools_only_xsearch_when_web_search_disabled() {
+    async fn hosted_web_search_does_not_require_local_search_credentials() {
         let agent = build_with_web_search(false, true, &[], None).await;
         let hosted = agent.hosted_tools();
         assert!(
-            !hosted
+            hosted
                 .iter()
                 .any(|t| matches!(t, xai_grok_sampling_types::HostedTool::WebSearch { .. })),
-            "WebSearch must NOT appear when web_search is disabled, got: {hosted:?}"
+            "hosted WebSearch must not depend on local search credentials, got: {hosted:?}"
         );
         assert!(
             hosted

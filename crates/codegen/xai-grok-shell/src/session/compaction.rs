@@ -31,7 +31,7 @@ use xai_chat_state::compaction_utils::{
     prepare_conversation_for_verbatim_summarization, sanitize_compacted_history,
     validate_compacted_history,
 };
-use xai_grok_sampling_types::{ApiBackend, ConversationItem};
+use xai_grok_sampling_types::{ApiBackend, ConversationItem, ConversationRequest};
 /// Default percentage points below the auto-compact threshold at which prefire
 /// (background pass-1) starts, giving pass-1 runway to finish before the limit.
 /// Override with `GROK_PREFIRE_LEAD_PERCENT`.
@@ -57,9 +57,13 @@ fn fingerprint_prefix(items: &[ConversationItem]) -> u64 {
             ConversationItem::ToolResult(_) => 3,
             ConversationItem::BackendToolCall(_) => 4,
             ConversationItem::Reasoning(_) => 5,
+            ConversationItem::Compaction(_) => 6,
         };
         tag.hash(&mut h);
-        it.text_content().hash(&mut h);
+        match it {
+            ConversationItem::Compaction(compaction) => compaction.encrypted_content.hash(&mut h),
+            _ => it.text_content().hash(&mut h),
+        }
     }
     h.finish()
 }
@@ -182,13 +186,13 @@ impl SessionActor {
             }
         };
         let tool_defs = self.prepare_tool_definitions().await;
-        let tools = self.turn_base_tool_specs(&tool_defs);
+        let tools = self.turn_base_tool_specs(&tool_defs).await;
         let wall_clock_budget_secs = self
             .agent
             .borrow()
             .compaction_policy()
             .wall_clock_budget_secs;
-        let hosted_tools = self.hosted_tools_for_turn();
+        let hosted_tools = self.hosted_tools_for_turn().await;
         match generate_session_compact(
             history,
             tools,
@@ -957,6 +961,7 @@ impl SessionActor {
             self.chat_state_handle.get_system_message(),
             self.chat_state_handle.get_conversation(),
         );
+        let remote_compact_conversation = full_conversation.clone();
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
             xai_chat_state::compaction_utils::prepare_conversation_for_segment(
                 full_conversation.clone(),
@@ -1021,7 +1026,7 @@ impl SessionActor {
         }
         let sampling_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
-        let backend_search_active = self.backend_search_active();
+        let backend_search_active = self.backend_search_active().await;
         let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
             .prepare_tool_definitions()
             .await
@@ -1035,7 +1040,7 @@ impl SessionActor {
             .map(xai_grok_sampling_types::ToolSpec::from)
             .collect();
         let compaction_hosted_tools: Vec<xai_grok_sampling_types::HostedTool> =
-            self.hosted_tools_for_turn();
+            self.hosted_tools_for_turn().await;
         tracing::info!(
             num_tools = compaction_tools.len(),
             tool_tokens = compaction_tool_tokens,
@@ -1043,6 +1048,157 @@ impl SessionActor {
             &sampling_config.model,
             &sampling_config.model
         );
+        if sampling_config.api_backend == ApiBackend::CodexResponses && user_context.is_none() {
+            let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
+            let remote_request = ConversationRequest {
+                items: remote_compact_conversation.clone(),
+                tools: compaction_tools.clone(),
+                hosted_tools: compaction_hosted_tools.clone(),
+                model: Some(sampling_config.model.clone()),
+                reasoning_effort: sampling_config.reasoning_effort,
+                prompt_cache_key: Some(self.session_info.id.0.to_string()),
+                x_grok_conv_id: Some(self.session_info.id.0.to_string()),
+                x_grok_req_id: Some(format!("codex-compact-{}", uuid::Uuid::new_v4())),
+                x_grok_session_id: Some(self.session_info.id.0.to_string()),
+                x_grok_turn_idx: Some(prompt_index_at_compaction.to_string()),
+                x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                ..Default::default()
+            };
+            match sampling_client
+                .compact_conversation(remote_request, system_message.text_content())
+                .await
+            {
+                Ok(Some(remote_items)) => {
+                    let mut compacted_history = Vec::with_capacity(remote_items.len() + 1);
+                    compacted_history.push(system_message.clone());
+                    compacted_history.extend(
+                        remote_items
+                            .into_iter()
+                            .filter(|item| !matches!(item, ConversationItem::System(_))),
+                    );
+                    let original_user_info = remote_compact_conversation
+                        .get(1)
+                        .and_then(|item| match item {
+                            ConversationItem::User(user) => user.content.first(),
+                            _ => None,
+                        })
+                        .and_then(|part| match part {
+                            xai_grok_sampling_types::ContentPart::Text { text } => {
+                                Some(text.to_string())
+                            }
+                            _ => None,
+                        });
+                    self.chat_state_handle
+                        .record_compaction_at(prompt_index_at_compaction);
+                    self.persist_compaction_checkpoint(
+                        &compacted_history,
+                        prompt_index_at_compaction,
+                        auto_continue,
+                        original_user_info,
+                    );
+                    let prefix_len = if self
+                        .compaction
+                        .prefix_released
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        0
+                    } else {
+                        self.startup_hints.inherited_prefix_len.unwrap_or(0)
+                    };
+                    let compacted_history = if prefix_len == 0 {
+                        compacted_history
+                    } else {
+                        self.resolve_forked_compacted_history(
+                            compacted_history,
+                            prefix_len,
+                            tokens_before,
+                            context_window,
+                        )
+                        .await
+                    };
+                    let new_len = compacted_history.len();
+                    self.chat_state_handle
+                        .replace_conversation_for_compaction(compacted_history);
+                    if self.startup_hints.inherited_prefix_len.is_some() {
+                        let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
+                        let suppression = if xai_token_estimation::exceeds_threshold(
+                            post_replace_tokens,
+                            context_window,
+                            self.compaction.threshold_percent.get(),
+                        ) {
+                            SUPPRESS_STICKY
+                        } else {
+                            SUPPRESS_NONE
+                        };
+                        self.compaction
+                            .auto_compact_suppressed
+                            .store(suppression, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        self.compaction
+                            .auto_compact_suppressed
+                            .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    self.last_idle_flush_conversation_len
+                        .store(new_len, std::sync::atomic::Ordering::Relaxed);
+                    self.memory
+                        .context_injected
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    let _ = self
+                        .notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::PlanState(
+                            crate::tools::todo::TodoState::default(),
+                        ));
+                    self.agent
+                        .borrow()
+                        .tool_bridge()
+                        .on_agents_md_compaction()
+                        .await;
+                    self.agent
+                        .borrow()
+                        .tool_bridge()
+                        .on_skill_discovery_compaction()
+                        .await;
+                    self.persist_announcement_state().await;
+                    self.plan_mode.lock().reset_after_compaction();
+                    self.persist_plan_mode_state();
+                    self.dispatch_hook(
+                        xai_grok_hooks::event::HookEventName::PostCompact,
+                        xai_grok_hooks::event::HookPayload::PostCompact {
+                            source: compact_source.into(),
+                        },
+                        None,
+                        None,
+                    )
+                    .await;
+                    let tokens_after = self.chat_state_handle.get_total_tokens().await;
+                    let span = tracing::Span::current();
+                    span.record("compaction_tokens_after", tokens_after as i64);
+                    span.record("compaction_summary_chars", 0_i64);
+                    span.record("compaction_attempts", 1_i64);
+                    span.record("compaction_outcome", CompactionOutcome::Success.as_str());
+                    span.record("compaction_stop_reason", "remote_compact");
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        items_after = new_len,
+                        "Codex remote compact installed replacement history"
+                    );
+                    compaction.complete(tokens_after);
+                    return Ok(());
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        "Codex remote compact unavailable; continuing with local summary"
+                    );
+                }
+                Err(error) => {
+                    tracing::Span::current().record("compaction_outcome", "failed");
+                    return Err(acp::Error::internal_error()
+                        .data(format!("Codex remote compact failed: {error}")));
+                }
+            }
+        }
         let mut last_error: Option<acp::Error> = None;
         let mut last_failure_outcome = CompactionOutcome::Failed;
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2454,10 +2610,10 @@ mod inline_auto_compact_flow_tests {
             hook_load_errors: std::cell::RefCell::new(Vec::new()),
             plugin_registry: std::cell::RefCell::new(None),
             plugin_registry_handle: None,
-        extension_runtime: std::cell::RefCell::new(
-            xai_grok_extension_runtime::ExtensionRuntime::new(),
-        ),
-        wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
+            extension_runtime: std::cell::RefCell::new(
+                xai_grok_extension_runtime::ExtensionRuntime::new(),
+            ),
+            wasm_registered_tools: std::cell::RefCell::new(Vec::new()),
             events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
             observability_bridge: noop_observability_bridge(),
             current_turn_number: std::cell::Cell::new(0),

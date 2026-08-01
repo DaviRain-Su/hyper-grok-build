@@ -3697,16 +3697,16 @@ pub fn resolve_model_list(
             .map(|e| (e.info.model.clone(), e.info.context_window))
             .collect();
         for entry in resolved.values_mut() {
-            if let Some(donor_cw) = donors.get(&entry.info.model) {
-                if entry.info.context_window.get() == default_cw {
-                    tracing::debug!(
-                        model = %entry.info.model,
-                        from = default_cw,
-                        to = donor_cw.get(),
-                        "slug-match: inheriting context_window from sibling catalog entry"
-                    );
-                    entry.info.context_window = *donor_cw;
-                }
+            if let Some(donor_cw) = donors.get(&entry.info.model)
+                && entry.info.context_window.get() == default_cw
+            {
+                tracing::debug!(
+                    model = %entry.info.model,
+                    from = default_cw,
+                    to = donor_cw.get(),
+                    "slug-match: inheriting context_window from sibling catalog entry"
+                );
+                entry.info.context_window = *donor_cw;
             }
         }
     }
@@ -4275,7 +4275,7 @@ fn inject_moonshot_builtin_models(resolved: &mut IndexMap<String, ModelEntry>) {
             reasoning_effort,
             supports_reasoning_effort,
             reasoning_efforts,
-            supports_backend_search: false,
+            supports_backend_search: provider.adapter == xai_grok_models::AdapterKind::OpenAiCodex,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4943,6 +4943,8 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
+        } else if self.api_backend == Some(ApiBackend::CodexResponses) {
+            entry.info.supports_backend_search = true;
         }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
@@ -6102,6 +6104,9 @@ pub fn resolve_chat_state_auth_type(
 /// Resolve provider adapter metadata from a stable managed catalog id.
 /// User-defined and remote models fall back to the standard wire adapter.
 pub fn adapter_kind_for_model(model: &ModelEntry) -> xai_grok_models::AdapterKind {
+    if model.info.api_backend == ApiBackend::CodexResponses {
+        return xai_grok_models::AdapterKind::OpenAiCodex;
+    }
     let catalog_id = model
         .info
         .id
@@ -6139,9 +6144,12 @@ pub fn sampling_config_for_model(
         &credentials.base_url,
     );
     let route_oauth_platform = oauth_platform_for_model(model);
+    let codex_oauth_active = model_uses_openai_codex_oauth(model);
     align_oauth_headers_with_platform(
         &mut extra_headers,
-        route_oauth_platform,
+        route_oauth_platform.filter(|platform| {
+            *platform != xai_grok_models::PlatformId::OpenAiCodex || codex_oauth_active
+        }),
         &credentials.base_url,
     );
     if route_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
@@ -6364,7 +6372,8 @@ pub fn kimi_code_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBe
 
 /// Whether this catalog entry routes through OpenAI Codex (ChatGPT) OAuth.
 pub fn model_uses_openai_codex_oauth(model: &ModelEntry) -> bool {
-    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::OpenAiCodex)
+    model.platform_oauth_active
+        && oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::OpenAiCodex)
 }
 
 /// Per-request bearer for OpenAI Codex models; `None` for everything else.
@@ -6731,6 +6740,16 @@ pub fn to_acp_model_info(
         })
         .collect()
 }
+
+/// ACP metadata flag identifying catalog rows sourced from `[model.*]` in
+/// `config.toml`. Clients use it to replace only config-owned rows during an
+/// explicit `/model` reload while retaining remote and provider catalogs.
+pub const CONFIG_MODEL_META_KEY: &str = "xaiConfigModel";
+
+/// Request metadata flag asking the shell to re-read model configuration
+/// before resolving an explicitly selected model.
+pub const RELOAD_MODEL_CONFIG_META_KEY: &str = "reloadModelConfig";
+
 /// Error code for model switch rejection due to agent type mismatch.
 pub const MODEL_SWITCH_INCOMPATIBLE_AGENT: &str = "MODEL_SWITCH_INCOMPATIBLE_AGENT";
 /// Error code for model switch failure during the zero-turn full harness
@@ -8034,6 +8053,7 @@ reasoning_effort = "low"
         );
         codex.info.id = Some("openai-codex/gpt-5.1-codex".into());
         codex.info.base_url = proxy.to_string();
+        codex.platform_oauth_active = true;
 
         assert!(model_uses_kimi_code_oauth(&kimi));
         assert!(!model_uses_openai_codex_oauth(&kimi));
@@ -9037,6 +9057,63 @@ default = 42
             !entry.info.show_model_fingerprint,
             "Some(false) override should disable show_model_fingerprint over a true base"
         );
+    }
+    #[test]
+    fn codex_responses_defaults_backend_search_but_explicit_false_wins() {
+        let endpoints = EndpointsConfig::default();
+        let defaulted = ConfigModelOverride {
+            api_backend: Some(ApiBackend::CodexResponses),
+            ..Default::default()
+        }
+        .apply("codex-byok", None, &endpoints);
+        assert!(defaulted.info.supports_backend_search);
+
+        let disabled = ConfigModelOverride {
+            api_backend: Some(ApiBackend::CodexResponses),
+            supports_backend_search: Some(false),
+            ..Default::default()
+        }
+        .apply("codex-byok", None, &endpoints);
+        assert!(!disabled.info.supports_backend_search);
+    }
+
+    #[test]
+    fn codex_responses_byok_keeps_provider_key_and_avoids_oauth_headers() {
+        let mut model = test_model_entry(
+            "gpt-codex",
+            "https://codex-provider.example/v1",
+            Some("sk-codex-byok"),
+            None,
+            None,
+        );
+        model.info.api_backend = ApiBackend::CodexResponses;
+        model
+            .info
+            .extra_headers
+            .insert("X-Tenant".into(), "tenant-a".into());
+
+        let sampler = sampling_config_for_model(
+            &model,
+            resolve_credentials(&model, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(sampler.api_key.as_deref(), Some("sk-codex-byok"));
+        assert!(sampler.bearer_resolver.is_none());
+        assert!(sampler.responses_codex_dialect);
+        assert_eq!(
+            sampler.adapter_kind,
+            xai_grok_models::AdapterKind::OpenAiCodex
+        );
+        assert_eq!(
+            sampler.extra_headers.get("X-Tenant").map(String::as_str),
+            Some("tenant-a")
+        );
+        assert!(!sampler.extra_headers.contains_key("OpenAI-Beta"));
+        assert!(!sampler.extra_headers.contains_key("originator"));
+        assert!(!model_uses_openai_codex_oauth(&model));
     }
     #[test]
     fn user_override_parses_compaction_at_tokens_from_toml() {

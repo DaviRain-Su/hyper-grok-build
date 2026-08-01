@@ -681,7 +681,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1);
@@ -709,7 +709,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(dirs.is_empty());
@@ -739,7 +739,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert!(
@@ -769,7 +769,7 @@ mod tests {
             hooks: None,
             mcp_servers: None,
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         };
         let dirs = manifest.skill_dirs(&root);
         assert_eq!(dirs.len(), 1, "path within plugin root should be accepted");
@@ -799,7 +799,7 @@ mod tests {
             hooks: Some(PathOrInline::Path("../outside-hooks.json".to_string())),
             mcp_servers: None,
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         };
         assert!(
             manifest.hooks_path(&root).is_none(),
@@ -830,7 +830,7 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Path("../outside-mcp.json".to_string())),
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         };
         assert!(
             manifest.mcp_config_path(&root).is_none(),
@@ -890,10 +890,16 @@ mod tests {
                 gate_fail: None,
             }),
         };
-        assert_eq!(m2.runtime_wasm_path(root).as_deref(), Some(custom.as_path()));
-        assert!(m2.runtime.as_ref().unwrap().has_capability(
-            xai_grok_extension_api::Capability::PreToolGate
-        ));
+        assert_eq!(
+            m2.runtime_wasm_path(root).as_deref(),
+            Some(custom.as_path())
+        );
+        assert!(
+            m2.runtime
+                .as_ref()
+                .unwrap()
+                .has_capability(xai_grok_extension_api::Capability::PreToolGate)
+        );
     }
 
     fn manifest_with_inline_mcp(servers: serde_json::Value) -> PluginManifest {
@@ -912,7 +918,7 @@ mod tests {
             hooks: None,
             mcp_servers: Some(PathOrInline::Inline(servers)),
             lsp_servers: None,
-        runtime: None,
+            runtime: None,
         }
     }
 

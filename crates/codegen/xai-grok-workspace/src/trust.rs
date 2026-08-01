@@ -597,8 +597,17 @@ mod tests {
 
         TrustStore::persist_doc(&link, &TrustDocument::default()).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert!(std::fs::read_to_string(&target).unwrap().contains("version"));
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::read_to_string(&target)
+                .unwrap()
+                .contains("version")
+        );
     }
 
     #[test]

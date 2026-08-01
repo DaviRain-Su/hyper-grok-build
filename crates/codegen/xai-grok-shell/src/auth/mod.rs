@@ -16,8 +16,8 @@ pub(crate) mod manager;
 mod model;
 pub mod oidc;
 pub mod openai_codex;
-pub mod radius;
 pub(crate) mod platform_refresh_sticky;
+pub mod radius;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub(crate) mod single_flight;
@@ -45,8 +45,7 @@ pub use flow::{
     ensure_authenticated_or_noninteractive, ensure_authenticated_with_override, perform_logout,
     run_cli_login, run_cli_logout, run_cli_logout_all, run_cli_logout_anthropic_claude,
     run_cli_logout_github_copilot, run_cli_logout_kimi, run_cli_logout_openai_codex,
-    run_cli_logout_radius,
-    try_ensure_fresh_auth,
+    run_cli_logout_radius, try_ensure_fresh_auth,
 };
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
@@ -64,11 +63,12 @@ pub(crate) use model::{
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{
     auth_json_path, clear_anthropic_claude_auth, clear_api_key, clear_bedrock_auth,
-    clear_github_copilot_auth, clear_kimi_code_auth, clear_openai_codex_auth, clear_radius_auth,
-    clear_platform_api_key, clear_platform_api_keys, read_anthropic_claude_auth, read_api_key,
-    read_auth_json, read_bedrock_auth_marker, read_bedrock_profile, read_github_copilot_auth,
-    read_kimi_code_auth, read_openai_codex_auth, read_radius_auth, read_platform_api_key,
-    read_platform_base_url, read_token_by_scope, store_anthropic_claude_auth, store_api_key,
-    store_bedrock_credential_chain, store_bedrock_profile, store_github_copilot_auth,
-    store_kimi_code_auth, store_openai_codex_auth, store_radius_auth, store_platform_api_key,
+    clear_github_copilot_auth, clear_kimi_code_auth, clear_openai_codex_auth,
+    clear_platform_api_key, clear_platform_api_keys, clear_radius_auth, read_anthropic_claude_auth,
+    read_api_key, read_auth_json, read_bedrock_auth_marker, read_bedrock_profile,
+    read_github_copilot_auth, read_kimi_code_auth, read_openai_codex_auth, read_platform_api_key,
+    read_platform_base_url, read_radius_auth, read_token_by_scope, store_anthropic_claude_auth,
+    store_api_key, store_bedrock_credential_chain, store_bedrock_profile,
+    store_github_copilot_auth, store_kimi_code_auth, store_openai_codex_auth,
+    store_platform_api_key, store_radius_auth,
 };

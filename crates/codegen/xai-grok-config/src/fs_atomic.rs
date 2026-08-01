@@ -18,7 +18,10 @@ pub fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
                 current = if link.is_absolute() {
                     link
                 } else {
-                    current.parent().unwrap_or_else(|| Path::new(".")).join(link)
+                    current
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(link)
                 };
             }
             Ok(_) => return Ok(current),
@@ -64,7 +67,7 @@ pub fn write_atomically(
     let result = options
         .open(&tmp)
         .and_then(|mut f| f.write_all(contents.as_bytes()))
-        .and_then(|()| std::fs::rename(&tmp, &final_path));
+        .and_then(|()| std::fs::rename(&tmp, final_path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -107,7 +110,12 @@ mod tests {
         let write_target = resolve_write_target(&link).unwrap();
         write_atomically(&write_target, "new", Some(0o600)).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
     }
 

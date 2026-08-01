@@ -15,6 +15,10 @@ use xai_grok_sampling_types::rs;
 /// decoder (which starves the layer-2 idle detector) or failing fatally, the
 /// decoder surfaces them as [`ResponsesStreamItem::Heartbeat`].
 #[derive(Debug, Clone)]
+// Boxing every event would ripple through the public raw-stream API and add an
+// allocation to every SSE frame. Streams carry one item at a time, so retaining
+// the direct representation is an intentional latency/compatibility tradeoff.
+#[allow(clippy::large_enum_variant)]
 pub enum ResponsesStreamItem {
     /// A typed Responses API event.
     Event(rs::ResponseStreamEvent),

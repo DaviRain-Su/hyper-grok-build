@@ -38,6 +38,7 @@ impl BackendAdapter {
     /// backend. This is the only factory used by `SamplingClient`.
     pub fn from_route(kind: AdapterKind, backend: ApiBackend) -> Result<Self> {
         match kind {
+            AdapterKind::Standard if backend == ApiBackend::CodexResponses => Ok(Self::OpenAiCodex),
             AdapterKind::Standard => Ok(Self::Standard(backend)),
             AdapterKind::KimiCoding
                 if matches!(backend, ApiBackend::ChatCompletions | ApiBackend::Messages) =>
@@ -183,6 +184,14 @@ mod tests {
                 .expect("CodexResponses backend with OpenAiCodex adapter");
         assert!(codex_proxy.uses_openai_codex_dialect());
         assert_eq!(codex_proxy.endpoint_path(), Some("responses"));
+        let configured_codex =
+            BackendAdapter::from_route(AdapterKind::Standard, ApiBackend::CodexResponses)
+                .expect("configured Codex Responses route");
+        assert!(configured_codex.uses_openai_codex_dialect());
+        assert_eq!(
+            configured_codex.wire_backend(),
+            Some(&ApiBackend::Responses)
+        );
 
         assert!(
             BackendAdapter::from_route(AdapterKind::OpenAiCodex, ApiBackend::ChatCompletions)

@@ -42,11 +42,7 @@ pub fn deny_category_from_reason(reason: &str) -> &'static str {
 ///   [`ExtensionRuntime::log_metrics`](xai_grok_extension_runtime::ExtensionRuntime::log_metrics)).
 /// - Product Mixpanel / events: only when `telemetry_enabled`.
 /// - External OTEL: via [`log_event_dual`] when the external stream is active.
-pub fn emit_runtime_metrics(
-    telemetry_enabled: bool,
-    reason: &str,
-    runtime: &ExtensionRuntime,
-) {
+pub fn emit_runtime_metrics(telemetry_enabled: bool, reason: &str, runtime: &ExtensionRuntime) {
     let snap = runtime.metrics();
     snap.log_tracing(reason);
     xai_grok_telemetry::session_ctx::log_event_dual(
@@ -107,11 +103,7 @@ impl std::fmt::Debug for WasmExtensionTool {
 }
 
 impl WasmExtensionTool {
-    pub fn new(
-        runtime: ExtensionRuntime,
-        desc: WasmToolDescriptor,
-        client_name: String,
-    ) -> Self {
+    pub fn new(runtime: ExtensionRuntime, desc: WasmToolDescriptor, client_name: String) -> Self {
         let short_name = desc.name;
         let description = if desc.description.is_empty() {
             format!("WASM extension tool `{short_name}`")
@@ -150,9 +142,8 @@ impl Tool for WasmExtensionTool {
         // client_name is already sanitized; fall back to a unique-ish id.
         ToolId::new(&self.tool_id).unwrap_or_else(|_| {
             let fallback = format!("wasm_fallback_{}", self.tool_id.len());
-            ToolId::new(&fallback).unwrap_or_else(|_| {
-                ToolId::new("wasm_fallback").expect("static tool id")
-            })
+            ToolId::new(&fallback)
+                .unwrap_or_else(|_| ToolId::new("wasm_fallback").expect("static tool id"))
         })
     }
 
@@ -362,10 +353,12 @@ mod tests {
         let bridge = xai_grok_tools::bridge::ToolBridge::for_test();
         let mut a = Vec::new();
         let mut b = Vec::new();
-        let n1 = sync_wasm_tools_to_bridge(&bridge, &rt, &mut a, "11111111-1111-1111-1111-111111111111")
-            .await;
-        let n2 = sync_wasm_tools_to_bridge(&bridge, &rt, &mut b, "22222222-2222-2222-2222-222222222222")
-            .await;
+        let n1 =
+            sync_wasm_tools_to_bridge(&bridge, &rt, &mut a, "11111111-1111-1111-1111-111111111111")
+                .await;
+        let n2 =
+            sync_wasm_tools_to_bridge(&bridge, &rt, &mut b, "22222222-2222-2222-2222-222222222222")
+                .await;
         assert!(n1 >= 1 && n2 >= 1);
         // Names must not collide across sessions on the shared bridge.
         for name in &a {

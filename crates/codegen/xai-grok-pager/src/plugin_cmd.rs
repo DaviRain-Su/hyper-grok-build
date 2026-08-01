@@ -832,12 +832,8 @@ fn cmd_init(path: &str, name: Option<&str>) -> Result<()> {
     }
     // Point the new crate at the monorepo SDK when scaffolding from a source tree.
     // Absolute path so the guest builds outside the workspace.
-    let sdk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../xai-grok-extension-sdk")
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../xai-grok-extension-sdk")
-        });
+    let sdk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../xai-grok-extension-sdk");
+    let sdk_path = dunce::canonicalize(&sdk_path).unwrap_or(sdk_path);
     let cargo_toml = format!(
         r#"[workspace]
 
@@ -883,10 +879,7 @@ strip = true
 "#
     );
     std::fs::write(dest.join("plugin.json"), plugin_json)?;
-    std::fs::write(
-        dest.join(".gitignore"),
-        "target/\nCargo.lock\n",
-    )?;
+    std::fs::write(dest.join(".gitignore"), "target/\nCargo.lock\n")?;
 
     println!("Created Rust WASM extension at {}", dest.display());
     println!("  name: {plugin_name}");
@@ -1015,24 +1008,24 @@ fn find_guest_wasm_artifact(out_dir: &Path) -> Result<PathBuf> {
 
 /// Destination path for the built guest module.
 fn runtime_wasm_dest(root: &Path) -> PathBuf {
-    match load_manifest(root) {
-        Ok(ManifestLoadResult::Found(m)) => {
-            if let Some(p) = m.runtime_wasm_path(root) {
-                // If the declared file is missing, still write to that relative path.
-                return p;
-            }
-            if let Some(ref rt) = m.runtime {
-                return root.join(&rt.wasm);
-            }
+    if let Ok(ManifestLoadResult::Found(m)) = load_manifest(root) {
+        if let Some(p) = m.runtime_wasm_path(root) {
+            // If the declared file is missing, still write to that relative path.
+            return p;
         }
-        _ => {}
+        if let Some(ref rt) = m.runtime {
+            return root.join(&rt.wasm);
+        }
     }
     root.join("extension.wasm")
 }
 
 fn validate_wasm_load(wasm_path: &Path) -> Result<()> {
     xai_grok_extension_runtime::ExtensionRuntime::validate_wasm_file(wasm_path).map_err(|e| {
-        anyhow::anyhow!("WASM load/ABI check failed for {}: {e}", wasm_path.display())
+        anyhow::anyhow!(
+            "WASM load/ABI check failed for {}: {e}",
+            wasm_path.display()
+        )
     })?;
     println!("  runtime load: ok (ABI + required exports)");
     Ok(())
@@ -1104,10 +1097,7 @@ fn validate_runtime_section(manifest: &PluginManifest, root: &Path, load: bool) 
     } else {
         println!(
             "    capabilities: {}",
-            caps.iter()
-                .map(|(s, _)| *s)
-                .collect::<Vec<_>>()
-                .join(", ")
+            caps.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", ")
         );
     }
     println!("  runtime validation: ok");

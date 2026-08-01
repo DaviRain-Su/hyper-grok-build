@@ -332,7 +332,7 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
         // Reasoning siblings don't enter the fork-background rendering —
         // they're rendered (when needed) inline with the surrounding
         // assistant turn elsewhere.
-        ConversationItem::Reasoning(_) => {}
+        ConversationItem::Reasoning(_) | ConversationItem::Compaction(_) => {}
     }
 }
 

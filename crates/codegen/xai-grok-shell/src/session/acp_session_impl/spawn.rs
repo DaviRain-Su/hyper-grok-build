@@ -954,7 +954,9 @@ pub(crate) async fn spawn_session_actor(
             .map(|s| s.workspace_memory_file().to_string_lossy().into_owned()),
         memory_backend: memory_backend_for_spec,
         web_search_config: web_search_config.clone(),
-        backend_search: backend_tools_enabled,
+        // `disable_web_search` is the final kill switch for both the local
+        // function tool and provider-hosted search.
+        backend_search: backend_tools_enabled && !disable_web_search,
         web_fetch_config: web_fetch_config.clone(),
         image_gen_config: image_gen_config.clone(),
         video_gen_config: video_gen_config.clone(),

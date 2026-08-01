@@ -534,11 +534,18 @@ mod tests {
         store.insert_rmcp("test", &url, test_stored_creds("test-client"));
         store.save_to(&link).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert!(McpCredentialStore::load_from(&target)
-            .unwrap()
-            .get("test", &url)
-            .is_some());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            McpCredentialStore::load_from(&target)
+                .unwrap()
+                .get("test", &url)
+                .is_some()
+        );
     }
 
     #[test]

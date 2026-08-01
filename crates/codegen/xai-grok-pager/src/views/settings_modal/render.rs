@@ -2468,7 +2468,7 @@ pub(super) fn render_setting_row(
     let layout_decision = row_layout(
         area.width,
         &meta.label_l10n(),
-        &value_text,
+        value_text,
         show_restart_pill,
     );
     let layout = if area.height < 2 {

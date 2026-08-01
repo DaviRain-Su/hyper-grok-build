@@ -723,7 +723,9 @@ pub(crate) async fn generate_session_compact(
                 itl_max_ms: timing.itl_max_ms(),
             }
         }
-        ApiBackend::GoogleGenerateContent | ApiBackend::BedrockConverseStream | ApiBackend::PiMessages => {
+        ApiBackend::GoogleGenerateContent
+        | ApiBackend::BedrockConverseStream
+        | ApiBackend::PiMessages => {
             let request = ConversationRequest {
                 items: chat_history,
                 tool_choice: (!tools.is_empty()).then_some(conversation_tool_choice),

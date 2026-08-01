@@ -125,6 +125,7 @@ mod tests {
             bundle_state: &EMPTY_BUNDLE,
             screen_mode: crate::app::ScreenMode::Inline,
             billing_surface_visible: true,
+            usage_command_visible: true,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
         }
     }
@@ -174,7 +175,9 @@ mod tests {
         let models = ModelState::default();
         let mut ctx = dummy_exec_ctx(&models);
         match NexusCommand.run(&mut ctx, "clear") {
-            CommandResult::Action(Action::SetPlatformApiKey { platform, api_key, .. }) => {
+            CommandResult::Action(Action::SetPlatformApiKey {
+                platform, api_key, ..
+            }) => {
                 assert_eq!(platform, "nexus");
                 assert!(api_key.is_empty());
             }

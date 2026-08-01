@@ -75,6 +75,9 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
             let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
             ((text_bytes + enc_bytes) as u64) / xai_token_estimation::BYTES_PER_TOKEN
         }
+        ConversationItem::Compaction(compaction) => {
+            (compaction.encrypted_content.len() as u64) / xai_token_estimation::BYTES_PER_TOKEN
+        }
     }
 }
 

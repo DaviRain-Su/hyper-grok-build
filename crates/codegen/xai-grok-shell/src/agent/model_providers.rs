@@ -12,6 +12,7 @@ pub struct ModelProviderConfig {
     pub env_key: Option<EnvKeys>,
     pub api_key: Option<String>,
     pub api_backend: Option<ApiBackend>,
+    pub supports_backend_search: Option<bool>,
     pub extra_headers: IndexMap<String, String>,
     /// Query parameters folded into every request URL; inherited by models.
     pub query_params: IndexMap<String, String>,
@@ -179,6 +180,7 @@ impl ConfigModelOverride {
             env_key,
             api_key,
             api_backend,
+            supports_backend_search,
             extra_headers,
             query_params,
             env_http_headers,
@@ -192,6 +194,8 @@ impl ConfigModelOverride {
         merged.base_url = merged.base_url.or_else(|| base_url.clone());
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
+        merged.supports_backend_search =
+            merged.supports_backend_search.or(*supports_backend_search);
         merged.context_window = merged.context_window.or(*context_window);
         // Inherited wholesale only when the model sets none of its own.
         if merged.extra_headers.is_empty() {
@@ -229,7 +233,10 @@ impl ConfigModelOverride {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::config::{Config, resolve_credentials, resolve_model_list};
+    use crate::agent::config::{
+        Config, adapter_kind_for_model, resolve_credentials, resolve_model_list,
+    };
+    use crate::sampling::ApiBackend;
     #[test]
     fn model_inherits_provider_connection_defaults() {
         let raw_config: toml::Value = toml::from_str(
@@ -970,6 +977,34 @@ mod tests {
                 .map(String::as_str),
             Some("GATEWAY_TENANT_TOKEN"),
             "the model inherits the provider's env_http_headers mapping (unresolved names)"
+        );
+    }
+
+    #[test]
+    fn model_inherits_codex_backend_and_explicit_search_capability() {
+        let toml_cfg: toml::Value = toml::from_str(
+            r#"
+            [model_providers.codex-gateway]
+            base_url = "https://codex.example/v1"
+            api_key = "sk-provider"
+            api_backend = "codex_responses"
+            supports_backend_search = false
+
+            [model.via-codex]
+            model = "gpt-codex"
+            model_provider = "codex-gateway"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&toml_cfg).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("via-codex").expect("model should exist");
+        assert_eq!(model.info.api_backend, ApiBackend::CodexResponses);
+        assert!(!model.info.supports_backend_search);
+        assert_eq!(
+            adapter_kind_for_model(model),
+            xai_grok_models::AdapterKind::OpenAiCodex
         );
     }
 

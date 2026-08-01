@@ -483,6 +483,14 @@ pub(super) fn dispatch_send_prompt_inner(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if !literal
+        && let Some(invocation) = crate::slash::parse_invocation(text.trim())
+        && matches!(invocation.token, "model" | "m")
+        && let Err(error) = crate::app::model_config_reload::refresh_app_model_catalog(app)
+    {
+        app.show_toast(&error);
+        return vec![];
+    }
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();

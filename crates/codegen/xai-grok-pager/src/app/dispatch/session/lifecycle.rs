@@ -927,7 +927,9 @@ pub(in crate::app::dispatch) fn handle_session_created(
         agent.bind_session_id(session_id);
         agent.scheduler_background_loops = scheduler_background_loops;
         if let Some(m) = new_models {
+            let reload_config = app.models.reload_config_on_model_command;
             app.models = Some(m).into();
+            app.models.reload_config_on_model_command = reload_config;
             agent.session.models = app.models.clone();
         }
         let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
@@ -1025,7 +1027,9 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
         if let Some(m) = new_models {
+            let reload_config = app.models.reload_config_on_model_command;
             app.models = Some(m).into();
+            app.models.reload_config_on_model_command = reload_config;
             agent.session.models = app.models.clone();
         }
         agent.prompt.file_search.retarget(&session_cwd);

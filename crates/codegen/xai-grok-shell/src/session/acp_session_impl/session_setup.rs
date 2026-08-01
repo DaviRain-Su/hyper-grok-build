@@ -592,7 +592,7 @@ impl SessionActor {
             .as_ref()
             .map(xai_chat_state::estimate_system_message_tokens)
             .unwrap_or(0);
-        let backend_search_active = self.backend_search_active();
+        let backend_search_active = self.backend_search_active().await;
         let tool_defs: Vec<_> = self
             .prepare_tool_definitions_inner()
             .await

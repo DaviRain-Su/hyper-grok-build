@@ -836,11 +836,9 @@ impl SessionActor {
             let ext_rt = self.extension_runtime.borrow().clone();
             if !ext_rt.is_empty() {
                 let d = ext_rt
-                    .dispatch_before_agent_start(
-                        &xai_grok_extension_api::BeforeAgentStartIn {
-                            prompt: prompt_text_for_hook.clone(),
-                        },
-                    )
+                    .dispatch_before_agent_start(&xai_grok_extension_api::BeforeAgentStartIn {
+                        prompt: prompt_text_for_hook.clone(),
+                    })
                     .await;
                 if let Some(ctx) = d.out.inject_context.as_deref() {
                     self.push_system_reminder(ctx);
@@ -2244,7 +2242,7 @@ impl SessionActor {
                     return Err(self.surface_compact_auth_failure(e).await);
                 }
             }
-            let backend_search_active = self.backend_search_active();
+            let backend_search_active = self.backend_search_active().await;
             tracing::debug!(
                 backend_search_active,
                 "backend_search: turn tool resolution"
@@ -2253,7 +2251,7 @@ impl SessionActor {
                 if let Some(ref override_tools) = self.forked_tool_override {
                     override_tools.clone()
                 } else {
-                    self.turn_base_tool_specs(&tool_definitions)
+                    self.turn_base_tool_specs(&tool_definitions).await
                 };
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
@@ -2307,7 +2305,7 @@ impl SessionActor {
             if structured_output_native {
                 request.json_schema = json_schema.clone();
             }
-            request.hosted_tools = self.hosted_tools_for_turn();
+            request.hosted_tools = self.hosted_tools_for_turn().await;
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)

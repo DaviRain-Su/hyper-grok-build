@@ -2534,8 +2534,8 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     }
     let disabled =
         |name: &str| std::env::var_os(name).is_some_and(|v| env_flag_enabled(&v.to_string_lossy()));
-    !disabled("GROK_DISABLE_AUTOUPDATER")
-        && !(cfg!(feature = "community-build") && disabled("HYPER_DISABLE_AUTOUPDATER"))
+    !(disabled("GROK_DISABLE_AUTOUPDATER")
+        || cfg!(feature = "community-build") && disabled("HYPER_DISABLE_AUTOUPDATER"))
 }
 /// Gate for the stdio agent's background auto-update: only the direct stdio
 /// agent, from the managed install. Other modes update in `run_agent_command`.
@@ -2656,7 +2656,7 @@ async fn signal_leaders_to_relaunch(installed_version: &str, allow_same_version:
                 ),
                 (Ok(leader), Ok(installed)) if leader == installed
             );
-            if !older && !(allow_same_version && equal) {
+            if !(older || allow_same_version && equal) {
                 continue;
             }
         }

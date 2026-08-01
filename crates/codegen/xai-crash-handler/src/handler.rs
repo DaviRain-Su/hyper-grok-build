@@ -632,7 +632,7 @@ mod win {
             }
 
             let signal = exception_to_signal(exception_code);
-            let si_code = exception_code as i32;
+            let si_code = exception_code;
 
             // ExceptionInformation[1] holds the faulting address for ACCESS_VIOLATION.
             let si_addr = if exception_code == EXCEPTION_ACCESS_VIOLATION

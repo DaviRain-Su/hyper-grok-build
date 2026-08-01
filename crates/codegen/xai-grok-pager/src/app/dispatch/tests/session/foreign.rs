@@ -1014,8 +1014,7 @@ fn welcome_and_modal_foreign_picks_always_target_fresh_sessions() {
 #[test]
 fn welcome_omp_foreign_pick_targets_fresh_session_with_resume_prompt() {
     let mut welcome = test_app();
-    welcome.session_picker_entries =
-        Some(vec![make_foreign_entry("omp-native", "omp", "/repo")]);
+    welcome.session_picker_entries = Some(vec![make_foreign_entry("omp-native", "omp", "/repo")]);
     let effects = dispatch(Action::PickSession(0), &mut welcome);
     assert!(
         effects

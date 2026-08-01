@@ -358,10 +358,10 @@ pub(crate) mod telemetry;
 #[cfg(feature = "test-support")]
 pub mod testkit;
 pub mod tool_index;
-pub mod wasm_tools;
 pub(crate) mod turn_completion;
 pub mod unified_list;
 pub(crate) mod user_message;
+pub mod wasm_tools;
 pub(crate) mod wire_tags;
 pub(crate) mod workflow;
 pub mod worktree;

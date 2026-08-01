@@ -872,11 +872,20 @@ pub fn parse_remote_model_value(
         .or_else(|| get_string(obj, "api_backend"))
         .and_then(|s| match s.as_str() {
             "responses" => Some(crate::sampling::ApiBackend::Responses),
+            "codex_responses" | "codex-responses" => {
+                Some(crate::sampling::ApiBackend::CodexResponses)
+            }
             "chat_completions" => Some(crate::sampling::ApiBackend::ChatCompletions),
             "messages" => Some(crate::sampling::ApiBackend::Messages),
             _ => None,
         })
         .unwrap_or_default();
+    let supports_backend_search = obj
+        .get("supportsBackendSearch")
+        .or_else(|| obj.get("supports_backend_search"))
+        .or_else(|| meta.and_then(|m| m.get("supportsBackendSearch")))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(api_backend == crate::sampling::ApiBackend::CodexResponses);
     Some(crate::agent::config::ModelEntryConfig {
         id,
         model,
@@ -944,12 +953,7 @@ pub fn parse_remote_model_value(
             .and_then(|v| v.as_array())
             .map(|arr| xai_grok_sampling_types::parse_reasoning_effort_options(arr))
             .unwrap_or_default(),
-        supports_backend_search: obj
-            .get("supportsBackendSearch")
-            .or_else(|| obj.get("supports_backend_search"))
-            .or_else(|| meta.and_then(|m| m.get("supportsBackendSearch")))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        supports_backend_search,
         compactions_remaining: obj
             .get("compactionsRemaining")
             .or_else(|| obj.get("compactions_remaining"))
@@ -1533,6 +1537,31 @@ mod tests {
         let result = parse_remote_model_value(&value, "https://default.url").unwrap();
         assert_eq!(result.model, "actual-model-id");
         assert_eq!(result.name.as_deref(), Some("Display Name"));
+    }
+    #[test]
+    fn parse_codex_responses_backend_aliases_and_search_default() {
+        for spelling in ["codex_responses", "codex-responses"] {
+            let value = serde_json::json!({
+                "model": "codex-byok",
+                "context_window": 200_000,
+                "api_backend": spelling,
+            });
+            let result = parse_remote_model_value(&value, "https://codex.example/v1").unwrap();
+            assert_eq!(
+                result.api_backend,
+                crate::sampling::ApiBackend::CodexResponses
+            );
+            assert!(result.supports_backend_search);
+        }
+
+        let disabled = serde_json::json!({
+            "model": "codex-byok",
+            "context_window": 200_000,
+            "apiBackend": "codex_responses",
+            "supportsBackendSearch": false,
+        });
+        let result = parse_remote_model_value(&disabled, "https://codex.example/v1").unwrap();
+        assert!(!result.supports_backend_search);
     }
     #[test]
     fn parse_reads_reasoning_effort_fields() {

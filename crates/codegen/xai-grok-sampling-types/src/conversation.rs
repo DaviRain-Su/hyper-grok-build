@@ -57,6 +57,11 @@ pub enum ConversationItem {
     /// wrapping `rs::WebSearchToolCall` etc.) so no field is dropped on the
     /// way through.
     Reasoning(rs::ReasoningItem),
+    /// Opaque replacement-history state returned by Codex's
+    /// `/responses/compact` endpoint. The encrypted payload is not a visible
+    /// summary; it must be persisted and replayed as a native Responses input
+    /// item on the exact route that created it.
+    Compaction(CodexCompactionItem),
 }
 
 /// System message content
@@ -245,6 +250,25 @@ pub struct ReasoningModelIdentity {
     model: String,
     api_backend: ApiBackend,
     endpoint_sha256: String,
+}
+
+/// A Codex Responses compaction item retained for later native replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexCompactionItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub encrypted_content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// Internal route provenance. This is deliberately not part of the wire
+    /// item, but prevents an opaque compacted context from leaking across a
+    /// model, backend, or provider switch.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_reasoning_model_identity_lossy"
+    )]
+    pub reasoning_model_identity: Option<ReasoningModelIdentity>,
 }
 
 impl ReasoningModelIdentity {
@@ -822,7 +846,9 @@ impl ConversationRequest {
         self.items.retain(|item| {
             !matches!(
                 item,
-                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+                ConversationItem::Reasoning(_)
+                    | ConversationItem::BackendToolCall(_)
+                    | ConversationItem::Compaction(_)
             )
         });
         let mut stripped = before.saturating_sub(self.items.len());
@@ -1463,6 +1489,8 @@ impl ConversationItem {
             Self::BackendToolCall(_) => Role::Assistant,
             // Reasoning is semantically part of the assistant's turn.
             Self::Reasoning(_) => Role::Assistant,
+            // A compaction item replaces prior assistant-side context.
+            Self::Compaction(_) => Role::Assistant,
         }
     }
 
@@ -1492,6 +1520,8 @@ impl ConversationItem {
             Self::ToolResult(t) => t.content.as_ref().to_owned(),
             Self::BackendToolCall(b) => b.text_summary(),
             Self::Reasoning(r) => reasoning_item_text(r),
+            // Encrypted compaction content is intentionally never rendered.
+            Self::Compaction(_) => String::new(),
         }
     }
 }
@@ -1545,7 +1575,7 @@ impl xai_grok_compaction::CompactionItem for ConversationItem {
         // does not consult this (it summarizes the whole conversation). Revisit
         // (add a dedicated marker) before routing grok-build history through
         // the shared `history`/`inter` filter.
-        false
+        matches!(self, Self::Compaction(_))
     }
 
     fn attachment_refs(&self) -> Vec<xai_grok_compaction::CompactionFileRef> {
@@ -2168,6 +2198,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
             "conversation_to_chat_messages folds Reasoning siblings; \
                  conversation_item_to_chat_message is never called with one"
         ),
+        ConversationItem::Compaction(_) => {
+            unreachable!("Codex compaction items have no Chat Completions representation")
+        }
     }
 }
 
@@ -2235,6 +2268,10 @@ fn conversation_to_chat_messages_for_route(
                 // message but keep `pending_reasoning` intact so it still
                 // folds onto the following assistant.
                 out.push(conversation_item_to_chat_message(item));
+            }
+            ConversationItem::Compaction(_) => {
+                // Opaque Codex state is not portable to Chat Completions.
+                pending_reasoning.clear();
             }
             other => {
                 // Trailing reasoning is held until the next assistant;
@@ -2357,6 +2394,14 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
                 // `tco_*` encrypted blobs from parallel backend tool
                 // calls — is emitted as its own sibling, preserving order.
                 items.push(ConversationItem::Reasoning(r));
+            }
+            rs::OutputItem::Compaction(compaction) => {
+                items.push(ConversationItem::Compaction(CodexCompactionItem {
+                    id: Some(compaction.id),
+                    encrypted_content: compaction.encrypted_content,
+                    created_by: compaction.created_by,
+                    reasoning_model_identity: None,
+                }));
             }
             // Backend-executed tools: the server already ran these and
             // fed results into the model's context. We capture them as
@@ -2710,11 +2755,14 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
         .items
         .iter()
         .enumerate()
-        .filter(|(index, item)| {
-            !matches!(
-                item,
-                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
-            ) || opaque_item_matches_target_route(&req.items, *index, target_identity, target_model)
+        .filter(|(index, item)| match item {
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {
+                opaque_item_matches_target_route(&req.items, *index, target_identity, target_model)
+            }
+            ConversationItem::Compaction(compaction) => {
+                compaction_matches_target_route(compaction, target_identity)
+            }
+            _ => true,
         })
         .flat_map(|(_, item)| conversation_item_to_input_items(item))
         .collect();
@@ -2831,10 +2879,106 @@ fn opaque_item_matches_target_route(
             }
             ConversationItem::System(_)
             | ConversationItem::User(_)
-            | ConversationItem::ToolResult(_) => return false,
+            | ConversationItem::ToolResult(_)
+            | ConversationItem::Compaction(_) => return false,
         }
     }
     false
+}
+
+/// Decode the sparse `output` array returned by Codex's unary compact
+/// endpoint. The endpoint returns replacement history rather than a normal
+/// Responses resource, and compatible relays occasionally omit output-item
+/// fields or add future item kinds. Unknown/non-portable items are skipped;
+/// encrypted compaction state is retained as a dedicated item.
+pub fn codex_compact_output_to_conversation_items(
+    output: serde_json::Value,
+    identity: Option<ReasoningModelIdentity>,
+) -> Vec<ConversationItem> {
+    let Some(output) = output.as_array() else {
+        return Vec::new();
+    };
+    let mut items = Vec::with_capacity(output.len());
+    for value in output {
+        let Some(kind) = value.get("type").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        match kind {
+            // `compaction_summary` is the legacy wire name accepted by Codex.
+            "compaction" | "compaction_summary" => {
+                let Some(encrypted_content) = value
+                    .get("encrypted_content")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|content| !content.is_empty())
+                else {
+                    continue;
+                };
+                items.push(ConversationItem::Compaction(CodexCompactionItem {
+                    id: value
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    encrypted_content: encrypted_content.to_owned(),
+                    created_by: value
+                        .get("created_by")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    reasoning_model_identity: identity.clone(),
+                }));
+            }
+            "message" => {
+                let text = value
+                    .get("content")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|content| {
+                        content
+                            .iter()
+                            .filter_map(|part| {
+                                part.get("text")
+                                    .or_else(|| part.get("refusal"))
+                                    .and_then(serde_json::Value::as_str)
+                            })
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    continue;
+                }
+                match value.get("role").and_then(serde_json::Value::as_str) {
+                    Some("system" | "developer") => {
+                        items.push(ConversationItem::System(SystemItem {
+                            content: Arc::<str>::from(text),
+                        }));
+                    }
+                    Some("assistant") => items.push(ConversationItem::assistant(text)),
+                    _ => items.push(ConversationItem::user(text)),
+                }
+            }
+            // Reasoning, tool calls, and provider-local execution records are
+            // intentionally not copied into replacement history. The compact
+            // item is the sole opaque continuation state needed for replay.
+            _ => {}
+        }
+    }
+    items
+}
+
+fn compaction_matches_target_route(
+    compaction: &CodexCompactionItem,
+    target_identity: Option<&ReasoningModelIdentity>,
+) -> bool {
+    match (
+        compaction.reasoning_model_identity.as_ref(),
+        target_identity,
+    ) {
+        (Some(source), Some(target)) => source == target,
+        // Legacy persisted items without provenance may only be replayed when
+        // the caller also has no route identity. Production requests always do.
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Convert a ConversationItem to Responses API InputItem(s).
@@ -2870,6 +3014,14 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
             let mut r = r.clone();
             r.status = None;
             vec![rs::InputItem::Item(rs::Item::Reasoning(r))]
+        }
+        ConversationItem::Compaction(compaction) => {
+            vec![rs::InputItem::Item(rs::Item::Compaction(
+                rs::CompactionSummaryItemParam {
+                    id: compaction.id.clone(),
+                    encrypted_content: compaction.encrypted_content.clone(),
+                },
+            ))]
         }
         ConversationItem::Assistant(a) => {
             let mut items = Vec::new();
@@ -3343,6 +3495,8 @@ pub fn transform_conversation_cwd(
             }
             // Backend tool calls don't contain workspace paths — no-op.
             ConversationItem::BackendToolCall(_) => {}
+            // Encrypted compact state is opaque and contains no editable path.
+            ConversationItem::Compaction(_) => {}
             // Reasoning items rarely reference CWD paths, but they can —
             // patch both summary parts and content blocks defensively.
             ConversationItem::Reasoning(r) => {
@@ -3621,7 +3775,7 @@ fn mark_message_cache_breakpoint(msg: &mut crate::messages::Message) -> bool {
                     | ContentBlock::ToolUse { cache_control, .. } => cache_control,
                     // Thinking / redacted reasoning never carry a cache breakpoint.
                     ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
-                        continue
+                        continue;
                     }
                 };
                 *cache_control = Some(CacheControl::ephemeral());
@@ -3908,6 +4062,8 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     signature: signature.to_owned(),
                 });
             }
+            // Native Codex continuation state is not portable to Messages.
+            ConversationItem::Compaction(_) => {}
         }
     }
 
@@ -4309,6 +4465,79 @@ mod tests {
     use super::*;
     use crate::tool_overrides::*;
     use assert_matches::assert_matches;
+
+    #[test]
+    fn codex_compaction_item_persists_and_replays_only_on_its_route() {
+        let identity = ReasoningModelIdentity::new(
+            "gpt-test",
+            ApiBackend::CodexResponses,
+            "https://provider.test/v1",
+        );
+        let item = ConversationItem::Compaction(CodexCompactionItem {
+            id: None,
+            encrypted_content: "opaque-state".into(),
+            created_by: Some("server".into()),
+            reasoning_model_identity: Some(identity.clone()),
+        });
+        let restored: ConversationItem =
+            serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
+        assert_matches!(&restored, ConversationItem::Compaction(compaction) => {
+            assert_eq!(compaction.encrypted_content, "opaque-state");
+            assert_eq!(compaction.id, None);
+            assert_eq!(compaction.reasoning_model_identity, Some(identity.clone()));
+        });
+
+        let same_route = ConversationRequest {
+            items: vec![restored.clone()],
+            model: Some("gpt-test".into()),
+            reasoning_model_identity: Some(identity),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(rs::CreateResponse::from(&same_route)).unwrap();
+        assert_eq!(body["input"][0]["type"], "compaction");
+        assert_eq!(body["input"][0]["encrypted_content"], "opaque-state");
+        assert!(body["input"][0].get("id").is_none());
+
+        let switched_route = ConversationRequest {
+            items: vec![restored],
+            model: Some("gpt-test".into()),
+            reasoning_model_identity: Some(ReasoningModelIdentity::new(
+                "gpt-test",
+                ApiBackend::CodexResponses,
+                "https://other-provider.test/v1",
+            )),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(rs::CreateResponse::from(&switched_route)).unwrap();
+        assert_eq!(body["input"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn sparse_codex_compact_output_keeps_messages_and_opaque_state() {
+        let identity = ReasoningModelIdentity::new(
+            "gpt-test",
+            ApiBackend::CodexResponses,
+            "https://provider.test/v1",
+        );
+        let items = codex_compact_output_to_conversation_items(
+            serde_json::json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "original prompt"}]
+                },
+                {"type": "future_item", "payload": "ignored"},
+                {"type": "compaction", "encrypted_content": "opaque-state"}
+            ]),
+            Some(identity.clone()),
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].text_content(), "original prompt");
+        assert_matches!(&items[1], ConversationItem::Compaction(compaction) => {
+            assert_eq!(compaction.id, None);
+            assert_eq!(compaction.reasoning_model_identity, Some(identity));
+        });
+    }
 
     #[test]
     fn prior_turn_interrupt_serde_round_trip_and_unknown_fallback() {

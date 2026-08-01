@@ -1,5 +1,3 @@
-#![cfg(feature = "codex-live")]
-
 use super::*;
 use crate::live::LiveCommand;
 use crate::live::broker::LiveDelegationBroker;

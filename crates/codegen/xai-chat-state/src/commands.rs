@@ -119,7 +119,7 @@ pub enum ChatStateCommand {
     IncrementPromptIndex,
 
     /// Update the sampling config (e.g., model switch).
-    UpdateSamplingConfig { config: SamplingConfig },
+    UpdateSamplingConfig { config: Box<SamplingConfig> },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
@@ -401,7 +401,7 @@ mod tests {
         let _ = ChatStateCommand::RecordTokenUsage { total_tokens: 100 };
         let _ = ChatStateCommand::IncrementPromptIndex;
         let _ = ChatStateCommand::UpdateSamplingConfig {
-            config: SamplingConfig {
+            config: Box::new(SamplingConfig {
                 base_url: String::new(),
                 model: String::new(),
                 max_completion_tokens: None,
@@ -417,7 +417,7 @@ mod tests {
                 context_window: std::num::NonZeroU64::new(128_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
-            },
+            }),
         };
         let _ = ChatStateCommand::RecordAgentEditedPath {
             path: "src/main.rs".to_string(),

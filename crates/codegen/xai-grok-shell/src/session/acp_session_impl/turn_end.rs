@@ -171,8 +171,9 @@ impl SessionActor {
     }
 
     pub(super) async fn handle_completion(&self, prompt_id: String, result: PromptTurnResult) {
+        let tool_overrides = self.effective_tool_overrides().await;
         let result = result.map(|mut ok| {
-            ok.tool_overrides = self.effective_tool_overrides();
+            ok.tool_overrides = tool_overrides;
             ok
         });
         let became_idle = {

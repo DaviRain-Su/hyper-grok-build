@@ -468,7 +468,7 @@ pub fn render_changes_modal(
 
     let rows = build_rows(&state.files, &state.hunks);
     // Patch preview gets the bottom ~40% (bounded), list the rest.
-    let preview_h = (inner.height * 2 / 5).min(12).max(3);
+    let preview_h = (inner.height * 2 / 5).clamp(3, 12);
     let list_h = inner.height.saturating_sub(preview_h + 1);
     let mut y = inner.y;
     let list_end = inner.y + list_h;

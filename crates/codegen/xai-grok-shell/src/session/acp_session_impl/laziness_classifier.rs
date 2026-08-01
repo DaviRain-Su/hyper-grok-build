@@ -399,6 +399,9 @@ pub(crate) fn flatten_transcript_for_classifier(
                     }
                 }
             }
+            // Encrypted remote-compaction state has no classifier-readable
+            // text and must never be exposed as prompt content.
+            ConversationItem::Compaction(_) => {}
         }
     }
     out

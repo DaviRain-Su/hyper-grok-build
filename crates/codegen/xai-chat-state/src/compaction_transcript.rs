@@ -69,6 +69,7 @@ fn role_label(item: &ConversationItem) -> &'static str {
         ConversationItem::ToolResult(_) => "Function",
         ConversationItem::BackendToolCall(_) => "Assistant",
         ConversationItem::Reasoning(_) => "Assistant",
+        ConversationItem::Compaction(_) => "Assistant",
     }
 }
 

@@ -35,7 +35,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let model = host.model().to_string();
 
     println!("hypercore-demo  session={session}  model={model}");
-    println!("storage: {}", host.hypercore_root().join(&session).display());
+    println!(
+        "storage: {}",
+        host.hypercore_root().join(&session).display()
+    );
     println!("type a message (or turn_id|message). empty / quit to exit.\n");
 
     let mut core = HyperCore::restore_or_new(
@@ -99,7 +102,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!();
                 if out.replayed {
-                    println!("(replayed turn_id={turn_id}, streams={})", host.model_stream_opens());
+                    println!(
+                        "(replayed turn_id={turn_id}, streams={})",
+                        host.model_stream_opens()
+                    );
                 } else {
                     println!(
                         "(committed turn_id={turn_id}, streams={})",

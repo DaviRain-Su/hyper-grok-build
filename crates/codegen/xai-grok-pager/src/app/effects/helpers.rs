@@ -1620,7 +1620,7 @@ pub(super) async fn send_changes_action(
 ) -> TaskResult {
     let req = acp::ExtRequest::new(
         kind.method(),
-        serde_json::value::to_raw_value(&kind.params(&session_id.0.to_string()))
+        serde_json::value::to_raw_value(&kind.params(session_id.0.as_ref()))
             .expect("serialize hunk action params")
             .into(),
     );

@@ -88,6 +88,8 @@ impl Drop for EnvVarGuard {
 /// theme tests that reset the cache on exit.
 ///
 /// Usage: `let _theme = crate::test_util::pin_theme();` at the top of a test.
+// The guard's tuple field is intentionally only held for its Drop behavior.
+#[allow(dead_code)]
 pub struct PinnedThemeGuard(std::sync::MutexGuard<'static, ()>);
 
 /// Pin the theme cache to GrokNight until the returned guard drops.
@@ -156,9 +158,7 @@ impl GrokHomeFixture {
     /// through the explicit `*_for_cwd` seams; the process cwd is never
     /// mutated.
     pub fn cwd_str(&self) -> String {
-        self.cwd
-            .path()
-            .canonicalize()
+        dunce::canonicalize(self.cwd.path())
             .expect("canonicalize cwd")
             .to_string_lossy()
             .to_string()

@@ -734,7 +734,7 @@ pub fn dup_tui_stderr() -> io::Result<std::fs::File> {
         // `DuplicateHandle` — avoiding the `from_raw_handle` footgun
         // where `File` would take ownership of the process stderr handle
         // and close it on drop.
-        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use std::os::windows::io::FromRawHandle;
         let stderr_handle = unsafe {
             windows::Win32::System::Console::GetStdHandle(
                 windows::Win32::System::Console::STD_ERROR_HANDLE,

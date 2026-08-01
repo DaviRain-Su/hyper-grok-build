@@ -135,51 +135,82 @@ impl SessionActor {
     /// parent turn actually sends. `defs` is the already-resolved tool list
     /// (`prepare_tool_definitions_*`); this applies only the `web_search` drop
     /// under backend search and the `ToolSpec::from` mapping.
-    pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
-        let backend_search_active = self.backend_search_active();
+    pub(crate) async fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
+        let hosted_web_search_active = self
+            .projected_hosted_tools()
+            .await
+            .iter()
+            .any(|tool| matches!(tool, xai_grok_sampling_types::HostedTool::WebSearch { .. }));
         defs.iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
+            .filter(|td| !hosted_web_search_active || td.function.name != "web_search")
             .cloned()
             .map(ToolSpec::from)
             .collect()
     }
+    /// Project the agent's provider-agnostic hosted-tool candidates onto the
+    /// route that is active now. This must be request-time state: model
+    /// switching updates chat state without rebuilding the agent.
+    async fn projected_hosted_tools(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
+        if !self.agent.borrow().backend_search_enabled() || !self.supports_backend_search.get() {
+            return Vec::new();
+        }
+        let Some(config) = self.chat_state_handle.get_sampling_config().await else {
+            return Vec::new();
+        };
+        let mut tools = self.agent.borrow().hosted_tools().to_vec();
+        let codex_dialect = config.api_backend
+            == xai_grok_sampling_types::ApiBackend::CodexResponses
+            || config.adapter_kind == xai_grok_models::AdapterKind::OpenAiCodex;
+        if codex_dialect {
+            tools.retain(|tool| {
+                matches!(tool, xai_grok_sampling_types::HostedTool::WebSearch { .. })
+            });
+        } else if config.api_backend == xai_grok_sampling_types::ApiBackend::Responses {
+            tools.retain(|tool| {
+                matches!(
+                    tool,
+                    xai_grok_sampling_types::HostedTool::WebSearch { .. }
+                        | xai_grok_sampling_types::HostedTool::XSearch { .. }
+                )
+            });
+        } else {
+            tools.clear();
+        }
+        tools
+    }
     /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.
-    fn resolve_hosted(
+    async fn resolve_hosted(
         &self,
     ) -> (
         Vec<xai_grok_sampling_types::HostedTool>,
         xai_grok_sampling_types::ToolOverrides,
     ) {
-        let mut tools = self.agent.borrow().hosted_tools().to_vec();
+        let mut tools = self.projected_hosted_tools().await;
         let applied = xai_grok_sampling_types::apply_tool_overrides(
             &mut tools,
             self.tool_overrides.borrow().as_ref(),
         );
         (tools, applied)
     }
-    /// Ungated. Prefer [`Self::hosted_tools_for_turn`], which folds in the backend-search gate.
-    pub(crate) fn effective_hosted_tools(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
-        self.resolve_hosted().0
+    /// Hosted tools after route projection and per-turn overrides.
+    pub(crate) async fn effective_hosted_tools(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
+        self.resolve_hosted().await.0
     }
-    pub(crate) fn hosted_tools_for_turn(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
-        if self.backend_search_active() {
-            self.effective_hosted_tools()
-        } else {
-            Vec::new()
-        }
+    pub(crate) async fn hosted_tools_for_turn(&self) -> Vec<xai_grok_sampling_types::HostedTool> {
+        self.effective_hosted_tools().await
     }
     /// The applied overrides to echo, or `None` when backend search is off.
-    pub(crate) fn effective_tool_overrides(
+    pub(crate) async fn effective_tool_overrides(
         &self,
     ) -> Option<xai_grok_sampling_types::ToolOverrides> {
-        if !self.backend_search_active() {
+        let (tools, applied) = self.resolve_hosted().await;
+        if tools.is_empty() {
             return None;
         }
-        let applied = self.resolve_hosted().1;
         (!applied.is_empty()).then_some(applied)
     }
-    pub(crate) fn backend_search_active(&self) -> bool {
-        self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get()
+    pub(crate) async fn backend_search_active(&self) -> bool {
+        !self.projected_hosted_tools().await.is_empty()
     }
     /// Set the per-turn override and emit it before any turn runs, so a subagent spawned this turn
     /// inherits it.
@@ -504,6 +535,9 @@ impl SessionActor {
                 // identity was unavailable.
                 oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
             };
+        let codex_oauth_active = model_facts.oauth_platform
+            == Some(xai_grok_models::PlatformId::OpenAiCodex)
+            && model_facts.platform_oauth_active;
         let oauth_origin = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
         let auth_method = self.auth_method_id.load();
@@ -531,7 +565,7 @@ impl SessionActor {
                     as xai_grok_sampler::SharedBearerResolver
             });
         let codex_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
-            (oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex)).then(|| {
+            codex_oauth_active.then(|| {
                 std::sync::Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver)
                     as xai_grok_sampler::SharedBearerResolver
             });
@@ -553,8 +587,10 @@ impl SessionActor {
         let github_copilot_oauth_active = cfg.adapter_kind
             == xai_grok_models::AdapterKind::GitHubCopilot
             && model_facts.platform_oauth_active;
-        let responses_codex_dialect =
-            oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
+        let responses_codex_dialect = cfg.api_backend
+            == crate::sampling::ApiBackend::CodexResponses
+            || cfg.adapter_kind == xai_grok_models::AdapterKind::OpenAiCodex
+            || codex_oauth_active;
         let kimi_dialect = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
             || xai_grok_models::PlatformId::MoonshotCn.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url);
@@ -566,7 +602,9 @@ impl SessionActor {
         );
         crate::agent::config::align_oauth_headers_with_platform(
             &mut extra_headers,
-            oauth_platform,
+            oauth_platform.filter(|platform| {
+                *platform != xai_grok_models::PlatformId::OpenAiCodex || codex_oauth_active
+            }),
             &cfg.base_url,
         );
         if oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) && !kimi_oauth_active {
@@ -603,7 +641,7 @@ impl SessionActor {
         // Preferring AuthManager here previously sent the xAI OIDC JWT to
         // chatgpt.com → 401 "Could not parse your authentication token" while
         // recovery "succeeded" by refreshing the *wrong* token.
-        let (api_key, bearer_resolver) = if responses_codex_dialect {
+        let (api_key, bearer_resolver) = if codex_oauth_active {
             // The resolver is authoritative and performs the sole auth lookup
             // for each HTTP attempt, including the companion account header.
             (None, codex_bearer_resolver)
@@ -635,8 +673,7 @@ impl SessionActor {
                 (creds.api_key, None)
             }
         } else if oauth_origin
-            && !(oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
-                && !kimi_oauth_active)
+            && (oauth_platform != Some(xai_grok_models::PlatformId::KimiCode) || kimi_oauth_active)
         {
             // Both OAuth providers may share one user proxy. Without catalog
             // identity, fail closed rather than send Kimi, Codex, or xAI auth
@@ -646,13 +683,9 @@ impl SessionActor {
         } else if use_bearer_resolver {
             (
                 creds.api_key,
-                self.auth_manager
-                    .as_ref()
-                    .map(|am| {
-                        crate::auth::credential_provider::WireValidBearerResolver::shared(
-                            am.clone(),
-                        )
-                    }),
+                self.auth_manager.as_ref().map(|am| {
+                    crate::auth::credential_provider::WireValidBearerResolver::shared(am.clone())
+                }),
             )
         } else {
             (creds.api_key, None)

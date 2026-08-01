@@ -726,7 +726,8 @@ impl SessionActor {
                     xai_grok_sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
                 xai_grok_sampler::collect_response(events).await
             }
-            crate::sampling::ApiBackend::Responses | crate::sampling::ApiBackend::CodexResponses => {
+            crate::sampling::ApiBackend::Responses
+            | crate::sampling::ApiBackend::CodexResponses => {
                 let (raw, meta, doom_loop) = sampling_client
                     .conversation_stream_responses(request)
                     .await

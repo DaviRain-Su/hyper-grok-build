@@ -1016,10 +1016,7 @@ mod tests {
     /// hardcoded `false` here once disabled it everywhere.
     #[test]
     fn remote_restore_follows_compiled_restore_stack() {
-        assert_eq!(
-            MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
-            false
-        );
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore);
     }
     /// Explicit-id resume under `--chat` passes the id through untouched:
     /// no disk resolution, no GCS restore (the cwd does not even exist).

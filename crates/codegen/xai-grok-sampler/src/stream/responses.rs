@@ -3,7 +3,7 @@
 //! Consumes a raw [`ResponsesStreamItem`] stream and produces
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -21,6 +21,143 @@ use xai_grok_sampling_types::{
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::{RequestId, ResponsesStreamItem};
+
+type BackendToolOutcome = Result<Option<serde_json::Value>, String>;
+type OutputItemIdentity = (String, String);
+
+fn output_item_identity(item: &rs::OutputItem) -> Option<OutputItemIdentity> {
+    let value = serde_json::to_value(item).ok()?;
+    let kind = value.get("type")?.as_str()?;
+    let stable_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            value
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+        })?;
+    Some((kind.to_string(), stable_id.to_string()))
+}
+
+fn merge_completed_output_items(
+    terminal_output: &mut Vec<rs::OutputItem>,
+    completed_output_items: Vec<rs::OutputItem>,
+) -> usize {
+    let mut added = 0;
+    for item in completed_output_items {
+        let identity = output_item_identity(&item);
+        let already_present = match identity {
+            Some(ref identity) => terminal_output
+                .iter()
+                .any(|existing| output_item_identity(existing).as_ref() == Some(identity)),
+            None => terminal_output.iter().any(|existing| existing == &item),
+        };
+        if !already_present {
+            terminal_output.push(item);
+            added += 1;
+        }
+    }
+    added
+}
+
+fn backend_tool_outcome(item: &rs::OutputItem) -> Option<(String, String, BackendToolOutcome)> {
+    match item {
+        rs::OutputItem::WebSearchCall(call) => {
+            let outcome = if call.status == rs::WebSearchToolCallStatus::Failed {
+                Err("web search failed".to_string())
+            } else {
+                Ok(serde_json::to_value(call).ok())
+            };
+            Some((call.id.clone(), "web_search".to_string(), outcome))
+        }
+        rs::OutputItem::CustomToolCall(call) => Some((
+            call.id.clone(),
+            "x_search".to_string(),
+            Ok(serde_json::to_value(call).ok()),
+        )),
+        rs::OutputItem::CodeInterpreterCall(call) => Some((
+            call.id.clone(),
+            "code_interpreter".to_string(),
+            Ok(serde_json::to_value(call).ok()),
+        )),
+        _ => None,
+    }
+}
+
+fn start_backend_tool(
+    active: &mut BTreeMap<String, String>,
+    terminal: &BTreeSet<String>,
+    request_id: &RequestId,
+    call_id: String,
+    name: &str,
+) -> Option<SamplingEvent> {
+    if terminal.contains(&call_id) || active.contains_key(&call_id) {
+        return None;
+    }
+    active.insert(call_id.clone(), name.to_string());
+    Some(SamplingEvent::BackendToolCallStarted {
+        request_id: request_id.clone(),
+        call_id,
+        name: name.to_string(),
+    })
+}
+
+fn finish_backend_tool(
+    active: &mut BTreeMap<String, String>,
+    terminal: &mut BTreeSet<String>,
+    request_id: &RequestId,
+    call_id: String,
+    name: String,
+    outcome: BackendToolOutcome,
+) -> Vec<SamplingEvent> {
+    if terminal.contains(&call_id) {
+        return Vec::new();
+    }
+    let mut events = Vec::new();
+    if let Some(started) = start_backend_tool(active, terminal, request_id, call_id.clone(), &name)
+    {
+        events.push(started);
+    }
+    active.remove(&call_id);
+    terminal.insert(call_id.clone());
+    events.push(match outcome {
+        Ok(result) => SamplingEvent::BackendToolCallCompleted {
+            request_id: request_id.clone(),
+            call_id,
+            name,
+            result,
+        },
+        Err(error) => SamplingEvent::BackendToolCallFailed {
+            request_id: request_id.clone(),
+            call_id,
+            name,
+            error,
+        },
+    });
+    events
+}
+
+fn fail_active_backend_tools(
+    active: &mut BTreeMap<String, String>,
+    terminal: &mut BTreeSet<String>,
+    request_id: &RequestId,
+    error: &str,
+) -> Vec<SamplingEvent> {
+    std::mem::take(active)
+        .into_iter()
+        .map(|(call_id, name)| {
+            terminal.insert(call_id.clone());
+            SamplingEvent::BackendToolCallFailed {
+                request_id: request_id.clone(),
+                call_id,
+                name,
+                error: error.to_string(),
+            }
+        })
+        .collect()
+}
 
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.
@@ -179,6 +316,8 @@ pub(crate) fn stream_responses_tracked<'a>(
         // mis-classify as empty_response and retry forever while the UI
         // already showed ChannelToken text.
         let mut completed_output_items: Vec<rs::OutputItem> = Vec::new();
+        let mut active_backend_tools: BTreeMap<String, String> = BTreeMap::new();
+        let mut terminal_backend_tools: BTreeSet<String> = BTreeSet::new();
 
         let mut stream = raw_stream;
         loop {
@@ -189,6 +328,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                     let err = SamplingError::IdleTimeout {
                         elapsed_secs: idle_timeout.as_secs(),
                     };
+                    for event in fail_active_backend_tools(
+                        &mut active_backend_tools,
+                        &mut terminal_backend_tools,
+                        &request_id,
+                        "backend request timed out",
+                    ) {
+                        yield event;
+                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -200,6 +347,14 @@ pub(crate) fn stream_responses_tracked<'a>(
             let item = match event_result {
                 Ok(item) => item,
                 Err(err) => {
+                    for event in fail_active_backend_tools(
+                        &mut active_backend_tools,
+                        &mut terminal_backend_tools,
+                        &request_id,
+                        &err.to_string(),
+                    ) {
+                        yield event;
+                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -234,6 +389,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                     triggers,
                     aborted_at_chunk: Some(chunk_index),
                 };
+                for event in fail_active_backend_tools(
+                    &mut active_backend_tools,
+                    &mut terminal_backend_tools,
+                    &request_id,
+                    "backend request aborted after doom-loop detection",
+                ) {
+                    yield event;
+                }
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
@@ -312,18 +475,43 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // Start of a Responses FunctionCall — emit initial id+name
                 // and remember the output_index → tool_index mapping.
                 ResponseStreamEvent::ResponseOutputItemAdded(added_event) => {
-                    if let rs::OutputItem::FunctionCall(fc) = added_event.item {
-                        let tool_index = next_tool_index;
-                        next_tool_index += 1;
-                        output_to_tool_index.insert(added_event.output_index, tool_index);
+                    match added_event.item {
+                        rs::OutputItem::FunctionCall(fc) => {
+                            let tool_index = next_tool_index;
+                            next_tool_index += 1;
+                            output_to_tool_index.insert(added_event.output_index, tool_index);
 
-                        yield SamplingEvent::ToolCallDelta {
-                            request_id: request_id.clone(),
-                            tool_index,
-                            id: Some(fc.call_id),
-                            name: Some(fc.name),
-                            arguments_delta: None,
-                        };
+                            yield SamplingEvent::ToolCallDelta {
+                                request_id: request_id.clone(),
+                                tool_index,
+                                id: Some(fc.call_id),
+                                name: Some(fc.name),
+                                arguments_delta: None,
+                            };
+                        }
+                        rs::OutputItem::WebSearchCall(call) => {
+                            if let Some(event) = start_backend_tool(
+                                &mut active_backend_tools,
+                                &terminal_backend_tools,
+                                &request_id,
+                                call.id,
+                                "web_search",
+                            ) {
+                                yield event;
+                            }
+                        }
+                        rs::OutputItem::CustomToolCall(call) => {
+                            if let Some(event) = start_backend_tool(
+                                &mut active_backend_tools,
+                                &terminal_backend_tools,
+                                &request_id,
+                                call.id,
+                                "x_search",
+                            ) {
+                                yield event;
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
@@ -351,6 +539,14 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
                     final_response = Some(incomplete_event.response);
+                    for event in fail_active_backend_tools(
+                        &mut active_backend_tools,
+                        &mut terminal_backend_tools,
+                        &request_id,
+                        "response incomplete",
+                    ) {
+                        yield event;
+                    }
                     should_break = true;
                 }
 
@@ -363,11 +559,19 @@ pub(crate) fn stream_responses_tracked<'a>(
                         .unwrap_or_else(|| "Response failed with unknown error".to_string());
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message,
+                        message: error_message.clone(),
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
                     };
+                    for event in fail_active_backend_tools(
+                        &mut active_backend_tools,
+                        &mut terminal_backend_tools,
+                        &request_id,
+                        &error_message,
+                    ) {
+                        yield event;
+                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -380,11 +584,19 @@ pub(crate) fn stream_responses_tracked<'a>(
                     let error_message = format!("{}: {}", code, error_event.message);
                     let err = SamplingError::Api {
                         status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message,
+                        message: error_message.clone(),
                         model_metadata: None,
                         retry_after_secs: None,
                         should_retry: None,
                     };
+                    for event in fail_active_backend_tools(
+                        &mut active_backend_tools,
+                        &mut terminal_backend_tools,
+                        &request_id,
+                        &error_message,
+                    ) {
+                        yield event;
+                    }
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -399,16 +611,40 @@ pub(crate) fn stream_responses_tracked<'a>(
 
                 // Web search
                 ResponseStreamEvent::ResponseWebSearchCallInProgress(ev) => {
-                    yield SamplingEvent::BackendToolCallStarted {
-                        request_id: request_id.clone(),
-                        call_id: ev.item_id.clone(),
-                        name: "web_search".to_string(),
-                    };
+                    if let Some(event) = start_backend_tool(
+                        &mut active_backend_tools,
+                        &terminal_backend_tools,
+                        &request_id,
+                        ev.item_id,
+                        "web_search",
+                    ) {
+                        yield event;
+                    }
                 }
-                // Completed/Searching carry no data — the real payload
-                // arrives via ResponseOutputItemDone(WebSearchCall) below.
-                ResponseStreamEvent::ResponseWebSearchCallCompleted(_)
-                | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {}
+                ResponseStreamEvent::ResponseWebSearchCallSearching(ev) => {
+                    if let Some(event) = start_backend_tool(
+                        &mut active_backend_tools,
+                        &terminal_backend_tools,
+                        &request_id,
+                        ev.item_id,
+                        "web_search",
+                    ) {
+                        yield event;
+                    }
+                }
+                // This progress event carries no result. Keep the call open
+                // until output_item.done or terminal response reconciliation.
+                ResponseStreamEvent::ResponseWebSearchCallCompleted(ev) => {
+                    if let Some(event) = start_backend_tool(
+                        &mut active_backend_tools,
+                        &terminal_backend_tools,
+                        &request_id,
+                        ev.item_id,
+                        "web_search",
+                    ) {
+                        yield event;
+                    }
+                }
 
                 // Code interpreter (server-side, like web/x search). Surface it
                 // the same way x_search is: a generic backend tool call that the
@@ -418,11 +654,15 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // event fires on InProgress; the full payload (code + outputs)
                 // rides ResponseOutputItemDone(CodeInterpreterCall) below.
                 ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(ev) => {
-                    yield SamplingEvent::BackendToolCallStarted {
-                        request_id: request_id.clone(),
-                        call_id: ev.item_id.clone(),
-                        name: "code_interpreter".to_string(),
-                    };
+                    if let Some(event) = start_backend_tool(
+                        &mut active_backend_tools,
+                        &terminal_backend_tools,
+                        &request_id,
+                        ev.item_id,
+                        "code_interpreter",
+                    ) {
+                        yield event;
+                    }
                 }
                 // Interpreting/Completed carry no payload — the result arrives
                 // via ResponseOutputItemDone(CodeInterpreterCall) below.
@@ -437,56 +677,44 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // For WebSearchCall this includes the query and source URLs.
                 // For CustomToolCall this includes x_search results.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
-                    match &done_event.item {
-                        rs::OutputItem::WebSearchCall(ws) => {
-                            let result = serde_json::to_value(ws).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ws.id.clone(),
-                                name: "web_search".to_string(),
-                                result,
-                            };
+                    if let Some((call_id, name, outcome)) = backend_tool_outcome(&done_event.item) {
+                        for event in finish_backend_tool(
+                            &mut active_backend_tools,
+                            &mut terminal_backend_tools,
+                            &request_id,
+                            call_id,
+                            name,
+                            outcome,
+                        ) {
+                            yield event;
                         }
-                        // X search results arrive as CustomToolCall with
-                        // names like x_keyword_search, x_semantic_search, etc.
-                        // Use "x_search" consistently (matching the Started event);
-                        // the specific sub-type is in the serialized result payload
-                        // and extracted by the pager from raw_output.name.
-                        rs::OutputItem::CustomToolCall(ct) => {
-                            let result = serde_json::to_value(ct).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ct.id.clone(),
-                                name: "x_search".to_string(),
-                                result,
-                            };
-                        }
-                        // Code interpreter: the full call (code + outputs) rides
-                        // the done item. Surfaced under the shared "code_interpreter"
-                        // name (matching the Started event); the shell renders it via
-                        // the client `tool_use` + `user` `tool_result` split.
-                        rs::OutputItem::CodeInterpreterCall(ci) => {
-                            let result = serde_json::to_value(ci).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ci.id.clone(),
-                                name: "code_interpreter".to_string(),
-                                result,
-                            };
-                        }
-                        _ => {}
                     }
                     completed_output_items.push(done_event.item);
                 }
 
                 // CustomToolCallInputDelta is x_search in-progress streaming.
                 // Emit a started event on first delta per item_id.
+                ResponseStreamEvent::ResponseCustomToolCallInputDelta(ev) => {
+                    if let Some(event) = start_backend_tool(
+                        &mut active_backend_tools,
+                        &terminal_backend_tools,
+                        &request_id,
+                        ev.item_id,
+                        "x_search",
+                    ) {
+                        yield event;
+                    }
+                }
                 ResponseStreamEvent::ResponseCustomToolCallInputDone(ev) => {
-                    yield SamplingEvent::BackendToolCallStarted {
-                        request_id: request_id.clone(),
-                        call_id: ev.item_id.clone(),
-                        name: "x_search".to_string(),
-                    };
+                    if let Some(event) = start_backend_tool(
+                        &mut active_backend_tools,
+                        &terminal_backend_tools,
+                        &request_id,
+                        ev.item_id,
+                        "x_search",
+                    ) {
+                        yield event;
+                    }
                 }
 
                 // All other events (intermediate progress, annotations,
@@ -500,6 +728,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                 let err = SamplingError::IdleTimeout {
                     elapsed_secs: idle_timeout.as_secs(),
                 };
+                for event in fail_active_backend_tools(
+                    &mut active_backend_tools,
+                    &mut terminal_backend_tools,
+                    &request_id,
+                    "backend request timed out",
+                ) {
+                    yield event;
+                }
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
@@ -525,6 +761,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                     retry_after_secs: None,
                     should_retry: None,
                 };
+                for event in fail_active_backend_tools(
+                    &mut active_backend_tools,
+                    &mut terminal_backend_tools,
+                    &request_id,
+                    "response stream ended before a terminal response",
+                ) {
+                    yield event;
+                }
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
@@ -533,19 +777,20 @@ pub(crate) fn stream_responses_tracked<'a>(
             }
         };
 
-        // ChatGPT Codex (`chatgpt.com/backend-api/codex`): terminal
-        // `response.completed` frequently has `output: []` while the full
-        // message/function items already arrived on `output_item.done`.
-        // Without splicing them in we treat a successful stream as empty
-        // and retry forever (UI already showed the streamed text).
-        if response.output.is_empty() && !completed_output_items.is_empty() {
+        // ChatGPT Codex (`chatgpt.com/backend-api/codex`) may return an empty
+        // or only partially populated terminal `output`. Preserve its order,
+        // then append items seen only on `output_item.done`. Prefer type+id,
+        // fall back to type+call_id, and finally typed equality for identity.
+        let merged_output_items =
+            merge_completed_output_items(&mut response.output, completed_output_items);
+        if merged_output_items > 0 {
             tracing::debug!(
                 request_id = %request_id,
-                n_items = completed_output_items.len(),
-                "Codex completed with empty output[]; adopting output_item.done items"
+                n_items = merged_output_items,
+                "merged output_item.done items missing from terminal response"
             );
-            response.output = completed_output_items;
-        } else if response.output.is_empty() && !text_acc.is_empty() {
+        }
+        if response.output.is_empty() && !text_acc.is_empty() {
             // Fallback: only deltas were usable (no done items).
             tracing::debug!(
                 request_id = %request_id,
@@ -562,6 +807,34 @@ pub(crate) fn stream_responses_tracked<'a>(
                     logprobs: None,
                 })],
             })];
+        }
+
+        // Some compatible providers omit output_item.done and place the full
+        // hosted-tool item only in the terminal response. Reconcile it here.
+        for item in &response.output {
+            if let Some((call_id, name, outcome)) = backend_tool_outcome(item) {
+                for event in finish_backend_tool(
+                    &mut active_backend_tools,
+                    &mut terminal_backend_tools,
+                    &request_id,
+                    call_id,
+                    name,
+                    outcome,
+                ) {
+                    yield event;
+                }
+            }
+        }
+        // Last-resort compatibility for providers that send progress plus an
+        // empty successful completion and no output item.
+        for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+            terminal_backend_tools.insert(call_id.clone());
+            yield SamplingEvent::BackendToolCallCompleted {
+                request_id: request_id.clone(),
+                call_id,
+                name,
+                result: None,
+            };
         }
 
         // Billing fields (`prompt_tokens`, `completion_tokens`,
@@ -670,7 +943,12 @@ mod tests {
     fn raw_events(
         events: Vec<Result<rs::ResponseStreamEvent, SamplingError>>,
     ) -> BoxStream<'static, Result<ResponsesStreamItem, SamplingError>> {
-        stream::iter(events.into_iter().map(|r| r.map(ResponsesStreamItem::Event))).boxed()
+        stream::iter(
+            events
+                .into_iter()
+                .map(|r| r.map(ResponsesStreamItem::Event)),
+        )
+        .boxed()
     }
 
     /// Build a minimal `rs_types::Response` for use in `ResponseCompleted`
@@ -742,20 +1020,209 @@ mod tests {
     }
 
     fn message_item_done(text: &str) -> rs::ResponseStreamEvent {
-        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
-            sequence_number: 0,
-            output_index: 0,
-            item: rs::OutputItem::Message(rs::OutputMessage {
-                id: "msg_1".into(),
-                role: rs::AssistantRole::Assistant,
-                status: rs::OutputStatus::Completed,
-                content: vec![rs::OutputMessageContent::OutputText(rs::OutputTextContent {
+        message_item_done_with_id("msg_1", text)
+    }
+
+    fn message_item(id: &str, text: &str) -> rs::OutputItem {
+        rs::OutputItem::Message(rs::OutputMessage {
+            id: id.into(),
+            role: rs::AssistantRole::Assistant,
+            status: rs::OutputStatus::Completed,
+            content: vec![rs::OutputMessageContent::OutputText(
+                rs::OutputTextContent {
                     text: text.into(),
                     annotations: vec![],
                     logprobs: None,
-                })],
+                },
+            )],
+        })
+    }
+
+    fn message_item_done_with_id(id: &str, text: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+            sequence_number: 0,
+            output_index: 0,
+            item: message_item(id, text),
+        })
+    }
+
+    fn web_search_item(id: &str, status: rs::WebSearchToolCallStatus) -> rs::OutputItem {
+        rs::OutputItem::WebSearchCall(rs::WebSearchToolCall {
+            id: id.into(),
+            status,
+            action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch {
+                query: "rust async traits".into(),
+                sources: Some(vec![]),
             }),
         })
+    }
+
+    fn web_search_added(id: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
+            sequence_number: 0,
+            output_index: 0,
+            item: web_search_item(id, rs::WebSearchToolCallStatus::InProgress),
+        })
+    }
+
+    fn web_search_done(id: &str, status: rs::WebSearchToolCallStatus) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+            sequence_number: 1,
+            output_index: 0,
+            item: web_search_item(id, status),
+        })
+    }
+
+    fn web_search_progress(id: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseWebSearchCallInProgress(
+            rs_types::ResponseWebSearchCallInProgressEvent {
+                sequence_number: 0,
+                output_index: 0,
+                item_id: id.into(),
+            },
+        )
+    }
+
+    fn backend_lifecycle_counts(events: &[SamplingEvent]) -> (usize, usize, usize) {
+        let started = events
+            .iter()
+            .filter(|event| matches!(event, SamplingEvent::BackendToolCallStarted { .. }))
+            .count();
+        let completed = events
+            .iter()
+            .filter(|event| matches!(event, SamplingEvent::BackendToolCallCompleted { .. }))
+            .count();
+        let failed = events
+            .iter()
+            .filter(|event| matches!(event, SamplingEvent::BackendToolCallFailed { .. }))
+            .count();
+        (started, completed, failed)
+    }
+
+    #[tokio::test]
+    async fn web_search_done_only_synthesizes_started_once() {
+        let raw = raw_events(vec![
+            Ok(web_search_done(
+                "ws_done_only",
+                rs::WebSearchToolCallStatus::Completed,
+            )),
+            Ok(completed_event()),
+        ]);
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn web_search_progress_added_and_done_are_deduplicated() {
+        let raw = raw_events(vec![
+            Ok(web_search_progress("ws_dedup")),
+            Ok(web_search_progress("ws_dedup")),
+            Ok(web_search_added("ws_dedup")),
+            Ok(web_search_done(
+                "ws_dedup",
+                rs::WebSearchToolCallStatus::Completed,
+            )),
+            Ok(completed_event()),
+        ]);
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn failed_web_search_done_maps_to_failed_lifecycle() {
+        let raw = raw_events(vec![
+            Ok(web_search_done(
+                "ws_failed",
+                rs::WebSearchToolCallStatus::Failed,
+            )),
+            Ok(completed_event()),
+        ]);
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert_eq!(backend_lifecycle_counts(&events), (1, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn terminal_output_reconciles_missing_done_event() {
+        let mut response = empty_completed_response();
+        response.output.push(web_search_item(
+            "ws_terminal",
+            rs::WebSearchToolCallStatus::Completed,
+        ));
+        let terminal =
+            rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+                response,
+                sequence_number: 0,
+            });
+        let events = collect(stream_responses(
+            raw_events(vec![Ok(terminal)]),
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn empty_success_closes_progress_only_search() {
+        let events = collect(stream_responses(
+            raw_events(vec![
+                Ok(web_search_progress("ws_progress_only")),
+                Ok(completed_event()),
+            ]),
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert_eq!(backend_lifecycle_counts(&events), (1, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn response_failure_closes_active_search_as_failed() {
+        let failed = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {
+            response: failed_response_with_error("provider failed"),
+            sequence_number: 1,
+        });
+        let events = collect(stream_responses(
+            raw_events(vec![Ok(web_search_progress("ws_active")), Ok(failed)]),
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert_eq!(backend_lifecycle_counts(&events), (1, 0, 1));
+        assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
     }
 
     /// ChatGPT Codex: deltas + output_item.done with text, but completed.output=[].
@@ -789,6 +1256,39 @@ mod tests {
             completed.empty_reason()
         );
         assert_eq!(completed.assistant_text(), "Hi!");
+    }
+
+    #[tokio::test]
+    async fn codex_partial_terminal_output_merges_only_missing_done_items() {
+        let raw = raw_events(vec![
+            Ok(message_item_done_with_id("msg_terminal", "first")),
+            Ok(message_item_done_with_id("msg_done_only", " second")),
+            Ok({
+                let mut response = empty_completed_response();
+                response.output.push(message_item("msg_terminal", "first"));
+                rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+                    response,
+                    sequence_number: 2,
+                })
+            }),
+        ]);
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+        let completed = events
+            .iter()
+            .find_map(|event| match event {
+                SamplingEvent::Completed { response, .. } => Some(response.as_ref()),
+                _ => None,
+            })
+            .expect("Completed event");
+
+        assert_eq!(completed.assistant_text(), "first\n second");
     }
 
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
@@ -1128,7 +1628,9 @@ mod tests {
                 ),
             },
         );
-        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())]).boxed();
+        let raw = stream::iter(vec![Ok(in_progress), Ok(done), Ok(completed_event())])
+            .map(|event| event.map(ResponsesStreamItem::Event))
+            .boxed();
         let events = collect(stream_responses(
             raw,
             None,

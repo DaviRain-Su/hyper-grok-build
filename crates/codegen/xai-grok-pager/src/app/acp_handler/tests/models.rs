@@ -126,6 +126,31 @@
     }
 
     #[test]
+    fn models_update_preserves_config_reload_capability() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut models = ModelState::default();
+        models.reload_config_on_model_command = true;
+        models.current = Some(acp::ModelId::new("grok-4"));
+        let mut app = AppView::new(tx, models, Vec::new());
+
+        let notif = make_models_update_notif("grok-4", &["grok-4"]);
+        handle_models_update(&notif, &mut app);
+
+        assert!(app.models.reload_config_on_model_command);
+    }
+
+    #[test]
+    fn models_update_does_not_enable_config_reload_for_foreign_agent() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+
+        let notif = make_models_update_notif("foreign-model", &["foreign-model"]);
+        handle_models_update(&notif, &mut app);
+
+        assert!(!app.models.reload_config_on_model_command);
+    }
+
+    #[test]
     fn models_update_noop_when_agent_matches_shell_default() {
         let mut app = make_app_with_agent("sess-1");
 

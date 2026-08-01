@@ -406,7 +406,23 @@ impl ModelsManager {
             .filter(|(_, e)| e.info.user_selectable)
             .collect();
 
-        available_models(&selectable, self.is_session_auth())
+        let mut available = available_models(&selectable, self.is_session_auth());
+        let config_model_ids = self
+            .inner
+            .cfg
+            .read()
+            .config_models
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in config_model_ids {
+            if let Some(info) = available.get_mut(&acp::ModelId::new(id)) {
+                info.meta
+                    .get_or_insert_with(serde_json::Map::new)
+                    .insert(config::CONFIG_MODEL_META_KEY.to_string(), true.into());
+            }
+        }
+        available
     }
 
     pub(crate) fn task_model_error(&self, requested: &str) -> Option<String> {

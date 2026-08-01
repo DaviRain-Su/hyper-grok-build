@@ -4,6 +4,7 @@
 //! consumes a Layer 2 stream from the matching backend transform.
 //! Cancellation is cooperative via `CancellationToken`.
 
+use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::{
     Arc, Mutex,
@@ -702,10 +703,19 @@ async fn drive_l2(
     output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
+    let mut active_backend_tools = BTreeMap::<String, String>::new();
     loop {
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
+                for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+                    let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
+                        request_id: request_id.clone(),
+                        call_id,
+                        name,
+                        error: "request cancelled".to_string(),
+                    });
+                }
                 return AttemptOutcome::Cancelled;
             }
             next = l2.next() => match next {
@@ -746,6 +756,14 @@ async fn drive_l2(
                     return AttemptOutcome::Completed { response, metrics };
                 }
                 Some(SamplingEvent::Failed { error: info, .. }) => {
+                    for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+                        let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
+                            request_id: request_id.clone(),
+                            call_id,
+                            name,
+                            error: info.message.clone(),
+                        });
+                    }
                     let raw = captured
                         .lock()
                         .ok()
@@ -754,6 +772,16 @@ async fn drive_l2(
                     return AttemptOutcome::Failed { error };
                 }
                 Some(other) => {
+                    match &other {
+                        SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
+                            active_backend_tools.insert(call_id.clone(), name.clone());
+                        }
+                        SamplingEvent::BackendToolCallCompleted { call_id, .. }
+                        | SamplingEvent::BackendToolCallFailed { call_id, .. } => {
+                            active_backend_tools.remove(call_id);
+                        }
+                        _ => {}
+                    }
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -761,12 +789,21 @@ async fn drive_l2(
                             | SamplingEvent::ToolCallDelta { .. }
                             | SamplingEvent::BackendToolCallStarted { .. }
                             | SamplingEvent::BackendToolCallCompleted { .. }
+                            | SamplingEvent::BackendToolCallFailed { .. }
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
                     }
                     let _ = event_tx.send(retag(other, &request_id));
                 }
                 None => {
+                    for (call_id, name) in std::mem::take(&mut active_backend_tools) {
+                        let _ = event_tx.send(SamplingEvent::BackendToolCallFailed {
+                            request_id: request_id.clone(),
+                            call_id,
+                            name,
+                            error: "stream dropped without terminal event".to_string(),
+                        });
+                    }
                     // L2 streams always terminate with Completed or
                     // Failed; reaching None means the producer was
                     // dropped without termination -- treat as a

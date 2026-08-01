@@ -1445,6 +1445,23 @@ impl From<crate::messages::MessagesRequest> for MessagesRequestWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_responses_serde_is_canonical_and_accepts_hyphen_alias() {
+        assert_eq!(
+            serde_json::to_string(&ApiBackend::CodexResponses).unwrap(),
+            r#""codex_responses""#
+        );
+        assert_eq!(
+            serde_json::from_str::<ApiBackend>(r#""codex_responses""#).unwrap(),
+            ApiBackend::CodexResponses
+        );
+        assert_eq!(
+            serde_json::from_str::<ApiBackend>(r#""codex-responses""#).unwrap(),
+            ApiBackend::CodexResponses
+        );
+        assert!(ApiBackend::CodexResponses.supports_native_schema());
+    }
     use serde_json::json;
 
     #[test]

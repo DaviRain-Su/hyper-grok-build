@@ -59,18 +59,30 @@ impl SlashCommand for ModelCommand {
     }
 
     fn suggest_args(&self, ctx: &AppCtx, args_query: &str) -> Option<Vec<ArgItem>> {
-        if ctx.models.is_empty() {
+        let refreshed = match crate::app::model_config_reload::refreshed_model_state(ctx.models) {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(%error, "could not refresh config models for /model suggestions");
+                ctx.models.clone()
+            }
+        };
+        if refreshed.is_empty() {
             return None;
         }
 
         // Effort phase if input is "<reasoning-model> ", else model phase.
-        if let Some(model_id) = detect_effort_phase(ctx.models, args_query) {
-            return Some(build_effort_items(ctx.models, &model_id));
+        if let Some(model_id) = detect_effort_phase(&refreshed, args_query) {
+            return Some(build_effort_items(&refreshed, &model_id));
         }
-        Some(build_model_items(ctx.models))
+        Some(build_model_items(&refreshed))
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        let refreshed = match crate::app::model_config_reload::refreshed_model_state(ctx.models) {
+            Ok(models) => models,
+            Err(error) => return CommandResult::Error(error),
+        };
+        let models = &refreshed;
         let trimmed = args.trim();
         if trimmed.is_empty() {
             return CommandResult::Error("Usage: /model <name> [effort]".into());
@@ -80,13 +92,13 @@ impl SlashCommand for ModelCommand {
         // often contain spaces ("Grok 4.5"); if we split on the last token
         // first, a shorter catalog entry ("Grok") would steal the prefix and
         // treat "4.5" as an effort level.
-        if let Some(id) = ctx.models.resolve_by_name_or_id(trimmed) {
-            if let Some(lock) = locked_model(ctx.models, &id) {
+        if let Some(id) = models.resolve_by_name_or_id(trimmed) {
+            if let Some(lock) = locked_model(models, &id) {
                 return CommandResult::Error(lock_message(&lock, trimmed));
             }
             return CommandResult::Action(Action::SetDefaultModel(id));
         }
-        if let Some(msg) = ambiguous_model_message(ctx.models, trimmed) {
+        if let Some(msg) = ambiguous_model_message(models, trimmed) {
             return CommandResult::Error(msg);
         }
 
@@ -95,18 +107,17 @@ impl SlashCommand for ModelCommand {
         // level (e.g. `none` on grok-4.5) surfaces the effort error with the
         // model's offered ids — not "Unknown model: … none".
         if let Some((prefix, token)) = split_trailing_token(trimmed)
-            && let Some(id) = resolve_model(ctx.models, prefix)
-            && ctx
-                .models
+            && let Some(id) = resolve_model(models, prefix)
+            && models
                 .available
                 .get(&id)
                 .map(supports_reasoning_effort)
                 .unwrap_or(false)
         {
-            if let Some(lock) = locked_model(ctx.models, &id) {
+            if let Some(lock) = locked_model(models, &id) {
                 return CommandResult::Error(lock_message(&lock, prefix));
             }
-            return match ctx.models.resolve_effort_for_model(&id, token) {
+            return match models.resolve_effort_for_model(&id, token) {
                 Ok(effort) => CommandResult::Action(Action::SwitchModel {
                     model_id: id,
                     effort: Some(effort),
@@ -115,7 +126,7 @@ impl SlashCommand for ModelCommand {
             };
         }
         if let Some((prefix, _)) = split_trailing_token(trimmed)
-            && let Some(msg) = ambiguous_model_message(ctx.models, prefix)
+            && let Some(msg) = ambiguous_model_message(models, prefix)
         {
             return CommandResult::Error(msg);
         }
@@ -742,6 +753,7 @@ mod tests {
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -773,6 +785,7 @@ mod tests {
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -853,6 +866,7 @@ mod tests {
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -909,6 +923,7 @@ mod tests {
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
@@ -979,6 +994,7 @@ mod tests {
             cwd: std::path::Path::new("."),
             has_session_announcements: false,
             billing_surface_visible: true,
+            usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };

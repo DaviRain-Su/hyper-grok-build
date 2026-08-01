@@ -61,15 +61,27 @@ default = "grok-4.5"
 
 ## Supported API Backends
 
-Grok supports three API backends. Set `api_backend` in your `[model.*]` config to choose which protocol the model uses:
+Grok supports four API backends. Set `api_backend` in your `[model.*]` config to choose which protocol the model uses:
 
 | Value | API | Default |
 |-------|-----|---------|
 | `"chat_completions"` | OpenAI Chat Completions (`/v1/chat/completions`) | Yes |
 | `"responses"` | OpenAI Responses (`/v1/responses`) | |
+| `"codex_responses"` | OpenAI Codex-compatible Responses (`/v1/responses`) | |
 | `"messages"` | Anthropic Messages (`/v1/messages`) | |
 
 When you omit `api_backend`, Grok uses `chat_completions`.
+
+`codex_responses` uses the Responses transport with Codex request shaping (instructions,
+reasoning, caching, streaming, and tool defaults). It is intended for BYOK providers that
+implement the Codex Responses dialect; the provider's own API key and headers remain in use.
+`codex-responses` is accepted as an input alias, while saved/serialized configuration uses
+`codex_responses`. Compaction first uses Codex's unary
+`POST /v1/responses/compact` endpoint and persists its opaque replacement history. Providers
+that explicitly reject that endpoint (for example, with 404 or 405) automatically fall back
+to local summary compaction. A relay-specific `503` that explicitly reports no available
+`-openai-compact` model channel is treated the same way, while authentication, quota,
+rate-limit, and all other server failures remain visible errors.
 
 To send provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- use the `extra_headers` field described below. Grok sends those headers verbatim with every request to the endpoint.
 
@@ -87,7 +99,7 @@ name = "Display Name"                     # Shown in the model picker
 description = "Model description"          # Optional description
 api_key = "sk-..."                        # API key for this provider (optional)
 env_key = "XAI_API_KEY"                   # Env var holding the API key (optional; string or array)
-api_backend = "chat_completions"          # "chat_completions", "responses", or "messages"
+api_backend = "chat_completions"          # chat_completions, responses, codex_responses, or messages
 temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
@@ -239,6 +251,26 @@ api_backend = "responses"
 env_key = "OPENAI_API_KEY"
 ```
 
+### Codex-compatible Responses (BYOK)
+
+Use `codex_responses` when a provider implements the Codex Responses request dialect:
+
+```toml
+[model_providers.codex-gateway]
+base_url = "https://codex-provider.example/v1"
+env_key = "CODEX_PROVIDER_API_KEY"
+api_backend = "codex_responses"
+
+[model.codex-byok]
+model = "gpt-5-codex"
+name = "Codex (BYOK)"
+model_provider = "codex-gateway"
+```
+
+This backend defaults `supports_backend_search` to `true` and sends the native Responses
+`web_search` tool. It never sends xAI's `x_search`. Set
+`supports_backend_search = false` on the provider or model to opt out explicitly.
+
 ### Ollama (Local / Cloud)
 
 Run models via [Ollama](https://ollama.ai) — either the cloud service or a local instance.
@@ -358,7 +390,7 @@ Or via environment variable:
 export GROK_WEB_SEARCH_MODEL="grok-4.5"
 ```
 
-If you point web search at a custom model, you also need a `[model.*]` entry so Grok can reach it. Server-side ("backend") web search runs only when the model sets `supports_backend_search = true` (and the build enables backend search); it does not depend on `api_backend`:
+If you point the local `web_search` function at a custom model, you also need a `[model.*]` entry so Grok can reach it. Provider-hosted ("backend") search is separate: it runs only on a Responses-compatible backend when the model supports it and backend tools are enabled:
 
 ```toml
 [models]
@@ -368,6 +400,10 @@ web_search = "my-custom-model"
 model = "my-custom-model"
 supports_backend_search = true
 ```
+
+For `api_backend = "codex_responses"`, support defaults to `true`; an explicit
+`supports_backend_search = false` wins. The `disable_web_search` setting is the final kill
+switch for both local and provider-hosted web search.
 
 ---
 

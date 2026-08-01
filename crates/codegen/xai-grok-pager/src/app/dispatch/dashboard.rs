@@ -1294,6 +1294,15 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
     if trimmed.is_empty() || !trimmed.starts_with('/') {
         return vec![];
     }
+    if let Some(invocation) = parse_invocation(trimmed.as_str())
+        && matches!(invocation.token, "model" | "m")
+        && let Err(error) = crate::app::model_config_reload::refresh_app_model_catalog(app)
+    {
+        if let Some(dashboard) = app.dashboard.as_mut() {
+            dashboard.set_error_toast(&error);
+        }
+        return vec![];
+    }
 
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();

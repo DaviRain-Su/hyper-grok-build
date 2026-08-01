@@ -361,20 +361,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(&path, "[models]\ndefault = \"grok-4.5\"\n").unwrap();
-        set_enabled_model_ids_at(
-            &path,
-            &["grok-*".to_string(), "openai/gpt-5".to_string()],
-        )
-        .unwrap();
-        assert_eq!(
-            enabled_model_ids_at(&path),
-            ["grok-*", "openai/gpt-5"]
-        );
+        set_enabled_model_ids_at(&path, &["grok-*".to_string(), "openai/gpt-5".to_string()])
+            .unwrap();
+        assert_eq!(enabled_model_ids_at(&path), ["grok-*", "openai/gpt-5"]);
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("default = \"grok-4.5\""));
         set_enabled_model_ids_at(&path, &[]).unwrap();
         assert!(enabled_model_ids_at(&path).is_empty());
-        assert!(!fs::read_to_string(&path).unwrap().contains("enabled_models"));
+        assert!(
+            !fs::read_to_string(&path)
+                .unwrap()
+                .contains("enabled_models")
+        );
     }
 
     #[test]

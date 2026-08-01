@@ -61,9 +61,11 @@ rustflags = [
 ]
 
 [target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
 rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
 
 [target.aarch64-pc-windows-msvc]
+linker = "rust-lld"
 rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
 
 
@@ -80,6 +82,9 @@ rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"
 # `static` feature. Force the pinned bundled Opus source so normal and release
 # builds use the same ABI/license payload on every supported target.
 LIBOPUS_NO_PKG = "1"
+# Apply the workspace's static MSVC runtime choice to CMake-built native
+# dependencies before their project() calls select a runtime library.
+CMAKE_TOOLCHAIN_FILE = { value = ".cargo/msvc-static-crt.cmake", relative = true }
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 SYSTEM_DEPS_DAV1D_BUILD_INTERNAL = "auto"
 AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"

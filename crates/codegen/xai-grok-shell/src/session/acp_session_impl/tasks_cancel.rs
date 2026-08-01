@@ -635,7 +635,7 @@ impl SessionActor {
                 completion_kind: PromptCompletionKind::Rewound,
                 structured_output: None,
                 usage: None,
-                tool_overrides: self.effective_tool_overrides(),
+                tool_overrides: self.effective_tool_overrides().await,
             }));
             return;
         }
@@ -683,7 +683,7 @@ impl SessionActor {
                     // Only the running turn (idx 0) ran, so only it echoes a bound; a queued prompt
                     // that never promoted attests nothing (like respond_removed_prompt).
                     tool_overrides: if is_running_turn {
-                        self.effective_tool_overrides()
+                        self.effective_tool_overrides().await
                     } else {
                         None
                     },

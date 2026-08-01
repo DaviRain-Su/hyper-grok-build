@@ -46,7 +46,10 @@ unsafe extern "C" {
     fn raw_compact_reason_byte(idx: i32) -> i32;
 }
 
-fn read_bytes(len_fn: unsafe extern "C" fn() -> i32, byte_fn: unsafe extern "C" fn(i32) -> i32) -> Vec<u8> {
+fn read_bytes(
+    len_fn: unsafe extern "C" fn() -> i32,
+    byte_fn: unsafe extern "C" fn(i32) -> i32,
+) -> Vec<u8> {
     let n = unsafe { len_fn() };
     if n <= 0 {
         return Vec::new();
@@ -76,7 +79,8 @@ pub fn read_prompt() -> Vec<u8> {
 }
 
 pub fn read_compact_reason() -> String {
-    String::from_utf8_lossy(&read_bytes(raw_compact_reason_len, raw_compact_reason_byte)).into_owned()
+    String::from_utf8_lossy(&read_bytes(raw_compact_reason_len, raw_compact_reason_byte))
+        .into_owned()
 }
 
 pub fn tool_index() -> i32 {

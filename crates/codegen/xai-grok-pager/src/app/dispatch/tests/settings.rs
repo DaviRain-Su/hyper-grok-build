@@ -3145,10 +3145,7 @@ fn set_theme_emits_persist_setting_with_correct_payload() {
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
-        assert_eq!(
-            app.current_ui.theme.as_deref(),
-            Some("base16-default-dark")
-        );
+        assert_eq!(app.current_ui.theme.as_deref(), Some("base16-default-dark"));
         assert!(
             !crate::theme::cache::is_auto_mode(),
             "concrete theme commit must disable AUTO_MODE",

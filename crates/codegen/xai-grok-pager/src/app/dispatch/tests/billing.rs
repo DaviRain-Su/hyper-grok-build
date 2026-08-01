@@ -1009,8 +1009,7 @@ fn free_usage_upsell_shows_two_options_with_exact_labels() {
     let q = &qv.questions[0];
     if cfg!(feature = "community-build") {
         assert!(
-            q.question.contains("Grok free usage limit")
-                || q.question.contains("another model"),
+            q.question.contains("Grok free usage limit") || q.question.contains("another model"),
             "community heading should mention multi-provider escape, got: {}",
             q.question
         );

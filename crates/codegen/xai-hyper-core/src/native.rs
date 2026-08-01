@@ -18,8 +18,8 @@ use xai_grok_sampler::{
 };
 use xai_grok_sampling_types::{ConversationItem, ConversationRequest, ToolCall, ToolSpec};
 use xai_hyper_host::{
-    HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream, ModelStreamRequest,
-    TerminalTurnRecord,
+    HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream,
+    ModelStreamRequest, TerminalTurnRecord,
 };
 
 use crate::disk_store::HypercoreSessionStore;
@@ -266,10 +266,7 @@ impl HyperHost for NativeHost {
             sampler_cfg.responses_codex_dialect = true;
         }
 
-        open_model_stream_from_sampler_config(sampler_cfg, ModelStreamRequest {
-            model,
-            ..req
-        })
+        open_model_stream_from_sampler_config(sampler_cfg, ModelStreamRequest { model, ..req })
     }
 
     async fn commit_snapshot(

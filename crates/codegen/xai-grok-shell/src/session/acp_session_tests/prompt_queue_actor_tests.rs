@@ -1893,8 +1893,11 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
                 }])
                 .await;
             actor.supports_backend_search.set(true);
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.api_backend = xai_grok_sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg);
             assert!(
-                actor.backend_search_active(),
+                actor.backend_search_active().await,
                 "fixture must actually reach the enabled-backend-search path"
             );
 
@@ -1915,12 +1918,12 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
             *actor.tool_overrides.borrow_mut() = Some(expected.clone());
 
             assert_eq!(
-                actor.effective_tool_overrides(),
+                actor.effective_tool_overrides().await,
                 Some(expected.clone()),
                 "backend search on ⇒ the applied cutoff echoes back for attestation"
             );
             assert_eq!(
-                actor.effective_hosted_tools(),
+                actor.effective_hosted_tools().await,
                 vec![xai_grok_sampling_types::HostedTool::XSearch {
                     options: Some(options.clone()),
                 }],
@@ -1933,10 +1936,54 @@ async fn effective_tool_overrides_echoes_and_gates_on_backend_search() {
                 "the standing override is unchanged — only per-model support flipped"
             );
             assert_eq!(
-                actor.effective_tool_overrides(),
+                actor.effective_tool_overrides().await,
                 None,
                 "backend search off ⇒ echo is None: never attest a cutoff the wire never carried"
             );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn hosted_search_projection_tracks_model_switches() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use xai_grok_sampling_types::{ApiBackend, HostedTool};
+
+            let (actor, _rx) = build_actor().await;
+            *actor.agent.borrow_mut() = test_agent_backend_search(vec![
+                HostedTool::WebSearch { options: None },
+                HostedTool::XSearch { options: None },
+            ])
+            .await;
+            actor.supports_backend_search.set(true);
+
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.api_backend = ApiBackend::Responses;
+            actor.chat_state_handle.update_sampling_config(cfg.clone());
+            assert_eq!(actor.hosted_tools_for_turn().await.len(), 2);
+
+            cfg.api_backend = ApiBackend::CodexResponses;
+            actor.chat_state_handle.update_sampling_config(cfg.clone());
+            assert_eq!(
+                actor.hosted_tools_for_turn().await,
+                vec![HostedTool::WebSearch { options: None }]
+            );
+
+            cfg.api_backend = ApiBackend::Responses;
+            cfg.adapter_kind = xai_grok_models::AdapterKind::OpenAiCodex;
+            actor.chat_state_handle.update_sampling_config(cfg.clone());
+            assert_eq!(
+                actor.hosted_tools_for_turn().await,
+                vec![HostedTool::WebSearch { options: None }]
+            );
+
+            cfg.api_backend = ApiBackend::Messages;
+            cfg.adapter_kind = xai_grok_models::AdapterKind::Standard;
+            actor.chat_state_handle.update_sampling_config(cfg);
+            assert!(actor.hosted_tools_for_turn().await.is_empty());
+            assert!(!actor.backend_search_active().await);
         })
         .await;
 }
@@ -1951,7 +1998,7 @@ async fn agent_rebuild_republishes_the_configured_cutoff() {
         .run_until(async {
             let (actor, _rx) = build_actor().await;
             assert!(
-                !actor.backend_search_active(),
+                !actor.backend_search_active().await,
                 "fixture must exercise the not-gated-on-backend-search path",
             );
             assert!(

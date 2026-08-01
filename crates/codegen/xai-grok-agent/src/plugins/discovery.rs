@@ -675,7 +675,7 @@ fn collect_plugin(
                 hooks: None,
                 mcp_servers: None,
                 lsp_servers: None,
-            runtime: None,
+                runtime: None,
             }
         }
         Err(e) => {

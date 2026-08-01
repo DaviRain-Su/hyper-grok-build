@@ -355,6 +355,36 @@ fn config_from_toml(toml: &str) -> config::Config {
     config::Config::new_from_toml_cfg(&toml::from_str(toml).unwrap()).unwrap()
 }
 
+#[test]
+fn available_marks_config_owned_models_for_client_side_reload() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let auth_manager = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let cfg = config_from_toml(
+        r#"
+            [model.centos]
+            model = "gpt-5-codex"
+            name = "CentOS Codex"
+            base_url = "https://example.invalid/v1"
+            api_key = "test-only"
+            context_window = 200000
+        "#,
+    );
+    let manager = ModelsManager::from_config(&cfg, None, auth_manager).unwrap();
+
+    let info = manager
+        .available()
+        .get(&acp::ModelId::new("centos"))
+        .cloned()
+        .expect("config model should be visible");
+    assert_eq!(
+        info.meta
+            .as_ref()
+            .and_then(|meta| meta.get(config::CONFIG_MODEL_META_KEY))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
 /// Hermetic platform-credential isolation for tests that assert no-credentials
 /// behavior: unset every registry platform's API-key env vars and redirect
 /// `GROK_AUTH_PATH` to a scratch dir.

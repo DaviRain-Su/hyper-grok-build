@@ -230,14 +230,12 @@ pub(crate) fn session_usage_block_text(
     // OpenAI-style cache hit rate: cached_read / input (when providers report
     // full input including cached tokens — same convention as /usage input row).
     if t.input_tokens > 0 && t.cached_read_tokens > 0 {
-        let hit_pct = ((t.cached_read_tokens.min(t.input_tokens) as f64)
-            / (t.input_tokens as f64)
+        let hit_pct = ((t.cached_read_tokens.min(t.input_tokens) as f64) / (t.input_tokens as f64)
             * 1000.0)
             .round()
             / 10.0;
         rows.push(
-            rust_i18n::t!("status.usage_cache_hit", pct = format!("{hit_pct:.1}"))
-                .into_owned(),
+            rust_i18n::t!("status.usage_cache_hit", pct = format!("{hit_pct:.1}")).into_owned(),
         );
     }
     rows.push(

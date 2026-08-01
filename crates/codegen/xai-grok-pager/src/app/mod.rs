@@ -43,6 +43,7 @@ mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
 mod modals;
+pub(crate) mod model_config_reload;
 mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
@@ -1179,11 +1180,11 @@ pub(crate) mod win_native_selection {
             let Ok(saved) = u32::try_from(saved) else {
                 return;
             };
-            if let Some((handle, current)) = stdin_console_mode() {
-                if current != saved {
-                    unsafe {
-                        let _ = SetConsoleMode(handle, saved);
-                    }
+            if let Some((handle, current)) = stdin_console_mode()
+                && current != saved
+            {
+                unsafe {
+                    let _ = SetConsoleMode(handle, saved);
                 }
             }
         }
