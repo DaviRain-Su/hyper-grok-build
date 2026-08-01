@@ -73,6 +73,14 @@ pub struct BtwEntry {
     /// Error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Model-call attempts made (1 = no retry). Entries written before this
+    /// field existed deserialize as 1.
+    #[serde(default = "default_btw_attempts")]
+    pub attempts: u32,
+}
+
+fn default_btw_attempts() -> u32 {
+    1
 }
 
 // Local feedback persistence types

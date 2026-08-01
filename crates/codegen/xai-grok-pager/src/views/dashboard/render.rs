@@ -153,6 +153,13 @@ pub fn render_dashboard(
         home,
         roster,
     );
+    // Chat-conversation roster rows can't be deleted from the dashboard
+    // yet — record them so the `[✗]` and Ctrl+X arm both skip them.
+    state.conversation_row_ids = roster
+        .iter()
+        .filter(|e| e.origin.kind == "conversation")
+        .map(|e| e.session_id.clone())
+        .collect();
     state.reanchor_selection(&rows);
 
     // DO NOT GC pinned/reorder at render time. The old
@@ -593,6 +600,7 @@ fn render_dashboard_banner(
     use ratatui::widgets::{Block, Borders, Widget};
 
     state.row_rects.clear();
+    state.row_delete_rects.clear();
     state.section_rects.clear();
     if area.area() == 0 || area.height < 3 {
         return;
@@ -1550,6 +1558,7 @@ fn render_rows(
     state: &mut DashboardState,
 ) {
     state.row_rects.clear();
+    state.row_delete_rects.clear();
     state.section_rects.clear();
     state.idle_overflow_rect = None;
     if area.area() == 0 {
@@ -2168,7 +2177,7 @@ fn render_row(
     rect: Rect,
     theme: &Theme,
     row: &DashboardRow,
-    state: &DashboardState,
+    state: &mut DashboardState,
 ) {
     if rect.area() == 0 {
         return;
@@ -2304,25 +2313,57 @@ fn render_row(
         Style::default().bg(bg).fg(icon_color),
     );
 
-    // Age column — reserve up to 8 cells on the right edge (to fit
-    // "just now"). Uses coarse buckets: just now / m / h / d / mo / y.
+    let armed_delete = state.armed_delete_row_ref();
+    let show_delete = !row.is_more_placeholder
+        && !row.id.is_subagent()
+        && row.state.allows_delete()
+        && !state.row_is_conversation(&row.id)
+        && (state.hovered_row.as_ref() == Some(&row.id) || armed_delete == Some(&row.id));
+    let delete_label = crate::glyphs::ballot_x_button();
+    let delete_w = UnicodeWidthStr::width(delete_label) as u16;
     let age = format_time_ago(row.last_change_at.elapsed().unwrap_or_default());
     let age_str = format!("{age:>6}");
     let age_w = UnicodeWidthStr::width(age_str.as_str()) as u16;
-    let age_x = rect.x + rect.width.saturating_sub(age_w + 1);
-    if age_x > content_start_x {
-        buf.set_string(
-            age_x,
-            title_y,
-            &age_str,
-            Style::default().bg(bg).fg(theme.gray),
-        );
+    let right_w = if show_delete { delete_w } else { age_w };
+    let right_x = rect.x + rect.width.saturating_sub(right_w + 1);
+    if right_x > content_start_x {
+        if show_delete {
+            let fg = if state.hovered_delete.as_ref() == Some(&row.id)
+                || armed_delete == Some(&row.id)
+            {
+                theme.accent_error
+            } else {
+                theme.text_secondary
+            };
+            buf.set_string(
+                right_x,
+                title_y,
+                delete_label,
+                Style::default().bg(bg).fg(fg),
+            );
+            state.row_delete_rects.push((
+                row.id.clone(),
+                Rect {
+                    x: right_x,
+                    y: title_y,
+                    width: delete_w,
+                    height: 1,
+                },
+            ));
+        } else {
+            buf.set_string(
+                right_x,
+                title_y,
+                &age_str,
+                Style::default().bg(bg).fg(theme.gray),
+            );
+        }
     }
 
     // Title text: `{label}` (bright) + ` · {subtitle}` (dim) +
     // optional `[badge]` chips for failed / pinned.
     // Trimmed to fit between the icon and the age column.
-    let title_avail = age_x.saturating_sub(content_start_x).saturating_sub(2);
+    let title_avail = right_x.saturating_sub(content_start_x).saturating_sub(2);
     let mut cx = content_start_x;
     if title_avail > 0 {
         let label_style = Style::default().bg(bg).fg(if row.is_more_placeholder {
@@ -2364,9 +2405,9 @@ fn render_row(
 
         // Subtitle: ` · xai my-branch-2 worktree`.
         if let Some(sub) = row.subtitle.as_deref()
-            && cx + 4 < age_x
+            && cx + 4 < right_x
         {
-            let remaining = age_x.saturating_sub(cx).saturating_sub(2) as usize;
+            let remaining = right_x.saturating_sub(cx).saturating_sub(2) as usize;
             let sub_str = format!(" \u{00B7} {sub}");
             let sub_trunc = truncate_str(&sub_str, remaining);
             let sub_w = UnicodeWidthStr::width(&sub_trunc[..]) as u16;
@@ -2398,7 +2439,7 @@ fn render_row(
             };
             let chip = format!(" [{label}]");
             let cw = UnicodeWidthStr::width(chip.as_str()) as u16;
-            if cx + cw + 1 < age_x {
+            if cx + cw + 1 < right_x {
                 buf.set_string(
                     cx,
                     title_y,
@@ -2469,6 +2510,7 @@ fn render_narrow_rows(
     state: &mut DashboardState,
 ) {
     state.row_rects.clear();
+    state.row_delete_rects.clear();
     state.section_rects.clear();
     state.idle_overflow_rect = None;
     if area.area() == 0 {
@@ -2639,7 +2681,18 @@ fn render_narrow_rows(
             let indent_w = UnicodeWidthStr::width(indent.as_str()) as u16;
             let gap_after_marker = 1u16;
             let chrome = marker_w + gap_after_marker + indent_w + icon_w + 1;
-            let label = truncate_str(&row.label, body_width.saturating_sub(chrome) as usize);
+            let armed_here = state.armed_delete_row_ref() == Some(&row.id);
+            let show_delete = !row.is_more_placeholder
+                && !row.id.is_subagent()
+                && row.state.allows_delete()
+                && !state.row_is_conversation(&row.id)
+                && (hovered || armed_here);
+            let delete_label = crate::glyphs::ballot_x_button();
+            let delete_w = UnicodeWidthStr::width(delete_label) as u16;
+            let label_budget = body_width
+                .saturating_sub(chrome)
+                .saturating_sub(if show_delete { delete_w + 1 } else { 0 });
+            let label = truncate_str(&row.label, label_budget as usize);
             let line = format!("{marker} {indent}{icon} {label}");
             buf.set_string(
                 area.x,
@@ -2647,6 +2700,18 @@ fn render_narrow_rows(
                 line,
                 Style::default().fg(theme.text_primary).bg(bg),
             );
+            if show_delete && body_width > chrome + delete_w {
+                let dx = area.x + body_width.saturating_sub(delete_w);
+                let fg = if state.hovered_delete.as_ref() == Some(&row.id) || armed_here {
+                    theme.accent_error
+                } else {
+                    theme.text_secondary
+                };
+                buf.set_string(dx, y, delete_label, Style::default().fg(fg).bg(bg));
+                state
+                    .row_delete_rects
+                    .push((row.id.clone(), Rect::new(dx, y, delete_w, 1)));
+            }
         }
         if !row.is_more_placeholder {
             state.row_rects.push((row.id.clone(), line_rect));
@@ -3321,19 +3386,11 @@ fn render_file_search_dropdown_for(
 ///   (no inline approve/reject yet — punted per the user's note
 ///   "maybe its just easier to hit enter and go details view";
 ///   the dashboard is intentionally a navigator, not a permission UI).
-/// - Anything else → `Enter:open · Ctrl+x:stop|close · ?:shortcuts`.
+/// - Anything else → `Enter:open · Ctrl+x:stop|delete · ?:shortcuts`.
 ///
 /// The Ctrl+x chip label follows the selected agent's state: `stop`
 /// for an agent with a live turn (Working, or NeedsInput — paused but
-/// still running, so the first Ctrl+x cancels), `close` for an idle /
-/// quiet one.
-///
-/// The ↑/↓ nav chip is intentionally omitted from every state — the
-/// list is obviously arrow-navigable, and dropping it frees space so
-/// the Ctrl+x chip stays visible while an agent is selected.
-///
-/// Stop-confirm still routes through `with_pending` so the canonical
-/// `press again to close this session` message takes over.
+/// still running, so the first Ctrl+x cancels), `delete` otherwise.
 #[allow(clippy::too_many_arguments)]
 fn render_footer(
     buf: &mut Buffer,
@@ -3376,27 +3433,31 @@ fn render_footer(
         return;
     }
 
-    // Only paint the "press again" hint while the confirm window is
-    // actually live — the dispatcher re-arms (rather than closes) on a
-    // press after [`super::state::STOP_CONFIRM_WINDOW`], so an expired
-    // confirm must not keep claiming the footer (e.g. after a mouse
-    // click moved the selection without a keypress to disarm it).
-    let stop_confirm_live = state
-        .stop_confirm
-        .as_ref()
-        .is_some_and(|(_, t)| t.elapsed() < super::state::STOP_CONFIRM_WINDOW);
-    if stop_confirm_live {
-        let stop_key = registry
-            .find(crate::actions::ActionId::DashboardStop)
-            .map(|d| d.default_key)
-            .unwrap_or_else(|| key!('x', CONTROL));
-        let pending = PendingHint {
-            shortcut: stop_key,
-            label: rust_i18n::t!("hints.close_session"),
-        };
-        ShortcutsBar::new(&[])
-            .with_pending(Some(pending))
-            .render(inner, buf);
+    // A live delete-confirm owns the footer: `y`/`n` when the list is
+    // focused, else the second-`Ctrl+X` "press again" hint. An expired arm
+    // falls through to the normal hints.
+    if state.armed_delete_row_ref().is_some() {
+        if state.list_focused {
+            let hints = vec![
+                HintItem::new(key!('y'), rust_i18n::t!("hints.confirm")),
+                HintItem::new(key!('n'), rust_i18n::t!("hints.cancel")),
+            ];
+            ShortcutsBar::new(&hints)
+                .compact(4, None)
+                .render(inner, buf);
+        } else {
+            let stop_key = registry
+                .find(crate::actions::ActionId::DashboardStop)
+                .map(|d| d.default_key)
+                .unwrap_or_else(|| key!('x', CONTROL));
+            let pending = PendingHint {
+                shortcut: stop_key,
+                label: rust_i18n::t!("hints.delete_row"),
+            };
+            ShortcutsBar::new(&[])
+                .with_pending(Some(pending))
+                .render(inner, buf);
+        }
         return;
     }
 
@@ -3428,23 +3489,16 @@ fn render_footer(
         return;
     }
 
-    // A selected Inactive row is roster-only (owned by another pager
-    // process, never loaded here) — there's nothing running to stop,
-    // so every branch below suppresses its `stop` chip.
-    let stoppable = selected_state != Some(RowState::Inactive);
-
-    // Ctrl+x cancels the live turn for a busy agent, else closes the
-    // session — mirroring `dispatch_dashboard_stop` (cancel-if-running,
-    // else close). A `NeedsInput` row keeps a paused-but-running turn (the
-    // permission/Q&A prompt suspends it, never idles it), so its first
-    // Ctrl+x cancels too — label it `stop`, not `close`.
+    let show_ctrl_x = selected_state.is_some_and(|s| {
+        matches!(s, RowState::Working | RowState::NeedsInput) || s.allows_delete()
+    });
     let stop_label = if matches!(
         selected_state,
         Some(RowState::Working | RowState::NeedsInput)
     ) {
         rust_i18n::t!("hints.stop")
     } else {
-        rust_i18n::t!("hints.close")
+        rust_i18n::t!("hints.delete_row")
     };
 
     // Overview list focused (via Tab) — navigation hints: arrows / j-k
@@ -3512,11 +3566,10 @@ fn render_footer(
             HintItem::new(key!(Enter), rust_i18n::t!("hints.open")),
             HintItem::new(key!(Tab), rust_i18n::t!("hints.input")),
         ];
-        if stoppable {
-            // Pinned so the stop chip always survives compact
-            // truncation while an agent row is selected.
+        if show_ctrl_x {
             hints.push(HintItem::new(stop, stop_label).pinned());
         }
+
         ShortcutsBar::new(&hints)
             .compact(
                 4,
@@ -3632,7 +3685,7 @@ fn render_footer(
                 tab_hint,
                 esc_hint,
             ];
-            if stoppable {
+            if show_ctrl_x {
                 h.push(HintItem::new(stop, stop_label).pinned());
             }
             h
@@ -3656,7 +3709,7 @@ fn render_footer(
                     HintItem::new(send_open, rust_i18n::t!("hints.send_open")),
                 );
             }
-            if stoppable {
+            if show_ctrl_x {
                 h.push(HintItem::new(stop, stop_label).pinned());
             }
             h
@@ -3668,7 +3721,7 @@ fn render_footer(
                 tab_hint,
                 esc_hint,
             ];
-            if stoppable {
+            if show_ctrl_x {
                 h.push(HintItem::new(stop, stop_label).pinned());
             }
             h
@@ -3688,7 +3741,7 @@ fn render_footer(
                 tab_hint,
                 esc_hint,
             ];
-            if stoppable {
+            if show_ctrl_x {
                 h.push(HintItem::new(stop, stop_label).pinned());
             }
             h
@@ -3760,10 +3813,7 @@ fn render_footer(
             h.push(HintItem::new(send_key, rust_i18n::t!("hints.send")));
             h.push(HintItem::new(send_open, rust_i18n::t!("hints.send_open")));
         }
-        if stoppable {
-            // Pinned so Ctrl+x always shows while an agent row is
-            // selected, even if earlier chips would otherwise fill the
-            // compact bar.
+        if show_ctrl_x {
             h.push(HintItem::new(stop, stop_label).pinned());
         }
         h
@@ -4483,6 +4533,57 @@ mod tests {
         assert!(
             !content.contains("No agents yet"),
             "must not show empty-state while roster rows exist, got: {content:?}"
+        );
+    }
+
+    /// Hover `[✗]` paints only on settled rows, never on a busy one.
+    #[test]
+    fn render_dashboard_hover_shows_delete_x_only_for_settled_rows() {
+        use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
+
+        let ballot = crate::glyphs::ballot_x_button();
+        let render_with = |activity: RosterActivity| -> String {
+            let area = Rect::new(0, 0, 100, 24);
+            let mut buf = Buffer::empty(area);
+            let mut agents: IndexMap<AgentId, AgentView> = IndexMap::new();
+            let mut state = DashboardState::new();
+            let registry = crate::actions::ActionRegistry::defaults();
+            let roster = [RosterEntry {
+                session_id: "sess-hover".into(),
+                title: Some("Hover me".into()),
+                cwd: "/repo/work".into(),
+                is_worktree: false,
+                model_id: None,
+                yolo: false,
+                activity,
+                resident: true,
+                last_change_unix_ms: 1_725_000_000_000,
+                origin: RosterOrigin::default(),
+            }];
+            state.hovered_row = Some(DashboardRowId::Roster {
+                session_id: "sess-hover".into(),
+            });
+            let _ = render_dashboard(
+                &mut buf,
+                area,
+                &mut state,
+                &mut agents,
+                &registry,
+                None,
+                &roster,
+                false,
+                None,
+            );
+            buf_to_text(&buf)
+        };
+
+        assert!(
+            render_with(RosterActivity::Completed).contains(ballot),
+            "hovering a settled (completed) row must show the [✗] delete affordance",
+        );
+        assert!(
+            !render_with(RosterActivity::Working).contains(ballot),
+            "hovering a busy (working) row must NOT show the [✗] delete affordance",
         );
     }
 
@@ -5306,12 +5407,12 @@ mod tests {
     #[test]
     fn render_row_centers_title_only_content() {
         let theme = Theme::current();
-        let state = DashboardState::new();
+        let mut state = DashboardState::new();
 
         // Title-only → centered on the middle line.
         let row = header_test_row(1, RowState::Idle, "solo");
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 3));
-        render_row(&mut buf, Rect::new(0, 0, 40, 3), &theme, &row, &state);
+        render_row(&mut buf, Rect::new(0, 0, 40, 3), &theme, &row, &mut state);
         assert_eq!(buf[(4, 1)].symbol(), "s", "title must sit on line 1");
         assert_eq!(buf[(4, 0)].symbol(), " ", "line 0 must be padding");
         assert_eq!(buf[(4, 2)].symbol(), " ", "line 2 must be padding");
@@ -5320,7 +5421,7 @@ mod tests {
         let mut row = header_test_row(2, RowState::Working, "pair");
         row.secondary_line = Some("Responding".to_string());
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 3));
-        render_row(&mut buf, Rect::new(0, 0, 40, 3), &theme, &row, &state);
+        render_row(&mut buf, Rect::new(0, 0, 40, 3), &theme, &row, &mut state);
         assert_eq!(buf[(4, 0)].symbol(), "p", "title must sit on line 0");
         assert_eq!(buf[(4, 1)].symbol(), "R", "secondary must sit on line 1");
         assert_eq!(buf[(4, 2)].symbol(), " ", "line 2 must be padding");
@@ -6836,7 +6937,7 @@ mod tests {
             is_more_placeholder: false,
             more_count: 0,
         };
-        render_row(&mut buf, Rect::new(0, 0, 100, 2), &theme, &row, &state);
+        render_row(&mut buf, Rect::new(0, 0, 100, 2), &theme, &row, &mut state);
 
         // Title row.
         assert_eq!(
@@ -6926,13 +7027,13 @@ mod tests {
 
         // Unselected → dim secondary.
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
-        let state_unselected = DashboardState::new();
+        let mut state_unselected = DashboardState::new();
         render_row(
             &mut buf,
             Rect::new(0, 0, 100, 2),
             &theme,
             &row,
-            &state_unselected,
+            &mut state_unselected,
         );
         assert_eq!(
             buf[(4, 1)].fg,
@@ -6949,7 +7050,7 @@ mod tests {
             Rect::new(0, 0, 100, 2),
             &theme,
             &row,
-            &state_selected,
+            &mut state_selected,
         );
         assert_eq!(
             buf[(4, 1)].fg,
@@ -6995,7 +7096,7 @@ mod tests {
                 Rect::new(0, 0, 100, 2),
                 &theme,
                 &make_row(),
-                &state,
+                &mut state,
             );
             buf
         };
@@ -7056,7 +7157,7 @@ mod tests {
         use std::time::SystemTime;
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
         let theme = Theme::current();
-        let state = DashboardState::new();
+        let mut state = DashboardState::new();
         let row = DashboardRow {
             id: DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
             label: "New session #abc12345".to_string(),
@@ -7076,7 +7177,7 @@ mod tests {
             is_more_placeholder: false,
             more_count: 0,
         };
-        render_row(&mut buf, Rect::new(0, 0, 100, 2), &theme, &row, &state);
+        render_row(&mut buf, Rect::new(0, 0, 100, 2), &theme, &row, &mut state);
 
         // Title starts at col 4: "New session" (11 chars, cols 4..15) then
         // " #abc12345" (suffix from col 15).
@@ -8079,10 +8180,6 @@ mod tests {
         );
     }
 
-    /// When peek is active, the footer flips to peek-
-    /// mode hints (`enter:open · esc:New Agent · ctrl+x:close`). The
-    /// nav chip is dropped (saving space) and the Ctrl+x chip stays
-    /// visible while the agent is selected.
     #[test]
     fn render_footer_peek_mode_shows_peek_hints() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
@@ -8095,8 +8192,8 @@ mod tests {
             &theme,
             &state,
             &registry,
-            None,
-            true, // peek_active
+            Some(RowState::Idle),
+            true,
             None,
         );
         let content = buf_to_text(&buf);
@@ -8104,11 +8201,9 @@ mod tests {
             content.contains(":open") && content.contains(":New Agent"),
             "peek-mode footer must include open + New Agent (unselect) hints, got: {content:?}",
         );
-        // The stop chip stays visible while an agent is selected. With
-        // no row state passed (None) the label is the idle-style `close`.
         assert!(
-            content.contains(":close"),
-            "peek-mode footer must keep the Ctrl+x stop chip, got: {content:?}",
+            content.contains(":delete"),
+            "peek-mode footer must keep the Ctrl+x delete chip, got: {content:?}",
         );
         // The nav chip is dropped to save bottom-bar space.
         assert!(
@@ -8422,10 +8517,8 @@ mod tests {
         );
     }
 
-    /// An Inactive (roster-only) selection has nothing running to stop —
-    /// the stop chip is suppressed in both focus modes.
     #[test]
-    fn render_footer_inactive_row_hides_stop() {
+    fn render_footer_inactive_row_shows_delete() {
         let theme = Theme::current();
         let registry = crate::actions::ActionRegistry::defaults();
 
@@ -8445,15 +8538,14 @@ mod tests {
         );
         let content = buf_to_text(&buf);
         assert!(
-            !content.contains(":stop") && !content.contains(":close"),
-            "inactive row footer must NOT show the stop chip, got: {content:?}",
+            content.contains(":delete"),
+            "list-focused idle-row footer must show the delete chip, got: {content:?}",
         );
         assert!(
             content.contains(":open"),
-            "inactive row footer keeps the open chip, got: {content:?}",
+            "list-focused idle-row footer must show the open chip, got: {content:?}",
         );
 
-        // List focused (Tab) — same suppression.
         state.list_focused = true;
         let mut buf2 = Buffer::empty(Rect::new(0, 0, 200, 1));
         render_footer(
@@ -8467,13 +8559,8 @@ mod tests {
             None,
         );
         let content2 = buf_to_text(&buf2);
-        assert!(
-            !content2.contains(":stop") && !content2.contains(":close"),
-            "list-focused inactive footer must NOT show the stop chip, got: {content2:?}",
-        );
+        assert!(content2.contains(":delete"), "{content2:?}");
 
-        // Control: an Idle selection keeps the stop chip in both modes —
-        // labelled `close` (the session is idle, so Ctrl+x closes it).
         state.list_focused = false;
         let mut buf3 = Buffer::empty(Rect::new(0, 0, 200, 1));
         render_footer(
@@ -8487,16 +8574,9 @@ mod tests {
             None,
         );
         let content3 = buf_to_text(&buf3);
-        assert!(
-            content3.contains(":close"),
-            "idle row footer must keep the stop chip labelled `close`, got: {content3:?}",
-        );
+        assert!(content3.contains(":delete"), "{content3:?}");
     }
 
-    /// The Ctrl+x chip label follows the selected agent's state: a
-    /// Working or NeedsInput agent shows `stop` (cancel the turn — a
-    /// NeedsInput row keeps a paused-but-running turn), while an idle /
-    /// quiet one shows `close` (close the session).
     #[test]
     fn render_footer_stop_label_follows_state() {
         let theme = Theme::current();
@@ -8541,7 +8621,7 @@ mod tests {
             "NeedsInput agent footer must label Ctrl+x as `stop`, got: {needs_input:?}",
         );
 
-        // Idle → `close`.
+        // Idle → `delete`.
         let mut buf2 = Buffer::empty(Rect::new(0, 0, 200, 1));
         render_footer(
             &mut buf2,
@@ -8555,8 +8635,8 @@ mod tests {
         );
         let idle = buf_to_text(&buf2);
         assert!(
-            idle.contains(":close") && !idle.contains(":stop"),
-            "Idle agent footer must label Ctrl+x as `close`, got: {idle:?}",
+            idle.contains(":delete") && !idle.contains(":stop"),
+            "Idle agent footer must label Ctrl+x as `delete`, got: {idle:?}",
         );
     }
 
@@ -8881,17 +8961,14 @@ mod tests {
         );
     }
 
-    /// Stop-confirm armed routes through `ShortcutsBar::with_pending`.
+    /// Delete-confirm armed while the input is focused routes through
+    /// `ShortcutsBar::with_pending` ("press Ctrl+x again to delete").
     #[test]
-    fn render_footer_stop_confirm_uses_pending_hint() {
-        use std::time::Instant;
+    fn render_footer_delete_confirm_uses_pending_hint() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
-        state.stop_confirm = Some((
-            DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
-            Instant::now(),
-        ));
+        state.arm_delete(DashboardRowId::TopLevel(crate::app::agent::AgentId(1)));
         let registry = crate::actions::ActionRegistry::defaults();
         render_footer(
             &mut buf,
@@ -8909,26 +8986,26 @@ mod tests {
             "stop-confirm footer must say `press again`, got: {content:?}",
         );
         assert!(
-            content.to_lowercase().contains("close this session"),
-            "stop-confirm footer must mention closing the session, got: {content:?}",
+            content.to_lowercase().contains("delete this session"),
+            "delete-confirm footer must name the action, got: {content:?}",
         );
     }
 
-    /// An EXPIRED stop-confirm (older than `STOP_CONFIRM_WINDOW`) must
+    /// An EXPIRED delete-confirm (older than `CONFIRM_WINDOW`) must
     /// not claim the footer — the dispatcher would re-arm rather than
-    /// close on the next press, so "press again" would lie. Regular
+    /// delete on the next press, so "press again" would lie. Regular
     /// hints render instead (e.g. after a mouse click moved the
     /// selection without a keypress to disarm the confirm).
     #[test]
-    fn render_footer_expired_stop_confirm_shows_regular_hints() {
+    fn render_footer_expired_delete_confirm_shows_regular_hints() {
         use std::time::{Duration, Instant};
         let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
         let theme = Theme::current();
         let mut state = DashboardState::new();
         state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(1)));
-        state.stop_confirm = Some((
+        state.delete_confirm = Some((
             DashboardRowId::TopLevel(crate::app::agent::AgentId(1)),
-            Instant::now() - (super::super::state::STOP_CONFIRM_WINDOW + Duration::from_secs(1)),
+            Instant::now() - (super::super::state::CONFIRM_WINDOW + Duration::from_secs(1)),
         ));
         let registry = crate::actions::ActionRegistry::defaults();
         render_footer(

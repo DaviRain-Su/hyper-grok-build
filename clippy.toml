@@ -24,4 +24,5 @@ disallowed-methods = [
     { path = "tokio::fs::canonicalize", reason = "returns \\\\?\\ verbatim paths on Windows; use xai_grok_tools::util::fs helpers or spawn_blocking + dunce::canonicalize" },
     { path = "std::process::Command::spawn", reason = "an unenrolled child outlives its session; use xai_tty_utils::ProcessScope::enroll" },
     { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use xai_tty_utils::ProcessScope::enroll", allow-invalid = true },
+    { path = "portable_pty::SlavePty::spawn_command", reason = "an unenrolled pty child outlives its session; enroll the shell with xai_tty_utils::ProcessScope::enroll_terminal_pid" },
 ]

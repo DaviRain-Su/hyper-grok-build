@@ -173,8 +173,10 @@ impl xai_tool_runtime::Tool for WaitTasksTool {
             .timeout_ms
             .map(std::time::Duration::from_millis)
             .unwrap_or(super::DEFAULT_WAIT_TIMEOUT);
-        let timeout =
-            crate::implementations::grok_build::task_output::capped_wait_timeout(input.timeout_ms);
+        let timeout = crate::implementations::grok_build::task_output::capped_wait_timeout(
+            input.timeout_ms,
+            crate::implementations::grok_build::task_output::max_wait_block(),
+        );
 
         let (terminal, backend, read_file_name, max_output_bytes) = {
             let res = resources.lock().await;

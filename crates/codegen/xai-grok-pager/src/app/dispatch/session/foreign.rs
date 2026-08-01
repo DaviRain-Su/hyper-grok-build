@@ -138,6 +138,23 @@ impl PickerSurface<'_> {
     }
 }
 
+/// Kind facet for welcome multi-source history under `--chat`.
+///
+/// Sandbox → `chat` (gateway); Local → `build` (local-disk). Modal / non-welcome
+/// fetches leave this `None` so the shell keeps its default chat-mode force.
+pub(in crate::app::dispatch) fn welcome_history_kind_filter(app: &AppView) -> Option<Vec<String>> {
+    #[cfg(feature = "local-workspace")]
+    {
+        if app.chat_mode && matches!(app.active_view, crate::app::app_view::ActiveView::Welcome) {
+            return Some(vec![
+                app.welcome_workspace_mode.history_kind_filter().to_string(),
+            ]);
+        }
+    }
+    let _ = app;
+    None
+}
+
 pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -> Vec<Effect> {
     app.session_picker_detail_generation += 1;
     app.session_picker_loading = true;
@@ -154,9 +171,18 @@ pub(in crate::app::dispatch) fn dispatch_fetch_session_list(app: &mut AppView) -
     }
     app.foreign_session_scan_seq += 1;
     let foreign_seq = app.foreign_session_scan_seq;
+    let kind_filter = welcome_history_kind_filter(app);
+    #[cfg(feature = "local-workspace")]
+    crate::views::welcome::workspace_mode::log_history_source(
+        "session_list_fetch_dispatch",
+        Some(app.welcome_workspace_mode),
+        kind_filter.as_deref(),
+        None,
+    );
     let mut effects = vec![Effect::FetchSessionList {
         query: None,
         seq: app.session_picker_list_seq,
+        kind_filter,
     }];
     let foreign_effect = if app.chat_mode {
         app.foreign_scan_coordinator.begin_request(foreign_seq);
@@ -269,20 +295,19 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         app.show_toast(&notice);
     } else if scope.is_relaxed()
         && app.session_picker_relaxed_notified_for.as_deref() != Some(app.cwd.as_path())
-    {
         // Welcome view drops toasts; don't consume the one-shot notice unless
         // it can render.
-        if !matches!(app.active_view, crate::app::app_view::ActiveView::Welcome) {
-            // Notify once per directory; the browse is scoped to `app.cwd`.
-            app.session_picker_relaxed_notified_for = Some(app.cwd.clone());
-            let message = match scope {
-                ListScope::Repo => {
-                    "No sessions in this directory. Showing other sessions from this repository."
-                }
-                _ => "No sessions in this directory. Showing sessions from other directories.",
-            };
-            app.show_toast(message);
-        }
+        && !matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
+    {
+        // Notify once per directory; the browse is scoped to `app.cwd`.
+        app.session_picker_relaxed_notified_for = Some(app.cwd.clone());
+        let message = match scope {
+            ListScope::Repo => {
+                "No sessions in this directory. Showing other sessions from this repository."
+            }
+            _ => "No sessions in this directory. Showing sessions from other directories.",
+        };
+        app.show_toast(message);
     }
     // A cwd-scoped browse clears the latch so a later relax re-notifies; search
     // responses leave it alone.

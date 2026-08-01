@@ -89,7 +89,8 @@ The dispatch input uses the same prompt chrome as the agent view. Press
 | `Ctrl+R` | Rename selected row |
 | `Ctrl+T` | Pin / unpin |
 | `Ctrl+G` | Toggle grouping (state ↔ directory) |
-| `Ctrl+X` | Stop / kill (two presses within 2s to close a session) |
+| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
+| Hover + click `[✗]` | Permanently delete an idle/done row (click again to confirm) |
 | `Shift+↑` / `Shift+↓` | Reorder pinned rows |
 | `Esc` | Step back: cancel search → close peek → clear filter → unfocus dispatch → unselect row → exit. Never clears a typed dispatch draft (`Ctrl+U` / `Ctrl+C` for that) |
 | `Ctrl+\` | Return from details view, or exit dashboard |
@@ -130,11 +131,14 @@ There is **no** “mark completed” command. Row state is derived from the agen
 - **Completed** / **Failed** when work ends on its own (turn finished and no
   background task / monitor / `/loop` still running).
 - **`Ctrl+X` once** while a turn is running cancels the turn.
-- **`Ctrl+X` twice** (within 2s) on an idle / stopped row **closes** the
-  session and removes it from the live roster.
+- **`Ctrl+X` twice** (within 2s) **permanently deletes** the session
+  (same as `/delete`). Hover an idle/done row to swap age for `[✗]` and
+  click twice to confirm.
 - In the details view, `/exit` also closes the session (Esc only returns).
+  `/delete` inside an attached agent wipes that session and returns home.
 
-Use close/stop when you want a row gone; there is no manual complete flag.
+There is no manual complete flag. Use `/exit` to leave a session without
+deleting history.
 
 ---
 

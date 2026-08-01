@@ -21,11 +21,12 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration as StdDuration, Instant, SystemTime};
+use std::time::{Duration as StdDuration, Instant};
 
 use parking_lot::RwLock;
 
 use super::AuthManager;
+use crate::util::dual_clock::DualClock;
 
 /// Max lifetime of the "system sleep imminent" gate. A wake event normally
 /// clears it; this is the safety bound so a *missed* wake event can never
@@ -40,7 +41,7 @@ pub(super) const SLEEP_GATE_MAX: StdDuration = StdDuration::from_secs(120);
 /// interactive Mac with no display, whose system video capability is never set
 /// — which would otherwise defer every refresh forever and reach the same
 /// logged-out state this guard prevents. Bounded on two clocks (see
-/// [`GateRaise`]) so it also survives the machine sleeping between dark wakes.
+/// [`DualClock`]) so it also survives the machine sleeping between dark wakes.
 ///
 /// The straddle risk of one forced refresh is far smaller than a guaranteed
 /// logout: requests only force through while the machine is busy enough to
@@ -65,57 +66,23 @@ pub(super) const SLEEP_ACK_MAX_WAIT: StdDuration = StdDuration::from_secs(20);
 #[cfg(not(target_os = "macos"))]
 pub(super) const SLEEP_ACK_MAX_WAIT: StdDuration = StdDuration::from_secs(3);
 
-/// When a gate was raised, captured on *two* clocks so the [`SLEEP_GATE_MAX`]
-/// backstop survives a system sleep.
-///
-/// `Instant` is monotonic but, on macOS (`mach_absolute_time`) and Linux
-/// (`CLOCK_MONOTONIC`), *pauses while the machine is asleep*. A gate raised just
-/// before a long sleep would therefore never auto-expire on the monotonic clock
-/// alone — the exact bug that let an expired token reach the server and 401.
-/// The wall clock (`SystemTime`) keeps advancing through sleep, so we expire the
-/// gate once *either* clock passes the bound:
-/// - the monotonic clock bounds elapsed *awake* time (immune to wall-clock
-///   jumps from NTP / manual changes), and
-/// - the wall clock bounds elapsed *real* time (immune to the sleep pause).
-#[derive(Clone, Copy)]
-pub(super) struct GateRaise {
-    /// Monotonic; pauses during sleep. Bounds elapsed *awake* time.
-    pub(super) mono: Instant,
-    /// Wall clock; advances through sleep. Bounds elapsed *real* time.
-    pub(super) wall: SystemTime,
-}
-
-impl GateRaise {
-    pub(super) fn now() -> Self {
-        Self {
-            mono: Instant::now(),
-            wall: SystemTime::now(),
-        }
-    }
-
-    /// Elapsed on each clock as `(monotonic, wall)`. Wall-clock elapsed is
-    /// clamped to zero if the clock ran backwards (NTP step / manual change) so
-    /// a backward jump can never *extend* the gate — the monotonic clock still
-    /// bounds it in that case.
-    pub(super) fn elapsed(&self) -> (StdDuration, StdDuration) {
-        (
-            self.mono.elapsed(),
-            self.wall.elapsed().unwrap_or(StdDuration::ZERO),
-        )
-    }
-}
-
 /// A gate `refresh_chain` consults to avoid *starting* an IdP refresh just
 /// before sleep. Only *defers* a not-yet-started refresh; an in-flight one is
 /// left to finish (see [`AuthManager::refresh_chain`]).
+///
+/// The raise timestamp is a [`DualClock`] so the [`SLEEP_GATE_MAX`] backstop
+/// survives the sleep itself: a gate raised just before a long sleep would
+/// never auto-expire on the monotonic clock alone — the exact bug that let
+/// an expired token reach the server and 401 — so the gate expires once
+/// *either* clock passes the bound.
 #[derive(Default)]
 pub(super) struct SleepGate {
-    pub(super) raised_at: RwLock<Option<GateRaise>>,
+    pub(super) raised_at: RwLock<Option<DualClock>>,
 }
 
 impl SleepGate {
     pub(super) fn raise(&self) {
-        *self.raised_at.write() = Some(GateRaise::now());
+        *self.raised_at.write() = Some(DualClock::now());
         xai_grok_telemetry::unified_log::warn("auth.sleep.gate_set", None, None);
     }
 
@@ -142,7 +109,7 @@ impl SleepGate {
     /// A stale gate (a missed/late wake event) is lazily lowered here so it can
     /// never permanently block refresh; this read can therefore have a side
     /// effect. The gate expires once *either* clock passes [`SLEEP_GATE_MAX`]
-    /// (see [`GateRaise`]): without the wall-clock arm, a gate raised before a
+    /// (see [`DualClock`]): without the wall-clock arm, a gate raised before a
     /// long sleep would never auto-expire, because the monotonic clock pauses
     /// while the machine is asleep.
     pub(super) fn is_gated(&self) -> bool {
@@ -355,7 +322,7 @@ impl AuthManager {
     /// in a dark wake — bounded so deferral can never be indefinite.
     ///
     /// Tracks when the current unbroken run of dark-wake deferrals began (on two
-    /// clocks; see [`GateRaise`]). While inside the [`DARK_WAKE_DEFER_MAX`]
+    /// clocks; see [`DualClock`]). While inside the [`DARK_WAKE_DEFER_MAX`]
     /// budget it returns `true` (defer). Once either clock passes the bound it
     /// forces one refresh through (`false`) and resets the clock, so a machine
     /// stuck reporting a continuous dark wake refreshes periodically instead of
@@ -375,7 +342,7 @@ impl AuthManager {
         }
         let Some(raise) = *run else {
             // First deferral of this dark-wake run: start the budget clock.
-            *run = Some(GateRaise::now());
+            *run = Some(DualClock::now());
             return true;
         };
         let (mono, wall) = raise.elapsed();

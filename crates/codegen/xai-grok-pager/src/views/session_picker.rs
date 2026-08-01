@@ -78,6 +78,89 @@ pub enum PickerItem {
     Content { hit_index: usize },
 }
 
+/// A session armed for deletion, captured on `d` so the `y` confirm keeps
+/// a valid `(source, session_id, cwd)` even if the lists shift. Shared by
+/// the welcome and modal `/resume` pickers so they can't drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDelete {
+    pub source: String,
+    pub session_id: String,
+    pub cwd: String,
+}
+
+/// Outcome of routing a key through an armed [`PendingDelete`] confirm.
+pub(crate) enum PendingDeleteKey {
+    /// `y`: caller should delete this session.
+    Confirm(PendingDelete),
+    /// `n`: arm cleared; caller should redraw.
+    Cancel,
+    /// Other key: arm cleared, but the key should still be processed.
+    Disarmed,
+    /// Nothing armed, or not an unmodified key press.
+    NotArmed,
+}
+
+/// Arm a [`PendingDelete`] from the selected row, or `None` if it can't be
+/// deleted (foreign source or non-selectable position).
+pub(crate) fn pending_delete_from_selection(
+    selected: usize,
+    entry_map: &[Option<PickerItem>],
+    entries: Option<&[SessionPickerEntry]>,
+    content_results: Option<&[xai_grok_shell::extensions::session_search::SearchSessionHit]>,
+) -> Option<PendingDelete> {
+    match entry_map.get(selected).and_then(|e| e.as_ref())? {
+        PickerItem::Fuzzy { original_index } => entries
+            .and_then(|e| e.get(*original_index))
+            .filter(|entry| !crate::app::is_foreign_picker_source(&entry.source))
+            .map(|e| PendingDelete {
+                source: e.source.clone(),
+                session_id: e.id.clone(),
+                cwd: e.cwd.clone(),
+            }),
+        PickerItem::Content { hit_index } => {
+            content_results
+                .and_then(|h| h.get(*hit_index))
+                .map(|h| PendingDelete {
+                    source: "local".into(),
+                    session_id: h.session_id.clone(),
+                    cwd: h.cwd.clone(),
+                })
+        }
+    }
+}
+
+/// Route a key through an armed [`PendingDelete`]: `y` confirms, `n`
+/// cancels, any other unmodified key disarms and falls through.
+pub(crate) fn handle_pending_delete_key(
+    pending: &mut Option<PendingDelete>,
+    ev: &crossterm::event::Event,
+) -> PendingDeleteKey {
+    use crossterm::event::{Event, KeyCode, KeyEventKind};
+    if pending.is_none() {
+        return PendingDeleteKey::NotArmed;
+    }
+    let Event::Key(k) = ev else {
+        return PendingDeleteKey::NotArmed;
+    };
+    if k.kind != KeyEventKind::Press || !k.modifiers.is_empty() {
+        return PendingDeleteKey::NotArmed;
+    }
+    match k.code {
+        KeyCode::Char('y') => pending
+            .take()
+            .map(PendingDeleteKey::Confirm)
+            .unwrap_or(PendingDeleteKey::Cancel),
+        KeyCode::Char('n') => {
+            *pending = None;
+            PendingDeleteKey::Cancel
+        }
+        _ => {
+            *pending = None;
+            PendingDeleteKey::Disarmed
+        }
+    }
+}
+
 /// Owned data for a single session picker row. Built once per frame and
 /// then borrowed by `PickerEntry` / `PickerField` slices. Shared between
 /// the welcome-screen `render_session_picker` and the

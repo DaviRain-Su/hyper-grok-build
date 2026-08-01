@@ -133,8 +133,17 @@ fn enqueue_permission(
     let subagent_label = resolve_subagent_label(agent, &perm.request.session_id);
 
     // 3. Build title and description from the tool call.
-    let (title, description, bash_command_raw) =
-        build_permission_display(&perm.request, bash_highlights.as_ref());
+    let (title, description, bash_command_raw) = build_permission_display(
+        &perm.request,
+        bash_highlights.as_ref(),
+        #[cfg(feature = "local-workspace")]
+        matches!(
+            agent.workspace_mode,
+            crate::views::welcome::WelcomeWorkspaceMode::LocalWorkspace
+        ),
+        #[cfg(not(feature = "local-workspace"))]
+        false,
+    );
 
     // 4. Assign a monotonic ID.
     let perm_id = agent.next_perm_req_id;
@@ -236,6 +245,7 @@ fn resolve_subagent_label(agent: &AgentView, session_id: &acp::SessionId) -> Opt
 fn build_permission_display(
     req: &acp::RequestPermissionRequest,
     bash_highlights: Option<&BashCommandHighlights>,
+    session_local_workspace: bool,
 ) -> (String, Vec<String>, Option<String>) {
     let is_bash = bash_highlights.is_some();
 
@@ -303,9 +313,27 @@ fn build_permission_display(
         }
     };
 
+    let title = qualify_permission_title_for_local_workspace(title, session_local_workspace);
     let description = permission_description_lines(req);
     let bash_cmd = if is_execute { raw_command } else { None };
     (title, description, bash_cmd)
+}
+
+/// Per-session HITL copy — not process-global CLI stamp.
+fn qualify_permission_title_for_local_workspace(
+    title: String,
+    session_local_workspace: bool,
+) -> String {
+    if !session_local_workspace {
+        return title;
+    }
+    if title.contains("on your machine") {
+        return title;
+    }
+    if let Some(stripped) = title.strip_suffix('?') {
+        return format!("{stripped} (on your machine)?");
+    }
+    format!("{title} (on your machine)")
 }
 
 /// Lines shown under the permission title: protected-edit note (if any), then
@@ -448,5 +476,22 @@ pub(super) fn apply_recap_block(agent: &mut AgentView, auto: bool, recap_block: 
         None => {
             agent.scrollback.push_block(recap_block);
         }
+    }
+}
+
+#[cfg(all(test, feature = "local-workspace"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_title_qualifies_for_local_workspace() {
+        assert_eq!(
+            qualify_permission_title_for_local_workspace("Allow Edit?".into(), false),
+            "Allow Edit?"
+        );
+        assert_eq!(
+            qualify_permission_title_for_local_workspace("Allow Edit?".into(), true),
+            "Allow Edit (on your machine)?"
+        );
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "0.2.114-r7"
+version = "0.2.117"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -298,7 +298,9 @@ default-bazel = [
     "jemalloc",
     "sandbox-enforce",
     "test-support",
+    "local-workspace",
     ]
+local-workspace = ["xai-grok-shell/local-workspace"]
 # No-op on this crate: the actual `#[global_allocator]` (and the
 # `tikv-jemallocator` dep) live on the composition-root binary
 # `xai-grok-pager-bin`, which owns `main.rs`. Kept as an empty feature so the

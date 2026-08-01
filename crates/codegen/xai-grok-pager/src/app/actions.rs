@@ -133,6 +133,9 @@ pub enum Action {
     /// load effect; under `--chat`, local Build disk rows are refused in
     /// dispatch (never coerced).
     LoadSession(String, Option<std::path::PathBuf>, bool),
+    /// Welcome Local workspace ACK confirmed (y); write ack + start session.
+    #[cfg(feature = "local-workspace")]
+    ConfirmWelcomeLocalWorkspaceAck,
     /// Create a new session with a client-chosen session ID (`--session-id`).
     NewSessionWithId(String),
     /// Startup `--fork-session`: fork `parent` then load the child.
@@ -896,9 +899,12 @@ pub enum Action {
     DashboardCommitRename,
     /// Cancel an in-progress rename without committing.
     DashboardCancelRename,
-    /// Stop / kill the selected row (top-level: cancel turn → close;
-    /// subagent: kill). Double-press protected for top-level rows.
+    /// Ctrl+X on the selected row. Top-level: cancels a running turn on a
+    /// busy row, else double-press permanently deletes an idle row.
+    /// Subagent: kills the subagent.
     DashboardStop,
+    /// Confirm permanent delete of the armed dashboard row.
+    DashboardDelete,
     /// Cycle the dispatch input's mode for the next spawned agent
     /// (Normal → Plan → Always-Approve → Normal). Bound to Shift+Tab.
     DashboardCycleMode,
@@ -1454,6 +1460,8 @@ pub enum AfterSessionDelete {
     Stay,
     /// `/delete` — return to welcome.
     Welcome,
+    /// Stay on the dashboard.
+    Dashboard,
 }
 #[derive(Debug)]
 pub enum Effect {
@@ -1558,6 +1566,10 @@ pub enum Effect {
         /// the response is dropped when no longer current, so out-of-order
         /// completions can't clobber newer results.
         seq: u64,
+        /// Optional unified-list `kind` facet filter (`"chat"` / `"build"`).
+        /// When set, stamped as `_meta["x.ai/facetFilters"].kind` so the shell
+        /// honors multi-source history under `--chat` instead of forcing chat-only.
+        kind_filter: Option<Vec<String>>,
     },
     /// Coalesce picker search keystrokes: fires
     /// [`TaskResult::SessionSearchDebounceExpired`] after a short sleep; the

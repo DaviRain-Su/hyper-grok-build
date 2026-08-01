@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "0.2.114-r7"
+version = "0.2.117"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -97,9 +97,11 @@ default = [
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
+    "local-workspace",
     ]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
+local-workspace = ["xai-grok-pager/local-workspace"]
 release-dist = ["xai-grok-pager/release-dist"]
 # Community Hyper builds: use Hyper branding and the isolated community updater.
 # The updater reads only this fork's GitHub Releases, keeps managed payloads and

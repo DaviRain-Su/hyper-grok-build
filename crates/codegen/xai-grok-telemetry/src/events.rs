@@ -289,14 +289,30 @@ pub struct LoginCompleted {
     pub mid_session: bool,
 }
 
-/// A login flow failed. `error` is the raw error message from the auth flow.
+/// How a login attempt's HTTP request failed.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginFailureKind {
+    /// `is_connect`: a dead TCP connect *or* a TLS handshake killed
+    /// mid-flight. `os_error` tells them apart.
+    TransportConnect,
+    /// In-flight request cut short: reset, close, timeout, body phase.
+    TransportInterrupted,
+    /// Client-side request construction / redirect policy defect.
+    TransportPermanent,
+    Decode,
+}
+
+/// One per failed login attempt, emitted by the login funnel so a retried
+/// request can't inflate the count. Failures that never reached HTTP (user
+/// backed out, loopback bind, id_token validation) are not reported.
 #[derive(Serialize)]
 pub struct LoginFailed {
-    pub method: String,
-    pub mode: String,
+    pub error_kind: LoginFailureKind,
+    /// OS code from the failure's cause chain (54/104 ECONNRESET, 10054 on
+    /// Windows).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub duration_ms: u64,
+    pub os_error: Option<i32>,
 }
 
 /// The user backed out of the login funnel. `stage` is "picker",
@@ -2242,6 +2258,29 @@ mod tests {
                 "mid_session": false,
             })
         );
+    }
+
+    #[test]
+    fn login_failed_serializes_kind_and_os_code() {
+        let v = serde_json::to_value(LoginFailed {
+            error_kind: LoginFailureKind::TransportInterrupted,
+            os_error: Some(104),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "error_kind": "transport_interrupted", "os_error": 104 })
+        );
+    }
+
+    #[test]
+    fn login_failed_omits_absent_os_code() {
+        let v = serde_json::to_value(LoginFailed {
+            error_kind: LoginFailureKind::Decode,
+            os_error: None,
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::json!({ "error_kind": "decode" }));
     }
 
     #[test]

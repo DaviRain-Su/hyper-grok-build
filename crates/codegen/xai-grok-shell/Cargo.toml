@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "0.2.114-r7"
+version = "0.2.117"
 edition.workspace = true
 
 [features]
@@ -12,7 +12,12 @@ dhat-heap = ["dep:dhat"]
 # load, and bench tests. Off by default; the tests/benches that use it declare
 # it via `required-features`.
 test-support = []
-default-bazel = ["test-support"]
+# Local Computer Hub workspace_server (own/attach + crash-restart). Requires
+local-workspace = []
+default-bazel = [
+    "local-workspace",
+    "test-support",
+]
 
 [dependencies]
 xai-grok-extra-ca = { workspace = true }
@@ -201,6 +206,8 @@ windows = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
+ctor = { workspace = true }
 filetime = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
@@ -234,6 +241,10 @@ harness = false
 name = "fork_copy"
 harness = false
 required-features = ["test-support"]
+
+[[bench]]
+name = "skills_watcher_startup"
+harness = false
 
 [[test]]
 name = "test_leader_soak"

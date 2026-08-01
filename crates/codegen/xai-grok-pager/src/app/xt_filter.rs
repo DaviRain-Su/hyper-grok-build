@@ -12,7 +12,7 @@ use super::event_loop::{TimedInputEvent, is_bare_esc_press};
 const XT_ARM_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long a held partial reply waits for its remaining fragments before
-/// being resolved (pi-mono uses 150ms).
+/// being resolved (other terminal UI stacks use 150ms).
 pub(super) const XT_FRAGMENT_TIMEOUT: Duration = Duration::from_millis(150);
 
 /// Total bound on one hold, so a terminal trickling valid payload chars

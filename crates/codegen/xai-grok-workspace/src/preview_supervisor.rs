@@ -400,25 +400,39 @@ fn activity_url(control_port: u16) -> String {
     )
 }
 
+/// One scrape of the proxy's activity endpoint. `last_activity_ms` is the only
+/// required field; the rest default to zero, so a workspace-server running
+/// ahead of the proxy binary degrades to the old behaviour rather than failing.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy, serde::Deserialize)]
+struct ActivitySample {
+    last_activity_ms: u64,
+    #[serde(default)]
+    last_routed_ms: u64,
+    #[serde(default)]
+    ws_tunnels_open: u64,
+    #[serde(default)]
+    routed_requests_in_flight: u64,
+}
+
 /// Classified result of one scrape, so a missing proxy (quiet no-op) is never
 /// confused with a genuine error response or with real activity.
 #[derive(Debug, PartialEq, Eq)]
 enum ScrapeOutcome {
-    /// The proxy answered with a parseable activity stamp (epoch-ms).
-    Stamp(u64),
+    /// The proxy answered with a parseable activity sample.
+    Stamp(ActivitySample),
     /// The proxy isn't reachable (connection refused / not up yet): quiet no-op.
     Absent,
     /// The proxy answered but the response was unusable (error status / bad body).
     BadResponse,
 }
 
-/// Parse `{ "last_activity_ms": <u64> }`; `None` for a malformed body, a missing
-/// field, or a non-integer value.
-fn parse_activity_body(body: &str) -> Option<u64> {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()?
-        .get("last_activity_ms")?
-        .as_u64()
+/// Parse an activity body; `None` for a malformed body or a missing/non-integer
+/// `last_activity_ms`. Unknown fields are ignored so the proxy can add more.
+fn parse_activity_body(body: &str) -> Option<ActivitySample> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    // Required, and must be an integer.
+    value.get("last_activity_ms")?.as_u64()?;
+    serde_json::from_value(value).ok()
 }
 
 /// Classify a completed response by status + body (transport failures are
@@ -428,7 +442,7 @@ fn classify_activity_response(status: u16, body: &str) -> ScrapeOutcome {
         return ScrapeOutcome::BadResponse;
     }
     match parse_activity_body(body) {
-        Some(ms) => ScrapeOutcome::Stamp(ms),
+        Some(sample) => ScrapeOutcome::Stamp(sample),
         None => ScrapeOutcome::BadResponse,
     }
 }
@@ -454,6 +468,19 @@ async fn scrape_activity(client: &reqwest::Client, url: &str) -> ScrapeOutcome {
         }
         Err(e) if e.is_connect() || e.is_timeout() => ScrapeOutcome::Absent,
         Err(_) => ScrapeOutcome::BadResponse,
+    }
+}
+
+/// Clear the mirrored attached-client counters once we have been without
+/// trustworthy data for `grace`. Starts the clock on the first bad scrape.
+fn clear_attached_if_stale(
+    tracker: &ActivityTracker,
+    stale_since: &mut Option<Instant>,
+    grace: Duration,
+) {
+    let since = *stale_since.get_or_insert_with(Instant::now);
+    if since.elapsed() >= grace {
+        tracker.set_preview_attached(0, 0);
     }
 }
 
@@ -507,22 +534,56 @@ async fn scrape_activity_loop(
     // `None` until the first successful scrape establishes a baseline. Baselining
     // (rather than starting at 0) avoids a spurious withhold when a workspace-server
     // restart meets a proxy whose stamp is already non-zero but stale.
-    let mut last_seen: Option<u64> = None;
+    let mut last_seen: Option<ActivitySample> = None;
+    // When we last had trustworthy attached-client data. The counters are the
+    // ONLY hold a WS-only client has — a tunnel writes no stamps — so one bad
+    // scrape must not clear them; but unlike the stamps they do not decay, so a
+    // sustained loss must, or a proxy that dies mid-tunnel holds the sandbox to
+    // the TTL. `Absent` and `BadResponse` both count as loss: one cannot reach
+    // the proxy, the other cannot understand it. The threshold is the stamp
+    // window, so both hold mechanisms expire on the same clock.
+    let attached_grace = Duration::from_millis(tracker.preview_activity_window_ms());
+    let mut attached_stale_since: Option<Instant> = None;
     loop {
         if sleep_or_shutdown(interval, &mut shutdown).await {
             return;
         }
         match scrape_activity(&client, &url).await {
             ScrapeOutcome::Stamp(current) => {
-                if last_seen.is_some_and(|prev| preview_activity_advanced(prev, current)) {
-                    tracker.note_preview_activity();
+                if let Some(prev) = last_seen {
+                    // The routed stamp is a subset of the generic one, so check
+                    // it first and attribute only the remainder to a poll —
+                    // otherwise one routed request would report as both.
+                    if preview_activity_advanced(prev.last_routed_ms, current.last_routed_ms) {
+                        tracker.note_preview_routed_activity();
+                    } else if preview_activity_advanced(
+                        prev.last_activity_ms,
+                        current.last_activity_ms,
+                    ) {
+                        tracker.note_preview_status_activity();
+                    }
                 }
+                // Absolute counters, republished every tick: a mirror of the
+                // proxy's state, not an edge.
+                tracker.set_preview_attached(
+                    current.ws_tunnels_open,
+                    current.routed_requests_in_flight,
+                );
                 last_seen = Some(current);
+                attached_stale_since = None;
             }
-            // Proxy absent (preview disabled / starting / restarting): no-op.
-            ScrapeOutcome::Absent => {}
+            // Proxy absent (preview disabled / starting / restarting): leave
+            // the stamps, and age the attached counters out. See above.
+            ScrapeOutcome::Absent => {
+                clear_attached_if_stale(&tracker, &mut attached_stale_since, attached_grace);
+            }
+            // Answering, but unusably. Same staleness clock: an error status or
+            // an unparseable body tells us nothing about attached clients, and
+            // leaving them untouched would let a persistently broken proxy hold
+            // the withhold open forever.
             ScrapeOutcome::BadResponse => {
                 tracing::debug!(%url, "preview-activity scrape returned an unusable response");
+                clear_attached_if_stale(&tracker, &mut attached_stale_since, attached_grace);
             }
         }
     }
@@ -886,15 +947,23 @@ mod tests {
         .expect("a pre-flipped shutdown must return without scraping");
     }
 
+    /// What an older proxy binary reports.
+    fn stamp_only(last_activity_ms: u64) -> ActivitySample {
+        ActivitySample {
+            last_activity_ms,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn parse_activity_body_reads_stamp_and_rejects_bad_shapes() {
         assert_eq!(
             parse_activity_body(r#"{"last_activity_ms":1234}"#),
-            Some(1234)
+            Some(stamp_only(1234))
         );
         assert_eq!(
             parse_activity_body(r#"{"last_activity_ms":0,"extra":true}"#),
-            Some(0)
+            Some(stamp_only(0))
         );
         assert_eq!(parse_activity_body(r#"{"other":1}"#), None);
         assert_eq!(parse_activity_body(r#"{"last_activity_ms":"7"}"#), None);
@@ -903,11 +972,130 @@ mod tests {
         assert_eq!(parse_activity_body(""), None);
     }
 
+    /// The binaries are version-pinned per session, but a restore can repin, so
+    /// this skew is real rather than theoretical.
+    #[test]
+    fn parse_activity_body_tolerates_a_proxy_without_the_new_fields() {
+        let old = parse_activity_body(r#"{"last_activity_ms":5,"status_holds_in_use":2}"#)
+            .expect("an old proxy body must still parse");
+        assert_eq!(old.last_routed_ms, 0);
+        assert_eq!(old.ws_tunnels_open, 0);
+        assert_eq!(
+            old.routed_requests_in_flight, 0,
+            "absent fields read as 'nothing attached', never as attached"
+        );
+    }
+
+    /// A WS-only client has no stamps, so the attached counters are its only
+    /// hold. One unreachable scrape — a proxy restart, a loopback hiccup — must
+    /// not drop it and publish idle; a sustained absence still must.
+    #[tokio::test]
+    async fn one_absent_scrape_does_not_drop_an_attached_client() {
+        let tracker = Arc::new(ActivityTracker::new().with_preview_activity_window_ms(10_000));
+        tracker.set_preview_attached(1, 0);
+        assert!(tracker.snapshot().idle_since_ms.is_none());
+
+        // Nothing is listening on this port, so every scrape classifies Absent.
+        let port = reserved_closed_port().await;
+        let (tx, rx) = watch::channel(false);
+        let loop_handle = tokio::spawn(scrape_activity_loop(
+            port,
+            Arc::clone(&tracker),
+            Duration::from_millis(10),
+            rx,
+        ));
+
+        // Many consecutive absences, all well inside the 10s grace.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            tracker.snapshot().idle_since_ms.is_none(),
+            "repeated unreachable scrapes inside the grace must not drop the hold"
+        );
+        assert_eq!(tracker.preview_ws_tunnels_open(), 1);
+
+        let _ = tx.send(true);
+        let _ = loop_handle.await;
+    }
+
+    /// A proxy that answers unusably tells us nothing about attached clients
+    /// either, and the mirrored counters do not decay on their own — so an
+    /// endless run of error statuses must not pin `PreviewAttached` forever.
+    #[tokio::test]
+    async fn a_persistently_broken_proxy_does_not_pin_attached_forever() {
+        let tracker = Arc::new(ActivityTracker::new().with_preview_activity_window_ms(50));
+        tracker.set_preview_attached(1, 0);
+
+        // Answers every time, always with a 500 => BadResponse, never Absent.
+        let port = serve_canned("HTTP/1.1 500 Internal Server Error", "boom", true).await;
+        let (tx, rx) = watch::channel(false);
+        let loop_handle = tokio::spawn(scrape_activity_loop(
+            port,
+            Arc::clone(&tracker),
+            Duration::from_millis(10),
+            rx,
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tracker.preview_ws_tunnels_open() != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a sustained run of unusable responses must age the hold out"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let _ = tx.send(true);
+        let _ = loop_handle.await;
+    }
+
+    /// The other half: a proxy that stays gone must eventually release, or a
+    /// tunnel that died with it would hold the sandbox to the TTL.
+    #[tokio::test]
+    async fn a_sustained_absence_clears_the_attached_client() {
+        let tracker = Arc::new(ActivityTracker::new().with_preview_activity_window_ms(50));
+        tracker.set_preview_attached(1, 0);
+
+        let port = reserved_closed_port().await;
+        let (tx, rx) = watch::channel(false);
+        let loop_handle = tokio::spawn(scrape_activity_loop(
+            port,
+            Arc::clone(&tracker),
+            Duration::from_millis(10),
+            rx,
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tracker.preview_ws_tunnels_open() != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "an absence past the window must clear the attached counters"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let _ = tx.send(true);
+        let _ = loop_handle.await;
+    }
+
+    #[test]
+    fn parse_activity_body_reads_the_attached_client_fields() {
+        let sample = parse_activity_body(
+            r#"{"last_activity_ms":9,"status_holds_in_use":1,
+                "held_status_aborts_quieted":0,"ws_tunnels_open":3,
+                "routed_requests_in_flight":2,"last_routed_ms":7}"#,
+        )
+        .expect("parse");
+        assert_eq!(sample.last_activity_ms, 9);
+        assert_eq!(sample.last_routed_ms, 7);
+        assert_eq!(sample.ws_tunnels_open, 3);
+        assert_eq!(sample.routed_requests_in_flight, 2);
+    }
+
     #[test]
     fn classify_activity_response_distinguishes_stamp_from_bad() {
         assert_eq!(
             classify_activity_response(200, r#"{"last_activity_ms":42}"#),
-            ScrapeOutcome::Stamp(42)
+            ScrapeOutcome::Stamp(stamp_only(42))
         );
         assert_eq!(
             classify_activity_response(200, "garbage"),
@@ -1022,7 +1210,7 @@ mod tests {
         let port = serve_canned("HTTP/1.1 200 OK", r#"{"last_activity_ms":9876}"#, false).await;
         assert_eq!(
             scrape_activity(&scrape_client(), &activity_url(port)).await,
-            ScrapeOutcome::Stamp(9876)
+            ScrapeOutcome::Stamp(stamp_only(9876))
         );
     }
 

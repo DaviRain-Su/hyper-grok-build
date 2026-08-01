@@ -67,6 +67,7 @@ fn auth_error() -> xai_grok_sampler::SamplingErrorInfo {
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        credential: xai_grok_sampling_types::SentCredential::Unknown,
     }
 }
 
@@ -209,7 +210,13 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
             let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::SessionToken,
+                        ..
+                    })
+                ),
                 "session-based auth with a working refresher must return RefreshAuthAndResubmit"
             );
             assert!(called.load(Ordering::SeqCst), "refresher must be invoked");
@@ -607,6 +614,7 @@ fn model_not_found_error() -> xai_grok_sampler::SamplingErrorInfo {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         }
 }
 
@@ -674,6 +682,7 @@ fn unauthorized_401_error() -> xai_grok_sampler::SamplingErrorInfo {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
         }
 }
 
@@ -853,7 +862,10 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "session-based method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -888,7 +900,10 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
             let result = actor.handle_sampling_failure(auth_error()).await;
 
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "oidc method must recover even when auth_type transiently reads ApiKey"
             );
             assert!(
@@ -1668,8 +1683,14 @@ async fn sampler_401_on_provider_model_remints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
-                "provider 401 must re-mint and resubmit"
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        store: RecoveredStore::AuthProvider,
+                        ..
+                    })
+                ),
+                "provider 401 must re-mint and resubmit via the provider store"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
             assert_eq!(
@@ -1704,7 +1725,10 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
             error.kind = xai_grok_sampler::SamplingErrorKind::Api;
             let result = actor.handle_sampling_failure(error).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "a non-Auth-kind 401 on a provider model must still recover via 4c"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1736,7 +1760,10 @@ async fn sampler_401_with_no_key_on_provider_model_mints_and_resubmits() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "an unauthenticated 401 on a provider model must mint and resubmit"
             );
             let creds = actor.chat_state_handle.get_credentials().await;
@@ -1779,7 +1806,10 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
 
             let result = actor.handle_sampling_failure(auth_error()).await;
             assert!(
-                matches!(result, Ok(SamplerFailureRecovery::RefreshAuthAndResubmit)),
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit { .. })
+                ),
                 "the provider arm must recover"
             );
             assert!(

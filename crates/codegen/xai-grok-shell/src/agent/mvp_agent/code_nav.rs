@@ -34,11 +34,8 @@ impl MvpAgent {
         // Pin the index to the requesting session so the Weak in
         // CodebaseIndexManager doesn't orphan it immediately.
         if let Some(sid) = session_id {
-            self.resident_resources
-                .borrow_mut()
-                .entry(sid.clone())
-                .or_default()
-                .codebase_index = Some(std::sync::Arc::clone(&handle));
+            self.session_registry
+                .set_codebase_index(sid, std::sync::Arc::clone(&handle));
         }
         Some((handle, was_newly_started))
     }

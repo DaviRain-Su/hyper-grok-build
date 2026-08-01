@@ -135,6 +135,23 @@ fn pseudo_long_help_key(lh: &str) -> &'static str {
     }
 }
 
+// Prompt history is not an ActionRegistry entry: Up is an inline key handler and
+// /history is a slash command. Surface both here for discoverability.
+const HISTORY_LONG_HELP: &str = "\
+Recalls previously sent prompts.\n\
+Press Up on an empty prompt to browse earlier prompts, newest first; each move \
+live-populates the composer so you can edit and resend.\n\
+Run /history to open a searchable history panel and filter by text.";
+
+// Scrollback search has no ActionRegistry entry: it's the vim `/` inline handler,
+// or the /find slash command in simple mode. Surface both triggers here.
+const SCROLLBACK_SEARCH_LONG_HELP: &str = "\
+Searches the conversation scrollback for text and jumps between matches.\n\
+In the prompt input, run /find to search. In vim mode, you can also press / \
+while the scrollback is focused.\n\
+Type a query, then use n and N (or the arrow keys) to step through matches. \
+Press Enter to jump to a match and Esc to dismiss.";
+
 /// Build the entries vector for the modal, grouped by category.
 ///
 /// All registered actions are included, grouped by category. Actions
@@ -287,7 +304,25 @@ pub fn build_entries(
                 item,
                 dimmed,
                 action_id: None,
-                long_help: None,
+                long_help: Some(SCROLLBACK_SEARCH_LONG_HELP),
+            });
+        }
+        // Simple mode reaches scrollback search via the `/find` slash command,
+        // not a keystroke: use a null key + custom display so the raw key list
+        // stays empty of `/`.
+        if !vim_mode && cat == Category::ConversationNav {
+            let mut item = HintItem::new(crate::key!(Null), "search");
+            item.custom_display = Some("/find");
+            item.description = Some("Search scrollback".into());
+            // `/find` is a slash command typed at the prompt (not a scrollback
+            // keystroke like the vim `/` above), so it is available when the
+            // prompt is focused — dim on `!PromptFocused`, not scrollback.
+            let dimmed = !active_contexts.contains(&When::PromptFocused);
+            entries.push(ShortcutsHelpEntry::Hint {
+                item,
+                dimmed,
+                action_id: None,
+                long_help: Some(SCROLLBACK_SEARCH_LONG_HELP),
             });
         }
         // Clipboard + textarea chords not in ActionRegistry. Super/Cmd omitted
@@ -325,6 +360,19 @@ pub fn build_entries(
             redo.description = Some(rust_i18n::t!("shortcuts_help.redo_desc"));
             redo.keys.push(crate::key!('r', CONTROL));
             push_pseudo(&mut entries, redo, Some(REDO_LONG_HELP));
+
+            // Prompt history (Up / /history). Not part of the shared paste/undo/redo
+            // `dimmed`: that also lights on DashboardFocused, but Up-history is
+            // prompt-only, so give it its own PromptFocused-scoped dim.
+            let mut history = HintItem::new(crate::key!(Up), "history");
+            history.description = Some("Prompt history".into());
+            let history_dimmed = !active_contexts.contains(&When::PromptFocused);
+            entries.push(ShortcutsHelpEntry::Hint {
+                item: history,
+                dimmed: history_dimmed,
+                action_id: None,
+                long_help: Some(HISTORY_LONG_HELP),
+            });
         }
         let count = entries.len() - header_idx - 1;
         if count == 0 {
@@ -573,7 +621,7 @@ impl ShortcutsHelpMode {
 /// Build detail mode state from a cheatsheet entry (title/keys/body for the man page).
 ///
 /// Registry rows always open. Pseudo-rows (`action_id: None`) open only when they
-/// ship `long_help` so list-only rows like scrollback search stay browse-only.
+/// ship `long_help`; one without it stays list-only (browse-only).
 pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode> {
     let ShortcutsHelpEntry::Hint {
         item,
@@ -1943,6 +1991,26 @@ mod tests {
         })
     }
 
+    fn has_find_search(entries: &[ShortcutsHelpEntry]) -> bool {
+        entries.iter().any(|e| {
+            matches!(
+                e,
+                ShortcutsHelpEntry::Hint { item, .. }
+                    if item.custom_display == Some("/find")
+            )
+        })
+    }
+
+    fn history_row(entries: &[ShortcutsHelpEntry]) -> Option<&ShortcutsHelpEntry> {
+        entries.iter().find(|e| {
+            matches!(
+                e,
+                ShortcutsHelpEntry::Hint { item, action_id: None, .. }
+                    if item.label == "history"
+            )
+        })
+    }
+
     #[test]
     fn build_entries_includes_scrollback_search_in_vim_mode() {
         let registry = ActionRegistry::defaults();
@@ -1951,15 +2019,71 @@ mod tests {
             has_scrollback_search(&entries),
             "vim cheatsheet should list / search"
         );
+        assert!(
+            !has_find_search(&entries),
+            "vim mode uses the `/` key row, not the /find slash row"
+        );
     }
 
     #[test]
-    fn build_entries_omits_scrollback_search_in_simple_mode() {
+    fn build_entries_includes_find_search_in_simple_mode() {
         let registry = ActionRegistry::defaults();
         let entries = build_entries(&all_contexts(), &registry, false);
         assert!(
+            has_find_search(&entries),
+            "simple mode should list the /find scrollback search"
+        );
+        assert!(
             !has_scrollback_search(&entries),
-            "simple mode does not bind / to search, so it must not be listed"
+            "simple mode must not list the bare `/` key row"
+        );
+    }
+
+    #[test]
+    fn build_entries_includes_history_row_in_both_modes() {
+        let registry = ActionRegistry::defaults();
+        for vim in [true, false] {
+            let entries = build_entries(&all_contexts(), &registry, vim);
+            assert!(
+                history_row(&entries).is_some(),
+                "history row should appear in vim={vim} mode"
+            );
+        }
+    }
+
+    #[test]
+    fn history_row_lit_only_by_prompt_focus() {
+        let registry = ActionRegistry::defaults();
+
+        let entries = build_entries(&[When::PromptFocused], &registry, false);
+        let ShortcutsHelpEntry::Hint { dimmed, .. } =
+            history_row(&entries).expect("history row present")
+        else {
+            unreachable!();
+        };
+        assert!(
+            !*dimmed,
+            "history row must be lit when the prompt is focused"
+        );
+
+        let entries = build_entries(&[When::ScrollbackFocused], &registry, false);
+        let ShortcutsHelpEntry::Hint { dimmed, .. } =
+            history_row(&entries).expect("history row present")
+        else {
+            unreachable!();
+        };
+        assert!(*dimmed, "history row must be dimmed without prompt focus");
+
+        // Dashboard focus alone must not light it (unlike paste/undo/redo).
+        let entries = build_entries(&[When::DashboardFocused], &registry, false);
+        let ShortcutsHelpEntry::Hint { dimmed, .. } =
+            history_row(&entries).expect("history row present")
+        else {
+            unreachable!();
+        };
+        assert!(
+            *dimmed,
+            "dashboard focus alone must not light the history row"
         );
     }
 
@@ -2211,16 +2335,27 @@ mod tests {
     fn build_entries_overlay_stop_wins_dedup_and_shadows_cheatsheet_ctrl_x() {
         let registry = ActionRegistry::defaults();
         let ctrl_x = crate::key!('x', CONTROL);
+        // Match the two Ctrl+X rows by ActionId: the list and overlay
+        // stops carry different labels ("delete" vs "stop").
+        let is_stop = |action_id: &Option<ActionId>| {
+            matches!(
+                action_id,
+                Some(ActionId::DashboardStop | ActionId::DashboardOverlayStop)
+            )
+        };
         let stop_rows = |entries: &[ShortcutsHelpEntry]| -> Vec<(String, bool)> {
             entries
                 .iter()
                 .filter_map(|e| match e {
-                    ShortcutsHelpEntry::Hint { item, dimmed, .. } if item.label == "stop" => {
-                        Some((
-                            item.description.as_deref().unwrap_or_default().to_string(),
-                            *dimmed,
-                        ))
-                    }
+                    ShortcutsHelpEntry::Hint {
+                        item,
+                        dimmed,
+                        action_id,
+                        ..
+                    } if is_stop(action_id) => Some((
+                        item.description.as_deref().unwrap_or_default().to_string(),
+                        *dimmed,
+                    )),
                     _ => None,
                 })
                 .collect()
@@ -2229,9 +2364,9 @@ mod tests {
             entries
                 .iter()
                 .find_map(|e| match e {
-                    ShortcutsHelpEntry::Hint {
-                        item, action_id, ..
-                    } if item.label == "stop" => Some(*action_id),
+                    ShortcutsHelpEntry::Hint { action_id, .. } if is_stop(action_id) => {
+                        Some(*action_id)
+                    }
                     _ => None,
                 })
                 .flatten()
@@ -2253,8 +2388,7 @@ mod tests {
         let list = build_entries(&[When::DashboardFocused, When::Always], &registry, true);
         assert_eq!(
             stop_rows(&list),
-            vec![("Stop / Close agent".to_string(), false)],
-            "the dashboard list must show exactly the list `stop`, lit",
+            vec![("Stop / Delete agent".to_string(), false)],
         );
         assert_eq!(
             stop_id(&list),
@@ -2770,7 +2904,7 @@ mod tests {
 
     /// Search has no long_help — Enter stays in browse.
     #[test]
-    fn enter_on_search_pseudo_row_does_not_open_detail() {
+    fn enter_on_search_pseudo_row_opens_detail() {
         let registry = ActionRegistry::defaults();
         let entries = build_entries(&all_contexts(), &registry, true);
         let idx = entries
@@ -2778,11 +2912,24 @@ mod tests {
             .position(|e| {
                 matches!(
                     e,
-                    ShortcutsHelpEntry::Hint { item, action_id: None, .. }
-                        if item.label == "search"
+                    ShortcutsHelpEntry::Hint {
+                        item,
+                        action_id: None,
+                        long_help: Some(_),
+                        ..
+                    } if item.label == "search"
                 )
             })
             .expect("vim-mode entries include the `/`-search pseudo-row");
+        assert_eq!(
+            detail_from_entry(&entries[idx])
+                .and_then(|m| match m {
+                    ShortcutsHelpMode::Detail { body, .. } => Some(body),
+                    _ => None,
+                })
+                .as_deref(),
+            Some(SCROLLBACK_SEARCH_LONG_HELP)
+        );
         let mut state = build_initial_picker_state(&entries);
         state.selected = idx;
         let mut mode = browse_mode();
@@ -2795,11 +2942,8 @@ mod tests {
             &no_expanded(),
             &mut mode,
         );
-        assert_eq!(out, ShortcutsHelpOutcome::Unchanged);
-        assert!(
-            mode.is_browse(),
-            "search pseudo-row Enter must not open detail"
-        );
+        assert_eq!(out, ShortcutsHelpOutcome::Changed);
+        assert!(mode.is_detail(), "search pseudo-row Enter opens detail");
     }
 
     #[test]
@@ -3314,6 +3458,9 @@ mod tests {
         let paste_key = key!('v', CONTROL);
         let undo_key = key!('z', CONTROL);
         let redo_key = key!('z', CONTROL | SHIFT);
+        // Prompt history (Up / /history) is an inline key handler + slash
+        // command, not an ActionRegistry entry, so it stays display-only too.
+        let history_key = key!(Up);
         for entry in &entries {
             let ShortcutsHelpEntry::Hint {
                 item, action_id, ..
@@ -3326,6 +3473,7 @@ mod tests {
                 "paste" => item.keys.contains(&paste_key),
                 "undo" => item.keys.contains(&undo_key),
                 "redo" => item.keys.contains(&redo_key),
+                "history" => item.keys.contains(&history_key),
                 _ => false,
             };
             if is_pseudo {
@@ -3448,7 +3596,7 @@ mod tests {
     }
 
     #[test]
-    fn search_pseudo_row_does_not_expand() {
+    fn search_pseudo_row_expands() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let registry = ActionRegistry::defaults();
         let entries = build_entries(&all_contexts(), &registry, true);
@@ -3478,8 +3626,8 @@ mod tests {
             );
             assert_eq!(
                 out,
-                ShortcutsHelpOutcome::Unchanged,
-                "search pseudo-row must stay inert for {code:?}, got {out:?}"
+                ShortcutsHelpOutcome::ToggleExpand(ExpandKey::Pseudo("search")),
+                "search pseudo-row must expand for {code:?}, got {out:?}"
             );
         }
     }

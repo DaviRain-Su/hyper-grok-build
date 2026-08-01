@@ -580,6 +580,16 @@ impl AgentState {
     pub fn is_turn_running(&self) -> bool {
         matches!(self, Self::TurnRunning)
     }
+    /// Manual `/compact` is in flight (stoppable via session/cancel).
+    pub fn is_compact_running(&self) -> bool {
+        matches!(
+            self,
+            Self::CommandRunning {
+                command: AgentCommand::Compact,
+                ..
+            }
+        )
+    }
     /// Either a turn or command cancel is in progress.
     pub fn is_cancelling(&self) -> bool {
         matches!(self, Self::TurnCancelling | Self::CommandCancelling { .. })
@@ -872,6 +882,18 @@ impl AgentSession {
     /// Finish a running command, return to Idle.
     pub fn finish_command(&mut self) {
         self.state = AgentState::Idle;
+    }
+    /// Mark an in-flight `/compact` as cancelling (waiting for CompactComplete).
+    pub fn cancel_compact_command(&mut self) {
+        if let AgentState::CommandRunning {
+            command: AgentCommand::Compact,
+            ..
+        } = &self.state
+        {
+            self.state = AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            };
+        }
     }
     /// Push a prompt onto the back of the queue. Returns the assigned ID.
     pub fn enqueue_prompt(&mut self, text: String) -> u64 {

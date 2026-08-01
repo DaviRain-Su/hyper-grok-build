@@ -253,7 +253,9 @@ fn build_local_rows(
     rows
 }
 /// Map a leader [`RosterActivity`] to the dashboard's coarse [`RowState`].
-fn roster_activity_to_state(activity: RosterActivity) -> RowState {
+/// Public so the dispatcher can gate roster-row deletion through the very
+/// same `RowState::allows_delete` predicate the renderer paints `[✗]` with.
+pub fn roster_activity_to_state(activity: RosterActivity) -> RowState {
     match activity {
         RosterActivity::Working => RowState::Working,
         RosterActivity::NeedsInput => RowState::NeedsInput,

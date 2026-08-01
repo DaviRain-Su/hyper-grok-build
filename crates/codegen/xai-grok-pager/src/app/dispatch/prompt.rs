@@ -14,7 +14,7 @@ use super::session::fork::open_project_question;
 use super::session::lifecycle::skip_picker_and_create_session;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, DoctorFixTarget, Effect};
-use crate::app::agent::{AgentId, AgentState};
+use crate::app::agent::{AgentCommand, AgentId, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
@@ -1660,10 +1660,23 @@ pub(super) fn handle_compact_complete(
     result: Result<(), String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        // Defensive: only process if we're still in CommandRunning state.
-        // This guards against state machine bugs or future cancellation support.
-        if !matches!(agent.session.state, AgentState::CommandRunning { .. }) {
-            tracing::debug!("Ignoring CompactComplete (not in CommandRunning state)");
+        // Defensive: only process if we're still in a compact command state.
+        let was_cancelling = matches!(
+            agent.session.state,
+            AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        );
+        if !matches!(
+            agent.session.state,
+            AgentState::CommandRunning {
+                command: AgentCommand::Compact,
+                ..
+            } | AgentState::CommandCancelling {
+                command: AgentCommand::Compact,
+            }
+        ) {
+            tracing::debug!("Ignoring CompactComplete (not in compact command state)");
             return vec![];
         }
 
@@ -1676,6 +1689,11 @@ pub(super) fn handle_compact_complete(
                     SessionEvent::CompactCompleted {
                         elapsed: elapsed.unwrap_or_default(),
                     },
+                ));
+            }
+            Err(err) if was_cancelling || err.contains("compact cancelled") => {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::CompactionCancelled,
                 ));
             }
             Err(err) => {

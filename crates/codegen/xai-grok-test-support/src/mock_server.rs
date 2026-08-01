@@ -1,13 +1,13 @@
-//! Mock inference server with request logging and automatic cleanup.
+//! Mock inference server. Logs every request and shuts down on drop.
 //!
-//! Serves `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` in one
-//! of two response modes: echo (default — streams `Echo: <last user message>`)
-//! or a fixed text set via [`MockInferenceServer::set_response`] (streamed
-//! with byte-exact reconstruction). Named request-matched expectations take
-//! precedence, followed by compatibility per-path [`ScriptedResponse`] FIFOs.
-//! `/v1/models` and `/v1/settings` return
-//! configurable responses (settings is 404 until set). All requests are
-//! logged — bodies and headers — for assertion in tests.
+//! Serves the three inference endpoints (`/v1/chat/completions`,
+//! `/v1/responses`, `/v1/messages`) plus `/v1/models`, `/v1/settings`,
+//! `/v1/user`, `/v1/storage`, and `/v1/privacy/coding-data-retention`.
+//!
+//! The inference endpoints answer from the first source that matches: a named
+//! expectation, then the path's [`ScriptedResponse`] queue, then the active
+//! mode, which echoes the last user message until
+//! [`MockInferenceServer::set_response`] replaces it with a fixed text.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -40,10 +40,8 @@ pub struct LogEntry {
     pub method: String,
     pub path: String,
     pub body: Option<Value>,
-    /// Value of the `Authorization` header, if present.
     pub authorization: Option<String>,
-    /// Request headers (lowercase names, arrival order), captured on the
-    /// inference POST endpoints; the GET endpoints log an empty list.
+    /// Lowercase names in arrival order. Empty for the GET endpoints.
     pub headers: Vec<(String, String)>,
 }
 
@@ -58,13 +56,13 @@ impl LogEntry {
     }
 }
 
-/// Requests kept for inspection; each holds a whole conversation, so an
-/// unbounded log outgrows what it is testing. `request_count` stays exact.
+/// An entry holds a whole conversation, so the log evicts oldest first.
 const MAX_LOGGED_REQUESTS: usize = 1024;
 
 pub struct RequestLog {
     count: AtomicU32,
     entries: std::sync::Mutex<Vec<LogEntry>>,
+    keep_entries: AtomicBool,
 }
 
 impl RequestLog {
@@ -72,6 +70,7 @@ impl RequestLog {
         Self {
             count: AtomicU32::new(0),
             entries: std::sync::Mutex::new(Vec::new()),
+            keep_entries: AtomicBool::new(true),
         }
     }
 
@@ -84,6 +83,9 @@ impl RequestLog {
         headers: Vec<(String, String)>,
     ) {
         self.count.fetch_add(1, Ordering::SeqCst);
+        if !self.keep_entries.load(Ordering::SeqCst) {
+            return;
+        }
         let mut entries = self.entries.lock().unwrap();
         if entries.len() >= MAX_LOGGED_REQUESTS {
             entries.remove(0);
@@ -98,26 +100,19 @@ impl RequestLog {
     }
 }
 
-/// A model entry for the mock `/v1/models` endpoint.
+/// A model served by `/v1/models`. Each field is emitted under its camelCase
+/// name when set, at the top level except for `agent_type`, which goes in
+/// `_meta`.
 #[derive(Debug, Clone)]
 pub struct MockModelEntry {
-    /// Model ID (e.g. `"test-model"`).
     pub id: String,
-    /// Optional agent type (e.g. `"cursor"`).
-    /// Emitted as `agentType` inside `_meta` when set.
     pub agent_type: Option<String>,
-    /// Optional API backend (e.g. `"messages"`). Emitted as `apiBackend`
-    /// when set; absent means the shell's default backend.
     pub api_backend: Option<String>,
-    /// Emitted as `supportsBackendSearch` when true.
     pub supports_backend_search: bool,
-    /// Emitted as `supportsReasoningEffort` (top-level) when true.
     pub supports_reasoning_effort: bool,
-    /// Emitted as `reasoningEffort` (top-level) when set.
     pub reasoning_effort: Option<String>,
-    /// Emitted as `reasoningEfforts` (top-level) when non-empty. Each entry is a
-    /// raw JSON option (a table `{ "value": ..., "id"?, "label"?, ... }` or a
-    /// bare value string), matching what `parse_remote_model_value` reads.
+    /// Each entry is a table carrying a `value` key, or a bare value string.
+    /// `parse_remote_model_value` defines the full shape.
     pub reasoning_efforts: Vec<Value>,
 }
 
@@ -195,12 +190,10 @@ impl MockModelEntry {
     }
 }
 
-/// What the inference endpoints stream back.
 enum ResponseMode {
-    /// Echo the last user message as `Echo: <msg>` (whitespace-collapsing).
+    /// `Echo: <last user message>`, with whitespace collapsed.
     Echo,
-    /// Stream a fixed text whose deltas reconstruct it byte-for-byte
-    /// (newlines preserved — required for fenced code blocks).
+    /// Deltas reconstruct the text byte for byte, newlines included.
     Fixed(String),
 }
 
@@ -228,24 +221,19 @@ fn paced_events(
     )
 }
 
-/// Max body bytes retained on each accepted [`StorageUpload`] (keeps large
-/// e2e artifacts from ballooning test memory; meta/small dumps stay intact).
 const STORAGE_BODY_CAPTURE_CAP: usize = 256 * 1024;
 
-/// One accepted (HTTP 200) mock `/v1/storage` upload.
+/// An upload `/v1/storage` accepted.
 #[derive(Debug, Clone)]
 pub struct StorageUpload {
     pub path: String,
     pub size: usize,
-    /// Request body when `size <= 256 KiB`; empty for larger payloads.
+    /// Empty when `size` exceeds `STORAGE_BODY_CAPTURE_CAP`.
     pub body: Vec<u8>,
-    /// `Authorization` header value as sent (e.g. `Bearer …`).
     pub authorization: Option<String>,
 }
 
-/// Mock `/v1/storage` state: a flippable 401 gate plus a record of accepted
-/// uploads, so e2e tests can simulate an auth outage window and assert the
-/// trace upload queue parks, then drains after the gate heals.
+/// A 401 gate tests can flip, plus the uploads accepted through it.
 #[derive(Default)]
 struct StorageState {
     unauthorized: AtomicBool,
@@ -253,10 +241,6 @@ struct StorageState {
     uploads: std::sync::Mutex<Vec<StorageUpload>>,
 }
 
-/// Mock `/v1/chat/completions` + `/v1/responses` + `/v1/messages` +
-/// `/v1/models` + `/v1/settings` + `/v1/storage` +
-/// `/v1/privacy/coding-data-retention` server.
-/// Logs all requests. Shuts down on drop.
 pub struct MockInferenceServer {
     addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -265,31 +249,23 @@ pub struct MockInferenceServer {
     settings: Arc<std::sync::RwLock<Option<Value>>>,
     response_mode: Arc<std::sync::RwLock<ResponseMode>>,
     overrides: InferenceOverrides,
-    /// Per-agent-turn assistant texts (see [`set_agent_turns`]).
-    ///
-    /// [`set_agent_turns`]: Self::set_agent_turns
+    /// One assistant text per agent turn, consumed in order.
     agent_turns: Arc<std::sync::Mutex<VecDeque<String>>>,
-    /// `stop_reason` emitted by the `/v1/messages` terminal `message_delta`.
+    /// `stop_reason` on the `/v1/messages` terminal `message_delta`.
     messages_stop_reason: Arc<std::sync::RwLock<String>>,
-    /// Optional per-SSE-event delay on all inference endpoints.
     chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
-    /// Mock `/v1/storage` 401 gate + accepted-upload record.
     storage: Arc<StorageState>,
-    /// When set, `/v1/models` and `/v1/settings` hang forever (never
-    /// respond); see [`Self::set_hang`].
+    /// When set, `/v1/models` and `/v1/settings` never respond.
     hang: Arc<std::sync::atomic::AtomicBool>,
-    /// See [`Self::set_user_subscription_tier`].
     user_tier: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl MockInferenceServer {
-    /// Start with a single default `test-model` (no agent_type).
+    /// Serves one `test-model` with no agent type.
     pub async fn start() -> anyhow::Result<Self> {
         Self::start_with_models(vec![MockModelEntry::new("test-model")]).await
     }
 
-    /// Start with custom models. Use [`MockModelEntry::with_agent_type`] to
-    /// configure models with specific harness types for agent-type tests.
     pub async fn start_with_models(models: Vec<MockModelEntry>) -> anyhow::Result<Self> {
         Self::start_inner(models, None).await
     }
@@ -374,24 +350,18 @@ impl MockInferenceServer {
         })
     }
 
-    /// Replace the model list at runtime. The next `/v1/models` request
-    /// (e.g. during session resume) will return the new list.
     pub fn set_models(&self, models: Vec<MockModelEntry>) {
         let mut guard = self.models.write().unwrap();
         *guard = models.iter().map(MockModelEntry::to_json).collect();
     }
 
-    /// Stream this fixed text from all inference endpoints instead of echoing
-    /// the user message. Deltas reconstruct the text byte-for-byte (newlines
-    /// preserved). Subsequent calls replace the text.
+    /// Stream this text instead of echoing. Deltas reconstruct it byte for byte.
     pub fn set_response(&self, text: impl Into<String>) {
         *self.response_mode.write().unwrap() = ResponseMode::Fixed(text.into());
     }
 
-    /// Queue a [`ScriptedResponse`] for the next request on `path` (e.g.
-    /// `"/v1/chat/completions"`). Scripts are consumed FIFO per path by the
-    /// three inference endpoints; when a path's queue is empty, requests fall
-    /// back to the active response mode (echo/fixed).
+    /// Consumed FIFO per `path`, e.g. `"/v1/chat/completions"`. An empty queue
+    /// falls back to the response mode.
     pub fn enqueue_response(&self, path: impl Into<String>, response: ScriptedResponse) {
         self.overrides.enqueue_response(path, response);
     }
@@ -420,65 +390,54 @@ impl MockInferenceServer {
             .register_expectation(name, matcher, response, true)
     }
 
-    /// Queue one byte-exact response per foreground turn as compatibility sugar.
+    /// Queue one byte-exact response per foreground turn.
     pub fn set_agent_turns(&self, turns: impl IntoIterator<Item = String>) {
         *self.agent_turns.lock().unwrap() = turns.into_iter().collect();
     }
 
-    /// Replace the settings at runtime. The next `GET /v1/settings` request
-    /// will return the new value as JSON. Until set, `/v1/settings` returns 404.
+    /// Until this is called, `GET /v1/settings` returns 404.
     pub fn set_settings(&self, settings: impl serde::Serialize) {
         let value = serde_json::to_value(settings).expect("serialize settings");
         let mut guard = self.settings.write().unwrap();
         *guard = Some(value);
     }
 
-    /// Preset `/v1/settings` to the minimal `{"allow_access": true}` payload
-    /// that opens the subscription gate (clients treat a missing field as
-    /// `false` and would sit on the upsell screen).
+    /// The smallest settings payload that opens the subscription gate. Without
+    /// it a client sits on the upsell screen.
     pub fn preset_allow_access(&self) {
         self.set_settings(json!({ "allow_access": true }));
     }
 
-    /// Make `/v1/models` and `/v1/settings` hang forever, standing in for a
-    /// black-holed backend in non-blocking-startup tests.
+    /// Stand in for a black-holed backend.
     pub fn set_hang(&self, hang: bool) {
         self.hang.store(hang, std::sync::atomic::Ordering::Release);
     }
 
-    /// Set the `subscriptionTier` served by `GET /v1/user`. `None`
-    /// (default) omits the field, which the shell treats as "no qualifying
-    /// subscription" (free tier).
+    /// The `subscriptionTier` on `GET /v1/user`. `None`, the default, omits the
+    /// field, which the shell reads as the free tier.
     pub fn set_user_subscription_tier(&self, tier: Option<&str>) {
         *self.user_tier.write().unwrap() = tier.map(str::to_owned);
     }
 
-    /// Set the `stop_reason` emitted by the `/v1/messages` terminal
-    /// `message_delta` (default `"end_turn"`).
+    /// Defaults to `"end_turn"`.
     pub fn set_messages_stop_reason(&self, stop_reason: impl Into<String>) {
         *self.messages_stop_reason.write().unwrap() = stop_reason.into();
     }
 
-    /// Pace all inference SSE streams: each event is emitted after `delay`.
-    /// `None` (default) restores instant streaming. Lets PTY e2e tests hold a
-    /// turn visibly "streaming" long enough to interact with it mid-flight
-    /// (e.g. Esc-cancel). Applies to requests started after the call.
+    /// Emit each SSE event after `delay`, so a test can hold a turn visibly
+    /// streaming. `None` restores instant streaming. Applies to requests
+    /// started after the call.
     pub fn set_chunk_delay(&self, delay: Option<Duration>) {
         *self.chunk_delay.write().unwrap() = delay;
     }
 
-    /// Hold foreground terminal SSE events until [`release_agent_completions`].
-    /// Compatibility API; per-expectation blocking gives tighter ownership.
-    ///
-    /// [`release_agent_completions`]: Self::release_agent_completions
+    /// Hold foreground terminal SSE events until
+    /// [`Self::release_agent_completions`]. Prefer per-expectation blocking.
     pub fn hold_agent_completions(&self) {
         self.overrides.hold_completions();
     }
 
-    /// Release a hold set by [`hold_agent_completions`], letting held (and
-    /// future) agent turns emit their terminal event and complete.
-    ///
-    /// [`hold_agent_completions`]: Self::hold_agent_completions
+    /// Let held and future agent turns emit their terminal event.
     pub fn release_agent_completions(&self) {
         self.overrides.release_completions();
     }
@@ -490,6 +449,11 @@ impl MockInferenceServer {
 
     pub fn request_count(&self) -> u32 {
         self.log.count.load(Ordering::SeqCst)
+    }
+
+    /// Stop retaining entries. [`Self::request_count`] stays exact.
+    pub fn set_keep_requests(&self, enabled: bool) {
+        self.log.keep_entries.store(enabled, Ordering::SeqCst);
     }
 
     pub fn requests(&self) -> Vec<LogEntry> {
@@ -576,8 +540,7 @@ impl MockInferenceServer {
             })
     }
 
-    /// Flip the mock `/v1/storage` 401 gate. While `true`, every upload is
-    /// rejected with 401 (the auth-outage window the park-on-401 e2e drives).
+    /// While closed, every `/v1/storage` upload is rejected with 401.
     pub fn set_storage_unauthorized(&self, unauthorized: bool) {
         self.storage
             .unauthorized
@@ -589,14 +552,13 @@ impl MockInferenceServer {
         self.storage.request_count.load(Ordering::SeqCst)
     }
 
-    /// Snapshot of accepted (HTTP 200) `/v1/storage` uploads.
+    /// Only the uploads that were accepted.
     pub fn storage_uploads(&self) -> Vec<StorageUpload> {
         self.storage.uploads.lock().unwrap().clone()
     }
 
-    /// Mock `/v1/storage` upload: count the attempt, reject with 401 while the
-    /// gate is closed, else record the upload and mirror the proxy's
-    /// `UploadResponse` JSON shape.
+    /// Counts the attempt, then either rejects it or records it and answers in
+    /// the proxy's `UploadResponse` shape.
     fn storage_upload_handler(
         storage: &StorageState,
         headers: &HeaderMap,
@@ -974,10 +936,8 @@ impl MockInferenceServer {
                             if hang.load(std::sync::atomic::Ordering::Acquire) {
                                 tokio::time::sleep(Duration::from_secs(3600)).await;
                             }
-                            // Scripted one-shots take precedence (FIFO), so a
-                            // test can serve a transient payload (e.g. one
-                            // stale gated snapshot) and fall back to the
-                            // steady-state `set_settings` value afterwards.
+                            // Scripts take precedence, so a test can serve a
+                            // transient payload before the steady-state value.
                             if let Some(s) = overrides.pop_scripted("/v1/settings") {
                                 return s.into_response_paced(None, None).await;
                             }
@@ -1023,9 +983,8 @@ impl MockInferenceServer {
                         let log = log.clone();
                         let user_tier = user_tier.clone();
                         async move {
-                            // Keep the query string in the log so tests can
-                            // count `?include=subscription` checks separately
-                            // from plain enrichment fetches.
+                            // Log the query string so a test can count
+                            // `?include=subscription` on its own.
                             let path = match query {
                                 Some(q) if !q.is_empty() => format!("/v1/user?{q}"),
                                 _ => "/v1/user".to_owned(),
@@ -1054,9 +1013,8 @@ impl MockInferenceServer {
                     }
                 }),
             )
-            // The shell probes these before/alongside per-file uploads. Answer
-            // 404 ("old proxy") so it falls back to plain `POST /v1/storage`,
-            // which is the path the park-on-401 e2e exercises.
+            // 404 reads as an old proxy, so the shell falls back to a plain
+            // `POST /v1/storage`.
             .route(
                 "/v1/storage/exists",
                 get(|| async { StatusCode::NOT_FOUND }),
@@ -1263,6 +1221,25 @@ mod tests {
             overrides
                 .classify(InferenceEndpoint::ChatCompletions, &headers, &body)
                 .is_foreground()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_entries_keeps_the_count_exact() {
+        let server = MockInferenceServer::start().await.unwrap();
+        post_chat(&server, "kept").await;
+        let counted = server.request_count();
+        let kept = server.requests().len();
+
+        server.set_keep_requests(false);
+        post_chat(&server, "dropped").await;
+
+        assert_eq!(server.request_count(), counted + 1);
+        let entries = server.requests();
+        assert_eq!(entries.len(), kept);
+        assert!(
+            format!("{:?}", entries.last().unwrap().body).contains("kept"),
+            "the surviving entry should be the one recorded before the switch"
         );
     }
 

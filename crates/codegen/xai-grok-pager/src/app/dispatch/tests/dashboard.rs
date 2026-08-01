@@ -3038,14 +3038,11 @@ fn dashboard_overlay_stop_busy_agent_cancels_instead_of_closing() {
         "the overlay attachment must survive",
     );
 }
-/// A COMMAND in flight at confirm time must NOT downgrade to a
-/// cancel — `dispatch_cancel_turn` no-ops for command states, which
-/// would silently eat the confirmed press. The close proceeds: it
-/// is the only termination the user can reach (commands can't be
-/// cancelled).
+/// `/compact` in flight: overlay stop cancels compaction instead of
+/// closing the session (same as a running turn).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_stop_command_running_closes_session() {
+fn dashboard_overlay_stop_compact_running_cancels() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     let id2 = AgentId(1);
@@ -3062,15 +3059,27 @@ fn dashboard_overlay_stop_command_running_closes_session() {
         command: crate::app::agent::AgentCommand::Compact,
         started_at: std::time::Instant::now(),
     };
-    let _ = dispatch_dashboard_overlay_stop(&mut app);
+    app.agents.get_mut(&id).unwrap().session.session_id = Some(acp::SessionId::new("sess-compact"));
+    let effects = dispatch_dashboard_overlay_stop(&mut app);
     assert!(
-        !app.agents.contains_key(&id),
-        "a command in flight must not block the confirmed close",
+        app.agents.contains_key(&id),
+        "stop during /compact must not close the session",
     );
     assert!(
-        matches!(app.active_view, ActiveView::AgentDashboard),
-        "the confirmed close must land on the dashboard, got {:?}",
-        app.active_view,
+        matches!(
+            app.agents.get(&id).unwrap().session.state,
+            AgentState::CommandCancelling {
+                command: crate::app::agent::AgentCommand::Compact,
+            }
+        ),
+        "stop during /compact must enter CommandCancelling, got {:?}",
+        app.agents.get(&id).unwrap().session.state,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. })),
+        "stop during /compact must emit CancelTurn, got {effects:?}",
     );
 }
 /// An armed overlay stop-confirm is bound to "this overlay, this
@@ -4010,25 +4019,27 @@ fn dashboard_open_drops_pinned_ids_for_missing_agents() {
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.pinned.is_empty(), "stale pin should be gc'd at open");
 }
-/// Ctrl+X first press arms confirm, second
-/// press within 2s closes. We don't sleep — we manually rewind
-/// `stop_confirm.1` to a recent instant and check the second
-/// press is honoured.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_stop_double_press_closes_top_level() {
+fn dashboard_stop_double_press_deletes_top_level() {
     let mut app = test_app();
     let _ = dispatch_new_session_inner(&mut app, None);
     let _ = dispatch_new_session_inner(&mut app, None);
+    for (i, a) in app.agents.values_mut().enumerate() {
+        a.session.session_id = Some(acp::SessionId::new(format!("s{i}")));
+    }
     open_dashboard(&mut app);
     let target = *app.agents.keys().next().unwrap();
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
     let _ = dispatch_dashboard_stop(&mut app);
-    assert!(app.dashboard.as_ref().unwrap().stop_confirm.is_some());
-    let _ = dispatch_dashboard_stop(&mut app);
-    assert!(!app.agents.contains_key(&target));
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(matches!(
+        effects.last(),
+        Some(crate::app::actions::Effect::DeleteSession { .. })
+    ));
 }
 /// Closing the selected agent moves the cursor DOWN one row (onto the
 /// agent that shifts up into its place) instead of dropping it to
@@ -4042,6 +4053,7 @@ fn dashboard_stop_moves_selection_down_one() {
     let _ = dispatch_new_session_inner(&mut app, None);
     for (i, agent) in app.agents.values_mut().enumerate() {
         agent.display_name = Some(format!("agent-{i}"));
+        agent.session.session_id = Some(acp::SessionId::new(format!("s{i}")));
     }
     open_dashboard(&mut app);
     let order = dashboard_row_order(&app);
@@ -4052,19 +4064,33 @@ fn dashboard_stop_moves_selection_down_one() {
         d.focus_row(first.clone());
     }
     let _ = dispatch_dashboard_stop(&mut app);
-    let _ = dispatch_dashboard_stop(&mut app);
-    let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = first else {
+    let effects = dispatch_dashboard_stop(&mut app);
+    let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = &first else {
         panic!("first row should be top-level");
     };
+    let session_id = app.agents[first_id]
+        .session
+        .session_id
+        .as_ref()
+        .expect("session id")
+        .to_string();
     assert!(
-        !app.agents.contains_key(&first_id),
-        "closed agent must be gone"
+        matches!(
+            effects.last(),
+            Some(crate::app::actions::Effect::DeleteSession { .. })
+        ),
+        "second Ctrl+X must delete, got {effects:?}"
     );
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().selected,
-        Some(second),
-        "closing the top row should select the next row down, not revert to top",
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
     );
+    assert!(!app.agents.contains_key(first_id));
+    assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(second));
 }
 /// Closing the LAST row has no row below it, so the cursor falls back
 /// to the previous row rather than disappearing.
@@ -4077,6 +4103,7 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     let _ = dispatch_new_session_inner(&mut app, None);
     for (i, agent) in app.agents.values_mut().enumerate() {
         agent.display_name = Some(format!("agent-{i}"));
+        agent.session.session_id = Some(acp::SessionId::new(format!("s{i}")));
     }
     open_dashboard(&mut app);
     let order = dashboard_row_order(&app);
@@ -4087,25 +4114,36 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
         d.focus_row(last.clone());
     }
     let _ = dispatch_dashboard_stop(&mut app);
-    let _ = dispatch_dashboard_stop(&mut app);
-    let crate::views::dashboard::DashboardRowId::TopLevel(last_id) = last else {
+    let effects = dispatch_dashboard_stop(&mut app);
+    let crate::views::dashboard::DashboardRowId::TopLevel(last_id) = &last else {
         panic!("last row should be top-level");
     };
-    assert!(
-        !app.agents.contains_key(&last_id),
-        "closed agent must be gone"
+    let session_id = app.agents[last_id]
+        .session
+        .session_id
+        .as_ref()
+        .expect("session id")
+        .to_string();
+    assert!(matches!(
+        effects.last(),
+        Some(crate::app::actions::Effect::DeleteSession { .. })
+    ));
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
     );
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().selected,
-        Some(prev),
-        "closing the last row should select the previous row",
-    );
+    assert!(!app.agents.contains_key(last_id));
+    assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(prev));
 }
 /// First Ctrl+X must NOT plant an `error_toast`. The
 /// dispatch-input placeholder is reserved for the user's typing
 /// target — the footer's `ShortcutsBar::with_pending` already
 /// surfaces the "press Ctrl+X again to close this session"
-/// hint via `stop_confirm` and is the canonical place for it.
+/// hint via `delete_confirm` and is the canonical place for it.
 /// Two copies of the same hint in two different surfaces
 /// confused the user (the prompt one stole visual weight).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -4122,8 +4160,8 @@ fn dashboard_stop_does_not_plant_error_toast() {
     let _ = dispatch_dashboard_stop(&mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(
-        d.stop_confirm.is_some(),
-        "first Ctrl+X must arm stop_confirm (footer reads from this)",
+        d.delete_confirm.is_some(),
+        "first Ctrl+X on an idle row must arm delete_confirm (footer reads from this)",
     );
     assert!(
         d.error_toast.is_none(),
@@ -4488,14 +4526,14 @@ fn dashboard_stop_double_press_after_2s_rearms() {
     }
     let _ = dispatch_dashboard_stop(&mut app);
     if let Some(d) = app.dashboard.as_mut()
-        && let Some((_row, at)) = d.stop_confirm.as_mut()
+        && let Some((_row, at)) = d.delete_confirm.as_mut()
     {
         *at = Instant::now() - Duration::from_secs(3);
     }
     let before_count = app.agents.len();
     let _ = dispatch_dashboard_stop(&mut app);
     assert_eq!(app.agents.len(), before_count);
-    assert!(app.dashboard.as_ref().unwrap().stop_confirm.is_some());
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
 }
 /// Subagent Ctrl+X bypasses confirm and emits KillSubagent.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -4519,7 +4557,248 @@ fn dashboard_stop_subagent_emits_kill_subagent_effect() {
         effects.as_slice(),
         [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-xyz"
     ));
-    assert!(app.dashboard.as_ref().unwrap().stop_confirm.is_none());
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_delete_complete_returns_from_foreground_agent() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = Some(acp::SessionId::new("sess-dash"));
+    open_dashboard(&mut app);
+    app.active_view = ActiveView::Agent(id);
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id: "sess-dash".into(),
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&id));
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_busy_roster_toasts_without_arming() {
+    let mut app = test_app();
+    let mut entry = idle_roster_entry("busy-sess", "Busy row");
+    entry.activity = crate::app::roster::RosterActivity::Working;
+    app.dashboard_local_sessions = vec![entry];
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::Roster {
+            session_id: "busy-sess".into(),
+        });
+    }
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_none());
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("Stop the session before deleting"),
+    );
+}
+/// A busy top-level row: Ctrl+X cancels the turn and never arms delete.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_busy_top_level_cancels_without_arming() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    {
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("busy-top"));
+        agent.session.state = AgentState::TurnRunning;
+    }
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        matches!(effects.as_slice(), [Effect::CancelTurn { .. }]),
+        "busy top-level Ctrl+X must cancel the turn, got {effects:?}",
+    );
+    assert!(
+        app.dashboard.as_ref().unwrap().delete_confirm.is_none(),
+        "busy top-level Ctrl+X must NOT arm delete",
+    );
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteSession { .. })),
+        "a busy row must never emit DeleteSession, got {effects:?}",
+    );
+    assert!(app.agents.contains_key(&target), "busy row must survive");
+}
+/// A row that's `Working` only due to background work (turn idle, a
+/// scheduled `/loop` live): Ctrl+X stops the background work rather than
+/// toasting, and never arms delete — so the row can settle to idle and
+/// then be deleted.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_bg_work_row_stops_without_arming() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    {
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("bg-loop"));
+        agent.session.state = AgentState::Idle;
+        agent.session.scheduled_tasks.insert(
+            "loop-1".into(),
+            crate::app::agent::ScheduledTaskInfo {
+                task_id: "loop-1".into(),
+                prompt: "keep going".into(),
+                human_schedule: "every 5m".into(),
+                created_at: std::time::Instant::now(),
+                next_fire_at: None,
+                tag: "loop".into(),
+                last_subagent_id: None,
+            },
+        );
+    }
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteScheduledTask { .. })),
+        "Ctrl+X must stop the scheduled loop, got {effects:?}",
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteSession { .. })),
+        "must not delete a bg-work row, got {effects:?}",
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_none(), "must not arm delete");
+    assert!(d.error_toast.is_none(), "stopped work, so no toast");
+}
+/// A row that's `Working` only because of a queued (unsent) prompt: Ctrl+X
+/// drops the queue (local, no effect) rather than toasting, and never arms
+/// — so the row settles to idle and can then be deleted.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_queued_prompt_row_drops_queue_without_arming() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    {
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("queued"));
+        agent.session.state = AgentState::Idle;
+        agent.session.enqueue_prompt("do the thing".into());
+    }
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteSession { .. })),
+        "must not delete a queued-prompt row, got {effects:?}",
+    );
+    assert!(
+        app.agents[&target].session.pending_prompts.is_empty(),
+        "the queued prompt must be dropped",
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_none(), "must not arm delete");
+    assert!(d.error_toast.is_none(), "dropped the queue, so no toast");
+}
+/// The `y` / second-`[✗]` confirm re-checks deletability: a row that
+/// became busy between arming and confirming must not be deleted.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_delete_confirm_rechecks_settled_row() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    {
+        let agent = app.agents.get_mut(&target).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("recheck"));
+        agent.session.state = AgentState::Idle;
+    }
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let _ = dispatch_dashboard_stop(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
+    app.agents.get_mut(&target).unwrap().session.state = AgentState::TurnRunning;
+    let effects = dispatch_dashboard_delete(&mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteSession { .. })),
+        "a row that went busy between gestures must not delete, got {effects:?}",
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        Some("Stop the session before deleting"),
+    );
+}
+/// A settled chat-conversation roster row must not arm on Ctrl+X — delete
+/// isn't supported for conversations, so a confirm could never succeed.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_stop_conversation_row_does_not_arm() {
+    let mut app = test_app();
+    let mut entry = idle_roster_entry("conv-1", "Chat row");
+    entry.origin.kind = "conversation".into();
+    app.dashboard_local_sessions = vec![entry];
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::Roster {
+            session_id: "conv-1".into(),
+        });
+    }
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    let d = app.dashboard.as_ref().unwrap();
+    assert!(d.delete_confirm.is_none(), "conversation row must not arm");
+    assert_eq!(
+        d.error_toast.as_deref(),
+        Some("Deleting chat conversations isn't supported yet"),
+    );
+}
+/// A row with no session id toasts instead of emitting a delete.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_delete_top_level_without_session_id_toasts() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let target = *app.agents.keys().next().unwrap();
+    app.agents.get_mut(&target).unwrap().session.session_id = None;
+    open_dashboard(&mut app);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
+    }
+    let _ = dispatch_dashboard_stop(&mut app);
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::DeleteSession { .. })),
+        "a row without a session id must not delete, got {effects:?}",
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        Some("No session history to delete"),
+    );
 }
 /// Happy path — matching ids → no panic, queue popped.
 /// Also assert the response was actually sent through

@@ -20,6 +20,20 @@ pub struct CancellationContext {
     /// `None` for graceful in-turn cancels and older clients.
     pub trigger: Option<String>,
 }
+/// Failure surface of a `/btw` side question. Kept typed until the ACP
+/// boundary so `handle_btw` can route model errors through the canonical
+/// [`map_sampling_err_to_acp`](crate::sampling::error::map_sampling_err_to_acp)
+/// (typed rate-limit / auth codes) instead of a flattened string.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SideQuestionError {
+    #[error("side question model call failed: {0}")]
+    Sampling(#[from] xai_grok_sampling_types::SamplingError),
+    #[error("failed to prepare client: {0}")]
+    PrepareClient(String),
+    #[error("No response from model")]
+    EmptyResponse,
+}
 /// Prompt completion kind returned to the ACP layer.
 #[derive(Debug, Clone)]
 pub enum PromptCompletionKind {
@@ -668,7 +682,7 @@ pub enum SessionCommand {
     /// tool-free model call, and returns the response text.
     SideQuestion {
         question: String,
-        respond_to: oneshot::Sender<Result<String, String>>,
+        respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast
     /// it to clients via `SessionUpdate::SessionRecap`.

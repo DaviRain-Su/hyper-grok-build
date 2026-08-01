@@ -655,6 +655,19 @@ pub async fn run(
     {
         anyhow::bail!("{err}");
     }
+    #[cfg(feature = "local-workspace")]
+    {
+        let lw = session_startup::resolve_local_workspace_config(
+            args.chat(),
+            args.local_workspace(),
+            args.local_workspace_attach(),
+            args.local_workspace_cwd(),
+        )?;
+        if let Some(ref cfg) = lw {
+            session_startup::emit_local_workspace_startup_ux(cfg)?;
+        }
+        session_startup::set_active_local_workspace(lw)?;
+    }
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2020,6 +2033,47 @@ mod tests {
     #[test]
     fn cli_chat_flag_rejected_without_feature() {
         assert!(try_parse_pager(&["grok-pager", "--chat"]).is_err());
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn cli_local_workspace_attach_requires_chat() {
+        assert!(
+            try_parse_pager(&["grok-pager", "--local-workspace-attach=srv"]).is_err(),
+            "attach without --chat must clap-error"
+        );
+        let args =
+            try_parse_pager(&["grok-pager", "--chat", "--local-workspace-attach=srv"]).unwrap();
+        assert_eq!(args.local_workspace_attach(), Some("srv"));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn cli_local_workspace_own_conflicts_with_attach() {
+        assert!(
+            try_parse_pager(&[
+                "grok-pager",
+                "--chat",
+                "--local-workspace=/tmp/a",
+                "--local-workspace-attach=srv",
+            ])
+            .is_err(),
+            "own + attach must clap-conflict"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn cli_local_workspace_cwd_requires_chat() {
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace-cwd=/tmp/a"]).is_err());
+        let args = try_parse_pager(&[
+            "grok-pager",
+            "--chat",
+            "--local-workspace-attach=srv",
+            "--local-workspace-cwd=/tmp/repo",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.local_workspace_cwd(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
     }
     #[test]
     fn cli_local_workspace_flags_rejected_without_feature() {

@@ -140,6 +140,7 @@ criterion = "0.6"
 crossbeam = "0.8"
 crossterm = "0.28"
 cryptify = "3.2"
+ctor = "0.4"
 dashmap = "6"
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "into", "into_iterator", "try_into"] }
 dhat = "0.3"
@@ -149,6 +150,7 @@ documented = "0.9"
 flume = "0.11"
 dunce = "1"
 educe = "0.6.0"
+encoding_rs = "0.8.35"
 enum_delegate = "0.2"
 env_logger = "0.11"
 eventsource-stream = "0.2"
@@ -183,6 +185,7 @@ infer = "0.19.0"
 insta = "1"
 itertools = "0.14"
 jsonschema = "0.30.0"
+kamadak-exif = "0.5"
 libc = "0.2"
 linkify = "0.10"
 lipsum = "0.9"
@@ -241,6 +244,7 @@ serde_json = "1"
 serde_path_to_error = "0.1"
 serde_yaml = "0.9"
 serial_test = "3"
+sha1 = "0.10"
 sha2 = { version = "0.10", features = ["force-soft"] }
 shlex = "1"
 signal-hook = "0.3"
@@ -281,6 +285,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 ts-rs = "12.0"
 tui-scrollbar = "0.2"
 two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
+unicode-normalization = "0.1"
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
 url = "2"
@@ -355,6 +360,7 @@ xai-tool-types = { path = "crates/common/xai-tool-types" }
 xai-tracing = { path = "crates/common/xai-tracing" }
 xai-tty-utils = { path = "crates/codegen/xai-tty-utils" }
 zbus = { version = "5" }
+zip = "3"
 zstd = "0.13"
 
 [profile.release]

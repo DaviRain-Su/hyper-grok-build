@@ -201,6 +201,11 @@ pub struct QuestionViewState {
     /// while the user is answering questions — the time spent in the
     /// question view is subtracted from the turn elapsed display.
     pub opened_at: Instant,
+    /// Wall-clock twin of `opened_at` (UTC ms). `Instant` is suspend-blind,
+    /// so a pause netted against the wall-anchored turn span must itself be
+    /// measured on the wall clock, or a suspend during an open question
+    /// would read as worked time.
+    pub opened_at_wall_ms: i64,
     /// When `true`, the freeform "Other" input row is hidden. Used by
     /// locally-driven questions (e.g. credit-limit upsell) that only
     /// offer fixed options with no free-text fallback.
@@ -272,6 +277,7 @@ impl QuestionViewState {
             bottom_panel_index: None,
             local_kind: None,
             opened_at: Instant::now(),
+            opened_at_wall_ms: chrono::Utc::now().timestamp_millis(),
             no_freeform: false,
         }
     }

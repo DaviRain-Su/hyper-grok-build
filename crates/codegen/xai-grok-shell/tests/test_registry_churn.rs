@@ -31,6 +31,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 #[serde(deny_unknown_fields)]
 struct Counts {
     sessions: usize,
+    loading_sessions: usize,
     session_threads: usize,
     resident_resources: usize,
     retained_resources: usize,
@@ -45,6 +46,7 @@ struct Counts {
     subagent_active: usize,
     subagent_completed: usize,
     workspace_bindings: Option<usize>,
+    workspace_activity_sessions: Option<usize>,
 }
 struct AutoApproveClient;
 #[async_trait::async_trait(?Send)]
@@ -90,6 +92,19 @@ async fn read_counts(conn: &acp::ClientSideConnection) -> Counts {
     let resp = ext_method(conn, "x.ai/debug/agent", json!({})).await;
     serde_json::from_value(resp["result"]["registries"].clone())
         .unwrap_or_else(|e| panic!("x.ai/debug/agent: bad registries payload: {e}\n{resp}"))
+}
+/// Counts read once the actor threads are reaped. Nothing signals a thread
+/// exit, so this polls; both ends settle, so neither catches one mid-exit.
+async fn settled_counts(conn: &acp::ClientSideConnection) -> Counts {
+    let mut counts = read_counts(conn).await;
+    for _ in 0..100 {
+        if counts.session_threads == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        counts = read_counts(conn).await;
+    }
+    counts
 }
 async fn new_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path) -> acp::SessionId {
     tokio::time::timeout(
@@ -252,21 +267,29 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
     agent_rt.block_on(local.run_until(async move {
         let client_conn = connect_and_auth().await;
         churn_one(&client_conn, workdir.path(), 0).await;
-        let baseline = read_counts(&client_conn).await;
+        let baseline = settled_counts(&client_conn).await;
         assert_eq!(
             baseline.sessions, 0,
             "warmup session must be fully removed before baseline"
         );
         assert_eq!(
-            (baseline.resident_resources, baseline.retained_resources),
-            (0, 0),
+            (
+                baseline.resident_resources,
+                baseline.retained_resources,
+                baseline.loading_sessions
+            ),
+            (0, 0, 0),
             "warmup must leave no per-session resource entries, including \
              entries holding no resources"
         );
         assert_eq!(
-            baseline.workspace_bindings,
-            Some(0),
-            "warmup must have built the local workspace and released its binding"
+            (
+                baseline.workspace_bindings,
+                baseline.workspace_activity_sessions
+            ),
+            (Some(0), Some(0)),
+            "warmup must have built the local workspace and released both its \
+             binding and its activity record"
         );
         assert_eq!(
             (
@@ -295,7 +318,7 @@ fn session_churn_returns_registry_snapshot_to_baseline() {
         }))
         .await;
         futures::future::join_all(concurrent.iter().map(|sid| close_session(conn, sid))).await;
-        let after = read_counts(&client_conn).await;
+        let after = settled_counts(&client_conn).await;
         assert_eq!(
             after, baseline,
             "session churn must return every registry count to baseline \

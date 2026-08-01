@@ -957,6 +957,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 after != AfterSessionDelete::Stay,
             );
             if after == AfterSessionDelete::Stay {
+                app.dashboard_local_sessions
+                    .retain(|entry| entry.session_id != session_id);
+                app.leader_roster
+                    .retain(|entry| entry.session_id != session_id);
                 app.show_toast("Session deleted");
                 return vec![];
             }
@@ -969,11 +973,49 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .collect();
             let foreground =
                 matches!(app.active_view, ActiveView::Agent(id) if to_remove.contains(&id));
+            let roster_row = crate::views::dashboard::DashboardRowId::Roster {
+                session_id: session_id.clone(),
+            };
+            let closed_rows: Vec<_> = to_remove
+                .iter()
+                .copied()
+                .map(crate::views::dashboard::DashboardRowId::TopLevel)
+                .chain(std::iter::once(roster_row))
+                .collect();
+            let selected = app.dashboard.as_ref().and_then(|d| d.selected.clone());
+            let neighbor = if after == AfterSessionDelete::Dashboard
+                && let Some(sel) = selected.as_ref().filter(|sel| closed_rows.contains(sel))
+            {
+                super::dashboard::dashboard_neighbor_row(app, sel)
+            } else {
+                None
+            };
+            app.dashboard_local_sessions
+                .retain(|entry| entry.session_id != session_id);
+            app.leader_roster
+                .retain(|entry| entry.session_id != session_id);
             for id in to_remove {
                 remove_agent_and_cleanup(app, id);
             }
             let mut effects = unregister_session_effect(Some(sid));
-            if foreground && after == AfterSessionDelete::Welcome {
+            if after == AfterSessionDelete::Dashboard {
+                if let Some(d) = app.dashboard.as_mut() {
+                    d.delete_confirm = None;
+                    let selected_closed = d
+                        .selected
+                        .as_ref()
+                        .is_some_and(|sel| closed_rows.contains(sel));
+                    match (selected_closed, neighbor) {
+                        (true, Some(n)) => d.focus_row(n),
+                        (true, None) => d.focus_new_agent_button(),
+                        _ => {}
+                    }
+                }
+                if foreground {
+                    super::dashboard::ensure_dashboard_state(app);
+                    app.active_view = ActiveView::AgentDashboard;
+                }
+            } else if foreground && after == AfterSessionDelete::Welcome {
                 effects.extend(dispatch_exit_session(app));
             }
             app.show_toast("Session deleted");

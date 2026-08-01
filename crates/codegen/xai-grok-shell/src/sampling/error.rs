@@ -96,12 +96,25 @@ fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
     d.contains("grok.com/supergrok") || d.contains("upgrade to a grok subscription")
 }
 
+/// User-facing copy for capacity/overload failures (stream `overloaded_error`,
+/// HTTP 529, proxy-wrapped 5xx). See [`SamplingError::is_overloaded`].
+pub const OVERLOADED_USER_MESSAGE: &str = "Model is temporarily overloaded. Try again in a moment.";
+
 /// Map a `SamplingError` to an ACP `Error` for client-facing responses.
 /// This stays in xai-grok-shell because it depends on `agent_client_protocol::Error`.
 pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
     use reqwest::StatusCode;
+    // Capacity/overload gets the same short copy on every surface. Message
+    // only, `data` deliberately unset: `Display` appends JSON-encoded `data`,
+    // and this string is meant for direct display.
+    if err.is_overloaded() {
+        return acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            OVERLOADED_USER_MESSAGE,
+        );
+    }
     match err {
-        SamplingError::Auth(msg) => acp::Error::auth_required().data(msg),
+        SamplingError::Auth { message, .. } => acp::Error::auth_required().data(message),
         SamplingError::InvalidConfiguration(msg) => acp::Error::invalid_params().data(msg),
         SamplingError::Http(e) => {
             acp::Error::internal_error().data(format!("http client init failed: {e}"))
@@ -487,6 +500,31 @@ mod tests {
             format_rate_limited_user_message(Some("   "), true),
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
+    }
+
+    #[test]
+    fn overload_maps_to_display_message_without_data() {
+        let err = SamplingError::StreamError {
+            error_type: "overloaded_error".into(),
+            message: "Overloaded".into(),
+        };
+        let acp_err = map_sampling_err_to_acp(err);
+        assert_eq!(acp_err.code, acp::ErrorCode::InternalError);
+        assert_eq!(acp_err.message, OVERLOADED_USER_MESSAGE);
+        // Display appends JSON-encoded `data`; direct-display copy must not
+        // carry any.
+        assert_eq!(acp_err.data, None);
+
+        let err_529 = SamplingError::Api {
+            status: StatusCode::from_u16(529).expect("valid status"),
+            message: "capacity".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let acp_529 = map_sampling_err_to_acp(err_529);
+        assert_eq!(acp_529.message, OVERLOADED_USER_MESSAGE);
+        assert_eq!(acp_529.data, None);
     }
 
     #[test]

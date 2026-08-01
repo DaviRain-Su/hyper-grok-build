@@ -3505,16 +3505,30 @@ impl WorkspaceHandle {
                 let mut any_attempt = false;
                 let mut any_success = false;
                 let session_ids = tracker_for_status.known_sessions();
-                for sid in &session_ids {
+                let mut publish = session_ids.clone();
+                for sid in last_sent.keys().filter_map(|k| k.as_ref()) {
+                    if !publish.contains(sid) {
+                        publish.push(sid.clone());
+                    }
+                }
+                let mut closed: Vec<String> = Vec::new();
+                for sid in &publish {
                     let payload = tracker_for_status.snapshot_session(sid);
                     let key = Some(sid.clone());
+                    let ended = !session_ids.iter().any(|s| s == sid);
                     if last_sent.get(&key).map(dedup_key) == Some(dedup_key(&payload)) {
+                        if ended {
+                            closed.push(sid.clone());
+                        }
                         continue;
                     }
                     if let Some(ok) = send_status(&server_conn, payload.clone()).await {
                         any_attempt = true;
                         if ok {
                             any_success = true;
+                            if ended {
+                                closed.push(sid.clone());
+                            }
                             last_sent.insert(key, payload);
                             last_successful_send = std::time::Instant::now();
                         }
@@ -3522,7 +3536,10 @@ impl WorkspaceHandle {
                 }
                 last_sent.retain(|k, _| match k {
                     None => true,
-                    Some(sid) => session_ids.iter().any(|s| s == sid),
+                    Some(sid) => {
+                        session_ids.iter().any(|s| s == sid)
+                            || (any_success && !closed.contains(sid))
+                    }
                 });
                 let payload = tracker_for_status.snapshot();
                 let needs_send = last_sent.get(&None).map(dedup_key) != Some(dedup_key(&payload));

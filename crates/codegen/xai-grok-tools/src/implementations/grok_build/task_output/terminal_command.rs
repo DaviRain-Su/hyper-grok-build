@@ -22,11 +22,14 @@ impl crate::types::tool_metadata::ToolMetadata for GetTerminalCommandOutputTool 
     }
 
     fn description_template(&self) -> &str {
+        // `{max_wait_ms}` is resolved per session by the finalize loop's
+        // `TruncationConfig::interpolate_description`, like `{max_lines_read}`:
+        // the cap is client-configurable, so it cannot be baked in here.
         r#"Get output and status from a background terminal command${%- if tools.by_kind.monitor %} or monitor${%- endif %}.
 
 Usage notes:
 - Pass ${{ params.background_task_action.task_ids }} with one or more ids from ${%- if params is defined and params.execute is defined and params.execute.is_background %} ${{ params.execute.is_background }}=true commands${%- else %} background commands${%- endif %}${%- if tools.by_kind.monitor %} (a monitor's ${{ params.kill_task_action.task_id }} is returned by ${{ tools.by_kind.monitor }})${%- endif %}; for a single task use a one-element array. Multiple ids with a positive ${{ params.background_task_action.timeout_ms }} wait until all complete
-- Omit ${{ params.background_task_action.timeout_ms }} or pass 0 for a non-blocking status snapshot; set a positive ${{ params.background_task_action.timeout_ms }} to wait up to that many milliseconds, capped at ~10 min
+- Omit ${{ params.background_task_action.timeout_ms }} or pass 0 for a non-blocking status snapshot; set a positive ${{ params.background_task_action.timeout_ms }} to wait up to that many milliseconds, capped at {max_wait_ms}
 - Returns current output, status, and exit code if completed${%- if tools.by_kind.read %}
 - If output is large, use ${{ tools.by_kind.read }} on the output_file path${%- endif %}"#
     }

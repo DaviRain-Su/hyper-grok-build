@@ -402,6 +402,10 @@ pub async fn resolve_read_tool_name(bridge: &ToolBridge) -> Option<String> {
 /// in the current agent's toolset. When `None`, the subagent's full
 /// `output` is inlined verbatim -- this notification is the only place
 /// the model will see it (no disk-backed output file exists for subagents).
+///
+/// KEEP IN SYNC: the exact wording of this message is a compatibility
+/// surface — downstream mirrors reproduce it verbatim (grep for
+/// `format_subagent_completion_reminder`). Update them when changing it.
 pub fn format_subagent_completion(
     c: &SubagentCompletionSummary,
     task_output_name: Option<&str>,

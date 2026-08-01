@@ -3134,6 +3134,290 @@ fn chat_new_session_model_state_matrix() {
         );
     }
 }
+/// valid `x.ai/local_workspace` → ExistingWorkspace only.
+/// Never reads `envId` / never emits SandboxEnvironment.
+#[cfg(feature = "local-workspace")]
+#[test]
+fn parse_session_computer_sessions_local_workspace_matrix() {
+    use crate::gateway_bridge::ComputerSession;
+    use serde_json::json;
+    fn existing(server_id: &str, cwd: Option<&str>) -> Vec<ComputerSession> {
+        vec![ComputerSession::ExistingWorkspace {
+            server_id: server_id.to_owned(),
+            cwd: cwd.map(str::to_owned),
+        }]
+    }
+    let cases: &[(&str, serde_json::Value, Option<Vec<ComputerSession>>)] = &[
+        (
+            "attach_server_id_on_local",
+            json!({
+                "x.ai/local_workspace": {
+                    "mode": "attach",
+                    "server_id": "lw-attach-1",
+                    "cwd": "/repo",
+                },
+                "envId": "env-must-be-ignored",
+            }),
+            Some(existing("lw-attach-1", Some("/repo"))),
+        ),
+        (
+            "attach_server_id_from_cloud_existing",
+            json!({
+                "x.ai/local_workspace": {
+                    "mode": "attach",
+                    "cwd": "/repo",
+                },
+                "x.ai/cloud_existing_workspace": {
+                    "server_id": "lw-attach-2",
+                    "cwd": "/repo-existing",
+                },
+                "envId": "env-must-be-ignored",
+            }),
+            Some(existing("lw-attach-2", Some("/repo"))),
+        ),
+        (
+            "own_with_server_id_ignores_envid",
+            json!({
+                "x.ai/local_workspace": {
+                    "mode": "own",
+                    "server_id": "lw-own-1",
+                    "cwd": "/Users/me/src",
+                },
+                "envId": "env-must-be-ignored",
+            }),
+            Some(existing("lw-own-1", Some("/Users/me/src"))),
+        ),
+        (
+            "own_without_server_id_no_sandbox_fallback",
+            json!({
+                "x.ai/local_workspace": {
+                    "mode": "own",
+                    "cwd": "/Users/me/src",
+                },
+                "envId": "env-must-be-ignored",
+            }),
+            None,
+        ),
+        (
+            "invalid_mode_falls_through_to_envid",
+            json!({
+                "x.ai/local_workspace": {
+                    "mode": "bogus",
+                    "server_id": "lw-x",
+                },
+                "envId": "env-prod",
+            }),
+            Some(vec![ComputerSession::SandboxEnvironment {
+                environment_id: Some("env-prod".to_owned()),
+            }]),
+        ),
+        (
+            "non_object_local_falls_through_to_envid",
+            json!({
+                "x.ai/local_workspace": "not-an-object",
+                "envId": "env-prod",
+            }),
+            Some(vec![ComputerSession::SandboxEnvironment {
+                environment_id: Some("env-prod".to_owned()),
+            }]),
+        ),
+    ];
+    for (label, meta, expected) in cases {
+        let got = parse_session_computer_sessions(meta.as_object());
+        assert_eq!(
+            got.as_deref(),
+            expected.as_deref(),
+            "[{label}] local_workspace match-table mismatch"
+        );
+    }
+}
+/// Local intent without resolvable server_id fails closed (no silent unstamped start).
+#[cfg(feature = "local-workspace")]
+#[test]
+fn resolve_local_workspace_missing_server_id_fails_closed() {
+    use serde_json::json;
+    let meta = json!({
+        "x.ai/session": { "kind": "chat" },
+        "x.ai/local_workspace": {
+            "mode": "own",
+            "cwd": "/repo",
+        }
+    });
+    let err = resolve_session_computer_sessions(meta.as_object())
+        .expect_err("own without server_id must fail closed");
+    assert_eq!(
+        err.data
+            .as_ref()
+            .and_then(|d| d.get("code"))
+            .and_then(|v| v.as_str()),
+        Some("local_workspace_server_id_missing")
+    );
+}
+/// Supervisor map + reap guard / shutdown_gateway_bridge tear down the entry.
+#[cfg(all(feature = "local-workspace", unix))]
+#[test]
+fn local_workspace_reap_guard_and_shutdown_clear_map() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = gateway_bridge_test_session_id();
+        {
+            let mut guard = agent.new_local_workspace_reap_guard(sid.clone(), true);
+            guard.disarm();
+        }
+        assert!(agent.local_workspace_supervisors.borrow().is_empty());
+        agent.shutdown_gateway_bridge(&sid);
+        assert!(
+            agent
+                .local_workspace_generations
+                .borrow()
+                .get(&sid)
+                .is_none()
+        );
+    });
+}
+/// Pre-bridge crash refresh rewrites handshake stamp from live supervisor id.
+#[cfg(all(feature = "local-workspace", unix))]
+#[test]
+fn refresh_sessions_from_supervisor_overrides_server_id() {
+    use crate::gateway_bridge::ComputerSession;
+    use crate::gateway_bridge::local_workspace_supervisor::test_start_ready_own;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = gateway_bridge_test_session_id();
+        let original = Some(vec![ComputerSession::ExistingWorkspace {
+            server_id: "lw-stale".into(),
+            cwd: Some("/repo".into()),
+        }]);
+        let unchanged = agent.refresh_sessions_from_supervisor(&sid, original.clone());
+        assert!(matches!(
+            unchanged.as_ref().and_then(|v| v.first()),
+            Some(ComputerSession::ExistingWorkspace { server_id, .. }) if server_id == "lw-stale"
+        ));
+        let (_dir, handle) = test_start_ready_own().await;
+        let live_id = handle.server_id.clone();
+        agent.register_local_workspace_supervisor(sid.clone(), handle);
+        let refreshed = agent.refresh_sessions_from_supervisor(&sid, original);
+        match refreshed.as_ref().and_then(|v| v.first()) {
+            Some(ComputerSession::ExistingWorkspace { server_id, .. }) => {
+                assert_eq!(
+                    server_id, &live_id,
+                    "refresh must use live supervisor server_id"
+                );
+            }
+            other => panic!("expected ExistingWorkspace, got {other:?}"),
+        }
+        agent.shutdown_gateway_bridge(&sid);
+    });
+}
+/// start_own + register stamps server_id into meta and stores the handle.
+#[cfg(all(feature = "local-workspace", unix))]
+#[test]
+fn start_own_registers_and_stamps_server_id() {
+    use crate::gateway_bridge::local_workspace_supervisor::{
+        stamp_server_id_into_meta, test_start_ready_own,
+    };
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = gateway_bridge_test_session_id();
+        let (_dir, handle) = test_start_ready_own().await;
+        let server_id = handle.server_id.clone();
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "x.ai/local_workspace".into(),
+            serde_json::json!({"mode": "own", "cwd": "/tmp/repo"}),
+        );
+        stamp_server_id_into_meta(&mut meta, &server_id);
+        assert_eq!(
+            meta.get("x.ai/local_workspace")
+                .and_then(|v| v.get("server_id"))
+                .and_then(|v| v.as_str()),
+            Some(server_id.as_str())
+        );
+        agent.register_local_workspace_supervisor(sid.clone(), handle);
+        assert!(
+            agent
+                .local_workspace_supervisors
+                .borrow()
+                .contains_key(&sid),
+            "handle must be registered by SessionId"
+        );
+        assert!(
+            agent
+                .local_workspace_generations
+                .borrow()
+                .get(&sid)
+                .is_some_and(|g| *g >= 1),
+            "arm must bump generation"
+        );
+        agent.shutdown_gateway_bridge(&sid);
+    });
+}
+/// Armed reap guard removes a registered supervisor on drop (session/new failure).
+#[cfg(all(feature = "local-workspace", unix))]
+#[test]
+fn reap_guard_drop_removes_registered_supervisor() {
+    use crate::gateway_bridge::local_workspace_supervisor::test_start_ready_own;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = gateway_bridge_test_session_id();
+        let (_dir, handle) = test_start_ready_own().await;
+        agent.register_local_workspace_supervisor(sid.clone(), handle);
+        assert!(
+            agent
+                .local_workspace_supervisors
+                .borrow()
+                .contains_key(&sid)
+        );
+        {
+            let _guard = agent.new_local_workspace_reap_guard(sid.clone(), true);
+        }
+        assert!(
+            agent
+                .local_workspace_supervisors
+                .borrow()
+                .get(&sid)
+                .is_none(),
+            "armed guard drop must reap supervisor"
+        );
+        assert!(
+            agent
+                .local_workspace_generations
+                .borrow()
+                .get(&sid)
+                .is_none(),
+            "armed guard drop must invalidate generation"
+        );
+    });
+}
+/// Shutdown generation invalidates a pending restart re-insert.
+#[cfg(all(feature = "local-workspace", unix))]
+#[test]
+fn shutdown_generation_invalidates_stale_restart() {
+    use crate::gateway_bridge::local_workspace_supervisor::test_start_ready_own;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = gateway_bridge_test_session_id();
+        let (_dir, handle) = test_start_ready_own().await;
+        agent.register_local_workspace_supervisor(sid.clone(), handle);
+        let generation = *agent
+            .local_workspace_generations
+            .borrow()
+            .get(&sid)
+            .expect("generation after register");
+        agent.shutdown_gateway_bridge(&sid);
+        assert!(
+            agent.local_workspace_generations.borrow().get(&sid) != Some(&generation),
+            "shutdown must invalidate generation so stale restart cannot re-insert"
+        );
+        assert!(
+            agent
+                .local_workspace_supervisors
+                .borrow()
+                .get(&sid)
+                .is_none()
+        );
+    });
+}
 /// `spawn_gateway_bridge` uses `tokio::task::spawn_local`.
 fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
 where
@@ -3198,39 +3482,26 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     .expect("bind_local_session must succeed");
     assert!(toolset_weak.upgrade().is_some());
     *agent.workspace_ops.borrow_mut() = Some(ops);
-    agent.model_unavailable_sessions.borrow_mut().insert(
-        sid.0.to_string(),
-        acp::ModelId::new(std::sync::Arc::from("gone-model")),
-    );
+    agent
+        .session_registry
+        .set_unavailable_model(&sid, acp::ModelId::new(std::sync::Arc::from("gone-model")));
     agent.set_turn_number(&sid, 3);
     let (_permission_tx, permission_rx) =
         tokio::sync::mpsc::unbounded_channel::<xai_grok_workspace::permission::PermissionEvent>();
     agent
-        .retained_resources
-        .borrow_mut()
-        .entry(sid.clone())
-        .or_default()
-        .permission_event_receiver = Some(permission_rx);
-    agent
-        .resident_resources
-        .borrow_mut()
-        .entry(sid.clone())
-        .or_default()
-        .require_gateway = true;
+        .session_registry
+        .set_permission_receiver(&sid, permission_rx);
+    agent.session_registry.mark_require_gateway(&sid);
     agent.remove_session(&sid);
     assert!(
         toolset_weak.upgrade().is_none(),
         "the workspace binding must release the toolset"
     );
-    assert!(
-        !agent
-            .model_unavailable_sessions
-            .borrow()
-            .contains_key(sid.0.as_ref())
-    );
-    assert!(!agent.resident_resources.borrow().contains_key(&sid));
-    assert!(
-        !agent.retained_resources.borrow().contains_key(&sid),
+    assert!(agent.session_registry.unavailable_model(&sid).is_none());
+    assert_eq!(agent.session_registry.counts().resident_resources, 0);
+    assert_eq!(
+        agent.session_registry.counts().retained_resources,
+        0,
         "retained per-session resources must be reclaimed on removal"
     );
 }
@@ -3508,6 +3779,46 @@ fn disconnect_keeps_resident_on_poisoned_lock() {
         );
     });
 }
+/// A wedged actor stays tracked. `remove_session` releases everything else but
+/// keeps a still-running thread, because dropping its handle would detach the
+/// thread and leave nothing for the supervisor sweep to find.
+#[test]
+fn remove_session_keeps_a_running_thread_tracked() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-wedged");
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        agent.session_registry.set_thread(
+            &sid,
+            crate::session::SessionThread::from_handle(std::thread::spawn(move || {
+                let _ = release_rx.recv();
+            })),
+        );
+        agent.set_turn_number(&sid, 1);
+        agent.remove_session(&sid);
+        assert!(
+            agent.session_registry.has_thread(&sid),
+            "a running actor thread must survive removal for the sweep"
+        );
+        assert_eq!(
+            agent.session_registry.counts().retained_resources,
+            0,
+            "everything except the running thread must be released"
+        );
+        drop(release_tx);
+        for _ in 0..100 {
+            agent.sweep_dead_sessions();
+            if !agent.session_registry.has_thread(&sid) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !agent.session_registry.has_thread(&sid),
+            "the sweep must reclaim the thread once it exits"
+        );
+    });
+}
 /// Idle-unload stub (memory bound) + supervisor interaction: a *fully idle*
 /// session is unloaded to disk on disconnect (actor `Shutdown`, handle
 /// dropped) while the `SessionThread` is **retained** for
@@ -3522,8 +3833,8 @@ fn disconnect_unloads_idle_session_without_finalize() {
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
         let mut observed = spawn_fake_actor(cmd_rx, false);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        agent.session_threads.borrow_mut().insert(
-            sid.clone(),
+        agent.session_registry.set_thread(
+            &sid,
             crate::session::SessionThread::from_handle(std::thread::spawn(move || {
                 let _ = release_rx.recv();
             })),
@@ -3535,7 +3846,7 @@ fn disconnect_unloads_idle_session_without_finalize() {
             "idle session must be unloaded from the resident map on disconnect"
         );
         assert!(
-            agent.session_threads.borrow().contains_key(&sid),
+            agent.session_registry.has_thread(&sid),
             "idle-unload must keep the SessionThread for reconnect drain"
         );
         let shutdown = tokio::time::timeout(std::time::Duration::from_secs(1), observed.recv())
@@ -3558,13 +3869,13 @@ fn disconnect_unloads_idle_session_without_finalize() {
         drop(release_tx);
         let deadline = tokio::time::Instant::now() + (SESSION_SUPERVISOR_TICK * 6);
         while tokio::time::Instant::now() < deadline {
-            if !agent.session_threads.borrow().contains_key(&sid) {
+            if !agent.session_registry.has_thread(&sid) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(
-            !agent.session_threads.borrow().contains_key(&sid),
+            !agent.session_registry.has_thread(&sid),
             "supervisor must drop the finished kept thread"
         );
         assert!(
@@ -3734,7 +4045,7 @@ fn session_live_state_map_is_bounded_across_cycles() {
             agent.close_session_explicit(&sid);
         }
         assert_eq!(
-            agent.session_live_state.borrow().len(),
+            agent.session_registry.counts().session_live_state,
             0,
             "terminal closes must leave no residual live-state entries (bounded map)"
         );
@@ -3806,21 +4117,21 @@ fn supervisor_reaps_panicked_resident_actor() {
         let (handle, _tx, _rx) = make_live_session_handle(&sid, Some("turn-1"));
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
         let panic_thread = std::thread::spawn(|| panic!("injected actor panic"));
-        agent.session_threads.borrow_mut().insert(
-            sid.clone(),
+        agent.session_registry.set_thread(
+            &sid,
             crate::session::SessionThread::from_handle(panic_thread),
         );
         agent.set_session_live_state(&sid, SessionLiveState::Working);
         agent.ensure_session_supervisor();
         let deadline = tokio::time::Instant::now() + (SESSION_SUPERVISOR_TICK * 6);
         while tokio::time::Instant::now() < deadline {
-            if !agent.session_threads.borrow().contains_key(&sid) {
+            if !agent.session_registry.has_thread(&sid) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(
-            !agent.session_threads.borrow().contains_key(&sid),
+            !agent.session_registry.has_thread(&sid),
             "supervisor must reap the dead thread"
         );
         assert!(

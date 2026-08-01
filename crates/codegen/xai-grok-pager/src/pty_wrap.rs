@@ -66,7 +66,8 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
     cmd.env("GROK_OSC52_SINK", "1");
     cmd.env("LC_GROK_OSC52_SINK", "1");
 
-    // Spawn child in the PTY slave.
+    // Not session-scoped: this is the wrapped process itself.
+    #[allow(clippy::disallowed_methods)]
     let mut child = pair.slave.spawn_command(cmd)?;
     // Drop the slave so we get EOF when child exits.
     drop(pair.slave);

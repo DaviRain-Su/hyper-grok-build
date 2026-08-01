@@ -63,7 +63,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
-use tokio_retry::strategy::ExponentialBackoff;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_agent::AgentDefinition;
 use xai_grok_agent::prompt::agents_md::LEGACY_AGENTS_MD_REMINDER_PREFIX;
@@ -92,18 +91,23 @@ mod compaction_segments;
 mod types;
 pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
+#[path = "acp_session_impl/auth_retry.rs"]
+mod auth_retry;
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
 #[path = "acp_session_impl/hypercore_turn.rs"]
 mod hypercore_turn;
-#[path = "acp_session_impl/interjection.rs"]
-mod interjection;
-#[path = "acp_session_impl/tool_calls.rs"]
-mod tool_calls;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
 #[path = "acp_session_impl/workflow.rs"]
 mod workflow_run;
+pub(crate) use auth_retry::{
+    AuthRetryDecision, AuthRetrySchedule, human_duration, pace_uncharged_resubmit,
+};
+#[path = "acp_session_impl/interjection.rs"]
+mod interjection;
+#[path = "acp_session_impl/tool_calls.rs"]
+mod tool_calls;
 pub(crate) use interjection::*;
 #[path = "acp_session_impl/laziness.rs"]
 mod laziness;
@@ -1821,6 +1825,9 @@ impl Drop for TurnMetrics {
 #[cfg(test)]
 #[path = "acp_session_tests/auth_error_no_retry_tests.rs"]
 mod auth_error_no_retry_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/auth_retry_budget_tests.rs"]
+mod auth_retry_budget_tests;
 /// Regression coverage for the auto-wake suppression sweep + shutdown
 /// drain. These exercise the helpers added to fix the trailing
 /// `<system-reminder>` chat history bug.

@@ -1699,6 +1699,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("hit".into()),
         seq: 7,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { sessions, scope, seq, query, .. } => {
@@ -1715,6 +1716,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: None,
         seq: 8,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListLoaded { scope, seq, query, .. } => {
@@ -1730,6 +1732,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let mut tasks = run(Effect::FetchSessionList {
         query: Some("fail-me".into()),
         seq: 9,
+        kind_filter: None,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
         TaskResult::SessionListFailed { error, seq, query } => {
@@ -1763,6 +1766,50 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             "browse fetches opt into relaxing"
         );
     assert_eq!(captured[2]["query"], "fail-me");
+}
+#[tokio::test]
+async fn fetch_session_list_sends_kind_facet_filter() {
+    use std::sync::{Arc, Mutex};
+    use xai_acp_lib::AcpAgentMessage;
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let captured_for_task = captured.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let AcpAgentMessage::ExtMethod(args) = msg {
+                let params: serde_json::Value = serde_json::from_str(
+                        args.request.params.get(),
+                    )
+                    .expect("params JSON");
+                captured_for_task.lock().unwrap().push(params);
+                let body = serde_json::json!({ "result": { "sessions": [] } });
+                let raw = serde_json::value::RawValue::from_string(body.to_string())
+                    .expect("ser");
+                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(Arc::from(raw))));
+            }
+        }
+    });
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = JoinSet::new();
+    execute(
+        Effect::FetchSessionList {
+            query: None,
+            seq: 1,
+            kind_filter: Some(vec!["build".into()]),
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let _ = tasks.join_next().await;
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
+            serde_json::json!(["build"])
+        );
 }
 #[tokio::test]
 async fn fetch_workflows_list_sends_session_id() {
@@ -2155,7 +2202,7 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("chat_mode must emit meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "K12: chat mode must omit Build agentProfile"
@@ -2182,7 +2229,7 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         scrub_chat_workspace_bind_meta(&mut meta);
     }
     let meta = meta.expect("chat_kind must produce meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "entry chat_kind must strip Build agentProfile"
@@ -2216,7 +2263,7 @@ fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
     apply_chat_kind_meta(&mut meta);
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat create must emit meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2240,10 +2287,164 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat load must emit meta");
-    assert_eq!(meta["x.ai/session"] ["kind"], "chat");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
+}
+/// Attach stamp keeps existing workspace + local intent; envId / Direct hub stay stripped.
+#[cfg(feature = "local-workspace")]
+#[test]
+fn scrub_chat_workspace_matrix_attach_exception() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let mut meta = Some(acp::Meta::new());
+    {
+        let obj = meta.as_mut().unwrap();
+        obj.insert("envId".into(), serde_json::json!("env-x"));
+        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-x"));
+        obj.insert(
+            "x.ai/cloud_existing_workspace".into(),
+            serde_json::json!({"server_id": "srv-x", "cwd": "/ws"}),
+        );
+    }
+    scrub_chat_workspace_bind_meta(&mut meta);
+    let scrubbed = meta.as_ref().unwrap();
+    assert!(scrubbed.get("envId").is_none());
+    assert!(scrubbed.get("x.ai/cloud_server_id").is_none());
+    assert!(scrubbed.get("x.ai/cloud_existing_workspace").is_none());
+    let mut meta = Some(acp::Meta::new());
+    apply_local_workspace_meta(
+        &mut meta,
+        &LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-dogfood".into()),
+        },
+    );
+    {
+        let obj = meta.as_mut().unwrap();
+        obj.insert("envId".into(), serde_json::json!("env-must-go"));
+        obj.insert("x.ai/cloud_server_id".into(), serde_json::json!("hub-must-go"));
+    }
+    scrub_chat_workspace_bind_meta(&mut meta);
+    let scrubbed = meta.as_ref().unwrap();
+    assert!(scrubbed.get("envId").is_none(), "envId must stay scrubbed");
+    assert!(
+            scrubbed.get("x.ai/cloud_server_id").is_none(),
+            "Direct hub must stay scrubbed"
+        );
+    assert_eq!(
+            scrubbed["x.ai/cloud_existing_workspace"]["server_id"],
+            "srv-dogfood"
+        );
+    assert_eq!(scrubbed["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(scrubbed["x.ai/local_workspace"]["server_id"], "srv-dogfood");
+    assert_eq!(scrubbed["x.ai/local_workspace"]["cwd"], "/tmp/repo");
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn to_meta_chat_attach_stamps_local_and_existing() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: true,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-1".into()),
+        }),
+        ..Default::default()
+    };
+    let meta = flags.to_meta().expect("meta");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-1");
+    assert!(meta.get("envId").is_none());
+    assert!(meta.get("x.ai/cloud_server_id").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn to_meta_chat_own_stamps_intent_without_existing() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: true,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Own,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo-own")),
+            server_id: None,
+        }),
+        ..Default::default()
+    };
+    let meta = flags.to_meta().expect("meta");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "own");
+    assert_eq!(meta["x.ai/local_workspace"]["cwd"], "/tmp/repo-own");
+    assert!(meta["x.ai/local_workspace"].get("server_id").is_none());
+    assert!(
+            meta.get("x.ai/cloud_existing_workspace").is_none(),
+            "own must not stamp existing; shell mints server_id"
+        );
+    assert!(meta.get("envId").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn mid_session_add_params_scrub_envid() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let params = mid_session_add_local_workspace_params(
+        "sess-1",
+        &LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-add".into()),
+        },
+    );
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["meta"]["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(
+            params["meta"]["x.ai/cloud_existing_workspace"]["server_id"],
+            "srv-add"
+        );
+    assert!(params["meta"].get("envId").is_none());
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn reject_non_fs_only_advertised_tools_matrix() {
+    let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
+    assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
+    assert!(
+            reject_non_fs_only_advertised_tools(None)
+                .unwrap_err()
+                .contains("uncheckable")
+        );
+    assert!(
+            reject_non_fs_only_advertised_tools(Some(&[][..]))
+                .unwrap_err()
+                .contains("empty")
+        );
+    let with_exec = ["workspace.fs_list", "workspace.bash", "terminal.exec"];
+    let err = reject_non_fs_only_advertised_tools(Some(&with_exec[..])).unwrap_err();
+    assert!(err.contains("FS-only"), "{err}");
+    assert!(err.contains("workspace.bash"), "{err}");
+    assert!(err.contains("terminal.exec"), "{err}");
+}
+#[cfg(feature = "local-workspace")]
+#[test]
+fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
+    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
+    let flags = SessionFlags {
+        chat_mode: false,
+        local_workspace: Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv-wt".into()),
+        }),
+        ..Default::default()
+    };
+    let mut meta = flags.to_meta();
+    finalize_chat_session_meta(&mut meta, true, &flags);
+    let meta = meta.expect("meta");
+    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
+    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-wt");
+    assert!(meta.get("envId").is_none());
 }
 #[test]
 fn to_meta_yolo_suppresses_auto_mode() {

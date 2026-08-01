@@ -881,6 +881,12 @@ pub struct AgentView {
     /// Unlike `chat_kind`, stays `false` for a `/chat` one-shot session in
     /// a Build process, whose picker still lists local sessions.
     pub app_chat_mode: bool,
+    /// Durable workspace mode for the in-session status indicator (`--chat`).
+    #[cfg(feature = "local-workspace")]
+    pub workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
+    /// True when CLI/env locked local workspace at startup for this session.
+    #[cfg(feature = "local-workspace")]
+    pub workspace_mode_cli_locked: bool,
     /// Mocked credit balance for the status bar indicator.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// Auto top-up rule paired with `credit_balance` for the prompt warning.
@@ -925,6 +931,11 @@ pub struct AgentView {
     /// Accumulated duration the turn timer was paused (while the user was
     /// answering questions via `AskUserQuestion`). Reset when the turn ends.
     pub turn_paused_duration: std::time::Duration,
+    /// Wall-clock twin of `turn_paused_duration`: the same pauses measured on
+    /// the wall clock, which keeps counting through OS suspend while `Instant`
+    /// does not. Netted against the wall-anchored turn span so a suspend
+    /// during an open question isn't reported as worked time.
+    pub turn_paused_wall: std::time::Duration,
     /// IDs of interjections this client sent and already rendered locally
     /// (optimistic echo). The shell broadcasts `x.ai/session/interjection` to
     /// every attached pane; when our own broadcast echoes back carrying an id

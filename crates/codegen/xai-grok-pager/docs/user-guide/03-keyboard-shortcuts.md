@@ -253,7 +253,7 @@ Bindings while the [Agent Dashboard](23-dashboard.md) is focused (`Ctrl+\` or `/
 | `Ctrl+R` | Rename the selected agent |
 | `Ctrl+T` | Pin / unpin |
 | `Ctrl+G` | Toggle grouping (state ↔ working directory) |
-| `Ctrl+X` | Stop a running turn, or press twice within 2s to close the session |
+| `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
 | `Ctrl+O` | Toggle always-approve on the selected agent |
 | `Tab` | Toggle focus between the list and the dispatch / peek input |
 | `Esc` | Step back (cancel search → close peek → clear filter → unfocus → unselect → exit) |

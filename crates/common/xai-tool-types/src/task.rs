@@ -404,8 +404,12 @@ pub struct TaskOutputToolInput {
     pub task_ids: Vec<String>,
 
     /// When set and positive, wait up to this many milliseconds; omit or `0` polls.
+    ///
+    /// `{max_wait_ms}` is resolved at finalize from the session's wait ceiling,
+    /// which also pins it as the schema `maximum` — the tool description cannot
+    /// carry the bound alone, since randomization may replace it wholesale.
     #[schemars(
-        description = "Max wait time in milliseconds. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
+        description = "Max wait time in milliseconds, up to {max_wait_ms}. A positive value waits for completion; omit or pass 0 for a non-blocking status poll."
     )]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -444,6 +448,44 @@ impl TaskOutputToolInput {
 pub fn task_output_waits(timeout_ms: Option<u64>) -> bool {
     timeout_ms.is_some_and(|ms| ms > 0)
 }
+
+/// Default ceiling on a single blocking wait (`get_task_output` with a positive
+/// `timeout_ms`, `wait_tasks`). Capping is safe because a completed task pings
+/// the model, so a truncated wait costs one more poll, not the result.
+pub const MAX_WAIT_BLOCK_MS_DEFAULT: u64 = 600_000;
+
+/// The blocking-wait ceiling in effect, honoring `GROK_MAX_WAIT_BLOCK_MS`.
+///
+/// A host whose transport deadline is shorter than the default sets the env var
+/// so the server enforces — and the tool descriptions advertise — the same
+/// number the caller will actually wait for. Without that, a model believing the
+/// default asks for a wait its own client will abandon first.
+pub fn max_wait_block_ms() -> u64 {
+    std::env::var("GROK_MAX_WAIT_BLOCK_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(MAX_WAIT_BLOCK_MS_DEFAULT)
+}
+
+/// Render a wait ceiling for tool descriptions, e.g. `600000 (~10 min)`.
+///
+/// The unit is derived from the value, so it cannot drift from the millisecond
+/// figure beside it. Both branches round *down*: a cap must never read as
+/// longer than it is.
+pub fn format_wait_cap_ms(ms: u64) -> String {
+    if ms < 60_000 {
+        format!("{ms} (~{} s)", ms / 1_000)
+    } else {
+        format!("{ms} (~{} min)", ms / 60_000)
+    }
+}
+
+/// Placeholder the description builders emit for the wait ceiling.
+///
+/// Resolved per session by `TruncationConfig::interpolate_description` in the
+/// finalize loop, the same way `{max_lines_read}` is: the cap is client
+/// configurable, so it cannot be baked in when the description is built.
+pub const MAX_WAIT_MS_PLACEHOLDER: &str = "{max_wait_ms}";
 
 /// Same as [`task_output_waits`], from raw tool-arg JSON (fingerprint / doom-loop).
 pub fn task_output_waits_from_json(args: &serde_json::Value) -> bool {
@@ -568,7 +610,9 @@ pub struct WaitTasksToolInput {
     )]
     pub mode: WaitMode,
 
-    #[schemars(description = "Max wait time in milliseconds")]
+    /// Carries the same `{max_wait_ms}` marker as `TaskOutputToolInput`: this
+    /// tool blocks on the same ceiling, so it needs the same resolved bound.
+    #[schemars(description = "Max wait time in milliseconds, up to {max_wait_ms}")]
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
@@ -1221,12 +1265,13 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
         Some(r) => format!("\n- If output is large, use {r} on the output_file path"),
         None => String::new(),
     };
+    let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
 
     format!(
         "Get output and status from a background task{target_suffix}.\n\n\
          Usage notes:\n\
          - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
-         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at ~10 min\n\
+         - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -1259,13 +1304,15 @@ pub fn build_wait_tasks_description(naming: &WaitTasksToolNaming) -> String {
         (None, None) => "background tasks".to_string(),
     };
 
+    let wait_cap = MAX_WAIT_MS_PLACEHOLDER;
+
     format!(
         "Wait for multiple background tasks or subagents to complete.\n\n\
          Prefer {background_retrieval_tool} with task_ids and a positive timeout_ms. This tool is kept for compatibility.\n\n\
          Usage notes:\n\
          - task_ids: list of task IDs from {sources}\n\
          - mode: 'wait_all' or 'wait_any'\n\
-         - timeout_ms: optional max wait, default 30s, capped at ~10 min"
+         - timeout_ms: optional max wait, default 30s, capped at {wait_cap}"
     )
 }
 
@@ -1803,6 +1850,19 @@ mod tests {
     }
 
     #[test]
+    fn format_wait_cap_ms_derives_its_unit_and_rounds_down() {
+        assert_eq!(
+            format_wait_cap_ms(MAX_WAIT_BLOCK_MS_DEFAULT),
+            "600000 (~10 min)"
+        );
+        assert_eq!(format_wait_cap_ms(300_000), "300000 (~5 min)");
+        // Rounds down: 1.5 min must not read as 2.
+        assert_eq!(format_wait_cap_ms(90_000), "90000 (~1 min)");
+        // Sub-minute caps switch unit rather than rendering "~0 min".
+        assert_eq!(format_wait_cap_ms(30_000), "30000 (~30 s)");
+    }
+
+    #[test]
     fn task_output_description_tracks_renamed_params() {
         let desc = build_task_output_description(&TaskOutputToolNaming {
             monitor_tool: Some("monitor"),
@@ -1847,7 +1907,7 @@ mod tests {
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
              - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at ~10 min\n\
+             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1869,7 +1929,7 @@ mod tests {
             "Get output and status from a background task or subagent.\n\n\
              Usage notes:\n\
              - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
-             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at ~10 min\n\
+             - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1889,7 +1949,7 @@ mod tests {
              Usage notes:\n\
              - task_ids: list of task IDs from background=true commands or subagents\n\
              - mode: 'wait_all' or 'wait_any'\n\
-             - timeout_ms: optional max wait, default 30s, capped at ~10 min"
+             - timeout_ms: optional max wait, default 30s, capped at {max_wait_ms}"
         );
     }
 

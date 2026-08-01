@@ -294,18 +294,15 @@ impl ToolServerBuilder {
     }
 
     /// Override the inbound-liveness deadline on a freshly-opened
-    /// connection: if no inbound WebSocket frame of any kind arrives within
-    /// this window, the connection is declared dead and reconnected. This
-    /// catches silently dead transports (e.g. a VM snapshot restore or
-    /// NAT/LB flow expiry) that a send-only keepalive never notices.
+    /// connection: if no RTT proof (WS/app pong) arrives within this
+    /// window, the connection is declared dead and reconnected.
+    /// Hub→client pings and one-way data do not re-arm.
     ///
-    /// Default (also used for a zero value): 2.5× the effective ping
-    /// interval — 75s at the default 30s ping — which guarantees at least
-    /// two keepalive pings fit in every window, so a healthy-but-idle
-    /// connection (one pong per ping) can never trip it. Explicit values
-    /// are honored verbatim; keep them comfortably above the ping interval
-    /// for the same reason (a value at or below the ping interval churns
-    /// healthy idle connections and is logged as a warning at connect).
+    /// Default (also used for a zero value): `min(4× ping, 120s)` — 120s
+    /// at the default 30s ping, still under the hub's ~150s idle. Explicit
+    /// values are honored verbatim; keep them comfortably above the ping
+    /// interval (a value at or below the ping interval churns healthy idle
+    /// connections and is logged as a warning at connect).
     pub fn with_ws_liveness_deadline(mut self, deadline: std::time::Duration) -> Self {
         self.ws_liveness_deadline = Some(deadline);
         self
@@ -398,8 +395,9 @@ impl ToolServerBuilder {
         self
     }
 
-    /// Optional callback fired once on the initial successful connect, before
-    /// the actor starts (so it happens-before any disconnect/reconnect).
+    /// Optional callback fired once on the initial successful connect, after
+    /// the writer task enters its loop and before the reader actor starts.
+    /// The first keepalive may still be in flight.
     pub fn on_connect<F>(mut self, cb: F) -> Self
     where
         F: Fn() + Send + Sync + 'static,

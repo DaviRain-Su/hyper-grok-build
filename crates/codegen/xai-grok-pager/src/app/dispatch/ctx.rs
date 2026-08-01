@@ -136,6 +136,16 @@ pub(super) fn reseed_tip_for_new_session(app: &mut AppView) {
 pub(super) fn show_welcome(app: &mut AppView) {
     app.active_view = ActiveView::Welcome;
     app.welcome_announcement = WelcomeAnnouncementState::default();
+    // Drop stale welcome workspace one-shot / ACK so a later create/load
+    // cannot inherit an override from a deferred or abandoned NewSession.
+    #[cfg(feature = "local-workspace")]
+    {
+        app.welcome_session_local_workspace = None;
+        app.welcome_local_workspace_ack_pending = false;
+        // Abandoning a session/restore must not leak history bypass into the
+        // next welcome LoadSession / SessionFlags.chat_mode batch.
+        app.welcome_history_load_as_build = false;
+    }
 }
 
 /// Restore the view a mid-session auth flow launched from, falling back to the

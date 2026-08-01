@@ -44,6 +44,9 @@ pub struct DeferredStartupActions {
     pub prompt: Option<String>,
     pub open_dashboard: bool,
     pub pending_chat: bool,
+    /// Welcome history local-disk bypass persisted across the startup gate.
+    #[cfg(feature = "local-workspace")]
+    pub history_load_as_build: bool,
 }
 impl DeferredStartupActions {
     pub fn is_empty(&self) -> bool {
@@ -300,8 +303,320 @@ pub fn chat_mode_flag_conflict(
     }
     None
 }
+/// Env: enable local workspace without CLI flags (`1`). Mode defaults to `own`
+/// unless `GROK_CHAT_LOCAL_WORKSPACE_MODE` / attach server id is set.
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_CWD";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_MODE";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID";
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME";
+/// Skip interactive first-run confirm (still prints the banner).
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_ACK";
+/// Startup banner / first-run copy.
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_BANNER: &str =
+    "Local workspace runs tools on this machine (FS confined to <cwd>).";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_ATTACH_NEEDS_SERVER_ID: &str = "local-workspace attach requires --local-workspace-attach=<server_id> \
+     (or GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID)";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_REQUIRES_CHAT: &str = "local-workspace flags/env require --chat";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_HOME_DENIED: &str =
+    "local-workspace cwd may not be / or $HOME unless GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME=1";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_HITL_HINT: &str = "Permission prompts for local workspace tools apply to your machine. \
+     Local workspace replaces the chat sandbox.";
+#[cfg(feature = "local-workspace")]
+pub const LOCAL_WORKSPACE_ACK_REQUIRED: &str =
+    "local-workspace requires interactive confirm, GROK_CHAT_LOCAL_WORKSPACE_ACK=1, or an ack file";
+/// Declared advertised tool ids for attach FS-only check (comma-separated).
+#[cfg(feature = "local-workspace")]
+pub const GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV: &str =
+    "GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS";
+#[cfg(feature = "local-workspace")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalWorkspaceMode {
+    Own,
+    Attach,
+}
+#[cfg(feature = "local-workspace")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalWorkspaceConfig {
+    pub mode: LocalWorkspaceMode,
+    pub cwd: Option<std::path::PathBuf>,
+    pub server_id: Option<String>,
+}
+#[cfg(feature = "local-workspace")]
+static ACTIVE_LOCAL_WORKSPACE: std::sync::Mutex<Option<LocalWorkspaceConfig>> =
+    std::sync::Mutex::new(None);
+#[cfg(feature = "local-workspace")]
+pub fn set_active_local_workspace(cfg: Option<LocalWorkspaceConfig>) -> anyhow::Result<()> {
+    let mut guard = ACTIVE_LOCAL_WORKSPACE.lock().map_err(|_| {
+        anyhow::anyhow!("local-workspace intent mutex poisoned; refuse attach (fail closed)")
+    })?;
+    tracing::info!(
+        target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
+        event = if cfg.is_some() {
+            "process_stamp_set"
+        } else {
+            "process_stamp_cleared"
+        },
+        mode = cfg.as_ref().map(|c| format!("{:?}", c.mode)),
+        server_id = cfg.as_ref().and_then(|c| c.server_id.as_deref()),
+        cwd = cfg.as_ref().and_then(|c| c.cwd.as_ref().map(|p| p.display().to_string())),
+        "local-workspace process-wide intent stamp"
+    );
+    *guard = cfg;
+    Ok(())
+}
+#[cfg(feature = "local-workspace")]
+pub fn active_local_workspace() -> anyhow::Result<Option<LocalWorkspaceConfig>> {
+    ACTIVE_LOCAL_WORKSPACE
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|_| {
+            anyhow::anyhow!("local-workspace intent mutex poisoned; refuse attach (fail closed)")
+        })
+}
+#[cfg(not(feature = "local-workspace"))]
 pub fn active_local_workspace() -> anyhow::Result<Option<()>> {
     Ok(None)
+}
+#[cfg(feature = "local-workspace")]
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+#[cfg(feature = "local-workspace")]
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+/// Resolve CLI > env local-workspace intent (own or attach).
+///
+/// Returns `Ok(None)` when local workspace is not requested.
+#[cfg(feature = "local-workspace")]
+pub fn resolve_local_workspace_config(
+    chat: bool,
+    cli_own: Option<Option<&std::path::Path>>,
+    cli_attach: Option<&str>,
+    cli_cwd: Option<&std::path::Path>,
+) -> anyhow::Result<Option<LocalWorkspaceConfig>> {
+    let env_enable = env_truthy(GROK_CHAT_LOCAL_WORKSPACE_ENV);
+    let env_mode = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV);
+    let env_server_id = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
+    let env_cwd = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV).map(std::path::PathBuf::from);
+    let cli_attach = cli_attach.map(str::trim).filter(|s| !s.is_empty());
+    let cli_requested = cli_own.is_some() || cli_attach.is_some();
+    let env_requested = env_enable || env_mode.is_some() || env_server_id.is_some();
+    if !cli_requested && !env_requested {
+        return Ok(None);
+    }
+    if !chat {
+        anyhow::bail!("{LOCAL_WORKSPACE_REQUIRES_CHAT}");
+    }
+    let mode = if cli_attach.is_some() {
+        LocalWorkspaceMode::Attach
+    } else if cli_own.is_some() {
+        LocalWorkspaceMode::Own
+    } else if let Some(ref m) = env_mode {
+        match m.as_str() {
+            "attach" => LocalWorkspaceMode::Attach,
+            "own" => LocalWorkspaceMode::Own,
+            other => {
+                anyhow::bail!(
+                    "invalid {GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV}={other:?}; expected own|attach"
+                )
+            }
+        }
+    } else if env_server_id.is_some() {
+        LocalWorkspaceMode::Attach
+    } else {
+        LocalWorkspaceMode::Own
+    };
+    let cwd = cli_cwd
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| cli_own.and_then(|inner| inner.map(std::path::Path::to_path_buf)))
+        .or(env_cwd)
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+    let cwd = if cwd.is_absolute() {
+        cwd
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(cwd)
+    };
+    let cwd = validate_local_workspace_cwd(&cwd)?;
+    match mode {
+        LocalWorkspaceMode::Own => Ok(Some(LocalWorkspaceConfig {
+            mode,
+            cwd: Some(cwd),
+            server_id: None,
+        })),
+        LocalWorkspaceMode::Attach => {
+            let server_id = cli_attach
+                .map(str::to_owned)
+                .or(env_server_id)
+                .filter(|s| !s.is_empty());
+            let Some(server_id) = server_id else {
+                anyhow::bail!("{LOCAL_WORKSPACE_ATTACH_NEEDS_SERVER_ID}");
+            };
+            ensure_attach_fs_only_toolset(&server_id)?;
+            Ok(Some(LocalWorkspaceConfig {
+                mode,
+                cwd: Some(cwd),
+                server_id: Some(server_id),
+            }))
+        }
+    }
+}
+/// Canonicalize `path` and enforce the `/` + `$HOME` denylist.
+///
+/// Returns the canonical directory so callers stamp/persist what was actually
+/// checked (symlinks / `..` must not diverge from validation).
+#[cfg(feature = "local-workspace")]
+pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(path)
+    };
+    let canon = abs.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "local workspace cwd must exist and be canonicalizable: {}: {e}",
+            abs.display()
+        )
+    })?;
+    if !canon.is_dir() {
+        anyhow::bail!(
+            "local workspace cwd must be an existing directory: {}",
+            canon.display()
+        );
+    }
+    if env_truthy(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV) {
+        return Ok(canon);
+    }
+    if canon == std::path::Path::new("/") {
+        anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
+    }
+    if let Some(home_path) = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(Into::into)) {
+        let home_canon = home_path.canonicalize().unwrap_or(home_path);
+        if canon == home_canon {
+            anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
+        }
+    }
+    Ok(canon)
+}
+/// Banner + first-run confirm for local-workspace own/attach.
+///
+/// Skip confirm only with `GROK_CHAT_LOCAL_WORKSPACE_ACK=1` or a prior ack file.
+/// Non-TTY without ACK refuses (fail closed).
+#[cfg(feature = "local-workspace")]
+pub fn emit_local_workspace_startup_ux(cfg: &LocalWorkspaceConfig) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    emit_local_workspace_startup_ux_with(cfg, std::io::stdin().is_terminal())
+}
+/// Testable UX gate: `stdin_is_terminal` is injected.
+#[cfg(feature = "local-workspace")]
+pub fn emit_local_workspace_startup_ux_with(
+    cfg: &LocalWorkspaceConfig,
+    stdin_is_terminal: bool,
+) -> anyhow::Result<()> {
+    let cwd_display = cfg
+        .cwd
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<session cwd>".to_string());
+    let banner = LOCAL_WORKSPACE_BANNER.replace("<cwd>", &cwd_display);
+    eprintln!("{banner}");
+    eprintln!("{LOCAL_WORKSPACE_HITL_HINT}");
+    if local_workspace_ack_satisfied() {
+        return Ok(());
+    }
+    if !stdin_is_terminal {
+        anyhow::bail!("{LOCAL_WORKSPACE_ACK_REQUIRED}");
+    }
+    eprint!("Continue with local workspace on this machine? [y/N] ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let ok = matches!(line.trim(), "y" | "Y" | "yes" | "YES");
+    if !ok {
+        anyhow::bail!("local workspace cancelled");
+    }
+    write_local_workspace_ack();
+    Ok(())
+}
+/// True when ACK env or ack file already authorizes local workspace.
+#[cfg(feature = "local-workspace")]
+pub fn local_workspace_ack_satisfied() -> bool {
+    if env_truthy(GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV) {
+        return true;
+    }
+    local_workspace_ack_path().is_some_and(|p| p.is_file())
+}
+/// Persist the first-run local-workspace ACK file (best-effort).
+#[cfg(feature = "local-workspace")]
+pub fn write_local_workspace_ack() {
+    if let Some(path) = local_workspace_ack_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, "1\n");
+    }
+}
+/// Fail closed unless advertised tools are FS-only.
+///
+/// Until diag exposes a real tool catalog, attach trusts operator attestation
+/// via `GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS` (comma-separated ids).
+/// Unset / empty → refuse.
+#[cfg(feature = "local-workspace")]
+pub fn ensure_attach_fs_only_toolset(_server_id: &str) -> anyhow::Result<()> {
+    let advertised = probe_advertised_tool_ids();
+    let refs: Option<Vec<&str>> = advertised
+        .as_ref()
+        .map(|ids| ids.iter().map(String::as_str).collect());
+    crate::app::effects::reject_non_fs_only_advertised_tools(refs.as_deref())
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+/// Operator-attested advertised tool ids for attach (env only; no fake diag probe).
+#[cfg(feature = "local-workspace")]
+pub fn probe_advertised_tool_ids() -> Option<Vec<String>> {
+    let raw = env_nonempty(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV)?;
+    let ids: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some(ids)
+}
+#[cfg(feature = "local-workspace")]
+fn local_workspace_ack_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("GROK_HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            dirs::home_dir()
+                .or_else(|| std::env::var_os("HOME").map(Into::into))
+                .map(|h| h.join(".grok"))
+        })?;
+    Some(home.join("local_workspace_ack"))
 }
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
 ///
@@ -1329,5 +1644,201 @@ mod tests {
                 other => panic!("expected Resume, got {other:?}"),
             }
         }
+    }
+    #[cfg(feature = "local-workspace")]
+    fn advertised_tools_env() -> xai_grok_test_support::EnvGuard {
+        xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
+            "workspace.fs_list,workspace.fs_read_file,workspace.fs_write_file,workspace.fs_exists,workspace.fs_delete_file,workspace.put_files,workspace.get_files",
+        )
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_attach_from_cli() {
+        let _env = advertised_tools_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = resolve_local_workspace_config(true, None, Some("srv-dogfood"), Some(tmp.path()))
+            .unwrap()
+            .expect("attach config");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Attach);
+        assert_eq!(cfg.server_id.as_deref(), Some("srv-dogfood"));
+        let canon = tmp.path().canonicalize().unwrap();
+        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID)]
+    #[test]
+    fn resolve_local_workspace_empty_cli_attach_falls_back_to_env() {
+        let _env = advertised_tools_env();
+        let _sid = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV,
+            "srv-from-env",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = resolve_local_workspace_config(true, None, Some(""), Some(tmp.path()))
+            .unwrap()
+            .expect("empty CLI attach should fall back to env server id");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Attach);
+        assert_eq!(cfg.server_id.as_deref(), Some("srv-from-env"));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_CWD)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_MODE)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID)]
+    #[test]
+    fn resolve_local_workspace_cwd_only_is_not_a_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _cwd = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV,
+            tmp.path().to_str().unwrap(),
+        );
+        let _enable = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ENV);
+        let _mode = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV);
+        let _sid = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
+        let cfg = resolve_local_workspace_config(true, None, None, Some(tmp.path())).unwrap();
+        assert!(
+            cfg.is_none(),
+            "cwd-only CLI/env must not activate local workspace: {cfg:?}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_own_from_cli() {
+        let _env = advertised_tools_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = resolve_local_workspace_config(true, Some(Some(tmp.path())), None, None)
+            .unwrap()
+            .expect("own config");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Own);
+        assert!(
+            cfg.server_id.is_none(),
+            "own leaves server_id to supervisor"
+        );
+        let canon = tmp.path().canonicalize().unwrap();
+        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_own_env_defaults() {
+        let _env = advertised_tools_env();
+        let _enable = xai_grok_test_support::EnvGuard::set(GROK_CHAT_LOCAL_WORKSPACE_ENV, "1");
+        let _mode = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_MODE_ENV);
+        let _sid = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
+        let cwd = tempfile::tempdir().unwrap();
+        let _cwd = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_CWD_ENV,
+            cwd.path().to_str().unwrap(),
+        );
+        let cfg = resolve_local_workspace_config(true, None, None, None)
+            .unwrap()
+            .expect("env own");
+        assert_eq!(cfg.mode, LocalWorkspaceMode::Own);
+        assert!(cfg.server_id.is_none());
+        let canon = cwd.path().canonicalize().unwrap();
+        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_requires_chat() {
+        let _env = advertised_tools_env();
+        let err = resolve_local_workspace_config(false, None, Some("srv"), None).unwrap_err();
+        assert!(
+            err.to_string().contains("require --chat"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
+    #[serial_test::serial(HOME)]
+    #[serial_test::serial(USERPROFILE)]
+    #[test]
+    fn resolve_local_workspace_defaults_cwd_and_denies_home() {
+        let _tools = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
+            "workspace.fs_list",
+        );
+        let _allow =
+            xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_str().unwrap();
+        let _home = xai_grok_test_support::EnvGuard::set("HOME", home_str);
+        let _userprofile = xai_grok_test_support::EnvGuard::set("USERPROFILE", home_str);
+        let err =
+            resolve_local_workspace_config(true, None, Some("srv"), Some(home.path())).unwrap_err();
+        assert!(err.to_string().contains("ALLOW_HOME"), "unexpected: {err}");
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_refuses_uncheckable_toolset() {
+        let _tools =
+            xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            resolve_local_workspace_config(true, None, Some("srv"), Some(tmp.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("uncheckable") || err.to_string().contains("FS-only"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
+    #[test]
+    fn resolve_local_workspace_refuses_non_fs_toolset() {
+        let _tools = xai_grok_test_support::EnvGuard::set(
+            GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
+            "workspace.fs_list,workspace.bash",
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let err =
+            resolve_local_workspace_config(true, None, Some("srv"), Some(tmp.path())).unwrap_err();
+        assert!(err.to_string().contains("FS-only"), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("workspace.bash"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn local_workspace_banner_mentions_local_machine() {
+        assert!(LOCAL_WORKSPACE_BANNER.contains("on this machine"));
+        assert!(LOCAL_WORKSPACE_HITL_HINT.contains("your machine"));
+        assert!(LOCAL_WORKSPACE_HITL_HINT.contains("replaces the chat sandbox"));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    #[serial_test::serial(GROK_HOME)]
+    #[test]
+    fn local_workspace_non_tty_requires_ack() {
+        let _ack = xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV);
+        let home = tempfile::tempdir().unwrap();
+        let _home =
+            xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path().to_str().unwrap());
+        let cfg = LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
+            server_id: Some("srv".into()),
+        };
+        let err = emit_local_workspace_startup_ux_with(&cfg, false).unwrap_err();
+        assert!(
+            err.to_string().contains("ACK") || err.to_string().contains("ack"),
+            "unexpected: {err}"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
+    #[test]
+    fn validate_local_workspace_cwd_denies_root() {
+        let _allow =
+            xai_grok_test_support::EnvGuard::unset(GROK_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
+        let err = validate_local_workspace_cwd(std::path::Path::new("/")).unwrap_err();
+        assert!(err.to_string().contains("ALLOW_HOME"), "{err}");
     }
 }

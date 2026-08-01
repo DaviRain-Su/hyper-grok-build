@@ -6,6 +6,8 @@ edition.workspace = true
 description = "Foundation modules for the grok shell crate family: environment presets, CPU profiling, and process/filesystem utilities."
 
 [features]
+# Forwarded from shell; empty here (no local-ws code in this crate).
+local-workspace = []
 # Exposes `#[cfg(test)]`-only helpers (`env::EnvVarGuard`,
 # `cpu_profile` test seams) to downstream crates' test targets. Enabled by
 test-support = ["xai-grok-env/test-support"]

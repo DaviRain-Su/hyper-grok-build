@@ -21,7 +21,7 @@ pub use self::doom_loop::{
 };
 pub use self::error::{
     EmptyReason, EmptyResponseContext, ResponseModelMetadata, Result, SamplingError,
-    is_context_length_error, status_user_message, user_facing_api_error_message,
+    SentCredential, is_context_length_error, status_user_message, user_facing_api_error_message,
 };
 pub use self::tool_overrides::{
     ClearableField, SearchDateBound, SearchDateBoundError, ToolOverrides, ToolOverridesUpdate,

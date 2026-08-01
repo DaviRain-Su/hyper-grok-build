@@ -167,8 +167,67 @@ type FileIdentity = (u64, u64);
 
 static WRITER: LazyLock<Mutex<Option<LogWriter>>> = LazyLock::new(|| Mutex::new(open_writer()));
 
+/// See [`redirect_to_temp_for_tests`].
+static TEST_REDIRECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Redirect all subsequent unified-log writes **and** snapshot reads to a
+/// per-process file under the system temp directory, so test binaries stop
+/// writing synthetic events into the developer's real
+/// `~/.grok/logs/unified.jsonl` (those bursts inflate exactly the counters
+/// an incident responder greps for). Runtime-activated rather than a cargo
+/// feature: Bazel compiles production and test targets with one shared
+/// feature set, so a feature gate would leak into production builds.
+///
+/// Idempotent and safe at any point: an already-open writer is re-pointed,
+/// so an emit that precedes the redirect cannot pin the real path. Test
+/// binaries install it pre-main via `#[ctor]`.
+pub fn redirect_to_temp_for_tests() {
+    TEST_REDIRECT.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut guard) = WRITER.lock() {
+        *guard = open_writer();
+    }
+}
+
 fn log_path() -> PathBuf {
+    if TEST_REDIRECT.load(std::sync::atomic::Ordering::Relaxed) {
+        return test_log_dir().join(LOG_FILE);
+    }
     grok_home().join(LOG_DIR).join(LOG_FILE)
+}
+
+/// Owner-only (0o700), freshly-created directory for the test redirect.
+///
+/// The stream carries path metadata and credential tail fragments, and the
+/// system temp dir is world-writable on Linux: a pre-planted directory or
+/// symlink would let another local user read the file — or make the writer
+/// and [`trim_file`] operate through a symlink onto a victim file. The
+/// non-recursive `create` fails on any pre-existing path instead of
+/// adopting it, and the nanos component makes the name unpredictable.
+/// Panicking on failure is deliberate: this branch only runs in test
+/// binaries, and silently falling back would reopen the hole via
+/// `open_writer_at`'s `create_dir_all`.
+fn test_log_dir() -> &'static PathBuf {
+    static TEST_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+    TEST_LOG_DIR.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "grok-unified-log-test-{}-{nanos}",
+            std::process::id()
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&dir)
+            .expect("create private unified-log test dir");
+        dir
+    })
 }
 
 pub fn file_size(path: &std::path::Path) -> u64 {
@@ -515,6 +574,34 @@ pub fn snapshot_session_log(session_id: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pre-main, so no test in this binary can race the lazily-opened
+    /// writer onto the developer's real `~/.grok/logs/unified.jsonl`.
+    #[ctor::ctor]
+    fn redirect_for_tests() {
+        redirect_to_temp_for_tests();
+    }
+
+    /// The redirect must cover both the writer and the snapshot readers:
+    /// an emit lands in a per-process temp file, never under `grok_home()`.
+    #[test]
+    fn redirect_routes_writes_and_snapshots_to_process_temp_file() {
+        info(
+            "unified-log redirect probe",
+            Some("redirect-probe-sid"),
+            None,
+        );
+        let snapshot = snapshot_log().expect("snapshot after emit");
+        assert!(
+            String::from_utf8_lossy(&snapshot).contains("unified-log redirect probe"),
+            "snapshot must read the same redirected file the writer appended to"
+        );
+        assert!(
+            log_path().starts_with(std::env::temp_dir()),
+            "the shared file must live under the temp dir, not grok_home(): {}",
+            log_path().display()
+        );
+    }
 
     #[test]
     fn log_entry_serializes_minimal() {

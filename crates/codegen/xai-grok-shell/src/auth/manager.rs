@@ -18,7 +18,9 @@ pub(super) mod lock;
 mod sleep_gate;
 
 use lock::try_lock_auth_file_async;
-use sleep_gate::{GateRaise, InFlightGuard, SleepGate};
+use sleep_gate::{InFlightGuard, SleepGate};
+
+use crate::util::dual_clock::DualClock;
 
 use crate::auth::config::GrokComConfig;
 use crate::auth::error::AuthError;
@@ -98,13 +100,13 @@ const RELOAD_RETRY_BACKOFF: StdDuration = StdDuration::from_millis(50);
 struct ScopedRefreshFailure {
     token_key: String,
     error: crate::auth::error::RefreshTokenFailedError,
-    /// Two-clock timestamp (see [`GateRaise`]): the TTL below is *real* time,
+    /// Two-clock timestamp (see [`DualClock`]): the TTL below is *real* time,
     /// so it must keep counting across a system sleep. The monotonic clock
     /// pauses during suspend — with it alone, a failure cached just before
     /// sleep would still short-circuit `auth()` for a further
     /// [`PERMANENT_FAILURE_TTL`] of *awake* time after wake, exactly when the
     /// user comes back and expects a recovered session.
-    recorded_at: GateRaise,
+    recorded_at: DualClock,
 }
 
 /// Auto-expiry safety net for the recoverable reasons (`ClientRejected`,
@@ -202,11 +204,11 @@ pub struct AuthManager {
     /// manager so repeated 401s on the most-recent dead credential emit once.
     manual_auth: crate::auth::recovery::ManualAuthTracker,
     /// When the current unbroken run of dark-wake refresh deferrals began, on
-    /// two clocks (see [`GateRaise`]); `None` outside such a run. Bounds the
+    /// two clocks (see [`DualClock`]); `None` outside such a run. Bounds the
     /// deferral to [`sleep_gate::DARK_WAKE_DEFER_MAX`] so a machine stuck
     /// reporting dark wake can't defer refresh forever — see
     /// [`AuthManager::should_defer_for_dark_wake`].
-    dark_wake_defer_since: parking_lot::RwLock<Option<GateRaise>>,
+    dark_wake_defer_since: parking_lot::RwLock<Option<DualClock>>,
     /// Test-only override for [`AuthManager::is_dark_wake`]. `Some(_)` forces
     /// the dark-wake decision so the refresh-deferral path is unit-testable
     /// without a real macOS dark wake. `None` = consult the OS.
@@ -2106,7 +2108,7 @@ impl AuthManager {
         *self.permanent_failure.write() = Some(ScopedRefreshFailure {
             token_key,
             error,
-            recorded_at: GateRaise::now(),
+            recorded_at: DualClock::now(),
         });
     }
 
@@ -2138,7 +2140,7 @@ impl AuthManager {
     /// on disk) must be allowed to refresh — otherwise a hard-expired sibling
     /// AT strands a process that could still refresh a live RT.
     ///
-    /// TTL expiry is judged on *both* clocks (see [`GateRaise`]): the monotonic
+    /// TTL expiry is judged on *both* clocks (see [`DualClock`]): the monotonic
     /// clock pauses during a system suspend, so a wall-clock arm is required
     /// for the TTL to elapse across sleep. Without it, a recoverable failure
     /// cached just before the lid closes (e.g. a transient escalation while
@@ -2227,7 +2229,7 @@ impl AuthManager {
             // which the asserting test will surface loudly.
             let now_mono = std::time::Instant::now();
             let now_wall = std::time::SystemTime::now();
-            pf.recorded_at = GateRaise {
+            pf.recorded_at = DualClock {
                 mono: now_mono.checked_sub(past_ttl).unwrap_or(now_mono),
                 wall: now_wall.checked_sub(past_ttl).unwrap_or(now_wall),
             };

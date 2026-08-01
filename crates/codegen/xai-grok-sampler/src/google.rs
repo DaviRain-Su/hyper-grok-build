@@ -683,15 +683,14 @@ impl VertexAdcTokenProvider {
                 let provider = gcloud_auth::token::DefaultTokenSourceProvider::new(config)
                     .await
                     .map_err(|e| {
-                        SamplingError::Auth(format!("failed to initialize Google ADC: {e}"))
+                        SamplingError::auth_unknown(format!("failed to initialize Google ADC: {e}"))
                     })?;
                 Ok::<Arc<dyn token_source::TokenSource>, SamplingError>(provider.token_source())
             })
             .await?;
-        source
-            .token()
-            .await
-            .map_err(|e| SamplingError::Auth(format!("failed to mint Google ADC token: {e}")))
+        source.token().await.map_err(|e| {
+            SamplingError::auth_unknown(format!("failed to mint Google ADC token: {e}"))
+        })
     }
 }
 

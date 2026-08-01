@@ -215,7 +215,13 @@ async fn unsupported_compact_endpoint_is_cached_but_auth_is_not_fallback() {
         .compact_conversation(compact_request(), String::new())
         .await
         .expect_err("401 must not become a local fallback");
-    assert!(matches!(error, SamplingError::Auth(_)));
+    assert!(matches!(
+        error,
+        SamplingError::Auth {
+            message: _,
+            credential: _
+        }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

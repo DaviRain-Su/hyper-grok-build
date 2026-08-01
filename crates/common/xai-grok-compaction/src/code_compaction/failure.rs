@@ -33,6 +33,7 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
+        || (m.contains("current message") && m.contains("exceeds budget"))
 }
 
 /// Classify an HTTP API failure (status + message) for the compaction retry
@@ -183,6 +184,9 @@ mod tests {
             "exceeds the maximum prompt length",
             "This model's maximum context length is 128000 tokens",
             "error code: context_length_exceeded",
+            "Failed to start sampling: [conversation] Current message (1000000 tokens) exceeds budget (500000 tokens)",
+            "compact failed: API error (status 400 Bad Request): invalid-argument: Failed to start sampling: [conversation] Current message (1000000 tokens) exceeds budget (500000 tokens)",
+            "Current message (600000) exceeds budget (500000)",
         ] {
             assert!(is_context_length_error(msg), "should match: {msg}");
         }
@@ -190,6 +194,8 @@ mod tests {
             "internal server error",
             "rate limited",
             "connection reset by peer",
+            "Attached file content (300000 tokens) causes message to exceed budget",
+            "compact index estimate 2.0 GB exceeds budget 1.0 GB",
         ] {
             assert!(!is_context_length_error(msg), "should not match: {msg}");
         }

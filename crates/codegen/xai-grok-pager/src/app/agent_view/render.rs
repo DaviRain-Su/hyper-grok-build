@@ -1377,6 +1377,20 @@ impl AgentView {
         }) {
             status.push("mcp", mcp_line);
         }
+        #[cfg(feature = "local-workspace")]
+        if self.chat_kind || self.app_chat_mode {
+            let label = self
+                .workspace_mode
+                .status_label(self.workspace_mode_cli_locked);
+            let mut mode_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
+            if self.workspace_mode_cli_locked {
+                mode_style = mode_style.add_modifier(ratatui::style::Modifier::DIM);
+            }
+            status.push(
+                "workspace_mode",
+                Line::from(Span::styled(label, mode_style)),
+            );
+        }
         let ctx_used = self.context_state.as_ref().map(|c| c.used);
         let model_window = self.session.models.get_context_window();
         let ctx_total = self

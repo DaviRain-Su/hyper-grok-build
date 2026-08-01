@@ -38,21 +38,21 @@ pub use error_codes::{
 };
 pub use error_wire::ToolErrorWire;
 pub use frames::{
-    AttachRoute, HookFrame, HookReplyFrame, LastSeq, LogsDonateParams, MAX_DONATION_BYTES,
-    MAX_LOG_RECORDS_PER_DONATION, MAX_METRICS_PER_DONATION, MAX_SPANS_PER_DONATION,
-    MAX_SYSTEM_NOTIFY_PAYLOAD_BYTES, MetricsDonateParams, NotificationFilter, PingFrame, PongFrame,
-    ServeParams, ServeResult, ServerBindAck, ServerBindOutcome, ServerBindParams, ServerInfo,
-    ServerUnbindAck, ServerUnbindOutcome, ServerUnbindParams, ServersListParams, ServersListResult,
-    SessionAttachServerParams, SessionAttachServerResult, SessionBindParams, SessionBindResult,
-    SessionBindServerParams, SessionBindServerResult, SessionCloseParams, SessionOpenParams,
-    SessionOpenResult, SessionUnbindParams, SessionUnbindServerParams, SubscribeAck,
-    SubscribeNotificationsParams, SubscribeOutcome, SystemNotifyParams, ToolCallParams,
-    ToolCallProgressFrame, ToolCallResult, ToolNotificationFrame, ToolSearchResult,
-    ToolServerConnectionStatus, ToolServerDisconnectReason, ToolServerEvictParams,
-    ToolServerGetStatusParams, ToolServerGetStatusResult, ToolServerLifecycleStatus,
-    ToolServerStatusPayload, ToolsChanged, ToolsListParams, ToolsListResult, ToolsSearchParams,
-    ToolsSearchResultBody, TracesDonateParams, UnsubscribeAck, UnsubscribeNotificationsParams,
-    UnsubscribeOutcome,
+    AttachRoute, HookFrame, HookReplyFrame, IdleWithholdReason, LastSeq, LogsDonateParams,
+    MAX_DONATION_BYTES, MAX_LOG_RECORDS_PER_DONATION, MAX_METRICS_PER_DONATION,
+    MAX_SPANS_PER_DONATION, MAX_SYSTEM_NOTIFY_PAYLOAD_BYTES, MetricsDonateParams,
+    NotificationFilter, PingFrame, PongFrame, ServeParams, ServeResult, ServerBindAck,
+    ServerBindOutcome, ServerBindParams, ServerInfo, ServerUnbindAck, ServerUnbindOutcome,
+    ServerUnbindParams, ServersListParams, ServersListResult, SessionAttachServerParams,
+    SessionAttachServerResult, SessionBindParams, SessionBindResult, SessionBindServerParams,
+    SessionBindServerResult, SessionCloseParams, SessionOpenParams, SessionOpenResult,
+    SessionUnbindParams, SessionUnbindServerParams, SubscribeAck, SubscribeNotificationsParams,
+    SubscribeOutcome, SystemNotifyParams, ToolCallParams, ToolCallProgressFrame, ToolCallResult,
+    ToolNotificationFrame, ToolSearchResult, ToolServerConnectionStatus,
+    ToolServerDisconnectReason, ToolServerEvictParams, ToolServerGetStatusParams,
+    ToolServerGetStatusResult, ToolServerLifecycleStatus, ToolServerStatusPayload, ToolsChanged,
+    ToolsListParams, ToolsListResult, ToolsSearchParams, ToolsSearchResultBody, TracesDonateParams,
+    UnsubscribeAck, UnsubscribeNotificationsParams, UnsubscribeOutcome,
 };
 pub use handshake::{HelloAckMsg, HelloMsg, PROTOCOL_VERSION};
 pub use hook::HookEvent;

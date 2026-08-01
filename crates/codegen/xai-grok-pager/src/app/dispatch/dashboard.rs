@@ -499,7 +499,7 @@ fn clear_pending_overlay_stop(app: &mut AppView) {
 ///   session.
 /// - First press, any other state (idle, command in flight, cancel
 ///   pending) → arms `AppView::pending_action` with the dashboard's
-///   2s `STOP_CONFIRM_WINDOW`; the shortcuts bar paints "press Ctrl+x
+///   2s `CONFIRM_WINDOW`; the shortcuts bar paints "press Ctrl+x
 ///   again to close this session". Cancel can't help in the non-idle
 ///   variants of this arm — `dispatch_cancel_turn` no-ops unless a
 ///   turn is running, and command cancellation isn't implemented (see
@@ -522,7 +522,7 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
     if app
         .agents
         .get(&id)
-        .is_some_and(|a| a.session.state.is_turn_running())
+        .is_some_and(|a| a.session.state.is_turn_running() || a.session.state.is_compact_running())
     {
         return dispatch_cancel_turn(app);
     }
@@ -1888,7 +1888,7 @@ pub(super) fn dispatch_dashboard_commit_rename(app: &mut AppView) -> Vec<Effect>
 /// Without this, closing the selected agent leaves a stale cursor that
 /// `reanchor_selection` drops to `None`, and the next ↑/↓ restarts from
 /// the top of the list — a jarring jump.
-fn dashboard_neighbor_row(
+pub(super) fn dashboard_neighbor_row(
     app: &AppView,
     closed: &crate::views::dashboard::DashboardRowId,
 ) -> Option<crate::views::dashboard::DashboardRowId> {
@@ -1934,6 +1934,16 @@ fn dashboard_neighbor_row(
     })
 }
 
+/// Ctrl+X on the selected dashboard row, keyed off the row's `RowState`
+/// (the same `allows_delete` the renderer paints `[✗]` with):
+/// - Deletable row: first press arms, a second within the window deletes.
+/// - Busy top-level row: stop what keeps it busy (running turn, background
+///   tasks/monitors/`/loop`s, or queued prompts), never arm (a roster row
+///   has no local work to stop, so it just reports it must be stopped first).
+/// - Subagent row: kill the subagent.
+///
+/// Delete only ever runs on an idle row, so it is never queued alongside
+/// a `CancelTurn`.
 pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
     use std::time::Instant;
@@ -1944,76 +1954,27 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
     match &sel {
         DashboardRowId::TopLevel(id) => {
             let id = *id;
-            let Some(agent) = app.agents.get(&id) else {
+            let Some(agent) = app.agents.get_mut(&id) else {
                 return vec![];
             };
-            let now = Instant::now();
-            // `t.elapsed()` is the idiomatic Instant API
-            // for "how long since this Instant". Behaviour identical
-            // to `now.duration_since(*t)` when `t <= now`, which is
-            // the only case the dispatcher constructs.
-            let already_confirming = app
-                .dashboard
-                .as_ref()
-                .and_then(|d| d.stop_confirm.as_ref())
-                .is_some_and(|(prev, t)| {
-                    *prev == sel
-                        && t.elapsed() < crate::views::dashboard::state::STOP_CONFIRM_WINDOW
-                });
-            if already_confirming {
-                // Pick the cursor's next home BEFORE the row vanishes, so
-                // closing moves the selection down 1 instead of letting it
-                // go stale (which `reanchor_selection` drops to `None`,
-                // bouncing the next ↑/↓ back to the top of the list).
-                let neighbor = dashboard_neighbor_row(app, &sel);
+            if !crate::views::dashboard::classify_top_level(agent).allows_delete() {
+                // Busy row: stop what keeps it out of Idle — a running turn,
+                // background work (bg tasks, monitors, scheduled `/loop`s),
+                // or queued prompts. Never arms; once the row settles to
+                // idle, Ctrl+X twice deletes it.
+                let stopped = stop_top_level_activity(agent);
                 if let Some(d) = app.dashboard.as_mut() {
-                    d.stop_confirm = None;
+                    d.delete_confirm = None;
                 }
-                // Second press: close the agent.
-                let effects = dispatch_sessions_confirm_close(app, id);
-                // Only move the cursor if the close actually happened
-                // (it's refused for the last remaining session).
-                if !app.agents.contains_key(&id)
-                    && let Some(d) = app.dashboard.as_mut()
-                {
-                    match neighbor {
-                        Some(n) => d.focus_row(n),
-                        // No neighbour left — land on the always-present
-                        // `[+ New Agent]` button via the focus helper so the
-                        // "exactly one cursor active" invariant holds (a bare
-                        // `selected = None` would leave no cursor and drop the
-                        // footer into its defensive fallback).
-                        None => d.focus_new_agent_button(),
+                return match stopped {
+                    Some(effects) => effects,
+                    None => {
+                        app.show_toast("Stop the session before deleting");
+                        vec![]
                     }
-                }
-                return effects;
+                };
             }
-            // First press: cancel turn if running, plant confirmation.
-            let mut effects = Vec::new();
-            if !agent.session.state.is_idle()
-                && let Some(sid) = agent.session.session_id.clone()
-            {
-                effects.push(Effect::CancelTurn {
-                    session_id: sid,
-                    cancel_subagents: true,
-                    trigger: None,
-                    // Dashboard first-press cancel — no local prompt rewind.
-                    rewind_if_pristine: false,
-                });
-            }
-            if let Some(d) = app.dashboard.as_mut() {
-                // The footer's `ShortcutsBar::with_pending` already
-                // paints the "press Ctrl+X again to close this
-                // session" prompt in the bottom bar. Surfacing the
-                // same line via `error_toast` would also bleed it
-                // into the dispatch input placeholder — two copies
-                // of the same hint, in two different places, with
-                // the dispatch one stealing visual weight from the
-                // user's typing area. The footer hint is the
-                // canonical surface.
-                d.stop_confirm = Some((sel, now));
-            }
-            effects
+            arm_or_delete(app, sel)
         }
         DashboardRowId::Subagent {
             parent,
@@ -2037,9 +1998,200 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                 .into_iter()
                 .collect()
         }
-        // Roster-only rows are hosted elsewhere — this client can't stop
-        // them.
-        DashboardRowId::Roster { .. } => vec![],
+        DashboardRowId::Roster { session_id } => {
+            let entry = app
+                .leader_roster
+                .iter()
+                .chain(app.dashboard_local_sessions.iter())
+                .find(|e| e.session_id == session_id.as_str());
+            match entry {
+                None => {
+                    app.show_toast("Session is no longer in the list");
+                    vec![]
+                }
+                // Chat conversations can't be deleted from here yet, so
+                // don't arm a confirm that could never succeed.
+                Some(e) if e.origin.kind == "conversation" => {
+                    app.show_toast("Deleting chat conversations isn't supported yet");
+                    vec![]
+                }
+                // No local turn to cancel, so a busy roster row can't delete.
+                Some(e)
+                    if !crate::views::dashboard::roster_activity_to_state(e.activity)
+                        .allows_delete() =>
+                {
+                    app.show_toast("Stop the session before deleting");
+                    vec![]
+                }
+                Some(_) => arm_or_delete(app, sel),
+            }
+        }
+    }
+}
+
+/// Stop everything keeping a busy top-level row out of Idle: a running
+/// turn, running background tasks/monitors, scheduled `/loop`s, and queued
+/// (unsent) prompts. Marks local state optimistically (mirroring the agent
+/// view's own kill paths). Returns `Some(effects)` when it stopped
+/// something — the effects may be empty if the only thing to stop was the
+/// local prompt queue — or `None` when there was nothing stoppable (so the
+/// caller can explain why).
+fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Option<Vec<Effect>> {
+    let session_id = agent.session.session_id.clone();
+    let mut effects = Vec::new();
+
+    // Turn / background work need a session id to reach the backend.
+    if let Some(session_id) = session_id {
+        if !agent.session.state.is_idle() {
+            effects.push(Effect::CancelTurn {
+                session_id: session_id.clone(),
+                cancel_subagents: true,
+                trigger: None,
+                rewind_if_pristine: false,
+            });
+        }
+        let running: Vec<String> = agent
+            .session
+            .bg_tasks
+            .values()
+            .filter(|t| t.status == crate::app::agent::BgTaskStatus::Running)
+            .map(|t| t.task_id.clone())
+            .collect();
+        for task_id in running {
+            if let Some(task) = agent.session.bg_tasks.get_mut(&task_id) {
+                task.pending_kill = true;
+                task.kill_requested_at = Some(std::time::Instant::now());
+            }
+            effects.push(Effect::KillBgTask {
+                session_id: session_id.clone(),
+                task_id,
+            });
+        }
+        let scheduled: Vec<String> = agent.session.scheduled_tasks.keys().cloned().collect();
+        for task_id in scheduled {
+            agent.session.scheduled_tasks.remove(&task_id);
+            effects.push(Effect::DeleteScheduledTask {
+                session_id: session_id.clone(),
+                task_id,
+            });
+        }
+    }
+
+    // Queued prompts are local (unsent), so dropping them needs no effect
+    // and works even before the session exists (a just-dispatched row).
+    let dropped_queue = !agent.session.pending_prompts.is_empty();
+    if dropped_queue {
+        agent.session.pending_prompts.clear();
+        agent.sync_queue_pane();
+    }
+
+    (!effects.is_empty() || dropped_queue).then_some(effects)
+}
+
+/// A live arm on `sel` confirms and deletes; otherwise (re)arm.
+fn arm_or_delete(app: &mut AppView, sel: crate::views::dashboard::DashboardRowId) -> Vec<Effect> {
+    let armed = app
+        .dashboard
+        .as_mut()
+        .and_then(|d| d.armed_delete_row())
+        .as_ref()
+        == Some(&sel);
+    if armed {
+        return delete_dashboard_row(app, sel);
+    }
+    if let Some(d) = app.dashboard.as_mut() {
+        d.arm_delete(sel);
+    }
+    vec![]
+}
+
+pub(super) fn dispatch_dashboard_delete(app: &mut AppView) -> Vec<Effect> {
+    let Some(d) = app.dashboard.as_mut() else {
+        return vec![];
+    };
+    // The `y` confirm: only fire on a row whose arm is still live AND is
+    // still the selected row. Reanchor / gc can drop `selected` without
+    // going through the focus helpers, which would otherwise let `y`
+    // delete a row the cursor has left.
+    let Some(sel) = d.armed_delete_row() else {
+        return vec![];
+    };
+    if d.selected.as_ref() != Some(&sel) {
+        d.delete_confirm = None;
+        return vec![];
+    }
+    delete_dashboard_row(app, sel)
+}
+
+/// Delete `row`, which the caller has confirmed is idle and armed. Takes
+/// `row` as a parameter (not read back off `delete_confirm`) and never
+/// cancels a turn or kills a task — delete is a settled-row operation.
+fn delete_dashboard_row(
+    app: &mut AppView,
+    row: crate::views::dashboard::DashboardRowId,
+) -> Vec<Effect> {
+    use crate::views::dashboard::DashboardRowId;
+
+    if let Some(d) = app.dashboard.as_mut() {
+        d.delete_confirm = None;
+    }
+    match row {
+        DashboardRowId::TopLevel(id) => {
+            let Some(agent) = app.agents.get(&id) else {
+                return vec![];
+            };
+            // Defensive re-check via the SAME predicate the renderer and
+            // arm path use: state can change between arming and confirming
+            // (a new turn, `/loop`, queued prompt, replay, needs-input, or
+            // bg task), and delete must never run on a non-settled row.
+            if !crate::views::dashboard::classify_top_level(agent).allows_delete() {
+                app.show_toast("Stop the session before deleting");
+                return vec![];
+            }
+            let Some(session_id) = agent.session.session_id.clone() else {
+                app.show_toast("No session history to delete");
+                return vec![];
+            };
+            let cwd = agent.session.cwd.display().to_string();
+            app.show_toast("Deleting session\u{2026}");
+            vec![Effect::DeleteSession {
+                source: "current".into(),
+                session_id: session_id.to_string(),
+                cwd,
+                after: crate::app::actions::AfterSessionDelete::Dashboard,
+            }]
+        }
+        DashboardRowId::Subagent { .. } => {
+            app.show_toast("Subagent rows can't be deleted from the dashboard");
+            vec![]
+        }
+        DashboardRowId::Roster { session_id } => {
+            let Some(entry) = app
+                .leader_roster
+                .iter()
+                .chain(app.dashboard_local_sessions.iter())
+                .find(|e| e.session_id == session_id)
+                .cloned()
+            else {
+                app.show_toast("Session is no longer in the list");
+                return vec![];
+            };
+            if entry.origin.kind == "conversation" {
+                app.show_toast("Deleting chat conversations isn't supported yet");
+                return vec![];
+            }
+            if !crate::views::dashboard::roster_activity_to_state(entry.activity).allows_delete() {
+                app.show_toast("Stop the session before deleting");
+                return vec![];
+            }
+            app.show_toast("Deleting session\u{2026}");
+            vec![Effect::DeleteSession {
+                source: "local".into(),
+                session_id,
+                cwd: entry.cwd,
+                after: crate::app::actions::AfterSessionDelete::Dashboard,
+            }]
+        }
     }
 }
 

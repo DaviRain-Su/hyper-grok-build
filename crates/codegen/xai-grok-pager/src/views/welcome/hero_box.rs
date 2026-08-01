@@ -290,6 +290,8 @@ pub(super) struct HeroBoxRects {
     pub(super) announcement_rect: Option<Rect>,
     /// Promo upgrade CTA `[label]` button rect (click → open), if drawn.
     pub(super) upgrade_cta_rect: Option<Rect>,
+    #[cfg(feature = "local-workspace")]
+    pub(super) workspace_mode_rects: super::WorkspaceModeHitRects,
 }
 
 /// Render the bordered hero box with logo left, version + subtitle + menu right.
@@ -306,6 +308,11 @@ pub(super) fn render_hero_box(
     changelog_bullets: &[String],
     changelog_has_full_notes: bool,
     upgrade_cta: Option<&str>,
+    #[cfg(feature = "local-workspace")] workspace_mode: Option<(
+        super::WelcomeWorkspaceMode,
+        bool,
+        bool,
+    )>,
 ) -> HeroBoxRects {
     // Dim the box border toward the background for a softer, dimmer gray.
     let border_color = crate::render::color::blend_color(theme.bg_base, theme.gray_dim, 0.45)
@@ -371,14 +378,45 @@ pub(super) fn render_hero_box(
         }
     }
 
+    #[cfg(feature = "local-workspace")]
+    let (menu_area, workspace_mode_rects) =
+        if let Some((mode, locked, ack_pending)) = workspace_mode {
+            let picker_rect = Rect {
+                height: 1.min(layout.hero_menu.height),
+                ..layout.hero_menu
+            };
+            let rects = super::render_workspace_mode_picker(
+                picker_rect,
+                buf,
+                theme,
+                mode,
+                mouse_pos,
+                locked,
+                ack_pending,
+            );
+            let menu_area = Rect {
+                y: layout.hero_menu.y + super::workspace_mode::WORKSPACE_MODE_MENU_ROWS,
+                height: layout
+                    .hero_menu
+                    .height
+                    .saturating_sub(super::workspace_mode::WORKSPACE_MODE_MENU_ROWS),
+                ..layout.hero_menu
+            };
+            (menu_area, rects)
+        } else {
+            (layout.hero_menu, super::WorkspaceModeHitRects::default())
+        };
+    #[cfg(not(feature = "local-workspace"))]
+    let menu_area = layout.hero_menu;
+
     let menu_rects = super::menu::render_menu(
-        layout.hero_menu,
+        menu_area,
         buf,
         theme,
         menu_items,
         selected,
         mouse_pos,
-        layout.hero_menu.width,
+        menu_area.width,
     );
     HeroBoxRects {
         menu_rects,
@@ -386,6 +424,8 @@ pub(super) fn render_hero_box(
         announcement_truncated,
         announcement_rect,
         upgrade_cta_rect,
+        #[cfg(feature = "local-workspace")]
+        workspace_mode_rects,
     }
 }
 

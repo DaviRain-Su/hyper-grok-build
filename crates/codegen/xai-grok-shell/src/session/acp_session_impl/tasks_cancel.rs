@@ -248,6 +248,9 @@ impl SessionActor {
         trigger: Option<String>,
     ) {
         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
+        // Abort in-flight `/compact` or auto-compact generation (stream select +
+        // pre-replace guard). Safe when no compact is running.
+        self.compaction.cancel.request_cancel();
         if suppress_task_wakes {
             if let Some(gate) = &self.tool_context.task_wake_suppressed {
                 gate.set(true);

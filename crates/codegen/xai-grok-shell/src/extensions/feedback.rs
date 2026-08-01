@@ -18,7 +18,7 @@ use crate::agent::MvpAgent;
 use crate::session::persistence::{LocalFeedbackEntry, UserFeedbackEntry};
 use crate::session::{
     ClientFeedbackInput, CommentDeleteRequest, CommentDeleteResponse, CommentRequest,
-    CommentResponse, FeedbackRequestDismiss, FeedbackResponse, SessionCommand,
+    CommentResponse, FeedbackRequestDismiss, FeedbackResponse, SessionCommand, SideQuestionError,
 };
 use crate::upload::gcs::WithAuth as _;
 use xai_file_utils::gcs::upload_bytes;
@@ -75,7 +75,20 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         Ok(answer) => super::to_ext_response(Ok(serde_json::json!({
             "answer": answer,
         }))),
-        Err(e) => Err(acp::Error::internal_error().data(e)),
+        // Model errors take the canonical mapping: overload gets its short
+        // display copy there, rate limits keep the typed code + upgrade
+        // copy, auth failures surface as auth_required.
+        Err(SideQuestionError::Sampling(e)) => {
+            Err(crate::sampling::error::map_sampling_err_to_acp(e))
+        }
+        // Non-model failures are already readable sentences. Set `message`
+        // and leave `data` unset — `Display` appends JSON-encoded `data`,
+        // and `internal_error().data(e)` rendered as `Internal error: "…"`,
+        // which made capacity failures look like client bugs in the TUI.
+        Err(e) => Err(acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            e.to_string(),
+        )),
     }
 }
 

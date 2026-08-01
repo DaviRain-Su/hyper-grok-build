@@ -149,8 +149,8 @@ impl SamplerHandle {
                 request_id: cancel_id,
             });
         completion_rx.await.unwrap_or_else(|_| {
-            Err(SamplingError::Auth(
-                "sampler actor dropped before completion".to_string(),
+            Err(SamplingError::auth_unknown(
+                "sampler actor dropped before completion",
             ))
         })
     }

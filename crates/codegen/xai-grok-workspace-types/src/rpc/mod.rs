@@ -13,6 +13,7 @@ pub mod agents_md;
 pub mod code_nav;
 pub mod deploy;
 pub mod envelope;
+pub mod export;
 pub mod export_github;
 pub mod fs;
 pub mod git;

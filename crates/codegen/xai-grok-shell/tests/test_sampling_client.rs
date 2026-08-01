@@ -920,7 +920,7 @@ async fn test_chat_completions_401_unauthorized() {
     let result = client.conversation_stream(request).await;
     assert!(result.is_err());
 
-    if let Err(SamplingError::Auth(_)) = result {
+    if let Err(SamplingError::Auth { .. }) = result {
         // Expected
     } else {
         panic!("Expected Auth error");
@@ -963,7 +963,7 @@ async fn test_responses_api_401_unauthorized() {
     let result = client.conversation_stream_responses(request).await;
     assert!(result.is_err());
 
-    if let Err(SamplingError::Auth(_)) = result {
+    if let Err(SamplingError::Auth { .. }) = result {
         // Expected
     } else {
         panic!("Expected Auth error");

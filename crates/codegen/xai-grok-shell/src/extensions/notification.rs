@@ -467,6 +467,25 @@ impl SubagentBudgetInfo {
     }
 }
 
+/// Why auto-compaction stopped before completing.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::Display,
+    strum::EnumString,
+    strum::AsRefStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum AutoCompactCancelReason {
+    UserCancelled,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
 pub enum SessionUpdate {
@@ -532,7 +551,7 @@ pub enum SessionUpdate {
     /// Auto-compact was cancelled (user pressed Ctrl+C)
     AutoCompactCancelled {
         /// Reason for cancellation
-        reason: String,
+        reason: AutoCompactCancelReason,
     },
     /// Auto-continue completed after compaction
     /// This signals the TUI to flush pending agent messages and end the turn
@@ -1874,6 +1893,16 @@ mod tests {
         let json = r#"{"sessionUpdate": "memory_flush_started"}"#;
         let update: SessionUpdate = serde_json::from_str(json).unwrap();
         assert_eq!(update, SessionUpdate::MemoryFlushStarted);
+
+        // AutoCompactCancelled (strenum reason)
+        let json = r#"{"sessionUpdate": "auto_compact_cancelled", "reason": "user_cancelled"}"#;
+        let update: SessionUpdate = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            update,
+            SessionUpdate::AutoCompactCancelled {
+                reason: AutoCompactCancelReason::UserCancelled,
+            }
+        );
 
         // AutoCompactFailed (struct variant)
         let json = r#"{"sessionUpdate": "auto_compact_failed", "error": "oom"}"#;

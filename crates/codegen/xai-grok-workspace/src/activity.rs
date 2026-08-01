@@ -8,7 +8,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 use xai_file_utils::events::{Event, EventWriter, ToolCompletedSource, ToolOutcome};
 use xai_file_utils::queue::UploadQueueStats;
-use xai_tool_protocol::{ToolServerLifecycleStatus, ToolServerStatusPayload};
+use xai_tool_protocol::{IdleWithholdReason, ToolServerLifecycleStatus, ToolServerStatusPayload};
 
 const LIFECYCLE_NONE: u8 = 0;
 const LIFECYCLE_DRAINING: u8 = 1;
@@ -88,10 +88,25 @@ pub struct ActivityTracker {
     /// Window (ms) recent preview-proxy traffic withholds idle for; defaults to
     /// [`PREVIEW_ACTIVITY_WINDOW_MS`], overridable via the builder.
     preview_activity_window_ms: u64,
-    /// Epoch ms of the last scraped preview-proxy activity (`0` = none). Fed by
-    /// the preview-activity scraper (`preview_supervisor`); withholds idle within
+    /// Epoch ms the pane's own status poll was last observed (`0` = none). Fed
+    /// by the preview-activity scraper; withholds idle within
     /// [`preview_activity_window_ms`](Self::preview_activity_window_ms).
-    last_preview_activity_ms: AtomicU64,
+    ///
+    /// The *observation* time, not the proxy's stamp: the two processes are not
+    /// clock-coupled, and only the local clock is comparable with the rest.
+    last_preview_status_ms: AtomicU64,
+    /// Epoch ms real app traffic was last observed (`0` = none).
+    last_preview_routed_ms: AtomicU64,
+    /// Open preview WebSocket (HMR) tunnels as of the last scrape. Nonzero ⇒ a
+    /// client is attached, which no activity stamp would reveal.
+    preview_ws_tunnels_open: AtomicU64,
+    /// In-flight `Routed` preview requests as of the last scrape.
+    preview_routed_in_flight: AtomicU64,
+    /// Epoch ms this process started — the floor of the withhold anchor, so a
+    /// young or freshly-restored workspace is never treated as long-idle.
+    /// Distinct from [`Self::started_at`], a monotonic `Instant` that cannot be
+    /// compared against the epoch stamps around it.
+    started_at_ms: u64,
 
     sessions: DashMap<String, SessionActivity>,
     /// call_id → session_id so `tool_call_completed` can decrement
@@ -168,7 +183,11 @@ impl ActivityTracker {
             durability_idle_hold_max_ms,
             idle_ignores_background: false,
             preview_activity_window_ms: PREVIEW_ACTIVITY_WINDOW_MS,
-            last_preview_activity_ms: AtomicU64::new(0),
+            last_preview_status_ms: AtomicU64::new(0),
+            last_preview_routed_ms: AtomicU64::new(0),
+            preview_ws_tunnels_open: AtomicU64::new(0),
+            preview_routed_in_flight: AtomicU64::new(0),
+            started_at_ms: now_ms(),
             sessions: DashMap::new(),
             call_to_session: DashMap::new(),
             prune_window_ms: prune_window.as_millis() as u64,
@@ -217,13 +236,52 @@ impl ActivityTracker {
         self.notify.clone()
     }
 
-    /// Record fresh preview-proxy traffic: withholds `idle_since_ms` for
+    /// Record fresh `Routed` preview traffic. Withholds `idle_since_ms` for
     /// [`preview_activity_window_ms`](Self::preview_activity_window_ms) and wakes
     /// the status publisher so the renewed "active" status reaches the server promptly.
-    pub fn note_preview_activity(&self) {
-        self.last_preview_activity_ms
+    pub fn note_preview_routed_activity(&self) {
+        self.last_preview_routed_ms
             .store(now_ms(), Ordering::Relaxed);
         self.notify.notify_waiters();
+    }
+
+    /// Record a fresh preview status poll. Withholds idle exactly as routed
+    /// traffic does today, but is tracked separately: the poll continues at the
+    /// same cadence whether or not anyone is watching.
+    pub fn note_preview_status_activity(&self) {
+        self.last_preview_status_ms
+            .store(now_ms(), Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Mirror the proxy's attached-client counters. Absolute values, not edges,
+    /// so a missed scrape self-corrects on the next one.
+    pub fn set_preview_attached(&self, ws_tunnels_open: u64, routed_in_flight: u64) {
+        let was_attached = self.has_preview_client_attached();
+        self.preview_ws_tunnels_open
+            .store(ws_tunnels_open, Ordering::Relaxed);
+        self.preview_routed_in_flight
+            .store(routed_in_flight, Ordering::Relaxed);
+        // The scraper calls this every tick; the common case is 0 → 0.
+        if was_attached != self.has_preview_client_attached() {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// An open WebSocket tunnel or a routed request in flight. Never a poll.
+    fn has_preview_client_attached(&self) -> bool {
+        self.preview_ws_tunnels_open.load(Ordering::Relaxed) > 0
+            || self.preview_routed_in_flight.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn preview_ws_tunnels_open(&self) -> u64 {
+        self.preview_ws_tunnels_open.load(Ordering::Relaxed)
+    }
+
+    /// Window recent preview activity withholds idle for — the horizon the
+    /// stamps decay over, and the one the scraper ages an absent proxy against.
+    pub fn preview_activity_window_ms(&self) -> u64 {
+        self.preview_activity_window_ms
     }
 
     /// Pending upload-queue items (0 when no queue is coupled).
@@ -265,15 +323,33 @@ impl ActivityTracker {
         let (queue_pending, queue_pending_bytes, queue_inflight, breaker, drain_started) =
             self.drain_status_fields();
         let (producers, durability_withhold) = self.durability_gate(queue_pending, breaker);
-        // Withhold idle on durability work OR recent preview traffic, decided here
+        let now = now_ms();
+        let (preview_withhold, preview_reason, preview_anchor) = self.preview_withholds_idle(now);
+        // Withhold idle on durability work OR preview activity, decided here
         // once so both snapshot paths agree (preview has no hold cap; 12h VM TTL backstops).
-        let withhold_idle = durability_withhold || self.preview_withholds_idle(now_ms());
+        let withhold_idle = durability_withhold || preview_withhold;
+        // Invariants: no reason while genuinely busy (`idle_since == 0` — the
+        // work is the cause, not a concurrent poll); durability outranks
+        // preview; every reason carries a stamp.
+        let (withhold_reason, withhold_since_ms) = if idle_since == 0 {
+            (None, None)
+        } else if durability_withhold {
+            (
+                Some(IdleWithholdReason::Durability),
+                Some(self.durability_busy_since_ms.load(Ordering::Relaxed)),
+            )
+        } else {
+            (preview_reason, preview_reason.map(|_| preview_anchor))
+        };
         DurabilityPayloadFields {
             idle_since_ms: if idle_since == 0 || withhold_idle {
                 None
             } else {
                 Some(idle_since)
             },
+            withhold_reason,
+            withhold_since_ms,
+            preview_ws_tunnels_open: self.preview_ws_tunnels_open().min(u32::MAX as u64) as u32,
             upload_queue_pending: queue_pending,
             upload_queue_pending_bytes: queue_pending_bytes,
             upload_queue_inflight: queue_inflight,
@@ -316,13 +392,41 @@ impl ActivityTracker {
         (producers, !hold_expired)
     }
 
-    /// Whether recent preview-proxy traffic should currently withhold idle.
-    fn preview_withholds_idle(&self, now: u64) -> bool {
-        preview_activity_withholds_idle(
+    /// Whether preview activity should withhold idle, and on what grounds.
+    ///
+    /// Returns `(withhold, reason, anchor)`, where the anchor is the epoch-ms
+    /// the current hold is measured from. Tiers are checked strongest first;
+    /// all three withhold identically today, only the accounting differs.
+    fn preview_withholds_idle(&self, now: u64) -> (bool, Option<IdleWithholdReason>, u64) {
+        // Including process start means a young or freshly-restored workspace
+        // can never look long-idle — the process restarts on restore, so this
+        // covers revived sessions without a separate minimum-age rule.
+        let anchor = self
+            .last_preview_routed_ms
+            .load(Ordering::Relaxed)
+            .max(self.last_call_completed_ms.load(Ordering::Relaxed))
+            .max(self.started_at_ms);
+
+        if self.has_preview_client_attached() {
+            return (true, Some(IdleWithholdReason::PreviewAttached), anchor);
+        }
+        if preview_activity_withholds_idle(
             now,
-            self.last_preview_activity_ms.load(Ordering::Relaxed),
+            self.last_preview_routed_ms.load(Ordering::Relaxed),
             self.preview_activity_window_ms,
-        )
+        ) {
+            return (true, Some(IdleWithholdReason::PreviewRouted), anchor);
+        }
+        if preview_activity_withholds_idle(
+            now,
+            self.last_preview_status_ms.load(Ordering::Relaxed),
+            self.preview_activity_window_ms,
+        ) {
+            // Holds, but never advances the anchor: a poll must not reset a
+            // clock meant to measure real use.
+            return (true, Some(IdleWithholdReason::PreviewStatusOnly), anchor);
+        }
+        (false, None, anchor)
     }
 
     /// Whether any tracked session currently has an active turn (the aggregate
@@ -522,12 +626,16 @@ impl ActivityTracker {
         count
     }
 
-    /// Mark a session as ended: clear turn-active flag and notify waiters.
-    ///
-    /// Called by [`crate::handle::WorkspaceHandle::on_session_ended()`] when
-    /// a `HookEvent::SessionEnded` arrives from the server.
+    /// Releases the session's entry. One with calls in flight keeps it: the
+    /// swap policy reads that count, and the idle prune collects it later.
     pub fn session_ended(&self, session_id: &str) {
-        if let Some(session) = self.sessions.get(session_id) {
+        let released = self
+            .sessions
+            .remove_if(session_id, |_, s| {
+                s.active_tool_calls.load(Ordering::Acquire) == 0
+            })
+            .is_some();
+        if !released && let Some(session) = self.sessions.get(session_id) {
             session.turn_active.store(false, Ordering::Release);
         }
         self.notify.notify_waiters();
@@ -640,6 +748,11 @@ impl ActivityTracker {
         }
     }
 
+    /// Resident session records. Does not prune, unlike [`Self::known_sessions`].
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// Returns live session IDs. As a side-effect, prunes sessions
     /// that have been idle longer than the configured prune window.
     pub fn known_sessions(&self) -> Vec<String> {
@@ -731,6 +844,11 @@ impl ActivityTracker {
             drain_started_ms: d.drain_started_ms,
             turn_active,
             idle_ignores_background: self.idle_ignores_background,
+            withhold_reason: d.withhold_reason,
+            withhold_since_ms: d.withhold_since_ms,
+            // No ceilings configured yet, so a hold can never be capped.
+            withhold_capped: false,
+            preview_ws_tunnels_open: d.preview_ws_tunnels_open,
         }
     }
 
@@ -783,6 +901,11 @@ impl ActivityTracker {
             drain_started_ms: d.drain_started_ms,
             turn_active: self.any_turn_active(),
             idle_ignores_background: self.idle_ignores_background,
+            withhold_reason: d.withhold_reason,
+            withhold_since_ms: d.withhold_since_ms,
+            // No ceilings configured yet, so a hold can never be capped.
+            withhold_capped: false,
+            preview_ws_tunnels_open: d.preview_ws_tunnels_open,
         }
     }
 }
@@ -791,6 +914,9 @@ impl ActivityTracker {
 /// [`ActivityTracker::durability_payload_fields`].
 struct DurabilityPayloadFields {
     idle_since_ms: Option<u64>,
+    withhold_reason: Option<IdleWithholdReason>,
+    withhold_since_ms: Option<u64>,
+    preview_ws_tunnels_open: u32,
     upload_queue_pending: u32,
     upload_queue_pending_bytes: u64,
     upload_queue_inflight: u32,
@@ -1287,29 +1413,195 @@ mod tests {
 
     #[test]
     fn note_preview_activity_withholds_then_resumes_idle() {
+        for (label, note) in [
+            (
+                "routed",
+                &ActivityTracker::note_preview_routed_activity as &dyn Fn(&ActivityTracker),
+            ),
+            ("status", &ActivityTracker::note_preview_status_activity),
+        ] {
+            let t = ActivityTracker::new();
+            assert!(
+                t.snapshot().idle_since_ms.is_some(),
+                "{label}: an idle tracker reports idle before any preview activity"
+            );
+
+            note(&t);
+            assert!(
+                t.snapshot().idle_since_ms.is_none(),
+                "{label}: recent preview activity must withhold idle"
+            );
+            assert!(
+                t.snapshot_session("any").idle_since_ms.is_none(),
+                "{label}: the per-session payload must withhold idle too"
+            );
+
+            let stale = now_ms().saturating_sub(PREVIEW_ACTIVITY_WINDOW_MS + 1_000);
+            t.last_preview_routed_ms.store(stale, Ordering::Relaxed);
+            t.last_preview_status_ms.store(stale, Ordering::Relaxed);
+            assert!(
+                t.snapshot().idle_since_ms.is_some(),
+                "{label}: idle must resume once the preview window decays"
+            );
+        }
+    }
+
+    #[test]
+    fn withhold_reason_reports_the_tier_that_is_holding() {
         let t = ActivityTracker::new();
-        assert!(
-            t.snapshot().idle_since_ms.is_some(),
-            "an idle tracker reports idle before any preview activity"
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            None,
+            "nothing holding ⇒ no reason"
         );
 
-        t.note_preview_activity();
+        t.note_preview_status_activity();
+        let s = t.snapshot();
+        assert_eq!(
+            s.withhold_reason,
+            Some(IdleWithholdReason::PreviewStatusOnly),
+            "a bare status poll is the weakest tier"
+        );
+        assert!(
+            s.withhold_since_ms.is_some(),
+            "every reason carries a since-stamp so a reader can age the hold"
+        );
+
+        t.note_preview_routed_activity();
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::PreviewRouted),
+            "real app traffic outranks the status poll"
+        );
+
+        t.set_preview_attached(1, 0);
+        let s = t.snapshot();
+        assert_eq!(
+            s.withhold_reason,
+            Some(IdleWithholdReason::PreviewAttached),
+            "an open tunnel outranks everything below it"
+        );
+        assert_eq!(s.preview_ws_tunnels_open, 1);
+        assert!(!s.withhold_capped, "no ceilings configured yet");
+    }
+
+    /// An HMR socket writes no activity stamps, so the counter must hold alone
+    /// — which is exactly why the scraper must not clear it on one missed poll.
+    #[test]
+    fn attached_client_withholds_without_any_activity_stamp() {
+        let t = ActivityTracker::new();
+        assert!(t.snapshot().idle_since_ms.is_some());
+
+        t.set_preview_attached(1, 0);
         assert!(
             t.snapshot().idle_since_ms.is_none(),
-            "recent preview activity must withhold idle"
-        );
-        assert!(
-            t.snapshot_session("any").idle_since_ms.is_none(),
-            "the per-session payload must withhold idle too"
+            "an open WebSocket tunnel withholds idle by itself"
         );
 
-        t.last_preview_activity_ms.store(
-            now_ms().saturating_sub(PREVIEW_ACTIVITY_WINDOW_MS + 1_000),
-            Ordering::Relaxed,
+        t.set_preview_attached(0, 1);
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::PreviewAttached),
+            "a routed request in flight is equally an attached client"
         );
+
+        t.set_preview_attached(0, 0);
         assert!(
             t.snapshot().idle_since_ms.is_some(),
-            "idle must resume once the preview window decays"
+            "once detached with no stamp in window, idle resumes"
+        );
+    }
+
+    /// A ceiling will be measured from the anchor, so letting the pane's own
+    /// poll reset it would make that ceiling unreachable.
+    #[test]
+    fn status_poll_does_not_advance_the_withhold_anchor() {
+        let t = ActivityTracker::new();
+        t.note_preview_routed_activity();
+        let anchor = t.snapshot().withhold_since_ms.expect("routed holds");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        t.note_preview_status_activity();
+        assert_eq!(
+            t.snapshot().withhold_since_ms,
+            Some(anchor),
+            "a status poll leaves the anchor where the last real use put it"
+        );
+    }
+
+    /// A session busy with real work must not be attributed to the preview just
+    /// because the pane happens to be polling it. Both look like a missing
+    /// `idle_since_ms` on the wire, and conflating them would inflate the
+    /// preview share of exactly the population this field exists to measure.
+    #[test]
+    fn a_genuinely_busy_session_reports_no_withhold_reason() {
+        let t = ActivityTracker::new();
+        t.note_preview_status_activity();
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::PreviewStatusOnly),
+            "idle but polled ⇒ the poll is the reason"
+        );
+
+        t.tool_call_started("c1", "read_file", Some("sess-a"));
+        let s = t.snapshot();
+        assert!(
+            s.idle_since_ms.is_none(),
+            "a tool call in flight withholds idle on its own"
+        );
+        assert_eq!(
+            s.withhold_reason, None,
+            "the tool call is the cause, not the concurrent poll"
+        );
+        assert_eq!(s.withhold_since_ms, None);
+
+        t.tool_call_completed("c1", Some("sess-a"), ToolOutcome::Success);
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::PreviewStatusOnly),
+            "once the real work finishes, the poll is the reason again"
+        );
+    }
+
+    /// Durability is already bounded by its own cap, so it is the reason worth
+    /// reporting when both hold.
+    #[tokio::test]
+    async fn durability_outranks_preview_in_the_reported_reason() {
+        let t = ActivityTracker::new();
+        let tasks = tokio_util::task::TaskTracker::new();
+        t.set_producer_tasks(tasks.clone());
+
+        t.note_preview_status_activity();
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::PreviewStatusOnly),
+            "preview alone reports the preview reason"
+        );
+
+        // An in-flight producer engages the durability gate. Nothing else does
+        // — a background task is not durable work.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let gate2 = gate.clone();
+        let join = tasks.spawn(async move { gate2.notified().await });
+
+        let s = t.snapshot();
+        assert_eq!(s.artifact_producers_inflight, 1, "the gate is engaged");
+        assert_eq!(
+            s.withhold_reason,
+            Some(IdleWithholdReason::Durability),
+            "durability outranks a concurrent preview hold"
+        );
+        assert!(
+            s.withhold_since_ms.is_some(),
+            "a durability hold reports its own busy-since stamp"
+        );
+
+        gate.notify_one();
+        join.await.expect("producer task must not panic");
+        assert_eq!(
+            t.snapshot().withhold_reason,
+            Some(IdleWithholdReason::PreviewStatusOnly),
+            "once durability clears, the preview hold is reported again"
         );
     }
 
@@ -1317,13 +1609,13 @@ mod tests {
     fn configured_preview_window_overrides_default() {
         let configured = ActivityTracker::new().with_preview_activity_window_ms(500);
         configured
-            .last_preview_activity_ms
+            .last_preview_status_ms
             .store(now_ms().saturating_sub(1_000), Ordering::Relaxed);
         assert!(configured.snapshot().idle_since_ms.is_some());
 
         let default = ActivityTracker::new();
         default
-            .last_preview_activity_ms
+            .last_preview_status_ms
             .store(now_ms().saturating_sub(1_000), Ordering::Relaxed);
         assert!(default.snapshot().idle_since_ms.is_none());
     }
@@ -1332,7 +1624,7 @@ mod tests {
     fn preview_activity_does_not_override_active_tool_call() {
         let t = ActivityTracker::new();
         t.tool_call_started("c1", "read_file", Some("sess-a"));
-        t.note_preview_activity();
+        t.note_preview_routed_activity();
         let s = t.snapshot();
         assert!(s.idle_since_ms.is_none());
         assert_eq!(
@@ -1704,16 +1996,16 @@ mod tests {
     }
 
     #[test]
-    fn session_ended_clears_turn_active() {
+    fn session_ended_releases_an_idle_session() {
         let t = ActivityTracker::new();
         t.turn_started("sess-a", 3);
-        let session = t.sessions.get("sess-a").expect("session should exist");
-        assert!(session.turn_active.load(Ordering::Acquire));
+        assert!(t.is_turn_active("sess-a"));
 
         t.session_ended("sess-a");
+
         assert!(
-            !session.turn_active.load(Ordering::Acquire),
-            "turn_active should be cleared after session_ended"
+            !t.sessions.contains_key("sess-a"),
+            "an ended session must not stay resident"
         );
     }
 
@@ -1732,10 +2024,9 @@ mod tests {
         t.tool_call_started("c1", "read_file", Some("sess-a"));
         t.tool_call_completed("c1", None, ToolOutcome::Success);
 
-        // session_ended should not panic when turn was never active.
         t.session_ended("sess-a");
-        let session = t.sessions.get("sess-a").expect("session should exist");
-        assert!(!session.turn_active.load(Ordering::Acquire));
+
+        assert!(!t.sessions.contains_key("sess-a"));
     }
 
     #[tokio::test]
@@ -1770,8 +2061,11 @@ mod tests {
 
         t.session_ended("sess-a");
 
-        // turn_active cleared, but the in-flight tool call remains.
         assert!(!t.is_turn_active("sess-a"));
+        assert!(
+            t.sessions.contains_key("sess-a"),
+            "a session with a call in flight keeps its counters"
+        );
         assert_eq!(
             t.snapshot_session("sess-a").active_tool_calls,
             1,

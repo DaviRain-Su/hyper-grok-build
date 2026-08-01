@@ -183,7 +183,7 @@ mod init_metrics_tests {
         ));
         assert!(has(
             "grok_workspace_rpc_errors_total",
-            &[("method", "unknown"), ("error_kind", "hub_error")]
+            &[("method", "unknown"), ("error_kind", "unknown_method")]
         ));
         for stage in [
             "startup_recovery",

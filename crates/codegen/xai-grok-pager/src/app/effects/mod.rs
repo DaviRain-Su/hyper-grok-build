@@ -18,6 +18,8 @@ pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
     persist_setting, sanitize_user_error,
 };
+#[cfg(feature = "local-workspace")]
+pub(crate) use helpers::reject_non_fs_only_advertised_tools;
 use helpers::*;
 use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
@@ -777,7 +779,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionList { query, seq } => {
+        Effect::FetchSessionList { query, seq, kind_filter } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             tasks
@@ -790,6 +792,19 @@ pub(crate) fn execute(
                         params["query"] = serde_json::Value::String(q.clone());
                     } else {
                         params["allowRelax"] = serde_json::Value::Bool(true);
+                    }
+                    if let Some(kinds) = &kind_filter {
+                        params["_meta"] = serde_json::json!({
+                        "x.ai/facetFilters": { "kind": kinds },
+                    });
+                        tracing::info!(
+                        target: "grok.pager.workspace_mode",
+                        event = "session_list_fetch",
+                        kind_filter = ?kinds,
+                        query = ?query,
+                        seq,
+                        "FetchSessionList with kind facet filter"
+                    );
                     }
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",
@@ -3709,6 +3724,7 @@ pub(crate) fn execute(
         }
         Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
             let tx = acp_tx.clone();
+            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     let request = acp::ExtRequest::new(
@@ -3743,9 +3759,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::BtwResponse {
                                 agent_id,
-                                result: Err(
-                                    sanitize_user_error(&format!("side question failed: {e}")),
-                                ),
+                                result: Err(format_acp_error(&e, is_api_key_auth)),
                                 minimal_request_id,
                             }
                         }

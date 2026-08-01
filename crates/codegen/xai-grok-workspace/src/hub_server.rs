@@ -90,17 +90,13 @@ static WORKSPACE_RPC_DURATION_SECONDS: std::sync::LazyLock<HistogramVec> =
         .unwrap()
     });
 const UNKNOWN_METHOD_LABEL: &str = "unknown";
-/// Prefix of the [`WorkspaceError::HubError`] for an unrecognized method. Shared
-/// by the dispatch default arm and the metric classifier so the "collapse to
-/// `unknown`" decision cannot drift from the error it keys on.
-const UNKNOWN_METHOD_ERR_PREFIX: &str = "unknown workspace method:";
 /// Zero-init this module's metric families. See [`crate::init_metrics`].
 pub(crate) fn init_metrics() {
     WORKSPACE_RPC_REQUESTS_TOTAL
         .with_label_values(&[UNKNOWN_METHOD_LABEL, "error"])
         .inc_by(0);
     WORKSPACE_RPC_ERRORS_TOTAL
-        .with_label_values(&[UNKNOWN_METHOD_LABEL, "hub_error"])
+        .with_label_values(&[UNKNOWN_METHOD_LABEL, "unknown_method"])
         .inc_by(0);
     let _ = WORKSPACE_RPC_DURATION_SECONDS.with_label_values(&[UNKNOWN_METHOD_LABEL]);
 }
@@ -930,9 +926,7 @@ impl WorkspaceRpcHandler {
             }
             _ => {
                 tracing::warn!(method, "unknown workspace rpc method");
-                Err(WorkspaceError::HubError(format!(
-                    "{UNKNOWN_METHOD_ERR_PREFIX} {method}"
-                )))
+                Err(WorkspaceError::UnknownMethod(method.to_owned()))
             }
         }
     }
@@ -989,10 +983,7 @@ impl ToolServerHandler for WorkspaceRpcHandler {
                 bound_session.as_deref().map(|s| s.0.as_str()),
             )
             .await;
-        let is_unknown_method = matches!(
-            &result,
-            Err(WorkspaceError::HubError(msg)) if msg.starts_with(UNKNOWN_METHOD_ERR_PREFIX)
-        );
+        let is_unknown_method = matches!(&result, Err(WorkspaceError::UnknownMethod(_)));
         let method_label = if is_unknown_method {
             UNKNOWN_METHOD_LABEL
         } else {
@@ -1273,15 +1264,18 @@ mod tests {
         assert_eq!(reply, turn_hook::HookReply::default());
     }
     #[tokio::test]
-    async fn dispatch_unknown_method_returns_hub_error() {
+    async fn dispatch_unknown_method_returns_unknown_method_error() {
         let handle = make_handle();
         let handler = WorkspaceRpcHandler::new(handle);
         let result = handler
             .dispatch("workspace.nonexistent", Value::Null, None)
             .await;
-        assert!(
-            matches!(result, Err(WorkspaceError::HubError(msg)) if msg.contains("unknown workspace method"))
-        );
+        match result {
+            Err(WorkspaceError::UnknownMethod(method)) => {
+                assert_eq!(method, "workspace.nonexistent");
+            }
+            other => panic!("expected UnknownMethod, got {other:?}"),
+        }
     }
     /// A hub evict runs the two-phase drain then settles into terminal
     /// ShuttingDown (not a lingering Draining) for an evicted workspace.
@@ -2360,7 +2354,7 @@ mod tests {
             .with_label_values(&[UNKNOWN_METHOD_LABEL, "error"])
             .get();
         let kind_before = WORKSPACE_RPC_ERRORS_TOTAL
-            .with_label_values(&[UNKNOWN_METHOD_LABEL, "hub_error"])
+            .with_label_values(&[UNKNOWN_METHOD_LABEL, "unknown_method"])
             .get();
         let mut stream = handler
             .handle_call(
@@ -2378,7 +2372,7 @@ mod tests {
         );
         assert!(
             WORKSPACE_RPC_ERRORS_TOTAL
-                .with_label_values(&[UNKNOWN_METHOD_LABEL, "hub_error"])
+                .with_label_values(&[UNKNOWN_METHOD_LABEL, "unknown_method"])
                 .get()
                 > kind_before,
             "a failed dispatch must also record its error_kind on the errors counter"

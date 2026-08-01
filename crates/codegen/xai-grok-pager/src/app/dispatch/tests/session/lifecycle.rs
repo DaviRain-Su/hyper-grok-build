@@ -2107,6 +2107,7 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
     let _ = dispatch_new_session_inner(&mut app, None);
     for (i, agent) in app.agents.values_mut().enumerate() {
         agent.display_name = Some(format!("agent-{i}"));
+        agent.session.session_id = Some(acp::SessionId::new(format!("s{i}")));
     }
     open_dashboard(&mut app);
     let order = dashboard_row_order(&app);
@@ -2151,17 +2152,27 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
             other => panic!("Ctrl+X must produce DashboardStop, got {other:?}"),
         }
     }
-    let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = first else {
+    let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = &first else {
         panic!("first row should be top-level");
     };
-    assert!(
-        !app.agents.contains_key(&first_id),
-        "closed agent must be gone"
+    let session_id = app.agents[first_id]
+        .session
+        .session_id
+        .as_ref()
+        .expect("session id")
+        .to_string();
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
     );
+    assert!(!app.agents.contains_key(first_id));
     assert_eq!(
         app.dashboard.as_ref().unwrap().selected,
         Some(second.clone()),
-        "closing with peek open should still select the next row down",
     );
     render(&mut app);
     assert_eq!(
@@ -2177,24 +2188,25 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
 }
 /// Regression — the same Ctrl+X double-press path driven
 /// END-TO-END through `DashboardState::handle_input` (which the
-/// existing `dashboard_stop_double_press_closes_top_level` test
+/// existing `dashboard_stop_double_press_deletes_top_level` test
 /// bypasses by calling `dispatch_dashboard_stop` directly).
 ///
 /// Without the fix, the second `handle_input` call
 /// runs the top-of-`handle_key` toast/confirm clear BEFORE the
 /// registry resolves the key to `DashboardStop`, wiping the
-/// just-armed `stop_confirm`. The dispatcher then sees a fresh
-/// state and re-arms instead of closing. The session never closes
+/// just-armed `delete_confirm`. The dispatcher then sees a fresh
+/// state and re-arms instead of deleting. The session never deletes
 /// no matter how many times the user presses Ctrl+X.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_stop_double_press_via_handle_key_closes_top_level() {
+fn dashboard_stop_double_press_via_handle_key_deletes_top_level() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app();
     let _ = dispatch_new_session_inner(&mut app, None);
     let _ = dispatch_new_session_inner(&mut app, None);
     open_dashboard(&mut app);
     let target = *app.agents.keys().next().unwrap();
+    app.agents.get_mut(&target).unwrap().session.session_id = Some(acp::SessionId::new("s-target"));
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
@@ -2211,8 +2223,8 @@ fn dashboard_stop_double_press_via_handle_key_closes_top_level() {
         other => panic!("first Ctrl+X must produce DashboardStop, got {other:?}"),
     }
     assert!(
-        app.dashboard.as_ref().unwrap().stop_confirm.is_some(),
-        "first Ctrl+X must arm stop_confirm"
+        app.dashboard.as_ref().unwrap().delete_confirm.is_some(),
+        "first Ctrl+X must arm delete_confirm"
     );
     let outcome2 = app
         .dashboard
@@ -2221,14 +2233,27 @@ fn dashboard_stop_double_press_via_handle_key_closes_top_level() {
         .handle_input(&ctrl_x, &app.registry);
     match outcome2 {
         crate::app::app_view::InputOutcome::Action(crate::app::actions::Action::DashboardStop) => {
-            let _ = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
+            let effects = dispatch(crate::app::actions::Action::DashboardStop, &mut app);
+            assert!(matches!(effects.last(), Some(Effect::DeleteSession { .. })));
         }
         other => panic!("second Ctrl+X must produce DashboardStop, got {other:?}"),
     }
-    assert!(
-        !app.agents.contains_key(&target),
-        "second Ctrl+X via handle_input must close the target agent (Issue 300 regression)",
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+    let session_id = app.agents[&target]
+        .session
+        .session_id
+        .as_ref()
+        .expect("session id")
+        .to_string();
+    let _ = dispatch_task_result(
+        crate::app::actions::TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Dashboard,
+        },
+        &mut app,
     );
+    assert!(!app.agents.contains_key(&target));
 }
 /// Top-level resolver round-trip via real AgentView.
 #[test]
@@ -2273,4 +2298,885 @@ fn session_id_resolver_round_trip_subagent() {
     );
     let back = resolver.to_persisted(&live).expect("must reverse");
     assert_eq!(back, pid);
+}
+#[cfg(feature = "local-workspace")]
+mod welcome_workspace_mode {
+    use super::*;
+    use crate::app::session_startup::{
+        LocalWorkspaceConfig, LocalWorkspaceMode, set_active_local_workspace,
+    };
+    use crate::views::welcome::WelcomeWorkspaceMode;
+    #[test]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    fn welcome_new_session_sets_own_override() {
+        let _ack = xai_grok_test_support::EnvGuard::set(
+            crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
+            "1",
+        );
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        let _ = dispatch(Action::NewSession, &mut app);
+        let override_cfg = app
+            .welcome_session_local_workspace
+            .clone()
+            .flatten()
+            .expect("welcome Local must set one-shot own override");
+        assert_eq!(override_cfg.mode, LocalWorkspaceMode::Own);
+        assert_eq!(override_cfg.cwd.as_deref(), Some(tmp.path()));
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn new_session_ignores_history_bypass_for_indicator() {
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = false;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.welcome_history_load_as_build = true;
+        let effects = dispatch(Action::NewSession, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CreateSession { .. })),
+            "new session must create: {effects:?}"
+        );
+        assert!(
+            app.welcome_history_load_as_build,
+            "create must not consume history bypass (restore+load still owns it)"
+        );
+        let agent = app.agents.values().next().expect("new agent");
+        assert!(agent.chat_kind);
+        assert_eq!(
+            agent.workspace_mode,
+            WelcomeWorkspaceMode::Sandbox,
+            "create must not stamp Local from leftover history bypass"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn fork_from_welcome_with_local_selection_creates_placeholder() {
+        set_active_local_workspace(None).unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        assert!(app.agents.is_empty());
+        let effects = crate::app::dispatch::session::fork::dispatch_startup_fork_session(
+            &mut app,
+            "parent-1".into(),
+            None,
+            None,
+        );
+        assert!(
+            !app.agents.is_empty(),
+            "fork must still create a placeholder agent"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ForkSession { .. })),
+            "fork effect expected: {effects:?}"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn startup_lock_prevents_sandbox_from_clearing_cli_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_active_local_workspace(Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(tmp.path().to_path_buf()),
+            server_id: Some("cli-srv".into()),
+        }))
+        .unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.local_workspace_startup_locked = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.cwd = tmp.path().to_path_buf();
+        let _ = dispatch(Action::NewSession, &mut app);
+        let stamp = crate::app::session_startup::active_local_workspace()
+            .unwrap()
+            .expect("CLI stamp must remain");
+        assert_eq!(stamp.mode, LocalWorkspaceMode::Attach);
+        assert!(
+            app.welcome_session_local_workspace.is_none(),
+            "locked path must not set a one-shot override"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    fn confirm_ack_skips_reapply_and_sets_oneshot() {
+        let _ack = xai_grok_test_support::EnvGuard::unset(
+            crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
+        );
+        let home = tempfile::tempdir().unwrap();
+        let _home =
+            xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path().to_str().unwrap());
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.welcome_local_workspace_ack_pending = true;
+        let effects = dispatch(Action::ConfirmWelcomeLocalWorkspaceAck, &mut app);
+        assert!(
+            !app.welcome_local_workspace_ack_pending,
+            "confirm must clear pending"
+        );
+        assert!(
+            app.welcome_session_local_workspace
+                .clone()
+                .flatten()
+                .is_some(),
+            "one-shot Own override must be set before CreateSession"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CreateSession { .. })),
+            "confirm must create without re-entering AwaitAck: {effects:?}"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    fn welcome_local_worktree_always_keeps_oneshot_until_create() {
+        let _ack = xai_grok_test_support::EnvGuard::set(
+            crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
+            "1",
+        );
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = true;
+        app.new_session_worktree_mode = crate::app::app_view::WorktreeMode::Always;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        let live = test_app_with_agent();
+        let (id, agent) = live.agents.into_iter().next().unwrap();
+        app.agents.insert(id, agent);
+        let effects = dispatch(Action::NewSession, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CreateWorktreeSession { .. })),
+            "Always worktree must emit CreateWorktreeSession: {effects:?}"
+        );
+        assert!(
+            app.welcome_session_local_workspace
+                .clone()
+                .flatten()
+                .is_some(),
+            "one-shot must remain until process_effects consumes CreateWorktreeSession"
+        );
+        assert!(
+            crate::app::session_startup::active_local_workspace()
+                .unwrap()
+                .is_some(),
+            "welcome Local stamps process-wide Own (agents map treated as stale)"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    fn failed_worktree_create_clears_welcome_oneshot() {
+        let _ack = xai_grok_test_support::EnvGuard::set(
+            crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
+            "1",
+        );
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = false;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.welcome_history_load_as_build = true;
+        let effects = dispatch(
+            Action::NewWorktreeSession {
+                load_session_id: None,
+                label: None,
+                git_ref: None,
+            },
+            &mut app,
+        );
+        assert!(effects.is_empty(), "expected hard-fail, got {effects:?}");
+        assert!(
+            app.welcome_session_local_workspace.is_none(),
+            "failed worktree must drop one-shot so next create re-applies picker"
+        );
+        assert!(
+            !app.welcome_history_load_as_build,
+            "failed worktree must not leak history bypass"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    fn confirm_ack_honors_worktree_always() {
+        let _ack = xai_grok_test_support::EnvGuard::unset(
+            crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
+        );
+        let home = tempfile::tempdir().unwrap();
+        let _home =
+            xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path().to_str().unwrap());
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = true;
+        app.new_session_worktree_mode = crate::app::app_view::WorktreeMode::Always;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.welcome_local_workspace_ack_pending = true;
+        let effects = dispatch(Action::ConfirmWelcomeLocalWorkspaceAck, &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CreateWorktreeSession { .. })),
+            "confirm must honor WorktreeMode::Always: {effects:?}"
+        );
+        assert!(
+            app.welcome_session_local_workspace
+                .clone()
+                .flatten()
+                .is_some()
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn welcome_fetch_session_list_filters_by_workspace_mode() {
+        set_active_local_workspace(None).unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        let effects = dispatch(Action::FetchSessionList, &mut app);
+        match &effects[..] {
+            [Effect::FetchSessionList { kind_filter, .. }] => {
+                assert_eq!(
+                    kind_filter.as_deref(),
+                    Some(["chat".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected FetchSessionList, got {other:?}"),
+        }
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        let effects = dispatch(Action::FetchSessionList, &mut app);
+        match &effects[..] {
+            [Effect::FetchSessionList { kind_filter, .. }] => {
+                assert_eq!(
+                    kind_filter.as_deref(),
+                    Some(["build".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected FetchSessionList, got {other:?}"),
+        }
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn pick_conversation_auto_switches_to_sandbox() {
+        set_active_local_workspace(None).unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "conv-1".into(),
+            summary: "hello".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: String::new(),
+            hostname: None,
+            source: "conversation".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSession(0), &mut app);
+        assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
+        assert!(
+            app.welcome_session_local_workspace.is_none(),
+            "conversation pick must drop (not force-clear) local one-shot"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::LoadSession {
+                    chat_kind: true,
+                    ..
+                }
+            )),
+            "conversation must load as chat: {effects:?}"
+        );
+        assert!(!app.welcome_history_load_as_build);
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn pick_local_disk_auto_switches_to_local_and_bypasses_chat_refusal() {
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        let sess_dir = super::super::super::plant_local_build_session(tmp.path(), "build-1");
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "build-1".into(),
+            summary: "local work".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: tmp.path().display().to_string(),
+            hostname: None,
+            source: "local".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSession(0), &mut app);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace
+        );
+        assert!(app.chat_mode, "sticky --chat remains");
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::LoadSession {
+                    chat_kind: false,
+                    ..
+                }
+            )),
+            "local-disk pick must load as build: {effects:?}"
+        );
+        assert!(
+            app.welcome_history_load_as_build,
+            "bypass stays until process_effects LoadSession"
+        );
+        let agent = app.agents.values().next().expect("placeholder agent");
+        assert!(
+            agent.chat_kind,
+            "sticky --chat keeps agent.chat_kind for already-open focus matching"
+        );
+        assert_eq!(
+            agent.workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace,
+            "Local UX is the workspace_mode indicator"
+        );
+        let _ = std::fs::remove_dir_all(sess_dir);
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn pick_local_disk_in_worktree_sets_history_bypass() {
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "build-wt".into(),
+            summary: "local work".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: tmp.path().display().to_string(),
+            hostname: None,
+            source: "local".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let _ = dispatch(Action::PickSessionInWorktree(0), &mut app);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace
+        );
+        assert!(
+            app.welcome_history_load_as_build,
+            "worktree pick of build row must set history bypass"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn pick_in_worktree_resume_skips_local_ack() {
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "build-wt".into(),
+            summary: "local work".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: tmp.path().display().to_string(),
+            hostname: None,
+            source: "local".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
+        assert!(
+            !app.welcome_local_workspace_ack_pending,
+            "worktree resume must not block on Local ACK"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CreateWorktreeSession { .. })),
+            "worktree resume must create worktree without ACK: {effects:?}"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    #[serial_test::serial(GROK_CHAT_LOCAL_WORKSPACE_ACK)]
+    fn pick_in_worktree_no_git_clears_history_bypass() {
+        let _ack = xai_grok_test_support::EnvGuard::set(
+            crate::app::session_startup::GROK_CHAT_LOCAL_WORKSPACE_ACK_ENV,
+            "1",
+        );
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.cwd_has_git_ancestor = false;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "build-wt".into(),
+            summary: "local work".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: tmp.path().display().to_string(),
+            hostname: None,
+            source: "local".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
+        assert!(
+            effects.is_empty(),
+            "no-git worktree must hard-fail: {effects:?}"
+        );
+        assert!(
+            !app.welcome_history_load_as_build,
+            "no-git worktree fail must not leak history bypass"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn cli_lock_still_sets_history_bypass_without_rewriting_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_active_local_workspace(Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(tmp.path().to_path_buf()),
+            server_id: Some("cli-srv".into()),
+        }))
+        .unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.cwd = tmp.path().to_path_buf();
+        app.local_workspace_startup_locked = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        let sess_dir = super::super::super::plant_local_build_session(tmp.path(), "build-lock");
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "build-lock".into(),
+            summary: "local work".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: tmp.path().display().to_string(),
+            hostname: None,
+            source: "local".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSession(0), &mut app);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::Sandbox,
+            "CLI lock must not rewrite welcome mode from Sandbox"
+        );
+        assert!(
+            app.welcome_history_load_as_build,
+            "CLI lock must still set local-disk load bypass"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::LoadSession {
+                    chat_kind: false,
+                    ..
+                }
+            )),
+            "locked local-disk pick must still load: {effects:?}"
+        );
+        let _ = std::fs::remove_dir_all(sess_dir);
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn failed_local_pick_clears_history_bypass() {
+        set_active_local_workspace(None).unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "missing-build".into(),
+            summary: "gone".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: String::new(),
+            hostname: None,
+            source: "local".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSession(0), &mut app);
+        assert!(effects.is_empty());
+        assert!(
+            !app.welcome_history_load_as_build,
+            "failed/no-op pick must not leak bypass"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn deferred_history_bypass_survives_startup_gate() {
+        set_active_local_workspace(None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.trust_state = crate::app::app_view::TrustState::Pending {
+            workspace: tmp.path().to_path_buf(),
+        };
+        app.welcome_history_load_as_build = true;
+        let effects = dispatch(Action::LoadSession("sid".into(), None, false), &mut app);
+        assert!(effects.is_empty());
+        assert!(
+            !app.welcome_history_load_as_build,
+            "live flag moved onto deferred startup"
+        );
+        assert!(app.deferred_startup.history_load_as_build);
+        let effects = finish_trust(&mut app);
+        assert!(
+            app.welcome_history_load_as_build,
+            "drain must re-apply bypass before LoadSession"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::LoadSession {
+                    chat_kind: false,
+                    ..
+                }
+            )),
+            "deferred drain must emit LoadSession: {effects:?}"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn cli_lock_conversation_pick_does_not_rewrite_sandbox_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_active_local_workspace(Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Attach,
+            cwd: Some(tmp.path().to_path_buf()),
+            server_id: Some("cli-srv".into()),
+        }))
+        .unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.local_workspace_startup_locked = true;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "conv-lock".into(),
+            summary: "hello".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: String::new(),
+            hostname: None,
+            source: "conversation".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSession(0), &mut app);
+        assert_eq!(
+            app.welcome_workspace_mode,
+            WelcomeWorkspaceMode::Sandbox,
+            "CLI lock must not auto-switch welcome mode on conversation pick"
+        );
+        assert!(!app.welcome_history_load_as_build);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::LoadSession {
+                    chat_kind: true,
+                    ..
+                }
+            )),
+            "conversation must still load: {effects:?}"
+        );
+        let agent = app.agents.values().next().expect("agent");
+        assert_eq!(
+            agent.workspace_mode,
+            WelcomeWorkspaceMode::Sandbox,
+            "conversation without session-local intent → Sandbox (not Local·CLI)"
+        );
+        assert!(
+            !agent.workspace_mode_cli_locked,
+            "CLI lock must not badge conversation LoadSession"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn session_restore_failed_clears_history_bypass() {
+        set_active_local_workspace(None).unwrap();
+        let mut app = test_app_with_agent();
+        app.chat_mode = true;
+        app.welcome_history_load_as_build = true;
+        let id = AgentId(0);
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::SessionRestoreFailed {
+                agent_id: id,
+                error: "boom".into(),
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty());
+        assert!(
+            !app.welcome_history_load_as_build,
+            "failed restore must not leak bypass into the next load"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn restore_and_load_sets_local_workspace_indicator() {
+        set_active_local_workspace(None).unwrap();
+        let mut app = test_app();
+        app.chat_mode = true;
+        app.active_view = ActiveView::Welcome;
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            id: "remote-1".into(),
+            summary: "remote row".into(),
+            updated_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            cwd: "/other".into(),
+            hostname: None,
+            source: "remote".into(),
+            model_id: None,
+            num_messages: 1,
+            last_active_at: None,
+            branch: None,
+            repo_name: String::new(),
+            worktree_label: None,
+            card_detail: None,
+        }]);
+        let effects = dispatch(Action::PickSession(0), &mut app);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::RestoreAndLoadSession { .. })),
+            "remote pick must restore: {effects:?}"
+        );
+        assert!(
+            app.welcome_history_load_as_build,
+            "bypass kept until follow-up LoadSession"
+        );
+        let agent = app.agents.values().next().expect("restore placeholder");
+        assert_eq!(
+            agent.workspace_mode,
+            WelcomeWorkspaceMode::LocalWorkspace,
+            "restore placeholder must show Local indicator"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn history_build_bypass_only_applies_to_load_session_batch() {
+        use crate::app::event_loop::welcome_history_build_bypass_applies;
+        assert!(!welcome_history_build_bypass_applies(&[], true));
+        assert!(!welcome_history_build_bypass_applies(
+            &[Effect::FetchSessionList {
+                query: None,
+                seq: 0,
+                kind_filter: None,
+            }],
+            true
+        ));
+        assert!(welcome_history_build_bypass_applies(
+            &[Effect::LoadSession {
+                agent_id: AgentId(0),
+                session_id: "s".into(),
+                session_cwd: None,
+                chat_kind: false,
+            }],
+            true
+        ));
+        assert!(welcome_history_build_bypass_applies(
+            &[Effect::RestoreAndLoadSession {
+                agent_id: AgentId(0),
+                session_id: "s".into(),
+                session_cwd: "/tmp".into(),
+            }],
+            true
+        ));
+        assert!(welcome_history_build_bypass_applies(
+            &[Effect::CreateWorktreeSession {
+                agent_id: AgentId(0),
+                load_session_id: Some("s".into()),
+                label: None,
+                git_ref: None,
+                model_id: None,
+                preferred_session_id: None,
+                chat_kind: false,
+            }],
+            true
+        ));
+        assert!(
+            crate::app::event_loop::welcome_history_build_bypass_consume(
+                &[Effect::CreateWorktreeSession {
+                    agent_id: AgentId(0),
+                    load_session_id: Some("s".into()),
+                    label: None,
+                    git_ref: None,
+                    model_id: None,
+                    preferred_session_id: None,
+                    chat_kind: false,
+                }],
+                true
+            ),
+            "worktree-resume batch consumes bypass (single-batch create)"
+        );
+        assert!(
+            !crate::app::event_loop::welcome_history_build_bypass_consume(
+                &[Effect::RestoreAndLoadSession {
+                    agent_id: AgentId(0),
+                    session_id: "s".into(),
+                    session_cwd: "/tmp".into(),
+                }],
+                true
+            ),
+            "restore-only batch keeps bypass for follow-up LoadSession"
+        );
+        assert!(
+            crate::app::event_loop::welcome_history_build_bypass_consume(
+                &[Effect::LoadSession {
+                    agent_id: AgentId(0),
+                    session_id: "s".into(),
+                    session_cwd: None,
+                    chat_kind: false,
+                }],
+                true
+            )
+        );
+    }
+    #[test]
+    fn fetch_session_list_kind_filter_only_on_welcome_chat() {
+        set_active_local_workspace(None).unwrap();
+        let mut welcome = test_app();
+        welcome.chat_mode = true;
+        welcome.active_view = ActiveView::Welcome;
+        welcome.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
+        match &dispatch(Action::FetchSessionList, &mut welcome)[..] {
+            [Effect::FetchSessionList { kind_filter, .. }] => {
+                assert_eq!(
+                    kind_filter.as_deref(),
+                    Some(["build".to_string()].as_slice())
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut in_session = test_app_with_agent();
+        in_session.chat_mode = true;
+        match &dispatch(Action::FetchSessionList, &mut in_session)[..] {
+            [Effect::FetchSessionList { kind_filter, .. }] => {
+                assert!(kind_filter.is_none())
+            }
+            other => panic!("{other:?}"),
+        }
+        set_active_local_workspace(None).unwrap();
+    }
+    #[test]
+    fn in_session_new_does_not_clear_process_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_active_local_workspace(Some(LocalWorkspaceConfig {
+            mode: LocalWorkspaceMode::Own,
+            cwd: Some(tmp.path().to_path_buf()),
+            server_id: None,
+        }))
+        .unwrap();
+        let mut app = test_app_with_agent();
+        app.chat_mode = true;
+        app.cwd = tmp.path().to_path_buf();
+        app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
+        let _ = dispatch(Action::NewSession, &mut app);
+        assert!(
+            crate::app::session_startup::active_local_workspace()
+                .unwrap()
+                .is_some(),
+            "in-session /new must not clear the process stamp"
+        );
+        set_active_local_workspace(None).unwrap();
+    }
 }

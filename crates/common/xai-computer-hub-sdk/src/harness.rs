@@ -3076,7 +3076,9 @@ mod tests {
             "supported_protocol_versions": ["1.0.0"],
         });
         let _ = socket.send(Message::Text(ack.to_string().into())).await;
-        while let Some(Ok(Message::Text(text))) = socket.recv().await {
+        // Ignore WS Ping/Pong/Close: keepalive fires immediately after hello.
+        while let Some(Ok(msg)) = socket.recv().await {
+            let Message::Text(text) = msg else { continue };
             let Ok(value) = serde_json::from_str::<Value>(text.as_ref()) else {
                 continue;
             };

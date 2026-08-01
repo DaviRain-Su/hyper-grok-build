@@ -905,6 +905,66 @@ pub struct ToolServerStatusPayload {
     /// tasks.
     #[serde(default)]
     pub idle_ignores_background: bool,
+    /// Why `idle_since_ms` is being withheld, when it is. `None` ⇒ not withheld
+    /// (or the tool server is genuinely busy, which `active_tool_calls`
+    /// reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withhold_reason: Option<IdleWithholdReason>,
+    /// Epoch ms the current hold is measured from. Never `None` while
+    /// `withhold_reason` is `Some`.
+    ///
+    /// NOT the instant the withhold began, for the preview reasons. It is the
+    /// **real-use anchor**: the last routed request or tool call, floored at
+    /// process start. A status poll never moves it, which is the point — a
+    /// ceiling has to be measured from genuine use, or the pane could hold a
+    /// sandbox open forever by resetting the clock it is judged against. So
+    /// for a poll-pinned session this is *older* than the poll-only period,
+    /// and `now - withhold_since_ms` is time-since-real-use, not
+    /// time-spent-withholding. `Durability` is the exception: there it is the
+    /// true busy-since stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withhold_since_ms: Option<u64>,
+    /// `true` once the current hold has crossed its effective ceiling. The
+    /// verdict is published rather than re-derived because the ceiling is
+    /// per-session config only the sender can see. Always `false` today: no
+    /// ceilings are configured yet.
+    #[serde(default)]
+    pub withhold_capped: bool,
+    /// Open WebSocket (HMR) tunnels through the in-sandbox preview proxy.
+    /// Nonzero ⇒ a client is attached even if the preview is otherwise silent.
+    #[serde(default)]
+    pub preview_ws_tunnels_open: u32,
+}
+
+/// Why a tool server is withholding `idle_since_ms`, ordered by strength of
+/// evidence that someone is really using the sandbox.
+///
+/// Carries an [`Unknown`](Self::Unknown) escape so adding a variant cannot
+/// break older readers: without it, one unrecognised string would fail
+/// deserialization of the **entire** status frame, taking the idle verdict down
+/// with it. Sandbox binaries are pinned per session, so old and new report side
+/// by side for at least a full session TTL.
+///
+/// Deliberately not `#[non_exhaustive]`: in-workspace matches should stay
+/// exhaustive so a new variant is a compile error at every decision site, which
+/// is a different problem from wire tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdleWithholdReason {
+    /// Artifact producers or queued uploads outstanding. Already bounded by the
+    /// durability idle-hold cap.
+    Durability,
+    /// An open WebSocket tunnel or a routed request in flight. Never a status
+    /// poll, however long it is held.
+    PreviewAttached,
+    /// Recent `Routed` preview traffic — a human loading the app.
+    PreviewRouted,
+    /// Only the preview pane's own `/__grok-preview/status` liveness poll.
+    PreviewStatusOnly,
+    /// A reason this build does not recognise — a newer sender. Never
+    /// constructed locally; only produced by deserialization.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ToolServerStatusPayload {
@@ -1336,6 +1396,10 @@ mod tests {
             drain_started_ms: Some(1721234599999),
             turn_active: true,
             idle_ignores_background: false,
+            withhold_reason: None,
+            withhold_since_ms: None,
+            withhold_capped: false,
+            preview_ws_tunnels_open: 0,
         };
         let json = serde_json::to_value(&payload).expect("serialize");
         assert_eq!(json["upload_queue_pending"], 7);
@@ -1348,6 +1412,81 @@ mod tests {
         let back: super::ToolServerStatusPayload =
             serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, payload);
+    }
+
+    /// `withhold_reason` is snake_case on the wire so it can be used directly
+    /// as a metric label.
+    #[test]
+    fn tool_server_status_payload_carries_withhold_fields() {
+        let payload = super::ToolServerStatusPayload {
+            status: super::ToolServerLifecycleStatus::Ready,
+            session_id: Some(sid()),
+            idle_since_ms: None,
+            withhold_reason: Some(super::IdleWithholdReason::PreviewStatusOnly),
+            withhold_since_ms: Some(1721234560000),
+            withhold_capped: true,
+            preview_ws_tunnels_open: 2,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(json["withhold_reason"], "preview_status_only");
+        assert_eq!(json["withhold_since_ms"], 1721234560000u64);
+        assert_eq!(json["withhold_capped"], true);
+        assert_eq!(json["preview_ws_tunnels_open"], 2);
+        let back: super::ToolServerStatusPayload =
+            serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, payload);
+    }
+
+    /// An unrecognised reason from a newer sender must degrade to `Unknown`,
+    /// not fail the whole frame and take the idle verdict with it.
+    #[test]
+    fn unknown_withhold_reason_does_not_fail_the_frame() {
+        let json = serde_json::json!({
+            "status": "ready",
+            "active_tool_calls": 0,
+            "background_tasks": 0,
+            "pending_tool_calls": 0,
+            "last_tool_call_started_ms": 0,
+            "last_tool_call_completed_ms": 0,
+            "uptime_ms": 1000,
+            "withhold_reason": "some_future_reason",
+            "withhold_since_ms": 1721234560000u64,
+        });
+        let back: super::ToolServerStatusPayload =
+            serde_json::from_value(json).expect("a newer reason must not break the frame");
+        assert_eq!(
+            back.withhold_reason,
+            Some(super::IdleWithholdReason::Unknown)
+        );
+        assert_eq!(
+            back.withhold_since_ms,
+            Some(1721234560000),
+            "the rest of the frame must survive intact"
+        );
+    }
+
+    /// The fleet is version-pinned per session, so old and new binaries report
+    /// side by side for at least a full session TTL.
+    #[test]
+    fn tool_server_status_payload_withhold_fields_are_optional_on_the_wire() {
+        let json = serde_json::json!({
+            "status": "ready",
+            "active_tool_calls": 0,
+            "background_tasks": 0,
+            "pending_tool_calls": 0,
+            "last_tool_call_started_ms": 0,
+            "last_tool_call_completed_ms": 0,
+            "uptime_ms": 1000,
+        });
+        let back: super::ToolServerStatusPayload =
+            serde_json::from_value(json).expect("old payload must still deserialize");
+        assert_eq!(back.withhold_reason, None);
+        assert_eq!(back.withhold_since_ms, None);
+        assert!(!back.withhold_capped);
+        assert_eq!(back.preview_ws_tunnels_open, 0);
+        // An absent reason is indistinguishable from "nothing is withheld" —
+        // what the field-coverage ratio exists to measure.
     }
 
     /// A legacy payload without the new fields deserializes with defaults.

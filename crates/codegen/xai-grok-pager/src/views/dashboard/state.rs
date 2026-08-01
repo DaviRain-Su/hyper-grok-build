@@ -181,11 +181,10 @@ impl PersistedRowId {
     }
 }
 
-/// Window within which a second `Ctrl+X` press confirms closing the
-/// selected agent. Shared by the dispatcher (which gates the actual
-/// close) and the footer (which only paints the "press again" hint
-/// while the window is live).
-pub const STOP_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+/// Window within which a second confirming gesture (`Ctrl+X`, a `[✗]`
+/// click, or `y`) deletes the armed row. Also reused by the
+/// dashboard-overlay stop for its double-press close confirm.
+pub const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Coarse state used for the dashboard grouping.
 ///
@@ -215,6 +214,17 @@ pub enum RowState {
 }
 
 impl RowState {
+    /// The one predicate for "may be deleted", shared by the renderer's
+    /// `[✗]` and the dispatcher: only settled rows qualify. `Working` /
+    /// `NeedsInput` are excluded so an in-flight turn is never wiped —
+    /// `Ctrl+X` cancels those instead.
+    pub fn allows_delete(self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::Inactive | Self::Completed | Self::Failed
+        )
+    }
+
     /// Sort priority used inside a state group: higher = floats up.
     /// Pinned rows always float to the absolute top regardless of state.
     pub fn group_priority(self) -> u8 {
@@ -493,11 +503,10 @@ pub struct DashboardState {
     /// exists"). Rendered verbatim by `paint_dispatch_feedback_badge`;
     /// error messages are built via [`Self::set_error_toast`].
     pub error_toast: Option<String>,
-    /// Pending stop confirmation. `Some((row, set_at))` after the first
-    /// `Ctrl+X` press on a top-level row. The second press within
-    /// [`STOP_CONFIRM_WINDOW`] closes the agent. Mirrors the session-close
-    /// close-confirm pattern.
-    pub stop_confirm: Option<(DashboardRowId, Instant)>,
+    /// Row armed for delete, and when. A second gesture on the same row
+    /// within [`CONFIRM_WINDOW`] deletes it (see [`Self::armed_delete_row`]);
+    /// otherwise it lapses. Cleared on any focus change.
+    pub delete_confirm: Option<(DashboardRowId, Instant)>,
     /// Tick counter for spinner animation. The
     /// counter is bumped by [`crate::app::app_view::AppView::tick`]
     /// (NOT the renderer, which is read-only).
@@ -508,6 +517,15 @@ pub struct DashboardState {
     /// mouse handling to map (col, row) → row id without scanning the
     /// row list a second time.
     pub row_rects: Vec<(DashboardRowId, Rect)>,
+    /// Per-row `[✗]` hit areas, rebuilt each render; maps a click onto the
+    /// delete gesture instead of a row select.
+    pub row_delete_rects: Vec<(DashboardRowId, Rect)>,
+    /// Row whose `[✗]` the mouse is over, so the renderer can tint it.
+    pub hovered_delete: Option<DashboardRowId>,
+    /// Roster session ids whose origin is a chat `conversation` — those
+    /// can't be deleted from the dashboard yet, so they get no `[✗]` and
+    /// don't arm. Rebuilt each render from the roster.
+    pub conversation_row_ids: std::collections::HashSet<String>,
     /// Last frame's section-header hit areas keyed by [`SectionKey`].
     /// Used by mouse handling to map (col, row) → section for
     /// click-to-toggle and hover. Rebuilt every render.
@@ -1351,9 +1369,12 @@ impl DashboardState {
             peek_reply_target_cwd: None,
             rename: None,
             error_toast: None,
-            stop_confirm: None,
+            delete_confirm: None,
             spinner_tick: 0,
             row_rects: Vec::new(),
+            row_delete_rects: Vec::new(),
+            hovered_delete: None,
+            conversation_row_ids: std::collections::HashSet::new(),
             section_rects: Vec::new(),
             idle_overflow_rect: None,
             last_area: Rect::default(),
@@ -1474,6 +1495,7 @@ impl DashboardState {
         self.selected = None;
         self.selected_section = None;
         self.selected_idle_overflow = false;
+        self.delete_confirm = None;
     }
 
     /// Focus the row identified by `id`. Clears the
@@ -1483,6 +1505,13 @@ impl DashboardState {
     /// risk — the invariant only holds when both fields are
     /// written through here.
     pub fn focus_row(&mut self, id: DashboardRowId) {
+        if self
+            .delete_confirm
+            .as_ref()
+            .is_some_and(|(armed, _)| armed != &id)
+        {
+            self.delete_confirm = None;
+        }
         self.selected = Some(id);
         self.new_agent_button_focused = false;
         self.selected_section = None;
@@ -1497,6 +1526,7 @@ impl DashboardState {
         self.selected = None;
         self.new_agent_button_focused = false;
         self.selected_idle_overflow = false;
+        self.delete_confirm = None;
     }
 
     /// Focus the Idle group's "N more" overflow toggle —
@@ -1507,6 +1537,62 @@ impl DashboardState {
         self.selected = None;
         self.selected_section = None;
         self.new_agent_button_focused = false;
+        self.delete_confirm = None;
+    }
+
+    fn set_list_focused(&mut self, focused: bool) {
+        self.list_focused = focused;
+        if !focused {
+            self.delete_confirm = None;
+        }
+    }
+
+    /// The armed row while its [`CONFIRM_WINDOW`] is still live, clearing
+    /// an expired arm as a side effect. The accessor the dispatcher and
+    /// mouse handler share so "armed on screen" and "armed for delete"
+    /// never diverge.
+    pub fn armed_delete_row(&mut self) -> Option<DashboardRowId> {
+        match &self.delete_confirm {
+            Some((id, at)) if at.elapsed() < CONFIRM_WINDOW => Some(id.clone()),
+            Some(_) => {
+                self.delete_confirm = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Read-only counterpart of [`Self::armed_delete_row`] for the
+    /// renderer (does not clear an expired arm).
+    pub fn armed_delete_row_ref(&self) -> Option<&DashboardRowId> {
+        self.delete_confirm
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < CONFIRM_WINDOW)
+            .map(|(id, _)| id)
+    }
+
+    pub fn arm_delete(&mut self, id: DashboardRowId) {
+        self.delete_confirm = Some((id, Instant::now()));
+    }
+
+    /// Whether `id` is a chat-conversation roster row, which the dashboard
+    /// can't delete yet (see [`Self::conversation_row_ids`]).
+    pub fn row_is_conversation(&self, id: &DashboardRowId) -> bool {
+        matches!(id, DashboardRowId::Roster { session_id }
+            if self.conversation_row_ids.contains(session_id))
+    }
+
+    /// Enforce the invariant that a delete arm belongs to the selected
+    /// row. Selection changes routed through the focus helpers already
+    /// disarm, but `reanchor_selection` / `gc_stale_refs` can drop or move
+    /// `selected` directly — without this a stale arm would let a later
+    /// `y` delete a row that is no longer selected.
+    fn sync_delete_confirm_to_selection(&mut self) {
+        if let Some((armed, _)) = self.delete_confirm.as_ref()
+            && self.selected.as_ref() != Some(armed)
+        {
+            self.delete_confirm = None;
+        }
     }
 
     /// Toggle whether the Idle group shows every agent (`true`) or caps
@@ -1683,6 +1769,7 @@ impl DashboardState {
             // holds at every close site, not just here.
             self.close_popup();
         }
+        self.sync_delete_confirm_to_selection();
     }
 
     /// Switch grouping (`Ctrl+G`).
@@ -3001,8 +3088,37 @@ impl DashboardState {
         InputOutcome::Action(Action::DashboardDispatch { text, attach })
     }
 
+    /// List-focused `y`/`n` confirm for an already-armed delete (arming is
+    /// via `Ctrl+X` / `[✗]`, not `d`). When the list isn't focused,
+    /// disarming is left to the caller so a second `Ctrl+X` reaches the
+    /// dispatcher.
+    fn handle_delete_confirm_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        if !self.list_focused {
+            return None;
+        }
+        self.armed_delete_row()?;
+        if !key.modifiers.is_empty() {
+            self.delete_confirm = None;
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('y') => Some(InputOutcome::Action(Action::DashboardDelete)),
+            KeyCode::Char('n') => {
+                self.delete_confirm = None;
+                Some(InputOutcome::Changed)
+            }
+            _ => {
+                self.delete_confirm = None;
+                None
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: &KeyEvent, registry: &ActionRegistry) -> InputOutcome {
-        // Resolve the registry binding up-front — the toast / stop-confirm
+        // Resolve the registry binding up-front — the toast / delete-confirm
         // clear below needs to know whether this key IS the stop key, and
         // it must run before the peek intercept (the lookup itself is a
         // pure read; the action is honoured further down).
@@ -3017,37 +3133,26 @@ impl DashboardState {
         let from_registry =
             registry.lookup_with_mode(key, crate::actions::When::DashboardFocused, vim_mode);
 
-        // Clear `error_toast` at the TOP of the
-        // handler so any subsequent keypress dismisses the toast,
-        // regardless of which branch handles the key (including keys
-        // the peek panel consumes — peek is open by default for a
-        // selected row, so nav keys route through it).
-        //
-        // When the toast is cleared, the linked
-        // `stop_confirm` armed state is also cleared. The two state
-        // bits are semantically linked: the user saw "Press Ctrl+X
-        // again", that hint is now gone, so re-arm rather than let a
-        // stale confirm window silently close the wrong session.
-        //
-        // The clear is SKIPPED when the resolved
-        // action is `DashboardStop`. Without this skip, the second
-        // Ctrl+X press would wipe the just-armed `stop_confirm`
-        // before `dispatch_dashboard_stop` could observe it, and the
-        // session would never close (the dispatcher kept re-arming a
-        // fresh confirm on every press). The Ctrl+X path owns
-        // `stop_confirm` and `error_toast` end-to-end: the first
-        // press arms both, the second press observes them and closes.
-        let preserve_stop_state =
-            matches!(from_registry, Some(crate::actions::ActionId::DashboardStop));
-        if !preserve_stop_state {
+        // Clear `error_toast` on any keypress so it never lingers; kept for
+        // `Ctrl+X` so the arm path's own messaging survives its first press.
+        let is_stop_key = matches!(from_registry, Some(crate::actions::ActionId::DashboardStop));
+        if !is_stop_key {
             self.error_toast = None;
-            // The disarm is NOT gated on `error_toast` being set (the
-            // Ctrl+X arm path deliberately plants no toast): a pending
-            // stop confirmation is bound to the row that was selected
-            // when Ctrl+X was pressed, so any other key — nav included —
-            // must disarm it. Otherwise the footer's "press again to
-            // close" hint lingers while the cursor moves to other agents.
-            self.stop_confirm = None;
+        }
+
+        // Disarm delete-confirm on any non-confirming key. Two gestures are
+        // preserved: `Ctrl+X` (its second press is the confirm, read by the
+        // dispatcher) and a list-focused bare `y`/`n` (handled just below).
+        let confirm_via_yn = self.list_focused
+            && self.armed_delete_row().is_some()
+            && key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('n'));
+        if !is_stop_key && !confirm_via_yn {
+            self.delete_confirm = None;
+        }
+
+        if !is_stop_key && let Some(outcome) = self.handle_delete_confirm_key(key) {
+            return outcome;
         }
 
         // Free-tier override: Ctrl+O opens the pinned upgrade CTA (when one is
@@ -3405,6 +3510,13 @@ impl DashboardState {
                 }
                 _ => true,
             };
+            // Never let an auto-repeat (held key) drive the destructive
+            // Ctrl+X arm→confirm — holding the key would arm and immediately
+            // confirm a delete. Require discrete presses, like the picker's
+            // `y` confirm. Non-destructive actions may still repeat.
+            if id == crate::actions::ActionId::DashboardStop && key.kind == KeyEventKind::Repeat {
+                return InputOutcome::Unchanged;
+            }
             if honor && let Some(outcome) = dashboard_action_for_id(id, &mut self.error_toast) {
                 return outcome;
             }
@@ -3483,7 +3595,7 @@ impl DashboardState {
         // slash / `@` dropdowns are open the intercepts above already
         // consumed Tab (accept completion), so this only fires otherwise.
         if matches!(key.code, KeyCode::Tab) && key.modifiers.is_empty() {
-            self.list_focused = !self.list_focused;
+            self.set_list_focused(!self.list_focused);
             // Re-engage selection-follow so the viewport tracks the
             // cursor once the list takes focus.
             self.clear_manual_scroll();
@@ -3502,12 +3614,12 @@ impl DashboardState {
             {
                 if vim_mode {
                     if key.code == KeyCode::Char('i') && key.modifiers.is_empty() {
-                        self.list_focused = false;
+                        self.set_list_focused(false);
                         return InputOutcome::Changed;
                     }
                     return InputOutcome::Unchanged;
                 }
-                self.list_focused = false;
+                self.set_list_focused(false);
                 // fall through to the widget so the char is typed.
             } else {
                 // Non-printable (Backspace/Home/…) while the overview is
@@ -3634,6 +3746,20 @@ impl DashboardState {
                 .map(|(id, _)| id.clone());
             if new_hover != self.hovered_row {
                 self.hovered_row = new_hover;
+                changed = true;
+            }
+            let new_hover_delete = self
+                .row_delete_rects
+                .iter()
+                .find(|(_, r)| {
+                    mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                })
+                .map(|(id, _)| id.clone());
+            if new_hover_delete != self.hovered_delete {
+                self.hovered_delete = new_hover_delete;
                 changed = true;
             }
             // Section-header hover → the renderer brightens its text.
@@ -3773,7 +3899,7 @@ impl DashboardState {
                         self.dispatch.accept_slash_completion(&self.models);
                     }
                 }
-                self.list_focused = false;
+                self.set_list_focused(false);
                 return InputOutcome::Changed;
             }
 
@@ -3821,7 +3947,29 @@ impl DashboardState {
                         }
                     }
                 }
-                self.list_focused = false;
+                self.set_list_focused(false);
+                return InputOutcome::Changed;
+            }
+
+            if let Some(id) = self
+                .row_delete_rects
+                .iter()
+                .find(|(_, r)| {
+                    mouse.column >= r.x
+                        && mouse.column < r.x + r.width
+                        && mouse.row >= r.y
+                        && mouse.row < r.y + r.height
+                })
+                .map(|(id, _)| id.clone())
+            {
+                self.manual_scroll_active = false;
+                // Second `[✗]` click within the window confirms; else re-arm.
+                if self.armed_delete_row().as_ref() == Some(&id) {
+                    return InputOutcome::Action(Action::DashboardDelete);
+                }
+                self.focus_row(id.clone());
+                self.set_list_focused(true);
+                self.arm_delete(id);
                 return InputOutcome::Changed;
             }
 
@@ -3934,7 +4082,7 @@ impl DashboardState {
                 && mouse.row >= rect.y
                 && mouse.row < rect.y + rect.height
             {
-                self.list_focused = false;
+                self.set_list_focused(false);
                 // Forward the click so the caret lands where the user
                 // clicked. Skipped in search mode, where the prompt
                 // renders its own single-line cursor with a `Search:`
@@ -4334,6 +4482,7 @@ impl DashboardState {
             rows.iter().filter(|r| !r.is_more_placeholder).collect();
         if selectable.is_empty() {
             self.selected = None;
+            self.delete_confirm = None;
             return;
         }
         if let Some(sel) = self.selected.as_ref()
@@ -4344,6 +4493,7 @@ impl DashboardState {
             // the user's job.
             self.selected = None;
         }
+        self.sync_delete_confirm_to_selection();
     }
 }
 
@@ -9587,33 +9737,33 @@ mod tests {
         );
     }
 
-    /// An armed stop confirmation is bound to the row that was selected
+    /// An armed delete confirmation is bound to the row that was selected
     /// when `Ctrl+X` was pressed — any other key (nav included) must
-    /// disarm it, otherwise the footer's "press again to close" hint
+    /// disarm it, otherwise the footer's "press again to delete" hint
     /// lingers while the cursor moves to other agents. The disarm must
     /// NOT depend on `error_toast` (the Ctrl+X arm path plants none).
     #[test]
-    fn nav_key_disarms_pending_stop_confirm() {
+    fn nav_key_disarms_pending_delete_confirm() {
         let mut state = DashboardState::new();
         let reg = crate::actions::ActionRegistry::defaults();
         state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
-        state.stop_confirm = Some((DashboardRowId::TopLevel(AgentId(0)), Instant::now()));
+        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
         assert!(state.error_toast.is_none(), "arm path plants no toast");
         let _ = state.handle_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &reg);
         assert!(
-            state.stop_confirm.is_none(),
-            "a nav keypress must disarm the pending stop confirm",
+            state.delete_confirm.is_none(),
+            "a nav keypress must disarm the pending delete confirm",
         );
 
         // Control — Ctrl+X itself preserves the armed confirm so the
-        // dispatcher can observe it and close.
-        state.stop_confirm = Some((DashboardRowId::TopLevel(AgentId(0)), Instant::now()));
+        // dispatcher can observe it and delete.
+        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
         let _ = state.handle_key(
             &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
             &reg,
         );
         assert!(
-            state.stop_confirm.is_some(),
+            state.delete_confirm.is_some(),
             "Ctrl+X must preserve the armed confirm for the dispatcher",
         );
 
@@ -9621,16 +9771,115 @@ mod tests {
         // row, and `handle_peek_key` CONSUMES Up/Down (agent switch) —
         // the disarm must sit above that intercept or nav keys never
         // reach it and the footer hint lingers.
-        state.stop_confirm = Some((DashboardRowId::TopLevel(AgentId(0)), Instant::now()));
+        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
         state.peek = Some(super::super::peek::PeekPanelState::new(
             DashboardRowId::TopLevel(AgentId(0)),
             peek_fields_for_test("Idle"),
         ));
         let _ = state.handle_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &reg);
         assert!(
-            state.stop_confirm.is_none(),
+            state.delete_confirm.is_none(),
             "a nav keypress consumed by the peek panel must still disarm the confirm",
         );
+    }
+
+    #[test]
+    fn click_delete_control_arms_then_confirms() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = DashboardState::new();
+        let id = DashboardRowId::TopLevel(AgentId(0));
+        state
+            .row_delete_rects
+            .push((id.clone(), Rect::new(10, 2, 3, 1)));
+        let click = |col, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // First `[✗]` click only arms — it must not open/attach the session.
+        let first = state.handle_mouse(&click(11, 2));
+        assert!(matches!(first, InputOutcome::Changed), "got {first:?}");
+        assert!(!matches!(
+            first,
+            InputOutcome::Action(Action::DashboardAttach(_))
+        ));
+        assert_eq!(state.armed_delete_row_ref(), Some(&id));
+        // Second click confirms.
+        assert!(matches!(
+            state.handle_mouse(&click(11, 2)),
+            InputOutcome::Action(Action::DashboardDelete)
+        ));
+    }
+
+    #[test]
+    fn focus_change_disarms_delete_confirm() {
+        let mut state = DashboardState::new();
+        let a = DashboardRowId::TopLevel(AgentId(0));
+        let b = DashboardRowId::TopLevel(AgentId(1));
+        state.focus_row(a.clone());
+        state.arm_delete(a.clone());
+        state.focus_row(a.clone());
+        assert_eq!(state.armed_delete_row_ref(), Some(&a));
+        state.focus_row(b);
+        assert!(state.delete_confirm.is_none());
+        state.arm_delete(DashboardRowId::TopLevel(AgentId(0)));
+        state.focus_new_agent_button();
+        assert!(state.delete_confirm.is_none());
+
+        state.focus_row(a.clone());
+        state.list_focused = true;
+        state.arm_delete(a);
+        state.dispatch_rect = Some(Rect::new(0, 10, 40, 1));
+        let _ = state.handle_mouse(&crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 2,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(state.delete_confirm.is_none());
+        assert!(!state.list_focused);
+    }
+
+    /// An auto-repeat (held) Ctrl+X must not drive the destructive
+    /// arm→confirm: only discrete presses count, so holding the key can't
+    /// arm and immediately confirm a delete.
+    #[test]
+    fn ctrl_x_key_repeat_is_ignored() {
+        let mut state = DashboardState::new();
+        let reg = crate::actions::ActionRegistry::defaults();
+        state.focus_row(DashboardRowId::TopLevel(AgentId(0)));
+        let repeat = Event::Key(crossterm::event::KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: crossterm::event::KeyEventKind::Repeat,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        assert!(matches!(
+            state.handle_input(&repeat, &reg),
+            InputOutcome::Unchanged
+        ));
+        // A real press still resolves to the stop action.
+        let press = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            state.handle_input(&press, &reg),
+            InputOutcome::Action(Action::DashboardStop)
+        ));
+    }
+
+    /// `gc_stale_refs` dropping the selected row (session left the list)
+    /// must also disarm delete, so a later `y` can't delete a phantom row.
+    #[test]
+    fn gc_stale_refs_disarms_delete_when_selection_dropped() {
+        let mut state = DashboardState::new();
+        let a = DashboardRowId::TopLevel(AgentId(0));
+        state.focus_row(a.clone());
+        state.arm_delete(a.clone());
+        assert!(state.armed_delete_row_ref().is_some());
+        // The armed row is no longer alive → gc drops selection AND disarms.
+        state.gc_stale_refs(&|_| false);
+        assert!(state.selected.is_none());
+        assert!(state.delete_confirm.is_none(), "stale arm must be cleared");
     }
 
     /// Section header selected while the LIST is focused — the input is

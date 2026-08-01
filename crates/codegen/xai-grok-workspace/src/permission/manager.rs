@@ -5123,7 +5123,11 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                for path in ["/etc/hosts", "/home/user/.grok/hooks/evil.json"] {
+                for path in [
+                    "/etc/hosts",
+                    "/home/user/.grok/hooks/evil.json",
+                    "/home/user/.grok/sandbox.toml",
+                ] {
                     let mut auto = crate::permission::types::PermissionConfig::new(vec![]);
                     auto.prompt_policy = PromptPolicy::Auto;
                     let allow =

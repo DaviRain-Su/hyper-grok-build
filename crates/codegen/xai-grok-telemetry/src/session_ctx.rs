@@ -5,6 +5,7 @@
 //! Extracted from `xai-grok-shell::agent::telemetry`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Serialize;
 use serde_json::json;
@@ -198,6 +199,37 @@ pub fn emit_event<T: Serialize + Send + 'static>(event_suffix: impl Into<String>
     emit_event_with_origin(EmitterOrigin::Shell, event_suffix, data);
 }
 
+/// Posts spawned by [`emit_event_with_origin`] that haven't finished. Emission
+/// is fire-and-forget so it never blocks a turn, which also means a process
+/// exiting right after emitting drops the event — see [`drain_pending`].
+static PENDING_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Decrement on every exit path, including a panicking or cancelled post.
+struct PendingEventGuard;
+
+impl Drop for PendingEventGuard {
+    fn drop(&mut self) {
+        PENDING_EVENTS.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Wait (up to `timeout`) for in-flight event posts to finish. For commands
+/// that exit as soon as their work is done; the agent runs long enough that
+/// its events land on their own.
+pub async fn drain_pending(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while PENDING_EVENTS.load(Ordering::Acquire) > 0 {
+        if std::time::Instant::now() >= deadline {
+            tracing::debug!(
+                pending = PENDING_EVENTS.load(Ordering::Acquire),
+                "telemetry: gave up draining pending events"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// Emit an event whose analytics name is `{origin prefix}{event_suffix}`.
 pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
     origin: EmitterOrigin,
@@ -214,7 +246,15 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
         })
         .ok();
 
+    if tokio::runtime::Handle::try_current().is_err() {
+        // `spawn` below panics without a runtime; counting first would pin the
+        // gauge above zero for the rest of the process.
+        tracing::debug!(event = %event_name, "telemetry: no runtime, dropping event");
+        return;
+    }
+    PENDING_EVENTS.fetch_add(1, Ordering::Release);
     tokio::spawn(async move {
+        let _pending = PendingEventGuard;
         let user_ctx = UserContext::collect();
         let request_id = format!("{}-{}", event_name, uuid::Uuid::new_v4());
 
@@ -262,6 +302,30 @@ mod tests {
                 "session span must expose `{SESSION_ID_FIELD}` for debug-log routing",
             );
         });
+    }
+
+    /// What a command exiting right after emitting (`grok login`) relies on.
+    /// Asserts on the wait, not on the gauge: it is process-global and other
+    /// tests in this binary emit concurrently.
+    #[tokio::test]
+    async fn drain_pending_waits_for_in_flight_posts() {
+        emit_event_with_origin(
+            EmitterOrigin::Shell,
+            "drain_probe",
+            json!({ "probe": true }),
+        );
+        assert!(
+            PENDING_EVENTS.load(Ordering::Acquire) > 0,
+            "emission must register before the post is awaited"
+        );
+
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(5);
+        drain_pending(budget).await;
+        assert!(
+            started.elapsed() < budget,
+            "drain must observe the post finish, not time out"
+        );
     }
 
     /// Event-name prefixes are wire contract — analytics queries match on them, so

@@ -4353,7 +4353,7 @@ async fn dark_wake_defer_forces_refresh_after_max() {
     ) else {
         return; // machine/clock can't represent the backdate — skip
     };
-    *mgr.dark_wake_defer_since.write() = Some(super::sleep_gate::GateRaise { mono, wall });
+    *mgr.dark_wake_defer_since.write() = Some(crate::util::dual_clock::DualClock { mono, wall });
 
     assert_eq!(
         mgr.auth().await.unwrap().key,
@@ -4490,7 +4490,7 @@ async fn sleep_gate_auto_expires_after_max() {
     ) else {
         return; // machine/clock can't represent the backdate — not reproducible; skip
     };
-    *mgr.sleep_gate.raised_at.write() = Some(super::sleep_gate::GateRaise { mono, wall });
+    *mgr.sleep_gate.raised_at.write() = Some(crate::util::dual_clock::DualClock { mono, wall });
 
     assert!(
         !mgr.is_sleep_gated(),
@@ -4522,7 +4522,7 @@ async fn sleep_gate_auto_expires_when_wall_clock_passes_during_sleep() {
     let Some(wall) = std::time::SystemTime::now().checked_sub(back) else {
         return; // clock can't represent the backdate — not reproducible; skip
     };
-    *mgr.sleep_gate.raised_at.write() = Some(super::sleep_gate::GateRaise {
+    *mgr.sleep_gate.raised_at.write() = Some(crate::util::dual_clock::DualClock {
         mono: Instant::now(),
         wall,
     });

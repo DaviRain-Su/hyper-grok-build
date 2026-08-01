@@ -739,7 +739,7 @@ impl MvpAgent {
     /// Most recently allocated turn number for `sid`, or `None` if the
     /// session has not started a turn yet.
     pub(crate) fn session_turn_number(&self, sid: &acp::SessionId) -> Option<u64> {
-        self.retained_resources.borrow().get(sid).and_then(|d| d.turn_number)
+        self.session_registry.turn_number(sid)
     }
     /// Return the current GrokAuth credentials, if authenticated and not expired.
     pub(crate) fn current_auth(&self) -> Option<crate::auth::GrokAuth> {
@@ -762,6 +762,596 @@ impl MvpAgent {
     }
     pub(crate) fn alpha_test_key(&self) -> Option<String> {
         self.cfg.borrow().endpoints.alpha_test_key.clone()
+    }
+    #[cfg(all(feature = "local-workspace", unix))]
+    /// Spawn owned `workspace_server` for chat+local `own` intent.
+    /// Mints `server_id` into `_meta` before handshake parse.
+    pub(crate) async fn start_own_local_workspace_if_needed(
+        &self,
+        meta: &mut Option<acp::Meta>,
+        session_cwd: &std::path::Path,
+    ) -> Result<
+        Option<crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle>,
+        acp::Error,
+    > {
+        use crate::gateway_bridge::local_workspace_supervisor::{
+            parse_local_workspace_intent, stamp_server_id_into_meta, start_own,
+            StartOwnConfig, LocalWorkspaceIntent,
+        };
+        let Some(LocalWorkspaceIntent::Own { cwd }) = parse_local_workspace_intent(
+            meta.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        let cwd = if cwd.as_os_str().is_empty() {
+            session_cwd.to_path_buf()
+        } else {
+            cwd
+        };
+        crate::gateway_bridge::local_workspace_supervisor::validate_cwd(&cwd)
+            .map_err(|e| e.into_acp_error())?;
+        let hub_url = {
+            let cfg = self.cfg.borrow();
+            crate::gateway_bridge::local_workspace_supervisor::resolve_hub_url(
+                cfg.hub.url.as_deref(),
+            )
+        };
+        let handle = start_own(StartOwnConfig {
+                cwd,
+                hub_url,
+                auth_config: None,
+                binary: None,
+                ready_timeout: crate::gateway_bridge::local_workspace_supervisor::READY_TIMEOUT,
+                allow_missing_auth: false,
+            })
+            .await
+            .map_err(|e| e.into_acp_error())?;
+        let meta_map = meta.get_or_insert_with(acp::Meta::new);
+        stamp_server_id_into_meta(meta_map, &handle.server_id);
+        Ok(Some(handle))
+    }
+    #[cfg(all(feature = "local-workspace", unix))]
+    pub(crate) fn register_local_workspace_supervisor(
+        &self,
+        session_id: acp::SessionId,
+        handle: crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle,
+    ) {
+        let server_id = handle.server_id.clone();
+        self.arm_local_workspace_watcher(session_id.clone(), handle);
+        tracing::info!(
+            session_id = %session_id.0,
+            server_id = %server_id,
+            "local_workspace_supervisor: registered own workspace_server"
+        );
+    }
+    #[cfg(all(feature = "local-workspace", unix))]
+    pub(crate) fn new_local_workspace_reap_guard(
+        &self,
+        session_id: acp::SessionId,
+        armed: bool,
+    ) -> LocalWorkspaceReapGuard {
+        LocalWorkspaceReapGuard {
+            supervisors: self.local_workspace_supervisors.clone(),
+            generations: self.local_workspace_generations.clone(),
+            session_id,
+            armed,
+        }
+    }
+    /// Prefer live supervisor `server_id` over the parse-time stamp (pre-bridge crash).
+    #[cfg(all(feature = "local-workspace", unix))]
+    pub(crate) fn refresh_sessions_from_supervisor(
+        &self,
+        session_id: &acp::SessionId,
+        sessions: Option<Vec<crate::gateway_bridge::ComputerSession>>,
+    ) -> Option<Vec<crate::gateway_bridge::ComputerSession>> {
+        use crate::gateway_bridge::ComputerSession;
+        let supervisors = self.local_workspace_supervisors.borrow();
+        let Some(handle) = supervisors.get(session_id) else {
+            return sessions;
+        };
+        let server_id = handle.server_id.clone();
+        let cwd = Some(handle.cwd.to_string_lossy().into_owned());
+        match sessions {
+            None => Some(vec![ComputerSession::ExistingWorkspace { server_id, cwd }]),
+            Some(mut list) => {
+                for session in &mut list {
+                    if let ComputerSession::ExistingWorkspace {
+                        server_id: sid,
+                        cwd: existing_cwd,
+                    } = session {
+                        *sid = server_id.clone();
+                        if existing_cwd.is_none() {
+                            *existing_cwd = cwd.clone();
+                        }
+                    }
+                }
+                Some(list)
+            }
+        }
+    }
+    /// Wait out an in-flight crash restart before refreshing handshake sessions.
+    #[cfg(all(feature = "local-workspace", unix))]
+    pub(crate) async fn await_refresh_sessions_from_supervisor(
+        &self,
+        session_id: &acp::SessionId,
+        sessions: Option<Vec<crate::gateway_bridge::ComputerSession>>,
+    ) -> Option<Vec<crate::gateway_bridge::ComputerSession>> {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let pending = self
+                .local_workspace_restart_pending
+                .borrow()
+                .contains(session_id);
+            let live = self
+                .local_workspace_supervisors
+                .borrow()
+                .contains_key(session_id);
+            if live || !pending {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    "timed out waiting for local-workspace crash restart before handshake refresh"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        self.refresh_sessions_from_supervisor(session_id, sessions)
+    }
+    #[cfg(all(feature = "local-workspace", unix))]
+    fn arm_local_workspace_watcher(
+        &self,
+        session_id: acp::SessionId,
+        handle: crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle,
+    ) {
+        let cwd = handle.cwd.clone();
+        let sessions = self.session_registry.clone();
+        let supervisors = self.local_workspace_supervisors.clone();
+        let generations = self.local_workspace_generations.clone();
+        let sid = session_id.clone();
+        let hub_url = {
+            let cfg = self.cfg.borrow();
+            crate::gateway_bridge::local_workspace_supervisor::resolve_hub_url(
+                cfg.hub.url.as_deref(),
+            )
+        };
+        let auth_path = xai_grok_workspace::hub_auth::default_auth_path().ok();
+        let binary = crate::gateway_bridge::local_workspace_supervisor::resolve_workspace_server_bin()
+            .ok();
+        let agent_ref = LocalRef::new(self);
+        let generation = {
+            let mut gens = generations.borrow_mut();
+            let e = gens.entry(session_id.clone()).or_insert(0);
+            *e = e.saturating_add(1);
+            *e
+        };
+        self.local_workspace_supervisors.borrow_mut().insert(session_id.clone(), handle);
+        let mut supervisors_mut = self.local_workspace_supervisors.borrow_mut();
+        let Some(handle_mut) = supervisors_mut.get_mut(&session_id) else {
+            return;
+        };
+        let _ = handle_mut
+            .spawn_exit_watcher(move || {
+                let sessions = sessions.clone();
+                let supervisors = supervisors.clone();
+                let generations = generations.clone();
+                let sid = sid.clone();
+                let hub_url = hub_url.clone();
+                let auth_path = auth_path.clone();
+                let binary = binary.clone();
+                let cwd = cwd.clone();
+                let agent_ref = agent_ref.clone();
+                tokio::task::spawn_local(async move {
+                    if generations.borrow().get(&sid) != Some(&generation) {
+                        return;
+                    }
+                    agent_ref
+                        .get()
+                        .local_workspace_restart_pending
+                        .borrow_mut()
+                        .insert(sid.clone());
+                    let prev = supervisors.borrow_mut().remove(&sid);
+                    let Some(prev) = prev else {
+                        agent_ref
+                            .get()
+                            .local_workspace_restart_pending
+                            .borrow_mut()
+                            .remove(&sid);
+                        return;
+                    };
+                    let Some(binary) = binary else {
+                        tracing::warn!(
+                        session_id = %sid.0,
+                        "local workspace crash restart skipped: binary missing"
+                    );
+                        prev.shutdown().await;
+                        agent_ref
+                            .get()
+                            .local_workspace_restart_pending
+                            .borrow_mut()
+                            .remove(&sid);
+                        return;
+                    };
+                    let auth = auth_path
+                        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"));
+                    let restart_count = prev.restart_count;
+                    let prev_cwd = prev.cwd.clone();
+                    prev.shutdown().await;
+                    match crate::gateway_bridge::local_workspace_supervisor::restart_own_from(
+                            restart_count,
+                            prev_cwd,
+                            &binary,
+                            &hub_url,
+                            &auth,
+                            false,
+                        )
+                        .await
+                    {
+                        Ok(new_handle) => {
+                            if generations.borrow().get(&sid) != Some(&generation) {
+                                new_handle.shutdown().await;
+                                agent_ref
+                                    .get()
+                                    .local_workspace_restart_pending
+                                    .borrow_mut()
+                                    .remove(&sid);
+                                return;
+                            }
+                            let new_id = new_handle.server_id.clone();
+                            let cwd_str = cwd.to_string_lossy().into_owned();
+                            agent_ref
+                                .get()
+                                .arm_local_workspace_watcher(sid.clone(), new_handle);
+                            agent_ref
+                                .get()
+                                .local_workspace_restart_pending
+                                .borrow_mut()
+                                .remove(&sid);
+                            let armed_generation = generations
+                                .borrow()
+                                .get(&sid)
+                                .copied();
+                            let bridge = sessions.bridge(&sid);
+                            if let Some(bridge) = bridge {
+                                let _ = crate::gateway_bridge::local_workspace_supervisor::push_computer_sessions_update(
+                                        &bridge,
+                                        new_id.clone(),
+                                        Some(cwd_str.clone()),
+                                        false,
+                                    )
+                                    .await;
+                                let _ = bridge.wait_until_ready().await;
+                                if generations.borrow().get(&sid)
+                                    != armed_generation.as_ref()
+                                {
+                                    tracing::debug!(
+                                    session_id = %sid.0,
+                                    "skip stale local-workspace session.update after superseded restart"
+                                );
+                                    return;
+                                }
+                                let _ = crate::gateway_bridge::local_workspace_supervisor::push_computer_sessions_update(
+                                        &bridge,
+                                        new_id,
+                                        Some(cwd_str),
+                                        false,
+                                    )
+                                    .await;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                            session_id = %sid.0,
+                            error = %err,
+                            "local workspace crash restart failed"
+                        );
+                            agent_ref
+                                .get()
+                                .local_workspace_restart_pending
+                                .borrow_mut()
+                                .remove(&sid);
+                        }
+                    }
+                });
+            });
+    }
+    /// add-only mid-session local workspace via ACP extension / session.update.
+    ///
+    /// Refuses if a local existing workspace is already bound (no remove until session end).
+    /// Own mode requires unix (supervisor spawn). Attach is platform-agnostic.
+    #[cfg(feature = "local-workspace")]
+    pub(crate) async fn add_local_workspace_mid_session(
+        &self,
+        session_id: &acp::SessionId,
+        mut meta: Option<acp::Meta>,
+        session_cwd: &std::path::Path,
+    ) -> Result<serde_json::Value, acp::Error> {
+        use crate::gateway_bridge::ComputerSession;
+        use crate::gateway_bridge::local_workspace_supervisor::{
+            parse_local_workspace_intent, LocalWorkspaceIntent, SupervisorError,
+        };
+        if self.local_workspace_already_bound(session_id) {
+            return Err(
+                acp::Error::invalid_params()
+                    .data(
+                        serde_json::json!({
+                "code": "local_workspace_already_bound",
+                "message": "local workspace already bound; remove is not supported until session end",
+            }),
+                    ),
+            );
+        }
+        self.mark_local_workspace_bound(session_id.clone());
+        let mut bind_guard = LocalWorkspaceBindGuard {
+            bound: self.local_workspace_bound.clone(),
+            session_id: session_id.clone(),
+            keep: false,
+        };
+        let Some(intent) = parse_local_workspace_intent(meta.as_ref()) else {
+            return Err(
+                acp::Error::invalid_params()
+                    .data(
+                        serde_json::json!({
+                "code": "local_workspace_intent_missing",
+                "message": "x.ai/local_workspace intent required for mid-session add",
+            }),
+                    ),
+            );
+        };
+        let mode = match &intent {
+            LocalWorkspaceIntent::Own { .. } => "own",
+            LocalWorkspaceIntent::Attach { .. } => "attach",
+        };
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        let pending: Option<
+            crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle,
+        > = match intent {
+            LocalWorkspaceIntent::Own { .. } => {
+                #[cfg(unix)]
+                {
+                    self.start_own_local_workspace_if_needed(&mut meta, session_cwd)
+                        .await?
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = session_cwd;
+                    return Err(SupervisorError::UnsupportedPlatform.into_acp_error());
+                }
+            }
+            LocalWorkspaceIntent::Attach { cwd, .. } => {
+                if let Some(ref cwd) = cwd {
+                    crate::gateway_bridge::local_workspace_supervisor::validate_cwd(cwd)
+                        .map_err(|e| e.into_acp_error())?;
+                }
+                Self::ensure_attach_fs_only_advertised_tools()
+                    .map_err(|msg| {
+                        acp::Error::invalid_params()
+                            .data(
+                                serde_json::json!({
+                        "code": "local_workspace_fs_only_required",
+                        "message": msg,
+                    }),
+                            )
+                    })?;
+                None
+            }
+        };
+        let sessions = resolve_session_computer_sessions(meta.as_ref())?;
+        let Some(sessions) = sessions.filter(|s| !s.is_empty()) else {
+            return Err(
+                acp::Error::invalid_params()
+                    .data(
+                        serde_json::json!({
+                "code": "local_workspace_stamp_failed",
+                "message": "failed to resolve existing_workspace stamp for mid-session add",
+            }),
+                    ),
+            );
+        };
+        if !sessions
+            .iter()
+            .any(|s| matches!(s, ComputerSession::ExistingWorkspace { .. }))
+        {
+            return Err(
+                acp::Error::invalid_params()
+                    .data(
+                        serde_json::json!({
+                "code": "local_workspace_stamp_failed",
+                "message": "mid-session add did not produce existing_workspace",
+            }),
+                    ),
+            );
+        }
+        #[cfg(unix)]
+        let mut reap_guard = self
+            .new_local_workspace_reap_guard(session_id.clone(), false);
+        #[cfg(unix)]
+        if let Some(handle) = pending {
+            self.register_local_workspace_supervisor(session_id.clone(), handle);
+            reap_guard = self.new_local_workspace_reap_guard(session_id.clone(), true);
+        }
+        let Some(bridge) = self.gateway_bridge_for(session_id) else {
+            return Err(
+                acp::Error::invalid_params()
+                    .data(
+                        serde_json::json!({
+                "code": "gateway_bridge_missing",
+                "message": "session has no gateway bridge for session.update computer_sessions",
+            }),
+                    ),
+            );
+        };
+        match tokio::time::timeout(BRIDGE_READY_TIMEOUT, bridge.wait_until_ready()).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                return Err(err.into_acp_error());
+            }
+            Err(_) => {
+                return Err(
+                    acp::Error::internal_error()
+                        .data(
+                            "gateway bridge not ready for mid-session add_local_workspace",
+                        ),
+                );
+            }
+        }
+        let sessions = sessions;
+        let server_id = match sessions.first() {
+            Some(ComputerSession::ExistingWorkspace { server_id, .. }) => {
+                server_id.clone()
+            }
+            _ => {
+                return Err(
+                    acp::Error::internal_error()
+                        .data("expected existing_workspace as first computer session"),
+                );
+            }
+        };
+        let cwd = match sessions.first() {
+            Some(ComputerSession::ExistingWorkspace { cwd, .. }) => cwd.clone(),
+            _ => None,
+        };
+        if let Some(ref stamped_cwd) = cwd {
+            crate::gateway_bridge::local_workspace_supervisor::validate_cwd(
+                    std::path::Path::new(stamped_cwd),
+                )
+                .map_err(|e| e.into_acp_error())?;
+        }
+        if let Err(err) = crate::gateway_bridge::local_workspace_supervisor::push_computer_sessions_update(
+                &bridge,
+                server_id.clone(),
+                cwd,
+                true,
+            )
+            .await
+        {
+            return Err(err.into_acp_error());
+        }
+        #[cfg(unix)] reap_guard.disarm();
+        bind_guard.keep = true;
+        Ok(serde_json::json!({
+            "ok": true,
+            "server_id": server_id,
+            "mode": mode,
+        }))
+    }
+    #[cfg(feature = "local-workspace")]
+    pub(crate) fn local_workspace_already_bound(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> bool {
+        if self.local_workspace_bound.borrow().contains(session_id) {
+            return true;
+        }
+        #[cfg(unix)]
+        if self.local_workspace_supervisors.borrow().contains_key(session_id) {
+            return true;
+        }
+        false
+    }
+    #[cfg(feature = "local-workspace")]
+    pub(crate) fn mark_local_workspace_bound(&self, session_id: acp::SessionId) {
+        self.local_workspace_bound.borrow_mut().insert(session_id);
+    }
+    /// Operator-attested FS-only toolset for mid-session attach.
+    #[cfg(feature = "local-workspace")]
+    fn ensure_attach_fs_only_advertised_tools() -> Result<(), String> {
+        const ENV: &str = "GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS";
+        const ALLOW: &[&str] = &[
+            "workspace.fs_list",
+            "workspace.fs_exists",
+            "workspace.fs_read_file",
+            "workspace.fs_write_file",
+            "workspace.fs_delete_file",
+            "workspace.put_files",
+            "workspace.get_files",
+        ];
+        let Some(raw) = std::env::var(ENV)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()) else {
+            return Err(
+                "attached workspace_server advertised toolset is uncheckable; refuse attach \
+                 (set GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS to a comma-separated FS-only catalog)"
+                    .into(),
+            );
+        };
+        let ids: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if ids.is_empty() {
+            return Err(
+                "attached workspace_server advertised an empty toolset; refuse attach"
+                    .into(),
+            );
+        }
+        let forbidden: Vec<&str> = ids
+            .into_iter()
+            .filter(|id| !ALLOW.contains(id))
+            .collect();
+        if forbidden.is_empty() {
+            Ok(())
+        } else {
+            Err(
+                    format!(
+                "attached workspace_server advertises tools outside the FS-only allowlist: {}",
+                forbidden.join(", ")
+            ),
+                )
+        }
+    }
+    #[cfg(feature = "local-workspace")]
+    /// After chat+local stamp, wait for handshake success.
+    ///
+    /// Only fail-closed for `x.ai/local_workspace` intent (not generic
+    /// GatewayAttach). Handshake errors propagate; session + bridge are reaped
+    /// on failure / timeout.
+    pub(crate) async fn await_existing_workspace_handshake(
+        &self,
+        session_id: &acp::SessionId,
+        local_workspace_intent: bool,
+    ) -> Result<(), acp::Error> {
+        if !local_workspace_intent {
+            return Ok(());
+        }
+        #[cfg(feature = "local-workspace")]
+        self.mark_local_workspace_bound(session_id.clone());
+        let Some(bridge) = self.gateway_bridge_for(session_id) else {
+            return Ok(());
+        };
+        match tokio::time::timeout(BRIDGE_READY_TIMEOUT, bridge.wait_until_ready()).await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    error = %err,
+                    kind = "existing_workspace_handshake_failed",
+                    "chat+local handshake failed; reaping session"
+                );
+                self.request_session_shutdown(session_id);
+                self.remove_session(session_id);
+                Err(err.into_acp_error())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    kind = "existing_workspace_handshake_timeout",
+                    "chat+local handshake timed out; reaping session"
+                );
+                self.request_session_shutdown(session_id);
+                self.remove_session(session_id);
+                Err(
+                    acp::Error::internal_error().data("gateway bridge connect timed out"),
+                )
+            }
+        }
     }
     /// Build the process-lifetime local `WorkspaceOps` on first use.
     ///
@@ -1896,9 +2486,8 @@ impl MvpAgent {
         let instance = Self {
             sessions: RefCell::new(HashMap::new()),
             activity,
+            session_registry: SessionRegistry::default(),
             loading_sessions: RefCell::new(HashMap::new()),
-            retained_resources: RefCell::new(HashMap::new()),
-            session_threads: RefCell::new(HashMap::new()),
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
             gateway,
@@ -1948,7 +2537,6 @@ impl MvpAgent {
             codebase_indexes: Arc::new(
                 parking_lot::Mutex::new(CodebaseIndexManager::new()),
             ),
-            resident_resources: RefCell::new(HashMap::new()),
             worktree_type,
             restore_code,
             session_registry_local,
@@ -1958,7 +2546,6 @@ impl MvpAgent {
                     crate::session::mcp_servers::McpState::new(vec![]),
                 ),
             ),
-            model_unavailable_sessions: RefCell::new(std::collections::HashMap::new()),
             subagent_event_tx,
             subagent_event_rx: RefCell::new(Some(subagent_event_rx)),
             subagent_presentation: RefCell::new(
@@ -1970,7 +2557,18 @@ impl MvpAgent {
                 std::sync::atomic::AtomicBool::new(false),
             ),
             workspace_ops: RefCell::new(None),
-            session_live_state: RefCell::new(HashMap::new()),
+            #[cfg(all(feature = "local-workspace", unix))]
+            local_workspace_supervisors: Rc::new(RefCell::new(HashMap::new())),
+            #[cfg(all(feature = "local-workspace", unix))]
+            local_workspace_generations: Rc::new(RefCell::new(HashMap::new())),
+            #[cfg(all(feature = "local-workspace", unix))]
+            local_workspace_restart_pending: Rc::new(
+                RefCell::new(std::collections::HashSet::new()),
+            ),
+            #[cfg(feature = "local-workspace")]
+            local_workspace_bound: Rc::new(
+                RefCell::new(std::collections::HashSet::new()),
+            ),
             supervisor_started: std::cell::Cell::new(false),
             settings_reapply_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
             post_auth_settings_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
@@ -2074,7 +2672,7 @@ impl MvpAgent {
             }
             self.request_session_shutdown(&id);
             if self.take_session(&id).is_some() {
-                self.resident_resources.borrow_mut().remove(&id);
+                self.session_registry.clear_resident(&id);
                 self.set_session_live_state(&id, SessionLiveState::Dormant);
                 unloaded += 1;
                 tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");
@@ -2095,10 +2693,13 @@ impl MvpAgent {
     /// Uses async polling (never blocks the `LocalSet` runtime) with a 5s deadline
     /// to handle slow shutdowns (e.g., embedding API timeouts).
     pub(super) async fn drain_old_session_thread(&self, session_id: &acp::SessionId) {
-        let thread = self.session_threads.borrow_mut().remove(session_id);
-        let Some(thread) = thread else { return };
-        if thread.is_finished() {
-            return;
+        match self.session_registry.thread_is_finished(session_id) {
+            None => return,
+            Some(true) => {
+                self.session_registry.clear_thread(session_id);
+                return;
+            }
+            Some(false) => {}
         }
         tracing::info!(
             session_id = %session_id.0,
@@ -2106,12 +2707,17 @@ impl MvpAgent {
         );
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if thread.is_finished() {
-                tracing::debug!(
-                    session_id = %session_id.0,
-                    "Old session thread finished cleanly"
-                );
-                return;
+            match self.session_registry.thread_is_finished(session_id) {
+                None => return,
+                Some(true) => {
+                    self.session_registry.clear_thread(session_id);
+                    tracing::debug!(
+                        session_id = %session_id.0,
+                        "Old session thread finished cleanly"
+                    );
+                    return;
+                }
+                Some(false) => {}
             }
             if tokio::time::Instant::now() >= deadline {
                 tracing::warn!(
@@ -2904,12 +3510,7 @@ impl MvpAgent {
     }
     /// Set a session's next trace turn number.
     pub(super) fn set_turn_number(&self, session_id: &acp::SessionId, next: u64) {
-        self
-            .retained_resources
-            .borrow_mut()
-            .entry(session_id.clone())
-            .or_default()
-            .turn_number = Some(next);
+        self.session_registry.set_turn_number(session_id, next);
     }
     /// Upload each drained harness trace turn as its own `turn_{N}` artifact,
     /// numbered from the same counter as model turns so subagents interleave
@@ -4102,9 +4703,7 @@ impl MvpAgent {
                 )
                 .await?
         };
-        self.session_threads
-            .borrow_mut()
-            .insert(session_info.id.clone(), session_thread);
+        self.session_registry.set_thread(&session_info.id, session_thread);
         tracing::debug!(session_id = %session_info.id.0, "spawn_session_on_thread complete");
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
@@ -4164,12 +4763,8 @@ impl MvpAgent {
                 }
             });
         }
-        self
-            .retained_resources
-            .borrow_mut()
-            .entry(session_info.id.clone())
-            .or_default()
-            .permission_event_receiver = Some(permission_events_rx);
+        self.session_registry
+            .set_permission_receiver(&session_info.id, permission_events_rx);
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;
         }
@@ -4203,16 +4798,56 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> Vec<PermissionEvent> {
-        let mut events = Vec::new();
-        let mut retained = self.retained_resources.borrow_mut();
-        if let Some(rx) = retained
-            .get_mut(session_id)
-            .and_then(|d| d.permission_event_receiver.as_mut())
-        {
-            while let Ok(event) = rx.try_recv() {
-                events.push(event);
-            }
+        self.session_registry.drain_permission_events(session_id)
+    }
+}
+/// Rollback guard for mid-session bind reservation.
+#[cfg(feature = "local-workspace")]
+struct LocalWorkspaceBindGuard {
+    bound: Rc<RefCell<std::collections::HashSet<acp::SessionId>>>,
+    session_id: acp::SessionId,
+    keep: bool,
+}
+#[cfg(feature = "local-workspace")]
+impl Drop for LocalWorkspaceBindGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.bound.borrow_mut().remove(&self.session_id);
         }
-        events
+    }
+}
+/// Reap guard: if session/new fails after register, Drop kills the supervisor.
+#[cfg(all(feature = "local-workspace", unix))]
+pub(crate) struct LocalWorkspaceReapGuard {
+    supervisors: Rc<
+        RefCell<
+            HashMap<
+                acp::SessionId,
+                crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle,
+            >,
+        >,
+    >,
+    generations: Rc<RefCell<HashMap<acp::SessionId, u64>>>,
+    session_id: acp::SessionId,
+    armed: bool,
+}
+#[cfg(all(feature = "local-workspace", unix))]
+impl LocalWorkspaceReapGuard {
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+#[cfg(all(feature = "local-workspace", unix))]
+impl Drop for LocalWorkspaceReapGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.generations.borrow_mut().remove(&self.session_id);
+        if let Some(handle) = self.supervisors.borrow_mut().remove(&self.session_id) {
+            tokio::spawn(async move {
+                handle.shutdown().await;
+            });
+        }
     }
 }

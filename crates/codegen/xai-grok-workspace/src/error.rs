@@ -41,6 +41,10 @@ pub enum WorkspaceError {
     /// An error from the server connection or tool server.
     #[error("hub error: {0}")]
     HubError(String),
+    #[error("unknown workspace method: {0}")]
+    UnknownMethod(String),
+    #[error("workspace archive export failed: {0}")]
+    ExportArchiveLimitExceeded(String),
     #[error("github export error: {message}")]
     ExportGithub {
         kind: xai_grok_workspace_types::rpc::export_github::ExportGithubError,
@@ -78,6 +82,8 @@ impl WorkspaceError {
             Self::InvalidHunkAction(_) => "invalid_hunk_action",
             Self::HunkActionFailed(_) => "hunk_action_failed",
             Self::HubError(_) => "hub_error",
+            Self::UnknownMethod(_) => "unknown_method",
+            Self::ExportArchiveLimitExceeded(_) => "export_archive_limit_exceeded",
             Self::ExportGithub { kind, .. } => kind.wire_code(),
             Self::ShuttingDown => "shutting_down",
             Self::ToolsetExternallyOwned(_) => "toolset_externally_owned",

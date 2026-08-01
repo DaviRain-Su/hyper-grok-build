@@ -55,10 +55,18 @@ pub fn conversations_lane_active() -> bool {
 }
 /// Parse `x.ai/session/list` params and, under process-wide chat mode, force
 /// the conversations-only `kind` facet (see [`force_kind_chat`]).
+///
+/// Client-sent `kind` of `chat`/`build` is honored only behind
+/// `feature = "local-workspace"` (pager welcome Local history). Chat-only
+/// Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot
+/// surface Build rows.
 pub fn parse_list_req(raw: &str) -> Result<ListReq, serde_json::Error> {
     let mut req: ListReq = serde_json::from_str(raw)?;
     if crate::agent::chat_modes::process_chat_mode_enabled() {
-        force_kind_chat(&mut req);
+        let honor_client_kind = cfg!(feature = "local-workspace") && client_sent_kind_filter(&req);
+        if !honor_client_kind {
+            force_kind_chat(&mut req);
+        }
     }
     Ok(req)
 }
@@ -71,6 +79,23 @@ where
     } else {
         CwdScope::WithSiblings
     })
+}
+fn client_sent_kind_filter(req: &ListReq) -> bool {
+    let Some(kind) = req
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("x.ai/facetFilters"))
+        .and_then(|f| f.get("kind"))
+    else {
+        return false;
+    };
+    match kind {
+        serde_json::Value::Array(arr) if !arr.is_empty() => arr
+            .iter()
+            .any(|v| matches!(v.as_str(), Some("chat" | "build"))),
+        serde_json::Value::String(s) if s == "chat" || s == "build" => true,
+        _ => false,
+    }
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,6 +197,10 @@ fn value_list(v: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 /// Rewrite `req` so the `kind` facet filter is exactly `["chat"]`.
 ///
+/// Used when process chat mode is on **and** the client omitted a recognized
+/// `kind` facet (see [`parse_list_req`]). Welcome history sends an explicit
+/// `kind` (`chat` / `build`) that must not be rewritten. Other facet filters
+/// and `_meta` keys are left untouched.
 pub fn force_kind_chat(req: &mut ListReq) {
     force_kind(req, SessionKind::Chat);
 }
@@ -201,7 +230,7 @@ pub async fn build_unified_list(
     conversations_client: Option<&ConversationsClient>,
     mut req: ListReq,
 ) -> UnifiedListResult {
-    if crate::agent::chat_modes::process_chat_mode_enabled() {
+    if crate::agent::chat_modes::process_chat_mode_enabled() && !client_sent_kind_filter(&req) {
         force_kind_chat(&mut req);
     }
     let reg = facet_registry();
@@ -935,16 +964,42 @@ mod tests {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected = "build";
+            let expected_build = if cfg!(feature = "local-workspace") {
+                Some(&vec![serde_json::json!("build")])
+            } else {
+                Some(&vec![serde_json::json!("build")])
+            };
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
-                Some(&vec![serde_json::json!(expected)])
+                expected_build,
+                "client kind=build under process chat mode"
             );
             assert_eq!(
                 parsed.facet_filters.get("starred"),
                 Some(&vec![serde_json::json!(true)]),
                 "other facets pass through"
             );
+            let req = parse_list_req("{}").expect("parse");
+            let parsed = ParsedMeta::parse(req.meta.as_ref());
+            let expected = None;
+            assert_eq!(
+                parsed.facet_filters.get(KIND_FACET_KEY),
+                expected,
+                "absent client kind still forces chat under process chat mode"
+            );
+            for bad in [
+                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
+                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
+                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+            ] {
+                let req = parse_list_req(&bad.to_string()).expect("parse");
+                let parsed = ParsedMeta::parse(req.meta.as_ref());
+                assert_eq!(
+                    parsed.facet_filters.get(KIND_FACET_KEY),
+                    expected,
+                    "empty/null/unknown kind must still force chat: {bad}"
+                );
+            }
         }
     }
     /// Wire pin for the cross-crate `x.ai/partial` envelope the pager parses:

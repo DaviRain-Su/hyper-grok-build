@@ -433,6 +433,11 @@ mod inner {
         HEARTBEAT_PONG_DROPPED_TOTAL.inc();
     }
 
+    #[cfg(test)]
+    pub(crate) fn heartbeat_pong_dropped_count() -> u64 {
+        HEARTBEAT_PONG_DROPPED_TOTAL.get()
+    }
+
     pub(crate) fn cancel_applied() {
         CANCEL_APPLIED_TOTAL.inc();
     }
@@ -561,6 +566,10 @@ mod inner {
 
 #[cfg(not(feature = "metrics"))]
 mod inner {
+    #[cfg(test)]
+    static TEST_HEARTBEAT_PONG_DROPPED: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     pub(crate) fn pool_connections_inc() {}
     pub(crate) fn pool_connections_dec() {}
     pub(crate) fn pool_evictions_inc() {}
@@ -584,7 +593,15 @@ mod inner {
     pub(crate) fn writer_sink_send_error() {}
     pub(crate) fn reconnect_writer_resume() {}
     pub(crate) fn liveness_deadline_expired() {}
-    pub(crate) fn heartbeat_pong_dropped() {}
+    pub(crate) fn heartbeat_pong_dropped() {
+        #[cfg(test)]
+        TEST_HEARTBEAT_PONG_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heartbeat_pong_dropped_count() -> u64 {
+        TEST_HEARTBEAT_PONG_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+    }
     pub(crate) fn cancel_applied() {}
     pub(crate) fn cancel_pending_tombstoned() {}
     pub(crate) fn cancel_no_target() {}
@@ -619,6 +636,8 @@ pub(crate) use inner::demux_inbox_depth_set;
 pub(crate) use inner::disconnect_detail_class;
 pub(crate) use inner::early_notif_buffered;
 pub(crate) use inner::heartbeat_pong_dropped;
+#[cfg(test)]
+pub(crate) use inner::heartbeat_pong_dropped_count;
 pub(crate) use inner::hook_send;
 pub(crate) use inner::inbox_full_notification_dropped;
 pub(crate) use inner::inbox_full_reject_send_failed;

@@ -267,8 +267,8 @@ async fn handle_session_list(
 ) -> Result<acp::ExtResponse, acp::Error> {
     use crate::session::unified_list;
 
-    // Under chat mode `parse_list_req` REPLACES any client-sent `kind` facet
-    // (never union) so every list surface is conversations-only.
+    // Under chat mode `parse_list_req` force-rewrites `kind` to conversations
+    // unless `local-workspace` is compiled in and the client sent chat/build.
     let req = unified_list::parse_list_req(args.params.get())
         .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
     tracing::debug!(

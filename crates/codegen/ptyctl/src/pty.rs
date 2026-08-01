@@ -110,6 +110,8 @@ impl PtyHandle {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
 
+        // Not session-scoped: ptyctl's child is the process it exists to run.
+        #[allow(clippy::disallowed_methods)]
         let child = pair
             .slave
             .spawn_command(cmd)

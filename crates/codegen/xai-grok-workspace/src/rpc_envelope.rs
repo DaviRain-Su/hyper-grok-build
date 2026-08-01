@@ -30,6 +30,8 @@ pub fn error_code(err: &WorkspaceError) -> &'static str {
         WorkspaceError::InvalidHunkAction(_) => "invalid_hunk_action",
         WorkspaceError::HunkActionFailed(_) => "hunk_action_failed",
         WorkspaceError::HubError(_) => "hub_error",
+        WorkspaceError::UnknownMethod(_) => "unknown_method",
+        WorkspaceError::ExportArchiveLimitExceeded(_) => "export_archive_limit_exceeded",
         WorkspaceError::ExportGithub { kind, .. } => kind.wire_code(),
         WorkspaceError::ShuttingDown => "shutting_down",
         WorkspaceError::ToolsetExternallyOwned(_) => "toolset_externally_owned",
@@ -80,6 +82,8 @@ pub fn rpc_error_to_workspace(err: RpcError) -> WorkspaceError {
         "invalid_hunk_action" => WorkspaceError::InvalidHunkAction(err.message),
         "hunk_action_failed" => WorkspaceError::HunkActionFailed(err.message),
         "hub_error" => WorkspaceError::HubError(err.message),
+        "unknown_method" => WorkspaceError::UnknownMethod(err.message),
+        "export_archive_limit_exceeded" => WorkspaceError::ExportArchiveLimitExceeded(err.message),
         "shutting_down" => WorkspaceError::ShuttingDown,
         "toolset_externally_owned" => WorkspaceError::ToolsetExternallyOwned(err.message),
         unknown => {
@@ -115,6 +119,8 @@ mod tests {
             WorkspaceError::InvalidHunkAction("h".into()),
             WorkspaceError::HunkActionFailed("h".into()),
             WorkspaceError::HubError("hub".into()),
+            WorkspaceError::UnknownMethod("workspace.bogus".into()),
+            WorkspaceError::ExportArchiveLimitExceeded("too big".into()),
             WorkspaceError::ShuttingDown,
             WorkspaceError::ToolsetExternallyOwned("s".into()),
         ];

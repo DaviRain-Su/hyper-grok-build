@@ -30,8 +30,8 @@ use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
     ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MaxTokensField,
     MessagesRequestWrapper, ReasoningModelIdentity, RequestCompat, ResponseModelMetadata, Result,
-    SamplingError, SessionAffinityFormat, ThinkingFormat, build_messages_request, is_check_event,
-    messages, rs,
+    SamplingError, SentCredential, SessionAffinityFormat, ThinkingFormat, build_messages_request,
+    is_check_event, messages, rs,
 };
 
 use crate::adapter::BackendAdapter;
@@ -1611,6 +1611,28 @@ pub fn user_agent_string_for(origin: &OriginClientInfo) -> String {
     }
 }
 
+/// A request builder coupled to the credential state it was built with, so
+/// a 401 arm cannot classify from anything but the build-time capture. The
+/// wire default (`SentCredential::Unknown`, which charges the retry budget)
+/// stays the fail-closed one; only an explicit `sent_bearer: None` — a send
+/// the builder provably stamped no credential onto — reaches the uncharged
+/// lane via [`auth_rejected`].
+struct SentRequest {
+    builder: reqwest::RequestBuilder,
+    /// Tail fragment of the credential in the built headers (`None` = no
+    /// credential header at all).
+    sent_bearer: Option<String>,
+}
+
+/// The one way a 401 becomes a `SamplingError::Auth` with a wire-derived
+/// credential classification: from the fragment its [`SentRequest`] captured.
+fn auth_rejected(message: String, sent_bearer: Option<&str>) -> SamplingError {
+    SamplingError::Auth {
+        message,
+        credential: SentCredential::from_sent_fragment(sent_bearer),
+    }
+}
+
 // =============================================================================
 // SamplingClient
 // =============================================================================
@@ -1651,9 +1673,8 @@ impl SamplingClient {
             Some(
                 auth_header_value(config.auth_scheme, api_key).ok_or_else(|| {
                     tracing::debug!("api_key could not be converted to a valid HTTP auth header");
-                    SamplingError::Auth(
-                        "Invalid api_key: cannot be converted to a valid HTTP auth header"
-                            .to_string(),
+                    SamplingError::auth_unknown(
+                        "Invalid api_key: cannot be converted to a valid HTTP auth header",
                     )
                 })?,
             )
@@ -1814,13 +1835,18 @@ impl SamplingClient {
         self.defaults.configured_api_backend.clone()
     }
 
-    /// POST with default headers. A live resolver is evaluated exactly once;
-    /// the returned prefix is carried to 401 attribution so logging never
-    /// performs another potentially blocking credential lookup.
-    /// When a bearer_resolver is wired it is the sole auth source: a missing
-    /// live bearer strips default Authorization / x-api-key so a hard-expired
+    /// POST with default headers, returning the builder coupled to the tail
+    /// fragment of the credential actually placed in its headers (`None` =
+    /// no credential) — captured at build time because a record-time
+    /// re-read races with the recovery a 401 triggers.
+    ///
+    /// A live resolver is evaluated exactly once; the returned fragment is
+    /// carried to 401 attribution so logging never performs another potentially
+    /// blocking credential lookup. A wired bearer_resolver is the sole auth
+    /// source: a missing live bearer strips default Authorization / x-api-key
+    /// so a hard-expired
     /// seed key cannot ride on the wire.
-    fn post(&self, url: impl reqwest::IntoUrl) -> (reqwest::RequestBuilder, Option<String>) {
+    fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
         let mut headers = self.default_headers.clone();
         if let Some(resolver) = &self.bearer_resolver {
             // A resolver is authoritative. Remove construction-time auth even
@@ -1863,8 +1889,11 @@ impl SamplingClient {
             injector.inject(&mut headers);
         }
         normalize_auth_headers(&mut headers, self.defaults.auth_scheme, authoritative_auth);
-        let sent_bearer_prefix = self.extract_sent_bearer_from(&headers);
-        (self.http.post(url).headers(headers), sent_bearer_prefix)
+        let sent_bearer = self.extract_sent_bearer_from(&headers);
+        SentRequest {
+            builder: self.http.post(url).headers(headers),
+            sent_bearer,
+        }
     }
 
     fn truncate_bearer_prefix(bearer: &str) -> String {
@@ -2335,7 +2364,7 @@ impl SamplingClient {
     async fn handle_response(
         &self,
         response: reqwest::Response,
-        sent_bearer_prefix: Option<&str>,
+        sent_bearer: Option<&str>,
     ) -> Result<ChatCompletionResponse> {
         let status = response.status();
         let model_metadata = extract_model_metadata(response.headers());
@@ -2347,12 +2376,13 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ChatCompletions,
-                    sent_bearer_prefix,
+                    sent_bearer,
                 );
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401): {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401): {server_message}"),
+                    sent_bearer,
+                ));
             }
             let message = user_facing_api_error_message(status, bytes.as_ref());
             return Err(SamplingError::Api {
@@ -2410,9 +2440,12 @@ impl SamplingClient {
             SamplingError::Serialization(error)
         })?;
         self.patch_chat_request_body(&mut request_body, false);
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("chat/completions"));
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(self.endpoint("chat/completions"));
         let mut http_request = self.apply_chat_session_affinity(
-            grok_headers.apply(http_request),
+            grok_headers.apply(builder),
             payload.x_grok_session_id.as_deref(),
         );
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -2426,8 +2459,7 @@ impl SamplingClient {
             e
         })?;
 
-        self.handle_response(response, sent_bearer_prefix.as_deref())
-            .await
+        self.handle_response(response, sent_bearer.as_deref()).await
     }
 
     /// Start a streaming chat completion request. Returns a stream of typed chunks.
@@ -2480,10 +2512,13 @@ impl SamplingClient {
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
         };
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("chat/completions"));
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(self.endpoint("chat/completions"));
         let mut http_request = self
             .apply_chat_session_affinity(
-                grok_headers.apply(http_request),
+                grok_headers.apply(builder),
                 payload.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -2522,14 +2557,15 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ChatCompletionsStream,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("chat/completions");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
 
             let bytes = response.bytes().await?;
@@ -2732,9 +2768,12 @@ impl SamplingClient {
         {
             Self::strip_strict_tool_fields(&mut request_body);
         }
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("responses"));
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(self.endpoint("responses"));
         let mut http_request = self.apply_responses_session_affinity(
-            grok_headers.apply(http_request),
+            grok_headers.apply(builder),
             request.x_grok_session_id.as_deref(),
         );
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -2757,13 +2796,14 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::Responses,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("responses");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
@@ -2905,7 +2945,10 @@ impl SamplingClient {
             .unwrap_or(responses_endpoint.as_str())
             .trim_end_matches('/')
             .to_string();
-        let (http_request, sent_bearer_prefix) = self.post(responses_endpoint);
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(responses_endpoint);
         let codex_turn_key = self
             .defaults
             .adapter
@@ -2928,7 +2971,7 @@ impl SamplingClient {
             });
         let mut http_request = self
             .apply_responses_session_affinity(
-                grok_headers.apply(http_request),
+                grok_headers.apply(builder),
                 request.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -2975,14 +3018,15 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::ResponsesStream,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("responses");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(response.headers());
@@ -3183,9 +3227,12 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("messages"));
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(self.endpoint("messages"));
         let mut http_request = self.apply_messages_session_affinity(
-            grok_headers.apply(http_request),
+            grok_headers.apply(builder),
             request.x_grok_session_id.as_deref(),
         );
         if self.defaults.adapter.uses_github_copilot_dialect() {
@@ -3210,13 +3257,14 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::Messages,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("messages");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
 
             let message = user_facing_api_error_message(status, bytes.as_ref());
@@ -3301,10 +3349,13 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("messages"));
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(self.endpoint("messages"));
         let mut http_request = self
             .apply_messages_session_affinity(
-                grok_headers.apply(http_request),
+                grok_headers.apply(builder),
                 request.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -3342,14 +3393,15 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::MessagesStream,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(response.headers());
@@ -3603,8 +3655,11 @@ impl SamplingClient {
             .unwrap_or_else(|| self.defaults.model.clone());
         let body = crate::pi_messages::build_request(&request, &model)?;
         tracing::debug!(base_url = %self.base_url, model_id = %model, "Sending Pi Messages stream request");
-        let (http_request, sent_bearer_prefix) = self.post(self.endpoint("messages"));
-        let http_request = http_request
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(self.endpoint("messages"));
+        let http_request = builder
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .json(&body);
@@ -3618,14 +3673,15 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::MessagesStream,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("messages");
                 let body = response.bytes().await.unwrap_or_default();
                 let server_message = user_facing_api_error_message(status, body.as_ref());
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {server_message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {server_message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(response.headers());
@@ -3886,10 +3942,13 @@ impl SamplingClient {
                     .to_string();
                 (responses_route, session_id.to_string(), turn_id.to_string())
             });
-        let (http_request, sent_bearer_prefix) = self.post(endpoint.clone());
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = self.post(endpoint.clone());
         let mut http_request = self
             .apply_responses_session_affinity(
-                grok_headers.apply(http_request),
+                grok_headers.apply(builder),
                 wrapper.x_grok_session_id.as_deref(),
             )
             .header(ACCEPT, HeaderValue::from_static("application/json"))
@@ -3928,11 +3987,12 @@ impl SamplingClient {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     crate::attribution::SamplingConsumer::Responses,
-                    sent_bearer_prefix.as_deref(),
+                    sent_bearer.as_deref(),
                 );
-                return Err(SamplingError::Auth(format!(
-                    "Unauthorized (401) from {endpoint}: {message}"
-                )));
+                return Err(auth_rejected(
+                    format!("Unauthorized (401) from {endpoint}: {message}"),
+                    sent_bearer.as_deref(),
+                ));
             }
             return Err(SamplingError::Api {
                 status,
@@ -4950,7 +5010,7 @@ mod tests {
             },
         ));
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (builder, _) = client.post("https://example.test/v1/chat/completions");
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/chat/completions");
         let request = client
             .apply_chat_session_affinity(builder, Some("session-123"))
             .build()
@@ -5062,8 +5122,11 @@ mod tests {
         cfg.bearer_resolver = Some(std::sync::Arc::new(Resolver));
         cfg.header_injector = Some(std::sync::Arc::new(ConflictingInjector));
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, sent_prefix) = client.post("https://example.test/v1/responses");
-        let request = request.build().expect("request should build");
+        let SentRequest {
+            builder,
+            sent_bearer: sent_prefix,
+        } = client.post("https://example.test/v1/responses");
+        let request = builder.build().expect("request should build");
         assert_eq!(
             request
                 .headers()
@@ -5101,8 +5164,8 @@ mod tests {
         let mut config = minimal_config();
         config.header_injector = Some(std::sync::Arc::new(TestInjector));
         let client = SamplingClient::new(config).expect("build");
-        let (req, _) = client.post("http://localhost/test");
-        let req = req.build().expect("build request");
+        let SentRequest { builder, .. } = client.post("http://localhost/test");
+        let req = builder.build().expect("build request");
         assert!(
             req.headers().contains_key("traceparent"),
             "HeaderInjector should inject traceparent into post() requests"
@@ -5217,7 +5280,10 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (_builder, bearer) = client.post("https://example.test/v1/chat/completions");
+        let SentRequest {
+            sent_bearer: bearer,
+            ..
+        } = client.post("https://example.test/v1/chat/completions");
         assert_eq!(bearer.as_deref(), Some("r-1234567890"));
         assert_eq!(
             bearer.as_deref().map(str::len),
@@ -5236,7 +5302,10 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (_builder, bearer) = client.post("https://example.test/v1/messages");
+        let SentRequest {
+            sent_bearer: bearer,
+            ..
+        } = client.post("https://example.test/v1/messages");
         assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
         assert_eq!(
             bearer.as_deref().map(str::len),
@@ -5253,7 +5322,10 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (_builder, bearer) = client.post("https://example.test/v1/chat/completions");
+        let SentRequest {
+            sent_bearer: bearer,
+            ..
+        } = client.post("https://example.test/v1/chat/completions");
         assert!(bearer.is_none());
     }
 
@@ -5282,7 +5354,10 @@ mod tests {
         };
         let client = SamplingClient::new(cfg).expect("client should build");
 
-        let (_builder, sent_at_build) = client.post("https://example.test/v1/responses");
+        let SentRequest {
+            sent_bearer: sent_at_build,
+            ..
+        } = client.post("https://example.test/v1/responses");
         // The 401 kicks recovery; the resolver rotates before the callback runs.
         *resolver.0.lock().unwrap() = "fresh-token-newtail99".to_string();
 
@@ -5310,8 +5385,8 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, _) = client.post("https://example.test/v1/messages");
-        let request = request.build().expect("request should build");
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/messages");
+        let request = builder.build().expect("request should build");
         let auth = request
             .headers()
             .get(AUTHORIZATION)
@@ -5328,11 +5403,14 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, sent_bearer_prefix) = client.post("https://example.test/v1/responses");
-        let request = request.build().expect("request should build");
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = client.post("https://example.test/v1/responses");
+        let request = builder.build().expect("request should build");
 
         assert!(request.headers().get(AUTHORIZATION).is_none());
-        assert!(sent_bearer_prefix.is_none());
+        assert!(sent_bearer.is_none());
     }
 
     #[test]
@@ -5351,8 +5429,11 @@ mod tests {
             let info = client.auth_info();
             assert_eq!(info.auth_type, "bearer");
             assert!(info.auth_prefix.is_none());
-            let (request, sent_bearer_prefix) = client.post("https://example.test/v1/responses");
-            let request = request.build().expect("request should build");
+            let SentRequest {
+                builder,
+                sent_bearer,
+            } = client.post("https://example.test/v1/responses");
+            let request = builder.build().expect("request should build");
 
             assert_eq!(
                 request
@@ -5368,10 +5449,10 @@ mod tests {
                     .and_then(|value| value.to_str().ok()),
                 expected
             );
-            assert_eq!(sent_bearer_prefix.as_deref(), Some("fresh-bearer"));
+            assert_eq!(sent_bearer.as_deref(), Some("fresh-bearer"));
             client.record_401_attribution(
                 crate::attribution::SamplingConsumer::Responses,
-                sent_bearer_prefix.as_deref(),
+                sent_bearer.as_deref(),
             );
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -5391,14 +5472,17 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, sent_bearer_prefix) = client.post("https://example.test/v1/messages");
-        let request = request.build().expect("request should build");
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = client.post("https://example.test/v1/messages");
+        let request = builder.build().expect("request should build");
         assert!(
             request.headers().get(AUTHORIZATION).is_none(),
             "failed refresh must not send the expired construction-time bearer"
         );
         assert!(request.headers().get("x-api-key").is_none());
-        assert!(sent_bearer_prefix.is_none());
+        assert!(sent_bearer.is_none());
     }
 
     #[test]
@@ -5411,14 +5495,17 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, sent_bearer_prefix) = client.post("https://example.test/v1/messages");
-        let request = request.build().expect("request should build");
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = client.post("https://example.test/v1/messages");
+        let request = builder.build().expect("request should build");
         assert!(request.headers().get(AUTHORIZATION).is_none());
         assert!(
             request.headers().get("x-api-key").is_none(),
             "failed live resolution must not send a stale construction-time x-api-key"
         );
-        assert!(sent_bearer_prefix.is_none());
+        assert!(sent_bearer.is_none());
     }
 
     /// Regression: when `api_key` (which seeds `default_headers` with an
@@ -5437,8 +5524,8 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, _) = client.post("https://example.test/v1/responses");
-        let request = request.build().expect("request should build");
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/responses");
+        let request = builder.build().expect("request should build");
         let auth_count = request.headers().get_all(AUTHORIZATION).iter().count();
         assert_eq!(
             auth_count, 1,
@@ -5463,8 +5550,8 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (request, _) = client.post("https://example.test/v1/messages");
-        let request = request.build().expect("request should build");
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/messages");
+        let request = builder.build().expect("request should build");
         let api_key = request
             .headers()
             .get("x-api-key")
@@ -5487,10 +5574,11 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let sent_bearer_prefix = client.extract_sent_bearer();
+        let SentRequest { sent_bearer, .. } =
+            client.post("https://example.test/v1/chat/completions");
         client.record_401_attribution(
             crate::attribution::SamplingConsumer::ChatCompletionsStream,
-            sent_bearer_prefix.as_deref(),
+            sent_bearer.as_deref(),
         );
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -5551,14 +5639,17 @@ mod tests {
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
-        let (builder, sent_bearer_prefix) = client.post("https://example.test/v1/responses");
+        let SentRequest {
+            builder,
+            sent_bearer,
+        } = client.post("https://example.test/v1/responses");
         let request = builder.body("").build().expect("request should build");
         assert!(
             request.headers().get(AUTHORIZATION).is_none(),
             "stale default Authorization must not be sent when resolver is empty"
         );
         assert!(
-            sent_bearer_prefix.is_none(),
+            sent_bearer.is_none(),
             "resolver None must not attribute a stripped default seed"
         );
     }
@@ -5588,7 +5679,7 @@ mod tests {
         let client = SamplingClient::new(cfg).expect("client should build");
 
         // Build a request to inspect the final headers.
-        let (builder, _) = client.post("https://example.test/v1/responses");
+        let SentRequest { builder, .. } = client.post("https://example.test/v1/responses");
         let request = builder.body("").build().expect("request should build");
 
         let auth_values: Vec<_> = request.headers().get_all(AUTHORIZATION).iter().collect();

@@ -320,6 +320,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_exceeds_budget_is_context_overflow() {
+        let sampler =
+            MockSampler::scripted(vec![Err(CompactionSampleError::Other(anyhow::anyhow!(
+                "API error (status 400 Bad Request): invalid-argument: \
+                 Failed to start sampling: [conversation] Current message \
+                 (1000000 tokens) exceeds budget (500000 tokens)"
+            )))]);
+        let err = run(&sampler, 3).await.expect_err("should fail");
+        assert!(matches!(
+            err,
+            SampleRetryError::Failure {
+                deterministic: true,
+                context_overflow: true,
+                ..
+            }
+        ));
+        assert_eq!(sampler.call_count(), 1, "overflow must not retry");
+    }
+
+    #[tokio::test]
     async fn transient_exhausted_is_non_deterministic_failure() {
         let sampler = MockSampler::scripted(vec![
             Err(CompactionSampleError::Timeout {

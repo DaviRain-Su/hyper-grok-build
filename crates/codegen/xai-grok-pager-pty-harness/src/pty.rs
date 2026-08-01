@@ -139,6 +139,7 @@ impl PtyController {
         // portable-pty calls setsid on Unix. Windows Job enrollment is a
         // best-effort post-spawn attachment, so a very short-lived descendant
         // may escape before enrollment; diagnostics preserve that downgrade.
+        #[allow(clippy::disallowed_methods)]
         let child = pair.slave.spawn_command(cmd)?;
         #[cfg(unix)]
         let process_pid = child
