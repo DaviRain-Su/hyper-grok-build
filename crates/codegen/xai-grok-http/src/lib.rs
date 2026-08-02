@@ -2,18 +2,20 @@
 //!
 //! Building a `reqwest::Client` is expensive (~95ms) because it loads
 //! TLS root certificates from the OS trust store. This module
-//! provides four clients for non-sampling traffic (the first three
-//! public and cached, the last crate-internal and built on demand):
+//! provides clients for non-sampling traffic:
 //!
 //! - `shared_client`: a `OnceLock`-cached async client for general
 //!   use (telemetry, feedback, settings, etc.).
 //! - `shared_upload_client`: a `OnceLock`-cached client for GCS
 //!   uploads with aggressive connection pool eviction.
+//! - `shared_oauth_client`: a `OnceLock`-cached HTTP/1.1 client for
+//!   third-party OAuth IdP calls (Kimi / Codex token endpoints). HTTP/2
+//!   multiplex reuse against some CDNs surfaces as mid-stream
+//!   `ECONNRESET` / GOAWAY; OAuth must not share that pool.
 //! - `shared_startup_blocking_client`: a blocking client for the early
 //!   model prefetch (runs before the async runtime is available).
-//! - `fresh_http1_client` -- a crate-internal, on-demand, pool-less
-//!   HTTP/1.1 client used by `send_with_retry_escaping_pool` for the
-//!   final retry attempt to escape a poisoned pool within a tight budget.
+//! - `fresh_http1_client` -- on-demand, pool-less HTTP/1.1 client used
+//!   by `send_with_retry_escaping_pool` and OAuth retry escapes.
 //!
 //! Sampling traffic uses process-wide shared clients owned by
 //! `xai_grok_sampler::shared_http` (one HTTP/2 pooled client plus
@@ -347,6 +349,36 @@ pub fn with_auth_retry(
         .build()
 }
 
+/// Shared HTTP/1.1 client for third-party OAuth IdP traffic (token exchange /
+/// refresh / device poll).
+///
+/// Kimi (`auth.kimi.com`) and similar endpoints sit behind CDNs that frequently
+/// reset or GOAWAY idle HTTP/2 streams. When OAuth reused [`shared_client`]'s
+/// HTTP/2 pool, a single half-dead connection produced repeated
+/// `ECONNRESET` / "connection closed before message completed" failures and
+/// left subscription models looking permanently broken. HTTP/1.1 isolates each
+/// request to its own connection lifecycle; a short idle timeout still reuses
+/// healthy sockets without replaying a poisoned multiplexed session.
+pub fn shared_oauth_client() -> reqwest::Client {
+    static OAUTH_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    OAUTH_CLIENT
+        .get_or_init(|| {
+            xai_grok_extra_ca::with_extra_root_certificates(
+                reqwest::Client::builder()
+                    .http1_only()
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .pool_max_idle_per_host(2)
+                    .pool_idle_timeout(std::time::Duration::from_secs(10))
+                    .tcp_nodelay(true)
+                    .tcp_keepalive(std::time::Duration::from_secs(30))
+                    .user_agent(process_user_agent_string()),
+            )
+            .build()
+            .expect("failed to build shared OAuth HTTP client")
+        })
+        .clone()
+}
+
 /// Returns a shared [`reqwest::Client`] for GCS uploads, creating it on first call.
 ///
 /// Unlike `shared_client()`, this client has aggressive connection pool eviction
@@ -391,11 +423,16 @@ pub fn shared_upload_client() -> reqwest::Client {
 ///
 /// Fallible: build can fail under fd/TLS pressure; the caller must not
 /// panic on error (fallback policy lives at the call site).
-pub(crate) fn fresh_http1_client() -> reqwest::Result<reqwest::Client> {
+///
+/// Public so platform OAuth refresh paths (Kimi / Codex) can escape a
+/// poisoned connection on retry without depending on sampling clients.
+pub fn fresh_http1_client() -> reqwest::Result<reqwest::Client> {
     xai_grok_extra_ca::with_extra_root_certificates(
         reqwest::Client::builder()
             .http1_only()
             .pool_max_idle_per_host(0)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .tcp_nodelay(true)
             .user_agent(process_user_agent_string()),
     )
     .build()

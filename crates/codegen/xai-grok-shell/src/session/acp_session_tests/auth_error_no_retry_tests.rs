@@ -1034,6 +1034,7 @@ async fn reconstruct_full_config_uses_catalog_platform_on_shared_oauth_proxy() {
                             platform_oauth_active: true,
                         },
                         provider: None,
+                        catalog_epoch: 0,
                     }));
 
                 let config = actor.reconstruct_full_config().await;
@@ -1061,6 +1062,63 @@ async fn reconstruct_full_config_uses_catalog_platform_on_shared_oauth_proxy() {
                     assert!(!config.extra_headers.contains_key("X-Msh-Device-Id"));
                 }
             }
+        })
+        .await;
+}
+
+/// Regression: install `OpenAiCodexBearerResolver` from catalog identity alone.
+///
+/// A session that selected `openai-codex/*` *before* `/login` memoizes
+/// `platform_oauth_active = false`. Gating the resolver on that flag (post-r7)
+/// sent requests with no Authorization → 401 uncharged resubmit loop.
+#[tokio::test(flavor = "current_thread")]
+async fn reconstruct_full_config_installs_codex_resolver_when_platform_oauth_inactive() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let model = "gpt-5.1-codex";
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "stale-session-token".to_string(),
+            )
+            .await;
+            if let Some(mut sampling) = actor.chat_state_handle.get_sampling_config().await {
+                sampling.base_url = "https://chatgpt.com/backend-api/codex".to_string();
+                sampling.model = model.to_string();
+                sampling.adapter_kind = xai_grok_models::AdapterKind::OpenAiCodex;
+                actor.chat_state_handle.update_sampling_config(sampling);
+            }
+            // Pre-login memo: catalog id is OpenAiCodex but stamp not yet active.
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id: model.to_string(),
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::NotByok,
+                        auth_scheme: Default::default(),
+                        oauth_platform: Some(xai_grok_models::PlatformId::OpenAiCodex),
+                        platform_oauth_active: false,
+                    },
+                    provider: None,
+                    catalog_epoch: 0,
+                }));
+
+            let config = actor.reconstruct_full_config().await;
+            let resolver = config
+                .bearer_resolver
+                .as_ref()
+                .expect("codex catalog identity must install OpenAiCodexBearerResolver even when platform_oauth_active is false");
+            assert!(
+                format!("{resolver:?}").contains("OpenAiCodexBearerResolver"),
+                "expected OpenAiCodexBearerResolver, got {resolver:?}"
+            );
+            assert!(
+                config.api_key.is_none(),
+                "codex oauth route must not fall through to the session/api_key stamp"
+            );
+            assert!(config.responses_codex_dialect);
         })
         .await;
 }
@@ -1104,6 +1162,7 @@ async fn reconstruct_full_config_distinguishes_copilot_oauth_marker_from_static_
                             platform_oauth_active,
                         },
                         provider: None,
+                        catalog_epoch: 0,
                     }));
 
                 let config = actor.reconstruct_full_config().await;
@@ -1118,6 +1177,70 @@ async fn reconstruct_full_config_distinguishes_copilot_oauth_marker_from_static_
                     assert_eq!(config.api_key.as_deref(), Some("static-copilot-token"));
                 }
             }
+        })
+        .await;
+}
+
+/// Regression: chat-state still holds the xAI session JWT after switching to
+/// a managed API-key model (`ollama/*`) whose base_url is *local* (not in the
+/// open-platform host list). Catalog-id detection must keep the session
+/// resolver off and must not send the session JWT as the platform key.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_managed_ollama_catalog_drops_session_jwt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _auth_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+            let _ollama_key =
+                xai_grok_test_support::EnvGuard::set("OLLAMA_API_KEY", "ollama-live-env-key");
+
+            let (_am_dir, am) = auth_manager_with_valid_token("xai-session-jwt");
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                // Stale: previous first-party turn left the session JWT here.
+                "xai-session-jwt".to_string(),
+            )
+            .await;
+
+            if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
+                // Local Ollama is NOT matched by open_platform_endpoint host list.
+                cfg.base_url = "http://127.0.0.1:11434/v1".into();
+                cfg.model = "ollama/deepseek-v4-flash".into();
+                actor.chat_state_handle.update_sampling_config(cfg);
+            }
+
+            // Seed the live catalog with a managed ollama entry that owns env_key.
+            let mut entry = crate::agent::config::ModelEntry::fallback(
+                "deepseek-v4-flash",
+                &crate::agent::config::EndpointsConfig::default(),
+            );
+            entry.info.id = Some("ollama/deepseek-v4-flash".into());
+            entry.info.base_url = "http://127.0.0.1:11434/v1".into();
+            entry.env_key = Some(crate::agent::config::EnvKeys::new(["OLLAMA_API_KEY"]));
+            assert!(
+                entry.has_own_credentials(),
+                "test fixture must resolve OLLAMA_API_KEY"
+            );
+            actor
+                .models_manager
+                .insert_test_entry("ollama/deepseek-v4-flash", entry);
+
+            let cfg = actor.reconstruct_full_config().await;
+            assert!(
+                cfg.bearer_resolver.is_none(),
+                "managed ollama/* must not install the xAI session bearer resolver"
+            );
+            assert_eq!(
+                cfg.api_key.as_deref(),
+                Some("ollama-live-env-key"),
+                "must prefer live OLLAMA_API_KEY over the stale session JWT in chat-state"
+            );
         })
         .await;
 }
@@ -1404,6 +1527,7 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
                         platform_oauth_active: false,
                     },
                     provider: None,
+                    catalog_epoch: 0,
                 }));
 
             // Cache hit: served without consulting config.
@@ -1450,6 +1574,7 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                         platform_oauth_active: false,
                     },
                     provider: None,
+                    catalog_epoch: 0,
                 }));
 
             let cfg = actor.reconstruct_full_config().await;
@@ -1500,6 +1625,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                         platform_oauth_active: false,
                     },
                     provider: None,
+                    catalog_epoch: 0,
                 }));
 
             // Switch to the same model_id, now a per-model BYOK model on a
@@ -1578,6 +1704,7 @@ async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::Au
                 platform_oauth_active: false,
             },
             provider: Some(provider),
+            catalog_epoch: 0,
         }));
 }
 

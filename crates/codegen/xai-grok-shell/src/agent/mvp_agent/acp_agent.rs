@@ -842,14 +842,43 @@ impl acp::Agent for MvpAgent {
                 let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
                 let client_seq = auth_meta.request_seq;
                 let mut cancelled = false;
-                let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
-                let auth_result = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        cancelled = true;
-                        Err(anyhow::anyhow!("Authentication cancelled"))
+                // Mirror GitHub Copilot / Codex: interactive TUI must receive
+                // the device verification URL over AuthChannels. Calling
+                // `run_kimi_code_login()` without channels only eprinted the
+                // URL (invisible under the fullscreen TUI) so the browser
+                // never "jumped" and the login widget stayed blank.
+                let auth_result = if !auth_meta.headless {
+                    let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+                    let (code_tx, code_rx) = tokio::sync::mpsc::channel(1);
+                    let (cancel, _guard) = self.interactive_auth.begin(
+                        Some(crate::auth::single_flight::AttemptChannels::new(
+                            code_tx, url_rx,
+                        )),
+                        client_seq,
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::kimi::run_kimi_code_login_with_channels(
+                            Some(crate::auth::AuthChannels {
+                                url_tx: Some(url_tx),
+                                code_rx,
+                            }),
+                        ) => r,
                     }
-                    r = crate::auth::kimi::run_kimi_code_login() => r,
+                } else {
+                    let (cancel, _guard) = self.interactive_auth.begin(None, client_seq);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            cancelled = true;
+                            Err(anyhow::anyhow!("Authentication cancelled"))
+                        }
+                        r = crate::auth::kimi::run_kimi_code_login() => r,
+                    }
                 };
                 let auth = auth_result.map_err(|e| {
                     emit_login_span(

@@ -4,6 +4,34 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **ChatGPT / OpenAI Codex OAuth infinite 401 retry after login** — Installing
+  `OpenAiCodexBearerResolver` no longer requires memoized
+  `platform_oauth_active` (restored r7 catalog-identity routing). A session that
+  selected `openai-codex/*` before `/login` could cache
+  `platform_oauth_active = false`; post-login catalog restamp did not refresh
+  that memo, so requests went out without `Authorization` and
+  `auth_retry` looped until the runaway guard. Also bump a catalog content
+  epoch on every models update so `model_auth_memo` re-reads live stamp flags
+  after platform credential restamp (Kimi / Claude / Radius / Copilot too).
+- **Kimi Code OAuth `ECONNRESET` / token refresh failures** — Kimi (and other
+  third-party OAuth) token traffic now uses a dedicated HTTP/1.1 client instead
+  of the shared HTTP/2 pool, with transport retries that escape onto a fresh
+  connection after reset/GOAWAY. Catalog-identity install for
+  `KimiCodeBearerResolver` matches the Codex fix so post-login turns no longer
+  drop the live bearer after a stale memo.
+- **Ollama / other API-key models retrying with the wrong credential** — Managed
+  API-key catalog ids (`ollama/*`, `openrouter/*`, …) and open-platform hosts now
+  share one fail-closed path: never install the xAI session bearer resolver,
+  re-resolve live `env_key`/`api_key` at turn time, and drop a chat-state key
+  that is still the session JWT (common after switching from a first-party
+  model). Local Ollama base URLs are covered via catalog id, not host matching
+  alone. 401 recovery also skips xAI session refresh for these routes.
+- **TUI Kimi login never opened the browser / showed no URL** — `/login` for
+  `kimi-code` now pushes the device verification URL through `AuthChannels`
+  (same as Codex / GitHub Copilot) and opens the browser. Previously the flow
+  only wrote the URL to stderr, which the fullscreen TUI does not display.
+
 ### Added
 - **Hypercore primary agent path (P0–P6)** — default chat/agent turns run through
   `xai-hyper-core` + `ShellHyperHost` with shell `execute_tool_calls`,

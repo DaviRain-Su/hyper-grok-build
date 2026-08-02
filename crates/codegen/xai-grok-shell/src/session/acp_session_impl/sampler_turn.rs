@@ -280,6 +280,19 @@ impl SessionActor {
     pub(crate) fn invalidate_model_auth_memo(&self) {
         self.model_auth_memo.replace(None);
     }
+    /// Live catalog own credential (model `api_key` / resolved `env_key`) for
+    /// `model_id`, if the models manager still has the entry. Used so a turn
+    /// can re-resolve `OLLAMA_API_KEY` etc. even when chat-state still holds a
+    /// previous session JWT.
+    fn live_catalog_own_credential(&self, model_id: &str) -> Option<String> {
+        if model_id.is_empty() {
+            return None;
+        }
+        let models = self.models_manager.models();
+        crate::agent::config::find_model_by_id(&models, model_id)
+            .and_then(|entry| entry.own_credential())
+    }
+
     /// Auth facts from the live models-manager catalog, which includes
     /// platform `/models` live-synced entries (e.g. `ollama/glm-5.2`) that
     /// the offline-config resolver in
@@ -328,9 +341,11 @@ impl SessionActor {
     ) {
         use crate::agent::auth_method::ModelByok;
         use crate::session::acp_session::ModelAuthMemo;
+        let live_epoch = self.models_manager.catalog_epoch();
         if let Some(memo) = self.model_auth_memo.borrow().as_ref()
             && memo.model_id == model_id
             && memo.facts.byok != ModelByok::Unknown
+            && memo.catalog_epoch == live_epoch
         {
             return (memo.facts, memo.provider.clone());
         }
@@ -338,8 +353,14 @@ impl SessionActor {
             crate::agent::config::resolve_model_auth_facts_and_provider(model_id)
         });
         if fresh.byok == ModelByok::Unknown {
+            // Fall back to the last definite entry only when it was built
+            // against the current catalog epoch — a credential restamp
+            // (post-`/login` `restamp_platform_credentials`) bumps the
+            // epoch specifically so this stale-facts escape hatch cannot
+            // resurrect a pre-login `platform_oauth_active = false`.
             if let Some(memo) = self.model_auth_memo.borrow().as_ref()
                 && memo.model_id == model_id
+                && memo.catalog_epoch == live_epoch
             {
                 return (memo.facts, memo.provider.clone());
             }
@@ -349,6 +370,7 @@ impl SessionActor {
             model_id: model_id.to_string(),
             facts: fresh,
             provider: provider.clone(),
+            catalog_epoch: live_epoch,
         });
         (fresh, provider)
     }
@@ -527,35 +549,60 @@ impl SessionActor {
         let oauth_platform = model_facts
             .oauth_platform
             .or_else(|| crate::agent::config::oauth_platform_for_base_url(&cfg.base_url));
-        let kimi_oauth_active =
-            if model_facts.oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) {
-                model_facts.platform_oauth_active
-            } else {
-                // Preserve the legacy URL-only OAuth fallback only when catalog
-                // identity was unavailable.
-                oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
-            };
-        let codex_oauth_active = model_facts.oauth_platform
-            == Some(xai_grok_models::PlatformId::OpenAiCodex)
-            && model_facts.platform_oauth_active;
+        // Kimi OAuth resolver installs on catalog / unambiguous URL identity
+        // alone — same posture as `codex_oauth_route`. Gating on
+        // `platform_oauth_active` left pre-login memo sessions without a
+        // resolver after `/login --kimi` restamped the catalog but not the
+        // memo (live `KimiCodeBearerResolver` re-reads auth.json per request
+        // and returns None when no credential is cached, so unconditional
+        // install on identity is safe).
+        let kimi_oauth_active = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode);
+        // Codex OAuth resolver is installed purely on catalog identity
+        // (`openai-codex/*` → `oauth_platform == Some(OpenAiCodex)`), NOT on
+        // `platform_oauth_active`. The live `OpenAiCodexBearerResolver`
+        // re-reads `auth.json` per request and returns `None` when no
+        // credential is cached, so installing it unconditionally on catalog
+        // identity is safe.
+        //
+        // Gating it on `platform_oauth_active` (as `75cbc1c` did) regressed
+        // the Mac interactive login flow: a session that selected
+        // `openai-codex/*` before `/login` memoized
+        // `platform_oauth_active = false`; the post-login
+        // `restamp_platform_credentials` updated the catalog but did not
+        // invalidate the session's `model_auth_memo`, so
+        // `codex_oauth_active` stayed `false`, the resolver was never
+        // installed, the request went out with no `Authorization` header,
+        // and `auth_retry` looped on 401 until the runaway guard tripped.
+        // r7 installed the resolver on `oauth_platform` alone and worked.
+        let codex_oauth_route =
+            oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
         let oauth_origin = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
-        // A third-party BYOK platform endpoint must never carry the xAI
-        // session bearer: a live-only catalog entry (e.g. `ollama/glm-5.2`
-        // from the platform `/models` sync) is absent from the offline
-        // catalog the BYOK gate consults, so it can classify `NotByok` and
-        // activate the gate — the AuthManager resolver would then replace
-        // the stamped platform key with the xAI session JWT and the
-        // third-party host 401s (the false "recovery succeeded" loop).
-        let open_platform = crate::agent::config::open_platform_endpoint(&cfg.base_url);
-        let use_bearer_resolver = gate.active() && open_platform.is_none();
+        // A third-party BYOK / managed API-key route must never carry the xAI
+        // session bearer. URL matching alone is not enough: local Ollama
+        // (`http://127.0.0.1:11434/v1`) and reverse proxies are not in the
+        // registry host list, but `ollama/*` catalog ids still must fail
+        // closed. A live-only catalog entry can also classify `NotByok` and
+        // activate the session gate — without this guard the AuthManager
+        // resolver replaces the platform key with the xAI JWT → third-party
+        // 401 → false "recovery succeeded" retry loop.
+        let third_party_api_key_route =
+            crate::agent::config::is_third_party_api_key_route(cfg.model.as_str(), &cfg.base_url);
+        let use_bearer_resolver = gate.active() && !third_party_api_key_route;
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             let _ = am.auth().await;
         }
+        // Live catalog own key (env / stamped api_key) preferred over chat-state,
+        // which may still hold a previous session JWT after a model switch race.
+        let live_platform_key = self.live_catalog_own_credential(cfg.model.as_str());
+        let session_token = self
+            .auth_manager
+            .as_ref()
+            .and_then(|am| am.current_or_expired().map(|a| a.key));
         let auth_scheme = model_facts.auth_scheme;
         // Capture before `cfg` fields are moved into `SamplingConfig`. Catalog
         // identity wins; URL fallback above is accepted only when unambiguous.
@@ -565,7 +612,7 @@ impl SessionActor {
                     as xai_grok_sampler::SharedBearerResolver
             });
         let codex_bearer_resolver: Option<xai_grok_sampler::SharedBearerResolver> =
-            codex_oauth_active.then(|| {
+            codex_oauth_route.then(|| {
                 std::sync::Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver)
                     as xai_grok_sampler::SharedBearerResolver
             });
@@ -587,10 +634,17 @@ impl SessionActor {
         let github_copilot_oauth_active = cfg.adapter_kind
             == xai_grok_models::AdapterKind::GitHubCopilot
             && model_facts.platform_oauth_active;
+        // Dialect flag for the ChatGPT Codex Responses wire shape.
+        // - `api_backend` / `adapter_kind`: third-party reverse proxies and
+        //   catalog materialization (`adapter_kind_for_model`).
+        // - `codex_oauth_route`: catalog OAuth identity alone (r7 semantics).
+        //   Do NOT gate this on `platform_oauth_active` — that was the
+        //   regression that left pre-login memo sessions without dialect
+        //   headers / affinity even after a successful ChatGPT login.
         let responses_codex_dialect = cfg.api_backend
             == crate::sampling::ApiBackend::CodexResponses
             || cfg.adapter_kind == xai_grok_models::AdapterKind::OpenAiCodex
-            || codex_oauth_active;
+            || codex_oauth_route;
         let kimi_dialect = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
             || xai_grok_models::PlatformId::MoonshotCn.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url);
@@ -602,14 +656,9 @@ impl SessionActor {
         );
         crate::agent::config::align_oauth_headers_with_platform(
             &mut extra_headers,
-            oauth_platform.filter(|platform| {
-                *platform != xai_grok_models::PlatformId::OpenAiCodex || codex_oauth_active
-            }),
+            oauth_platform,
             &cfg.base_url,
         );
-        if oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) && !kimi_oauth_active {
-            crate::agent::config::remove_kimi_device_headers(&mut extra_headers);
-        }
         let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
         if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
@@ -641,7 +690,7 @@ impl SessionActor {
         // Preferring AuthManager here previously sent the xAI OIDC JWT to
         // chatgpt.com → 401 "Could not parse your authentication token" while
         // recovery "succeeded" by refreshing the *wrong* token.
-        let (api_key, bearer_resolver) = if codex_oauth_active {
+        let (api_key, bearer_resolver) = if codex_oauth_route {
             // The resolver is authoritative and performs the sole auth lookup
             // for each HTTP attempt, including the companion account header.
             (None, codex_bearer_resolver)
@@ -680,6 +729,19 @@ impl SessionActor {
             // to a route whose credential family is ambiguous. A managed Kimi
             // API-key route is the explicit non-OAuth exception.
             (None, None)
+        } else if third_party_api_key_route {
+            // Ollama / OpenRouter / Fireworks / … : never install the xAI
+            // session resolver. Prefer a live catalog own key; then a chat
+            // credential that is NOT the current session JWT (stale JWT left
+            // over from a prior first-party turn must not ride to a third
+            // party). Empty key fails closed as unauthenticated — better than
+            // a false recovery loop.
+            let chat_key = creds.api_key.filter(|key| {
+                session_token
+                    .as_deref()
+                    .is_none_or(|session| session != key.as_str())
+            });
+            (live_platform_key.or(chat_key), None)
         } else if use_bearer_resolver {
             (
                 creds.api_key,
@@ -688,7 +750,7 @@ impl SessionActor {
                 }),
             )
         } else {
-            (creds.api_key, None)
+            (live_platform_key.or(creds.api_key), None)
         };
         let bedrock_profile = (cfg.adapter_kind
             == xai_grok_models::AdapterKind::BedrockConverseStream
@@ -1375,6 +1437,9 @@ impl SessionActor {
             );
         } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
             && let Some(platform) = crate::agent::config::open_platform_endpoint(&failed_base_url)
+                .or_else(|| {
+                    crate::agent::config::managed_api_key_provider(failed_model_id.as_str())
+                })
         {
             // Same wrong-credential trap as Kimi/Codex: refreshing the xAI
             // session cannot fix a third-party BYOK 401 — the retry re-sends
@@ -1382,6 +1447,9 @@ impl SessionActor {
             // misleading "Auth recovery succeeded but ... 401" terminal
             // error. Surface the 401 with the platform's setup hint so the
             // user re-checks the platform key instead.
+            //
+            // Catalog-id matching covers local Ollama / custom base URLs that
+            // `open_platform_endpoint` cannot recognize by host alone.
             tracing::warn!(
                 session_id = % self.session_info.id.0,
                 platform = platform.as_str(),
@@ -1692,11 +1760,12 @@ impl SessionActor {
                 .map(|c| (c.model, c.base_url))
                 .unwrap_or_default();
             // Never refresh-then-rewrite chat-state credentials with the xAI
-            // session token for a third-party BYOK platform endpoint: the
-            // stamped platform key is the correct signer, and the BYOK gate
-            // can misclassify live-only catalog models as `NotByok`.
+            // session token for a third-party API-key route (Ollama cloud,
+            // local Ollama, OpenRouter, …): the platform key is the correct
+            // signer, and the BYOK gate can misclassify live-only catalog
+            // models as `NotByok`.
             if self.auth_gate(&model_id, &base_url).active()
-                && crate::agent::config::open_platform_endpoint(&base_url).is_none()
+                && !crate::agent::config::is_third_party_api_key_route(&model_id, &base_url)
             {
                 match am.get_valid_token().await {
                     Ok(key) => {

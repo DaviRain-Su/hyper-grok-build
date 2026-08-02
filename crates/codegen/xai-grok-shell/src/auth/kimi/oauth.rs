@@ -138,6 +138,28 @@ fn oauth_url(host: &str, path: &str) -> String {
     format!("{}{path}", host.trim_end_matches('/'))
 }
 
+/// HTTP client for Kimi OAuth IdP calls.
+///
+/// Prefer the dedicated HTTP/1.1 OAuth pool ([`xai_grok_http::shared_oauth_client`])
+/// so token traffic never reuses a half-dead HTTP/2 multiplex from the general
+/// shared client (the classic `ECONNRESET` / "connection closed" loop against
+/// `auth.kimi.com`). After a transport failure, retries escalate to a fresh
+/// pool-less HTTP/1.1 client.
+fn kimi_oauth_client(escape_pool: bool) -> reqwest::Client {
+    if escape_pool {
+        match xai_grok_http::fresh_http1_client() {
+            Ok(client) => return client,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "auth: kimi oauth failed to build pool-escape client; falling back to shared oauth pool"
+                );
+            }
+        }
+    }
+    xai_grok_http::shared_oauth_client()
+}
+
 fn with_device_headers(
     mut builder: reqwest::RequestBuilder,
 ) -> anyhow::Result<reqwest::RequestBuilder> {
@@ -145,6 +167,15 @@ fn with_device_headers(
         builder = builder.header(name, value);
     }
     Ok(builder)
+}
+
+/// Whether a transport error should burn a retry / pool-escape slot.
+fn is_retryable_oauth_transport(err: &reqwest::Error) -> bool {
+    match xai_grok_http::TransportFailure::classify(err).kind {
+        xai_grok_http::TransportFailureKind::Interrupted
+        | xai_grok_http::TransportFailureKind::Unreachable => true,
+        xai_grok_http::TransportFailureKind::Permanent => false,
+    }
 }
 
 fn validate_verification_uri(uri: &str) -> anyhow::Result<()> {
@@ -166,38 +197,69 @@ pub(crate) async fn request_device_authorization(
 ) -> anyhow::Result<DeviceAuthorization> {
     let url = oauth_url(host, "/api/oauth/device_authorization");
     tracing::info!(url = %url, "auth: requesting Kimi device authorization");
-    let resp = with_device_headers(crate::http::shared_client().post(&url))?
-        .form(&[("client_id", KIMI_CODE_CLIENT_ID)])
-        .send()
-        .await?;
+    let mut last_err = None;
+    for attempt in 0..MAX_REFRESH_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
+        }
+        let client = kimi_oauth_client(attempt > 0);
+        let send = with_device_headers(client.post(&url))?
+            .form(&[("client_id", KIMI_CODE_CLIENT_ID)])
+            .send()
+            .await;
+        let resp = match send {
+            Ok(resp) => resp,
+            Err(e) if is_retryable_oauth_transport(&e) && attempt + 1 < MAX_REFRESH_RETRIES => {
+                tracing::warn!(
+                    attempt,
+                    error = %xai_grok_http::error_cause_chain(&e),
+                    "auth: Kimi device authorization transport failed; retrying with fresh HTTP/1.1"
+                );
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Device authorization request failed: {}",
+                    xai_grok_http::error_cause_chain(&e)
+                ));
+            }
+        };
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Device authorization failed (HTTP {status}): {body}");
-    }
-    let parsed: DeviceAuthorizationResponse = resp.json().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Device authorization failed (HTTP {status}): {body}");
+        }
+        let parsed: DeviceAuthorizationResponse = resp.json().await?;
 
-    if !parsed
-        .user_code
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        anyhow::bail!("Server returned invalid user_code format (expected [A-Z0-9-])");
-    }
-    validate_verification_uri(&parsed.verification_uri_complete)?;
-    if let Some(ref uri) = parsed.verification_uri {
-        validate_verification_uri(uri)?;
-    }
+        if !parsed
+            .user_code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            anyhow::bail!("Server returned invalid user_code format (expected [A-Z0-9-])");
+        }
+        validate_verification_uri(&parsed.verification_uri_complete)?;
+        if let Some(ref uri) = parsed.verification_uri {
+            validate_verification_uri(uri)?;
+        }
 
-    Ok(DeviceAuthorization {
-        user_code: parsed.user_code,
-        device_code: parsed.device_code,
-        verification_uri: parsed.verification_uri.filter(|u| !u.is_empty()),
-        verification_uri_complete: parsed.verification_uri_complete,
-        expires_in: parsed.expires_in.filter(|&e| e > 0),
-        interval: parsed.interval.unwrap_or(5),
-    })
+        return Ok(DeviceAuthorization {
+            user_code: parsed.user_code,
+            device_code: parsed.device_code,
+            verification_uri: parsed.verification_uri.filter(|u| !u.is_empty()),
+            verification_uri_complete: parsed.verification_uri_complete,
+            expires_in: parsed.expires_in.filter(|&e| e > 0),
+            interval: parsed.interval.unwrap_or(5),
+        });
+    }
+    Err(anyhow::anyhow!(
+        "Device authorization request failed: {}",
+        last_err
+            .map(|e| xai_grok_http::error_cause_chain(&e))
+            .unwrap_or_else(|| "no attempt made".into())
+    ))
 }
 
 /// One poll of `POST {host}/api/oauth/token` with the device grant.
@@ -206,49 +268,77 @@ pub(crate) async fn poll_device_token(
     device_code: &str,
 ) -> anyhow::Result<DevicePollResult> {
     let url = oauth_url(host, "/api/oauth/token");
-    let resp = with_device_headers(crate::http::shared_client().post(&url))?
-        .form(&[
-            ("client_id", KIMI_CODE_CLIENT_ID),
-            ("device_code", device_code),
-            ("grant_type", DEVICE_GRANT_TYPE),
-        ])
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("Token polling request failed: {e}"))?;
+    // One transport retry with pool escape: device-poll is already called in a
+    // loop by the login UI, so we only recover fast-fail connection resets here.
+    let mut last_transport: Option<reqwest::Error> = None;
+    for attempt in 0..2u32 {
+        let client = kimi_oauth_client(attempt > 0);
+        let send = with_device_headers(client.post(&url))?
+            .form(&[
+                ("client_id", KIMI_CODE_CLIENT_ID),
+                ("device_code", device_code),
+                ("grant_type", DEVICE_GRANT_TYPE),
+            ])
+            .send()
+            .await;
+        let resp = match send {
+            Ok(resp) => resp,
+            Err(e) if is_retryable_oauth_transport(&e) && attempt == 0 => {
+                tracing::warn!(
+                    error = %xai_grok_http::error_cause_chain(&e),
+                    "auth: Kimi device token poll transport failed; retrying with fresh HTTP/1.1"
+                );
+                last_transport = Some(e);
+                continue;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Token polling request failed: {}",
+                    xai_grok_http::error_cause_chain(&e)
+                ));
+            }
+        };
 
-    let status = resp.status();
-    if status.is_server_error() {
-        anyhow::bail!("Token polling server error: {status}");
-    }
-    let body = resp.bytes().await?;
-    if status.is_success() {
-        if let Ok(tokens) = serde_json::from_slice::<TokenResponse>(&body) {
-            tracing::info!("auth: Kimi device poll succeeded");
-            return Ok(DevicePollResult::Success(Box::new(tokens.into_auth())));
+        let status = resp.status();
+        if status.is_server_error() {
+            anyhow::bail!("Token polling server error: {status}");
         }
-        // 200 with unparseable body is a terminal protocol error, not pending.
-        return Ok(DevicePollResult::Fatal {
-            error: "missing_access_token".to_owned(),
-            description: None,
-        });
+        let body = resp.bytes().await?;
+        if status.is_success() {
+            if let Ok(tokens) = serde_json::from_slice::<TokenResponse>(&body) {
+                tracing::info!("auth: Kimi device poll succeeded");
+                return Ok(DevicePollResult::Success(Box::new(tokens.into_auth())));
+            }
+            // 200 with unparseable body is a terminal protocol error, not pending.
+            return Ok(DevicePollResult::Fatal {
+                error: "missing_access_token".to_owned(),
+                description: None,
+            });
+        }
+        let err: OAuthErrorBody = serde_json::from_slice(&body).unwrap_or_default();
+        let error = err.error.unwrap_or_else(|| "unknown_error".to_owned());
+        return match error.as_str() {
+            "expired_token" => Ok(DevicePollResult::Expired),
+            "access_denied" => Ok(DevicePollResult::AccessDenied {
+                description: err.error_description,
+            }),
+            // RFC 8628: only these two are retryable pending states.
+            "authorization_pending" | "slow_down" => Ok(DevicePollResult::Pending {
+                error,
+                description: err.error_description,
+            }),
+            _ => Ok(DevicePollResult::Fatal {
+                error,
+                description: err.error_description,
+            }),
+        };
     }
-    let err: OAuthErrorBody = serde_json::from_slice(&body).unwrap_or_default();
-    let error = err.error.unwrap_or_else(|| "unknown_error".to_owned());
-    match error.as_str() {
-        "expired_token" => Ok(DevicePollResult::Expired),
-        "access_denied" => Ok(DevicePollResult::AccessDenied {
-            description: err.error_description,
-        }),
-        // RFC 8628: only these two are retryable pending states.
-        "authorization_pending" | "slow_down" => Ok(DevicePollResult::Pending {
-            error,
-            description: err.error_description,
-        }),
-        _ => Ok(DevicePollResult::Fatal {
-            error,
-            description: err.error_description,
-        }),
-    }
+    Err(anyhow::anyhow!(
+        "Token polling request failed: {}",
+        last_transport
+            .map(|e| xai_grok_http::error_cause_chain(&e))
+            .unwrap_or_else(|| "no attempt made".into())
+    ))
 }
 
 /// Refresh an access token with exponential backoff on retryable statuses.
@@ -291,7 +381,12 @@ async fn refresh_token_with_timeout(
         // would allow one attempt to hold `auth.json.lock` for roughly twice
         // the advertised limit when headers arrive just before the first
         // deadline and the body then stalls.
-        let request = with_device_headers(crate::http::shared_client().post(&url))?.form(&[
+        //
+        // attempt 0 uses the dedicated HTTP/1.1 OAuth pool; later attempts
+        // escape onto a brand-new connection so a reset/GOAWAY cannot poison
+        // every subsequent spend of the same refresh token.
+        let client = kimi_oauth_client(attempt > 0);
+        let request = with_device_headers(client.post(&url))?.form(&[
             ("client_id", KIMI_CODE_CLIENT_ID),
             ("grant_type", REFRESH_GRANT_TYPE),
             ("refresh_token", refresh_token),
@@ -314,11 +409,32 @@ async fn refresh_token_with_timeout(
         // 3 × timeout and wedge any concurrent refresh — and TUI startup —
         // behind it. Fail fast so the lock is released; the next request that
         // needs a Kimi bearer re-invokes the refresh and retries naturally.
+        //
+        // Connection resets / GOAWAY / body drops ARE retried (with pool
+        // escape) — those complete in milliseconds and a fresh HTTP/1.1
+        // socket often succeeds against auth.kimi.com.
         let (status, body) = match attempt_result {
             Ok(Ok(response)) => response,
-            Ok(Err(e)) => {
-                last_error = format!("network error: {e}");
+            Ok(Err(e)) if is_retryable_oauth_transport(&e) => {
+                last_error = format!(
+                    "network error: {}",
+                    xai_grok_http::error_cause_chain(&e)
+                );
+                tracing::warn!(
+                    attempt,
+                    error = %last_error,
+                    "auth: Kimi token refresh transport failed; will retry with fresh connection"
+                );
                 continue;
+            }
+            Ok(Err(e)) => {
+                return Err(RefreshError::Fatal {
+                    status: 0,
+                    description: format!(
+                        "token refresh transport failed: {}",
+                        xai_grok_http::error_cause_chain(&e)
+                    ),
+                });
             }
             Err(_elapsed) => {
                 xai_grok_telemetry::unified_log::warn(

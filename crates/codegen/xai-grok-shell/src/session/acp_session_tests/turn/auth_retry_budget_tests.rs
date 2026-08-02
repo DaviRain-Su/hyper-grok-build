@@ -150,6 +150,7 @@ async fn session_token_actor(
                 platform_oauth_active: false,
             },
             provider: None,
+            catalog_epoch: 0,
         }));
 
     actor

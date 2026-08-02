@@ -582,6 +582,15 @@ pub(crate) struct ModelAuthMemo {
     pub(crate) model_id: String,
     pub(crate) facts: crate::agent::config::ModelAuthFacts,
     pub(crate) provider: Option<crate::auth::AuthProviderRef>,
+    /// Catalog content epoch captured when this memo was built. A session
+    /// that selected an OAuth-platform model (e.g. `openai-codex/*`) before
+    /// `/login` caches `platform_oauth_active = false`; the post-login
+    /// `restamp_platform_credentials` bumps the epoch via
+    /// `ModelsManager::notify_models_updated`, so the next
+    /// `model_auth_state` read sees a mismatch and re-reads the live catalog
+    /// instead of serving the stale pre-login facts. This is the
+    /// "credential chokepoint must clear the memo" contract made automatic.
+    pub(crate) catalog_epoch: u64,
 }
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {

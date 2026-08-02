@@ -182,7 +182,7 @@ pub(crate) async fn exchange_authorization_code(
     verifier: &str,
     redirect_uri: &str,
 ) -> anyhow::Result<CodexToken> {
-    let response = crate::http::shared_client()
+    let response = crate::http::shared_oauth_client()
         .post(format!("{}{TOKEN_PATH}", host_trim(host)))
         .form(&[
             ("grant_type", "authorization_code"),
@@ -221,7 +221,7 @@ async fn refresh_access_token_with_timeout(
     refresh: &str,
     timeout: std::time::Duration,
 ) -> anyhow::Result<CodexToken> {
-    let request = crate::http::shared_client()
+    let request = crate::http::shared_oauth_client()
         .post(format!("{}{TOKEN_PATH}", host_trim(host)))
         .form(&[
             ("grant_type", "refresh_token"),
@@ -264,7 +264,7 @@ struct DeviceAuthResponse {
 
 /// `POST {host}/api/accounts/deviceauth/usercode` (JSON body).
 pub(crate) async fn start_device_auth(host: &str) -> anyhow::Result<DeviceAuthInfo> {
-    let response = crate::http::shared_client()
+    let response = crate::http::shared_oauth_client()
         .post(format!("{}{DEVICE_USER_CODE_PATH}", host_trim(host)))
         .json(&serde_json::json!({ "client_id": OPENAI_CODEX_CLIENT_ID }))
         .send()
@@ -329,7 +329,7 @@ pub(crate) async fn poll_device_auth_once(
     host: &str,
     info: &DeviceAuthInfo,
 ) -> anyhow::Result<DevicePollTick> {
-    let response = crate::http::shared_client()
+    let response = crate::http::shared_oauth_client()
         .post(format!("{}{DEVICE_TOKEN_PATH}", host_trim(host)))
         .json(&serde_json::json!({
             "device_auth_id": info.device_auth_id,

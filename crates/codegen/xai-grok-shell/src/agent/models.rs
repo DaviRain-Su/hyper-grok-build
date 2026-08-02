@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -129,6 +129,14 @@ struct Inner {
     /// Set once the user explicitly picks a model (`/model`); guards the
     /// first-catalog reselect from clobbering that choice.
     user_selected_model: AtomicBool,
+    /// Catalog content epoch, bumped on every `notify_models_updated`. Session
+    /// actors cache per-model auth facts (`model_auth_memo`) keyed by this
+    /// epoch so a credential restamp (e.g. `restamp_platform_credentials`
+    /// after `/login`) invalidates the memo even when the model id is
+    /// unchanged. Without this, a session that selected `openai-codex/*`
+    /// before login keeps `platform_oauth_active = false` cached forever and
+    /// the post-login bearer never reaches the wire.
+    catalog_epoch: AtomicU64,
 }
 
 /// Clears an in-flight flag on drop so a panicking task can't wedge future refreshes.
@@ -224,6 +232,7 @@ impl ModelsManagerBuilder {
                 refresh_in_flight: AtomicBool::new(false),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
                 user_selected_model: AtomicBool::new(false),
+                catalog_epoch: AtomicU64::new(0),
             }),
         }
     }
@@ -379,6 +388,14 @@ impl ModelsManager {
 
     pub fn models(&self) -> IndexMap<String, ModelEntry> {
         self.inner.catalog.read().models.clone()
+    }
+
+    /// Current catalog content epoch. Session actors compare this against
+    /// the epoch stamped on their cached `model_auth_memo` to detect that the
+    /// catalog has been restamped (e.g. after `/login`) and the memo must be
+    /// re-read even though the model id is unchanged.
+    pub fn catalog_epoch(&self) -> u64 {
+        self.inner.catalog_epoch.load(Ordering::Acquire)
     }
 
     pub fn endpoints(&self) -> config::EndpointsConfig {
@@ -676,6 +693,13 @@ impl ModelsManager {
     }
 
     fn notify_models_updated(&self) {
+        // Bump the catalog content epoch so session actors invalidate any
+        // `model_auth_memo` cached against a prior catalog state (notably a
+        // `platform_oauth_active` flag stamped before a `/login`
+        // `restamp_platform_credentials`). The bump happens before the
+        // broadcast so a session that re-reads the epoch right after seeing
+        // the notification never observes a stale value.
+        let epoch = self.inner.catalog_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         let available = self.available();
         let current = self.current_model_id();
         let count = available.len();
@@ -685,6 +709,7 @@ impl ModelsManager {
             Some(serde_json::json!({
                 "model_count": count,
                 "current_model_id": current.0.as_ref(),
+                "catalog_epoch": epoch,
             })),
         );
         if let Some(ref gw) = *self.inner.gateway.read() {

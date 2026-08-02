@@ -6144,19 +6144,11 @@ pub fn sampling_config_for_model(
         &credentials.base_url,
     );
     let route_oauth_platform = oauth_platform_for_model(model);
-    let codex_oauth_active = model_uses_openai_codex_oauth(model);
     align_oauth_headers_with_platform(
         &mut extra_headers,
-        route_oauth_platform.filter(|platform| {
-            *platform != xai_grok_models::PlatformId::OpenAiCodex || codex_oauth_active
-        }),
+        route_oauth_platform,
         &credentials.base_url,
     );
-    if route_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
-        && !model_uses_kimi_code_oauth(model)
-    {
-        remove_kimi_device_headers(&mut extra_headers);
-    }
     let api_backend = info.api_backend.clone();
     // Custom `api_backend = "codex_responses"` forces the Codex adapter even
     // when the catalog id is not `openai-codex/*` (BYOK reverse proxies).
@@ -6325,8 +6317,10 @@ pub fn model_uses_github_copilot_oauth(model: &ModelEntry) -> bool {
 
 /// Whether this catalog entry routes through Kimi Code OAuth (subscription).
 pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
-    model.platform_oauth_active
-        && oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::KimiCode)
+    // Catalog identity alone (mirrors OpenAiCodex). `platform_oauth_active` is
+    // a visibility stamp, not a wire gate — the live resolver handles missing
+    // credentials by returning `None`.
+    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::KimiCode)
 }
 
 /// Whether request bodies should use Moonshot/Kimi-specific shaping
@@ -6371,9 +6365,12 @@ pub fn kimi_code_bearer_resolver_for_base_url(base_url: &str) -> Option<SharedBe
 }
 
 /// Whether this catalog entry routes through OpenAI Codex (ChatGPT) OAuth.
+///
+/// Catalog identity alone — not `platform_oauth_active`. The live bearer
+/// resolver re-reads `auth.json` per request; gating on the stamp flag
+/// regressed post-login turns (see session `codex_oauth_route`).
 pub fn model_uses_openai_codex_oauth(model: &ModelEntry) -> bool {
-    model.platform_oauth_active
-        && oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::OpenAiCodex)
+    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::OpenAiCodex)
 }
 
 /// Per-request bearer for OpenAI Codex models; `None` for everything else.
@@ -6390,6 +6387,32 @@ pub fn openai_codex_bearer_resolver_for_base_url(base_url: &str) -> Option<Share
         return None;
     }
     Some(Arc::new(crate::auth::openai_codex::OpenAiCodexBearerResolver) as SharedBearerResolver)
+}
+
+/// Managed catalog provider (`ollama/*`, `openrouter/*`, …) that authenticates
+/// with a static API key (not OAuth subscription).
+///
+/// Used together with [`open_platform_endpoint`] so a customized `base_url`
+/// (local Ollama `http://127.0.0.1:11434/v1`, reverse proxy, etc.) still
+/// fail-closes the xAI session bearer: URL matching alone cannot recognize
+/// those hosts, but the `provider/model` catalog id is unambiguous.
+pub fn managed_api_key_provider(model_id: &str) -> Option<&'static xai_grok_models::ProviderSpec> {
+    let (provider_id, _) = xai_grok_models::parse_managed_model_key(model_id)?;
+    let spec = xai_grok_models::provider_spec(provider_id.as_str())?;
+    // Static API-key family only. OAuth / hybrid providers have their own
+    // resolver branches and must not be treated as plain BYOK here.
+    if spec.accepts_api_key() && !spec.uses_oauth() {
+        Some(spec)
+    } else {
+        None
+    }
+}
+
+/// True when this turn must never install the xAI session [`WireValidBearerResolver`](crate::auth)
+/// or fall through to the session JWT: either the request URL is a known open
+/// platform host, or the catalog id is a managed API-key provider.
+pub fn is_third_party_api_key_route(model_id: &str, base_url: &str) -> bool {
+    open_platform_endpoint(base_url).is_some() || managed_api_key_provider(model_id).is_some()
 }
 
 /// Third-party BYOK (api-key) platform owning `base_url`, if any.

@@ -47,6 +47,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         CoreConfig {
             model,
             max_messages: 128,
+            max_tool_steps: xai_hyper_core::DEFAULT_MAX_TOOL_STEPS,
         },
     )
     .await?;

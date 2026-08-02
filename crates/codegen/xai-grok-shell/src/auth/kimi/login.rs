@@ -1,8 +1,13 @@
-//! Kimi Code device-code login (`grok login --kimi`).
+//! Kimi Code device-code login (`grok login --kimi` / TUI `/login` kimi-code).
 //!
 //! Two-phase flow matching kimi-cli / Kigi:
 //! 1. request device authorization
 //! 2. poll until approved, then persist under [`crate::auth::model::KIMI_CODE_OAUTH_SCOPE`]
+//!
+//! Interactive TUI/ACP must pass [`AuthChannels`] so the verification URL is
+//! pushed into the client (welcome/login widget) — the same contract as
+//! GitHub Copilot / Codex device flow. Without channels the flow only prints
+//! to stderr, which the fullscreen TUI does not surface.
 
 use super::oauth::{
     DeviceAuthorization, DevicePollResult, poll_device_token, request_device_authorization,
@@ -12,6 +17,7 @@ use crate::auth::storage::{
     auth_json_path, read_kimi_code_auth, store_kimi_code_auth,
     store_kimi_code_auth_after_refresh_locked,
 };
+use crate::auth::{AuthChannels, AuthUrlInfo, AuthUrlMode};
 
 const SLOW_DOWN_INCREMENT_SECS: u64 = 5;
 /// Match Codex / AuthManager: wait long enough for a sibling IdP call.
@@ -30,15 +36,36 @@ enum PollLoopOutcome {
     Restart,
 }
 
-/// Run interactive Kimi Code device login and persist the token set.
+/// Run interactive Kimi Code device login and persist the token set (CLI).
 pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
+    run_kimi_code_login_with_channels(None).await
+}
+
+/// Run Kimi Code device login.
+///
+/// When `channels` is supplied (ACP / fullscreen TUI), the verification URL is
+/// pushed to the client so the login widget can show the link and the host can
+/// open the browser. CLI callers pass `None` and get stderr prompts instead.
+pub async fn run_kimi_code_login_with_channels(
+    channels: Option<AuthChannels>,
+) -> anyhow::Result<GrokAuth> {
     let host = xai_grok_models::PlatformId::KimiCode
         .oauth_host()
         .ok_or_else(|| anyhow::anyhow!("Kimi Code OAuth host is not configured"))?;
 
+    // Device codes are single-use; only the first request can use url_tx
+    // (oneshot). On restart after expiry we fall back to stderr for CLI and
+    // re-open the browser; TUI already has the channel consumed so we rely on
+    // browser open + logging.
+    let mut channels = channels;
+
     loop {
         let device_auth = request_device_authorization(&host).await?;
-        prompt_on_stderr(&device_auth).await;
+        if let Some(ch) = channels.take() {
+            push_device_url(ch, &device_auth).await;
+        } else {
+            prompt_on_stderr(&device_auth).await;
+        }
 
         match complete_device_code_login(&host, &device_auth).await? {
             PollLoopOutcome::Done(auth) => {
@@ -499,14 +526,47 @@ async fn complete_device_code_login(
     }
 }
 
+/// Prefer the complete URI (pre-fills the user code). Fall back to the bare
+/// verification URI + `?user_code=` so the TUI can still derive the code.
+fn device_display_uri(device_auth: &DeviceAuthorization) -> String {
+    let complete = device_auth.verification_uri_complete.trim();
+    if !complete.is_empty() {
+        return complete.to_owned();
+    }
+    if let Some(base) = device_auth.verification_uri.as_deref() {
+        return url::Url::parse(base)
+            .map(|mut url| {
+                url.query_pairs_mut()
+                    .append_pair("user_code", &device_auth.user_code);
+                url.to_string()
+            })
+            .unwrap_or_else(|_| base.to_owned());
+    }
+    complete.to_owned()
+}
+
+/// Push the device verification URL into the TUI/ACP client and open a browser.
+async fn push_device_url(channels: AuthChannels, device_auth: &DeviceAuthorization) {
+    let display_uri = device_display_uri(device_auth);
+    if let Some(tx) = channels.url_tx {
+        let _ = tx.send(AuthUrlInfo {
+            url: display_uri.clone(),
+            mode: AuthUrlMode::Device,
+        });
+    }
+    // Same as Copilot/device_code: open even when the TUI shows the URL so the
+    // user does not have to copy-paste on desktop.
+    let _ = crate::auth::device_code::open_browser_detached(&display_uri).await;
+}
+
 async fn prompt_on_stderr(device_auth: &DeviceAuthorization) {
-    let display_uri = &device_auth.verification_uri_complete;
+    let display_uri = device_display_uri(device_auth);
     eprintln!();
     eprintln!("To sign in to Kimi Code, open this URL in your browser:");
     eprintln!();
     eprintln!("  {display_uri}");
     eprintln!();
-    if !open_browser_detached(display_uri).await {
+    if !crate::auth::device_code::open_browser_detached(&display_uri).await {
         eprintln!("  (Could not open browser automatically — open the URL above manually.)");
         eprintln!();
     }
@@ -520,24 +580,6 @@ async fn prompt_on_stderr(device_auth: &DeviceAuthorization) {
     );
     eprintln!();
     eprintln!("Waiting for authorization...");
-}
-
-async fn open_browser_detached(url: &str) -> bool {
-    if cfg!(test) {
-        return false;
-    }
-    let url = url.to_owned();
-    match tokio::task::spawn_blocking(move || webbrowser::open(&url)).await {
-        Ok(Ok(())) => true,
-        Ok(Err(e)) => {
-            tracing::info!(error = %e, "kimi auth: could not open browser");
-            false
-        }
-        Err(e) => {
-            tracing::info!(error = %e, "kimi auth: browser-open task failed");
-            false
-        }
-    }
 }
 
 #[cfg(test)]
