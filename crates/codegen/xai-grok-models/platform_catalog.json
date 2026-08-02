@@ -18928,9 +18928,9 @@
     },
     {
       "api_backend": "chat_completions",
-      "context_window": 262144,
+      "context_window": 1000000,
       "description": "Ollama Cloud (offline fallback; live /models syncs the full list)",
-      "max_completion_tokens": 32768,
+      "max_completion_tokens": 384000,
       "model": "deepseek-v4-pro",
       "name": "DeepSeek V4 Pro (Ollama Cloud)",
       "platform": "ollama",
@@ -18965,15 +18965,15 @@
         "path": "chat/completions",
         "query_params": {}
       },
-      "source": "ollama.com/v1/models (2026-07, offline fallback)",
+      "source": "ollama.com/v1/models (2026-08, offline fallback)",
       "supported_in_api": true,
       "supports_reasoning_effort": true
     },
     {
       "api_backend": "chat_completions",
-      "context_window": 262144,
+      "context_window": 1000000,
       "description": "Ollama Cloud (offline fallback; live /models syncs the full list)",
-      "max_completion_tokens": 32768,
+      "max_completion_tokens": 384000,
       "model": "deepseek-v4-flash",
       "name": "DeepSeek V4 Flash (Ollama Cloud)",
       "platform": "ollama",
@@ -19008,7 +19008,50 @@
         "path": "chat/completions",
         "query_params": {}
       },
-      "source": "ollama.com/v1/models (2026-07, offline fallback)",
+      "source": "ollama.com/v1/models (2026-08, offline fallback)",
+      "supported_in_api": true,
+      "supports_reasoning_effort": true
+    },
+    {
+      "api_backend": "chat_completions",
+      "context_window": 1000000,
+      "description": "Ollama Cloud (offline fallback; live /models syncs the full list)",
+      "max_completion_tokens": 384000,
+      "model": "deepseek-v4-flash:0731",
+      "name": "DeepSeek V4 Flash 0731 (Ollama Cloud)",
+      "platform": "ollama",
+      "request_compat": {
+        "chat_completions": {
+          "cache_control_format": null,
+          "chat_template_kwargs": {},
+          "deferred_tools_mode": null,
+          "max_tokens_field": "max_completion_tokens",
+          "openrouter_routing": {},
+          "requires_assistant_after_tool_result": false,
+          "requires_reasoning_content_on_assistant_messages": false,
+          "requires_thinking_as_text": false,
+          "requires_tool_result_name": false,
+          "send_session_affinity_headers": false,
+          "session_affinity_format": "openai",
+          "supports_developer_role": false,
+          "supports_long_cache_retention": true,
+          "supports_openai_grammar_tools": false,
+          "supports_reasoning_effort": true,
+          "supports_store": false,
+          "supports_strict_mode": true,
+          "supports_usage_in_streaming": true,
+          "thinking_format": "openai",
+          "vercel_gateway_routing": {},
+          "zai_tool_stream": false
+        }
+      },
+      "route": {
+        "auth": "bearer",
+        "headers": {},
+        "path": "chat/completions",
+        "query_params": {}
+      },
+      "source": "ollama.com/v1/models (2026-08, offline fallback)",
       "supported_in_api": true,
       "supports_reasoning_effort": true
     },

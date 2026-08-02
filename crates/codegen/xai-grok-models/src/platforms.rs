@@ -3938,8 +3938,29 @@ mod tests {
             "ollama/gpt-oss:120b",
             "ollama/kimi-k2.7-code",
             "ollama/deepseek-v4-pro",
+            "ollama/deepseek-v4-flash",
+            "ollama/deepseek-v4-flash:0731",
         ] {
             assert!(keys.contains(id), "missing offline fallback {id}");
+        }
+        for key in [
+            "ollama/deepseek-v4-flash",
+            "ollama/deepseek-v4-flash:0731",
+            "ollama/deepseek-v4-pro",
+        ] {
+            let m = platform_builtin_models()
+                .iter()
+                .find(|m| m.catalog_key() == key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(
+                m.context_window, 1_000_000,
+                "{key}: DeepSeek V4 on Ollama is 1M context"
+            );
+            assert_eq!(
+                m.max_completion_tokens,
+                Some(384_000),
+                "{key}: DeepSeek V4 max output is 384K"
+            );
         }
         assert!(
             platform_builtin_models().len() >= 100,

@@ -26,6 +26,27 @@ use crate::sampling::ApiBackend;
 /// Default context when the wire omits `context_length`.
 const DEFAULT_CONTEXT_WINDOW: u64 = 256_000;
 
+/// DeepSeek V4 (Flash/Pro) official context + max output (also on Ollama Cloud).
+const DEEPSEEK_V4_CONTEXT_WINDOW: u64 = 1_000_000;
+const DEEPSEEK_V4_MAX_COMPLETION_TOKENS: u32 = 384_000;
+
+/// Offline/live fallback context when `/models` omits `context_length`.
+fn platform_default_context_window(platform: PlatformId, model_id: &str) -> u64 {
+    if platform == PlatformId::Ollama && model_id.starts_with("deepseek-v4") {
+        return DEEPSEEK_V4_CONTEXT_WINDOW;
+    }
+    DEFAULT_CONTEXT_WINDOW
+}
+
+/// Offline/live fallback max completion when the wire omits output caps.
+fn platform_default_max_completion_tokens(platform: PlatformId, model_id: &str) -> u32 {
+    if platform == PlatformId::Ollama && model_id.starts_with("deepseek-v4") {
+        return DEEPSEEK_V4_MAX_COMPLETION_TOKENS;
+    }
+    // Kimi thinking + tool loops need a large cap (docs: default 32k).
+    xai_grok_models::KIMI_DEFAULT_MAX_TOKENS
+}
+
 /// Errors from a single-platform or multi-platform models fetch.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PlatformModelsError {
@@ -455,13 +476,14 @@ pub(crate) fn platform_wire_model_to_entry(
     base_url: &str,
 ) -> ModelEntryConfig {
     let think_efforts = wire.think_efforts.as_ref().filter(|t| t.support);
+    let default_context = platform_default_context_window(platform, &wire.id);
     let context_window = std::num::NonZeroU64::new(wire.context_length).unwrap_or_else(|| {
         tracing::debug!(
             model = %wire.id,
-            default = DEFAULT_CONTEXT_WINDOW,
+            default = default_context,
             "platform model missing context_length; using default"
         );
-        std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW).expect("non-zero")
+        std::num::NonZeroU64::new(default_context).expect("non-zero")
     });
     let env_key = (!platform.uses_oauth())
         .then(|| EnvKeys::new(platform.api_key_env_names().iter().copied()));
@@ -476,14 +498,16 @@ pub(crate) fn platform_wire_model_to_entry(
                     | xai_grok_models::ModelCapability::AlwaysThinking
             )
         });
+    let max_completion_tokens = wire
+        .max_output_tokens
+        .unwrap_or_else(|| platform_default_max_completion_tokens(platform, &wire.id));
     ModelEntryConfig {
         id: Some(platform.managed_model_key(&wire.id)),
         name: Some(wire.display_name.clone().unwrap_or_else(|| wire.id.clone())),
         model: wire.id,
         base_url: base_url.to_owned(),
         description: None,
-        // Kimi thinking + tool loops need a large cap (docs: default 32k).
-        max_completion_tokens: Some(xai_grok_models::KIMI_DEFAULT_MAX_TOKENS),
+        max_completion_tokens: Some(max_completion_tokens),
         // Fixed-sampling models error if non-default temperature/top_p is sent.
         temperature: None,
         top_p: None,
@@ -1269,6 +1293,38 @@ mod tests {
         assert!(entry.env_key.is_some());
         assert!(entry.api_key.is_none());
         assert!(entry.supports_reasoning_effort);
+    }
+
+    #[test]
+    fn ollama_deepseek_v4_defaults_1m_context_and_384k_output() {
+        // Ollama `/v1/models` only returns id/owned_by — no context_length.
+        let wire = WireModel {
+            id: "deepseek-v4-flash:0731".into(),
+            context_length: 0,
+            max_output_tokens: None,
+            supports_reasoning: false,
+            supports_image_in: false,
+            supports_video_in: false,
+            display_name: None,
+            supports_thinking_type: None,
+            think_efforts: None,
+        };
+        let entry = platform_wire_model_to_entry(
+            PlatformId::Ollama,
+            wire,
+            "https://ollama.com/v1",
+        );
+        assert_eq!(
+            entry.id.as_deref(),
+            Some("ollama/deepseek-v4-flash:0731")
+        );
+        assert_eq!(entry.context_window.get(), DEEPSEEK_V4_CONTEXT_WINDOW);
+        assert_eq!(
+            entry.max_completion_tokens,
+            Some(DEEPSEEK_V4_MAX_COMPLETION_TOKENS)
+        );
+        assert!(entry.supported_in_api);
+        assert!(entry.env_key.is_some());
     }
 
     #[test]
