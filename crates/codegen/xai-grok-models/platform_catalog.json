@@ -4016,6 +4016,40 @@
       "api_backend": "messages",
       "base_url_override": "https://api.fireworks.ai/inference",
       "context_window": 1000000,
+      "description": "DeepSeek-V4-Flash-0731 on Fireworks (official release; 1M context)",
+      "max_completion_tokens": 384000,
+      "model": "accounts/fireworks/models/deepseek-v4-flash-0731",
+      "name": "DeepSeek V4 Flash 0731",
+      "platform": "fireworks",
+      "request_compat": {
+        "messages": {
+          "allow_empty_signature": false,
+          "force_adaptive_thinking": false,
+          "send_session_affinity_headers": true,
+          "supports_cache_control_on_tools": false,
+          "supports_eager_tool_input_streaming": false,
+          "supports_long_cache_retention": false,
+          "supports_strict_tools": false,
+          "supports_temperature": true,
+          "supports_tool_references": false
+        }
+      },
+      "route": {
+        "auth": "x_api_key",
+        "headers": {
+          "anthropic-version": "2023-06-01"
+        },
+        "path": "messages",
+        "query_params": {}
+      },
+      "source": "app.fireworks.ai/models/fireworks/deepseek-v4-flash-0731 (2026-08)",
+      "supported_in_api": true,
+      "supports_reasoning_effort": true
+    },
+    {
+      "api_backend": "messages",
+      "base_url_override": "https://api.fireworks.ai/inference",
+      "context_window": 1000000,
       "description": "Official Pi catalog (fireworks)",
       "max_completion_tokens": 384000,
       "model": "accounts/fireworks/models/deepseek-v4-pro",
