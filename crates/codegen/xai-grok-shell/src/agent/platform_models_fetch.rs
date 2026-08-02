@@ -1309,15 +1309,8 @@ mod tests {
             supports_thinking_type: None,
             think_efforts: None,
         };
-        let entry = platform_wire_model_to_entry(
-            PlatformId::Ollama,
-            wire,
-            "https://ollama.com/v1",
-        );
-        assert_eq!(
-            entry.id.as_deref(),
-            Some("ollama/deepseek-v4-flash:0731")
-        );
+        let entry = platform_wire_model_to_entry(PlatformId::Ollama, wire, "https://ollama.com/v1");
+        assert_eq!(entry.id.as_deref(), Some("ollama/deepseek-v4-flash:0731"));
         assert_eq!(entry.context_window.get(), DEEPSEEK_V4_CONTEXT_WINDOW);
         assert_eq!(
             entry.max_completion_tokens,

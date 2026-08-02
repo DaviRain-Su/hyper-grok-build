@@ -46,6 +46,11 @@ pub async fn run_kimi_code_login() -> anyhow::Result<GrokAuth> {
 /// When `channels` is supplied (ACP / fullscreen TUI), the verification URL is
 /// pushed to the client so the login widget can show the link and the host can
 /// open the browser. CLI callers pass `None` and get stderr prompts instead.
+///
+/// Device codes are single-use and the client URL channel is a oneshot: only
+/// the first round can push a fresh URL into the TUI. On expiry the CLI
+/// auto-restarts and re-prompts on stderr; a client/TUI session fails with a
+/// clear error so the user re-runs login and gets a new oneshot channel.
 pub async fn run_kimi_code_login_with_channels(
     channels: Option<AuthChannels>,
 ) -> anyhow::Result<GrokAuth> {
@@ -53,10 +58,10 @@ pub async fn run_kimi_code_login_with_channels(
         .oauth_host()
         .ok_or_else(|| anyhow::anyhow!("Kimi Code OAuth host is not configured"))?;
 
-    // Device codes are single-use; only the first request can use url_tx
-    // (oneshot). On restart after expiry we fall back to stderr for CLI and
-    // re-open the browser; TUI already has the channel consumed so we rely on
-    // browser open + logging.
+    // Capture whether this session started with a client URL channel before
+    // `take()` consumes it. Restart policy depends on that, not on the
+    // post-take `None` (which would otherwise look like CLI).
+    let had_client_channels = channels.is_some();
     let mut channels = channels;
 
     loop {
@@ -86,12 +91,47 @@ pub async fn run_kimi_code_login_with_channels(
                 eprintln!("  TUI:  /model kimi-code/k3");
                 return Ok(auth);
             }
-            PollLoopOutcome::Restart => {
-                tracing::info!("auth: Kimi device code expired, restarting");
-                eprintln!("Device code expired — requesting a new one...");
-                continue;
-            }
+            PollLoopOutcome::Restart => match device_code_expiry_action(had_client_channels) {
+                DeviceCodeExpiryAction::Restart => {
+                    tracing::info!("auth: Kimi device code expired, restarting");
+                    eprintln!("Device code expired — requesting a new one...");
+                    continue;
+                }
+                DeviceCodeExpiryAction::Fail => {
+                    tracing::info!(
+                        "auth: Kimi device code expired under client UI; \
+                         refusing silent restart (oneshot URL channel already consumed)"
+                    );
+                    anyhow::bail!("{DEVICE_CODE_EXPIRED_CLIENT_MSG}");
+                }
+            },
         }
+    }
+}
+
+/// Clear error when a TUI/ACP device-code login expires after the oneshot URL
+/// channel was already delivered. Re-running login allocates a fresh channel.
+const DEVICE_CODE_EXPIRED_CLIENT_MSG: &str = "Kimi device code expired. \
+Re-run login (e.g. `grok login --kimi` or TUI `/login kimi`) to request a new code.";
+
+/// Policy for device-code expiry: CLI auto-restarts; client/TUI must fail so
+/// the next login attempt gets a fresh oneshot URL channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceCodeExpiryAction {
+    Restart,
+    Fail,
+}
+
+/// Decide whether an expired device code should auto-restart the poll loop.
+///
+/// - CLI (`had_client_channels = false`): restart and re-prompt on stderr.
+/// - Client/TUI (`had_client_channels = true`): fail — `url_tx` is oneshot and
+///   already consumed; a silent restart would leave the widget on a stale code.
+fn device_code_expiry_action(had_client_channels: bool) -> DeviceCodeExpiryAction {
+    if had_client_channels {
+        DeviceCodeExpiryAction::Fail
+    } else {
+        DeviceCodeExpiryAction::Restart
     }
 }
 
@@ -625,5 +665,86 @@ mod tests {
         let adopted = try_adopt_sibling_kimi_token(dir.path(), "refresh-old", false)
             .expect("a rotated refresh family must supersede the spent token");
         assert_eq!(adopted.refresh_token.as_deref(), Some("refresh-new"));
+    }
+
+    fn sample_device_auth(
+        complete: &str,
+        verification_uri: Option<&str>,
+        user_code: &str,
+    ) -> DeviceAuthorization {
+        DeviceAuthorization {
+            user_code: user_code.to_owned(),
+            device_code: "device-secret".into(),
+            verification_uri: verification_uri.map(str::to_owned),
+            verification_uri_complete: complete.to_owned(),
+            expires_in: Some(600),
+            interval: 5,
+        }
+    }
+
+    #[test]
+    fn device_display_uri_prefers_complete_uri() {
+        let auth = sample_device_auth(
+            "https://auth.example/device?user_code=ABCD-1234",
+            Some("https://auth.example/device"),
+            "ABCD-1234",
+        );
+        assert_eq!(
+            device_display_uri(&auth),
+            "https://auth.example/device?user_code=ABCD-1234"
+        );
+    }
+
+    #[test]
+    fn device_display_uri_falls_back_to_verification_uri_with_user_code() {
+        let auth = sample_device_auth("", Some("https://auth.example/device"), "WXYZ-9999");
+        let display = device_display_uri(&auth);
+        let url = url::Url::parse(&display).expect("display uri should be a valid URL");
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://auth.example/device")
+        );
+        let pairs: Vec<_> = url.query_pairs().collect();
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "user_code" && v == "WXYZ-9999"),
+            "expected user_code query on fallback URI, got {display}"
+        );
+    }
+
+    #[test]
+    fn device_display_uri_empty_complete_without_base_returns_empty() {
+        let auth = sample_device_auth("   ", None, "CODE");
+        assert_eq!(device_display_uri(&auth), "");
+    }
+
+    #[test]
+    fn client_ui_expiry_fails_so_stale_widget_code_is_not_kept() {
+        assert_eq!(
+            device_code_expiry_action(true),
+            DeviceCodeExpiryAction::Fail
+        );
+    }
+
+    #[test]
+    fn cli_expiry_auto_restarts() {
+        assert_eq!(
+            device_code_expiry_action(false),
+            DeviceCodeExpiryAction::Restart
+        );
+    }
+
+    #[test]
+    fn client_expiry_error_message_tells_user_to_re_run_login() {
+        assert!(DEVICE_CODE_EXPIRED_CLIENT_MSG.contains("expired"));
+        assert!(
+            DEVICE_CODE_EXPIRED_CLIENT_MSG.contains("grok login --kimi"),
+            "must point at Kimi CLI login, not bare `grok login`"
+        );
+        assert!(
+            DEVICE_CODE_EXPIRED_CLIENT_MSG.contains("/login kimi"),
+            "bare TUI `/login` defaults to xAI; must name `/login kimi`"
+        );
     }
 }

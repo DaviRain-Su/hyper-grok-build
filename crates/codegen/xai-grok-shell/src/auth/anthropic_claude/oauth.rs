@@ -218,7 +218,9 @@ pub(crate) async fn refresh_access_token(refresh: &str) -> anyhow::Result<Claude
         "refresh_token": refresh,
         "client_id": client_id(),
     });
-    let request = crate::http::shared_oauth_client().post(token_url()).json(&body);
+    let request = crate::http::shared_oauth_client()
+        .post(token_url())
+        .json(&body);
     let response = tokio::time::timeout(refresh_request_timeout(), request.send())
         .await
         .map_err(|_| anyhow::anyhow!("Anthropic Claude token refresh timed out"))??;

@@ -1066,6 +1066,262 @@ async fn reconstruct_full_config_uses_catalog_platform_on_shared_oauth_proxy() {
         .await;
 }
 
+/// Build a live-catalog Kimi entry for session reconstruct / 401 tests.
+/// Facts must come from `live_catalog_auth_facts` (not a hand-written memo).
+fn kimi_test_catalog_entry(
+    catalog_id: &str,
+    model_slug: &str,
+    api_key: Option<&str>,
+    platform_oauth_active: bool,
+) -> crate::agent::config::ModelEntry {
+    let mut entry = crate::agent::config::ModelEntry::fallback(
+        model_slug,
+        &crate::agent::config::EndpointsConfig::default(),
+    );
+    entry.info.id = Some(catalog_id.to_string());
+    entry.info.model = model_slug.to_string();
+    entry.info.base_url = "https://api.kimi.com/coding/v1".to_string();
+    entry.api_key = api_key.map(str::to_string);
+    entry.platform_oauth_active = platform_oauth_active;
+    entry
+}
+
+/// Regression: hybrid Kimi static API key must not install
+/// `KimiCodeBearerResolver` or drop the stamped key for an xAI session bearer.
+///
+/// a7ae611 made Kimi identity-only (like Codex) and stripped static keys on
+/// every `kimi-code/*` reconstruct. Static path is `Byok && !platform_oauth_active`:
+/// keep the key, strip x-msh-device-*, retain anthropic-version.
+///
+/// Uses `insert_test_entry` so `model_auth_facts` walks live catalog facts
+/// (not a hand-written `ModelAuthMemo`).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_static_kimi_keeps_api_key_without_resolver() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _auth_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+            // Isolate from a developer shell that may set KIMI_CODE_API_KEY.
+            let _clear_kimi =
+                xai_grok_test_support::EnvGuard::unset(xai_grok_models::KIMI_CODE_API_KEY_ENV);
+
+            let catalog_id = "kimi-code/kimi-static-test";
+            let static_key = "static-kimi-live-catalog-key";
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "xai.api_key",
+                xai_chat_state::AuthType::ApiKey,
+                // Chat-state may hold a different seed; live catalog own key wins.
+                "stale-chat-state-seed".to_string(),
+            )
+            .await;
+            if let Some(mut sampling) = actor.chat_state_handle.get_sampling_config().await {
+                sampling.base_url = "https://api.kimi.com/coding/v1".to_string();
+                sampling.model = catalog_id.to_string();
+                // Seed device headers the way a prior OAuth turn / catalog stamp
+                // might leave them; reconstruct must strip them for static mode.
+                sampling
+                    .extra_headers
+                    .insert("x-msh-device-id".to_string(), "stale-device-id".to_string());
+                sampling.extra_headers.insert(
+                    "x-msh-device-name".to_string(),
+                    "stale-device-name".to_string(),
+                );
+                sampling.extra_headers.insert(
+                    "x-msh-device-model".to_string(),
+                    "stale-device-model".to_string(),
+                );
+                actor.chat_state_handle.update_sampling_config(sampling);
+            }
+
+            let entry =
+                kimi_test_catalog_entry(catalog_id, "kimi-for-coding", Some(static_key), false);
+            assert!(
+                entry.has_own_credentials() && !entry.platform_oauth_active,
+                "fixture must be static own-key hybrid path"
+            );
+            actor.models_manager.insert_test_entry(catalog_id, entry);
+            // Ensure we do not short-circuit via a leftover memo from setup.
+            actor.invalidate_model_auth_memo();
+
+            let config = actor.reconstruct_full_config().await;
+            assert!(
+                config.bearer_resolver.is_none(),
+                "static Kimi must not install KimiCodeBearerResolver"
+            );
+            assert_eq!(
+                config.api_key.as_deref(),
+                Some(static_key),
+                "static Kimi must prefer live catalog own key (not strip for OAuth resolver)"
+            );
+            assert!(
+                config.extra_headers.keys().all(|name| {
+                    !name.eq_ignore_ascii_case("x-msh-device-id")
+                        && !name.eq_ignore_ascii_case("x-msh-device-name")
+                        && !name.eq_ignore_ascii_case("x-msh-device-model")
+                }),
+                "static Kimi must not send OAuth device identity headers: {:?}",
+                config.extra_headers.keys().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                config
+                    .extra_headers
+                    .get("anthropic-version")
+                    .map(String::as_str),
+                Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE),
+                "static Kimi Messages route still needs anthropic-version"
+            );
+            assert!(
+                config.kimi_dialect,
+                "Kimi dialect shaping still applies on the static path"
+            );
+        })
+        .await;
+}
+
+/// Pre-login / NotByok Kimi still installs the live resolver from catalog
+/// identity so post-`/login kimi` turns do not stick on a stale
+/// `platform_oauth_active = false` memo.
+///
+/// Live catalog entry (no own credential, oauth stamp inactive) — not a
+/// hand-written memo — so `live_catalog_auth_facts` produces NotByok.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn reconstruct_full_config_installs_kimi_resolver_when_not_byok_pre_login() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _auth_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+            let _clear_kimi =
+                xai_grok_test_support::EnvGuard::unset(xai_grok_models::KIMI_CODE_API_KEY_ENV);
+
+            let catalog_id = "kimi-code/kimi-prelogin-test";
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "stale-session-token".to_string(),
+            )
+            .await;
+            if let Some(mut sampling) = actor.chat_state_handle.get_sampling_config().await {
+                sampling.base_url = "https://api.kimi.com/coding/v1".to_string();
+                sampling.model = catalog_id.to_string();
+                actor.chat_state_handle.update_sampling_config(sampling);
+            }
+
+            let entry = kimi_test_catalog_entry(catalog_id, "kimi-for-coding", None, false);
+            assert!(
+                !entry.has_own_credentials() && !entry.platform_oauth_active,
+                "fixture must be pre-login NotByok hybrid path"
+            );
+            actor.models_manager.insert_test_entry(catalog_id, entry);
+            actor.invalidate_model_auth_memo();
+
+            let config = actor.reconstruct_full_config().await;
+            let resolver = config
+                .bearer_resolver
+                .as_ref()
+                .expect("pre-login Kimi NotByok must install KimiCodeBearerResolver");
+            assert!(
+                format!("{resolver:?}").contains("KimiCodeBearerResolver"),
+                "expected KimiCodeBearerResolver, got {resolver:?}"
+            );
+            assert!(
+                config.api_key.is_none(),
+                "OAuth Kimi path must not fall through to the session/api_key stamp"
+            );
+        })
+        .await;
+}
+
+/// Static Kimi 401 must not enter `force_refresh_kimi_code_auth` / xAI recovery.
+///
+/// Live catalog Byok + !platform_oauth_active drives the predicate (same path
+/// production uses after model_auth_memo is cold).
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn sampler_401_static_kimi_skips_oauth_refresh() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_path = dir.path().join("auth.json");
+            let _auth_guard =
+                xai_grok_test_support::EnvGuard::set("GROK_AUTH_PATH", auth_path.to_str().unwrap());
+            let _clear_kimi = xai_grok_test_support::EnvGuard::unset(
+                xai_grok_models::KIMI_CODE_API_KEY_ENV,
+            );
+
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+                Arc::new(AlwaysSucceedRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let catalog_id = "kimi-code/kimi-static-401";
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am),
+                "cached_token",
+                xai_chat_state::AuthType::ApiKey,
+                "static-kimi-bad-key".to_string(),
+            )
+            .await;
+            if let Some(mut sampling) = actor.chat_state_handle.get_sampling_config().await {
+                sampling.base_url = "https://api.kimi.com/coding/v1".to_string();
+                sampling.model = catalog_id.to_string();
+                actor.chat_state_handle.update_sampling_config(sampling);
+            }
+
+            let entry = kimi_test_catalog_entry(
+                catalog_id,
+                "kimi-for-coding",
+                Some("static-kimi-bad-key"),
+                false,
+            );
+            assert!(entry.has_own_credentials() && !entry.platform_oauth_active);
+            actor.models_manager.insert_test_entry(catalog_id, entry);
+            actor.invalidate_model_auth_memo();
+
+            let result = actor.handle_sampling_failure(auth_error()).await;
+            let err = match result {
+                Err(e) => e,
+                Ok(_) => {
+                    panic!("static Kimi 401 must surface a terminal error, not OAuth/xAI retry")
+                }
+            };
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "static Kimi 401 must NOT trigger xAI session-token refresh"
+            );
+            let data = err.data.expect("error data");
+            let msg = data
+                .as_str()
+                .or_else(|| data.get("message").and_then(|v| v.as_str()))
+                .unwrap_or_default();
+            assert!(
+                msg.contains("static API key")
+                    || msg.contains(xai_grok_models::KIMI_CODE_API_KEY_ENV),
+                "terminal message should point at the static Kimi key setup, got: {msg}"
+            );
+            assert!(
+                msg.contains("/login kimi") || msg.contains("grok login --kimi"),
+                "terminal message should mention real TUI `/login kimi` or CLI `grok login --kimi`, got: {msg}"
+            );
+            assert!(
+                !msg.contains("/login --kimi"),
+                "must not advertise non-existent TUI flag `/login --kimi`, got: {msg}"
+            );
+        })
+        .await;
+}
+
 /// Regression: install `OpenAiCodexBearerResolver` from catalog identity alone.
 ///
 /// A session that selected `openai-codex/*` *before* `/login` memoizes

@@ -6149,6 +6149,13 @@ pub fn sampling_config_for_model(
         route_oauth_platform,
         &credentials.base_url,
     );
+    // Hybrid Kimi: static own API key must not carry OAuth device identity.
+    // Keep `anthropic-version` (Messages protocol); only strip x-msh-device-*.
+    if route_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+        && !model_uses_kimi_code_oauth(model)
+    {
+        remove_kimi_device_headers(&mut extra_headers);
+    }
     let api_backend = info.api_backend.clone();
     // Custom `api_backend = "codex_responses"` forces the Codex adapter even
     // when the catalog id is not `openai-codex/*` (BYOK reverse proxies).
@@ -6315,12 +6322,30 @@ pub fn model_uses_github_copilot_oauth(model: &ModelEntry) -> bool {
         .is_some_and(|(provider, _)| provider.as_str() == "github-copilot")
 }
 
-/// Whether this catalog entry routes through Kimi Code OAuth (subscription).
+/// Whether this catalog entry should use Kimi Code OAuth (live bearer resolver).
+///
+/// Kimi is a **hybrid** provider (static API key *or* subscription OAuth), so
+/// this is not pure catalog identity (unlike OpenAI Codex):
+///
+/// * **Static own credential** (`has_own_credentials && !platform_oauth_active`)
+///   → `false`: keep the stamped API key, do not install
+///   [`KimiCodeBearerResolver`](crate::auth::kimi::KimiCodeBearerResolver)
+///   (the resolver would strip static auth and force OAuth device headers).
+/// * **OAuth active** (`platform_oauth_active`) → `true`.
+/// * **No own credential yet** (pre-login / empty auth.json) → `true` on
+///   catalog identity alone, so a session that selected `kimi-code/*` before
+///   `/login kimi` still installs the live resolver after restamp (avoids
+///   the post-login stale-memo regression that pure `platform_oauth_active`
+///   gating reintroduced for Codex and would reintroduce here).
 pub fn model_uses_kimi_code_oauth(model: &ModelEntry) -> bool {
-    // Catalog identity alone (mirrors OpenAiCodex). `platform_oauth_active` is
-    // a visibility stamp, not a wire gate — the live resolver handles missing
-    // credentials by returning `None`.
-    oauth_platform_for_model(model) == Some(xai_grok_models::PlatformId::KimiCode)
+    if oauth_platform_for_model(model) != Some(xai_grok_models::PlatformId::KimiCode) {
+        return false;
+    }
+    // Static BYOK path: own key stamped and OAuth not selected.
+    if model.has_own_credentials() && !model.platform_oauth_active {
+        return false;
+    }
+    true
 }
 
 /// Whether request bodies should use Moonshot/Kimi-specific shaping
@@ -8042,6 +8067,84 @@ reasoning_effort = "low"
             auth_provider: None,
             platform_oauth_active: false,
             api_base_url: api_base_url.map(|s| s.to_string()),
+        }
+    }
+
+    /// Hybrid Kimi OAuth predicate truth table (static / OAuth active / pre-login)
+    /// plus Codex identity-only (unchanged by the hybrid gate).
+    #[test]
+    fn model_uses_kimi_code_oauth_hybrid_truth_table() {
+        let mut static_kimi = test_model_entry(
+            "kimi-for-coding",
+            "https://api.kimi.com/coding/v1",
+            Some("static-kimi-key"),
+            None,
+            None,
+        );
+        static_kimi.info.id = Some("kimi-code/kimi-for-coding".into());
+        static_kimi.platform_oauth_active = false;
+        assert!(
+            static_kimi.has_own_credentials() && !static_kimi.platform_oauth_active,
+            "precondition: static own key + inactive OAuth stamp"
+        );
+        assert!(
+            !model_uses_kimi_code_oauth(&static_kimi),
+            "static own credential + !platform_oauth_active → no OAuth resolver"
+        );
+        assert!(kimi_code_bearer_resolver_for_model(&static_kimi).is_none());
+
+        let mut oauth_kimi = test_model_entry(
+            "kimi-for-coding",
+            "https://api.kimi.com/coding/v1",
+            Some("oauth-marker"),
+            None,
+            None,
+        );
+        oauth_kimi.info.id = Some("kimi-code/kimi-for-coding".into());
+        oauth_kimi.platform_oauth_active = true;
+        assert!(
+            model_uses_kimi_code_oauth(&oauth_kimi),
+            "platform_oauth_active → install live Kimi resolver"
+        );
+        assert!(kimi_code_bearer_resolver_for_model(&oauth_kimi).is_some());
+
+        let mut pre_login_kimi = test_model_entry(
+            "kimi-for-coding",
+            "https://api.kimi.com/coding/v1",
+            None,
+            None,
+            None,
+        );
+        pre_login_kimi.info.id = Some("kimi-code/kimi-for-coding".into());
+        pre_login_kimi.platform_oauth_active = false;
+        assert!(
+            !pre_login_kimi.has_own_credentials(),
+            "precondition: no own credential (pre-login)"
+        );
+        assert!(
+            model_uses_kimi_code_oauth(&pre_login_kimi),
+            "no own credential → identity-only install (avoid post-login stale memo)"
+        );
+        assert!(kimi_code_bearer_resolver_for_model(&pre_login_kimi).is_some());
+
+        // Codex remains identity-only regardless of stamp / own key.
+        for (api_key, oauth_active) in [(None, false), (None, true), (Some("codex-key"), false)] {
+            let mut codex = test_model_entry(
+                "gpt-5.1-codex",
+                "https://chatgpt.com/backend-api/codex",
+                api_key,
+                None,
+                None,
+            );
+            codex.info.id = Some("openai-codex/gpt-5.1-codex".into());
+            codex.platform_oauth_active = oauth_active;
+            assert!(
+                model_uses_openai_codex_oauth(&codex),
+                "Codex identity-only must not depend on stamp/own-key (active={oauth_active}, key={api_key:?})"
+            );
+            assert!(!model_uses_kimi_code_oauth(&codex));
+            assert!(openai_codex_bearer_resolver_for_model(&codex).is_some());
+            assert!(kimi_code_bearer_resolver_for_model(&codex).is_none());
         }
     }
 

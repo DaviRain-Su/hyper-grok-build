@@ -17,9 +17,10 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 - **Kimi Code OAuth `ECONNRESET` / token refresh failures** — Kimi (and other
   third-party OAuth) token traffic now uses a dedicated HTTP/1.1 client instead
   of the shared HTTP/2 pool, with transport retries that escape onto a fresh
-  connection after reset/GOAWAY. Catalog-identity install for
-  `KimiCodeBearerResolver` matches the Codex fix so post-login turns no longer
-  drop the live bearer after a stale memo.
+  connection after reset/GOAWAY. Kimi's hybrid auth routing now keeps an
+  authoritative static API key when configured, while OAuth/pre-login catalog
+  entries retain the live `KimiCodeBearerResolver` so post-login turns do not
+  drop the bearer after a stale memo.
 - **Ollama / other API-key models retrying with the wrong credential** — Managed
   API-key catalog ids (`ollama/*`, `openrouter/*`, …) and open-platform hosts now
   share one fail-closed path: never install the xAI session bearer resolver,

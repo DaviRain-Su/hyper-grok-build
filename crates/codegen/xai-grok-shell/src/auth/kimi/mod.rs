@@ -13,6 +13,5 @@ pub use device::device_headers;
 pub use login::{
     KimiCodeBearerResolver, ensure_kimi_code_access_token, ensure_kimi_code_access_token_blocking,
     force_refresh_kimi_code_auth, kimi_code_access_token_cached,
-    kimi_code_catalog_access_token_cached, run_kimi_code_login,
-    run_kimi_code_login_with_channels,
+    kimi_code_catalog_access_token_cached, run_kimi_code_login, run_kimi_code_login_with_channels,
 };

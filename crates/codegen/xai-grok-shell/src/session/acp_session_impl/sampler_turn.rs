@@ -549,14 +549,32 @@ impl SessionActor {
         let oauth_platform = model_facts
             .oauth_platform
             .or_else(|| crate::agent::config::oauth_platform_for_base_url(&cfg.base_url));
-        // Kimi OAuth resolver installs on catalog / unambiguous URL identity
-        // alone — same posture as `codex_oauth_route`. Gating on
-        // `platform_oauth_active` left pre-login memo sessions without a
-        // resolver after `/login --kimi` restamped the catalog but not the
-        // memo (live `KimiCodeBearerResolver` re-reads auth.json per request
-        // and returns None when no credential is cached, so unconditional
-        // install on identity is safe).
-        let kimi_oauth_active = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode);
+        // Kimi is hybrid (static API key *or* subscription OAuth). Pure
+        // identity-only install (a7ae611) stripped static keys; pure
+        // `platform_oauth_active` gating left pre-login memo sessions without
+        // a resolver after `/login kimi`. Distinguish with ModelAuthFacts:
+        //
+        // * Byok + !platform_oauth_active → static API-key path (no resolver).
+        // * platform_oauth_active → OAuth path (install live resolver).
+        // * NotByok / Unknown (no own credential yet) → identity-only install
+        //   so post-login restamp can resolve via the live resolver without
+        //   waiting for a memo rewrite.
+        // * URL-only fallback (no catalog platform on facts) → identity when
+        //   the base URL uniquely maps to Kimi.
+        use crate::agent::auth_method::ModelByok;
+        let kimi_static_api_key = oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+            && model_facts.byok == ModelByok::Byok
+            && !model_facts.platform_oauth_active;
+        let kimi_oauth_active = if kimi_static_api_key {
+            false
+        } else if model_facts.oauth_platform == Some(xai_grok_models::PlatformId::KimiCode) {
+            // Catalog identity present: OAuth stamp or pre-login NotByok.
+            model_facts.platform_oauth_active || model_facts.byok != ModelByok::Byok
+        } else {
+            // Preserve the legacy URL-only OAuth fallback only when catalog
+            // identity was unavailable.
+            oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+        };
         // Codex OAuth resolver is installed purely on catalog identity
         // (`openai-codex/*` → `oauth_platform == Some(OpenAiCodex)`), NOT on
         // `platform_oauth_active`. The live `OpenAiCodexBearerResolver`
@@ -574,8 +592,8 @@ impl SessionActor {
         // installed, the request went out with no `Authorization` header,
         // and `auth_retry` looped on 401 until the runaway guard tripped.
         // r7 installed the resolver on `oauth_platform` alone and worked.
-        let codex_oauth_route =
-            oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
+        // Codex is OAuth-only (not hybrid), so identity-only remains correct.
+        let codex_oauth_route = oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
         let oauth_origin = xai_grok_models::PlatformId::KimiCode.base_url_matches(&cfg.base_url)
             || xai_grok_models::PlatformId::OpenAiCodex.base_url_matches(&cfg.base_url);
         let auth_method = self.auth_method_id.load();
@@ -659,6 +677,11 @@ impl SessionActor {
             oauth_platform,
             &cfg.base_url,
         );
+        // Hybrid Kimi static API-key: drop OAuth device identity, keep
+        // `anthropic-version` required by the Messages protocol.
+        if kimi_static_api_key {
+            crate::agent::config::remove_kimi_device_headers(&mut extra_headers);
+        }
         let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
         if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
@@ -694,6 +717,12 @@ impl SessionActor {
             // The resolver is authoritative and performs the sole auth lookup
             // for each HTTP attempt, including the companion account header.
             (None, codex_bearer_resolver)
+        } else if kimi_static_api_key {
+            // Hybrid static Kimi: retain the stamped API key (prefer live
+            // catalog own key over a chat-state JWT left from a prior turn)
+            // and never install KimiCodeBearerResolver or the xAI session
+            // bearer.
+            (live_platform_key.or(creds.api_key), None)
         } else if let Some(kimi) = kimi_bearer_resolver {
             // Kimi access tokens are likewise resolved only when the request
             // is built, avoiding an eager refresh followed by a second lookup.
@@ -1225,7 +1254,18 @@ impl SessionActor {
             .or_else(|| crate::agent::config::oauth_platform_for_base_url(&failed_base_url));
         let is_openai_codex =
             failed_oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex);
-        let is_kimi_code = failed_oauth_platform == Some(xai_grok_models::PlatformId::KimiCode);
+        // Hybrid Kimi: only OAuth-active (or pre-login NotByok identity) routes
+        // may call `force_refresh_kimi_code_auth`. A static own API key
+        // (`Byok && !platform_oauth_active`) must surface the 401 — OAuth
+        // refresh cannot fix a rejected static key and would loop.
+        use crate::agent::auth_method::ModelByok as FailureByok;
+        let is_kimi_static_api_key = failed_oauth_platform
+            == Some(xai_grok_models::PlatformId::KimiCode)
+            && failed_model_facts.byok == FailureByok::Byok
+            && !failed_model_facts.platform_oauth_active;
+        let is_kimi_code_oauth = failed_oauth_platform
+            == Some(xai_grok_models::PlatformId::KimiCode)
+            && !is_kimi_static_api_key;
         let is_anthropic_claude =
             failed_oauth_platform == Some(xai_grok_models::PlatformId::AnthropicClaude);
         let is_github_copilot_oauth = failed_github_copilot_oauth;
@@ -1248,7 +1288,7 @@ impl SessionActor {
                     );
                     self.prepare_sampler_for_turn().await;
                     return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        credential: error.credential.clone(),
+                        credential: error.credential,
                         store: RecoveredStore::AuthProvider,
                     });
                 }
@@ -1265,7 +1305,27 @@ impl SessionActor {
                 }
             }
         } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
-            && is_kimi_code
+            && is_kimi_static_api_key
+        {
+            // Static Kimi API key rejected: do not OAuth-refresh and do not
+            // fall through to xAI AuthManager (wrong credential family).
+            tracing::warn!(
+                session_id = % self.session_info.id.0,
+                "auth recovery: static Kimi API key rejected; refusing OAuth/xAI credential refresh"
+            );
+            xai_grok_telemetry::unified_log::warn(
+                "auth recovery: static Kimi API key rejected",
+                Some(self.session_info.id.0.as_ref()),
+                None,
+            );
+            detailed_message = format!(
+                "{detailed_message}\n\n\
+                 The Kimi Code endpoint rejected its static API key. Check \
+                 {} / `/providers kimi` (or switch to `/login kimi` / `grok login --kimi` OAuth).",
+                xai_grok_models::KIMI_CODE_API_KEY_ENV
+            );
+        } else if (matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401))
+            && is_kimi_code_oauth
         {
             // Do not fall through to xAI AuthManager recovery (wrong credential).
             // Force a Kimi token refresh mirroring the openai-codex path; only
@@ -1284,7 +1344,7 @@ impl SessionActor {
                     );
                     self.prepare_sampler_for_turn().await;
                     return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        credential: error.credential.clone(),
+                        credential: error.credential,
                         store: RecoveredStore::AuthProvider,
                     });
                 }
@@ -1318,7 +1378,7 @@ impl SessionActor {
                     );
                     self.prepare_sampler_for_turn().await;
                     return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        credential: error.credential.clone(),
+                        credential: error.credential,
                         store: RecoveredStore::AuthProvider,
                     });
                 }
@@ -1354,7 +1414,7 @@ impl SessionActor {
                     );
                     self.prepare_sampler_for_turn().await;
                     return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        credential: error.credential.clone(),
+                        credential: error.credential,
                         store: RecoveredStore::AuthProvider,
                     });
                 }
@@ -1389,7 +1449,7 @@ impl SessionActor {
                     );
                     self.prepare_sampler_for_turn().await;
                     return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
-                        credential: error.credential.clone(),
+                        credential: error.credential,
                         store: RecoveredStore::AuthProvider,
                     });
                 }

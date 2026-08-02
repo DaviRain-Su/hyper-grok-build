@@ -790,44 +790,90 @@ async fn read_parent_sampling_config(
             let same_baseline_route = ctx.sampling_config.model == cfg.model
                 && ctx.sampling_config.base_url.trim_end_matches('/')
                     == cfg.base_url.trim_end_matches('/');
-            let (bearer_resolver, codex_oauth_active, kimi_dialect) = match parent_model {
-                Some(model) => (
-                    crate::agent::config::kimi_code_bearer_resolver_for_model(model).or_else(
-                        || crate::agent::config::openai_codex_bearer_resolver_for_model(model),
-                    ),
-                    crate::agent::config::model_uses_openai_codex_oauth(model),
-                    crate::agent::config::model_uses_kimi_request_dialect(model),
-                ),
-                None => (
-                    match oauth_platform {
-                        Some(xai_grok_models::PlatformId::KimiCode) => {
-                            crate::agent::config::kimi_code_bearer_resolver_for_base_url(
-                                &cfg.base_url,
-                            )
-                        }
-                        Some(xai_grok_models::PlatformId::OpenAiCodex) => {
-                            crate::agent::config::openai_codex_bearer_resolver_for_base_url(
-                                &cfg.base_url,
-                            )
-                        }
-                        _ if !oauth_origin && same_baseline_route => {
-                            ctx.sampling_config.bearer_resolver.clone()
-                        }
-                        _ => None,
-                    },
-                    oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex),
-                    oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
-                        || xai_grok_models::PlatformId::MoonshotCn.base_url_matches(&cfg.base_url)
-                        || xai_grok_models::PlatformId::MoonshotAi.base_url_matches(&cfg.base_url),
-                ),
-            };
+            let (bearer_resolver, codex_oauth_active, kimi_dialect, kimi_oauth_active) =
+                match parent_model {
+                    Some(model) => {
+                        // Hybrid Kimi: static own key + !platform_oauth_active is
+                        // not OAuth — use the shared helper (do not reimplement).
+                        let kimi_oauth = crate::agent::config::model_uses_kimi_code_oauth(model);
+                        (
+                            crate::agent::config::kimi_code_bearer_resolver_for_model(model)
+                                .or_else(|| {
+                                    crate::agent::config::openai_codex_bearer_resolver_for_model(
+                                        model,
+                                    )
+                                }),
+                            crate::agent::config::model_uses_openai_codex_oauth(model),
+                            crate::agent::config::model_uses_kimi_request_dialect(model),
+                            kimi_oauth,
+                        )
+                    }
+                    None => {
+                        // URL-only fallback (catalog miss). Shared Kimi/Codex
+                        // proxies fail-closed via `oauth_platform = None`.
+                        // Unique Kimi origin precedence:
+                        // 1) trusted same-route baseline resolver → OAuth
+                        // 2) live key equals persisted Kimi catalog token
+                        //    (compare only, never log) → OAuth
+                        // 3) live AuthType::ApiKey that is not the persisted
+                        //    Kimi token → static (keep key, no resolver)
+                        // 4) SessionToken / unrelated / empty key → install
+                        //    Kimi identity resolver (pre-login or fail-open
+                        //    to live OAuth refresh); strip stamped key
+                        let trusted_baseline_resolver =
+                            same_baseline_route && ctx.sampling_config.bearer_resolver.is_some();
+                        let live_key = creds.api_key.as_deref().filter(|k| !k.trim().is_empty());
+                        let matches_persisted_kimi = live_key.is_some_and(|key| {
+                            crate::auth::kimi::kimi_code_catalog_access_token_cached()
+                                .as_deref()
+                                .is_some_and(|persisted| persisted == key)
+                        });
+                        let live_static_api_key = live_key.is_some()
+                            && creds.auth_type == xai_chat_state::AuthType::ApiKey
+                            && !matches_persisted_kimi;
+                        let bearer_resolver = match oauth_platform {
+                            Some(xai_grok_models::PlatformId::KimiCode)
+                                if trusted_baseline_resolver =>
+                            {
+                                ctx.sampling_config.bearer_resolver.clone()
+                            }
+                            Some(xai_grok_models::PlatformId::KimiCode) if live_static_api_key => {
+                                None
+                            }
+                            Some(xai_grok_models::PlatformId::KimiCode) => {
+                                crate::agent::config::kimi_code_bearer_resolver_for_base_url(
+                                    &cfg.base_url,
+                                )
+                            }
+                            Some(xai_grok_models::PlatformId::OpenAiCodex) => {
+                                crate::agent::config::openai_codex_bearer_resolver_for_base_url(
+                                    &cfg.base_url,
+                                )
+                            }
+                            _ if !oauth_origin && same_baseline_route => {
+                                ctx.sampling_config.bearer_resolver.clone()
+                            }
+                            _ => None,
+                        };
+                        let kimi_oauth_active = oauth_platform
+                            == Some(xai_grok_models::PlatformId::KimiCode)
+                            && bearer_resolver.is_some();
+                        (
+                            bearer_resolver,
+                            oauth_platform == Some(xai_grok_models::PlatformId::OpenAiCodex),
+                            oauth_platform == Some(xai_grok_models::PlatformId::KimiCode)
+                                || xai_grok_models::PlatformId::MoonshotCn
+                                    .base_url_matches(&cfg.base_url)
+                                || xai_grok_models::PlatformId::MoonshotAi
+                                    .base_url_matches(&cfg.base_url),
+                            kimi_oauth_active,
+                        )
+                    }
+                };
             let responses_codex_dialect = cfg.api_backend
                 == crate::sampling::ApiBackend::CodexResponses
                 || cfg.adapter_kind == xai_grok_models::AdapterKind::OpenAiCodex
                 || codex_oauth_active;
-            let kimi_oauth_active = parent_model
-                .map(crate::agent::config::model_uses_kimi_code_oauth)
-                .unwrap_or(oauth_platform == Some(xai_grok_models::PlatformId::KimiCode));
             let auth_scheme = parent_model
                 .map(|model| model.info().auth_scheme)
                 .or_else(|| {
@@ -853,13 +899,18 @@ async fn read_parent_sampling_config(
             }
             let fail_closed_ambiguous_oauth =
                 parent_model.is_none() && oauth_origin && oauth_platform.is_none();
-            let strip_guard = ctx.would_strip_fallback_key(creds.api_key.as_deref());
-            let inherited = xai_grok_sampler::SamplerConfig {
-                api_key: if kimi_oauth_active || codex_oauth_active || fail_closed_ambiguous_oauth {
+            // OAuth / fail-closed paths clear the stamped key first. Evaluate
+            // strip_guard against the *effective* key so a stale SessionToken
+            // (or OAuth marker) cannot suppress a live Kimi/Codex resolver.
+            let effective_api_key =
+                if kimi_oauth_active || codex_oauth_active || fail_closed_ambiguous_oauth {
                     None
                 } else {
                     creds.api_key
-                },
+                };
+            let strip_guard = ctx.would_strip_fallback_key(effective_api_key.as_deref());
+            let inherited = xai_grok_sampler::SamplerConfig {
+                api_key: effective_api_key,
                 base_url: cfg.base_url,
                 model: cfg.model.clone(),
                 max_completion_tokens: cfg.max_completion_tokens,

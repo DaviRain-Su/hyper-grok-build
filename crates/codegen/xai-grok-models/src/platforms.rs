@@ -3967,7 +3967,9 @@ mod tests {
         }
         let fw_flash_0731 = platform_builtin_models()
             .iter()
-            .find(|m| m.catalog_key() == "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731")
+            .find(|m| {
+                m.catalog_key() == "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731"
+            })
             .expect("fireworks deepseek-v4-flash-0731");
         assert_eq!(
             fw_flash_0731.api_backend,

@@ -1851,6 +1851,338 @@ async fn read_parent_sampling_config_wires_kimi_code_bearer_resolver() {
     assert!(!config.extra_headers.contains_key("originator"));
 }
 
+/// Hybrid Kimi static API-key path: subagent must inherit the parent's
+/// stamped key, skip `KimiCodeBearerResolver`, drop x-msh-device-*, keep
+/// anthropic-version + kimi dialect. Mirrors parent
+/// `kimi_static_api_key_wins_over_oauth_marker_without_device_identity`.
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_keeps_kimi_static_api_key() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    let mut kimi = test_model_entry("k2p7");
+    kimi.info.id = Some("kimi-code/k2p7".to_string());
+    kimi.info.base_url = "https://api.kimi.com/coding/v1".to_string();
+    kimi.api_key = Some("static-kimi-test-key".to_string());
+    kimi.platform_oauth_active = false;
+    // Static own credential must not classify as OAuth (agent A helper).
+    assert!(
+        !crate::agent::config::model_uses_kimi_code_oauth(&kimi),
+        "static Kimi own key + !platform_oauth_active is not OAuth"
+    );
+    assert!(crate::agent::config::kimi_code_bearer_resolver_for_model(&kimi).is_none());
+
+    let mut models = indexmap::IndexMap::new();
+    models.insert("auto".to_string(), kimi);
+    let mut ctx = ctx_with_parent_chat_state("auto", "k2p7", "auto", models);
+    let parent = spawn_test_parent_chat_state_at("k2p7", "https://api.kimi.com/coding/v1");
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("static-kimi-test-key".to_string()),
+        ..Default::default()
+    });
+    // Parent live sampling may already carry device headers from URL injection;
+    // inheritance must strip them for the static path.
+    let mut sampling = parent.get_sampling_config().await.unwrap();
+    sampling.extra_headers.insert(
+        "x-msh-device-id".to_string(),
+        "must-be-stripped".to_string(),
+    );
+    sampling.extra_headers.insert(
+        "anthropic-version".to_string(),
+        xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.to_string(),
+    );
+    parent.update_sampling_config(sampling);
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(model_id.0.as_ref(), "auto");
+    assert_eq!(config.api_key.as_deref(), Some("static-kimi-test-key"));
+    assert!(
+        config.bearer_resolver.is_none(),
+        "static Kimi must not install KimiCodeBearerResolver: {:?}",
+        config.bearer_resolver
+    );
+    assert!(config.kimi_dialect);
+    assert!(!config.responses_codex_dialect);
+    assert!(
+        config.extra_headers.keys().all(|name| {
+            !name.eq_ignore_ascii_case("x-msh-device-id")
+                && !name.eq_ignore_ascii_case("x-msh-device-name")
+                && !name.eq_ignore_ascii_case("x-msh-device-model")
+        }),
+        "static Kimi must not carry OAuth device identity: {:?}",
+        config.extra_headers
+    );
+    assert_eq!(
+        config
+            .extra_headers
+            .get("anthropic-version")
+            .map(String::as_str),
+        Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE),
+        "Messages protocol header must survive static-key inheritance"
+    );
+}
+
+/// Catalog miss + same baseline route with a static buffered ApiKey must not
+/// invent a Kimi OAuth resolver from the URL alone.
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_catalog_miss_keeps_kimi_static_key() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    // Empty catalog → parent_model is None; URL is uniquely Kimi.
+    let models = indexmap::IndexMap::new();
+    let mut ctx = ctx_with_parent_chat_state("auto", "k2p7", "auto", models);
+    ctx.sampling_config.model = "k2p7".to_string();
+    ctx.sampling_config.base_url = "https://api.kimi.com/coding/v1".to_string();
+    ctx.sampling_config.api_key = Some("static-kimi-buffered".to_string());
+    ctx.sampling_config.bearer_resolver = None;
+    ctx.sampling_config.kimi_dialect = true;
+
+    let parent = spawn_test_parent_chat_state_at("k2p7", "https://api.kimi.com/coding/v1");
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("static-kimi-buffered".to_string()),
+        auth_type: xai_chat_state::AuthType::ApiKey,
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(config.api_key.as_deref(), Some("static-kimi-buffered"));
+    assert!(
+        config.bearer_resolver.is_none(),
+        "URL-only Kimi with baseline static key must not force OAuth: {:?}",
+        config.bearer_resolver
+    );
+    assert!(config.kimi_dialect);
+    assert!(
+        config.extra_headers.keys().all(|name| {
+            !name.eq_ignore_ascii_case("x-msh-device-id")
+                && !name.eq_ignore_ascii_case("x-msh-device-name")
+                && !name.eq_ignore_ascii_case("x-msh-device-model")
+        }),
+        "static fallback must strip device headers: {:?}",
+        config.extra_headers
+    );
+}
+
+/// Catalog miss + route mismatch: live chat-state has AuthType::ApiKey static
+/// Kimi credential, but spawn baseline model/base_url differ and carry no
+/// resolver. Must keep the key (not invent OAuth from the Kimi URL alone).
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_catalog_miss_route_mismatch_keeps_live_static_key() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    // Empty catalog → parent_model is None.
+    let models = indexmap::IndexMap::new();
+    let mut ctx = ctx_with_parent_chat_state("auto", "k2p7", "auto", models);
+    // Spawn baseline deliberately mismatches the live chat-state route.
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    ctx.sampling_config.api_key = None;
+    ctx.sampling_config.bearer_resolver = None;
+
+    let parent = spawn_test_parent_chat_state_at("k2p7", "https://api.kimi.com/coding/v1");
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("static-kimi-live".to_string()),
+        auth_type: xai_chat_state::AuthType::ApiKey,
+        ..Default::default()
+    });
+    let mut sampling = parent.get_sampling_config().await.unwrap();
+    sampling.extra_headers.insert(
+        "x-msh-device-id".to_string(),
+        "must-be-stripped".to_string(),
+    );
+    sampling.extra_headers.insert(
+        "anthropic-version".to_string(),
+        xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE.to_string(),
+    );
+    parent.update_sampling_config(sampling);
+    ctx.parent_chat_state = Some(parent);
+
+    // same_baseline_route must be false for this regression.
+    assert_ne!(
+        ctx.sampling_config.base_url.trim_end_matches('/'),
+        "https://api.kimi.com/coding/v1"
+    );
+
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    assert_eq!(config.api_key.as_deref(), Some("static-kimi-live"));
+    assert!(
+        config.bearer_resolver.is_none(),
+        "route-mismatched catalog miss must not invent Kimi OAuth over a live static key: {:?}",
+        config.bearer_resolver
+    );
+    assert!(config.kimi_dialect);
+    assert!(
+        config.extra_headers.keys().all(|name| {
+            !name.eq_ignore_ascii_case("x-msh-device-id")
+                && !name.eq_ignore_ascii_case("x-msh-device-name")
+                && !name.eq_ignore_ascii_case("x-msh-device-model")
+        }),
+        "static live key must strip device headers: {:?}",
+        config.extra_headers
+    );
+    assert_eq!(
+        config
+            .extra_headers
+            .get("anthropic-version")
+            .map(String::as_str),
+        Some(xai_grok_models::ANTHROPIC_VERSION_HEADER_VALUE)
+    );
+}
+
+/// Catalog miss + route mismatch + AuthType::SessionToken (stale xAI JWT):
+/// no trusted static provenance → install Kimi resolver and clear the key
+/// so a foreign session token is never sent to Kimi.
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_catalog_miss_route_mismatch_session_token_uses_kimi_oauth() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    let models = indexmap::IndexMap::new();
+    let mut ctx = ctx_with_parent_chat_state("auto", "k2p7", "auto", models);
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    ctx.sampling_config.api_key = Some("stale-xai-session-jwt".to_string());
+    ctx.sampling_config.bearer_resolver = None;
+
+    let parent = spawn_test_parent_chat_state_at("k2p7", "https://api.kimi.com/coding/v1");
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("stale-xai-session-jwt".to_string()),
+        auth_type: xai_chat_state::AuthType::SessionToken,
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    let resolver = config
+        .bearer_resolver
+        .expect("SessionToken without static provenance must install Kimi OAuth");
+    assert!(
+        format!("{resolver:?}").contains("KimiCodeBearerResolver"),
+        "expected KimiCodeBearerResolver, got {resolver:?}"
+    );
+    assert!(
+        config.api_key.is_none(),
+        "stale xAI SessionToken must not be forwarded to Kimi"
+    );
+    assert!(config.kimi_dialect);
+}
+
+/// Catalog miss + route mismatch + live key equals persisted Kimi OAuth
+/// access token: treat as OAuth (install resolver, clear stamped key).
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_catalog_miss_persisted_kimi_token_uses_oauth() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let auth_path = dir.path().join("auth.json");
+    let _auth_home = xai_grok_test_support::EnvGuard::set(
+        "GROK_AUTH_PATH",
+        auth_path.to_str().unwrap(),
+    );
+    let kimi_access = "persisted-kimi-access-token";
+    crate::auth::store_kimi_code_auth(
+        dir.path(),
+        &crate::auth::GrokAuth {
+            key: kimi_access.into(),
+            auth_mode: crate::auth::AuthMode::KimiCode,
+            create_time: chrono::Utc::now(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            refresh_token: Some("persisted-refresh".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::auth::kimi::kimi_code_catalog_access_token_cached().as_deref(),
+        Some(kimi_access)
+    );
+
+    let models = indexmap::IndexMap::new();
+    let mut ctx = ctx_with_parent_chat_state("auto", "k2p7", "auto", models);
+    ctx.sampling_config.model = "grok-4.5".to_string();
+    ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
+    ctx.sampling_config.api_key = None;
+    ctx.sampling_config.bearer_resolver = None;
+
+    let parent = spawn_test_parent_chat_state_at("k2p7", "https://api.kimi.com/coding/v1");
+    // Even if chat-state stamps AuthType::ApiKey, matching the persisted
+    // Kimi access token must not be treated as a static BYOK key.
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some(kimi_access.to_string()),
+        auth_type: xai_chat_state::AuthType::ApiKey,
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    let resolver = config
+        .bearer_resolver
+        .expect("persisted Kimi access token must install live OAuth resolver");
+    assert!(
+        format!("{resolver:?}").contains("KimiCodeBearerResolver"),
+        "expected KimiCodeBearerResolver, got {resolver:?}"
+    );
+    assert!(
+        config.api_key.is_none(),
+        "catalog-stamped Kimi OAuth token must be cleared for the live resolver"
+    );
+}
+
+/// Catalog miss + same-route baseline already carries a Kimi resolver:
+/// trusted OAuth inheritance wins over a live buffered key.
+#[tokio::test]
+#[serial_test::serial]
+async fn read_parent_sampling_config_catalog_miss_trusted_baseline_resolver_wins() {
+    let _byok = xai_grok_test_support::unset_all_byok_platform_api_key_envs();
+    let _base_guard = xai_grok_test_support::EnvGuard::unset(
+        xai_grok_models::KIMI_CODE_BASE_URL_ENV,
+    );
+    let models = indexmap::IndexMap::new();
+    let mut ctx = ctx_with_parent_chat_state("auto", "k2p7", "auto", models);
+    ctx.sampling_config.model = "k2p7".to_string();
+    ctx.sampling_config.base_url = "https://api.kimi.com/coding/v1".to_string();
+    ctx.sampling_config.api_key = None;
+    ctx.sampling_config.bearer_resolver = Some(std::sync::Arc::new(
+        crate::auth::kimi::KimiCodeBearerResolver,
+    ) as xai_grok_sampler::SharedBearerResolver);
+
+    let parent = spawn_test_parent_chat_state_at("k2p7", "https://api.kimi.com/coding/v1");
+    parent.update_credentials(xai_chat_state::Credentials {
+        api_key: Some("stale-buffered-marker".to_string()),
+        auth_type: xai_chat_state::AuthType::ApiKey,
+        ..Default::default()
+    });
+    ctx.parent_chat_state = Some(parent);
+
+    let (config, _) = read_parent_sampling_config(&ctx).await;
+    let resolver = config
+        .bearer_resolver
+        .expect("same-route baseline resolver must be trusted OAuth");
+    assert!(
+        format!("{resolver:?}").contains("KimiCodeBearerResolver"),
+        "expected baseline KimiCodeBearerResolver, got {resolver:?}"
+    );
+    assert!(
+        config.api_key.is_none(),
+        "trusted OAuth path must clear the stamped key"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn read_parent_sampling_config_uses_catalog_platform_on_shared_oauth_proxy() {

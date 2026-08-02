@@ -416,10 +416,7 @@ async fn refresh_token_with_timeout(
         let (status, body) = match attempt_result {
             Ok(Ok(response)) => response,
             Ok(Err(e)) if is_retryable_oauth_transport(&e) => {
-                last_error = format!(
-                    "network error: {}",
-                    xai_grok_http::error_cause_chain(&e)
-                );
+                last_error = format!("network error: {}", xai_grok_http::error_cause_chain(&e));
                 tracing::warn!(
                     attempt,
                     error = %last_error,
