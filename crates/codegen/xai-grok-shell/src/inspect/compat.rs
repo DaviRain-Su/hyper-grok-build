@@ -198,33 +198,67 @@ mod tests {
     fn empty_config_reports_defaults_and_remote_not_loaded() {
         let effective_config = toml::Value::Table(toml::map::Map::new());
         let report = resolve_without_env(Ok(&effective_config));
+        let defaults = CompatConfig::default();
+        // Must track COMPAT_CELLS runtime-supported set (not a hard-coded count):
+        // cursor/claude × 6 surfaces + codex/omp sessions-only.
+        let expected_cells: Vec<_> = COMPAT_CELLS
+            .into_iter()
+            .filter(|cell| cell.is_runtime_supported())
+            .map(|cell| (cell.vendor().as_str(), cell.surface().as_str()))
+            .collect();
 
         assert!(!report.remote_settings_loaded);
-        assert_eq!(report.cells.len(), 13);
+        assert_eq!(
+            report
+                .cells
+                .iter()
+                .map(|entry| (entry.vendor.as_str(), entry.surface.as_str()))
+                .collect::<Vec<_>>(),
+            expected_cells
+        );
         assert!(
             report
                 .cells
                 .iter()
-                .all(|cell| cell.enabled && cell.source == CompatSource::Default)
+                .all(|cell| cell.enabled && cell.source == CompatSource::Default),
+            "empty config must resolve every reported cell from defaults (enabled)"
         );
-        assert_eq!(
-            report
-                .cells
-                .iter()
-                .filter(|entry| entry.vendor == "codex")
-                .map(|entry| entry.surface.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sessions"]
-        );
-        let session = entry(&report, "codex", "sessions");
-        assert_eq!(session.enabled, CompatConfig::default().codex.sessions);
-        assert_eq!(session.source, CompatSource::Default);
+
+        // Session-only vendors: only the sessions surface is runtime-supported.
+        for vendor in ["codex", "omp"] {
+            assert_eq!(
+                report
+                    .cells
+                    .iter()
+                    .filter(|entry| entry.vendor == vendor)
+                    .map(|entry| entry.surface.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["sessions"],
+                "{vendor} must report only sessions"
+            );
+        }
+        let codex_session = entry(&report, "codex", "sessions");
+        assert_eq!(codex_session.enabled, defaults.codex.sessions);
+        assert_eq!(codex_session.source, CompatSource::Default);
+        let omp_session = entry(&report, "omp", "sessions");
+        assert_eq!(omp_session.enabled, defaults.omp.sessions);
+        assert_eq!(omp_session.source, CompatSource::Default);
+
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["remoteSettingsLoaded"], false);
         assert_eq!(
-            serde_json::to_value(session).unwrap(),
+            serde_json::to_value(codex_session).unwrap(),
             serde_json::json!({
                 "vendor": "codex",
+                "surface": "sessions",
+                "enabled": true,
+                "source": "default"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(omp_session).unwrap(),
+            serde_json::json!({
+                "vendor": "omp",
                 "surface": "sessions",
                 "enabled": true,
                 "source": "default"

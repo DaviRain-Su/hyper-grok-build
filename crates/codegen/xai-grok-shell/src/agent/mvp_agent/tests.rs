@@ -4246,6 +4246,21 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
 }
 /// Agent with pre-loaded auth, a gateway receiver (to assert emitted
 /// notifications), and the proxy URL pointed at a mock `/v1/settings`.
+///
+/// Bootstrap (`MvpAgent::new` → `ensure_remote_settings_side_effects`) early-
+/// prefetches via `AuthManager::new(grok_home(), …).current()` and
+/// `EndpointsConfig::from_effective_config()` — i.e. the process home / effective
+/// config, not this fixture's `AuthManager` or mock URL. A live developer
+/// session under `~/.grok` can therefore install `cfg.remote_settings` before
+/// the mock is ever consulted. That short-circuits
+/// [`MvpAgent::maybe_fetch_post_auth_settings`] (early-return when settings are
+/// already present), so the OTEL gate is never rearmed/resolved, storage mode
+/// never upgrades from the mock's `writeback_enabled`, and logout-during-fetch
+/// assertions observe ambient fleet policy instead of the fixture lifecycle.
+///
+/// We isolate `GROK_HOME` for bootstrap (best-effort against a cold
+/// `grok_home()` OnceLock) and always clear any prefetched
+/// `remote_settings` so post-auth tests exercise the mock path.
 fn build_agent_with_auth_and_proxy(
     auth: crate::auth::GrokAuth,
     proxy_url: String,
@@ -4256,7 +4271,11 @@ fn build_agent_with_auth_and_proxy(
 ) {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, GrokComConfig};
+    use xai_grok_test_support::EnvGuard;
     let temp_dir = tempfile::tempdir().unwrap();
+    // Best-effort: only effective when `grok_home()` has not been initialized
+    // yet in this process (it is a `OnceLock`).
+    let _isolated_home = EnvGuard::set("GROK_HOME", temp_dir.path());
     let auth_manager =
         std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
     auth_manager.hot_swap(auth);
@@ -4268,6 +4287,10 @@ fn build_agent_with_auth_and_proxy(
     };
     cfg.endpoints.cli_chat_proxy_base_url = Some(proxy_url);
     let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    // Drop ambient early-prefetch settings so callers exercise the mock
+    // post-auth path. Keep the fixture's proxy URL (bootstrap may re-merge
+    // endpoints from effective config layers).
+    agent.cfg.borrow_mut().remote_settings = None;
     (agent, rx)
 }
 /// Drain the gateway, returning `true` if any `x.ai/settings/update`
