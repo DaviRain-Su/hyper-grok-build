@@ -1472,6 +1472,7 @@ impl SessionActor {
     /// Shell outer loop: goal continuation + stop gate around each agent round.
     ///
     /// Each round is Hypercore (when enabled) or legacy `process_conversation_turn`.
+    /// Outer rounds use stable unique Hypercore turn ids (`r0`, `r1`, …).
     async fn run_turn_outer_loop(
         self: &Arc<Self>,
         prompt_id: &str,
@@ -1487,6 +1488,7 @@ impl SessionActor {
         // stripping; goal/stop continuations inject new user rows that Hypercore
         // must see as the current turn text.
         let mut round_user_text = user_text.to_string();
+        let mut outer_round: u32 = 0;
         loop {
             if self.goal_harness_enabled() {
                 let goal_loop_active = self.goal_tracker.lock().status()
@@ -1500,6 +1502,7 @@ impl SessionActor {
                     round_trace.take(),
                     round_artifact.take(),
                     json_schema.clone(),
+                    outer_round,
                 )
                 .await;
             if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
@@ -1533,6 +1536,7 @@ impl SessionActor {
                 if let GoalRoundDecision::Continue(directive) = decision {
                     round_user_text = directive.clone();
                     self.inject_goal_continuation_message(directive).await;
+                    outer_round = outer_round.saturating_add(1);
                     continue;
                 }
             }
@@ -1546,6 +1550,7 @@ impl SessionActor {
                     round_user_text = feedback.clone();
                     self.chat_state_handle
                         .push_user_message(ConversationItem::stop_hook_feedback(feedback));
+                    outer_round = outer_round.saturating_add(1);
                 }
             }
         }
@@ -1553,8 +1558,10 @@ impl SessionActor {
 
     /// One agent round: legacy by default, experimental Hypercore on explicit opt-in.
     ///
-    /// P6 containment policy: do not delete `process_conversation_turn`; keep it
-    /// as the default path and as the per-round fallback when Hypercore errors.
+    /// P6 containment: legacy remains the default production path and is selected
+    /// only by capability / path decision **before** entering Hypercore. Once
+    /// Hypercore is entered, non-Abort errors propagate (no same-round legacy
+    /// fallback).
     async fn run_one_agent_round(
         self: &Arc<Self>,
         prompt_id: &str,
@@ -1562,65 +1569,61 @@ impl SessionActor {
         trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
         artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
         json_schema: Option<serde_json::Value>,
+        outer_round: u32,
     ) -> Result<TurnOutcome, acp::Error> {
-        let decision = super::hypercore_turn::hypercore_path_decision(user_text);
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let decision = super::hypercore_turn::hypercore_path_decision_for_conversation(
+            user_text,
+            &conversation,
+        );
         if decision.uses_hypercore() {
-            match self
-                .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone())
-                .await
-            {
-                Ok(outcome) => {
-                    tracing::info!(
-                        session_id = %self.session_info.id.0,
-                        path = "hypercore",
-                        "agent round succeeded"
-                    );
-                    xai_grok_telemetry::unified_log::info(
-                        "shell.turn.path",
-                        Some(self.session_info.id.0.as_ref()),
-                        Some(serde_json::json!({
-                            "path": "hypercore",
-                            "prompt_id": prompt_id,
-                            "ok": true,
-                        })),
-                    );
-                    return Ok(outcome);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %self.session_info.id.0,
-                        error = %e,
-                        "hypercore turn failed; falling back to legacy for this round"
-                    );
-                    xai_grok_telemetry::unified_log::warn(
-                        "shell.turn.path",
-                        Some(self.session_info.id.0.as_ref()),
-                        Some(serde_json::json!({
-                            "path": "legacy",
-                            "reason": "hypercore_error",
-                            "prompt_id": prompt_id,
-                            "error": e.to_string(),
-                        })),
-                    );
-                }
-            }
-        } else {
+            let core_turn_id =
+                super::hypercore_turn::hypercore_round_turn_id(prompt_id, outer_round, None);
+            debug_assert_eq!(
+                super::hypercore_turn::hypercore_post_entry_error_policy(),
+                "propagate"
+            );
+            // Entered Hypercore: any non-Abort error propagates upward.
+            let outcome = self
+                .run_hypercore_plain_turn(prompt_id, user_text, json_schema.clone(), &core_turn_id)
+                .await?;
             tracing::info!(
                 session_id = %self.session_info.id.0,
-                path = "legacy",
-                reason = decision.as_str(),
-                "agent round using legacy path"
+                path = "hypercore",
+                outer_round,
+                core_turn_id = %core_turn_id,
+                "agent round succeeded"
             );
             xai_grok_telemetry::unified_log::info(
                 "shell.turn.path",
                 Some(self.session_info.id.0.as_ref()),
                 Some(serde_json::json!({
-                    "path": "legacy",
-                    "reason": decision.as_str(),
+                    "path": "hypercore",
                     "prompt_id": prompt_id,
+                    "core_turn_id": core_turn_id,
+                    "outer_round": outer_round,
+                    "ok": true,
                 })),
             );
+            return Ok(outcome);
         }
+
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            path = "legacy",
+            reason = decision.as_str(),
+            "agent round using legacy path"
+        );
+        xai_grok_telemetry::unified_log::info(
+            "shell.turn.path",
+            Some(self.session_info.id.0.as_ref()),
+            Some(serde_json::json!({
+                "path": "legacy",
+                "reason": decision.as_str(),
+                "prompt_id": prompt_id,
+                "outer_round": outer_round,
+            })),
+        );
         self.process_conversation_turn_with_recovery(
             prompt_id,
             trace_gcs_config,

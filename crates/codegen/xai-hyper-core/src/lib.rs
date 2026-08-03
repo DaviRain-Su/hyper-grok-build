@@ -49,6 +49,14 @@ pub enum CoreError {
     /// Tool loop exceeded [`CoreConfig::max_tool_steps`].
     #[error("tool loop limit exceeded ({0})")]
     ToolLoopLimit(u32),
+    /// Host/shell aborted the turn without committing (permission cancel, compact
+    /// restart, etc.). Transcript is restored to the pre-turn checkpoint; no
+    /// terminal record or snapshot is written.
+    #[error("aborted: {0}")]
+    Aborted(String),
+    /// Same `turn_id` was already committed with a different request text.
+    #[error("turn_id conflict: {0}")]
+    TurnIdConflict(String),
     /// Other.
     #[error("{0}")]
     Message(String),
@@ -101,8 +109,16 @@ pub enum ToolBatchResult {
     Continue(Vec<HostToolResult>),
     /// Apply tool results and **end** the user turn (no further model call).
     ///
-    /// Used for structured-output acceptance, permission cancel, etc.
+    /// Used for **successful** terminal outcomes only (e.g. structured-output
+    /// acceptance). Still commits snapshot + terminal + `TurnCommitted`.
     Finish(Vec<HostToolResult>),
+    /// Abort the turn **without** applying tool results, incrementing
+    /// `completed_turns`, writing snapshot/terminal, or emitting
+    /// `TurnCommitted`. Core restores the full pre-turn transcript checkpoint.
+    Abort {
+        /// Human-readable abort reason (surfaced as [`CoreError::Aborted`]).
+        reason: String,
+    },
 }
 
 /// One tool invocation recorded on a completed turn.
@@ -384,11 +400,12 @@ impl<H: HyperHost> HyperCore<H> {
     ///
     /// `invoke_batch(assistant_text, calls)` receives the intermediate assistant
     /// text for this model step plus every tool call, and returns
-    /// [`ToolBatchResult::Continue`] (sample again) or
-    /// [`ToolBatchResult::Finish`] (end the user turn after applying results).
+    /// [`ToolBatchResult::Continue`] (sample again),
+    /// [`ToolBatchResult::Finish`] (apply results and end the user turn), or
+    /// [`ToolBatchResult::Abort`] (restore checkpoint; no commit).
     ///
     /// When the model emits tool calls, runs model→tools→model until `end_turn`,
-    /// `Finish`, or [`CoreConfig::max_tool_steps`].
+    /// `Finish`, `Abort`, or [`CoreConfig::max_tool_steps`].
     pub async fn submit_turn_with_tools<F, Fut>(
         &mut self,
         req: TurnRequest,
@@ -407,33 +424,8 @@ impl<H: HyperHost> HyperCore<H> {
             return Err(CoreError::Invalid("text must be non-empty".into()));
         }
 
-        // Idempotent replay: never open a second model stream.
-        if let Some(term) = self
-            .host
-            .load_terminal_turn(&self.session_id, &turn_id)
-            .await?
-        {
-            let events = vec![
-                CoreEvent::TurnStarted {
-                    turn_id: turn_id.clone(),
-                },
-                CoreEvent::AssistantDelta {
-                    turn_id: turn_id.clone(),
-                    text: term.assistant_text.clone(),
-                },
-                CoreEvent::TurnCommitted {
-                    turn_id: turn_id.clone(),
-                    stop_reason: term.stop_reason.clone(),
-                    replayed: true,
-                },
-            ];
-            return Ok(TurnOutcome {
-                turn_id,
-                assistant_text: term.assistant_text,
-                replayed: true,
-                tools_called: Vec::new(),
-                events,
-            });
+        if let Some(outcome) = self.check_terminal_replay(&turn_id, &text).await? {
+            return Ok(outcome);
         }
 
         self.run_model_tool_loop(
@@ -466,9 +458,18 @@ impl<H: HyperHost> HyperCore<H> {
     {
         let turn_id = turn_id.into().trim().to_string();
         let request_text = request_text.into();
+        let request_text_trimmed = request_text.trim().to_string();
         if turn_id.is_empty() {
             return Err(CoreError::Invalid("turn_id must be non-empty".into()));
         }
+
+        if let Some(outcome) = self
+            .check_terminal_replay(&turn_id, &request_text_trimmed)
+            .await?
+        {
+            return Ok(outcome);
+        }
+
         self.run_model_tool_loop(
             turn_id,
             request_text,
@@ -478,6 +479,54 @@ impl<H: HyperHost> HyperCore<H> {
             invoke_batch,
         )
         .await
+    }
+
+    /// Idempotent terminal replay shared by submit and continue.
+    ///
+    /// Same `turn_id` + same trimmed `request_text` → replay without opening a
+    /// model stream. Same `turn_id` + different text → [`CoreError::TurnIdConflict`].
+    async fn check_terminal_replay(
+        &self,
+        turn_id: &str,
+        request_text: &str,
+    ) -> Result<Option<TurnOutcome>, CoreError> {
+        let Some(term) = self
+            .host
+            .load_terminal_turn(&self.session_id, turn_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let stored = term.request_text.trim();
+        let incoming = request_text.trim();
+        if stored != incoming {
+            return Err(CoreError::TurnIdConflict(format!(
+                "turn_id `{turn_id}` already committed with different request_text"
+            )));
+        }
+
+        let events = vec![
+            CoreEvent::TurnStarted {
+                turn_id: turn_id.to_string(),
+            },
+            CoreEvent::AssistantDelta {
+                turn_id: turn_id.to_string(),
+                text: term.assistant_text.clone(),
+            },
+            CoreEvent::TurnCommitted {
+                turn_id: turn_id.to_string(),
+                stop_reason: term.stop_reason.clone(),
+                replayed: true,
+            },
+        ];
+        Ok(Some(TurnOutcome {
+            turn_id: turn_id.to_string(),
+            assistant_text: term.assistant_text,
+            replayed: true,
+            tools_called: Vec::new(),
+            events,
+        }))
     }
 
     /// Shared model→tool loop for [`Self::submit_turn_with_tools`] and
@@ -508,15 +557,30 @@ impl<H: HyperHost> HyperCore<H> {
             },
         ];
 
-        let rollback_len = self.items.len();
+        // Full transactional checkpoint: trim_messages may drop old prefixes, so
+        // truncate-to-len is insufficient for rollback after mid-turn growth.
+        let checkpoint_items = self.items.clone();
+        let checkpoint_completed = self.completed_turns;
+
         if let Some(user_text) = append_user {
             self.items.push(TranscriptItem::text("user", user_text));
             self.trim_messages();
         }
 
+        let restore_checkpoint = |core: &mut Self| {
+            core.items = checkpoint_items.clone();
+            core.completed_turns = checkpoint_completed;
+        };
+
         let tools = match tools {
             Some(t) => t,
-            None => self.host.list_tools().await?,
+            None => match self.host.list_tools().await {
+                Ok(t) => t,
+                Err(e) => {
+                    restore_checkpoint(self);
+                    return Err(CoreError::Host(e));
+                }
+            },
         };
         let max_steps = self.config.max_tool_steps.max(1);
         let mut tools_called: Vec<TurnToolCall> = Vec::new();
@@ -539,7 +603,7 @@ impl<H: HyperHost> HyperCore<H> {
             let mut stream = match self.host.open_model_stream(stream_req).await {
                 Ok(s) => s,
                 Err(e) => {
-                    self.items.truncate(rollback_len);
+                    restore_checkpoint(self);
                     let err = e.to_string();
                     events.push(CoreEvent::TurnFailed {
                         turn_id: turn_id.clone(),
@@ -587,7 +651,7 @@ impl<H: HyperHost> HyperCore<H> {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        self.items.truncate(rollback_len);
+                        restore_checkpoint(self);
                         events.push(CoreEvent::TurnFailed {
                             turn_id: turn_id.clone(),
                             error: e.to_string(),
@@ -633,6 +697,12 @@ impl<H: HyperHost> HyperCore<H> {
             let (results, finish_after) = match batch {
                 ToolBatchResult::Continue(r) => (r, false),
                 ToolBatchResult::Finish(r) => (r, true),
+                ToolBatchResult::Abort { reason } => {
+                    restore_checkpoint(self);
+                    // No tool results applied, no completed_turns bump, no
+                    // snapshot/terminal/TurnCommitted.
+                    return Err(CoreError::Aborted(reason));
+                }
             };
 
             for (idx, call) in pending_calls.iter().enumerate() {
@@ -677,7 +747,7 @@ impl<H: HyperHost> HyperCore<H> {
             }
 
             if step + 1 >= max_steps {
-                self.items.truncate(rollback_len);
+                restore_checkpoint(self);
                 events.push(CoreEvent::TurnFailed {
                     turn_id: turn_id.clone(),
                     error: format!("tool loop limit exceeded ({max_steps})"),
@@ -694,10 +764,21 @@ impl<H: HyperHost> HyperCore<H> {
             assistant_text: final_assistant.clone(),
             stop_reason: stop_reason.clone(),
         };
-        let snapshot = self.export_snapshot()?;
-        self.host
+        let snapshot = match self.export_snapshot() {
+            Ok(s) => s,
+            Err(e) => {
+                restore_checkpoint(self);
+                return Err(e);
+            }
+        };
+        if let Err(e) = self
+            .host
             .commit_snapshot(&self.session_id, &snapshot, Some(&terminal))
-            .await?;
+            .await
+        {
+            restore_checkpoint(self);
+            return Err(CoreError::Host(e));
+        }
 
         events.push(CoreEvent::TurnCommitted {
             turn_id: turn_id.clone(),
@@ -994,6 +1075,339 @@ mod tests {
         // No extra user row — only assistant appended.
         assert_eq!(core.items().len(), before + 1);
         assert_eq!(core.items().last().unwrap().role, "assistant");
+        assert_eq!(host.model_stream_opens(), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_does_not_commit_and_restores_full_checkpoint_through_trim() {
+        let host = MockHost::with_echo_tool();
+        let mut core = HyperCore::restore_or_new(
+            host.clone(),
+            "abort-sess",
+            CoreConfig {
+                model: "mock-echo".into(),
+                // Small cap so append + tool rows would drop the system prefix
+                // if we only truncated by length.
+                max_messages: 3,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys-keep"),
+                TranscriptItem::text("user", "u0"),
+                TranscriptItem::text("assistant", "a0"),
+            ],
+            1,
+        );
+        let before_items = core.items().to_vec();
+        let before_turns = core.completed_turns();
+        assert_eq!(before_items.len(), 3);
+
+        let err = core
+            .submit_turn_with_tools(
+                TurnRequest {
+                    turn_id: "t-abort".into(),
+                    text: "please use the tool".into(),
+                    json_schema: None,
+                    tools: None,
+                },
+                |_text, _calls| async move {
+                    ToolBatchResult::Abort {
+                        reason: "permission cancelled".into(),
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, CoreError::Aborted(ref r) if r == "permission cancelled"));
+        assert_eq!(core.completed_turns(), before_turns);
+        assert_eq!(core.items(), before_items.as_slice());
+        // Full restore includes the system prefix that trim would have dropped.
+        assert_eq!(core.items()[0].content, "sys-keep");
+        assert!(
+            !core
+                .items()
+                .iter()
+                .any(|i| i.role == "user" && i.content == "please use the tool")
+        );
+        // No terminal / no TurnCommitted path: same turn_id can run for real.
+        assert!(
+            host.load_terminal_turn("abort-sess", "t-abort")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let out = core
+            .submit_turn_with_tools(
+                TurnRequest {
+                    turn_id: "t-abort".into(),
+                    text: "please use the tool".into(),
+                    json_schema: None,
+                    tools: None,
+                },
+                |_text, calls| async move {
+                    ToolBatchResult::Continue(
+                        calls
+                            .into_iter()
+                            .map(|c| HostToolResult {
+                                call_id: c.id,
+                                ok: true,
+                                content: "echoed".into(),
+                            })
+                            .collect(),
+                    )
+                },
+            )
+            .await
+            .expect("retry after abort");
+        assert!(!out.replayed);
+        assert_eq!(core.completed_turns(), before_turns + 1);
+        assert!(
+            host.load_terminal_turn("abort-sess", "t-abort")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_does_not_mutate_persisted_snapshot_or_terminal() {
+        use xai_hyper_host::TerminalTurnRecord;
+
+        let host = MockHost::with_echo_tool();
+        let session = "abort-persist-sess";
+
+        // Seed plain text history (no tool rows) so the echo-tool mock still
+        // emits a tool call on the next submit. Commit that state as baseline
+        // without going through a tool-loop turn (which would leave tool rows
+        // and make the mock skip tool emission).
+        let mut core = HyperCore::restore_or_new(
+            host.clone(),
+            session,
+            CoreConfig {
+                model: "mock-echo".into(),
+                max_messages: 32,
+                max_tool_steps: 8,
+            },
+        )
+        .await
+        .unwrap();
+        core.seed_transcript(
+            vec![
+                TranscriptItem::text("system", "sys"),
+                TranscriptItem::text("user", "prior"),
+                TranscriptItem::text("assistant", "prior reply"),
+            ],
+            1,
+        );
+        let baseline_snap = core.export_snapshot().expect("export baseline");
+        let baseline_term = TerminalTurnRecord {
+            turn_id: "t-baseline".into(),
+            request_text: "prior".into(),
+            assistant_text: "prior reply".into(),
+            stop_reason: Some("end_turn".into()),
+        };
+        host.commit_snapshot(session, &baseline_snap, Some(&baseline_term))
+            .await
+            .unwrap();
+
+        let mem_items = core.items().to_vec();
+        let mem_turns = core.completed_turns();
+        assert_eq!(mem_turns, 1);
+
+        // Abort mid tool-loop: host storage must stay byte-identical.
+        let err = core
+            .submit_turn_with_tools(
+                TurnRequest {
+                    turn_id: "t-abort-persist".into(),
+                    text: "please use the tool".into(),
+                    json_schema: None,
+                    tools: None,
+                },
+                |_text, _calls| async move {
+                    ToolBatchResult::Abort {
+                        reason: "cancel after tools scheduled".into(),
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Aborted(_)));
+
+        let after_snap = host
+            .load_snapshot(session)
+            .await
+            .unwrap()
+            .expect("snapshot still present");
+        assert_eq!(
+            after_snap, baseline_snap,
+            "Abort must not rewrite host snapshot bytes"
+        );
+
+        let after_term = host
+            .load_terminal_turn(session, "t-baseline")
+            .await
+            .unwrap()
+            .expect("baseline terminal still present");
+        assert_eq!(after_term, baseline_term);
+        assert!(
+            host.load_terminal_turn(session, "t-abort-persist")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(core.completed_turns(), mem_turns);
+        assert_eq!(core.items(), mem_items.as_slice());
+    }
+
+    #[tokio::test]
+    async fn finish_still_commits_successfully() {
+        let host = MockHost::with_echo_tool();
+        let mut core =
+            HyperCore::restore_or_new(host.clone(), "finish-sess", CoreConfig::default())
+                .await
+                .unwrap();
+
+        let out = core
+            .submit_turn_with_tools(
+                TurnRequest {
+                    turn_id: "t-finish".into(),
+                    text: "structured please".into(),
+                    json_schema: None,
+                    tools: None,
+                },
+                |_text, calls| async move {
+                    ToolBatchResult::Finish(
+                        calls
+                            .into_iter()
+                            .map(|c| HostToolResult {
+                                call_id: c.id,
+                                ok: true,
+                                content: "accepted".into(),
+                            })
+                            .collect(),
+                    )
+                },
+            )
+            .await
+            .expect("finish");
+
+        assert!(!out.replayed);
+        assert_eq!(core.completed_turns(), 1);
+        assert!(out.events.iter().any(|e| matches!(
+            e,
+            CoreEvent::TurnCommitted {
+                replayed: false,
+                ..
+            }
+        )));
+        assert!(
+            host.load_terminal_turn("finish-sess", "t-finish")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Finish applies tool results before ending (user + assistant(tool) + tool).
+        assert!(core.items().iter().any(|i| i.role == "tool"));
+    }
+
+    #[tokio::test]
+    async fn terminal_same_id_different_text_is_conflict() {
+        let host = MockHost::new();
+        let mut core =
+            HyperCore::restore_or_new(host.clone(), "conflict-sess", CoreConfig::default())
+                .await
+                .unwrap();
+
+        core.submit_turn(TurnRequest {
+            turn_id: "t-same".into(),
+            text: "first text".into(),
+            json_schema: None,
+            tools: None,
+        })
+        .await
+        .unwrap();
+
+        let err = core
+            .submit_turn(TurnRequest {
+                turn_id: "t-same".into(),
+                text: "different text".into(),
+                json_schema: None,
+                tools: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::TurnIdConflict(_)));
+        // Conflict must not open another stream.
+        assert_eq!(host.model_stream_opens(), 1);
+
+        // continue path shares the same check.
+        let err2 = core
+            .continue_turn_with_tools(
+                "t-same",
+                "also different",
+                Some(Vec::new()),
+                None,
+                |_t, _c| async move { ToolBatchResult::Continue(vec![]) },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err2, CoreError::TurnIdConflict(_)));
+        assert_eq!(host.model_stream_opens(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_same_id_same_text_replays() {
+        let host = MockHost::new();
+        let mut core =
+            HyperCore::restore_or_new(host.clone(), "replay-sess", CoreConfig::default())
+                .await
+                .unwrap();
+
+        let first = core
+            .submit_turn(TurnRequest {
+                turn_id: "t-replay".into(),
+                text: "  hello  ".into(),
+                json_schema: None,
+                tools: None,
+            })
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+
+        let second = core
+            .submit_turn(TurnRequest {
+                turn_id: "t-replay".into(),
+                // trim-equal to first request.
+                text: "hello".into(),
+                json_schema: None,
+                tools: None,
+            })
+            .await
+            .unwrap();
+        assert!(second.replayed);
+        assert_eq!(second.assistant_text, first.assistant_text);
+        assert_eq!(host.model_stream_opens(), 1);
+
+        // continue with same id + same trimmed text also replays.
+        let third = core
+            .continue_turn_with_tools(
+                "t-replay",
+                "hello",
+                Some(Vec::new()),
+                None,
+                |_t, _c| async move { ToolBatchResult::Continue(vec![]) },
+            )
+            .await
+            .unwrap();
+        assert!(third.replayed);
         assert_eq!(host.model_stream_opens(), 1);
     }
 }

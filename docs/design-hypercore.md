@@ -448,11 +448,13 @@ docs/
 | 工厂 | `SessionActor::shell_hypercore_host()` |
 | 实验 turn 路径 | **P6 containment：** legacy 默认；仅显式 `HYPERCORE_TURN=1` 进入 Hypercore |
 | Host API | **v2**：`ToolDefinition`、`ModelChunk::ToolCall`、`list_tools`、`ChatMessage` tool 字段 |
-| Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools` / `continue_turn_with_tools`；snapshot **v2** |
+| Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools` / `continue_turn_with_tools`；snapshot **v2**；`ToolBatchResult::Abort` + 完整 transcript checkpoint |
 | Native 桥 | tools/json_schema → `ConversationRequest`；`Completed` 提取 tool_calls |
 | Shell 工具 | `prepare_tool_definitions` → core；batch → `execute_tool_calls` |
-| json_schema / outer | native + StructuredOutput；`run_turn_outer_loop`（goal/stop） |
-| Compact | pre-seed + mid-turn overflow → `continue_turn_with_tools` |
+| json_schema / outer | native + StructuredOutput；`run_turn_outer_loop`（goal/stop）；稳定 `hc:{len}:{prompt_id}:r{n}` round id |
+| Compact | pre-seed + mid-turn overflow → `Abort` 段 + `continue_turn_with_tools`（仅 continuation 写 terminal） |
+| 多模态 | 当前/历史 user 含 Image → path decision **pre-route legacy**；转换 fail-closed |
+| 错误策略 | 进入 Hypercore 后 **不** 同 round broad fallback legacy；仅 Abort 有 shell side-channel 语义 |
 
 **开关：** 见 [hypercore-ops.md](hypercore-ops.md)。
 
@@ -484,9 +486,22 @@ hyper
 | 路径 | 策略 |
 |------|------|
 | **Memory dream / recap / laziness** | shell 旁路 sampler |
-| **Legacy `process_conversation_turn`** | 默认生产路径；Hypercore 未启用或出错时使用（P6 明确不删） |
+| **Legacy `process_conversation_turn`** | 默认生产路径；仅由 capability / path decision **进入 Hypercore 之前** 选择（P6 明确不删） |
+| **多模态 user（Image 等）** | path decision pre-route legacy；seed 转换 fail-closed，禁止静默 strip |
 | **双 transcript** | `chat_state` 权威；`~/.grok/hypercore/<id>/` 旁路 snapshot |
 | **Cloudflare / 远端 Host** | 原 Phase 2，仍后置 |
+
+### Core Abort / terminal 语义（correctness）
+
+| 结果 | 行为 |
+|------|------|
+| `ToolBatchResult::Continue` | 写入 tool results，继续 sample |
+| `ToolBatchResult::Finish` | 写入 tool results，**成功**结束 turn（snapshot + terminal + `TurnCommitted`） |
+| `ToolBatchResult::Abort { reason }` | **不**写 tool results / 不增 `completed_turns` / 不写 snapshot·terminal / 不发 `TurnCommitted`；完整恢复 pre-turn checkpoint（含 `trim_messages` 可能删掉的前缀）→ `CoreError::Aborted` |
+| 同 `turn_id` + 同 trim 后 `request_text` | terminal replay，不开 stream |
+| 同 `turn_id` + 不同文本 | `CoreError::TurnIdConflict`，不开 stream |
+
+Shell：permission reject / tool cancel / 已有 abort 短路 / post-tool preflight overflow → `Abort`。`CoreError::Aborted` 时：terminal side-channel → 返回该 outcome；compact flag 且无 terminal → compact 后用 `:cN` segment 继续；都无 → 明确错误。**不**把 expected Abort 包装成「再跑一遍 legacy」。
 
 ### P6 验收（本机）
 
@@ -494,7 +509,9 @@ hyper
 2. `HYPERCORE_TURN=1` 时显式金丝雀日志含 `path=hypercore`
 3. `json_schema` headless 金丝雀返回 `structuredOutput`
 4. 子 agent 使用独立 `session_id` 目录
-5. Hypercore 失败时同 round 回退 legacy
+5. 进入 Hypercore 后非 Abort 错误 **向上传播**（**不再**同 round fallback legacy）
+6. 含 Image 的 user 历史 / 当前消息 pre-route `legacy_multimodal`
+7. outer goal/stop 每轮唯一 core turn id；compact 仅 continuation 提交 terminal
 
 ## 12. 下一步（执行顺序）
 

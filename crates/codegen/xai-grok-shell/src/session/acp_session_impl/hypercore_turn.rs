@@ -16,16 +16,17 @@
 //! - `HYPERCORE_TOOLS=0` — disable tool loop (plain only with `HYPERCORE_PLAIN=1`)
 //! - `HYPERCORE_PLAIN=1` — force plain Hypercore (no tools in the request)
 //!
-//! On Hypercore failure the outer loop falls back to
-//! `process_conversation_turn` for that round only. Legacy is **retained** as
-//! a safety net (not deleted in P6).
+//! Once path decision selects Hypercore, non-[`xai_hyper_core::CoreError::Aborted`]
+//! errors **propagate** — there is no same-round broad fallback to legacy.
+//! Legacy is chosen only by capability / path decision **before** entering Core.
+//! Multimodal (image) user content is pre-routed to legacy; conversion is fail-closed.
 
 use super::*;
 use std::sync::Arc;
 use xai_grok_sampling_types::conversation::ToolCall as SamplingToolCall;
 use xai_grok_sampling_types::{ContentPart, ConversationItem};
 use xai_hyper_core::{
-    CoreConfig, CoreEvent, HyperCore, ToolBatchResult, TranscriptItem, TurnRequest,
+    CoreConfig, CoreError, CoreEvent, HyperCore, ToolBatchResult, TranscriptItem, TurnRequest,
 };
 use xai_hyper_host::{HostToolCall, HostToolResult, ToolDefinition as HostToolDefinition};
 
@@ -118,6 +119,8 @@ pub(super) enum HypercorePathDecision {
     EmptyPrompt,
     /// Tools disabled and plain not forced.
     ToolsDisabledNeedsPlain,
+    /// Current or historical user message has non-text content (e.g. image).
+    UnsupportedMultimodal,
 }
 
 impl HypercorePathDecision {
@@ -128,6 +131,7 @@ impl HypercorePathDecision {
             Self::DisabledByEnv => "legacy_env_disabled",
             Self::EmptyPrompt => "legacy_empty_prompt",
             Self::ToolsDisabledNeedsPlain => "legacy_tools_off",
+            Self::UnsupportedMultimodal => "legacy_multimodal",
         }
     }
 
@@ -136,10 +140,41 @@ impl HypercorePathDecision {
     }
 }
 
-/// Decide Hypercore vs legacy for one prompt round.
+/// Stable unique Hypercore turn id for an outer-loop round / compact segment.
+///
+/// Format: `hc:{prompt_id_len}:{prompt_id}:r{round}` with optional `:c{n}` for
+/// mid-turn compact continuations. Length-prefix avoids collisions when
+/// `prompt_id` itself contains `:r…` / `:c…` suffixes. ACP `prompt_id` /
+/// telemetry keep the original value; only the core turn id uses this form.
+///
+/// Outer rounds use `round` 0, 1, 2, … without reuse. Compact segments append
+/// `c1`, `c2`, … Same segment retries reuse the same id.
+pub(super) fn hypercore_round_turn_id(
+    prompt_id: &str,
+    outer_round: u32,
+    compact_segment: Option<u32>,
+) -> String {
+    let base = format!("hc:{}:{prompt_id}:r{outer_round}", prompt_id.len());
+    match compact_segment {
+        Some(n) if n > 0 => format!("{base}:c{n}"),
+        _ => base,
+    }
+}
+
+/// Error policy after path decision has selected Hypercore.
+///
+/// Locked for tests: must remain `"propagate"` (never `"legacy_fallback"`).
+pub(super) fn hypercore_post_entry_error_policy() -> &'static str {
+    "propagate"
+}
+
+/// Decide Hypercore vs legacy for one prompt round (text-only gates).
 ///
 /// Empty prompt → legacy. Tool loop ready → Hypercore. Else only
 /// `HYPERCORE_PLAIN=1` takes plain Hypercore. `json_schema` is allowed (P4).
+///
+/// Prefer [`hypercore_path_decision_for_conversation`] when history is available
+/// so image / multimodal user rows pre-route to legacy.
 pub(super) fn hypercore_path_decision(prompt: &str) -> HypercorePathDecision {
     if !hypercore_plain_turn_enabled() {
         return HypercorePathDecision::DisabledByEnv;
@@ -153,9 +188,34 @@ pub(super) fn hypercore_path_decision(prompt: &str) -> HypercorePathDecision {
     HypercorePathDecision::ToolsDisabledNeedsPlain
 }
 
+/// Path decision including multimodal pre-route from conversation history.
+pub(super) fn hypercore_path_decision_for_conversation(
+    prompt: &str,
+    conversation: &[ConversationItem],
+) -> HypercorePathDecision {
+    let base = hypercore_path_decision(prompt);
+    if base.uses_hypercore() && conversation_has_non_text_user_content(conversation) {
+        return HypercorePathDecision::UnsupportedMultimodal;
+    }
+    base
+}
+
 /// Whether this prompt should enter the Hypercore path for a round.
 pub(super) fn should_use_hypercore_turn(prompt: &str) -> bool {
     hypercore_path_decision(prompt).uses_hypercore()
+}
+
+/// True if any user message has a non-[`ContentPart::Text`] part (e.g. image).
+pub(super) fn conversation_has_non_text_user_content(conversation: &[ConversationItem]) -> bool {
+    conversation.iter().any(|item| {
+        if let ConversationItem::User(u) = item {
+            u.content
+                .iter()
+                .any(|p| !matches!(p, ContentPart::Text { .. }))
+        } else {
+            false
+        }
+    })
 }
 
 /// Max mid-turn compact→continue restarts inside one Hypercore prompt.
@@ -170,15 +230,22 @@ impl SessionActor {
     ///
     /// P5: pre-seed auto-compact, model-switch compact, and mid-turn
     /// preflight overflow → compact → [`HyperCore::continue_turn_with_tools`].
+    ///
+    /// `core_turn_id_base` is the stable Hypercore turn id for this outer-loop
+    /// round (see [`hypercore_round_turn_id`]); compact segments append `:cN`.
+    /// ACP `prompt_id` stays separate for telemetry.
     pub(super) async fn run_hypercore_plain_turn(
         self: &std::sync::Arc<Self>,
         prompt_id: &str,
         user_text: &str,
         json_schema: Option<serde_json::Value>,
+        core_turn_id_base: &str,
     ) -> Result<TurnOutcome, acp::Error> {
         let session_id = self.session_info.id.0.to_string();
         tracing::info!(
             session_id = %session_id,
+            prompt_id = %prompt_id,
+            core_turn_id = %core_turn_id_base,
             is_subagent = self.startup_hints.is_subagent,
             parent = ?self.startup_hints.parent_session_id.as_deref(),
             "hypercore turn: begin"
@@ -245,10 +312,14 @@ impl SessionActor {
         let structured_from_tool: std::cell::RefCell<Option<Result<serde_json::Value, String>>> =
             std::cell::RefCell::new(None);
 
-        let mut accumulated_tools: Vec<String> = Vec::new();
+        // Actually-executed tool names across compact segments. Source of truth
+        // for final `TurnOutcome::Completed.tools_called` (not Core Ok outcomes,
+        // which drop names when a segment Aborts after tools already ran).
+        let executed_tools: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
         let mut compact_round: u32 = 0;
         let mut is_continuation = false;
         let mut final_outcome: Option<xai_hyper_core::TurnOutcome> = None;
+        // Side-channels for Abort handling (not applied into core transcript).
         let mut terminal_abort: Option<TurnOutcome> = None;
 
         loop {
@@ -269,21 +340,28 @@ impl SessionActor {
             let conversation = self.chat_state_handle.get_conversation().await;
             let seeded = if is_continuation {
                 // Full history after tools + compact (no user re-append).
-                conversation_to_full_seed_items(&conversation)
+                // Tool side-effects already live in chat_state.
+                conversation_to_full_seed_items(&conversation).map_err(|e| {
+                    acp::Error::internal_error().data(format!("hypercore seed: {e}"))
+                })?
             } else {
-                conversation_to_seed_items(&conversation, user_text)
+                conversation_to_seed_items(&conversation, user_text).map_err(|e| {
+                    acp::Error::internal_error().data(format!("hypercore seed: {e}"))
+                })?
             };
             let completed = seeded.iter().filter(|i| i.role == "assistant").count() as u64;
             core.seed_transcript(seeded, completed);
 
+            // Compact segment 0 = base id; c1/c2 after each compact restart.
             let turn_id = if is_continuation {
-                format!("{prompt_id}-c{compact_round}")
+                format!("{core_turn_id_base}:c{compact_round}")
             } else {
-                prompt_id.to_string()
+                core_turn_id_base.to_string()
             };
 
             tracing::info!(
                 session_id = %session_id,
+                prompt_id = %prompt_id,
                 turn_id = %turn_id,
                 continuation = is_continuation,
                 compact_round,
@@ -302,18 +380,12 @@ impl SessionActor {
                 let structured_retries = &structured_retries;
                 let structured_from_tool = &structured_from_tool;
                 let structured_output_validator = &structured_output_validator;
+                let executed_tools = &executed_tools;
                 async move {
                     if abort.borrow().is_some() {
-                        return ToolBatchResult::Finish(
-                            calls
-                                .into_iter()
-                                .map(|c| HostToolResult {
-                                    call_id: c.id,
-                                    ok: false,
-                                    content: "turn aborted".into(),
-                                })
-                                .collect(),
-                        );
+                        return ToolBatchResult::Abort {
+                            reason: "turn already aborted".into(),
+                        };
                     }
 
                     if structured_output_tool
@@ -326,18 +398,28 @@ impl SessionActor {
                                 structured_retries,
                                 structured_from_tool,
                                 abort,
+                                compact_restart,
+                                executed_tools,
                             )
                             .await
                     {
                         return batch;
                     }
 
+                    let batch_names: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
                     match self
                         .hypercore_execute_tool_batch(calls, &assistant_text)
                         .await
                     {
                         Ok(results) => {
-                            // P5: post-tool preflight overflow → compact + continue.
+                            // Record real executions even if we Abort for compact.
+                            record_executed_tool_names(
+                                &mut executed_tools.borrow_mut(),
+                                batch_names,
+                            );
+                            // P5: post-tool preflight overflow → Abort core
+                            // segment (no terminal/snapshot); shell compact
+                            // restarts from full chat_state on a new segment id.
                             if self.tool_context.task_output_token_budget.is_none()
                                 && self.check_preflight_overflow().await.is_some()
                             {
@@ -346,19 +428,23 @@ impl SessionActor {
                                     "hypercore turn: preflight overflow after tools; will compact and continue"
                                 );
                                 compact_restart.set(true);
-                                return ToolBatchResult::Finish(results);
+                                return ToolBatchResult::Abort {
+                                    reason: "preflight overflow; compact restart".into(),
+                                };
                             }
                             ToolBatchResult::Continue(results)
                         }
                         Err(terminal) => {
                             *abort.borrow_mut() = Some(terminal);
-                            ToolBatchResult::Finish(vec![])
+                            ToolBatchResult::Abort {
+                                reason: "tool terminal / cancel".into(),
+                            }
                         }
                     }
                 }
             };
 
-            let outcome = if is_continuation {
+            let core_result = if is_continuation {
                 core.continue_turn_with_tools(
                     turn_id.clone(),
                     user_text.to_string(),
@@ -378,12 +464,93 @@ impl SessionActor {
                     invoker,
                 )
                 .await
-            }
-            .map_err(|e| {
-                acp::Error::internal_error().data(format!("hypercore submit_turn: {e}"))
-            })?;
+            };
 
-            // ACP stream events for this segment.
+            let outcome = match core_result {
+                Ok(o) => o,
+                Err(CoreError::Aborted(reason)) => {
+                    let terminal = abort.into_inner();
+                    let wants_compact = compact_restart.get();
+
+                    match (terminal, wants_compact) {
+                        (Some(t), true) => {
+                            // Fail closed: terminal side-channel wins.
+                            tracing::error!(
+                                session_id = %session_id,
+                                reason = %reason,
+                                "hypercore invariant: Abort with both terminal and compact flags; preferring terminal"
+                            );
+                            terminal_abort = Some(t);
+                            break;
+                        }
+                        (Some(t), false) => {
+                            tracing::info!(
+                                session_id = %session_id,
+                                reason = %reason,
+                                "hypercore turn: Abort with terminal side-channel"
+                            );
+                            terminal_abort = Some(t);
+                            break;
+                        }
+                        (None, true) if compact_round < HYPERCORE_MAX_COMPACT_ROUNDS => {
+                            // Aborted segment must not emit buffered assistant
+                            // events as committed; tools already dual-wrote to
+                            // chat_state. Compact then continue with cN id.
+                            compact_round += 1;
+                            if let Some(trigger) = self.check_preflight_overflow().await {
+                                tracing::info!(
+                                    session_id = %session_id,
+                                    round = compact_round,
+                                    "hypercore turn: mid-turn compact before continue"
+                                );
+                                if let Err(e) = self.run_compact_only(trigger).await {
+                                    tracing::error!(
+                                        error = %e,
+                                        "hypercore mid-turn compact failed"
+                                    );
+                                    if Self::is_auth_compact_error(&e) {
+                                        return Err(self.surface_compact_auth_failure(e).await);
+                                    }
+                                    return Err(acp::Error::internal_error()
+                                        .data(format!("hypercore mid-turn compact failed: {e}")));
+                                }
+                            } else if let Some(trigger) = self.check_auto_compact_needed().await
+                                && let Err(e) = self.run_compact_only(trigger).await
+                            {
+                                tracing::error!(
+                                    error = %e,
+                                    "hypercore mid-turn auto-compact failed"
+                                );
+                                if Self::is_auth_compact_error(&e) {
+                                    return Err(self.surface_compact_auth_failure(e).await);
+                                }
+                                return Err(acp::Error::internal_error()
+                                    .data(format!("hypercore mid-turn auto-compact failed: {e}")));
+                            }
+                            is_continuation = true;
+                            continue;
+                        }
+                        (None, true) => {
+                            return Err(acp::Error::internal_error().data(format!(
+                                "hypercore compact restart limit exceeded ({HYPERCORE_MAX_COMPACT_ROUNDS}): {reason}"
+                            )));
+                        }
+                        (None, false) => {
+                            return Err(acp::Error::internal_error().data(format!(
+                                "hypercore aborted without terminal or compact: {reason}"
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Non-Abort: propagate. Never broad-fallback to legacy here.
+                    return Err(
+                        acp::Error::internal_error().data(format!("hypercore submit_turn: {e}"))
+                    );
+                }
+            };
+
+            // ACP stream events for this *committed* segment only.
             for ev in &outcome.events {
                 match ev {
                     CoreEvent::AssistantDelta { text, .. } if !text.is_empty() => {
@@ -402,35 +569,16 @@ impl SessionActor {
                 }
             }
 
-            accumulated_tools.extend(outcome.tools_called.iter().map(|t| t.name.clone()));
+            // Do not extend tools_called from Core outcome — Abort segments
+            // after real tools would drop names, and Finish would double-count
+            // if we also recorded in the invoker. `executed_tools` is authoritative.
 
+            // Structured-output acceptance uses Finish (commits) and stashes a
+            // shell TurnOutcome::Completed on the abort side-channel (already
+            // merged with prior executed tool names).
             if let Some(terminal) = abort.into_inner() {
                 terminal_abort = Some(terminal);
                 break;
-            }
-
-            if compact_restart.get() && compact_round < HYPERCORE_MAX_COMPACT_ROUNDS {
-                compact_round += 1;
-                if let Some(trigger) = self.check_preflight_overflow().await {
-                    tracing::info!(
-                        session_id = %session_id,
-                        round = compact_round,
-                        "hypercore turn: mid-turn compact before continue"
-                    );
-                    if let Err(e) = self.run_compact_only(trigger).await {
-                        tracing::error!(error = %e, "hypercore mid-turn compact failed");
-                        if Self::is_auth_compact_error(&e) {
-                            return Err(self.surface_compact_auth_failure(e).await);
-                        }
-                        // Fall through to return partial outcome if compact fails non-auth.
-                        final_outcome = Some(outcome);
-                        break;
-                    }
-                } else if let Some(trigger) = self.check_auto_compact_needed().await {
-                    let _ = self.run_compact_only(trigger).await;
-                }
-                is_continuation = true;
-                continue;
             }
 
             // Dual-write final assistant when not already present.
@@ -448,13 +596,37 @@ impl SessionActor {
             break;
         }
 
+        let tools_called = executed_tools.into_inner();
+
         if let Some(terminal) = terminal_abort {
             tracing::info!(
                 session_id = %session_id,
+                tools = tools_called.len(),
                 "hypercore turn: finished via tool-loop terminal outcome"
             );
             self.record_turn_model().await;
-            return Ok(terminal);
+            // Prefer side-channel tools_called when present (SO path merges
+            // prior + StructuredOutput into the Completed variant).
+            return Ok(match terminal {
+                TurnOutcome::Completed {
+                    snapshot,
+                    tools_called: side,
+                    structured_output,
+                    refusal,
+                } => TurnOutcome::Completed {
+                    snapshot,
+                    // Side-channel should already include the full ordered list;
+                    // fall back to accumulated if empty but we have names.
+                    tools_called: if side.is_empty() && !tools_called.is_empty() {
+                        tools_called
+                    } else {
+                        side
+                    },
+                    structured_output,
+                    refusal,
+                },
+                other => other,
+            });
         }
 
         let outcome = final_outcome.ok_or_else(|| {
@@ -473,10 +645,11 @@ impl SessionActor {
 
         tracing::info!(
             session_id = %session_id,
+            prompt_id = %prompt_id,
             turn_id = %outcome.turn_id,
             replayed = outcome.replayed,
             bytes = outcome.assistant_text.len(),
-            tools = accumulated_tools.len(),
+            tools = tools_called.len(),
             compact_rounds = compact_round,
             has_structured = structured_output.is_some(),
             is_subagent = self.startup_hints.is_subagent,
@@ -485,7 +658,7 @@ impl SessionActor {
 
         Ok(TurnOutcome::Completed {
             snapshot: Box::new(None),
-            tools_called: accumulated_tools,
+            tools_called,
             structured_output,
             refusal: None,
         })
@@ -530,9 +703,11 @@ impl SessionActor {
 
     /// Handle a batch that includes `StructuredOutput` (tool-based schema path).
     ///
-    /// Returns `Some` when the batch was fully handled (continue or finish).
-    /// Returns `None` when StructuredOutput is mixed with real tools → strip and
-    /// let the real tools run via normal execute.
+    /// Returns `Some` when the batch was fully handled (continue, finish, or abort).
+    /// Mixed SO + real tools: execute real tools only, soft-correct SO (not a
+    /// successful StructuredOutput call), check preflight overflow like a normal
+    /// batch, and keep Core results order-aligned.
+    #[allow(clippy::too_many_arguments)]
     async fn hypercore_try_structured_output_batch(
         &self,
         calls: &[HostToolCall],
@@ -541,6 +716,8 @@ impl SessionActor {
         structured_retries: &std::cell::Cell<u32>,
         structured_from_tool: &std::cell::RefCell<Option<Result<serde_json::Value, String>>>,
         abort: &std::cell::RefCell<Option<TurnOutcome>>,
+        compact_restart: &std::cell::Cell<bool>,
+        executed_tools: &std::cell::RefCell<Vec<String>>,
     ) -> Option<ToolBatchResult> {
         let so_name = super::turn::STRUCTURED_OUTPUT_TOOL;
         let has_so = calls.iter().any(|c| c.name == so_name);
@@ -548,10 +725,8 @@ impl SessionActor {
             return None;
         }
 
-        // Mixed with real tools: push corrective results for SO calls only,
-        // drop them from the batch by returning None so caller runs real tools
-        // — but we must not execute SO. Handle: if any non-SO tools, return
-        // Continue after feeding SO co-emit errors and executing real tools only.
+        // Mixed with real tools: push corrective results for SO calls only;
+        // execute real tools; do not count unaccepted SO as a successful call.
         let real: Vec<HostToolCall> = calls
             .iter()
             .filter(|c| c.name != so_name)
@@ -561,7 +736,7 @@ impl SessionActor {
 
         if !real.is_empty() {
             // Dual-write assistant with all calls, then only execute real tools;
-            // SO gets a corrective tool_result.
+            // SO gets a corrective tool_result (not a successful StructuredOutput).
             self.hypercore_push_assistant_tool_calls(calls, assistant_text)
                 .await;
             for so in &so_calls {
@@ -571,10 +746,13 @@ impl SessionActor {
                         "Call StructuredOutput alone, exactly once, after all other tools finish.",
                     ));
             }
+            let real_names: Vec<String> = real.iter().map(|c| c.name.clone()).collect();
             match self.hypercore_execute_tool_batch_prepared(real).await {
-                Ok(mut results) => {
-                    // Prepend SO soft results so Core alignment still works if
-                    // we returned full order — better rebuild full order:
+                Ok(results) => {
+                    // Record real tool names (not the mixed SO correction).
+                    record_executed_tool_names(&mut executed_tools.borrow_mut(), real_names);
+
+                    // Rebuild full-order Core results (SO soft rows + real).
                     let mut full = Vec::with_capacity(calls.len());
                     let mut real_i = 0;
                     for c in calls {
@@ -593,12 +771,27 @@ impl SessionActor {
                             real_i += 1;
                         }
                     }
-                    let _ = &mut results;
+
+                    // Same post-tool preflight as a normal batch.
+                    if self.tool_context.task_output_token_budget.is_none()
+                        && self.check_preflight_overflow().await.is_some()
+                    {
+                        tracing::warn!(
+                            session_id = %self.session_info.id.0,
+                            "hypercore turn: preflight overflow after mixed SO+tools; will compact and continue"
+                        );
+                        compact_restart.set(true);
+                        return Some(ToolBatchResult::Abort {
+                            reason: "preflight overflow after mixed tools; compact restart".into(),
+                        });
+                    }
                     return Some(ToolBatchResult::Continue(full));
                 }
                 Err(terminal) => {
                     *abort.borrow_mut() = Some(terminal);
-                    return Some(ToolBatchResult::Finish(vec![]));
+                    return Some(ToolBatchResult::Abort {
+                        reason: "tool terminal / cancel during structured-output batch".into(),
+                    });
                 }
             }
         }
@@ -615,6 +808,7 @@ impl SessionActor {
         let validated = super::turn::validate_structured_output(validator, &args_raw);
         let retries = structured_retries.get();
 
+        // Validation retry: do not record StructuredOutput as a successful call.
         if let Err(err) = &validated
             && retries < super::turn::STRUCTURED_OUTPUT_MAX_RETRIES
         {
@@ -640,7 +834,10 @@ impl SessionActor {
             ));
         *structured_from_tool.borrow_mut() = Some(validated.clone());
 
-        let tools_called = vec![so_name.to_string()];
+        // Final acceptance only: prior real tools + StructuredOutput.
+        // Validation retries never reach here without accepting/ending.
+        let tools_called = merge_tools_with_structured_output(&executed_tools.borrow(), so_name);
+        *executed_tools.borrow_mut() = tools_called.clone();
         *abort.borrow_mut() = Some(TurnOutcome::Completed {
             snapshot: Box::new(None),
             tools_called,
@@ -817,11 +1014,53 @@ fn sampling_tools_to_host(
         .collect()
 }
 
+/// Append actually-executed tool names in call order (preserves duplicates).
+///
+/// Used across compact segments and StructuredOutput acceptance so
+/// `TurnOutcome::Completed.tools_called` does not depend on Core Ok outcomes
+/// (which drop names when a segment Aborts after tools already ran).
+fn record_executed_tool_names(acc: &mut Vec<String>, names: impl IntoIterator<Item = String>) {
+    acc.extend(names);
+}
+
+/// Merge prior real-tool names with a final accepted StructuredOutput call.
+///
+/// Pure helper for tests / SO terminal path. Does not record SO validation retries
+/// or mixed-batch SO corrections.
+fn merge_tools_with_structured_output(
+    prior: &[String],
+    structured_output_tool: &str,
+) -> Vec<String> {
+    let mut out = prior.to_vec();
+    out.push(structured_output_tool.to_string());
+    out
+}
+
+/// Contract for mixed SO + real tools after successful real execution:
+/// record real names only, then either Continue or Abort(compact) — never treat
+/// the unaccepted SO correction as a successful StructuredOutput call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixedSoPostToolsAction {
+    /// Apply soft SO results + real results and sample again.
+    Continue,
+    /// Overflow: keep real tool names, set compact, Abort without Core commit.
+    AbortCompact,
+}
+
+fn mixed_so_post_tools_action(preflight_overflow: bool) -> MixedSoPostToolsAction {
+    if preflight_overflow {
+        MixedSoPostToolsAction::AbortCompact
+    } else {
+        MixedSoPostToolsAction::Continue
+    }
+}
+
+/// Fail-closed conversion of chat_state → hypercore seed (drops matching trailing user).
 fn conversation_to_seed_items(
     conversation: &[ConversationItem],
     current_user_text: &str,
-) -> Vec<TranscriptItem> {
-    let mut items = conversation_to_full_seed_items(conversation);
+) -> Result<Vec<TranscriptItem>, String> {
+    let mut items = conversation_to_full_seed_items(conversation)?;
 
     if let Some(last) = items.last()
         && last.role == "user"
@@ -829,28 +1068,39 @@ fn conversation_to_seed_items(
     {
         items.pop();
     }
-    items
+    Ok(items)
 }
 
 /// Full chat_state → hypercore seed (used after mid-turn compact).
-fn conversation_to_full_seed_items(conversation: &[ConversationItem]) -> Vec<TranscriptItem> {
-    conversation
-        .iter()
-        .filter_map(conversation_item_to_transcript)
-        .collect()
+fn conversation_to_full_seed_items(
+    conversation: &[ConversationItem],
+) -> Result<Vec<TranscriptItem>, String> {
+    let mut items = Vec::with_capacity(conversation.len());
+    for item in conversation {
+        if let Some(t) = conversation_item_to_transcript(item)? {
+            items.push(t);
+        }
+    }
+    Ok(items)
 }
 
-fn conversation_item_to_transcript(item: &ConversationItem) -> Option<TranscriptItem> {
+/// Convert one conversation row. Returns `Ok(None)` for intentionally skipped
+/// empty rows; `Err` for unsupported multimodal (never silent strip).
+fn conversation_item_to_transcript(
+    item: &ConversationItem,
+) -> Result<Option<TranscriptItem>, String> {
     use xai_hyper_core::TranscriptToolCall;
 
     match item {
-        ConversationItem::System(s) => Some(TranscriptItem::text("system", s.content.to_string())),
+        ConversationItem::System(s) => {
+            Ok(Some(TranscriptItem::text("system", s.content.to_string())))
+        }
         ConversationItem::User(u) => {
-            let text = user_parts_to_text(&u.content);
+            let text = user_parts_to_text(&u.content)?;
             if text.is_empty() {
-                None
+                Ok(None)
             } else {
-                Some(TranscriptItem::text("user", text))
+                Ok(Some(TranscriptItem::text("user", text)))
             }
         }
         ConversationItem::Assistant(a) => {
@@ -865,37 +1115,47 @@ fn conversation_item_to_transcript(item: &ConversationItem) -> Option<Transcript
                 })
                 .collect();
             if text.is_empty() && tool_calls.is_empty() {
-                None
+                Ok(None)
             } else {
-                Some(TranscriptItem {
+                Ok(Some(TranscriptItem {
                     role: "assistant".into(),
                     content: text,
                     tool_calls,
                     tool_call_id: None,
-                })
+                }))
             }
         }
-        ConversationItem::ToolResult(t) => Some(TranscriptItem {
+        ConversationItem::ToolResult(t) => Ok(Some(TranscriptItem {
             role: "tool".into(),
             content: t.content.to_string(),
             tool_calls: Vec::new(),
             tool_call_id: Some(t.tool_call_id.clone()),
-        }),
-        _ => None,
+        })),
+        // Other item kinds are intentionally omitted from core transcript.
+        _ => Ok(None),
     }
 }
 
-fn user_parts_to_text(parts: &[ContentPart]) -> String {
+/// Join user text parts. Fail closed on any non-text part (images, etc.).
+fn user_parts_to_text(parts: &[ContentPart]) -> Result<String, String> {
     let mut out = String::new();
     for p in parts {
-        if let ContentPart::Text { text } = p {
-            if !out.is_empty() {
-                out.push('\n');
+        match p {
+            ContentPart::Text { text } => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(text);
             }
-            out.push_str(text);
+            ContentPart::Image { .. } => {
+                return Err(
+                    "unsupported multimodal content: image parts cannot be converted for Hypercore"
+                        .into(),
+                );
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 fn trailing_assistant_matches(conversation: &[ConversationItem], assistant_text: &str) -> bool {
@@ -908,6 +1168,7 @@ fn trailing_assistant_matches(conversation: &[ConversationItem], assistant_text:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn seed_drops_matching_trailing_user() {
@@ -915,7 +1176,7 @@ mod tests {
             ConversationItem::system("sys"),
             ConversationItem::user("hello"),
         ];
-        let seeded = conversation_to_seed_items(&conv, "hello");
+        let seeded = conversation_to_seed_items(&conv, "hello").expect("text only");
         assert_eq!(seeded.len(), 1);
         assert_eq!(seeded[0].role, "system");
     }
@@ -927,10 +1188,77 @@ mod tests {
             ConversationItem::assistant("reply"),
             ConversationItem::user("new"),
         ];
-        let seeded = conversation_to_seed_items(&conv, "new");
+        let seeded = conversation_to_seed_items(&conv, "new").expect("text only");
         assert_eq!(seeded.len(), 2);
         assert_eq!(seeded[0].content, "old");
         assert_eq!(seeded[1].content, "reply");
+    }
+
+    #[test]
+    fn seed_rejects_image_user_parts_fail_closed() {
+        let conv = vec![ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: Arc::<str>::from("caption"),
+            },
+            ContentPart::Image {
+                url: Arc::<str>::from("https://example.com/x.png"),
+            },
+        ])];
+        let err = conversation_to_seed_items(&conv, "caption").unwrap_err();
+        assert!(
+            err.contains("unsupported multimodal") || err.contains("image"),
+            "unexpected err: {err}"
+        );
+        // Must not silently drop the image and keep text-only.
+        assert!(conversation_has_non_text_user_content(&conv));
+    }
+
+    #[test]
+    fn image_only_user_is_detected_and_conversion_fails() {
+        let conv = vec![ConversationItem::user_with_parts(vec![
+            ContentPart::Image {
+                url: Arc::<str>::from("data:image/png;base64,xx"),
+            },
+        ])];
+        assert!(conversation_has_non_text_user_content(&conv));
+        let err = conversation_to_full_seed_items(&conv).unwrap_err();
+        assert!(err.contains("image") || err.contains("multimodal"));
+    }
+
+    #[test]
+    fn hypercore_round_turn_ids_are_unique_and_stable() {
+        let a = hypercore_round_turn_id("prompt", 0, None);
+        let b = hypercore_round_turn_id("prompt", 1, None);
+        let c = hypercore_round_turn_id("prompt", 0, Some(1));
+        let d = hypercore_round_turn_id("prompt", 0, Some(2));
+        // Length-prefix: prompt_id "p:r0" must not collide with "p" round 0.
+        let e = hypercore_round_turn_id("p:r0", 0, None);
+        let f = hypercore_round_turn_id("p", 0, None);
+        assert_eq!(a, "hc:6:prompt:r0");
+        assert_eq!(b, "hc:6:prompt:r1");
+        assert_eq!(c, "hc:6:prompt:r0:c1");
+        assert_eq!(d, "hc:6:prompt:r0:c2");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(e, f);
+        // Retry same segment reuses id.
+        assert_eq!(a, hypercore_round_turn_id("prompt", 0, None));
+        assert_eq!(c, hypercore_round_turn_id("prompt", 0, Some(1)));
+    }
+
+    #[test]
+    fn post_entry_error_policy_is_propagate_not_legacy_fallback() {
+        assert_eq!(hypercore_post_entry_error_policy(), "propagate");
+        assert_ne!(hypercore_post_entry_error_policy(), "legacy_fallback");
+    }
+
+    #[test]
+    fn path_decision_multimodal_reason_stable() {
+        assert_eq!(
+            HypercorePathDecision::UnsupportedMultimodal.as_str(),
+            "legacy_multimodal"
+        );
+        assert!(!HypercorePathDecision::UnsupportedMultimodal.uses_hypercore());
     }
 
     #[test]
@@ -1037,6 +1365,10 @@ mod tests {
             HypercorePathDecision::ToolsDisabledNeedsPlain.as_str(),
             "legacy_tools_off"
         );
+        assert_eq!(
+            HypercorePathDecision::UnsupportedMultimodal.as_str(),
+            "legacy_multimodal"
+        );
     }
 
     #[test]
@@ -1046,10 +1378,36 @@ mod tests {
             ConversationItem::assistant("a"),
             ConversationItem::user("tail"),
         ];
-        let full = conversation_to_full_seed_items(&conv);
+        let full = conversation_to_full_seed_items(&conv).expect("text only");
         assert_eq!(full.len(), 3);
         assert_eq!(full[2].role, "user");
         assert_eq!(full[2].content, "tail");
+    }
+
+    #[test]
+    fn path_decision_for_conversation_routes_images_to_legacy() {
+        // Only assert multimodal override when base decision would be Use.
+        // Without live env opt-in, base is DisabledByEnv and multimodal is
+        // not reached — still must detect content for the gate.
+        let with_image = vec![ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: Arc::<str>::from("look"),
+            },
+            ContentPart::Image {
+                url: Arc::<str>::from("https://example.com/i.png"),
+            },
+        ])];
+        let d = hypercore_path_decision_for_conversation("look", &with_image);
+        assert!(!d.uses_hypercore());
+        if hypercore_plain_turn_enabled()
+            && (hypercore_tool_loop_ready() || hypercore_plain_forced())
+        {
+            assert_eq!(d, HypercorePathDecision::UnsupportedMultimodal);
+        }
+        let plain = vec![ConversationItem::user("look")];
+        let d_plain = hypercore_path_decision_for_conversation("look", &plain);
+        // Multimodal gate must not fire on pure text.
+        assert_ne!(d_plain, HypercorePathDecision::UnsupportedMultimodal);
     }
 
     #[test]
@@ -1062,5 +1420,61 @@ mod tests {
         let host = sampling_tools_to_host(&defs);
         assert_eq!(host.len(), 1);
         assert_eq!(host[0].name, "read_file");
+    }
+
+    #[test]
+    fn record_executed_tool_names_preserves_order_and_duplicates() {
+        let mut acc = Vec::new();
+        record_executed_tool_names(&mut acc, ["read_file".into(), "bash".into()]);
+        // Compact abort then more tools — append, do not replace.
+        record_executed_tool_names(&mut acc, ["bash".into(), "read_file".into()]);
+        assert_eq!(
+            acc,
+            vec![
+                "read_file".to_string(),
+                "bash".to_string(),
+                "bash".to_string(),
+                "read_file".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_tools_with_structured_output_appends_so_only_on_accept() {
+        let prior = vec!["read_file".to_string(), "bash".to_string()];
+        let merged = merge_tools_with_structured_output(&prior, "StructuredOutput");
+        assert_eq!(
+            merged,
+            vec![
+                "read_file".to_string(),
+                "bash".to_string(),
+                "StructuredOutput".to_string(),
+            ]
+        );
+        // Retries / empty prior: only SO when nothing ran before.
+        assert_eq!(
+            merge_tools_with_structured_output(&[], "StructuredOutput"),
+            vec!["StructuredOutput".to_string()]
+        );
+    }
+
+    #[test]
+    fn mixed_so_overflow_contract_records_real_only_then_abort_compact() {
+        // Contract: after real tools succeed in a mixed batch, overflow →
+        // AbortCompact (not Finish/Continue), and only real names are recorded.
+        let mut acc = Vec::new();
+        let real_names = vec!["read_file".to_string(), "bash".to_string()];
+        record_executed_tool_names(&mut acc, real_names.clone());
+        assert_eq!(
+            mixed_so_post_tools_action(true),
+            MixedSoPostToolsAction::AbortCompact
+        );
+        assert_eq!(
+            mixed_so_post_tools_action(false),
+            MixedSoPostToolsAction::Continue
+        );
+        // Unaccepted SO must not appear.
+        assert!(!acc.iter().any(|n| n == "StructuredOutput"));
+        assert_eq!(acc, real_names);
     }
 }

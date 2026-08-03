@@ -54,18 +54,45 @@ Look for:
 | Event / field | Meaning |
 |---------------|---------|
 | `shell.turn.path` unified log | `path=hypercore` or `path=legacy` (+ `reason`) |
-| `hypercore turn: begin` | Round entered Hypercore (`is_subagent`, `parent`) |
+| `hypercore turn: begin` | Round entered Hypercore (`is_subagent`, `parent`, `core_turn_id`) |
 | `hypercore turn: tools prepared` | Tool count advertised to the model |
 | `hypercore turn: committed` | Core committed; `compact_rounds`, `tools`, `has_structured` |
-| `agent round using legacy path` | Decision skipped Hypercore (`legacy_env_disabled`, …) |
-| `falling back to legacy for this round` | Hypercore errored; same outer-loop round continues on legacy |
+| `agent round using legacy path` | Decision skipped Hypercore (`legacy_env_disabled`, `legacy_multimodal`, …) |
+
+Path `reason` values include: `legacy_env_disabled`, `legacy_empty_prompt`,
+`legacy_tools_off`, `legacy_multimodal`. There is **no**
+`hypercore_error` same-round legacy fallback.
+
+## Core turn ids
+
+Outer goal/stop rounds use a stable unique Hypercore turn id:
+
+```text
+hc:{prompt_id_len}:{prompt_id}:r{n}           # outer round n (0, 1, …)
+hc:{prompt_id_len}:{prompt_id}:r{n}:c{m}      # compact segment m (1, 2, …)
+```
+
+ACP `prompt_id` / client telemetry keep the original value; only the core
+terminal / stream id uses the `hc:…` form. Same segment retries reuse the id.
 
 ## Failure behavior
 
 1. **Hypercore not explicitly enabled** → legacy for the whole session (default).
-2. **Hypercore error mid-round** → log warn + **legacy for that round only**.
-3. **Context overflow mid-tools** → compact chat_state → `continue_turn_with_tools` (up to 3 restarts).
-4. **Auth compact failure** → same reauth surface as legacy compact.
+2. **Path decision pre-routes** empty prompt, tools-off-without-plain, and any
+   current/historical non-text user content (images) → legacy **before** Core.
+3. **Once Hypercore is entered**, non-`Aborted` errors **propagate** to the
+   caller. There is **no** same-round broad fallback to legacy.
+4. **`ToolBatchResult::Abort`** (permission reject/cancel, overflow compact
+   restart, abort short-circuit) → core restores full transcript checkpoint,
+   does **not** write terminal/snapshot or bump `completed_turns`. Shell maps:
+   - terminal side-channel → return that `TurnOutcome`
+   - compact flag only → compact chat_state, continue on `:cN` segment
+   - neither → explicit error (not a silent legacy replay)
+5. **Context overflow mid-tools** → Abort aborted segment (no terminal) → compact
+   → `continue_turn_with_tools` (up to 3 restarts); only the final continuation
+   commits terminal.
+6. **Auth compact failure** → same reauth surface as legacy compact.
+7. **Same turn_id, different request text** → `TurnIdConflict` (no stream).
 
 ## What stays on shell (not Core)
 

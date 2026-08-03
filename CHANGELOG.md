@@ -5,6 +5,13 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Hypercore correctness (Abort / no same-round legacy fallback)** — Core
+  `ToolBatchResult::Abort` restores a full transcript checkpoint (no terminal /
+  snapshot / `completed_turns` bump). Shell maps permission cancel, tool
+  terminal, and mid-turn compact overflow to Abort; once Hypercore is entered,
+  non-Abort errors propagate instead of replaying the round on legacy. Images
+  pre-route to legacy; seed conversion is fail-closed. Outer rounds use stable
+  unique core turn ids (`hc:{len}:{prompt_id}:r{n}`).
 - **Hypercore containment after correctness audit** — The experimental turn path
   now defaults to legacy and only enables for an explicit truthy
   `HYPERCORE_TURN` (or fallback `GROK_HYPERCORE_TURN`) value. Empty and unknown
