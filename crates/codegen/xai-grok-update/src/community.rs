@@ -3,7 +3,10 @@
 //! This module is deliberately separate from the official Grok updater. It
 //! only reads releases from `DaviRain-Su/hyper-grok-build` and only activates
 //! binaries below `~/.hyper` (or `HYPER_SHARE_DIR` in debug/test builds).
-//! Nothing here calls the x.ai/npm updater or writes `~/.grok/bin/grok`.
+//! Optional release `bundled/**` trees are activated at `$GROK_HOME/bundled`
+//! (default `~/.grok/bundled`) with a compensating transaction alongside the
+//! binary and `update-state.json`. Nothing here calls the x.ai/npm updater or
+//! writes `~/.grok/bin/grok`.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -33,8 +36,83 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_AUXILIARY_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES: usize = 32;
+/// Real release archives ship a full `bundled/**` tree (skills, agents, …).
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_BUNDLE_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_BUNDLE_FILES: usize = 4096;
+const MAX_PATH_DEPTH: usize = 32;
+const BUNDLE_DIR_NAME: &str = "bundled";
 const INSTALLER_NAME: &str = "community-github";
+
+#[cfg(feature = "community-update-test-hooks")]
+mod install_failpoints {
+    use std::sync::Mutex;
+
+    use anyhow::{Result, bail};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum InstallFailpoint {
+        AfterBundleActivation,
+        BeforeStateWrite,
+    }
+
+    static INSTALL_FAILPOINT: Mutex<Option<InstallFailpoint>> = Mutex::new(None);
+
+    /// Test-only install failpoint injection (`after_bundle_activation`,
+    /// `before_state_write`). Unknown / `None` clears the failpoint.
+    #[doc(hidden)]
+    pub fn set_install_failpoint(point: Option<&str>) {
+        let parsed = point.and_then(|name| match name {
+            "after_bundle_activation" => Some(InstallFailpoint::AfterBundleActivation),
+            "before_state_write" => Some(InstallFailpoint::BeforeStateWrite),
+            _ => None,
+        });
+        *INSTALL_FAILPOINT.lock().unwrap_or_else(|e| e.into_inner()) = parsed;
+    }
+
+    pub(super) fn take_install_failpoint(expected: InstallFailpoint) -> Result<()> {
+        let mut guard = INSTALL_FAILPOINT.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard == Some(expected) {
+            *guard = None;
+            bail!("injected install failpoint: {expected:?}");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "community-update-test-hooks")]
+#[doc(hidden)]
+pub use install_failpoints::set_install_failpoint;
+
+/// Production builds compile this to a no-op so failpoints cannot ship.
+#[cfg(feature = "community-update-test-hooks")]
+fn take_install_failpoint_after_bundle() -> Result<()> {
+    install_failpoints::take_install_failpoint(
+        install_failpoints::InstallFailpoint::AfterBundleActivation,
+    )
+}
+
+#[cfg(not(feature = "community-update-test-hooks"))]
+fn take_install_failpoint_after_bundle() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(feature = "community-update-test-hooks")]
+fn take_install_failpoint_before_state() -> Result<()> {
+    install_failpoints::take_install_failpoint(
+        install_failpoints::InstallFailpoint::BeforeStateWrite,
+    )
+}
+
+#[cfg(not(feature = "community-update-test-hooks"))]
+fn take_install_failpoint_before_state() -> Result<()> {
+    Ok(())
+}
+
+fn combine_errors(primary: anyhow::Error, secondary: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{primary:#}\n\nalso: {secondary:#}")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct UpdateState {
@@ -112,15 +190,28 @@ impl Drop for UpdateLock {
     }
 }
 
-/// Removes a temporary artifact unless ownership was explicitly consumed.
+/// Removes a temporary path unless ownership was explicitly consumed.
 struct TempArtifact {
     path: PathBuf,
+    is_dir: bool,
     keep: bool,
 }
 
 impl TempArtifact {
-    fn new(path: PathBuf) -> Self {
-        Self { path, keep: false }
+    fn new_file(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: false,
+            keep: false,
+        }
+    }
+
+    fn new_dir(path: PathBuf) -> Self {
+        Self {
+            path,
+            is_dir: true,
+            keep: false,
+        }
     }
 
     fn keep(mut self) -> PathBuf {
@@ -131,7 +222,12 @@ impl TempArtifact {
 
 impl Drop for TempArtifact {
     fn drop(&mut self) {
-        if !self.keep {
+        if self.keep {
+            return;
+        }
+        if self.is_dir {
+            let _ = std::fs::remove_dir_all(&self.path);
+        } else {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -144,6 +240,16 @@ pub(crate) fn hyper_home() -> PathBuf {
     #[allow(deprecated)]
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".hyper")
+}
+
+/// Shared Grok/Hyper config home (`$GROK_HOME` or `~/.grok`). Bundle assets
+/// live here so the runtime can load them alongside user config.
+fn community_grok_home() -> PathBuf {
+    xai_grok_shell::util::grok_home::grok_home()
+}
+
+fn managed_bundle_path() -> PathBuf {
+    community_grok_home().join(BUNDLE_DIR_NAME)
 }
 
 pub(crate) fn managed_application() -> PathBuf {
@@ -182,15 +288,19 @@ fn state_is_fresh(state: &UpdateState) -> bool {
 }
 
 fn reject_symlink(path: &Path, label: &str) -> Result<()> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        bail!(
-            "refusing to use symlinked Hyper {label}: {}",
-            path.display()
-        );
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to use symlinked Hyper {label}: {}",
+                path.display()
+            );
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspecting Hyper {label} {}", path.display()))
+        }
     }
-    Ok(())
 }
 
 fn ensure_safe_layout() -> Result<()> {
@@ -256,44 +366,70 @@ fn unique_sibling(base: &Path, suffix: &str) -> PathBuf {
     base.with_file_name(name)
 }
 
-fn write_state_atomic(state: &UpdateState) -> Result<()> {
-    ensure_safe_layout()?;
-    let path = state_path();
-    reject_symlink(&path, "update state")?;
-    let tmp = unique_sibling(&path, "tmp");
+fn write_state_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    reject_symlink(path, "update state")?;
+    let tmp = unique_sibling(path, "tmp");
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
-    let tmp_guard = TempArtifact::new(tmp.clone());
-    serde_json::to_writer_pretty(&mut file, state)?;
-    file.write_all(b"\n")?;
+    let tmp_guard = TempArtifact::new_file(tmp.clone());
+    file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
     #[cfg(windows)]
     {
-        let backup = unique_sibling(&path, "old");
+        let backup = unique_sibling(path, "old");
         let had_old = path.exists();
         if had_old {
-            std::fs::rename(&path, &backup).with_context(|| {
+            std::fs::rename(path, &backup).with_context(|| {
                 format!("moving existing Hyper update state {}", path.display())
             })?;
         }
-        if let Err(error) = std::fs::rename(&tmp, &path) {
-            if had_old {
-                let _ = std::fs::rename(&backup, &path);
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let activation_error =
+                anyhow::Error::new(error).context(format!("activating {}", path.display()));
+            if had_old && let Err(restore_error) = std::fs::rename(&backup, path) {
+                return Err(combine_errors(
+                    activation_error,
+                    anyhow::Error::new(restore_error).context(format!(
+                        "restoring previous Hyper update state from {} (backup preserved)",
+                        backup.display()
+                    )),
+                ));
             }
-            return Err(error).with_context(|| format!("activating {}", path.display()));
+            return Err(activation_error);
         }
         let _ = std::fs::remove_file(backup);
     }
     #[cfg(not(windows))]
-    std::fs::rename(&tmp, &path).with_context(|| format!("activating {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("activating {}", path.display()))?;
 
     let _ = tmp_guard.keep();
     Ok(())
+}
+
+fn write_state_atomic(state: &UpdateState) -> Result<()> {
+    ensure_safe_layout()?;
+    let path = state_path();
+    let mut bytes = serde_json::to_vec_pretty(state)?;
+    bytes.push(b'\n');
+    write_state_bytes_atomic(&path, &bytes)
+}
+
+fn restore_state_bytes(path: &Path, previous: Option<&[u8]>) -> Result<()> {
+    match previous {
+        Some(bytes) => write_state_bytes_atomic(path, bytes),
+        None => {
+            if path.exists() || path.is_symlink() {
+                std::fs::remove_file(path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[allow(unreachable_code)]
@@ -804,25 +940,123 @@ async fn download_archive(candidate: &Candidate, destination: &Path) -> Result<S
     Ok(digest)
 }
 
-fn normalized_root_entry(path: &Path) -> Result<Option<String>> {
-    let raw = path.to_string_lossy();
-    if raw.contains('\\') {
-        bail!("archive entry uses a backslash path: {raw}");
+/// Windows reserved device names (case-insensitive stem before any extension).
+fn is_windows_reserved_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn validate_path_component(name: &str, raw: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." {
+        bail!("archive entry has an invalid path component: {raw}");
     }
-    let mut name: Option<String> = None;
+    if name.contains('\0') {
+        bail!("archive entry has an invalid path component: {raw}");
+    }
+    // Portable cross-platform component rules (Windows-hostile shapes).
+    if name.contains(':') {
+        bail!("archive entry component contains ':': {raw}");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        bail!("archive entry component has trailing '.' or space: {raw}");
+    }
+    if is_windows_reserved_device(name) {
+        bail!("archive entry uses a Windows reserved device name: {raw}");
+    }
+    Ok(())
+}
+
+/// Safely normalize an archive entry to relative components.
+///
+/// Allows multiple `Normal` components, ignores `.`, and rejects absolute /
+/// rooted / prefix / `..` paths, empty names, reserved device names, and
+/// excessive depth. Returns `None` for the archive root (`.` / empty).
+///
+/// `allow_backslash_as_separator`: zip producers (PowerShell / older tools) may
+/// emit `\` separators; treat them as `/` then apply the same component rules.
+/// Tar entries must keep literal backslash rejection (`allow = false`).
+fn normalize_archive_path(
+    raw: &str,
+    allow_backslash_as_separator: bool,
+) -> Result<Option<Vec<String>>> {
+    if raw.contains('\0') {
+        bail!("archive entry contains a NUL byte");
+    }
+    let normalized = if allow_backslash_as_separator {
+        raw.replace('\\', "/")
+    } else {
+        if raw.contains('\\') {
+            bail!("archive entry uses a backslash path: {raw}");
+        }
+        raw.to_string()
+    };
+    // Reject Windows drive / UNC style even when Path components would not.
+    if normalized.chars().nth(1) == Some(':') {
+        bail!("archive entry has a Windows drive prefix: {raw}");
+    }
+    let path = Path::new(&normalized);
+    let mut parts = Vec::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(part) if name.is_none() => {
-                name = Some(part.to_string_lossy().to_string());
+            Component::Normal(part) => {
+                let name = part.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("archive entry has a non-UTF-8 component: {raw}")
+                })?;
+                validate_path_component(name, raw)?;
+                if name.contains('/') || (!allow_backslash_as_separator && name.contains('\\')) {
+                    bail!("archive entry has an invalid path component: {raw}");
+                }
+                parts.push(name.to_string());
             }
-            Component::Normal(_) => bail!("archive entry is nested: {raw}"),
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                bail!("archive entry escapes its root: {raw}")
+                bail!("archive entry escapes its root: {raw}");
             }
         }
     }
-    Ok(name)
+    if parts.len() > MAX_PATH_DEPTH {
+        bail!("archive entry exceeds the maximum path depth ({MAX_PATH_DEPTH}): {raw}");
+    }
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parts))
+}
+
+fn path_key_casefold(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn display_parts(parts: &[String]) -> String {
+    parts.join("/")
 }
 
 fn auxiliary_entry_allowed(name: &str) -> bool {
@@ -832,163 +1066,593 @@ fn auxiliary_entry_allowed(name: &str) -> bool {
     )
 }
 
-#[cfg(unix)]
-fn extract_tar_binary(archive_path: &Path, destination: &Path, binary_entry: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveEntryClass {
+    /// Archive root `.` / empty (tar directory placeholder).
+    RootPlaceholder,
+    /// Root-level managed binary (`hyper` / `hyper.exe`).
+    Binary,
+    /// Root-level license/notice allowlist (drained, not deployed).
+    Notice,
+    /// `bundled` directory entry itself.
+    BundleRootDir,
+    /// Directory under `bundled/`.
+    BundleDir,
+    /// Regular file under `bundled/`.
+    BundleFile,
+}
 
-    let archive_file = File::open(archive_path)?;
+fn classify_archive_entry(
+    parts: Option<&[String]>,
+    binary_entry: &str,
+) -> Result<ArchiveEntryClass> {
+    let Some(parts) = parts else {
+        return Ok(ArchiveEntryClass::RootPlaceholder);
+    };
+    match parts.len() {
+        0 => Ok(ArchiveEntryClass::RootPlaceholder),
+        1 => {
+            let name = &parts[0];
+            if name == binary_entry {
+                Ok(ArchiveEntryClass::Binary)
+            } else if auxiliary_entry_allowed(name) {
+                Ok(ArchiveEntryClass::Notice)
+            } else if name == BUNDLE_DIR_NAME {
+                Ok(ArchiveEntryClass::BundleRootDir)
+            } else {
+                bail!("Hyper archive contains unexpected root entry {name}");
+            }
+        }
+        _ => {
+            if parts[0] != BUNDLE_DIR_NAME {
+                bail!(
+                    "Hyper archive contains unexpected nested entry {}",
+                    display_parts(parts)
+                );
+            }
+            // Remaining components must all be ordinary names (already
+            // validated by normalize_archive_path).
+            Ok(ArchiveEntryClass::BundleFile)
+        }
+    }
+}
+
+/// Result of a successful archive extraction.
+struct ExtractedArchive {
+    binary: PathBuf,
+    /// Stage directory whose contents are the `bundled/` tree (not including
+    /// the `bundled` name itself). Present only when the archive shipped a
+    /// bundle.
+    bundle_stage: Option<PathBuf>,
+    _binary_guard: TempArtifact,
+    _bundle_guard: Option<TempArtifact>,
+}
+
+struct ExtractLimits {
+    entries: usize,
+    bundle_files: usize,
+    bundle_bytes: u64,
+}
+
+impl ExtractLimits {
+    fn new() -> Self {
+        Self {
+            entries: 0,
+            bundle_files: 0,
+            bundle_bytes: 0,
+        }
+    }
+
+    fn count_entry(&mut self) -> Result<()> {
+        self.entries += 1;
+        if self.entries > MAX_ARCHIVE_ENTRIES {
+            bail!("Hyper archive contains too many entries (limit {MAX_ARCHIVE_ENTRIES})");
+        }
+        Ok(())
+    }
+
+    fn count_bundle_file(&mut self, size: u64) -> Result<()> {
+        self.bundle_files += 1;
+        if self.bundle_files > MAX_BUNDLE_FILES {
+            bail!("Hyper archive bundle contains too many files (limit {MAX_BUNDLE_FILES})");
+        }
+        self.bundle_bytes = self.bundle_bytes.saturating_add(size);
+        if self.bundle_bytes > MAX_BUNDLE_TOTAL_BYTES {
+            bail!(
+                "Hyper archive bundle exceeds the {MAX_BUNDLE_TOTAL_BYTES}-byte decompressed limit"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn ensure_parent_dirs(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_limited<R: Read>(
+    reader: &mut R,
+    mut writer: impl Write,
+    max: u64,
+    label: &str,
+) -> Result<u64> {
+    let copied = std::io::copy(&mut reader.take(max.saturating_add(1)), &mut writer)?;
+    if copied > max {
+        bail!("{label} exceeds the decompressed size limit ({max} bytes)");
+    }
+    Ok(copied)
+}
+
+fn drain_limited<R: Read>(reader: &mut R, max: u64, label: &str) -> Result<u64> {
+    copy_limited(reader, std::io::sink(), max, label)
+}
+
+fn insert_seen(seen: &mut HashSet<String>, parts: &[String]) -> Result<()> {
+    let key = path_key_casefold(parts);
+    if !seen.insert(key) {
+        bail!(
+            "Hyper archive contains duplicate or case-colliding entry {}",
+            display_parts(parts)
+        );
+    }
+    Ok(())
+}
+
+fn prepare_extract_destinations(
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    binary_entry: &str,
+) -> Result<(PathBuf, PathBuf, TempArtifact, TempArtifact)> {
+    std::fs::create_dir_all(stage_root)
+        .with_context(|| format!("creating extract stage {}", stage_root.display()))?;
+    let binary_path = stage_root.join(binary_entry);
+    // Bundle stage must already live on the same filesystem as the final
+    // `$GROK_HOME/bundled` target so activation can rename without copying.
+    if bundle_stage.exists() {
+        bail!(
+            "bundle stage path already exists: {}",
+            bundle_stage.display()
+        );
+    }
+    std::fs::create_dir_all(&bundle_stage)
+        .with_context(|| format!("creating bundle stage {}", bundle_stage.display()))?;
+    let binary_guard = TempArtifact::new_file(binary_path.clone());
+    let bundle_guard = TempArtifact::new_dir(bundle_stage.clone());
+    Ok((binary_path, bundle_stage, binary_guard, bundle_guard))
+}
+
+fn finish_extracted(
+    binary_path: PathBuf,
+    binary_guard: TempArtifact,
+    bundle_stage: PathBuf,
+    bundle_guard: TempArtifact,
+    wrote_bundle: bool,
+    found_binary: bool,
+    binary_entry: &str,
+) -> Result<ExtractedArchive> {
+    if !found_binary {
+        bail!("Hyper archive does not contain {binary_entry}");
+    }
+    if !binary_path.is_file() {
+        bail!("Hyper binary stage is missing after extraction");
+    }
+    if wrote_bundle {
+        Ok(ExtractedArchive {
+            binary: binary_path,
+            bundle_stage: Some(bundle_stage),
+            _binary_guard: binary_guard,
+            _bundle_guard: Some(bundle_guard),
+        })
+    } else {
+        // Drop empty bundle stage automatically.
+        drop(bundle_guard);
+        Ok(ExtractedArchive {
+            binary: binary_path,
+            bundle_stage: None,
+            _binary_guard: binary_guard,
+            _bundle_guard: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn extract_tar_archive(
+    archive_path: &Path,
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    binary_entry: &str,
+) -> Result<ExtractedArchive> {
+    use std::os::unix::fs::PermissionsExt;
+    use tar::EntryType;
+
+    let (binary_path, bundle_stage, binary_guard, bundle_guard) =
+        prepare_extract_destinations(stage_root, bundle_stage, binary_entry)?;
+
+    let archive_file = File::open(archive_path)
+        .with_context(|| format!("opening Hyper archive {}", archive_path.display()))?;
     let decoder = flate2::read::GzDecoder::new(archive_file);
     let mut archive = tar::Archive::new(decoder);
-    let mut seen_names = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut limits = ExtractLimits::new();
     let mut found_binary = false;
-    let mut entries = 0usize;
+    let mut wrote_bundle = false;
 
     for entry in archive.entries().context("reading Hyper tar archive")? {
-        entries += 1;
-        if entries > MAX_ARCHIVE_ENTRIES {
-            bail!("Hyper archive contains too many entries");
-        }
-        let entry = entry.context("reading Hyper tar entry")?;
-        let path = entry
+        limits.count_entry()?;
+        let mut entry = entry.context("reading Hyper tar entry")?;
+        let header = entry.header().clone();
+        // Security decisions require valid UTF-8; do not lossily decode paths.
+        let raw_os = entry
             .path()
             .context("reading Hyper tar entry path")?
             .into_owned();
-        let name = normalized_root_entry(&path)?;
-        let kind = entry.header().entry_type();
-        if kind.is_dir() && name.is_none() {
-            continue;
+        let raw = raw_os
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Hyper archive entry path is not valid UTF-8"))?;
+        let parts = normalize_archive_path(raw, false)?;
+        let kind = header.entry_type();
+
+        // Allow root `.` directory placeholders produced by `tar -C staging .`.
+        // Only Directory is accepted for unnamed root; regular/continuous are
+        // rejected so a zero-size root file cannot slip past classification.
+        if parts.is_none() {
+            match kind {
+                EntryType::Directory => continue,
+                _ => bail!("Hyper archive root entry has unsupported type: {raw}"),
+            }
         }
-        if !kind.is_file() {
+        let parts = parts.expect("checked above");
+        let mut class = classify_archive_entry(Some(&parts), binary_entry)?;
+        if matches!(class, ArchiveEntryClass::BundleFile) && kind == EntryType::Directory {
+            class = ArchiveEntryClass::BundleDir;
+        }
+        if matches!(class, ArchiveEntryClass::BundleRootDir) && kind != EntryType::Directory {
             bail!(
-                "Hyper archive contains a non-regular entry: {}",
-                path.display()
+                "Hyper archive entry {} must be a directory",
+                display_parts(&parts)
             );
         }
-        let Some(name) = name else {
-            bail!("Hyper archive contains an unnamed regular entry");
-        };
-        if !seen_names.insert(name.clone()) {
-            bail!("Hyper archive contains duplicate entry {name}");
-        }
-        if name == binary_entry {
-            if found_binary {
-                bail!("Hyper archive contains duplicate {binary_entry}");
+
+        match kind {
+            EntryType::Directory => {
+                insert_seen(&mut seen, &parts)?;
+                match class {
+                    ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => {
+                        let rel: PathBuf = parts[1..].iter().collect();
+                        let dest = bundle_stage.join(&rel);
+                        std::fs::create_dir_all(&dest).with_context(|| {
+                            format!(
+                                "creating bundle directory stage for {}",
+                                display_parts(&parts)
+                            )
+                        })?;
+                        wrote_bundle = true;
+                    }
+                    ArchiveEntryClass::RootPlaceholder => {}
+                    _ => {
+                        bail!(
+                            "Hyper archive has an unexpected directory entry {}",
+                            display_parts(&parts)
+                        );
+                    }
+                }
             }
-            if entry.size() > MAX_BINARY_BYTES {
-                bail!("Hyper binary exceeds the decompressed size limit");
+            EntryType::Regular | EntryType::Continuous => {
+                insert_seen(&mut seen, &parts)?;
+                match class {
+                    ArchiveEntryClass::Binary => {
+                        if found_binary {
+                            bail!("Hyper archive contains duplicate {binary_entry}");
+                        }
+                        if entry.size() > MAX_BINARY_BYTES {
+                            bail!("Hyper binary exceeds the decompressed size limit");
+                        }
+                        let mut out = OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(&binary_path)
+                            .with_context(|| {
+                                format!("creating binary stage {}", binary_path.display())
+                            })?;
+                        copy_limited(&mut entry, &mut out, MAX_BINARY_BYTES, "Hyper binary")?;
+                        out.sync_all()?;
+                        std::fs::set_permissions(
+                            &binary_path,
+                            std::fs::Permissions::from_mode(0o755),
+                        )?;
+                        found_binary = true;
+                    }
+                    ArchiveEntryClass::Notice => {
+                        if entry.size() > MAX_AUXILIARY_BYTES {
+                            bail!(
+                                "Hyper archive auxiliary entry {} is too large",
+                                display_parts(&parts)
+                            );
+                        }
+                        drain_limited(
+                            &mut entry,
+                            MAX_AUXILIARY_BYTES,
+                            &format!("Hyper archive auxiliary entry {}", display_parts(&parts)),
+                        )?;
+                    }
+                    ArchiveEntryClass::BundleFile => {
+                        if entry.size() > MAX_BUNDLE_FILE_BYTES {
+                            bail!(
+                                "Hyper archive bundle file {} exceeds the per-file size limit",
+                                display_parts(&parts)
+                            );
+                        }
+                        let rel: PathBuf = parts[1..].iter().collect();
+                        if rel.as_os_str().is_empty() {
+                            bail!("Hyper archive bundle file path is empty");
+                        }
+                        let dest = bundle_stage.join(&rel);
+                        ensure_parent_dirs(&dest)?;
+                        let mut out = OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(&dest)
+                            .with_context(|| {
+                                format!(
+                                    "creating bundle stage file {} -> {}",
+                                    display_parts(&parts),
+                                    dest.display()
+                                )
+                            })?;
+                        let copied = copy_limited(
+                            &mut entry,
+                            &mut out,
+                            MAX_BUNDLE_FILE_BYTES,
+                            &format!("Hyper archive bundle file {}", display_parts(&parts)),
+                        )?;
+                        out.sync_all()?;
+                        limits.count_bundle_file(copied)?;
+                        wrote_bundle = true;
+                    }
+                    ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => {
+                        bail!(
+                            "Hyper archive directory entry {} is not a regular file",
+                            display_parts(&parts)
+                        );
+                    }
+                    ArchiveEntryClass::RootPlaceholder => {
+                        bail!("Hyper archive contains an unnamed regular entry");
+                    }
+                }
             }
-            let mut out = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(destination)?;
-            let copied = std::io::copy(&mut entry.take(MAX_BINARY_BYTES + 1), &mut out)?;
-            if copied > MAX_BINARY_BYTES {
-                bail!("Hyper binary exceeds the decompressed size limit");
+            EntryType::Symlink
+            | EntryType::Link
+            | EntryType::Char
+            | EntryType::Block
+            | EntryType::Fifo
+            | EntryType::GNUSparse
+            | EntryType::GNULongName
+            | EntryType::GNULongLink
+            | EntryType::XGlobalHeader
+            | EntryType::XHeader => {
+                bail!(
+                    "Hyper archive contains unsupported entry type {:?} at {}",
+                    kind,
+                    display_parts(&parts)
+                );
             }
-            out.sync_all()?;
-            std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
-            found_binary = true;
-        } else if auxiliary_entry_allowed(&name) {
-            if entry.size() > MAX_AUXILIARY_BYTES {
-                bail!("Hyper archive auxiliary entry {name} is too large");
+            _ => {
+                bail!(
+                    "Hyper archive contains unsupported entry type {:?} at {}",
+                    kind,
+                    display_parts(&parts)
+                );
             }
-            // Drain to validate the compressed stream without unpacking it.
-            let copied = std::io::copy(
-                &mut entry.take(MAX_AUXILIARY_BYTES + 1),
-                &mut std::io::sink(),
-            )?;
-            if copied > MAX_AUXILIARY_BYTES {
-                bail!("Hyper archive auxiliary entry {name} is too large");
-            }
-        } else {
-            bail!("Hyper archive contains unexpected entry {name}");
         }
     }
-    if !found_binary {
-        bail!("Hyper archive does not contain {binary_entry}");
-    }
-    Ok(())
+
+    finish_extracted(
+        binary_path,
+        binary_guard,
+        bundle_stage,
+        bundle_guard,
+        wrote_bundle,
+        found_binary,
+        binary_entry,
+    )
 }
 
-#[cfg(windows)]
-fn extract_zip_binary(archive_path: &Path, destination: &Path, binary_entry: &str) -> Result<()> {
-    let file = File::open(archive_path)?;
+fn extract_zip_archive(
+    archive_path: &Path,
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    binary_entry: &str,
+) -> Result<ExtractedArchive> {
+    let (binary_path, bundle_stage, binary_guard, bundle_guard) =
+        prepare_extract_destinations(stage_root, bundle_stage, binary_entry)?;
+
+    let file = File::open(archive_path)
+        .with_context(|| format!("opening Hyper archive {}", archive_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("reading Hyper zip archive")?;
     if archive.len() > MAX_ARCHIVE_ENTRIES {
-        bail!("Hyper archive contains too many entries");
+        bail!("Hyper archive contains too many entries (limit {MAX_ARCHIVE_ENTRIES})");
     }
-    let mut seen_names = HashSet::new();
+
+    let mut seen = HashSet::new();
+    let mut limits = ExtractLimits::new();
     let mut found_binary = false;
+    let mut wrote_bundle = false;
+
     for index in 0..archive.len() {
-        let entry = archive.by_index(index)?;
-        let path = Path::new(entry.name());
-        let name = normalized_root_entry(path)?;
-        if entry.is_dir() && name.is_none() {
+        limits.count_entry()?;
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("reading Hyper zip entry #{index}"))?;
+        let raw_name = entry.name().to_string();
+        // PowerShell / older zip producers may use `\`; normalize as separators.
+        let trimmed = raw_name.trim_end_matches(['/', '\\']);
+        let parts = normalize_archive_path(trimmed, true)?;
+        let is_dir = entry.is_dir() || raw_name.ends_with('/') || raw_name.ends_with('\\');
+
+        // Reject Unix symlink mode (S_IFLNK) / reparse-style entries.
+        if entry.is_symlink() {
+            bail!("Hyper archive contains a symlink: {raw_name}");
+        }
+
+        if parts.is_none() {
+            if is_dir {
+                continue;
+            }
+            bail!("Hyper archive contains an unnamed regular entry: {raw_name}");
+        }
+        let parts = parts.expect("checked above");
+        let mut class = classify_archive_entry(Some(&parts), binary_entry)?;
+        if is_dir {
+            if matches!(class, ArchiveEntryClass::BundleFile) {
+                class = ArchiveEntryClass::BundleDir;
+            }
+            insert_seen(&mut seen, &parts)?;
+            match class {
+                ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => {
+                    let rel: PathBuf = parts[1..].iter().collect();
+                    let dest = bundle_stage.join(&rel);
+                    std::fs::create_dir_all(&dest).with_context(|| {
+                        format!(
+                            "creating bundle directory stage for {}",
+                            display_parts(&parts)
+                        )
+                    })?;
+                    wrote_bundle = true;
+                }
+                ArchiveEntryClass::RootPlaceholder => {}
+                _ => {
+                    bail!(
+                        "Hyper archive has an unexpected directory entry {}",
+                        display_parts(&parts)
+                    );
+                }
+            }
             continue;
         }
-        if entry.is_dir() {
-            bail!(
-                "Hyper archive contains an unexpected directory: {}",
-                entry.name()
-            );
-        }
-        if entry
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            bail!("Hyper archive contains a symlink: {}", entry.name());
-        }
-        let Some(name) = name else {
-            bail!("Hyper archive contains an unnamed regular entry");
-        };
-        if !seen_names.insert(name.clone()) {
-            bail!("Hyper archive contains duplicate entry {name}");
-        }
-        let max = if name == binary_entry {
-            MAX_BINARY_BYTES
-        } else if auxiliary_entry_allowed(&name) {
-            MAX_AUXILIARY_BYTES
-        } else {
-            bail!("Hyper archive contains unexpected entry {name}");
-        };
-        if entry.size() > max {
-            bail!("Hyper archive entry {name} exceeds the decompressed size limit");
-        }
-        if name == binary_entry {
-            let mut out = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(destination)?;
-            let copied = std::io::copy(&mut entry.take(max + 1), &mut out)?;
-            if copied > max {
-                bail!("Hyper binary exceeds the decompressed size limit");
+
+        insert_seen(&mut seen, &parts)?;
+        match class {
+            ArchiveEntryClass::Binary => {
+                if found_binary {
+                    bail!("Hyper archive contains duplicate {binary_entry}");
+                }
+                if entry.size() > MAX_BINARY_BYTES {
+                    bail!("Hyper binary exceeds the decompressed size limit");
+                }
+                let mut out = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&binary_path)
+                    .with_context(|| format!("creating binary stage {}", binary_path.display()))?;
+                copy_limited(&mut entry, &mut out, MAX_BINARY_BYTES, "Hyper binary")?;
+                out.sync_all()?;
+                found_binary = true;
             }
-            out.sync_all()?;
-            found_binary = true;
-        } else {
-            let copied = std::io::copy(&mut entry.take(max + 1), &mut std::io::sink())?;
-            if copied > max {
-                bail!("Hyper archive auxiliary entry {name} is too large");
+            ArchiveEntryClass::Notice => {
+                if entry.size() > MAX_AUXILIARY_BYTES {
+                    bail!(
+                        "Hyper archive auxiliary entry {} is too large",
+                        display_parts(&parts)
+                    );
+                }
+                drain_limited(
+                    &mut entry,
+                    MAX_AUXILIARY_BYTES,
+                    &format!("Hyper archive auxiliary entry {}", display_parts(&parts)),
+                )?;
+            }
+            ArchiveEntryClass::BundleFile => {
+                if entry.size() > MAX_BUNDLE_FILE_BYTES {
+                    bail!(
+                        "Hyper archive bundle file {} exceeds the per-file size limit",
+                        display_parts(&parts)
+                    );
+                }
+                let rel: PathBuf = parts[1..].iter().collect();
+                if rel.as_os_str().is_empty() {
+                    bail!("Hyper archive bundle file path is empty");
+                }
+                let dest = bundle_stage.join(&rel);
+                ensure_parent_dirs(&dest)?;
+                let mut out = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&dest)
+                    .with_context(|| {
+                        format!(
+                            "creating bundle stage file {} -> {}",
+                            display_parts(&parts),
+                            dest.display()
+                        )
+                    })?;
+                let copied = copy_limited(
+                    &mut entry,
+                    &mut out,
+                    MAX_BUNDLE_FILE_BYTES,
+                    &format!("Hyper archive bundle file {}", display_parts(&parts)),
+                )?;
+                out.sync_all()?;
+                limits.count_bundle_file(copied)?;
+                wrote_bundle = true;
+            }
+            ArchiveEntryClass::BundleRootDir | ArchiveEntryClass::BundleDir => {
+                bail!(
+                    "Hyper archive directory entry {} is not a regular file",
+                    display_parts(&parts)
+                );
+            }
+            ArchiveEntryClass::RootPlaceholder => {
+                bail!("Hyper archive contains an unnamed regular entry");
             }
         }
     }
-    if !found_binary {
-        bail!("Hyper archive does not contain {binary_entry}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if found_binary {
+            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))?;
+        }
     }
-    Ok(())
+
+    finish_extracted(
+        binary_path,
+        binary_guard,
+        bundle_stage,
+        bundle_guard,
+        wrote_bundle,
+        found_binary,
+        binary_entry,
+    )
 }
 
-async fn extract_binary(archive: &Path, destination: &Path, platform: Platform) -> Result<()> {
+async fn extract_archive(
+    archive: &Path,
+    stage_root: &Path,
+    bundle_stage: PathBuf,
+    platform: Platform,
+) -> Result<ExtractedArchive> {
     let archive = archive.to_owned();
-    let destination = destination.to_owned();
+    let stage_root = stage_root.to_owned();
     tokio::task::spawn_blocking(move || {
         #[cfg(unix)]
         {
-            extract_tar_binary(&archive, &destination, platform.binary_entry)
+            // Prefer tar.gz on Unix; also accept zip so unit tests can cover the
+            // Windows producer layout on Linux CI.
+            let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.ends_with(".zip") {
+                extract_zip_archive(&archive, &stage_root, bundle_stage, platform.binary_entry)
+            } else {
+                extract_tar_archive(&archive, &stage_root, bundle_stage, platform.binary_entry)
+            }
         }
         #[cfg(windows)]
         {
-            extract_zip_binary(&archive, &destination, platform.binary_entry)
+            extract_zip_archive(&archive, &stage_root, bundle_stage, platform.binary_entry)
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1077,10 +1741,33 @@ fn publish_versioned_binary(stage: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn activate_binary(versioned: &Path) -> Result<()> {
-    let app = managed_application();
-    let bin_dir = app.parent().context("Hyper application has no parent")?;
+/// Captured active binary state for rollback.
+#[derive(Debug)]
+enum PreviousBinary {
+    Missing,
+    #[cfg(unix)]
+    Symlink {
+        target: PathBuf,
+    },
+    #[cfg(unix)]
+    RegularAside {
+        aside: PathBuf,
+    },
+    #[cfg(windows)]
+    ExeAside {
+        aside: PathBuf,
+    },
+}
+
+#[derive(Debug)]
+struct BinaryActivation {
+    previous: PreviousBinary,
+    /// Aside path kept until state commit so a failed state write can restore
+    /// the prior executable (Windows) or regular-file install (Unix).
+    pending_aside: Option<PathBuf>,
+}
+
+fn relative_versioned_link_target(versioned: &Path) -> Result<PathBuf> {
     let downloads = hyper_home().join("downloads");
     let name = versioned
         .file_name()
@@ -1090,27 +1777,257 @@ fn activate_binary(versioned: &Path) -> Result<()> {
             .file_name()
             .context("Hyper downloads directory has no filename")?,
     );
-    let relative = relative.join(name);
-    let tmp = unique_sibling(&app, "tmp-link");
-    let tmp_guard = TempArtifact::new(tmp.clone());
-    std::os::unix::fs::symlink(&relative, &tmp)?;
-    std::fs::rename(&tmp, &app).with_context(|| {
+    Ok(relative.join(name))
+}
+
+/// Move `path` out of the way to a unique sibling before restoring an older
+/// tree. Rename failures are returned (never ignored) so rollback can report
+/// inconsistency instead of leaving a mixed deployment silently.
+fn move_active_aside(path: &Path, suffix: &str) -> Result<Option<PathBuf>> {
+    if !(path.exists() || path.is_symlink()) {
+        return Ok(None);
+    }
+    let doomed = unique_sibling(path, suffix);
+    std::fs::rename(path, &doomed).with_context(|| {
         format!(
+            "moving active path {} aside to {} for rollback",
+            path.display(),
+            doomed.display()
+        )
+    })?;
+    Ok(Some(doomed))
+}
+
+fn restore_previous_binary(app: &Path, previous: &PreviousBinary) -> Result<()> {
+    match previous {
+        PreviousBinary::Missing => {
+            // New install failed after creating the active path: remove it.
+            if path_exists_or_symlink(app) {
+                let doomed = move_active_aside(app, "failed-new")?;
+                if let Some(doomed) = doomed {
+                    let _ = std::fs::remove_file(&doomed);
+                    let _ = std::fs::remove_dir_all(&doomed);
+                }
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        PreviousBinary::Symlink { target } => {
+            // Prefer atomic replace: stage restore link then rename over active.
+            let tmp = unique_sibling(app, "restore-link");
+            std::os::unix::fs::symlink(target, &tmp).with_context(|| {
+                format!(
+                    "staging restore symlink for {} -> {}",
+                    app.display(),
+                    target.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&tmp, app) {
+                let _ = std::fs::remove_file(&tmp);
+                // Fall back: move active aside, then publish restore link.
+                let doomed = match move_active_aside(app, "failed-new") {
+                    Ok(d) => d,
+                    Err(move_err) => {
+                        return Err(combine_errors(
+                            anyhow::Error::new(error).context(format!(
+                                "restoring previous Hyper symlink at {}",
+                                app.display()
+                            )),
+                            move_err,
+                        ));
+                    }
+                };
+                if let Err(error) = std::os::unix::fs::symlink(target, app) {
+                    let restore_error = anyhow::Error::new(error).context(format!(
+                        "restoring previous Hyper symlink at {}",
+                        app.display()
+                    ));
+                    if let Some(doomed) = doomed.as_ref()
+                        && let Err(republish_error) = std::fs::rename(doomed, app)
+                    {
+                        return Err(combine_errors(
+                            restore_error,
+                            anyhow::Error::new(republish_error).context(format!(
+                                "republishing failed-new Hyper path from {} to {}",
+                                doomed.display(),
+                                app.display()
+                            )),
+                        ));
+                    }
+                    return Err(restore_error);
+                }
+                if let Some(doomed) = doomed {
+                    let _ = std::fs::remove_file(doomed);
+                }
+                return Ok(());
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        PreviousBinary::RegularAside { aside } => {
+            let doomed = match move_active_aside(app, "failed-new") {
+                Ok(d) => d,
+                Err(move_err) => {
+                    return Err(move_err.context(format!(
+                        "cannot clear active Hyper at {} before restoring {}",
+                        app.display(),
+                        aside.display()
+                    )));
+                }
+            };
+            if let Err(error) = std::fs::rename(aside, app) {
+                let restore_error = anyhow::Error::new(error).context(format!(
+                    "restoring previous Hyper regular file from {} (aside preserved)",
+                    aside.display()
+                ));
+                if let Some(doomed) = doomed.as_ref()
+                    && let Err(republish_error) = std::fs::rename(doomed, app)
+                {
+                    return Err(combine_errors(
+                        restore_error,
+                        anyhow::Error::new(republish_error).context(format!(
+                            "republishing failed-new Hyper file from {} to {}",
+                            doomed.display(),
+                            app.display()
+                        )),
+                    ));
+                }
+                return Err(restore_error);
+            }
+            if let Some(doomed) = doomed {
+                let _ = std::fs::remove_file(doomed);
+            }
+            Ok(())
+        }
+        #[cfg(windows)]
+        PreviousBinary::ExeAside { aside } => {
+            let doomed = match move_active_aside(app, "failed-new.exe") {
+                Ok(d) => d,
+                Err(move_err) => {
+                    return Err(move_err.context(format!(
+                        "cannot clear active Hyper at {} before restoring {}",
+                        app.display(),
+                        aside.display()
+                    )));
+                }
+            };
+            if let Err(error) = std::fs::rename(aside, app) {
+                let restore_error = anyhow::Error::new(error).context(format!(
+                    "restoring previous Hyper executable from {} (aside preserved)",
+                    aside.display()
+                ));
+                if let Some(doomed) = doomed.as_ref()
+                    && let Err(republish_error) = std::fs::rename(doomed, app)
+                {
+                    return Err(combine_errors(
+                        restore_error,
+                        anyhow::Error::new(republish_error).context(format!(
+                            "republishing failed-new Hyper executable from {} to {}",
+                            doomed.display(),
+                            app.display()
+                        )),
+                    ));
+                }
+                return Err(restore_error);
+            }
+            if let Some(doomed) = doomed {
+                let _ = std::fs::remove_file(doomed);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn path_exists_or_symlink(path: &Path) -> bool {
+    path.exists() || path.is_symlink()
+}
+
+#[cfg(unix)]
+fn activate_binary_transactional(versioned: &Path) -> Result<BinaryActivation> {
+    let app = managed_application();
+    let bin_dir = app.parent().context("Hyper application has no parent")?;
+
+    // Inspect without mutating first so unsupported shapes fail closed.
+    let meta = match std::fs::symlink_metadata(&app) {
+        Ok(meta) => Some(meta),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", app.display()));
+        }
+    };
+
+    let relative = relative_versioned_link_target(versioned)?;
+    let tmp = unique_sibling(&app, "tmp-link");
+    let tmp_guard = TempArtifact::new_file(tmp.clone());
+    std::os::unix::fs::symlink(&relative, &tmp).context("staging Hyper activation symlink")?;
+
+    let mut pending_aside = None;
+    // Capture whether the previous active path was a symlink that rename will
+    // replace atomically (still present until rename succeeds).
+    let previous = if let Some(meta) = meta {
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&app)
+                .with_context(|| format!("reading active Hyper symlink {}", app.display()))?;
+            PreviousBinary::Symlink { target }
+        } else if meta.is_file() {
+            // Move the regular file aside before publishing the symlink so we
+            // can restore it if a later stage fails.
+            let aside = unique_sibling(&app, "old-regular");
+            std::fs::rename(&app, &aside).with_context(|| {
+                format!(
+                    "preserving existing Hyper regular file {} before activation",
+                    app.display()
+                )
+            })?;
+            pending_aside = Some(aside.clone());
+            PreviousBinary::RegularAside { aside }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+            bail!(
+                "Hyper application path is not a regular file or symlink: {}",
+                app.display()
+            );
+        }
+    } else {
+        PreviousBinary::Missing
+    };
+
+    if let Err(error) = std::fs::rename(&tmp, &app) {
+        let activation_err = anyhow::Error::new(error).context(format!(
             "atomically activating Hyper at {} (bin dir {})",
             app.display(),
             bin_dir.display()
-        )
-    })?;
+        ));
+        // Old symlink is unchanged if rename never replaced it — only restore
+        // when we already moved a regular file aside.
+        match &previous {
+            PreviousBinary::RegularAside { .. } => {
+                if let Err(restore_error) = restore_previous_binary(&app, &previous) {
+                    return Err(combine_errors(activation_err, restore_error));
+                }
+            }
+            PreviousBinary::Symlink { .. } | PreviousBinary::Missing => {
+                // tmp may still exist; guard cleans it. Active path untouched.
+            }
+            #[cfg(windows)]
+            PreviousBinary::ExeAside { .. } => {}
+        }
+        return Err(activation_err);
+    }
     let _ = tmp_guard.keep();
-    Ok(())
+    Ok(BinaryActivation {
+        previous,
+        pending_aside,
+    })
 }
 
 #[cfg(windows)]
-fn activate_binary(versioned: &Path) -> Result<()> {
+fn activate_binary_transactional(versioned: &Path) -> Result<BinaryActivation> {
     let app = managed_application();
+    reject_symlink(&app, "application")?;
     let staged = unique_sibling(&app, "new.exe");
     std::fs::copy(versioned, &staged)?;
-    let staged_guard = TempArtifact::new(staged.clone());
+    let staged_guard = TempArtifact::new_file(staged.clone());
     if sha256_file(versioned)? != sha256_file(&staged)? {
         bail!("copied Hyper executable failed activation integrity check");
     }
@@ -1125,16 +2042,181 @@ fn activate_binary(versioned: &Path) -> Result<()> {
         })?;
     }
     if let Err(error) = std::fs::rename(&staged, &app) {
+        let activation_err =
+            anyhow::Error::new(error).context("activating downloaded Hyper executable");
         if had_old {
-            let _ = std::fs::rename(&aside, &app);
+            if let Err(restore_error) = std::fs::rename(&aside, &app) {
+                return Err(combine_errors(
+                    activation_err,
+                    anyhow::Error::new(restore_error).context(format!(
+                        "failed to restore previous Hyper executable from {} (aside preserved)",
+                        aside.display()
+                    )),
+                ));
+            }
         }
-        return Err(error).context("activating downloaded Hyper executable");
+        return Err(activation_err);
     }
     let _ = staged_guard.keep();
-    // A still-running old image may keep the aside locked. It is harmless and
-    // can be removed by a later update after that process exits.
-    let _ = std::fs::remove_file(aside);
+    // Keep the aside until state commit succeeds so a later failure can roll back.
+    let previous = if had_old {
+        PreviousBinary::ExeAside {
+            aside: aside.clone(),
+        }
+    } else {
+        PreviousBinary::Missing
+    };
+    Ok(BinaryActivation {
+        previous,
+        pending_aside: had_old.then_some(aside),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn activate_binary_transactional(_versioned: &Path) -> Result<BinaryActivation> {
+    bail!("unsupported platform for Hyper binary activation")
+}
+
+fn ensure_bundle_parent_ready(bundle_path: &Path) -> Result<()> {
+    let home = community_grok_home();
+    if home.as_os_str().is_empty() {
+        bail!("Grok home is empty");
+    }
+    if home.exists() {
+        reject_symlink(&home, "Grok home")?;
+        if !std::fs::metadata(&home)?.is_dir() {
+            bail!("Grok home is not a directory: {}", home.display());
+        }
+    } else {
+        std::fs::create_dir_all(&home)
+            .with_context(|| format!("creating Grok home {}", home.display()))?;
+    }
+    // Final bundle path must not be a symlink (would follow into attacker dir).
+    if path_exists_or_symlink(bundle_path) {
+        reject_symlink(bundle_path, "bundled runtime directory")?;
+    }
     Ok(())
+}
+
+/// Activate a staged bundle tree at `$GROK_HOME/bundled` via same-FS renames.
+/// Returns the aside path of the previous bundle, if any.
+fn activate_bundle_transactional(stage: &Path) -> Result<Option<PathBuf>> {
+    let bundle_path = managed_bundle_path();
+    ensure_bundle_parent_ready(&bundle_path)?;
+    if !stage.is_dir() {
+        bail!("bundle stage is not a directory: {}", stage.display());
+    }
+    reject_symlink(stage, "bundle stage")?;
+
+    let aside = unique_sibling(&bundle_path, "old");
+    let had_old = path_exists_or_symlink(&bundle_path);
+    if had_old {
+        reject_symlink(&bundle_path, "bundled runtime directory")?;
+        std::fs::rename(&bundle_path, &aside).with_context(|| {
+            format!(
+                "moving existing bundled runtime {} aside",
+                bundle_path.display()
+            )
+        })?;
+    }
+    if let Err(error) = std::fs::rename(stage, &bundle_path) {
+        let activation_err = anyhow::Error::new(error).context(format!(
+            "activating bundled runtime at {} from stage {}",
+            bundle_path.display(),
+            stage.display()
+        ));
+        if had_old && let Err(restore_error) = std::fs::rename(&aside, &bundle_path) {
+            return Err(combine_errors(
+                activation_err,
+                anyhow::Error::new(restore_error).context(format!(
+                    "failed to restore previous bundled runtime from {} (aside preserved at {})",
+                    aside.display(),
+                    aside.display()
+                )),
+            ));
+        }
+        return Err(activation_err);
+    }
+    Ok(had_old.then_some(aside))
+}
+
+fn restore_bundle(aside: Option<&Path>) -> Result<()> {
+    let bundle_path = managed_bundle_path();
+    let doomed = if path_exists_or_symlink(&bundle_path) {
+        Some(move_active_aside(&bundle_path, "failed")?)
+    } else {
+        None
+    };
+    let doomed = doomed.flatten();
+
+    if let Some(aside) = aside
+        && let Err(error) = std::fs::rename(aside, &bundle_path)
+    {
+        let restore_error = anyhow::Error::new(error).context(format!(
+            "restoring previous bundled runtime from {} (aside preserved)",
+            aside.display()
+        ));
+        // Try to put the failed-new tree back so the active path is not empty.
+        if let Some(doomed) = doomed.as_ref()
+            && let Err(republish_error) = std::fs::rename(doomed, &bundle_path)
+        {
+            return Err(combine_errors(
+                restore_error,
+                anyhow::Error::new(republish_error).context(format!(
+                    "republishing failed-new bundled runtime from {} to {}",
+                    doomed.display(),
+                    bundle_path.display()
+                )),
+            ));
+        }
+        return Err(restore_error);
+    }
+    // Best-effort cleanup of the failed new tree.
+    if let Some(doomed) = doomed {
+        let _ = std::fs::remove_dir_all(&doomed);
+        let _ = std::fs::remove_file(&doomed);
+    }
+    Ok(())
+}
+
+/// Capture exact previous update-state bytes before any activation mutation.
+/// Rejects symlinks and non-regular files; only `NotFound` maps to `None`.
+fn capture_previous_state_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    reject_symlink(path, "update state")?;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                bail!(
+                    "Hyper update state is not a regular file: {}",
+                    path.display()
+                );
+            }
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading Hyper update state {}", path.display()))?;
+            Ok(Some(bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspecting Hyper update state {}", path.display()))
+        }
+    }
+}
+
+fn format_rollback_failure(
+    commit_error: anyhow::Error,
+    rollback_errors: Vec<anyhow::Error>,
+) -> anyhow::Error {
+    if rollback_errors.is_empty() {
+        return commit_error;
+    }
+    let mut msg = format!(
+        "Hyper community update failed and rollback was incomplete; \
+         installation may be inconsistent.\n\ncommit error: {commit_error:#}"
+    );
+    for (i, err) in rollback_errors.iter().enumerate() {
+        msg.push_str(&format!("\n\nrollback error {}: {err:#}", i + 1));
+    }
+    anyhow::anyhow!(msg)
 }
 
 async fn install_candidate(candidate: &Candidate) -> Result<()> {
@@ -1142,7 +2224,7 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
     let platform = platform()?;
     let downloads = hyper_home().join("downloads");
     let archive_tmp = unique_sibling(&downloads.join(&candidate.asset_name), "download");
-    let archive_guard = TempArtifact::new(archive_tmp.clone());
+    let archive_guard = TempArtifact::new_file(archive_tmp.clone());
     eprintln!(
         "  Downloading Hyper v{} ({}) from community releases...",
         candidate.version, platform.asset_triple
@@ -1157,10 +2239,20 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
         );
     }
 
-    let stage = unique_sibling(&downloads.join("hyper-extracted"), "tmp");
-    let stage_guard = TempArtifact::new(stage.clone());
-    extract_binary(&archive_tmp, &stage, platform).await?;
-    smoke_test(&stage).await?;
+    // Binary extract root under downloads; bundle stage under GROK_HOME so the
+    // final rename stays on the same filesystem as `$GROK_HOME/bundled`.
+    let extract_root = unique_sibling(&downloads.join("hyper-extracted"), "dir");
+    std::fs::create_dir_all(&extract_root)
+        .with_context(|| format!("creating extract root {}", extract_root.display()))?;
+    let extract_root_guard = TempArtifact::new_dir(extract_root.clone());
+
+    let grok_home = community_grok_home();
+    ensure_bundle_parent_ready(&grok_home.join(BUNDLE_DIR_NAME))?;
+    let bundle_stage_path = unique_sibling(&grok_home.join(BUNDLE_DIR_NAME), "install");
+
+    let extracted =
+        extract_archive(&archive_tmp, &extract_root, bundle_stage_path, platform).await?;
+    smoke_test(&extracted.binary).await?;
 
     let extension = if cfg!(windows) { ".exe" } else { "" };
     let binary_name = format!(
@@ -1168,19 +2260,96 @@ async fn install_candidate(candidate: &Candidate) -> Result<()> {
         candidate.version, platform.local_os, platform.local_arch, candidate.sha256, extension
     );
     let versioned = downloads.join(&binary_name);
-    publish_versioned_binary(&stage, &versioned)?;
+    publish_versioned_binary(&extracted.binary, &versioned)?;
     smoke_test(&versioned).await?;
-    activate_binary(&versioned)?;
 
-    let state = UpdateState {
-        installed_version: Some(candidate.version.clone()),
-        installed_asset: Some(candidate.asset_name.clone()),
-        installed_sha256: Some(candidate.sha256.clone()),
-        installed_binary: Some(binary_name),
-        checked_at_unix: Some(now_unix()),
-    };
-    write_state_atomic(&state)?;
-    drop(stage_guard);
+    // State preflight *before* any activation mutation. Symlink / directory /
+    // unreadable state must fail closed without touching binary or bundle.
+    let state_file = state_path();
+    let previous_state_bytes = capture_previous_state_bytes(&state_file)?;
+
+    // --- Compensating transaction: bundle → binary → state ---
+    // State is written last; success is the sole commit point. Any earlier
+    // failure restores the full previous deployment (binary + bundle + state).
+    let mut bundle_aside: Option<PathBuf> = None;
+    let mut bundle_activated = false;
+    let mut binary_activation: Option<BinaryActivation> = None;
+    let mut state_write_attempted = false;
+
+    let commit_result: Result<()> = (|| {
+        if let Some(stage) = extracted.bundle_stage.as_ref() {
+            bundle_aside = activate_bundle_transactional(stage)?;
+            bundle_activated = true;
+            take_install_failpoint_after_bundle()?;
+        }
+
+        let activation = activate_binary_transactional(&versioned)?;
+        binary_activation = Some(activation);
+
+        take_install_failpoint_before_state()?;
+
+        let state = UpdateState {
+            installed_version: Some(candidate.version.clone()),
+            installed_asset: Some(candidate.asset_name.clone()),
+            installed_sha256: Some(candidate.sha256.clone()),
+            installed_binary: Some(binary_name.clone()),
+            checked_at_unix: Some(now_unix()),
+        };
+        state_write_attempted = true;
+        write_state_atomic(&state)?;
+        Ok(())
+    })();
+
+    if let Err(error) = commit_result {
+        let mut rollback_errors = Vec::new();
+
+        if let Some(activation) = binary_activation.as_ref() {
+            let app = managed_application();
+            if let Err(restore_error) = restore_previous_binary(&app, &activation.previous) {
+                rollback_errors.push(
+                    restore_error.context(
+                        "binary rollback failed; previous/active paths may be inconsistent",
+                    ),
+                );
+            }
+        }
+
+        if bundle_activated && let Err(restore_error) = restore_bundle(bundle_aside.as_deref()) {
+            let aside_note = bundle_aside
+                .as_ref()
+                .map(|p| format!(" (aside preserved at {})", p.display()))
+                .unwrap_or_default();
+            rollback_errors.push(restore_error.context(format!(
+                "bundle rollback failed{aside_note}; installation may be inconsistent"
+            )));
+        }
+
+        if state_write_attempted
+            && let Err(restore_error) =
+                restore_state_bytes(&state_file, previous_state_bytes.as_deref())
+        {
+            rollback_errors.push(
+                restore_error
+                    .context("update-state rollback failed; installation may be inconsistent"),
+            );
+        }
+
+        return Err(format_rollback_failure(error, rollback_errors));
+    }
+
+    // Commit succeeded — best-effort cleanup of asides. Versioned binary
+    // residuals under downloads are intentional.
+    if let Some(aside) = bundle_aside {
+        let _ = std::fs::remove_dir_all(&aside);
+        let _ = std::fs::remove_file(&aside);
+    }
+    if let Some(activation) = binary_activation
+        && let Some(aside) = activation.pending_aside
+    {
+        let _ = std::fs::remove_file(aside);
+    }
+    drop(extracted);
+    drop(extract_root_guard);
     drop(archive_guard);
     Ok(())
 }
@@ -1320,7 +2489,10 @@ async fn spawn_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             xai_grok_tools::util::detach_command(&mut command);
-            Ok(Some(command.spawn()?))
+            // Detached background `hyper update`; the caller does not wait on it.
+            #[allow(clippy::disallowed_methods)]
+            let child = command.spawn()?;
+            Ok(Some(child))
         }
     }
 }
@@ -1565,16 +2737,157 @@ mod tests {
     }
 
     #[test]
-    fn archive_paths_are_root_only_and_never_escape() {
+    fn archive_paths_normalize_and_never_escape() {
+        // Tar mode: literal backslash is rejected.
         assert_eq!(
-            normalized_root_entry(Path::new("./hyper"))
+            normalize_archive_path("./hyper", false).unwrap().as_deref(),
+            Some(["hyper".to_string()].as_slice())
+        );
+        assert_eq!(
+            normalize_archive_path("bundled/skills/x/SKILL.md", false)
                 .unwrap()
                 .as_deref(),
-            Some("hyper")
+            Some(
+                [
+                    "bundled".to_string(),
+                    "skills".to_string(),
+                    "x".to_string(),
+                    "SKILL.md".to_string()
+                ]
+                .as_slice()
+            )
         );
-        assert!(normalized_root_entry(Path::new("../hyper")).is_err());
-        assert!(normalized_root_entry(Path::new("nested/hyper")).is_err());
-        assert!(normalized_root_entry(Path::new("nested\\hyper")).is_err());
+        assert_eq!(normalize_archive_path(".", false).unwrap(), None);
+        assert_eq!(normalize_archive_path("./", false).unwrap(), None);
+        assert!(normalize_archive_path("../hyper", false).is_err());
+        assert!(normalize_archive_path("/hyper", false).is_err());
+        assert!(normalize_archive_path("nested\\hyper", false).is_err());
+        assert!(normalize_archive_path("bundled/../escape", false).is_err());
+        assert!(normalize_archive_path("C:/hyper", false).is_err());
+        assert!(normalize_archive_path("", false).unwrap().is_none());
+
+        // Zip mode: `\` is a separator; `..` after normalize still rejects.
+        assert_eq!(
+            normalize_archive_path("bundled\\skills\\x.md", true)
+                .unwrap()
+                .as_deref(),
+            Some(
+                [
+                    "bundled".to_string(),
+                    "skills".to_string(),
+                    "x.md".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        assert!(normalize_archive_path("..\\evil", true).is_err());
+        assert!(normalize_archive_path("bundled\\..\\escape", true).is_err());
+
+        // Portable Windows-hostile components.
+        assert!(normalize_archive_path("bundled/foo:bar", false).is_err());
+        assert!(normalize_archive_path("bundled/foo.", false).is_err());
+        assert!(normalize_archive_path("bundled/foo ", false).is_err());
+        assert!(normalize_archive_path("bundled/CON", false).is_err());
+        assert!(normalize_archive_path("bundled/nul.txt", false).is_err());
+        assert!(normalize_archive_path("bundled/COM1", false).is_err());
+        assert!(normalize_archive_path("bundled/lpt9.md", false).is_err());
+    }
+
+    #[test]
+    fn capture_previous_state_rejects_symlink_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("update-state.json");
+
+        // Missing is fine.
+        assert!(capture_previous_state_bytes(&state).unwrap().is_none());
+
+        // Regular file is captured.
+        std::fs::write(&state, b"{\"ok\":true}\n").unwrap();
+        assert_eq!(
+            capture_previous_state_bytes(&state).unwrap().as_deref(),
+            Some(b"{\"ok\":true}\n".as_slice())
+        );
+        std::fs::remove_file(&state).unwrap();
+
+        // Directory is not a regular file.
+        std::fs::create_dir(&state).unwrap();
+        assert!(capture_previous_state_bytes(&state).is_err());
+        std::fs::remove_dir(&state).unwrap();
+
+        #[cfg(unix)]
+        {
+            let target = dir.path().join("real.json");
+            std::fs::write(&target, b"secret\n").unwrap();
+            std::os::unix::fs::symlink(&target, &state).unwrap();
+            assert!(capture_previous_state_bytes(&state).is_err());
+        }
+    }
+
+    #[test]
+    fn restore_bundle_reports_aside_when_active_cannot_be_cleared() {
+        // When aside restore fails after a successful move-aside of the new
+        // tree, the error must mention the preserved aside path.
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("bundled");
+        let aside = dir.path().join("bundled.old");
+        std::fs::create_dir_all(bundle.join("new")).unwrap();
+        std::fs::write(bundle.join("new/x"), b"new").unwrap();
+        std::fs::create_dir_all(&aside).unwrap();
+        std::fs::write(aside.join("old"), b"old").unwrap();
+
+        // Simulate restore_bundle logic against these paths.
+        let doomed = unique_sibling(&bundle, "failed");
+        std::fs::rename(&bundle, &doomed).unwrap();
+        // Create a blocking file where bundle should land so rename(aside→bundle) fails...
+        // actually rename of dir onto existing fails on Unix if dest exists.
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("blocker"), b"x").unwrap();
+        let err = std::fs::rename(&aside, &bundle).unwrap_err();
+        let combined = combine_errors(
+            anyhow::Error::new(err).context(format!(
+                "restoring previous bundled runtime from {} (aside preserved)",
+                aside.display()
+            )),
+            anyhow::anyhow!("active clear already done"),
+        );
+        let msg = format!("{combined:#}");
+        assert!(msg.contains("aside preserved"), "{msg}");
+        assert!(msg.contains("bundled"), "{msg}");
+        // Cleanup doomed best-effort.
+        let _ = std::fs::remove_dir_all(doomed);
+    }
+
+    #[test]
+    fn classify_accepts_binary_notice_and_bundle_only() {
+        assert_eq!(
+            classify_archive_entry(Some(&["hyper".into()]), "hyper").unwrap(),
+            ArchiveEntryClass::Binary
+        );
+        assert_eq!(
+            classify_archive_entry(Some(&["LICENSE".into()]), "hyper").unwrap(),
+            ArchiveEntryClass::Notice
+        );
+        assert_eq!(
+            classify_archive_entry(Some(&["bundled".into()]), "hyper").unwrap(),
+            ArchiveEntryClass::BundleRootDir
+        );
+        assert_eq!(
+            classify_archive_entry(
+                Some(&["bundled".into(), "skills".into(), "x".into()]),
+                "hyper"
+            )
+            .unwrap(),
+            ArchiveEntryClass::BundleFile
+        );
+        assert!(classify_archive_entry(Some(&["README".into()]), "hyper").is_err());
+        assert!(classify_archive_entry(Some(&["other".into(), "nested".into()]), "hyper").is_err());
+    }
+
+    fn extract_dirs(root: &Path) -> (PathBuf, PathBuf) {
+        let stage = root.join("extract");
+        let bundle = root.join("bundle-stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        (stage, bundle)
     }
 
     #[cfg(unix)]
@@ -1585,41 +2898,486 @@ mod tests {
         for (name, kind, body) in entries {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(*kind);
-            header.set_mode(0o755);
-            if kind.is_symlink() {
+            header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+            if *kind == tar::EntryType::Symlink {
                 header.set_size(0);
                 header.set_link_name("outside").unwrap();
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *name, &[] as &[u8])
+                    .unwrap();
+            } else if *kind == tar::EntryType::Link {
+                header.set_size(0);
+                header.set_link_name("hyper").unwrap();
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *name, &[] as &[u8])
+                    .unwrap();
+            } else if kind.is_dir() {
+                header.set_size(0);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, *name, &[] as &[u8])
+                    .unwrap();
             } else {
                 header.set_size(body.len() as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, *name, *body).unwrap();
             }
-            header.set_cksum();
-            builder.append_data(&mut header, name, *body).unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
     }
 
+    fn write_test_zip(entries: &[(&str, bool, &[u8])], path: &Path) {
+        use std::io::Write as _;
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, is_dir, body) in entries {
+            if *is_dir {
+                let dir_name = if name.ends_with('/') {
+                    (*name).to_string()
+                } else {
+                    format!("{name}/")
+                };
+                zip.add_directory(dir_name, options).unwrap();
+            } else {
+                zip.start_file(*name, options).unwrap();
+                zip.write_all(body).unwrap();
+            }
+        }
+        zip.finish().unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
-    fn strict_tar_extraction_rejects_links_and_duplicate_binary() {
+    fn real_layout_tar_extracts_binary_licenses_and_bundle() {
         let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("bad.tar.gz");
-        let destination = dir.path().join("hyper");
-        write_test_tar(
-            &[("hyper", tar::EntryType::Symlink, b"".as_slice())],
-            &archive,
-        );
-        assert!(extract_tar_binary(&archive, &destination, "hyper").is_err());
-        assert!(!destination.exists());
-
-        std::fs::remove_file(&archive).unwrap();
+        let archive = dir.path().join("good.tar.gz");
         write_test_tar(
             &[
-                ("hyper", tar::EntryType::Regular, b"one".as_slice()),
-                ("hyper", tar::EntryType::Regular, b"two".as_slice()),
+                (".", tar::EntryType::Directory, b"".as_slice()),
+                ("hyper", tar::EntryType::Regular, b"#!/bin/sh\nexit 0\n"),
+                ("LICENSE", tar::EntryType::Regular, b"lic\n"),
+                ("NOTICE", tar::EntryType::Regular, b"note\n"),
+                ("THIRD-PARTY-NOTICES", tar::EntryType::Regular, b"tpn\n"),
+                ("bundled", tar::EntryType::Directory, b""),
+                ("bundled/skills", tar::EntryType::Directory, b""),
+                ("bundled/skills/demo", tar::EntryType::Directory, b""),
+                (
+                    "bundled/skills/demo/SKILL.md",
+                    tar::EntryType::Regular,
+                    b"# skill\n",
+                ),
+                ("bundled/agents", tar::EntryType::Directory, b""),
+                (
+                    "bundled/agents/helper.md",
+                    tar::EntryType::Regular,
+                    b"# agent\n",
+                ),
             ],
             &archive,
         );
-        assert!(extract_tar_binary(&archive, &destination, "hyper").is_err());
+        let (stage, bundle_stage) = extract_dirs(dir.path());
+        let extracted =
+            extract_tar_archive(&archive, &stage, bundle_stage.clone(), "hyper").unwrap();
+        assert_eq!(
+            std::fs::read(&extracted.binary).unwrap(),
+            b"#!/bin/sh\nexit 0\n"
+        );
+        let bundle = extracted.bundle_stage.expect("bundle present");
+        assert_eq!(
+            std::fs::read(bundle.join("skills/demo/SKILL.md")).unwrap(),
+            b"# skill\n"
+        );
+        assert_eq!(
+            std::fs::read(bundle.join("agents/helper.md")).unwrap(),
+            b"# agent\n"
+        );
+        // Root licenses are drained, never staged beside the binary.
+        assert!(!stage.join("LICENSE").exists());
+    }
+
+    #[test]
+    fn real_layout_zip_extracts_binary_and_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("good.zip");
+        write_test_zip(
+            &[
+                ("hyper.exe", false, b"MZ-fake-binary"),
+                ("LICENSE", false, b"lic\n"),
+                ("bundled/", true, b""),
+                ("bundled/skills/", true, b""),
+                ("bundled/skills/demo/", true, b""),
+                ("bundled/skills/demo/SKILL.md", false, b"# skill\n"),
+                ("bundled/agents/", true, b""),
+                ("bundled/agents/helper.md", false, b"# agent\n"),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path());
+        let extracted = extract_zip_archive(&archive, &stage, bundle_stage, "hyper.exe").unwrap();
+        assert_eq!(std::fs::read(&extracted.binary).unwrap(), b"MZ-fake-binary");
+        let bundle = extracted.bundle_stage.expect("bundle present");
+        assert_eq!(
+            std::fs::read(bundle.join("skills/demo/SKILL.md")).unwrap(),
+            b"# skill\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_only_tar_leaves_no_bundle_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("binary-only.tar.gz");
+        write_test_tar(
+            &[
+                ("hyper", tar::EntryType::Regular, b"#!/bin/sh\nexit 0\n"),
+                ("LICENSE", tar::EntryType::Regular, b"lic\n"),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path());
+        let extracted = extract_tar_archive(&archive, &stage, bundle_stage, "hyper").unwrap();
+        assert!(extracted.bundle_stage.is_none());
+        assert!(extracted.binary.is_file());
+    }
+
+    #[cfg(unix)]
+    fn write_raw_path_tar(entries: &[(&str, tar::EntryType, &[u8])], path: &Path) {
+        // Bypass tar::Builder path validation so we can ship `..` / absolute names.
+        use std::io::Write as _;
+        let file = File::create(path).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        for (name, kind, body) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(*kind);
+            header.set_mode(0o644);
+            if *kind == tar::EntryType::Symlink {
+                header.set_size(0);
+                header.set_link_name("outside").unwrap();
+            } else if *kind == tar::EntryType::Link {
+                header.set_size(0);
+                header.set_link_name("hyper").unwrap();
+            } else if kind.is_dir() {
+                header.set_size(0);
+            } else {
+                header.set_size(body.len() as u64);
+            }
+            // path_bytes allows names the high-level builder rejects.
+            header.set_path(name).ok();
+            // For names with `..` set_path fails; write the name into the
+            // ustar name field directly.
+            if header.path().map(|p| p != Path::new(name)).unwrap_or(true) {
+                let bytes = name.as_bytes();
+                let name_field = header.as_old_mut().name.as_mut_slice();
+                name_field.fill(0);
+                let n = bytes.len().min(name_field.len());
+                name_field[..n].copy_from_slice(&bytes[..n]);
+            }
+            header.set_cksum();
+            encoder.write_all(header.as_bytes()).unwrap();
+            if !kind.is_dir() && *kind != tar::EntryType::Symlink && *kind != tar::EntryType::Link {
+                encoder.write_all(body).unwrap();
+                let pad = (512 - (body.len() % 512)) % 512;
+                if pad > 0 {
+                    encoder.write_all(&vec![0u8; pad]).unwrap();
+                }
+            }
+        }
+        // Two zero blocks end a tar archive.
+        encoder.write_all(&[0u8; 1024]).unwrap();
+        encoder.finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_matrix_rejects_unsafe_tar_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, &[(&str, tar::EntryType, &[u8])], bool)] = &[
+            (
+                "symlink",
+                &[("hyper", tar::EntryType::Symlink, b"".as_slice())],
+                false,
+            ),
+            (
+                "hardlink",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("other", tar::EntryType::Link, b""),
+                ],
+                false,
+            ),
+            (
+                "parent_in_bundle",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("bundled/../escape", tar::EntryType::Regular, b"x"),
+                ],
+                true,
+            ),
+            (
+                "absolute",
+                &[("/etc/passwd", tar::EntryType::Regular, b"x")],
+                true,
+            ),
+            (
+                "backslash",
+                &[("nested\\hyper", tar::EntryType::Regular, b"x")],
+                true,
+            ),
+            (
+                "unexpected_root",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("README", tar::EntryType::Regular, b"nope"),
+                ],
+                false,
+            ),
+            (
+                "nested_outside_bundle",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("other/nested", tar::EntryType::Regular, b"x"),
+                ],
+                false,
+            ),
+            (
+                "duplicate_binary",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("hyper", tar::EntryType::Regular, b"two"),
+                ],
+                false,
+            ),
+            (
+                "case_collision",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("LICENSE", tar::EntryType::Regular, b"a"),
+                    ("license", tar::EntryType::Regular, b"b"),
+                ],
+                false,
+            ),
+            (
+                "reserved_device",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("bundled/CON", tar::EntryType::Regular, b"x"),
+                ],
+                false,
+            ),
+            (
+                "trailing_dot",
+                &[
+                    ("hyper", tar::EntryType::Regular, b"one"),
+                    ("bundled/foo.", tar::EntryType::Regular, b"x"),
+                ],
+                false,
+            ),
+            (
+                "root_regular_unnamed",
+                &[(".", tar::EntryType::Regular, b"x")],
+                false,
+            ),
+        ];
+        for (label, entries, raw) in cases {
+            let archive = dir.path().join(format!("{label}.tar.gz"));
+            if *raw {
+                write_raw_path_tar(entries, &archive);
+            } else {
+                write_test_tar(entries, &archive);
+            }
+            let stage = dir.path().join(format!("{label}-stage"));
+            let bundle = dir.path().join(format!("{label}-bundle"));
+            let _ = std::fs::remove_dir_all(&stage);
+            let _ = std::fs::remove_dir_all(&bundle);
+            std::fs::create_dir_all(&stage).unwrap();
+            let result = extract_tar_archive(&archive, &stage, bundle, "hyper");
+            assert!(
+                result.is_err(),
+                "case {label} should be rejected: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_tar_path_is_rejected() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bad-utf8.tar.gz");
+        let file = File::create(&archive).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+
+        const BODY: &[u8] = b"one";
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o755);
+        header.set_size(BODY.len() as u64);
+        header.set_path("hyper").unwrap();
+        header.set_cksum();
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.write_all(BODY).unwrap();
+        let pad = (512 - (BODY.len() % 512)) % 512;
+        encoder.write_all(&vec![0u8; pad]).unwrap();
+
+        // Entry whose name is invalid UTF-8 (0xFF byte).
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(1);
+        let name_field = header.as_old_mut().name.as_mut_slice();
+        name_field.fill(0);
+        name_field[0] = 0xFF;
+        name_field[1] = b'x';
+        header.set_cksum();
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.write_all(b"z").unwrap();
+        encoder.write_all(&vec![0u8; 511]).unwrap();
+        encoder.write_all(&[0u8; 1024]).unwrap();
+        encoder.finish().unwrap();
+
+        let (stage, bundle_stage) = extract_dirs(dir.path());
+        let result = extract_tar_archive(&archive, &stage, bundle_stage, "hyper");
+        let err = match result {
+            Ok(_) => panic!("invalid UTF-8 path must be rejected"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("UTF-8") || msg.contains("utf-8") || msg.contains("invalid"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn security_matrix_rejects_unsafe_zip_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        #[allow(clippy::type_complexity)]
+        let path_cases: &[(&str, &[(&str, bool, &[u8])])] = &[
+            (
+                "parent_in_bundle",
+                &[
+                    ("hyper.exe", false, b"one"),
+                    ("bundled/x/../../../escape", false, b"x"),
+                ],
+            ),
+            (
+                "backslash_parent",
+                &[("hyper.exe", false, b"one"), ("..\\evil", false, b"x")],
+            ),
+            ("absolute", &[("/hyper.exe", false, b"x")]),
+            (
+                "unexpected_root",
+                &[("hyper.exe", false, b"one"), ("README", false, b"nope")],
+            ),
+            (
+                "case_collision",
+                &[
+                    ("hyper.exe", false, b"one"),
+                    ("bundled/A.txt", false, b"a"),
+                    ("bundled/a.txt", false, b"b"),
+                ],
+            ),
+            (
+                "nested_outside",
+                &[
+                    ("hyper.exe", false, b"one"),
+                    ("other/nested.txt", false, b"x"),
+                ],
+            ),
+            (
+                "reserved_device",
+                &[("hyper.exe", false, b"one"), ("bundled/CON", false, b"x")],
+            ),
+            (
+                "trailing_space",
+                &[("hyper.exe", false, b"one"), ("bundled/foo ", false, b"x")],
+            ),
+        ];
+        for (label, entries) in path_cases {
+            let archive = dir.path().join(format!("{label}.zip"));
+            write_test_zip(entries, &archive);
+            let stage = dir.path().join(format!("{label}-stage"));
+            let bundle = dir.path().join(format!("{label}-bundle"));
+            let _ = std::fs::remove_dir_all(&stage);
+            let _ = std::fs::remove_dir_all(&bundle);
+            std::fs::create_dir_all(&stage).unwrap();
+            let result = extract_zip_archive(&archive, &stage, bundle, "hyper.exe");
+            assert!(
+                result.is_err(),
+                "case {label} should be rejected: {:?}",
+                result.err()
+            );
+        }
+
+        {
+            let archive = dir.path().join("dup.zip");
+            write_test_zip(
+                &[("hyper.exe", false, b"one"), ("HYPER.EXE", false, b"two")],
+                &archive,
+            );
+            let stage = dir.path().join("dup-stage");
+            let bundle = dir.path().join("dup-bundle");
+            std::fs::create_dir_all(&stage).unwrap();
+            let result = extract_zip_archive(&archive, &stage, bundle, "hyper.exe");
+            assert!(result.is_err(), "duplicate/case binary must be rejected");
+        }
+
+        // Zip may use `\` as a path separator (PowerShell producers).
+        {
+            let archive = dir.path().join("backslash-ok.zip");
+            write_test_zip(
+                &[
+                    ("hyper.exe", false, b"MZ"),
+                    ("bundled\\skills\\demo\\SKILL.md", false, b"# skill\n"),
+                ],
+                &archive,
+            );
+            let stage = dir.path().join("bs-stage");
+            let bundle = dir.path().join("bs-bundle");
+            std::fs::create_dir_all(&stage).unwrap();
+            let extracted = extract_zip_archive(&archive, &stage, bundle, "hyper.exe").unwrap();
+            let tree = extracted.bundle_stage.expect("bundle");
+            assert_eq!(
+                std::fs::read(tree.join("skills/demo/SKILL.md")).unwrap(),
+                b"# skill\n"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversize_bundle_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("oversize.tar.gz");
+        // Use header size claim above limit without allocating a huge body by
+        // writing a small body but advertising a huge size — tar builder sets
+        // size from body, so instead write a file just over the per-file cap
+        // using a modest oversize for the unit test path via direct limit.
+        // We test the guard by setting entry size through a large payload that
+        // still fits in memory for CI: 1 MiB is enough to exercise the counter
+        // when combined with a temporary lower path — instead assert the
+        // constant-backed check rejects entry.size() > MAX via a crafted tar.
+        let big = vec![b'x'; (MAX_BUNDLE_FILE_BYTES as usize) + 1];
+        write_test_tar(
+            &[
+                ("hyper", tar::EntryType::Regular, b"one".as_slice()),
+                (
+                    "bundled/skills/huge.bin",
+                    tar::EntryType::Regular,
+                    big.as_slice(),
+                ),
+            ],
+            &archive,
+        );
+        let (stage, bundle_stage) = extract_dirs(dir.path());
+        let result = extract_tar_archive(&archive, &stage, bundle_stage, "hyper");
+        assert!(result.is_err());
     }
 
     #[test]

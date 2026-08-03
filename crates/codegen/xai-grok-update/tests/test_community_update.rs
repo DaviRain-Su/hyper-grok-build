@@ -1,4 +1,7 @@
 //! End-to-end tests for the isolated Hyper community updater.
+//!
+//! Fixtures match the release producer contract (`tar -C staging .`):
+//! root `hyper`, optional licenses, and a full `bundled/**` tree.
 
 #![cfg(all(unix, feature = "community-build"))]
 
@@ -45,9 +48,18 @@ fn local_platform() -> (&'static str, &'static str) {
     (os, arch)
 }
 
-fn release_archive(binary: &[u8]) -> Vec<u8> {
+/// Release-equivalent archive: `tar -C staging -czf … .` layout.
+fn release_archive(binary: &[u8], bundle_files: &[(&str, &[u8])]) -> Vec<u8> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut builder = tar::Builder::new(encoder);
+
+    // Root directory entry produced by `tar -C staging .`.
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder.append_data(&mut header, ".", &[] as &[u8]).unwrap();
 
     let mut header = tar::Header::new_gnu();
     header.set_size(binary.len() as u64);
@@ -55,17 +67,61 @@ fn release_archive(binary: &[u8]) -> Vec<u8> {
     header.set_cksum();
     builder.append_data(&mut header, "hyper", binary).unwrap();
 
-    let license = b"test license\n";
-    let mut header = tar::Header::new_gnu();
-    header.set_size(license.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, "LICENSE", &license[..])
-        .unwrap();
+    for (name, body) in [
+        ("LICENSE", b"test license\n".as_slice()),
+        ("NOTICE", b"test notice\n".as_slice()),
+        ("THIRD-PARTY-NOTICES", b"third party\n".as_slice()),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, name, body).unwrap();
+    }
+
+    if !bundle_files.is_empty() {
+        // Directory entries with trailing `/` (GNU tar / install.sh layout from
+        // `tar -C staging .`). install.sh skips these and extracts only files.
+        for dir in [
+            "bundled/",
+            "bundled/skills/",
+            "bundled/skills/demo/",
+            "bundled/agents/",
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, dir, &[] as &[u8]).unwrap();
+        }
+        for (rel, body) in bundle_files {
+            let name = format!("bundled/{rel}");
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, *body).unwrap();
+        }
+    }
 
     let encoder = builder.into_inner().unwrap();
     encoder.finish().unwrap()
+}
+
+fn default_bundle_files() -> Vec<(&'static str, &'static [u8])> {
+    vec![
+        ("skills/demo/SKILL.md", b"# demo skill\n".as_slice()),
+        ("agents/helper.md", b"# helper agent\n".as_slice()),
+    ]
+}
+
+fn binary_only_archive(binary: &[u8]) -> Vec<u8> {
+    release_archive(binary, &[])
+}
+
+fn full_release_archive(binary: &[u8]) -> Vec<u8> {
+    release_archive(binary, &default_bundle_files())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -171,21 +227,32 @@ impl EnvGuard {
     fn install() -> Self {
         let _ = test_home();
         reset_home();
+        // Wipe managed bundle left by prior tests in this binary's GROK_HOME.
+        let _ = std::fs::remove_dir_all(test_home().join("bundled"));
+        let _ = std::fs::remove_dir_all(test_home().join("skills"));
         let hyper_home = tempfile::tempdir().unwrap().keep();
         unsafe {
             std::env::set_var("HYPER_SHARE_DIR", &hyper_home);
             std::env::set_var("HYPER_ALLOW_INSECURE_UPDATE_BASE", "1");
         }
+        #[cfg(feature = "community-update-test-hooks")]
+        xai_grok_update::set_install_failpoint(None);
         Self { hyper_home }
     }
 
     fn use_server(&self, server: &MockServer) {
         unsafe { std::env::set_var("HYPER_UPDATE_BASE_URL", server.uri()) };
     }
+
+    fn grok_home(&self) -> &Path {
+        test_home()
+    }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
+        #[cfg(feature = "community-update-test-hooks")]
+        xai_grok_update::set_install_failpoint(None);
         unsafe {
             std::env::remove_var("HYPER_SHARE_DIR");
             std::env::remove_var("HYPER_ALLOW_INSECURE_UPDATE_BASE");
@@ -227,15 +294,48 @@ fn install_old_hyper(home: &Path, version: &str) -> PathBuf {
     old
 }
 
+fn seed_old_bundle(grok_home: &Path) {
+    let skill = grok_home.join("bundled/skills/old/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, b"# stale managed skill\n").unwrap();
+    // User-managed skills live beside bundled/, not inside it.
+    let user = grok_home.join("skills/user-skill.md");
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    std::fs::write(&user, b"# user skill must survive\n").unwrap();
+}
+
+fn assert_bundle_contents(grok_home: &Path, expect_new: bool) {
+    let bundled = grok_home.join("bundled");
+    if expect_new {
+        assert_eq!(
+            std::fs::read(bundled.join("skills/demo/SKILL.md")).unwrap(),
+            b"# demo skill\n"
+        );
+        assert_eq!(
+            std::fs::read(bundled.join("agents/helper.md")).unwrap(),
+            b"# helper agent\n"
+        );
+        assert!(
+            !bundled.join("skills/old/SKILL.md").exists(),
+            "stale managed bundle files must be replaced"
+        );
+    }
+    assert_eq!(
+        std::fs::read(grok_home.join("skills/user-skill.md")).unwrap(),
+        b"# user skill must survive\n"
+    );
+}
+
 #[tokio::test]
 #[serial]
-async fn community_update_installs_verified_archive_without_touching_official_grok() {
+async fn community_update_installs_verified_archive_with_bundle() {
     let env = EnvGuard::install();
     set_test_version("0.2.112");
     let (grok, sentinel) = install_official_sentinel();
     install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
 
-    let archive = release_archive(b"#!/bin/sh\nexit 0\n");
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n");
     let digest = sha256(&archive);
     let (server, asset) = mount_release("0.2.113", archive, &digest).await;
     env.use_server(&server);
@@ -254,6 +354,8 @@ async fn community_update_installs_verified_archive_without_touching_official_gr
     assert!(target_name.contains("hyper-0.2.113-"), "{target_name}");
     assert!(target_name.contains(&digest), "{target_name}");
     assert!(std::fs::metadata(&active).unwrap().len() > 0);
+
+    assert_bundle_contents(env.grok_home(), true);
 
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
@@ -277,12 +379,48 @@ async fn community_update_installs_verified_archive_without_touching_official_gr
 
 #[tokio::test]
 #[serial]
+async fn binary_only_archive_preserves_existing_bundle() {
+    let env = EnvGuard::install();
+    set_test_version("0.2.112");
+    install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
+
+    let archive = binary_only_archive(b"#!/bin/sh\nexit 0\n");
+    let digest = sha256(&archive);
+    let (server, _) = mount_release("0.2.113", archive, &digest).await;
+    env.use_server(&server);
+
+    let mut config = make_update_config("stable");
+    assert_eq!(
+        run_update(false, None, None, &mut config)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("0.2.113")
+    );
+
+    // Old managed bundle must remain intact.
+    assert_eq!(
+        std::fs::read(env.grok_home().join("bundled/skills/old/SKILL.md")).unwrap(),
+        b"# stale managed skill\n"
+    );
+    assert_eq!(
+        std::fs::read(env.grok_home().join("skills/user-skill.md")).unwrap(),
+        b"# user skill must survive\n"
+    );
+    let active = env.hyper_home.join("bin/hyper");
+    let target = std::fs::read_link(&active).unwrap();
+    assert!(target.to_string_lossy().contains(&digest));
+}
+
+#[tokio::test]
+#[serial]
 async fn concurrent_updaters_download_and_activate_archive_once() {
     let env = EnvGuard::install();
     set_test_version("0.2.112");
     install_old_hyper(&env.hyper_home, "0.2.112");
 
-    let archive = release_archive(b"#!/bin/sh\nexit 0\n");
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n");
     let digest = sha256(&archive);
     let (server, asset) = mount_release("0.2.113", archive, &digest).await;
     env.use_server(&server);
@@ -310,6 +448,11 @@ async fn concurrent_updaters_download_and_activate_archive_once() {
             .unwrap();
     assert_eq!(state["installed_sha256"], digest);
     assert!(std::fs::metadata(env.hyper_home.join("bin/hyper")).is_ok());
+    assert!(
+        env.grok_home()
+            .join("bundled/skills/demo/SKILL.md")
+            .is_file()
+    );
 }
 
 #[tokio::test]
@@ -332,7 +475,7 @@ async fn same_semver_digest_change_updates_once_then_converges() {
     )
     .unwrap();
 
-    let archive = release_archive(b"#!/bin/sh\nexit 0\n# republished\n");
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n# republished\n");
     let digest = sha256(&archive);
     let (server, asset) = mount_release("0.2.113", archive, &digest).await;
     env.use_server(&server);
@@ -371,7 +514,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     std::fs::create_dir_all(official.parent().unwrap()).unwrap();
     std::fs::write(&official, b"official-grok-sentinel\n").unwrap();
 
-    let archive_a = release_archive(b"#!/bin/sh\nexit 0\n# build a\n");
+    let archive_a = full_release_archive(b"#!/bin/sh\nexit 0\n# build a\n");
     let digest_a = sha256(&archive_a);
     let (server_a, _) = mount_release("0.2.113", archive_a, &digest_a).await;
     let first = run_root_installer(&env.hyper_home, user_home.path(), &server_a);
@@ -387,7 +530,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     assert!(target_a.to_string_lossy().contains(&digest_a));
     assert!(target_a.exists());
 
-    let archive_b = release_archive(b"#!/bin/sh\nexit 0\n# build b\n");
+    let archive_b = full_release_archive(b"#!/bin/sh\nexit 0\n# build b\n");
     let digest_b = sha256(&archive_b);
     let (server_b, _) = mount_release("0.2.113", archive_b, &digest_b).await;
     let second = run_root_installer(&env.hyper_home, user_home.path(), &server_b);
@@ -406,7 +549,7 @@ async fn root_installer_same_semver_republish_is_atomic_and_isolated() {
     );
     assert!(target_b.to_string_lossy().contains(&digest_b));
 
-    let bad_archive = release_archive(b"#!/bin/sh\nexit 1\n");
+    let bad_archive = full_release_archive(b"#!/bin/sh\nexit 1\n");
     let bad_digest = sha256(&bad_archive);
     let (bad_server, _) = mount_release("0.2.113", bad_archive, &bad_digest).await;
     let failed = run_root_installer(&env.hyper_home, user_home.path(), &bad_server);
@@ -439,8 +582,9 @@ async fn checksum_failure_preserves_both_active_hyper_and_official_grok() {
     let old = install_old_hyper(&env.hyper_home, "0.2.112");
     let active = env.hyper_home.join("bin/hyper");
     let old_target = std::fs::read_link(&active).unwrap();
+    seed_old_bundle(env.grok_home());
 
-    let archive = release_archive(b"#!/bin/sh\nexit 0\n");
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n");
     let (server, _) = mount_release("0.2.113", archive, &"0".repeat(64)).await;
     env.use_server(&server);
 
@@ -453,4 +597,288 @@ async fn checksum_failure_preserves_both_active_hyper_and_official_grok() {
     assert_eq!(std::fs::read(&old).unwrap(), b"#!/bin/sh\nexit 0\n");
     assert_eq!(std::fs::read(&grok).unwrap(), sentinel);
     assert!(!env.hyper_home.join("update-state.json").exists());
+    // Bundle must be untouched when the download fails before activation.
+    assert_eq!(
+        std::fs::read(env.grok_home().join("bundled/skills/old/SKILL.md")).unwrap(),
+        b"# stale managed skill\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+#[cfg(feature = "community-update-test-hooks")]
+async fn state_commit_failpoint_rolls_back_binary_bundle_and_state() {
+    let env = EnvGuard::install();
+    set_test_version("0.2.112");
+    install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
+    let active = env.hyper_home.join("bin/hyper");
+    let old_target = std::fs::read_link(&active).unwrap();
+    let old_state = serde_json::json!({
+        "installed_version": "0.2.112",
+        "installed_asset": format!("hyper-0.2.112-{}.tar.gz", platform_triple()),
+        "installed_sha256": "a".repeat(64),
+        "installed_binary": old_target.file_name().unwrap().to_string_lossy(),
+        "checked_at_unix": 1,
+    });
+    std::fs::write(
+        env.hyper_home.join("update-state.json"),
+        serde_json::to_vec_pretty(&old_state).unwrap(),
+    )
+    .unwrap();
+
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n# new\n");
+    let digest = sha256(&archive);
+    let (server, _) = mount_release("0.2.113", archive, &digest).await;
+    env.use_server(&server);
+
+    xai_grok_update::set_install_failpoint(Some("before_state_write"));
+    let mut config = make_update_config("stable");
+    let error = run_update(false, None, None, &mut config)
+        .await
+        .expect_err("failpoint must abort commit");
+    assert!(
+        format!("{error:#}").contains("failpoint") || format!("{error:#}").contains("injected"),
+        "{error:#}"
+    );
+
+    // Full previous deployment restored.
+    assert_eq!(std::fs::read_link(&active).unwrap(), old_target);
+    assert_eq!(
+        std::fs::read(env.grok_home().join("bundled/skills/old/SKILL.md")).unwrap(),
+        b"# stale managed skill\n"
+    );
+    assert!(
+        !env.grok_home()
+            .join("bundled/skills/demo/SKILL.md")
+            .exists()
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["installed_version"], "0.2.112");
+    assert_eq!(state["installed_sha256"], "a".repeat(64));
+    assert_eq!(
+        std::fs::read(env.grok_home().join("skills/user-skill.md")).unwrap(),
+        b"# user skill must survive\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+#[cfg(feature = "community-update-test-hooks")]
+async fn bundle_activation_failpoint_rolls_back_before_binary_swap() {
+    let env = EnvGuard::install();
+    set_test_version("0.2.112");
+    install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
+    let active = env.hyper_home.join("bin/hyper");
+    let old_target = std::fs::read_link(&active).unwrap();
+    let old_state = serde_json::json!({
+        "installed_version": "0.2.112",
+        "installed_asset": "old-asset",
+        "installed_sha256": "b".repeat(64),
+        "installed_binary": old_target.file_name().unwrap().to_string_lossy(),
+        "checked_at_unix": 2,
+    });
+    std::fs::write(
+        env.hyper_home.join("update-state.json"),
+        serde_json::to_vec_pretty(&old_state).unwrap(),
+    )
+    .unwrap();
+
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n# new\n");
+    let digest = sha256(&archive);
+    let (server, _) = mount_release("0.2.113", archive, &digest).await;
+    env.use_server(&server);
+
+    xai_grok_update::set_install_failpoint(Some("after_bundle_activation"));
+    let mut config = make_update_config("stable");
+    let error = run_update(false, None, None, &mut config)
+        .await
+        .expect_err("failpoint after bundle activation must abort");
+    assert!(
+        format!("{error:#}").contains("failpoint") || format!("{error:#}").contains("injected")
+    );
+
+    assert_eq!(std::fs::read_link(&active).unwrap(), old_target);
+    assert_eq!(
+        std::fs::read(env.grok_home().join("bundled/skills/old/SKILL.md")).unwrap(),
+        b"# stale managed skill\n"
+    );
+    assert!(
+        !env.grok_home()
+            .join("bundled/skills/demo/SKILL.md")
+            .exists(),
+        "new bundle must not remain after rollback"
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["installed_sha256"], "b".repeat(64));
+}
+
+#[tokio::test]
+#[serial]
+async fn state_symlink_preflight_fails_before_activation() {
+    let env = EnvGuard::install();
+    set_test_version("0.2.112");
+    install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
+    let active = env.hyper_home.join("bin/hyper");
+    let old_target = std::fs::read_link(&active).unwrap();
+
+    // Make update-state.json a symlink — preflight must reject before mutate.
+    let real = env.hyper_home.join("real-state.json");
+    std::fs::write(&real, b"{\"installed_version\":\"0.2.112\"}\n").unwrap();
+    let state_path = env.hyper_home.join("update-state.json");
+    let _ = std::fs::remove_file(&state_path);
+    std::os::unix::fs::symlink(&real, &state_path).unwrap();
+
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n");
+    let digest = sha256(&archive);
+    let (server, _) = mount_release("0.2.113", archive, &digest).await;
+    env.use_server(&server);
+
+    let mut config = make_update_config("stable");
+    let error = run_update(false, None, None, &mut config)
+        .await
+        .expect_err("symlinked update state must fail closed");
+    let msg = format!("{error:#}");
+    assert!(
+        msg.contains("symlink") || msg.contains("update state"),
+        "{msg}"
+    );
+
+    assert_eq!(std::fs::read_link(&active).unwrap(), old_target);
+    assert_eq!(
+        std::fs::read(env.grok_home().join("bundled/skills/old/SKILL.md")).unwrap(),
+        b"# stale managed skill\n"
+    );
+    assert!(
+        !env.grok_home()
+            .join("bundled/skills/demo/SKILL.md")
+            .exists(),
+        "bundle must not activate when state preflight fails"
+    );
+    // Symlink shape preserved.
+    assert!(state_path.is_symlink());
+    assert_eq!(
+        std::fs::read(&real).unwrap(),
+        b"{\"installed_version\":\"0.2.112\"}\n"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn state_directory_preflight_fails_before_activation() {
+    let env = EnvGuard::install();
+    set_test_version("0.2.112");
+    install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
+    let active = env.hyper_home.join("bin/hyper");
+    let old_target = std::fs::read_link(&active).unwrap();
+
+    let state_path = env.hyper_home.join("update-state.json");
+    let _ = std::fs::remove_file(&state_path);
+    std::fs::create_dir(&state_path).unwrap();
+
+    let archive = full_release_archive(b"#!/bin/sh\nexit 0\n");
+    let digest = sha256(&archive);
+    let (server, _) = mount_release("0.2.113", archive, &digest).await;
+    env.use_server(&server);
+
+    let mut config = make_update_config("stable");
+    let error = run_update(false, None, None, &mut config)
+        .await
+        .expect_err("directory update state must fail closed");
+    let msg = format!("{error:#}");
+    assert!(
+        msg.contains("regular file") || msg.contains("update state"),
+        "{msg}"
+    );
+
+    assert_eq!(std::fs::read_link(&active).unwrap(), old_target);
+    assert_eq!(
+        std::fs::read(env.grok_home().join("bundled/skills/old/SKILL.md")).unwrap(),
+        b"# stale managed skill\n"
+    );
+    assert!(state_path.is_dir());
+}
+
+/// Build a release archive with the system `tar -C staging -czf archive .`
+/// producer (same as GitHub Release workflows). Must not silently skip.
+fn system_tar_release_archive(staging: &Path, archive: &Path) {
+    // Populate a workflow-equivalent staging tree.
+    std::fs::write(staging.join("hyper"), b"#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            staging.join("hyper"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    std::fs::write(staging.join("LICENSE"), b"test license\n").unwrap();
+    std::fs::write(staging.join("NOTICE"), b"test notice\n").unwrap();
+    std::fs::write(staging.join("THIRD-PARTY-NOTICES"), b"third party\n").unwrap();
+    let skill = staging.join("bundled/skills/demo/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, b"# demo skill\n").unwrap();
+    let agent = staging.join("bundled/agents/helper.md");
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(&agent, b"# helper agent\n").unwrap();
+
+    let status = Command::new("tar")
+        .args([
+            "-C",
+            staging.to_str().expect("utf-8 staging path"),
+            "-czf",
+            archive.to_str().expect("utf-8 archive path"),
+            ".",
+        ])
+        .status()
+        .expect("system tar must be available on release-supported Unix platforms");
+    assert!(
+        status.success(),
+        "system tar -C staging -czf failed with {status}"
+    );
+    assert!(
+        archive.is_file() && std::fs::metadata(archive).unwrap().len() > 0,
+        "system tar produced an empty archive"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn system_tar_producer_archive_installs_successfully() {
+    let env = EnvGuard::install();
+    set_test_version("0.2.112");
+    install_old_hyper(&env.hyper_home, "0.2.112");
+    seed_old_bundle(env.grok_home());
+
+    let staging = tempfile::tempdir().unwrap();
+    let archive_path = env.hyper_home.join("system-release.tar.gz");
+    system_tar_release_archive(staging.path(), &archive_path);
+    let archive = std::fs::read(&archive_path).unwrap();
+    let digest = sha256(&archive);
+    let (server, asset) = mount_release("0.2.113", archive, &digest).await;
+    env.use_server(&server);
+
+    let mut config = make_update_config("stable");
+    let installed = run_update(false, None, None, &mut config)
+        .await
+        .expect("system-tar archive must install");
+    assert_eq!(installed.as_deref(), Some("0.2.113"));
+
+    let active = env.hyper_home.join("bin/hyper");
+    let target = std::fs::read_link(&active).unwrap();
+    assert!(target.to_string_lossy().contains(&digest));
+    assert_bundle_contents(env.grok_home(), true);
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(env.hyper_home.join("update-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["installed_sha256"], digest);
+    assert_eq!(state["installed_asset"], asset);
 }

@@ -247,7 +247,7 @@ Implications:
 
 - Sessions, API keys, and OAuth scopes are shared — log in once, both CLIs can see them.
 - Leader list/kill can see both products’ leaders. Prefer killing only leaders you started.
-- Community builds use an isolated updater: `hyper update` and startup auto-update read only this repository's GitHub Releases, while Hyper binaries and update state stay under `~/.hyper` (the managed executable is `~/.hyper/bin/hyper`). They never overwrite `~/.grok/bin/grok`. The auto-update preference remains part of Hyper's shared `~/.grok` configuration. Re-running `install.sh` / `install.ps1` remains a supported recovery path.
+- Community builds use an isolated updater: `hyper update` and startup auto-update read only this repository's GitHub Releases, while Hyper binaries and update state stay under `~/.hyper` (the managed executable is `~/.hyper/bin/hyper`). Release archives may also ship a managed `bundled/**` tree, which the updater installs transactionally at `~/.grok/bundled` (or `$GROK_HOME/bundled`). They never overwrite `~/.grok/bin/grok`. The auto-update preference remains part of Hyper's shared `~/.grok` configuration. Re-running `install.sh` / `install.ps1` remains a supported recovery path.
 
 Nothing in the official installer is rewritten by Hyper’s install script.
 

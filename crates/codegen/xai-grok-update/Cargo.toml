@@ -32,6 +32,9 @@ zip = { version = "3", default-features = false, features = ["deflate-flate2"], 
 [features]
 default = []
 community-build = ["dep:dunce", "dep:flate2", "dep:fs2", "dep:sha2", "dep:tar", "dep:zip"]
+# Test-only install failpoints for transactional rollback coverage. Never enable
+# in release/distribution builds.
+community-update-test-hooks = ["community-build"]
 
 [dev-dependencies]
 semver = { workspace = true }
@@ -42,3 +45,9 @@ time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
 dunce = { workspace = true }
+# Integration tests build release-shaped tar.gz / zip fixtures.
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { version = "3", default-features = false, features = ["deflate-flate2"] }
+sha2 = { workspace = true }
+futures = { workspace = true }

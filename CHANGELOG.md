@@ -5,6 +5,21 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Community updater real release archives + transactional bundle deploy** —
+  `hyper update` now accepts the producer contract used by GitHub Releases
+  (`tar -C staging .` on Unix / Windows zip): root `hyper`/`hyper.exe`, optional
+  root licenses (drained, not installed), and a full `bundled/**` tree.
+  Extraction is path-safe (valid UTF-8 only, no `..`/absolute/symlinks/hardlinks,
+  case-fold duplicate detection, portable Windows-hostile name rejection,
+  entry/size caps; zip may treat `\` as a separator). When a bundle is present
+  it is activated at `$GROK_HOME/bundled` (default `~/.grok/bundled`) on the same
+  filesystem as a sibling stage, with a compensating transaction across binary
+  activation and `~/.hyper/update-state.json` so failures restore the previous
+  binary, bundle, and state (or report an incomplete rollback with preserved
+  aside paths). Binary-only archives still update the binary without removing an
+  existing managed bundle. Official `~/.grok/bin/grok` remains untouched.
+  System-`tar` producer coverage is exercised on Unix; Windows zip paths are
+  unit-tested on Linux CI.
 - **Hypercore group-aware transcript trim** — `max_messages` is a soft target:
   trim drops whole atomic groups and never splits a tool exchange
   (`assistant` with `tool_calls` + following consecutive `tool` rows). While a
