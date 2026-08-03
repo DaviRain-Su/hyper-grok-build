@@ -121,9 +121,14 @@ const CONTROL_EVENT_RESERVE: usize = 32;
 struct MediaResources {
     peer: Arc<RTCPeerConnection>,
     data_channel: Arc<RTCDataChannel>,
+    /// Input command channel. Dropped (closed) on teardown so the encoder
+    /// task always unblocks even when `try_send(Close)` would Full.
     input_tx: flume::Sender<InputCommand>,
     input_task: JoinHandle<()>,
     rtcp_task: JoinHandle<()>,
+    /// Remote audio decoder task. Tracked so `close` can abort+join it instead
+    /// of detaching on peer drop (which leaked a task that kept reading RTP).
+    output_task: Mutex<Option<JoinHandle<()>>>,
     playback: PlaybackStream,
 }
 
@@ -141,6 +146,40 @@ struct LivePeerCore {
     /// can't suppress each other's first report (each is once-only).
     overflow_reported: AtomicBool,
     queued_samples: AtomicUsize,
+    /// Consecutive `try_send` Fulls on the audio input channel. A single Full
+    /// only sheds; sustained saturation above
+    /// [`INPUT_FULL_FATAL_THRESHOLD`] fatals. Reset on a successful enqueue.
+    input_full_streak: AtomicUsize,
+    /// Independent owner of once-only teardown. First `close` claim spawns this
+    /// so a cancelled caller cannot leave the peer half-closed without
+    /// publishing `PeerSignal::Closed`.
+    close_owner: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Consecutive audio-input Fulls before a stalled encoder is treated as fatal.
+/// A single Full is normal under brief backpressure and only sheds the chunk.
+const INPUT_FULL_FATAL_THRESHOLD: usize = 8;
+
+/// Bound on `RTCPeerConnection::close` during teardown. A hung peer close must
+/// not prevent playback stop, task abort/join, or publishing `Closed`.
+const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Invariant: single producer for LivePeerCore::push_audio. The session loop
+// is the only caller; streak accounting is not a multi-producer lock.
+// Concurrent push_audio is unsupported and not part of the public contract.
+
+/// Bounded `RTCPeerConnection::close` for create_offer early-failure paths.
+/// A hung peer close must not block connect failure from returning.
+async fn bounded_peer_close(peer: &Arc<RTCPeerConnection>) {
+    if tokio::time::timeout(PEER_CLOSE_TIMEOUT, peer.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "live peer close timed out after {}ms during create_offer failure teardown",
+            PEER_CLOSE_TIMEOUT.as_millis()
+        );
+    }
 }
 
 impl LivePeerCore {
@@ -156,6 +195,8 @@ impl LivePeerCore {
             failure_reported: AtomicBool::new(false),
             overflow_reported: AtomicBool::new(false),
             queued_samples: AtomicUsize::new(0),
+            input_full_streak: AtomicUsize::new(0),
+            close_owner: Mutex::new(None),
         }
     }
 
@@ -206,7 +247,7 @@ impl LivePeerCore {
         {
             Ok(sender) => sender,
             Err(e) => {
-                let _ = peer.close().await;
+                bounded_peer_close(&peer).await;
                 return Err(format!("Failed to add the live audio track: {e}"));
             }
         };
@@ -215,7 +256,7 @@ impl LivePeerCore {
         let data_channel = match peer.create_data_channel(DATA_CHANNEL_LABEL, None).await {
             Ok(channel) => channel,
             Err(e) => {
-                let _ = peer.close().await;
+                bounded_peer_close(&peer).await;
                 return Err(format!("Failed to create the live data channel: {e}"));
             }
         };
@@ -224,18 +265,18 @@ impl LivePeerCore {
         let offer = match peer.create_offer(None).await {
             Ok(offer) => offer,
             Err(e) => {
-                let _ = peer.close().await;
+                bounded_peer_close(&peer).await;
                 return Err(format!("Failed to create the live SDP offer: {e}"));
             }
         };
         if let Err(e) = peer.set_local_description(offer.clone()).await {
-            let _ = peer.close().await;
+            bounded_peer_close(&peer).await;
             return Err(format!("Failed to install the live SDP offer: {e}"));
         }
         let mut resources_slot = self.resources.lock();
         if self.closing.load(Ordering::Acquire) {
             drop(resources_slot);
-            let _ = peer.close().await;
+            bounded_peer_close(&peer).await;
             return Err("Native live WebRTC peer was closed while starting".to_owned());
         }
 
@@ -248,6 +289,7 @@ impl LivePeerCore {
             input_tx,
             input_task,
             rtcp_task,
+            output_task: Mutex::new(None),
             playback,
         };
         *resources_slot = Some(resources);
@@ -296,13 +338,29 @@ impl LivePeerCore {
         if samples.is_empty() || self.muted.load(Ordering::Acquire) {
             return Ok(());
         }
+        // Single-producer invariant: only the session loop calls push_audio.
         let input_tx = self
             .resources
             .lock()
             .as_ref()
             .map(|r| r.input_tx.clone())
             .ok_or_else(|| "Native live WebRTC peer has not started".to_owned())?;
+        self.try_enqueue_audio(&input_tx, samples)
+    }
+
+    /// Enqueue PCM onto a bounded input channel (shed-newest on Full).
+    ///
+    /// Extracted so tests can drive a real `flume` channel without a full
+    /// WebRTC peer. Production path is only [`Self::push_audio`].
+    fn try_enqueue_audio(
+        &self,
+        input_tx: &flume::Sender<InputCommand>,
+        samples: &[f32],
+    ) -> Result<(), String> {
         let sample_count = samples.len().min(MAX_QUEUED_INPUT_SAMPLES);
+        if sample_count == 0 {
+            return Ok(());
+        }
         let retained = &samples[samples.len() - sample_count..];
         let queued = self
             .queued_samples
@@ -312,35 +370,52 @@ impl LivePeerCore {
                 .fetch_sub(sample_count, Ordering::AcqRel);
             return Ok(());
         }
-        // The input channel is bounded. If it's full (encoder task backed up),
-        // drop this audio chunk (shed-newest) rather than blocking the caller.
-        // The queued_samples counter is rolled back so the bound stays accurate.
-        if input_tx
-            .try_send(InputCommand::Audio(retained.to_vec()))
-            .is_err()
-        {
-            self.queued_samples
-                .fetch_sub(sample_count, Ordering::AcqRel);
-            // A full input queue indicates the encoder is stalled; report a
-            // failure so the session tears down rather than silently dropping.
-            if !self.closing.load(Ordering::Acquire) {
-                self.report_failure(
-                    "Live audio input queue is full; the encoder may be stalled".to_owned(),
-                );
+        // Bounded channel: Full sheds the chunk and bumps the streak. A single
+        // Full is not fatal — only sustained saturation is. Disconnected
+        // rolls back the sample counter and surfaces closed input.
+        match input_tx.try_send(InputCommand::Audio(retained.to_vec())) {
+            Ok(()) => {
+                self.input_full_streak.store(0, Ordering::Release);
+                Ok(())
             }
-            return Err("Native live audio input is closed".to_owned());
+            Err(flume::TrySendError::Disconnected(_)) => {
+                self.queued_samples
+                    .fetch_sub(sample_count, Ordering::AcqRel);
+                Err("Native live audio input is closed".to_owned())
+            }
+            Err(flume::TrySendError::Full(_)) => {
+                self.queued_samples
+                    .fetch_sub(sample_count, Ordering::AcqRel);
+                let streak = self.input_full_streak.fetch_add(1, Ordering::AcqRel) + 1;
+                if streak >= INPUT_FULL_FATAL_THRESHOLD && !self.closing.load(Ordering::Acquire) {
+                    self.report_failure(
+                        "Live audio input queue is saturated; the encoder may be stalled"
+                            .to_owned(),
+                    );
+                }
+                // Shed-only: control path (mute/close) is unaffected.
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn set_muted(&self, muted: bool) -> Result<(), String> {
         self.muted.store(muted, Ordering::Release);
         let input_tx = self.resources.lock().as_ref().map(|r| r.input_tx.clone());
         if let Some(input_tx) = input_tx {
-            // Mute commands are small and critical; try_send and ignore a full
-            // queue (the muted flag is already set atomically, so the encoder
-            // will respect it on its next tick regardless).
-            let _ = input_tx.try_send(InputCommand::Muted(muted));
+            // Mute is critical control: prefer send with a short wait so a
+            // briefly full audio queue cannot drop mute indefinitely. The
+            // atomic muted flag is already set, so the encoder also honors
+            // mute on its next tick even if this enqueue is shed.
+            match input_tx.try_send(InputCommand::Muted(muted)) {
+                Ok(()) => {}
+                Err(flume::TrySendError::Full(cmd)) => {
+                    // Best-effort: drop one audio slot worth is not possible
+                    // without draining; leave atomic mute as source of truth.
+                    let _ = cmd;
+                }
+                Err(flume::TrySendError::Disconnected(_)) => {}
+            }
         }
         Ok(())
     }
@@ -426,33 +501,129 @@ impl LivePeerCore {
         let _ = self.event_tx.try_send(MediaEvent::Failure(message));
     }
 
-    async fn close(&self) {
-        if self.closing.swap(true, Ordering::AcqRel) {
-            let mut signal_rx = self.signal_tx.subscribe();
-            while !matches!(*signal_rx.borrow(), PeerSignal::Closed) {
-                if signal_rx.changed().await.is_err() {
-                    break;
-                }
-            }
+    /// Cancellation-safe, once-only teardown.
+    ///
+    /// The first caller claims ownership and spawns an independent close task
+    /// that always runs to completion (even if this future is aborted mid-way).
+    /// All callers — including the owner — wait with a bound for
+    /// [`PeerSignal::Closed`]. Resources are always joined (never timeout-drop
+    /// a running handle): input channel is closed by drop, tasks are aborted
+    /// then awaited without detaching.
+    async fn close(self: &Arc<Self>) {
+        let mut signal_rx = self.signal_tx.subscribe();
+        if matches!(*signal_rx.borrow(), PeerSignal::Closed) {
             return;
         }
 
+        if !self.closing.swap(true, Ordering::AcqRel) {
+            // First claim: force level to zero and spawn the owner task.
+            let _ = self.event_tx.try_send(MediaEvent::OutputLevel(0.0));
+            let this = Arc::clone(self);
+            let owner = tokio::spawn(async move {
+                this.run_close_once().await;
+            });
+            *self.close_owner.lock() = Some(owner);
+        }
+
+        // Bound the wait so a pathological close cannot wedge the caller forever,
+        // but the owner task continues independently until Closed is published.
+        let wait = async {
+            loop {
+                if matches!(*signal_rx.borrow(), PeerSignal::Closed) {
+                    return;
+                }
+                if signal_rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(CLOSE_TASK_TIMEOUT * 4, wait).await;
+    }
+
+    /// Body of the once-only close owner. Always publishes `Closed` at the end,
+    /// even when `peer.close()` hangs past [`PEER_CLOSE_TIMEOUT`].
+    async fn run_close_once(self: Arc<Self>) {
+        self.run_close_once_with_peer_close(None, PEER_CLOSE_TIMEOUT)
+            .await;
+    }
+
+    /// Close body with an optional peer-close future override (tests inject a
+    /// permanently-pending future to prove the timeout path). Production
+    /// passes `None` and uses `resources.peer.close()` under `peer_close_deadline`.
+    async fn run_close_once_with_peer_close(
+        self: Arc<Self>,
+        peer_close_override: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        >,
+        peer_close_deadline: Duration,
+    ) {
         // Finding 2: force output level to zero on teardown so the barge-in
         // gate clears reliably (not via a lossy metering queue).
         let _ = self.event_tx.try_send(MediaEvent::OutputLevel(0.0));
 
         let resources = self.resources.lock().take();
         if let Some(resources) = resources {
+            // Prefer Close command, then always drop the sender so a full
+            // queue cannot leave the encoder running forever.
             let _ = resources.input_tx.try_send(InputCommand::Close);
-            let _ = resources.peer.close().await;
+            drop(resources.input_tx);
+
+            // Bounded peer close: timeout must not skip playback stop / joins.
+            if let Some(pending) = peer_close_override {
+                if tokio::time::timeout(peer_close_deadline, pending)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "live peer close timed out after {}ms; continuing teardown",
+                        peer_close_deadline.as_millis()
+                    );
+                }
+                // Drop the real peer without awaiting an unbounded close when
+                // the override already simulated hang/success.
+                drop(resources.peer);
+            } else {
+                let peer = resources.peer;
+                if tokio::time::timeout(peer_close_deadline, peer.close())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "live peer close timed out after {}ms; continuing teardown",
+                        peer_close_deadline.as_millis()
+                    );
+                    // peer is dropped here when the timeout future is dropped,
+                    // which still schedules native cleanup without blocking us.
+                }
+            }
+
             resources.playback.stop();
-            let _ = tokio::time::timeout(CLOSE_TASK_TIMEOUT, resources.input_task).await;
+
+            // Always join after abort — never timeout-drop a running handle
+            // (that would detach and leak). Abort unblocks; await reaps.
+            resources.input_task.abort();
+            let _ = resources.input_task.await;
+
             resources.rtcp_task.abort();
             let _ = resources.rtcp_task.await;
+
+            let output_task = resources.output_task.lock().take();
+            if let Some(output_task) = output_task {
+                output_task.abort();
+                let _ = output_task.await;
+            }
             drop(resources.data_channel);
+        } else if let Some(pending) = peer_close_override {
+            // No resources but a test override: still honor the deadline so
+            // the production path (timeout → continue → Closed) is exercised.
+            let _ = tokio::time::timeout(peer_close_deadline, pending).await;
         }
+
         self.queued_samples.store(0, Ordering::Release);
+        self.input_full_streak.store(0, Ordering::Release);
         self.signal_tx.send_replace(PeerSignal::Closed);
+        // Reap owner tracking so Drop/repeat-close does not hold a stale handle.
+        let _ = self.close_owner.lock().take();
     }
 }
 
@@ -501,7 +672,9 @@ impl LiveMediaPeer {
     }
 
     /// Close media, the data channel, the peer connection, and speaker
-    /// playback. Safe to call repeatedly.
+    /// playback. Cancellation-safe and safe to call repeatedly: the first
+    /// claim owns teardown on an independent task that always publishes
+    /// [`PeerSignal::Closed`]; callers wait with a bound.
     pub async fn close(&self) {
         self.inner.close().await;
     }
@@ -558,7 +731,25 @@ fn install_peer_callbacks(
                 }
                 return;
             };
-            tokio::spawn(receive_output_audio(track, output_sender, core));
+            // Track the decoder handle on MediaResources so close can
+            // abort+join it. Detached spawn leaked a task that kept reading
+            // RTP after peer teardown.
+            let handle = tokio::spawn(receive_output_audio(track, output_sender, core.clone()));
+            if let Some(core) = core.upgrade() {
+                let mut resources = core.resources.lock();
+                if let Some(resources) = resources.as_mut() {
+                    let mut slot = resources.output_task.lock();
+                    if let Some(prev) = slot.replace(handle) {
+                        prev.abort();
+                    }
+                } else {
+                    // Peer already closed between track open and install —
+                    // abort immediately so the decoder cannot outlive close.
+                    handle.abort();
+                }
+            } else {
+                handle.abort();
+            }
         })
     }));
 
@@ -1100,5 +1291,152 @@ mod tests {
         core.report_level(f64::INFINITY);
         core.report_level(f64::NEG_INFINITY);
         assert!(event_rx.is_empty());
+    }
+
+    /// Drive try_enqueue_audio against a real capacity-1 flume channel.
+    /// Single-producer invariant: only this test thread enqueues.
+    #[tokio::test]
+    async fn audio_input_full_streak_via_real_channel() {
+        let (core, _event_rx, signal_rx) = core_with_channel(8);
+        let (tx, rx) = flume::bounded::<InputCommand>(1);
+        let sample = [0.1f32; 32];
+
+        // Fill the single slot.
+        assert!(core.try_enqueue_audio(&tx, &sample).is_ok());
+        assert_eq!(core.input_full_streak.load(Ordering::Acquire), 0);
+        assert!(!matches!(*signal_rx.borrow(), PeerSignal::Failed(_)));
+
+        // Fulls 1..7: shed only, no fatal.
+        for i in 1..INPUT_FULL_FATAL_THRESHOLD {
+            assert!(
+                core.try_enqueue_audio(&tx, &sample).is_ok(),
+                "Full #{i} must shed without error"
+            );
+            assert_eq!(core.input_full_streak.load(Ordering::Acquire), i);
+            assert!(
+                !matches!(*signal_rx.borrow(), PeerSignal::Failed(_)),
+                "Full #{i} must not fatal"
+            );
+        }
+
+        // Drain one slot → successful enqueue resets streak.
+        let _ = rx.try_recv();
+        assert!(core.try_enqueue_audio(&tx, &sample).is_ok());
+        assert_eq!(
+            core.input_full_streak.load(Ordering::Acquire),
+            0,
+            "successful enqueue must reset streak"
+        );
+
+        // Refill Full streak to exactly threshold → one fatal.
+        for _ in 0..INPUT_FULL_FATAL_THRESHOLD {
+            let _ = core.try_enqueue_audio(&tx, &sample);
+        }
+        assert!(matches!(
+            *signal_rx.borrow(),
+            PeerSignal::Failed(ref m) if m.contains("saturated")
+        ));
+        assert!(core.failure_reported.load(Ordering::Acquire));
+
+        // Further Fulls must not re-fire (once-only failure).
+        let first = format!("{:?}", signal_rx.borrow().clone());
+        let _ = core.try_enqueue_audio(&tx, &sample);
+        assert_eq!(
+            format!("{:?}", signal_rx.borrow().clone()),
+            first,
+            "second saturation must not overwrite Failed"
+        );
+    }
+
+    /// Disconnected input rolls back queued_samples and returns closed error.
+    #[test]
+    fn audio_input_disconnected_rolls_back_queued_samples() {
+        let (core, _event_rx, _signal_rx) = core_with_channel(4);
+        let (tx, rx) = flume::bounded::<InputCommand>(1);
+        drop(rx); // disconnect receiver
+        let before = core.queued_samples.load(Ordering::Acquire);
+        let sample = [0.2f32; 16];
+        let err = core
+            .try_enqueue_audio(&tx, &sample)
+            .expect_err("disconnected must error");
+        assert!(err.contains("closed"), "{err}");
+        assert_eq!(
+            core.queued_samples.load(Ordering::Acquire),
+            before,
+            "queued_samples must roll back on Disconnected"
+        );
+    }
+
+    /// Injected permanently-pending peer close still publishes Closed after
+    /// a short deadline and reaps close_owner (no tokio test-util needed).
+    #[tokio::test]
+    async fn close_with_pending_peer_close_still_publishes_closed() {
+        let (core, _event_rx, signal_rx) = core_with_channel(4);
+        *core.close_owner.lock() = Some(tokio::spawn(async {}));
+
+        let pending: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            Box::pin(std::future::pending::<()>());
+        // 30ms deadline: real wall clock, fast enough for CI.
+        let deadline = Duration::from_millis(30);
+        let close_fut = Arc::clone(&core).run_close_once_with_peer_close(Some(pending), deadline);
+        let _ = tokio::time::timeout(Duration::from_secs(2), close_fut)
+            .await
+            .expect("close owner must finish after peer-close deadline");
+
+        assert!(matches!(*signal_rx.borrow(), PeerSignal::Closed));
+        assert!(
+            core.close_owner.lock().is_none(),
+            "close_owner handle must be reaped"
+        );
+    }
+
+    /// Close is once-only: concurrent callers all observe Closed, and the
+    /// owner task always publishes Closed even if the first await is cancelled.
+    #[tokio::test]
+    async fn close_is_once_only_and_publishes_closed() {
+        let (core, _event_rx, signal_rx) = core_with_channel(8);
+        let c1 = Arc::clone(&core);
+        let c2 = Arc::clone(&core);
+        let h1 = tokio::spawn(async move { c1.close().await });
+        let h2 = tokio::spawn(async move { c2.close().await });
+        // Cancel the first waiter mid-flight; owner must still complete.
+        h1.abort();
+        let _ = h1.await;
+        let _ = h2.await;
+        // Bound wait for Closed.
+        let mut rx = signal_rx;
+        let done = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(*rx.borrow(), PeerSignal::Closed) {
+                    return;
+                }
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(done.is_ok(), "close did not publish Closed in time");
+        assert!(matches!(
+            *core.signal_tx.subscribe().borrow(),
+            PeerSignal::Closed
+        ));
+        // Repeat close is a no-op wait.
+        core.close().await;
+        assert!(matches!(
+            *core.signal_tx.subscribe().borrow(),
+            PeerSignal::Closed
+        ));
+    }
+
+    /// Closing an idle (never started) peer still publishes Closed.
+    #[tokio::test]
+    async fn close_idle_peer_publishes_closed() {
+        let (core, _event_rx, signal_rx) = core_with_channel(4);
+        core.close().await;
+        assert!(matches!(*signal_rx.borrow(), PeerSignal::Closed));
+        // Second close returns immediately.
+        core.close().await;
+        assert!(matches!(*signal_rx.borrow(), PeerSignal::Closed));
     }
 }

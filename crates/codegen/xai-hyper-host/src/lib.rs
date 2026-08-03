@@ -24,7 +24,7 @@ pub type SessionId = String;
 pub type TurnId = String;
 
 /// Host-side errors. Core maps these into its own error type.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum HostError {
     /// Capability not available on this host (e.g. tools in early phases).
     #[error("unsupported: {0}")]
@@ -35,9 +35,71 @@ pub enum HostError {
     /// Model / transport failure.
     #[error("transport: {0}")]
     Transport(String),
+    /// Auth / HTTP 401 failure from the model transport.
+    ///
+    /// Distinguished from generic [`Self::Transport`] so the shell Hypercore
+    /// path can apply the same force-refresh + per-incident retry budget as
+    /// the legacy turn loop (instead of propagating once and over-retrying
+    /// outside the budget, or skipping recovery entirely).
+    #[error("auth: {message}")]
+    Auth {
+        /// HTTP status when known (typically 401).
+        status_code: Option<u16>,
+        /// Human-readable error body / message.
+        message: String,
+        /// Wire credential provenance for the rejected request:
+        /// `"sent"`, `"missing"`, or `"unknown"`.
+        credential: String,
+    },
     /// Other failure.
     #[error("{0}")]
     Message(String),
+}
+
+impl HostError {
+    /// Build an auth failure with unknown wire provenance (charges the budget).
+    pub fn auth(status_code: Option<u16>, message: impl Into<String>) -> Self {
+        Self::Auth {
+            status_code,
+            message: message.into(),
+            credential: "unknown".into(),
+        }
+    }
+
+    /// `true` only for the typed [`Self::Auth`] variant.
+    ///
+    /// Hypercore recovery **must not** string-match `Transport` / `Message`
+    /// bodies for "401" / "unauthorized" — that loses credential provenance
+    /// and reopens unbounded retry. Emit `HostError::Auth` at the host boundary.
+    pub fn is_auth_error(&self) -> bool {
+        matches!(self, Self::Auth { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_variant_is_auth_error() {
+        let err = HostError::auth(Some(401), "token rejected");
+        assert!(err.is_auth_error());
+        assert!(matches!(
+            err,
+            HostError::Auth {
+                status_code: Some(401),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn transport_401_string_is_not_auth_error() {
+        // Bridge removed: typed Auth only.
+        assert!(!HostError::Transport("HTTP 401 Unauthorized".into()).is_auth_error());
+        assert!(!HostError::Message("authentication failed".into()).is_auth_error());
+        assert!(!HostError::Io("disk full".into()).is_auth_error());
+    }
 }
 
 /// One tool the model may call (schema only; execution is host-side).

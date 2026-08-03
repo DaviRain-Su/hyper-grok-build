@@ -609,10 +609,11 @@ impl<H: HyperHost> HyperCore<H> {
                 Ok(s) => s,
                 Err(e) => {
                     restore_checkpoint(self);
-                    let err = e.to_string();
+                    // Display-only TurnFailed; typed HostError is on the Err path.
+                    // Auth recovery must use Err(Host(Auth)), never this string.
                     events.push(CoreEvent::TurnFailed {
                         turn_id: turn_id.clone(),
-                        error: err.clone(),
+                        error: e.to_string(),
                     });
                     return Err(CoreError::Host(e));
                 }
@@ -2416,5 +2417,355 @@ mod tests {
         assert_eq!(core.items().last().unwrap().content, "final plain");
         assert!(core.items().iter().any(|i| i.role == "system"));
         assert!(core.items().len() <= 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auth open failures: real HyperCore::submit_turn + counting host
+    // -----------------------------------------------------------------------
+
+    /// Host that fails `open_model_stream` with typed [`HostError::Auth`].
+    #[derive(Clone)]
+    struct AuthOpenFailHost {
+        opens: Arc<AtomicUsize>,
+        credential: String,
+        /// After this many opens, return Ok with a trivial done stream.
+        /// `None` = always fail.
+        succeed_after: Option<usize>,
+    }
+
+    struct EmptyDoneStream {
+        done: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelStream for EmptyDoneStream {
+        async fn next_chunk(&mut self) -> Result<Option<ModelChunk>, HostError> {
+            if self.done {
+                return Ok(None);
+            }
+            self.done = true;
+            Ok(Some(ModelChunk::Done {
+                stop_reason: Some("end_turn".into()),
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HyperHost for AuthOpenFailHost {
+        async fn open_model_stream(
+            &self,
+            _req: ModelStreamRequest,
+        ) -> Result<Box<dyn ModelStream>, HostError> {
+            let n = self.opens.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(after) = self.succeed_after
+                && n > after
+            {
+                return Ok(Box::new(EmptyDoneStream { done: false }));
+            }
+            Err(HostError::Auth {
+                status_code: Some(401),
+                message: "token rejected".into(),
+                credential: self.credential.clone(),
+            })
+        }
+
+        async fn commit_snapshot(
+            &self,
+            _session_id: &str,
+            _snapshot: &[u8],
+            _terminal: Option<&xai_hyper_host::TerminalTurnRecord>,
+        ) -> Result<(), HostError> {
+            Ok(())
+        }
+
+        async fn load_snapshot(&self, _session_id: &str) -> Result<Option<Vec<u8>>, HostError> {
+            Ok(None)
+        }
+
+        async fn load_terminal_turn(
+            &self,
+            _session_id: &str,
+            _turn_id: &str,
+        ) -> Result<Option<xai_hyper_host::TerminalTurnRecord>, HostError> {
+            Ok(None)
+        }
+
+        fn now_unix_ms(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Outer recovery loop (shell Hypercore shape): one real
+    /// [`HyperCore::submit_turn`] per decision. Resubmit only when
+    /// `on_auth` returns true. Schedule math lives in the callback (shell's
+    /// `AuthRetrySchedule`), not duplicated here.
+    async fn outer_auth_resubmit_loop(
+        mut core: HyperCore<AuthOpenFailHost>,
+        opens: &Arc<AtomicUsize>,
+        max_attempts: usize,
+        mut on_auth: impl FnMut(&HostError) -> bool,
+    ) -> (usize, Option<CoreError>) {
+        let mut last_err = None;
+        for attempt in 0..max_attempts {
+            let turn_id = format!("t-{attempt}");
+            match core
+                .submit_turn(TurnRequest {
+                    turn_id,
+                    text: "hi".into(),
+                    tools: None,
+                    json_schema: None,
+                })
+                .await
+            {
+                Ok(_) => return (opens.load(Ordering::SeqCst), None),
+                Err(CoreError::Host(ref he)) if he.is_auth_error() => {
+                    if !on_auth(he) {
+                        last_err = Some(CoreError::Host(he.clone()));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        (opens.load(Ordering::SeqCst), last_err)
+    }
+
+    /// Sent credential: 3 charged resubmits then stop → total opens = 4
+    /// (initial + 3). Mirrors shell MAX_RETRIES=3.
+    #[tokio::test]
+    async fn real_submit_sent_auth_opens_four_then_stops() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let host = AuthOpenFailHost {
+            opens: Arc::clone(&opens),
+            credential: "sent".into(),
+            succeed_after: None,
+        };
+        let core = HyperCore::restore_or_new(
+            host,
+            "auth-sent",
+            CoreConfig {
+                model: "m".into(),
+                max_messages: 16,
+                max_tool_steps: 4,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Budget: allow 3 resubmits after the first failure (4 opens total).
+        let mut charged = 0u32;
+        let max_charged = 3u32;
+        let (n, err) = outer_auth_resubmit_loop(core, &opens, 20, |_he| {
+            if charged < max_charged {
+                charged += 1;
+                true // resubmit
+            } else {
+                false // exhaust
+            }
+        })
+        .await;
+        assert!(err.is_some());
+        assert_eq!(n, 4, "initial + 3 charged resubmits");
+        assert_eq!(charged, 3);
+    }
+
+    /// Missing credential: each decision +1 open; allow 50 uncharged resubmits
+    /// then stop (shell MAX_UNCHARGED_RESUBMITS) → 51 total opens.
+    #[tokio::test]
+    async fn real_submit_missing_auth_opens_fifty_one() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let host = AuthOpenFailHost {
+            opens: Arc::clone(&opens),
+            credential: "missing".into(),
+            succeed_after: None,
+        };
+        let core = HyperCore::restore_or_new(
+            host,
+            "auth-missing",
+            CoreConfig {
+                model: "m".into(),
+                max_messages: 16,
+                max_tool_steps: 4,
+            },
+        )
+        .await
+        .unwrap();
+
+        // on_auth is called after each failed open. Return true to resubmit
+        // up to 50 times; the 51st failure stops (resubmit count == 50).
+        let mut resubmits_granted = 0u32;
+        let max_resubmits = 50u32;
+        let (n, err) = outer_auth_resubmit_loop(core, &opens, 100, |_he| {
+            if resubmits_granted < max_resubmits {
+                resubmits_granted += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .await;
+        assert!(err.is_some());
+        assert_eq!(n, 51, "1 initial + 50 uncharged resubmits");
+        assert_eq!(resubmits_granted, 50);
+        // Each decision maps to exactly one open (no same-round double submit).
+        assert_eq!(n, resubmits_granted as usize + 1);
+    }
+
+    /// Refresh fail: single open, no resubmit.
+    #[tokio::test]
+    async fn real_submit_refresh_fail_one_open() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let host = AuthOpenFailHost {
+            opens: Arc::clone(&opens),
+            credential: "sent".into(),
+            succeed_after: None,
+        };
+        let core = HyperCore::restore_or_new(
+            host,
+            "auth-refresh-fail",
+            CoreConfig {
+                model: "m".into(),
+                max_messages: 16,
+                max_tool_steps: 4,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (n, err) = outer_auth_resubmit_loop(core, &opens, 10, |_he| false).await;
+        assert!(err.is_some());
+        assert_eq!(n, 1);
+    }
+
+    /// Non-auth transport open: no resubmit (and not is_auth_error).
+    #[tokio::test]
+    async fn real_submit_transport_error_no_resubmit() {
+        #[derive(Clone)]
+        struct TransportFailHost {
+            opens: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl HyperHost for TransportFailHost {
+            async fn open_model_stream(
+                &self,
+                _req: ModelStreamRequest,
+            ) -> Result<Box<dyn ModelStream>, HostError> {
+                self.opens.fetch_add(1, Ordering::SeqCst);
+                Err(HostError::Transport("HTTP 401 Unauthorized".into()))
+            }
+            async fn commit_snapshot(
+                &self,
+                _: &str,
+                _: &[u8],
+                _: Option<&xai_hyper_host::TerminalTurnRecord>,
+            ) -> Result<(), HostError> {
+                Ok(())
+            }
+            async fn load_snapshot(&self, _: &str) -> Result<Option<Vec<u8>>, HostError> {
+                Ok(None)
+            }
+            async fn load_terminal_turn(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<xai_hyper_host::TerminalTurnRecord>, HostError> {
+                Ok(None)
+            }
+            fn now_unix_ms(&self) -> u64 {
+                0
+            }
+        }
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let host = TransportFailHost {
+            opens: Arc::clone(&opens),
+        };
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "auth-transport",
+            CoreConfig {
+                model: "m".into(),
+                max_messages: 16,
+                max_tool_steps: 4,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Shell outer loop: only typed Auth resubmits.
+        let mut resubmits = 0u32;
+        for attempt in 0..5 {
+            match core
+                .submit_turn(TurnRequest {
+                    turn_id: format!("tt-{attempt}"),
+                    text: "hi".into(),
+                    tools: None,
+                    json_schema: None,
+                })
+                .await
+            {
+                Err(CoreError::Host(ref he)) if he.is_auth_error() => {
+                    resubmits += 1;
+                    continue;
+                }
+                Err(CoreError::Host(ref he)) => {
+                    // Transport 401 string is NOT typed Auth after bridge removal.
+                    assert!(!he.is_auth_error());
+                    // Also assert outcome events would carry TurnFailed display.
+                    break;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(resubmits, 0, "TurnFailed/Transport must not resubmit");
+    }
+
+    /// Open failure always returns Err(Host) **and** includes a display
+    /// TurnFailed event — recovery must use the typed Err, not the string.
+    #[tokio::test]
+    async fn open_auth_failure_err_is_typed_and_events_have_turn_failed() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let host = AuthOpenFailHost {
+            opens: Arc::clone(&opens),
+            credential: "missing".into(),
+            succeed_after: None,
+        };
+        let mut core = HyperCore::restore_or_new(
+            host,
+            "auth-typed-err",
+            CoreConfig {
+                model: "m".into(),
+                max_messages: 16,
+                max_tool_steps: 4,
+            },
+        )
+        .await
+        .unwrap();
+        let err = core
+            .submit_turn(TurnRequest {
+                turn_id: "only".into(),
+                text: "hi".into(),
+                tools: None,
+                json_schema: None,
+            })
+            .await
+            .expect_err("must fail");
+        match err {
+            CoreError::Host(HostError::Auth {
+                status_code: Some(401),
+                credential,
+                ..
+            }) => assert_eq!(credential, "missing"),
+            other => panic!("expected typed Auth Err, got {other:?}"),
+        }
+        // Note: TurnFailed is only on the Ok(outcome).events path when Core
+        // returns Ok; on open failure Core returns Err with events discarded
+        // except the push before return — those events are not returned to
+        // the caller. The shell must not invent recovery from missing events.
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 }

@@ -13,10 +13,12 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use xai_grok_sampler::{
-    ApiBackend, RequestId, SamplerConfig, SamplingChannel, SamplingClient, SamplingEvent,
-    stream_chat_completions, stream_messages, stream_responses,
+    ApiBackend, RequestId, SamplerConfig, SamplingChannel, SamplingClient, SamplingErrorInfo,
+    SamplingErrorKind, SamplingEvent, stream_chat_completions, stream_messages, stream_responses,
 };
-use xai_grok_sampling_types::{ConversationItem, ConversationRequest, ToolCall, ToolSpec};
+use xai_grok_sampling_types::{
+    ConversationItem, ConversationRequest, SamplingError, SentCredential, ToolCall, ToolSpec,
+};
 use xai_hyper_host::{
     HostError, HostToolCall, HostToolResult, HyperHost, ModelChunk, ModelStream,
     ModelStreamRequest, TerminalTurnRecord,
@@ -313,12 +315,14 @@ async fn drive_sampler_stream(
     let request_id = RequestId::random();
     let idle = Duration::from_secs(300);
 
+    // Open-time and event-path failures share [`sampling_error_to_host_error`]
+    // so Auth status/credential never collapse to opaque Transport.
     match api_backend {
         ApiBackend::ChatCompletions => {
             let (raw, meta) = client
                 .conversation_stream(request)
                 .await
-                .map_err(|e| HostError::Transport(e.to_string()))?;
+                .map_err(open_sampling_error_to_host_error)?;
             let stream = stream_chat_completions(raw, meta, request_id, idle);
             forward_sampling_events(stream, tx).await
         }
@@ -326,7 +330,7 @@ async fn drive_sampler_stream(
             let (raw, meta, doom) = client
                 .conversation_stream_responses(request)
                 .await
-                .map_err(|e| HostError::Transport(e.to_string()))?;
+                .map_err(open_sampling_error_to_host_error)?;
             let stream = stream_responses(raw, meta, request_id, idle, doom);
             forward_sampling_events(stream, tx).await
         }
@@ -334,7 +338,7 @@ async fn drive_sampler_stream(
             let (raw, meta) = client
                 .conversation_stream_messages(request)
                 .await
-                .map_err(|e| HostError::Transport(e.to_string()))?;
+                .map_err(open_sampling_error_to_host_error)?;
             let stream = stream_messages(raw, meta, request_id, idle);
             forward_sampling_events(stream, tx).await
         }
@@ -342,6 +346,11 @@ async fn drive_sampler_stream(
             "unsupported api backend for hypercore Phase 1: {other:?}"
         ))),
     }
+}
+
+/// Map a Layer-1 open-time [`SamplingError`] the same way L2 event failures do.
+fn open_sampling_error_to_host_error(err: SamplingError) -> HostError {
+    sampling_error_to_host_error(SamplingErrorInfo::from(&err))
 }
 
 async fn forward_sampling_events<S>(
@@ -387,10 +396,11 @@ where
                 return Ok(());
             }
             SamplingEvent::Failed { error, .. } => {
-                let _ = tx
-                    .send(Err(HostError::Transport(error.message.clone())))
-                    .await;
-                return Err(HostError::Transport(error.message));
+                // Do **not** `tx.send(Err)` here. The spawn wrapper around
+                // `drive_sampler_stream` is the sole publisher of a terminal
+                // channel Err, so a single Failed event yields exactly one
+                // error to the consumer (then None on subsequent recv).
+                return Err(sampling_error_to_host_error(error));
             }
             // ToolCallDelta: wait for Completed aggregation (avoids partial JSON).
             _ => {}
@@ -402,6 +412,258 @@ where
         }))
         .await;
     Ok(())
+}
+
+/// Map a sampler L1 open failure or L2 event failure into a typed [`HostError`]
+/// so the shell Hypercore path can distinguish auth/401 from generic transport
+/// errors and apply the same force-refresh + per-incident retry budget as the
+/// legacy turn loop. **Open-time and event-path share this helper.**
+fn sampling_error_to_host_error(error: SamplingErrorInfo) -> HostError {
+    let is_auth = matches!(error.kind, SamplingErrorKind::Auth) || error.status_code == Some(401);
+    if is_auth {
+        let credential = match error.credential {
+            SentCredential::Sent => "sent",
+            SentCredential::Missing => "missing",
+            // Unknown + any future non-exhaustive variant: charge the budget.
+            _ => "unknown",
+        };
+        HostError::Auth {
+            // Auth kind from L1 often has no HTTP status on the wire path that
+            // never got a response; still surface 401 so recovery is typed.
+            status_code: error.status_code.or(Some(401)),
+            message: error.message,
+            credential: credential.to_owned(),
+        }
+    } else {
+        HostError::Transport(error.message)
+    }
+}
+
+#[cfg(test)]
+mod sampling_error_map_tests {
+    use super::*;
+    use xai_grok_sampler::{SamplingErrorInfo, SamplingErrorKind};
+    use xai_grok_sampling_types::SentCredential;
+
+    fn info(
+        kind: SamplingErrorKind,
+        status: Option<u16>,
+        credential: SentCredential,
+    ) -> SamplingErrorInfo {
+        SamplingErrorInfo {
+            kind,
+            status_code: status,
+            message: "m".into(),
+            is_retryable: true,
+            retry_after_secs: None,
+            model_metadata: None,
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+            credential,
+        }
+    }
+
+    #[test]
+    fn auth_kind_maps_to_host_auth_with_credential() {
+        let err = sampling_error_to_host_error(info(
+            SamplingErrorKind::Auth,
+            Some(401),
+            SentCredential::Missing,
+        ));
+        match err {
+            HostError::Auth {
+                status_code,
+                credential,
+                ..
+            } => {
+                assert_eq!(status_code, Some(401));
+                assert_eq!(credential, "missing");
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sent_credential_preserved() {
+        let err =
+            sampling_error_to_host_error(info(SamplingErrorKind::Auth, None, SentCredential::Sent));
+        match err {
+            HostError::Auth {
+                status_code,
+                credential,
+                ..
+            } => {
+                assert_eq!(status_code, Some(401));
+                assert_eq!(credential, "sent");
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_auth_maps_to_transport() {
+        let err = sampling_error_to_host_error(info(
+            SamplingErrorKind::Http,
+            Some(500),
+            SentCredential::Unknown,
+        ));
+        assert!(matches!(err, HostError::Transport(_)));
+        assert!(!err.is_auth_error());
+    }
+
+    /// Open-time L1 Auth must preserve credential through the shared helper
+    /// used by all three backends (ChatCompletions / Responses / Messages).
+    #[test]
+    fn open_time_auth_missing_and_sent_preserve_credential() {
+        for (cred, expect) in [
+            (SentCredential::Missing, "missing"),
+            (SentCredential::Sent, "sent"),
+            (SentCredential::Unknown, "unknown"),
+        ] {
+            let l1 = SamplingError::Auth {
+                message: "open rejected".into(),
+                credential: cred,
+            };
+            let host = open_sampling_error_to_host_error(l1);
+            match host {
+                HostError::Auth {
+                    status_code,
+                    credential,
+                    message,
+                } => {
+                    assert_eq!(status_code, Some(401), "Auth kind defaults status to 401");
+                    assert_eq!(credential, expect);
+                    assert!(message.contains("open rejected"));
+                }
+                other => panic!("expected typed Auth for {expect}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Api 401 open failures (Responses / Messages often surface this way)
+    /// also become typed Auth via the shared Info→Host path.
+    #[test]
+    fn open_time_api_401_is_typed_auth() {
+        let host = sampling_error_to_host_error(info(
+            SamplingErrorKind::Api,
+            Some(401),
+            SentCredential::Unknown,
+        ));
+        assert!(
+            matches!(
+                host,
+                HostError::Auth {
+                    status_code: Some(401),
+                    ..
+                }
+            ),
+            "got {host:?}"
+        );
+    }
+
+    /// Event-path and open-path share the same mapping function identity.
+    #[test]
+    fn open_and_event_helpers_agree_on_auth() {
+        let l1 = SamplingError::Auth {
+            message: "x".into(),
+            credential: SentCredential::Missing,
+        };
+        let via_open = open_sampling_error_to_host_error(l1);
+        let via_event = sampling_error_to_host_error(info(
+            SamplingErrorKind::Auth,
+            None,
+            SentCredential::Missing,
+        ));
+        match (via_open, via_event) {
+            (
+                HostError::Auth {
+                    credential: c1,
+                    status_code: s1,
+                    ..
+                },
+                HostError::Auth {
+                    credential: c2,
+                    status_code: s2,
+                    ..
+                },
+            ) => {
+                assert_eq!(c1, c2);
+                assert_eq!(s1, s2);
+            }
+            other => panic!("expected both Auth, got {other:?}"),
+        }
+    }
+
+    /// Full bridge: one `SamplingEvent::Failed` through the same path as
+    /// production (`forward` returns Err → spawn wrapper sends exactly one
+    /// channel Err → subsequent recv is None). No double-terminal-error.
+    #[tokio::test]
+    async fn single_failed_event_yields_one_channel_err_then_none() {
+        use futures::stream;
+        use xai_grok_sampler::RequestId;
+        use xai_grok_sampler::SamplingEvent;
+
+        let (tx, mut rx) = mpsc::channel::<Result<ModelChunk, HostError>>(8);
+        let failed = SamplingEvent::Failed {
+            request_id: RequestId::random(),
+            error: info(SamplingErrorKind::Auth, Some(401), SentCredential::Sent),
+        };
+        // Mirror open_model_stream_from_sampler_config spawn wrapper:
+        // drive/forward returns Err → sole publisher of terminal Err.
+        tokio::spawn(async move {
+            let stream = stream::iter(vec![failed]);
+            if let Err(e) = forward_sampling_events(stream, tx.clone()).await {
+                let _ = tx.send(Err(e)).await;
+            }
+        });
+
+        let first = rx.recv().await.expect("one terminal item");
+        match first {
+            Err(HostError::Auth {
+                status_code: Some(401),
+                credential,
+                ..
+            }) => assert_eq!(credential, "sent"),
+            other => panic!("expected single typed Auth Err, got {other:?}"),
+        }
+        // Stream closed after the single terminal Err — no second Err, no Done.
+        assert!(
+            rx.recv().await.is_none(),
+            "channel must end after the sole terminal Err"
+        );
+    }
+
+    /// Regression: forward itself must not write Err (would double with spawn).
+    #[tokio::test]
+    async fn forward_failed_does_not_send_err_before_return() {
+        use futures::stream;
+        use xai_grok_sampler::RequestId;
+        use xai_grok_sampler::SamplingEvent;
+
+        let (tx, mut rx) = mpsc::channel::<Result<ModelChunk, HostError>>(8);
+        let failed = SamplingEvent::Failed {
+            request_id: RequestId::random(),
+            error: info(SamplingErrorKind::Auth, Some(401), SentCredential::Missing),
+        };
+        let stream = stream::iter(vec![failed]);
+        let result = forward_sampling_events(stream, tx).await;
+        assert!(
+            matches!(
+                result,
+                Err(HostError::Auth {
+                    credential: ref c,
+                    ..
+                }) if c == "missing"
+            ),
+            "forward must return Err, got {result:?}"
+        );
+        // Channel must still be empty — no Err was sent by forward.
+        assert!(
+            rx.try_recv().is_err(),
+            "forward must not tx.send(Err); spawn wrapper owns that"
+        );
+    }
 }
 
 /// Resolve API key: env vars first, then `auth.json` scopes.

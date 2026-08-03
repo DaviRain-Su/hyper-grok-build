@@ -252,37 +252,66 @@ async fn refresh_github_copilot_auth(force: bool) -> Option<GrokAuth> {
         }
     };
 
+    // Model-availability is best-effort metadata. A failed catalog fetch must
+    // not discard a successfully minted access token / durable GitHub token —
+    // that would lose the rotation the IdP already performed and leave the
+    // session with a stale bearer until the next force-refresh.
     let out = match result {
-        Ok(token) => match file_lock.as_ref() {
-            Some(file_lock) => {
-                match oauth::refresh_copilot_model_availability(&token.access, &token.base_url)
-                    .await
-                {
-                    Ok(available_models) => {
-                        let mut new_auth =
-                            oauth::credentials_from_token(token, github_token.clone(), enterprise);
-                        new_auth.github_copilot_available_models = Some(available_models);
-                        match store_github_copilot_auth_after_refresh_locked(
-                            home,
-                            &new_auth,
-                            &github_token,
-                            file_lock,
-                        ) {
-                            Ok(on_disk) => Some(on_disk),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "github-copilot auth: persist after refresh failed");
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "github-copilot auth: model availability refresh failed");
-                        None
-                    }
+        Ok(token) => {
+            let mut new_auth =
+                oauth::credentials_from_token(token, github_token.clone(), enterprise);
+            // Prefer a fresh model list; on failure keep any previously stored
+            // catalog so a transient models.github.com blip is not a logout.
+            match oauth::refresh_copilot_model_availability(
+                &new_auth.key,
+                new_auth
+                    .github_copilot_base_url
+                    .as_deref()
+                    .unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(available_models) => {
+                    new_auth.github_copilot_available_models = Some(available_models);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "github-copilot auth: model availability refresh failed; \
+                         keeping access token and prior model catalog"
+                    );
+                    new_auth.github_copilot_available_models =
+                        auth.github_copilot_available_models.clone();
                 }
             }
-            None => None,
-        },
+            match file_lock.as_ref() {
+                Some(file_lock) => {
+                    match store_github_copilot_auth_after_refresh_locked(
+                        home,
+                        &new_auth,
+                        &github_token,
+                        file_lock,
+                    ) {
+                        Ok(on_disk) => Some(on_disk),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "github-copilot auth: persist after refresh failed"
+                            );
+                            // Disk write failed but we hold a live access token —
+                            // return it so this process can keep working until
+                            // a sibling/later write lands.
+                            Some(new_auth)
+                        }
+                    }
+                }
+                None => {
+                    // Lock lost after IdP success: still hand the minted token
+                    // to the caller so the access token is not dropped.
+                    Some(new_auth)
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!(error = %e, "github-copilot auth: token exchange failed");
             None

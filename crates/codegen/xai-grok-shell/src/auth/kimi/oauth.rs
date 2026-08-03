@@ -61,7 +61,10 @@ struct DeviceAuthorizationResponse {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    refresh_token: String,
+    /// Omitted on some refresh responses when the IdP reuses the spent RT.
+    /// Must not fail the whole 200 body parse (and lose the new access token).
+    #[serde(default)]
+    refresh_token: Option<String>,
     expires_in: i64,
     #[serde(default)]
     scope: Option<String>,
@@ -70,15 +73,30 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
+    /// Device-login / exchange path: RT is expected but may still be absent.
     fn into_auth(self) -> GrokAuth {
+        self.into_auth_keeping_refresh(None)
+    }
+
+    /// Refresh path: when the IdP omits a replacement RT, keep `previous_refresh`
+    /// so a concurrent rotation / non-rotating grant never blanks the stored RT.
+    fn into_auth_keeping_refresh(self, previous_refresh: Option<&str>) -> GrokAuth {
         let now = Utc::now();
+        let refresh = self
+            .refresh_token
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                previous_refresh
+                    .map(str::to_owned)
+                    .filter(|s| !s.trim().is_empty())
+            });
         GrokAuth {
             key: self.access_token,
             auth_mode: AuthMode::KimiCode,
             create_time: now,
             user_id: String::new(),
             email: None,
-            refresh_token: Some(self.refresh_token),
+            refresh_token: refresh,
             expires_at: Some(now + Duration::seconds(self.expires_in)),
             oidc_issuer: Some(
                 xai_grok_models::PlatformId::KimiCode
@@ -460,7 +478,10 @@ async fn refresh_token_with_timeout(
         }
         if status == 200 {
             return match serde_json::from_slice::<TokenResponse>(&body) {
-                Ok(tokens) => Ok(tokens.into_auth()),
+                // Keep the spent RT when the IdP omits a replacement (common on
+                // non-rotating grants). Blanking it would discard the only
+                // durable credential after a successful access-token mint.
+                Ok(tokens) => Ok(tokens.into_auth_keeping_refresh(Some(refresh_token))),
                 Err(e) => Err(RefreshError::Fatal {
                     status,
                     description: format!("malformed token payload: {e}"),
@@ -653,6 +674,33 @@ mod poll_error_mapping_tests {
             DevicePollResult::Fatal { error, .. } => assert_eq!(error, "missing_access_token"),
             other => panic!("expected Fatal for malformed success, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn refresh_response_without_refresh_token_keeps_previous() {
+        let body = br#"{"access_token":"new-at","expires_in":3600}"#;
+        let tokens: TokenResponse = serde_json::from_slice(body).expect("parse without RT");
+        let auth = tokens.into_auth_keeping_refresh(Some("spent-rt"));
+        assert_eq!(auth.key, "new-at");
+        assert_eq!(auth.refresh_token.as_deref(), Some("spent-rt"));
+        assert!(auth.expires_at.is_some());
+    }
+
+    #[test]
+    fn refresh_response_with_rotated_refresh_token_uses_new() {
+        let body = br#"{"access_token":"new-at","refresh_token":"rt-rotated","expires_in":7200}"#;
+        let tokens: TokenResponse = serde_json::from_slice(body).expect("parse with RT");
+        let auth = tokens.into_auth_keeping_refresh(Some("spent-rt"));
+        assert_eq!(auth.key, "new-at");
+        assert_eq!(auth.refresh_token.as_deref(), Some("rt-rotated"));
+    }
+
+    #[test]
+    fn refresh_response_empty_refresh_token_keeps_previous() {
+        let body = br#"{"access_token":"new-at","refresh_token":"","expires_in":3600}"#;
+        let tokens: TokenResponse = serde_json::from_slice(body).expect("parse empty RT");
+        let auth = tokens.into_auth_keeping_refresh(Some("spent-rt"));
+        assert_eq!(auth.refresh_token.as_deref(), Some("spent-rt"));
     }
 
     #[tokio::test]

@@ -276,6 +276,13 @@ pub(crate) async fn oidc_token_exchange(auth: &GrokAuth) -> OidcRefreshResult {
     if new_auth.refresh_token.is_none() {
         new_auth.refresh_token = auth.refresh_token.clone();
     }
+    // Some IdPs omit expires_in on refresh. Do not blank expiry — that would
+    // make the token look non-expiring and skip proactive refresh, or lose the
+    // only clock we had. Fall back to the prior expires_at only when the
+    // response carried no TTL (build_grok_auth left expires_at None).
+    if new_auth.expires_at.is_none() {
+        new_auth.expires_at = auth.expires_at;
+    }
     tracing::debug!(
         idp_rotated,
         key_prefix = crate::auth::token_suffix(&new_auth.key),

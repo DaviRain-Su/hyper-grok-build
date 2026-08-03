@@ -482,6 +482,9 @@ async fn refresh_anthropic_claude_auth(force: bool) -> Option<GrokAuth> {
         }
     };
 
+    // IdP success must never be discarded because of a durable-write failure.
+    // Prefer an adopted sibling family when present; otherwise return the fresh
+    // candidate so this process keeps a usable access token.
     let out = match result {
         Ok(token) => {
             let refreshed = oauth::credentials_from_token(token, Some(&refresh));
@@ -491,11 +494,29 @@ async fn refresh_anthropic_claude_auth(force: bool) -> Option<GrokAuth> {
                 ) {
                     Ok(on_disk) => Some(on_disk),
                     Err(e) => {
-                        tracing::warn!(error = %e, "anthropic-claude auth: persist after refresh failed");
-                        None
+                        tracing::warn!(
+                            error = %e,
+                            "anthropic-claude auth: persist after refresh failed; \
+                             returning in-memory candidate (durable write error retained)"
+                        );
+                        // Sibling may still have rotated under a lost lock —
+                        // prefer their family when present.
+                        Some(
+                            try_adopt_sibling_anthropic_claude_token(home, &refresh, force)
+                                .unwrap_or(refreshed),
+                        )
                     }
                 },
-                None => None,
+                None => {
+                    tracing::warn!(
+                        "anthropic-claude auth: no live lock after IdP success; \
+                         returning candidate (or adopted sibling) without durable write"
+                    );
+                    Some(
+                        try_adopt_sibling_anthropic_claude_token(home, &refresh, force)
+                            .unwrap_or(refreshed),
+                    )
+                }
             }
         }
         Err(e) => {

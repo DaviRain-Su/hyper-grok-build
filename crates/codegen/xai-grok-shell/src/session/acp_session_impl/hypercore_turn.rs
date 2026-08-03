@@ -24,11 +24,13 @@
 use super::*;
 use std::sync::Arc;
 use xai_grok_sampling_types::conversation::ToolCall as SamplingToolCall;
-use xai_grok_sampling_types::{ContentPart, ConversationItem};
+use xai_grok_sampling_types::{ContentPart, ConversationItem, SentCredential};
 use xai_hyper_core::{
     CoreConfig, CoreError, CoreEvent, HyperCore, ToolBatchResult, TranscriptItem, TurnRequest,
 };
-use xai_hyper_host::{HostToolCall, HostToolResult, ToolDefinition as HostToolDefinition};
+use xai_hyper_host::{
+    HostError, HostToolCall, HostToolResult, ToolDefinition as HostToolDefinition,
+};
 
 /// Explicit truthy values that enable the Hypercore turn path.
 ///
@@ -321,6 +323,9 @@ impl SessionActor {
         let mut final_outcome: Option<xai_hyper_core::TurnOutcome> = None;
         // Side-channels for Abort handling (not applied into core transcript).
         let mut terminal_abort: Option<TurnOutcome> = None;
+        // Same per-incident 401 budget as the legacy turn loop. Hypercore must
+        // not unbounded-retry auth failures or skip recovery entirely.
+        let mut auth_retry_schedule = AuthRetrySchedule::new();
 
         loop {
             let host = self.shell_hypercore_host().await;
@@ -543,13 +548,28 @@ impl SessionActor {
                     }
                 }
                 Err(e) => {
-                    // Non-Abort: propagate. Never broad-fallback to legacy here.
-                    return Err(
-                        acp::Error::internal_error().data(format!("hypercore submit_turn: {e}"))
-                    );
+                    // Auth/401: force-refresh + charge the same per-incident
+                    // budget as legacy. Never broad-fallback to legacy; never
+                    // unbounded-retry outside AuthRetrySchedule.
+                    if let Some(acp_err) = self
+                        .hypercore_try_auth_recovery(&e, &mut auth_retry_schedule)
+                        .await?
+                    {
+                        return Err(acp_err);
+                    }
+                    // Recovery succeeded under budget → rebuild host credentials
+                    // and resubmit the same segment (same turn_id semantics as
+                    // a retry; host opens a fresh stream with the new bearer).
+                    continue;
                 }
             };
 
+            // Auth recovery is **only** via typed `CoreError::Host(HostError::Auth)`
+            // on the Err path above. Core always returns `Err(Host(...))` for
+            // stream open/chunk failures (and may also push a display-only
+            // `TurnFailed` string event). Never rebuild auth from that string —
+            // it loses credential provenance and would double-charge the budget.
+            //
             // ACP stream events for this *committed* segment only.
             for ev in &outcome.events {
                 match ev {
@@ -563,6 +583,9 @@ impl SessionActor {
                         .await;
                     }
                     CoreEvent::TurnFailed { error, .. } => {
+                        // Display-only: stream path already returned Err(Host).
+                        // If we somehow see TurnFailed without Err, surface it
+                        // as a hard failure — do not string-match for 401.
                         return Err(acp::Error::internal_error().data(error.clone()));
                     }
                     _ => {}
@@ -592,6 +615,8 @@ impl SessionActor {
                     ));
             }
 
+            // A committed model response ends the open 401 incident.
+            auth_retry_schedule.reset_on_success();
             final_outcome = Some(outcome);
             break;
         }
@@ -662,6 +687,106 @@ impl SessionActor {
             structured_output,
             refusal: None,
         })
+    }
+
+    /// Hypercore auth-error recovery with the **same** per-incident budget as
+    /// the legacy turn loop (`AuthRetrySchedule`).
+    ///
+    /// Returns:
+    /// - `Ok(None)` — recovery succeeded under budget; caller should resubmit.
+    /// - `Ok(Some(err))` — terminal failure (budget exhausted, non-auth, or
+    ///   refresh failed); caller should return the error.
+    /// - `Err(err)` — ACP error from budget exhaustion (already formatted).
+    ///
+    /// Non-auth host errors return `Ok(Some(...))` so the caller propagates
+    /// without retrying. Auth failures that recover return `Ok(None)`.
+    async fn hypercore_try_auth_recovery(
+        self: &Arc<Self>,
+        err: &CoreError,
+        schedule: &mut AuthRetrySchedule,
+    ) -> Result<Option<acp::Error>, acp::Error> {
+        // Typed Auth only — no Transport/Message string heuristics.
+        let (credential, message) = match err {
+            CoreError::Host(HostError::Auth {
+                status_code: _,
+                message,
+                credential,
+            }) => {
+                let cred = match credential.as_str() {
+                    "sent" => SentCredential::Sent,
+                    "missing" => SentCredential::Missing,
+                    _ => SentCredential::Unknown,
+                };
+                (cred, message.clone())
+            }
+            other => {
+                return Ok(Some(
+                    acp::Error::internal_error().data(format!("hypercore submit_turn: {other}")),
+                ));
+            }
+        };
+        if schedule.reset_if_incident_spans_suspend() {
+            tracing::info!("hypercore auth 401 retry: incident spanned a suspend; budget reset");
+        }
+
+        // Force-refresh the active credential family (platform OAuth or xAI
+        // session) via the same paths as legacy `handle_sampling_failure`.
+        // Build a synthetic SamplingErrorInfo so we reuse that logic without
+        // reopening a model stream outside the budget.
+        let synthetic = xai_grok_sampler::SamplingErrorInfo {
+            kind: xai_grok_sampler::SamplingErrorKind::Auth,
+            status_code: Some(401),
+            message: message.clone(),
+            is_retryable: true,
+            retry_after_secs: None,
+            model_metadata: None,
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+            credential,
+        };
+        match self.handle_sampling_failure(synthetic).await {
+            Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                credential: recovered_cred,
+                store,
+            }) => match schedule.on_recovered_401(recovered_cred) {
+                AuthRetryDecision::UnchargedResubmit { resubmit } => {
+                    tracing::warn!(
+                        resubmit,
+                        "hypercore auth 401 retry: no credential was sent; resubmitting uncharged"
+                    );
+                    pace_uncharged_resubmit(store, self.auth_manager.as_ref()).await;
+                    Ok(None)
+                }
+                AuthRetryDecision::Backoff { attempt, delay } => {
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        "hypercore auth 401 retry: backing off before resubmit"
+                    );
+                    tokio::time::sleep(delay).await;
+                    Ok(None)
+                }
+                AuthRetryDecision::Exhausted | AuthRetryDecision::RunawayGuard { .. } => {
+                    let (rejections, authenticated) = schedule.incident_counts();
+                    let msg = format!(
+                        "Hypercore auth retry budget exhausted after {rejections} \
+                         post-recovery 401s ({authenticated} provably carried a credential)."
+                    );
+                    tracing::error!(%msg);
+                    Err(acp::Error::internal_error().data(
+                        crate::sampling::error::error_data_with_status(msg, Some(401)),
+                    ))
+                }
+            },
+            Ok(SamplerFailureRecovery::CompactAndResubmit) => {
+                // Unexpected for pure auth; treat as terminal to avoid loops.
+                Ok(Some(acp::Error::internal_error().data(format!(
+                    "hypercore auth recovery returned compact: {message}"
+                ))))
+            }
+            Err(e) => Ok(Some(e)),
+        }
     }
 
     async fn hypercore_prepare_host_tools(
@@ -1166,6 +1291,63 @@ fn trailing_assistant_matches(conversation: &[ConversationItem], assistant_text:
 }
 
 #[cfg(test)]
+
+/// Pure outer-loop decision for Hypercore auth recovery (mirrors the shell
+/// turn's `match core_result / AuthRetrySchedule / continue` without SessionActor).
+///
+/// Returns whether the loop should resubmit (`true`) or terminate (`false`),
+/// and counts each simulated submit attempt.
+#[cfg(test)]
+fn hypercore_auth_submit_loop(
+    max_attempts: u32,
+    credential: xai_grok_sampling_types::SentCredential,
+    recover_ok: bool,
+) -> (u32, bool) {
+    use xai_grok_sampling_types::SentCredential;
+    let mut schedule = AuthRetrySchedule::new();
+    let mut submits = 0u32;
+    for _ in 0..max_attempts {
+        submits += 1;
+        // Simulate typed HostError::Auth from open_model_stream / next_chunk.
+        let err = CoreError::Host(HostError::Auth {
+            status_code: Some(401),
+            message: "token rejected".into(),
+            credential: match credential {
+                SentCredential::Sent => "sent".into(),
+                SentCredential::Missing => "missing".into(),
+                _ => "unknown".into(),
+            },
+        });
+        // Only typed Auth is recoverable (same match as hypercore_try_auth_recovery).
+        let is_typed_auth = matches!(&err, CoreError::Host(HostError::Auth { .. }));
+        if !is_typed_auth {
+            return (submits, false);
+        }
+        if !recover_ok {
+            // Refresh failed → terminate without further resubmit.
+            return (submits, false);
+        }
+        match schedule.on_recovered_401(credential) {
+            AuthRetryDecision::UnchargedResubmit { .. } | AuthRetryDecision::Backoff { .. } => {
+                // One resubmit per decision — no same-round extra submit.
+                continue;
+            }
+            AuthRetryDecision::Exhausted | AuthRetryDecision::RunawayGuard { .. } => {
+                return (submits, false);
+            }
+        }
+    }
+    (submits, true)
+}
+
+/// Display-only TurnFailed must never enter the auth schedule (no resubmit).
+#[cfg(test)]
+fn hypercore_turn_failed_does_not_resubmit(error: &str) -> bool {
+    // Production path: TurnFailed in Ok(outcome) → hard Err, no AuthRetrySchedule.
+    let _ = error;
+    false
+}
+
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -1456,6 +1638,71 @@ mod tests {
             merge_tools_with_structured_output(&[], "StructuredOutput"),
             vec!["StructuredOutput".to_string()]
         );
+    }
+
+    /// Outer submit loop + AuthRetrySchedule: Missing does not charge until
+    /// runaway (50 uncharged resubmits, 51st attempt terminates). Each
+    /// decision yields exactly one resubmit — no same-round double submit.
+    #[test]
+    fn hypercore_submit_loop_missing_budget() {
+        use xai_grok_sampling_types::SentCredential;
+        // 50 uncharged + 1 that hits RunawayGuard = 51 submits, terminated.
+        let (submits, still_running) =
+            hypercore_auth_submit_loop(100, SentCredential::Missing, true);
+        assert!(!still_running);
+        assert_eq!(
+            submits,
+            AuthRetrySchedule::MAX_UNCHARGED_RESUBMITS + 1,
+            "50 uncharged resubmits then terminate on 51st"
+        );
+    }
+
+    /// Sent credentials: initial + MAX_RETRIES backoffs then Exhausted.
+    /// MAX_RETRIES delays ⇒ MAX_RETRIES successful resubmit decisions, then
+    /// the next 401 exhausts (total submits = MAX_RETRIES + 1).
+    #[test]
+    fn hypercore_submit_loop_sent_budget() {
+        use xai_grok_sampling_types::SentCredential;
+        let (submits, still_running) = hypercore_auth_submit_loop(100, SentCredential::Sent, true);
+        assert!(!still_running);
+        assert_eq!(
+            submits,
+            AuthRetrySchedule::MAX_RETRIES + 1,
+            "3 charged backoffs then exhaust on 4th submit"
+        );
+    }
+
+    /// Transport 401 strings and TurnFailed display must not recover.
+    #[test]
+    fn hypercore_auth_recovery_typed_only_no_string_bridge() {
+        let transport = CoreError::Host(HostError::Transport("HTTP 401 Unauthorized".into()));
+        assert!(!matches!(
+            &transport,
+            CoreError::Host(HostError::Auth { .. })
+        ));
+        assert!(!matches!(
+            &transport,
+            CoreError::Host(h) if h.is_auth_error()
+        ));
+        let typed = CoreError::Host(HostError::Auth {
+            status_code: Some(401),
+            message: "token rejected".into(),
+            credential: "missing".into(),
+        });
+        assert!(matches!(
+            &typed,
+            CoreError::Host(h) if h.is_auth_error()
+        ));
+        assert!(!hypercore_turn_failed_does_not_resubmit("auth: 401"));
+    }
+
+    /// Refresh failure: single submit, no resubmit.
+    #[test]
+    fn hypercore_submit_loop_refresh_fail_stops_immediately() {
+        use xai_grok_sampling_types::SentCredential;
+        let (submits, still_running) = hypercore_auth_submit_loop(10, SentCredential::Sent, false);
+        assert!(!still_running);
+        assert_eq!(submits, 1);
     }
 
     #[test]

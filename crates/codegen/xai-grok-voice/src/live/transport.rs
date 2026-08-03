@@ -177,6 +177,11 @@ pub struct CodexLiveTransport {
     sideband_tx: Option<mpsc::Sender<String>>,
     sideband_writer: Option<JoinHandle<()>>,
     sideband_reader: Option<JoinHandle<()>>,
+    /// Media-event forward task (peer signal watch + bounded media channel).
+    /// Stored separately from [`Self::sideband_reader`] so open_sideband cannot
+    /// overwrite / detach it — a leaked media_forward would keep consuming the
+    /// peer's event channel after close and race teardown.
+    media_forward: Option<JoinHandle<()>>,
     /// Shared flag set by `close_inner` so the sideband reader knows the close
     /// was deliberate and suppresses the unexpected-close error event.
     sideband_closed_flag: Option<Arc<AtomicBool>>,
@@ -212,6 +217,7 @@ impl CodexLiveTransport {
             sideband_tx: None,
             sideband_writer: None,
             sideband_reader: None,
+            media_forward: None,
             sideband_closed_flag: None,
             sideband_open: None,
             connected: AtomicBool::new(false),
@@ -317,6 +323,11 @@ impl CodexLiveTransport {
             }
         });
 
+        // Track media_forward immediately so any error path that runs
+        // `close_inner` (via `connect`) can abort+join it. Leaving it local
+        // until sideband success would detach the task on mid-connect failure.
+        self.media_forward = Some(media_forward);
+
         let offer = peer.create_offer().await?;
         self.peer = Some(peer);
 
@@ -329,9 +340,6 @@ impl CodexLiveTransport {
         }
         self.connect_sideband(&signaling.call_id, &signaling.attestation)
             .await?;
-        // The media-forward task lives for the session; keep its handle so
-        // `close` can abort it. (It ends on its own when the peer drops.)
-        self.sideband_reader.get_or_insert(media_forward);
         Ok(())
     }
 
@@ -681,6 +689,11 @@ impl CodexLiveTransport {
 
     /// Serialize one Frameless Bidi control message onto the sideband. Returns
     /// an error if the transport is not connected or the sideband is gone.
+    ///
+    /// **Non-blocking for the session loop:** uses `try_send` so a stalled
+    /// writer / full control queue cannot park `session` forever (which would
+    /// starve Shutdown/CompleteDelegation). A full queue is treated as a
+    /// protocol failure — control messages are never silently dropped.
     pub async fn send(&self, message: &LiveClientMessage) -> Result<(), String> {
         if !self.connected.load(Ordering::Acquire) {
             return Err("Live transport is not connected".to_owned());
@@ -691,9 +704,16 @@ impl CodexLiveTransport {
             .ok_or_else(|| "Codex live sideband is not connected".to_owned())?;
         let json = serde_json::to_string(message)
             .map_err(|e| format!("failed to serialize live message: {e}"))?;
-        tx.send(json)
-            .await
-            .map_err(|_| "Codex live sideband is closed".to_owned())
+        match tx.try_send(json) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err("Codex live sideband is closed".to_owned())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => Err(
+                "Codex live sideband control queue is full; refusing to drop a control message"
+                    .to_owned(),
+            ),
+        }
     }
 
     /// Queue 16 kHz mono Float32 PCM for native Opus transmission. No-op when
@@ -735,7 +755,9 @@ impl CodexLiveTransport {
         if let Some(open) = self.sideband_open.take() {
             open.store(false, Ordering::Release);
         }
-        // Close the sideband first so no new messages are queued.
+        // Close the sideband first so no new messages are queued. Dropping the
+        // sender unblocks a writer parked on a full control channel without
+        // requiring an abort first (so in-flight control text can flush).
         if let Some(tx) = self.sideband_tx.take() {
             drop(tx);
         }
@@ -745,6 +767,12 @@ impl CodexLiveTransport {
         if let Some(reader) = self.sideband_reader.take() {
             reader.abort();
             let _ = reader.await;
+        }
+        // Abort + join media_forward before peer close so it cannot race
+        // peer teardown or keep holding the media event receiver.
+        if let Some(media_forward) = self.media_forward.take() {
+            media_forward.abort();
+            let _ = media_forward.await;
         }
         if let Some(peer) = self.peer.take() {
             peer.close().await;
@@ -768,6 +796,9 @@ impl Drop for CodexLiveTransport {
             handle.spawn(async move {
                 peer.close().await;
             });
+        }
+        if let Some(media_forward) = self.media_forward.take() {
+            media_forward.abort();
         }
         if let Some(reader) = self.sideband_reader.take() {
             reader.abort();

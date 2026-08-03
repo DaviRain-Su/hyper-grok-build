@@ -713,6 +713,9 @@ fn start_linux_subprocess(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     xai_tty_utils::detach_std_command(&mut cmd);
+    // Player is owned by the playback handle and killed on stop (same pattern
+    // as `audio/capture_linux.rs`); not a fire-and-forget session child.
+    #[allow(clippy::disallowed_methods)]
     let mut child = cmd
         .spawn()
         .map_err(|e| VoiceError::Config(format!("failed to start {}: {e}", player.program())))?;
@@ -1028,6 +1031,8 @@ fn start_macos_helper(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     xai_tty_utils::detach_std_command(&mut cmd);
+    // Helper owned by the playback handle and killed on stop.
+    #[allow(clippy::disallowed_methods)]
     let mut child = cmd
         .spawn()
         .map_err(|e| VoiceError::Config(format!("spawn speaker helper: {e}")))?;

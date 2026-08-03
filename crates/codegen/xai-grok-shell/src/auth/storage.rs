@@ -551,6 +551,50 @@ pub fn store_kimi_code_auth(grok_home: &Path, auth: &GrokAuth) -> std::io::Resul
     })
 }
 
+/// Durable compare/adopt for a post-refresh write under a live flock.
+///
+/// Decision is driven **only** by refresh-token family (not access expiry):
+/// - existing RT differs from `spent_refresh` and is non-empty → adopt sibling
+///   (even when access is expired — the RT family is the durable authority).
+/// - same RT + same access → idempotent no-op (no disk write needed by caller
+///   when `write=false` via returning the existing entry).
+/// - same RT + different access → insert candidate (force-refresh after 401).
+///
+/// Access-expiry must never gate adoption: an expired AT with a rotated RT is
+/// still the sibling's newer family and must not be overwritten by a stale
+/// candidate that spent the old RT.
+///
+/// Returns `(credential, wrote)` where `wrote` is true when the candidate was
+/// inserted into `map` (caller must `write_auth_json`).
+fn adopt_or_prepare_refreshed_scope(
+    map: &mut AuthStore,
+    scope: &str,
+    expected_mode: AuthMode,
+    candidate: &GrokAuth,
+    spent_refresh: &str,
+) -> (GrokAuth, bool) {
+    if let Some(existing) = map.get(scope).cloned()
+        && existing.auth_mode == expected_mode
+    {
+        let existing_rt = existing.refresh_token.as_deref().unwrap_or("").trim();
+        let spent = spent_refresh.trim();
+        // Sibling rotated the RT family: always adopt when their RT is non-empty
+        // and differs from the one we spent — independent of access expiry.
+        if !existing_rt.is_empty() && existing_rt != spent {
+            return (existing, false);
+        }
+        // Same RT family, same access: idempotent no-op.
+        if existing_rt == spent && existing.key == candidate.key {
+            return (existing, false);
+        }
+        // Same RT, different access (or empty existing RT): persist candidate.
+    }
+    let mut stored = candidate.clone();
+    stored.auth_mode = expected_mode;
+    map.insert(scope.to_owned(), stored.clone());
+    (stored, true)
+}
+
 /// Like [`store_kimi_code_auth`], but if a sibling already rotated past
 /// `spent_refresh`, adopt their on-disk entry instead of overwriting.
 ///
@@ -566,22 +610,16 @@ pub(crate) fn store_kimi_code_auth_after_refresh_locked(
     let path = resolve_auth_json_path(grok_home);
     ensure_live_auth_file_lock(file_lock, &path)?;
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    if let Some(existing) = map.get(KIMI_CODE_OAUTH_SCOPE).cloned()
-        && existing.auth_mode == AuthMode::KimiCode
-        && !super::model::is_expired(&existing)
-    {
-        let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
-        if existing_rt != spent_refresh {
-            return Ok(existing);
-        }
-        if existing.key == candidate.key {
-            return Ok(existing);
-        }
+    let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+        &mut map,
+        KIMI_CODE_OAUTH_SCOPE,
+        AuthMode::KimiCode,
+        candidate,
+        spent_refresh,
+    );
+    if wrote {
+        write_auth_json(&path, &map)?;
     }
-    let mut stored = candidate.clone();
-    stored.auth_mode = AuthMode::KimiCode;
-    map.insert(KIMI_CODE_OAUTH_SCOPE.to_owned(), stored.clone());
-    write_auth_json(&path, &map)?;
     Ok(stored)
 }
 
@@ -635,27 +673,16 @@ pub(crate) fn store_openai_codex_auth_after_refresh_locked(
     let path = resolve_auth_json_path(grok_home);
     ensure_live_auth_file_lock(file_lock, &path)?;
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    if let Some(existing) = map.get(OPENAI_CODEX_OAUTH_SCOPE).cloned()
-        && existing.auth_mode == AuthMode::OpenAiCodex
-        && !super::model::is_expired(&existing)
-    {
-        let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
-        // Sibling already rotated past the RT we spent — prefer their write
-        // so we do not clobber a newer family or double-spend.
-        if existing_rt != spent_refresh {
-            return Ok(existing);
-        }
-        // Same RT, same access: idempotent no-op.
-        if existing.key == candidate.key {
-            return Ok(existing);
-        }
-        // Same RT, different access: we just minted a replacement (e.g.
-        // force-refresh after 401) — fall through and persist candidate.
+    let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+        &mut map,
+        OPENAI_CODEX_OAUTH_SCOPE,
+        AuthMode::OpenAiCodex,
+        candidate,
+        spent_refresh,
+    );
+    if wrote {
+        write_auth_json(&path, &map)?;
     }
-    let mut stored = candidate.clone();
-    stored.auth_mode = AuthMode::OpenAiCodex;
-    map.insert(OPENAI_CODEX_OAUTH_SCOPE.to_owned(), stored.clone());
-    write_auth_json(&path, &map)?;
     Ok(stored)
 }
 
@@ -701,22 +728,16 @@ pub(crate) fn store_anthropic_claude_auth_after_refresh_locked(
     let path = resolve_auth_json_path(grok_home);
     ensure_live_auth_file_lock(file_lock, &path)?;
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    if let Some(existing) = map.get(ANTHROPIC_CLAUDE_OAUTH_SCOPE).cloned()
-        && existing.auth_mode == AuthMode::AnthropicClaude
-        && !super::model::is_expired(&existing)
-    {
-        let existing_rt = existing.refresh_token.as_deref().unwrap_or("");
-        if existing_rt != spent_refresh {
-            return Ok(existing);
-        }
-        if existing.key == candidate.key {
-            return Ok(existing);
-        }
+    let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+        &mut map,
+        ANTHROPIC_CLAUDE_OAUTH_SCOPE,
+        AuthMode::AnthropicClaude,
+        candidate,
+        spent_refresh,
+    );
+    if wrote {
+        write_auth_json(&path, &map)?;
     }
-    let mut stored = candidate.clone();
-    stored.auth_mode = AuthMode::AnthropicClaude;
-    map.insert(ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_owned(), stored.clone());
-    write_auth_json(&path, &map)?;
     Ok(stored)
 }
 
@@ -760,22 +781,16 @@ pub(crate) fn store_github_copilot_auth_after_refresh_locked(
     let path = resolve_auth_json_path(grok_home);
     ensure_live_auth_file_lock(file_lock, &path)?;
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    if let Some(existing) = map.get(GITHUB_COPILOT_OAUTH_SCOPE).cloned()
-        && existing.auth_mode == AuthMode::GitHubCopilot
-        && !super::model::is_expired(&existing)
-    {
-        let existing_refresh = existing.refresh_token.as_deref().unwrap_or("");
-        if existing_refresh != spent_github_token {
-            return Ok(existing);
-        }
-        if existing.key == candidate.key {
-            return Ok(existing);
-        }
+    let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+        &mut map,
+        GITHUB_COPILOT_OAUTH_SCOPE,
+        AuthMode::GitHubCopilot,
+        candidate,
+        spent_github_token,
+    );
+    if wrote {
+        write_auth_json(&path, &map)?;
     }
-    let mut stored = candidate.clone();
-    stored.auth_mode = AuthMode::GitHubCopilot;
-    map.insert(GITHUB_COPILOT_OAUTH_SCOPE.to_owned(), stored.clone());
-    write_auth_json(&path, &map)?;
     Ok(stored)
 }
 
@@ -820,23 +835,16 @@ pub(crate) fn store_radius_auth_after_refresh_locked(
     let path = resolve_auth_json_path(grok_home);
     ensure_live_auth_file_lock(file_lock, &path)?;
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
-    if let Some(existing) = map.get(RADIUS_OAUTH_SCOPE).cloned()
-        && existing.auth_mode == AuthMode::Radius
-    {
-        let existing_refresh = existing.refresh_token.as_deref().unwrap_or("");
-        if existing_refresh != spent_refresh
-            && (!super::radius::is_radius_auth_expired(&existing) || !existing_refresh.is_empty())
-        {
-            return Ok(existing);
-        }
-        if !super::radius::is_radius_auth_expired(&existing) && existing.key == candidate.key {
-            return Ok(existing);
-        }
+    let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+        &mut map,
+        RADIUS_OAUTH_SCOPE,
+        AuthMode::Radius,
+        candidate,
+        spent_refresh,
+    );
+    if wrote {
+        write_auth_json(&path, &map)?;
     }
-    let mut stored = candidate.clone();
-    stored.auth_mode = AuthMode::Radius;
-    map.insert(RADIUS_OAUTH_SCOPE.to_owned(), stored.clone());
-    write_auth_json(&path, &map)?;
     Ok(stored)
 }
 
@@ -1188,6 +1196,403 @@ mod scope_lock_tests {
 
         assert_eq!(read_api_key(&home).as_deref(), Some("first-key"));
         assert!(home.join("auth.json.lock").is_file());
+    }
+
+    #[test]
+    #[serial]
+    fn kimi_after_refresh_same_rt_new_access_persists_candidate() {
+        // Force-refresh after 401 mints a new access under the same RT.
+        // A still-valid disk access with that RT must not block the write —
+        // otherwise concurrent/older readers keep the rejected bearer.
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+        let prior = GrokAuth {
+            key: "rejected-access".to_string(),
+            refresh_token: Some("same-rt".to_string()),
+            auth_mode: AuthMode::KimiCode,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(KIMI_CODE_OAUTH_SCOPE.to_string(), prior);
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "fresh-access".to_string(),
+            refresh_token: Some("same-rt".to_string()),
+            auth_mode: AuthMode::KimiCode,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let stored = store_kimi_code_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "same-rt",
+            &file_lock,
+        )
+        .unwrap();
+        assert_eq!(stored.key, "fresh-access");
+        assert_eq!(
+            read_kimi_code_auth(dir.path()).map(|a| a.key),
+            Some("fresh-access".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn kimi_adopts_rotated_rt_even_when_sibling_access_is_expired() {
+        // Durable authority is the RT family, not access expiry. A sibling
+        // that rotated RT with an already-expired AT must still be adopted.
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+        let sibling = GrokAuth {
+            key: "expired-sibling-access".to_string(),
+            refresh_token: Some("rt-rotated".to_string()),
+            auth_mode: AuthMode::KimiCode,
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(KIMI_CODE_OAUTH_SCOPE.to_string(), sibling);
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "stale-candidate".to_string(),
+            refresh_token: Some("rt-from-us".to_string()),
+            auth_mode: AuthMode::KimiCode,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let stored = store_kimi_code_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "rt-spent",
+            &file_lock,
+        )
+        .unwrap();
+        assert_eq!(stored.key, "expired-sibling-access");
+        assert_eq!(stored.refresh_token.as_deref(), Some("rt-rotated"));
+        // Disk must still hold the sibling family (not overwritten).
+        assert_eq!(
+            read_kimi_code_auth(dir.path())
+                .and_then(|a| a.refresh_token)
+                .as_deref(),
+            Some("rt-rotated")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn anthropic_adopts_rotated_rt_even_when_sibling_access_is_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+        let sibling = GrokAuth {
+            key: "expired-claude-access".to_string(),
+            refresh_token: Some("claude-rt-new".to_string()),
+            auth_mode: AuthMode::AnthropicClaude,
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_string(), sibling);
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "our-fresh-access".to_string(),
+            refresh_token: Some("claude-rt-ours".to_string()),
+            auth_mode: AuthMode::AnthropicClaude,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let stored = store_anthropic_claude_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "claude-rt-spent",
+            &file_lock,
+        )
+        .unwrap();
+        assert_eq!(stored.refresh_token.as_deref(), Some("claude-rt-new"));
+        assert_eq!(stored.key, "expired-claude-access");
+    }
+
+    #[test]
+    #[serial]
+    fn github_copilot_adopts_rotated_token_even_when_access_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+        let sibling = GrokAuth {
+            key: "expired-copilot".to_string(),
+            refresh_token: Some("gho_rotated".to_string()),
+            auth_mode: AuthMode::GitHubCopilot,
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(2)),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(GITHUB_COPILOT_OAUTH_SCOPE.to_string(), sibling);
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "our-copilot".to_string(),
+            refresh_token: Some("gho_ours".to_string()),
+            auth_mode: AuthMode::GitHubCopilot,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            ..Default::default()
+        };
+        let stored = store_github_copilot_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "gho_spent",
+            &file_lock,
+        )
+        .unwrap();
+        assert_eq!(stored.refresh_token.as_deref(), Some("gho_rotated"));
+    }
+
+    #[test]
+    fn adopt_helper_wrong_mode_does_not_adopt() {
+        // Entry under the Claude scope but wrong auth_mode must not be adopted
+        // as a sibling family — fall through and store the candidate.
+        let mut map = AuthStore::new();
+        map.insert(
+            ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_string(),
+            GrokAuth {
+                key: "wrong-mode-access".into(),
+                refresh_token: Some("rt-other".into()),
+                auth_mode: AuthMode::KimiCode, // wrong mode for this scope
+                ..Default::default()
+            },
+        );
+        let candidate = GrokAuth {
+            key: "fresh-claude".into(),
+            refresh_token: Some("rt-ours".into()),
+            auth_mode: AuthMode::AnthropicClaude,
+            ..Default::default()
+        };
+        let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+            &mut map,
+            ANTHROPIC_CLAUDE_OAUTH_SCOPE,
+            AuthMode::AnthropicClaude,
+            &candidate,
+            "rt-spent",
+        );
+        assert!(wrote, "wrong mode must not adopt");
+        assert_eq!(stored.key, "fresh-claude");
+        assert_eq!(stored.auth_mode, AuthMode::AnthropicClaude);
+    }
+
+    #[test]
+    fn adopt_helper_empty_sibling_rt_does_not_adopt() {
+        let mut map = AuthStore::new();
+        map.insert(
+            KIMI_CODE_OAUTH_SCOPE.to_string(),
+            GrokAuth {
+                key: "no-rt-access".into(),
+                refresh_token: Some("".into()),
+                auth_mode: AuthMode::KimiCode,
+                ..Default::default()
+            },
+        );
+        let candidate = GrokAuth {
+            key: "candidate".into(),
+            refresh_token: Some("rt-new".into()),
+            auth_mode: AuthMode::KimiCode,
+            ..Default::default()
+        };
+        let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+            &mut map,
+            KIMI_CODE_OAUTH_SCOPE,
+            AuthMode::KimiCode,
+            &candidate,
+            "rt-spent",
+        );
+        assert!(wrote);
+        assert_eq!(stored.key, "candidate");
+    }
+
+    #[test]
+    fn adopt_helper_rotated_rt_adopts_without_write() {
+        let mut map = AuthStore::new();
+        map.insert(
+            ANTHROPIC_CLAUDE_OAUTH_SCOPE.to_string(),
+            GrokAuth {
+                key: "sibling".into(),
+                refresh_token: Some("rt-rotated".into()),
+                auth_mode: AuthMode::AnthropicClaude,
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+                ..Default::default()
+            },
+        );
+        let candidate = GrokAuth {
+            key: "stale".into(),
+            refresh_token: Some("rt-ours".into()),
+            auth_mode: AuthMode::AnthropicClaude,
+            ..Default::default()
+        };
+        let (stored, wrote) = adopt_or_prepare_refreshed_scope(
+            &mut map,
+            ANTHROPIC_CLAUDE_OAUTH_SCOPE,
+            AuthMode::AnthropicClaude,
+            &candidate,
+            "rt-spent",
+        );
+        assert!(!wrote, "rotated sibling must adopt without overwrite");
+        assert_eq!(stored.key, "sibling");
+        assert_eq!(stored.refresh_token.as_deref(), Some("rt-rotated"));
+    }
+
+    /// Persist-failure recovery decision used by Anthropic login: prefer
+    /// sibling family when present, else return the fresh candidate. Mirrors
+    /// the `store_…_locked` Err / no-lock branches without a live IdP.
+    #[test]
+    fn anthropic_persist_failure_prefers_sibling_then_candidate() {
+        // Sibling present under Claude scope with rotated RT.
+        let sibling = GrokAuth {
+            key: "sibling-at".into(),
+            refresh_token: Some("rt-sib".into()),
+            auth_mode: AuthMode::AnthropicClaude,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let candidate = GrokAuth {
+            key: "fresh-at".into(),
+            refresh_token: Some("rt-cand".into()),
+            auth_mode: AuthMode::AnthropicClaude,
+            ..Default::default()
+        };
+        // Decision pure: if sibling family differs from spent → sibling.
+        let spent = "rt-spent";
+        let existing_rt = sibling.refresh_token.as_deref().unwrap_or("");
+        let chosen = if !existing_rt.is_empty() && existing_rt != spent {
+            sibling.clone()
+        } else {
+            candidate.clone()
+        };
+        assert_eq!(chosen.key, "sibling-at");
+
+        // No sibling / same spent RT → candidate.
+        let same_family = GrokAuth {
+            key: "old".into(),
+            refresh_token: Some(spent.into()),
+            auth_mode: AuthMode::AnthropicClaude,
+            ..Default::default()
+        };
+        let existing_rt = same_family.refresh_token.as_deref().unwrap_or("");
+        let chosen = if !existing_rt.is_empty() && existing_rt != spent {
+            same_family
+        } else {
+            candidate.clone()
+        };
+        assert_eq!(chosen.key, "fresh-at");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_after_refresh_adopts_rotated_sibling_not_stale_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::unset("GROK_AUTH_PATH");
+        let auth_path = dir.path().join("auth.json");
+        let lock_path = dir.path().join("auth.json.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        let file_lock = AuthFileLock {
+            _heartbeat: None,
+            _file: file,
+        };
+        let sibling = GrokAuth {
+            key: "sibling-access".to_string(),
+            refresh_token: Some("rt-new".to_string()),
+            auth_mode: AuthMode::OpenAiCodex,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            account_id: Some("acct".into()),
+            ..Default::default()
+        };
+        let mut map = AuthStore::new();
+        map.insert(OPENAI_CODEX_OAUTH_SCOPE.to_string(), sibling);
+        write_auth_json(&auth_path, &map).unwrap();
+
+        let candidate = GrokAuth {
+            key: "stale-candidate-access".to_string(),
+            refresh_token: Some("rt-new-from-us".to_string()),
+            auth_mode: AuthMode::OpenAiCodex,
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            account_id: Some("acct".into()),
+            ..Default::default()
+        };
+        let stored = store_openai_codex_auth_after_refresh_locked(
+            dir.path(),
+            &candidate,
+            "rt-spent",
+            &file_lock,
+        )
+        .unwrap();
+        assert_eq!(stored.key, "sibling-access");
+        assert_eq!(stored.refresh_token.as_deref(), Some("rt-new"));
+        assert_eq!(
+            read_openai_codex_auth(dir.path()).map(|a| a.key),
+            Some("sibling-access".to_string())
+        );
     }
 
     #[test]
