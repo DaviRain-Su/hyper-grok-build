@@ -1551,10 +1551,10 @@ impl SessionActor {
         }
     }
 
-    /// One agent round: **Hypercore primary**, legacy secondary with recovery.
+    /// One agent round: legacy by default, experimental Hypercore on explicit opt-in.
     ///
-    /// P6 policy: do not delete `process_conversation_turn`; keep it as the
-    /// per-round fallback when Hypercore is disabled or errors.
+    /// P6 containment policy: do not delete `process_conversation_turn`; keep it
+    /// as the default path and as the per-round fallback when Hypercore errors.
     async fn run_one_agent_round(
         self: &Arc<Self>,
         prompt_id: &str,
@@ -2019,10 +2019,10 @@ impl SessionActor {
     )]
     /// Legacy full agent loop (tools / compact / recovery details).
     ///
-    /// **Secondary path (P6):** preferred entry is Hypercore via
-    /// [`Self::run_one_agent_round`]. This remains for `HYPERCORE_TURN=0` and
-    /// per-round fallback on Hypercore errors — do not delete without a long
-    /// canary.
+    /// **Default path:** Hypercore is experimental and only entered through
+    /// [`Self::run_one_agent_round`] after an explicit `HYPERCORE_TURN=1` opt-in.
+    /// Keep this legacy loop as the safe production path until Hypercore reaches
+    /// parity and its canary gate is deliberately enabled.
     async fn process_conversation_turn(
         self: &Arc<Self>,
         req_id: &str,

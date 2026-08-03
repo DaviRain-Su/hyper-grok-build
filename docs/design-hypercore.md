@@ -446,7 +446,7 @@ docs/
 | 存储 | `{grok_home}/hypercore/<session_id>/`（与 NativeHost 同布局） |
 | 流 | 复用 `xai_hyper_core::native::open_model_stream_from_sampler_config` |
 | 工厂 | `SessionActor::shell_hypercore_host()` |
-| 主路径 turn | **P6：** Hypercore 默认；`process_conversation_turn` 仅作回退 |
+| 实验 turn 路径 | **P6 containment：** legacy 默认；仅显式 `HYPERCORE_TURN=1` 进入 Hypercore |
 | Host API | **v2**：`ToolDefinition`、`ModelChunk::ToolCall`、`list_tools`、`ChatMessage` tool 字段 |
 | Core tool loop | **done**：`submit_turn` / `submit_turn_with_tools` / `continue_turn_with_tools`；snapshot **v2** |
 | Native 桥 | tools/json_schema → `ConversationRequest`；`Completed` 提取 tool_calls |
@@ -457,11 +457,11 @@ docs/
 **开关：** 见 [hypercore-ops.md](hypercore-ops.md)。
 
 ```bash
-# 默认：Hypercore 主路径 + shell 真工具环
+# 默认：legacy 安全路径
 hyper
 
-# 强制全程 legacy（金丝雀 / 排障）
-export HYPERCORE_TURN=0
+# 显式 Hypercore 金丝雀 + shell 真工具环
+export HYPERCORE_TURN=1
 hyper
 ```
 
@@ -477,30 +477,30 @@ hyper
 | **P3** | **done** | `submit_turn_with_tools` + shell `execute_tool_calls` |
 | **P4** | **done** | json_schema + `run_turn_outer_loop` |
 | **P5** | **done** | subagent 独立 core；compact continue |
-| **P6** | **done** | 主路径收口、文档/遥测、**保留** legacy 回退（不删） |
+| **P6** | **contained** | 文档/遥测完成；审查后恢复 legacy 默认，Hypercore 仅显式金丝雀启用 |
 
 ### 有意不进 Core 的路径
 
 | 路径 | 策略 |
 |------|------|
 | **Memory dream / recap / laziness** | shell 旁路 sampler |
-| **Legacy `process_conversation_turn`** | `HYPERCORE_TURN=0` 或 Hypercore 错误时的 **安全网**（P6 明确不删） |
+| **Legacy `process_conversation_turn`** | 默认生产路径；Hypercore 未启用或出错时使用（P6 明确不删） |
 | **双 transcript** | `chat_state` 权威；`~/.grok/hypercore/<id>/` 旁路 snapshot |
 | **Cloudflare / 远端 Host** | 原 Phase 2，仍后置 |
 
 ### P6 验收（本机）
 
-1. 默认 headless 工具 turn 日志含 `path=hypercore` / `shell.turn.path`  
-2. `HYPERCORE_TURN=0` 时 `path=legacy`  
-3. `json_schema` headless 返回 `structuredOutput`  
-4. 子 agent 使用独立 `session_id` 目录  
-5. Hypercore 失败时同 round 回退 legacy  
+1. 默认 headless 工具 turn 日志含 `path=legacy` / `reason=legacy_env_disabled`
+2. `HYPERCORE_TURN=1` 时显式金丝雀日志含 `path=hypercore`
+3. `json_schema` headless 金丝雀返回 `structuredOutput`
+4. 子 agent 使用独立 `session_id` 目录
+5. Hypercore 失败时同 round 回退 legacy
 
 ## 12. 下一步（执行顺序）
 
 1. ~~**评审本文** → status 改为 Accepted~~ **done**  
 2. ~~**M0 / M1 / Shell host / P0–P6 本机主路径**~~ **done**  
-3. **可选金丝雀：** 生产观察 `shell.turn.path` 后再考虑删 legacy  
+3. **显式金丝雀：** 修复 correctness/parity 后用 `HYPERCORE_TURN=1` 观察 `shell.turn.path`；不得在此之前恢复默认
 4. **CF / edge Host（原 Phase 2）** 后置  
 5. 不把完整 TUI/PTY 逻辑塞进 core。
 

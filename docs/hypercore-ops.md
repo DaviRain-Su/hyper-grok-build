@@ -1,7 +1,8 @@
 # Hypercore operations guide
 
-Hyper is the **default agent turn path** as of P6. The legacy
-`process_conversation_turn` loop remains only as a safety net.
+Hypercore is an **experimental opt-in agent turn path**. The legacy
+`process_conversation_turn` loop remains the default production path while
+Hypercore correctness and parity work continues.
 
 Design background: [design-hypercore.md](design-hypercore.md).
 
@@ -9,23 +10,26 @@ Design background: [design-hypercore.md](design-hypercore.md).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `HYPERCORE_TURN` / `GROK_HYPERCORE_TURN` | **on** | `0` / `false` / `no` forces legacy for every round |
-| `HYPERCORE_TOOLS` / `GROK_HYPERCORE_TOOLS` | **on** | `0` disables the tool loop; with tools off, Hypercore is only used if plain is forced |
-| `HYPERCORE_PLAIN` / `GROK_HYPERCORE_PLAIN` | off | `1` forces plain-text Hypercore (no tools in the model request) |
+| `HYPERCORE_TURN` / `GROK_HYPERCORE_TURN` | **off** | Only `1` / `true` / `yes` / `on` enables Hypercore; missing, empty, unknown, or falsy values stay on legacy |
+| `HYPERCORE_TOOLS` / `GROK_HYPERCORE_TOOLS` | **on once opted in** | `0` disables the tool loop; with tools off, Hypercore is only used if plain is forced |
+| `HYPERCORE_PLAIN` / `GROK_HYPERCORE_PLAIN` | off | `1` forces plain-text Hypercore (no tools in the model request) after the turn gate is enabled |
 
-Aliases accept `1` / `true` / `yes` and `0` / `false` / `no` (case-insensitive).
+`HYPERCORE_TURN` has priority whenever it is set. The `GROK_` alias is consulted
+only when the primary variable is unset; all parsing is case-insensitive and
+fail-closed.
 
 ### Examples
 
 ```bash
-# Normal agent (Hypercore + tools)
+# Normal agent (safe default: legacy)
 hyper
 
-# Full legacy (canary / bisect)
-export HYPERCORE_TURN=0
+# Explicit Hypercore canary (tools enabled)
+export HYPERCORE_TURN=1
 hyper
 
-# Plain Hypercore only (no tool schemas)
+# Plain Hypercore canary (no tool schemas)
+export HYPERCORE_TURN=1
 export HYPERCORE_TOOLS=0
 export HYPERCORE_PLAIN=1
 hyper
@@ -58,7 +62,7 @@ Look for:
 
 ## Failure behavior
 
-1. **Hypercore disabled** → legacy for the whole session (env).
+1. **Hypercore not explicitly enabled** → legacy for the whole session (default).
 2. **Hypercore error mid-round** → log warn + **legacy for that round only**.
 3. **Context overflow mid-tools** → compact chat_state → `continue_turn_with_tools` (up to 3 restarts).
 4. **Auth compact failure** → same reauth surface as legacy compact.
@@ -71,8 +75,11 @@ Look for:
 
 ## Rollback
 
+Unset the opt-in or force it off:
+
 ```bash
-export HYPERCORE_TURN=0
+unset HYPERCORE_TURN GROK_HYPERCORE_TURN
+# or: export HYPERCORE_TURN=0
 ```
 
-No binary rebuild required. Legacy code path is still compiled in (P6 does **not** feature-gate it away).
+No binary rebuild is required. Legacy remains compiled in and is the default.

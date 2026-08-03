@@ -3,8 +3,9 @@
 //! Holds a live [`SamplerConfig`] (credentials + model route from the session)
 //! and persists core snapshots under `{grok_home}/hypercore/`.
 //!
-//! Session turns use Hypercore by default (`HYPERCORE_TURN=0` forces legacy).
-//! Tool execution for agent turns goes through
+//! Session turns use the legacy loop by default. Hypercore is experimental and
+//! requires an explicit `HYPERCORE_TURN=1` opt-in.
+//! Tool execution for opted-in agent turns goes through
 //! [`HyperCore::submit_turn_with_tools`] + shell `execute_tool_calls` (P3),
 //! not [`HyperHost::invoke_tool`] on this host (still unsupported for native
 //! host-only demos).

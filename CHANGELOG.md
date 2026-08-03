@@ -5,6 +5,10 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **Hypercore containment after correctness audit** — The experimental turn path
+  now defaults to legacy and only enables for an explicit truthy
+  `HYPERCORE_TURN` (or fallback `GROK_HYPERCORE_TURN`) value. Empty and unknown
+  values fail closed instead of silently enabling an incomplete path.
 - **ChatGPT / OpenAI Codex OAuth infinite 401 retry after login** — Installing
   `OpenAiCodexBearerResolver` no longer requires memoized
   `platform_oauth_active` (restored r7 catalog-identity routing). A session that
@@ -34,13 +38,14 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
   only wrote the URL to stderr, which the fullscreen TUI does not display.
 
 ### Added
-- **Hypercore primary agent path (P0–P6)** — default chat/agent turns run through
-  `xai-hyper-core` + `ShellHyperHost` with shell `execute_tool_calls`,
-  `json_schema` (native + StructuredOutput), goal/stop outer loop, subagent
-  isolation under `~/.grok/hypercore/<session_id>/`, and mid-turn compact
-  continue. Ops: [docs/hypercore-ops.md](docs/hypercore-ops.md).
-- **Env switches:** `HYPERCORE_TURN` (default on; `0` = full legacy),
-  `HYPERCORE_TOOLS`, `HYPERCORE_PLAIN` (and `GROK_*` aliases).
+- **Experimental Hypercore agent path (P0–P6)** — explicitly opted-in chat/agent
+  turns can run through `xai-hyper-core` + `ShellHyperHost` with shell
+  `execute_tool_calls`, `json_schema` (native + StructuredOutput), goal/stop
+  outer loop, subagent isolation under `~/.grok/hypercore/<session_id>/`, and
+  mid-turn compact continue. Ops: [docs/hypercore-ops.md](docs/hypercore-ops.md).
+- **Env switches:** `HYPERCORE_TURN` is fail-closed and defaults off; only
+  `1` / `true` / `yes` / `on` explicitly enables it. `HYPERCORE_TOOLS`,
+  `HYPERCORE_PLAIN`, and the `GROK_*` aliases remain available.
 - **Telemetry:** `shell.turn.path` (`hypercore` vs `legacy` + reason).
 
 ### Notes

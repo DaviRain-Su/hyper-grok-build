@@ -1,10 +1,18 @@
-//! **Primary** agent turn path via Hypercore + [`ShellHyperHost`] (P6).
+//! **Experimental** agent turn path via Hypercore + [`ShellHyperHost`] (P6).
 //!
-//! Default on (`HYPERCORE_TURN`). Tools (P3), `json_schema` (P4), shell outer
-//! loop / goal / stop_gate (P4), compact continue (P5), and independent
-//! subagent sessions (P5) all share this path.
+//! **Default off.** Session turns stay on the legacy path until Hypercore is
+//! explicitly enabled. This is a containment gate: production traffic should
+//! not enter Hypercore without an intentional opt-in.
 //!
-//! - `HYPERCORE_TURN=0` — force legacy always
+//! Enable with an explicit truthy value only:
+//! - `HYPERCORE_TURN=1` / `true` / `yes` / `on` (preferred)
+//! - `GROK_HYPERCORE_TURN=…` — secondary alias, consulted **only** when
+//!   `HYPERCORE_TURN` is unset
+//!
+//! Empty, unknown, `0` / `false` / `no` / `off`, and missing values all
+//! **fail closed** to legacy (`false`).
+//!
+//! Other related flags (unchanged by this gate):
 //! - `HYPERCORE_TOOLS=0` — disable tool loop (plain only with `HYPERCORE_PLAIN=1`)
 //! - `HYPERCORE_PLAIN=1` — force plain Hypercore (no tools in the request)
 //!
@@ -21,24 +29,47 @@ use xai_hyper_core::{
 };
 use xai_hyper_host::{HostToolCall, HostToolResult, ToolDefinition as HostToolDefinition};
 
-/// Env gate: prefer Hypercore when the path is capable.
-pub(super) fn hypercore_plain_turn_enabled() -> bool {
-    for key in ["HYPERCORE_TURN", "GROK_HYPERCORE_TURN"] {
-        if let Ok(v) = std::env::var(key) {
-            let t = v.trim();
-            if t.is_empty() {
-                continue;
-            }
-            if t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no") {
-                return false;
-            }
-            if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
-                return true;
-            }
-            return true;
-        }
+/// Explicit truthy values that enable the Hypercore turn path.
+///
+/// Pure / fail-closed: only `1` / `true` / `yes` / `on` (case-insensitive,
+/// surrounding whitespace ignored) return `true`. Everything else — including
+/// empty, unknown tokens, and explicit falsy forms — returns `false`.
+fn parse_hypercore_turn_flag(raw: Option<&str>) -> bool {
+    let Some(v) = raw else {
+        return false;
+    };
+    let t = v.trim();
+    if t.is_empty() {
+        return false;
     }
-    true
+    t == "1"
+        || t.eq_ignore_ascii_case("true")
+        || t.eq_ignore_ascii_case("yes")
+        || t.eq_ignore_ascii_case("on")
+}
+
+/// Resolve Hypercore turn enablement from both env candidates (pure).
+///
+/// Priority: when `HYPERCORE_TURN` is **set** (including empty / unknown), it
+/// alone decides and `GROK_HYPERCORE_TURN` is ignored. The grok-prefixed alias
+/// is only read when `HYPERCORE_TURN` is unset. Both fail closed (default
+/// `false`).
+fn hypercore_turn_enabled_from_env_values(
+    hypercore_turn: Option<&str>,
+    grok_hypercore_turn: Option<&str>,
+) -> bool {
+    match hypercore_turn {
+        Some(v) => parse_hypercore_turn_flag(Some(v)),
+        None => parse_hypercore_turn_flag(grok_hypercore_turn),
+    }
+}
+
+/// Env gate: Hypercore turn path is **opt-in** (default off / fail-closed).
+pub(super) fn hypercore_plain_turn_enabled() -> bool {
+    hypercore_turn_enabled_from_env_values(
+        std::env::var("HYPERCORE_TURN").ok().as_deref(),
+        std::env::var("GROK_HYPERCORE_TURN").ok().as_deref(),
+    )
 }
 
 /// Force plain-text Hypercore (no tools in the request).
@@ -81,7 +112,7 @@ pub(super) fn hypercore_tool_loop_ready() -> bool {
 pub(super) enum HypercorePathDecision {
     /// Enter Hypercore for this round.
     Use,
-    /// `HYPERCORE_TURN=0` (or equivalent).
+    /// Hypercore turn gate not explicitly enabled (default / fail-closed).
     DisabledByEnv,
     /// Empty user text — cannot open a core turn.
     EmptyPrompt,
@@ -903,25 +934,92 @@ mod tests {
     }
 
     #[test]
-    fn env_gate_parses() {
+    fn parse_hypercore_turn_flag_explicit_enable_only() {
+        for on in ["1", "true", "TRUE", "Yes", "on", "ON", "  true  "] {
+            assert!(
+                parse_hypercore_turn_flag(Some(on)),
+                "expected enable for {on:?}"
+            );
+        }
+        for off in [
+            "0", "false", "FALSE", "no", "off", "OFF", "", "   ", "maybe", "2", "enable",
+            "enabled", "y", "t",
+        ] {
+            assert!(
+                !parse_hypercore_turn_flag(Some(off)),
+                "expected fail-closed for {off:?}"
+            );
+        }
+        assert!(!parse_hypercore_turn_flag(None));
+    }
+
+    #[test]
+    fn hypercore_turn_default_off_when_both_unset() {
+        assert!(!hypercore_turn_enabled_from_env_values(None, None));
+    }
+
+    #[test]
+    fn hypercore_turn_prefers_primary_over_alias() {
+        // Primary set (even to false) wins; alias is ignored.
+        assert!(!hypercore_turn_enabled_from_env_values(
+            Some("0"),
+            Some("1")
+        ));
+        assert!(!hypercore_turn_enabled_from_env_values(
+            Some("false"),
+            Some("true")
+        ));
+        assert!(!hypercore_turn_enabled_from_env_values(Some(""), Some("1")));
+        assert!(!hypercore_turn_enabled_from_env_values(
+            Some("maybe"),
+            Some("1")
+        ));
+        // Primary explicit enable wins even if alias is off.
+        assert!(hypercore_turn_enabled_from_env_values(Some("1"), Some("0")));
+        assert!(hypercore_turn_enabled_from_env_values(
+            Some("true"),
+            Some("false")
+        ));
+    }
+
+    #[test]
+    fn hypercore_turn_alias_used_only_when_primary_unset() {
+        assert!(hypercore_turn_enabled_from_env_values(None, Some("1")));
+        assert!(hypercore_turn_enabled_from_env_values(None, Some("yes")));
+        assert!(!hypercore_turn_enabled_from_env_values(None, Some("0")));
+        assert!(!hypercore_turn_enabled_from_env_values(None, Some("")));
+        assert!(!hypercore_turn_enabled_from_env_values(
+            None,
+            Some("unknown")
+        ));
+    }
+
+    #[test]
+    fn env_gate_smoke_and_empty_prompt() {
+        // Live env is process-global; only assert pure empty-prompt behavior here.
         let _ = hypercore_plain_turn_enabled();
         let _ = hypercore_tool_loop_ready();
-        let _ = should_use_hypercore_turn("hi");
         assert!(!should_use_hypercore_turn(""));
         assert!(!should_use_hypercore_turn("   "));
     }
 
     #[test]
-    fn path_decision_empty_prompt() {
-        assert_eq!(
-            hypercore_path_decision(""),
-            HypercorePathDecision::EmptyPrompt
-        );
-        assert_eq!(
-            hypercore_path_decision("  \n"),
-            HypercorePathDecision::EmptyPrompt
-        );
-        assert!(!hypercore_path_decision("").uses_hypercore());
+    fn path_decision_empty_prompt_never_uses_hypercore() {
+        // Gate is checked before empty-prompt classification. With the
+        // fail-closed default (off), empty prompts surface as DisabledByEnv;
+        // when the process has an explicit opt-in they surface as EmptyPrompt.
+        // Either way Hypercore must not run.
+        let d_empty = hypercore_path_decision("");
+        let d_ws = hypercore_path_decision("  \n");
+        assert!(!d_empty.uses_hypercore());
+        assert!(!d_ws.uses_hypercore());
+        if hypercore_plain_turn_enabled() {
+            assert_eq!(d_empty, HypercorePathDecision::EmptyPrompt);
+            assert_eq!(d_ws, HypercorePathDecision::EmptyPrompt);
+        } else {
+            assert_eq!(d_empty, HypercorePathDecision::DisabledByEnv);
+            assert_eq!(d_ws, HypercorePathDecision::DisabledByEnv);
+        }
     }
 
     #[test]
