@@ -4,7 +4,31 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 
 ## [Unreleased]
 
+## [0.2.118-r1] — 2026-08-03
+
+### Changed
+- **Upstream sync** — Merged official `xai-org/grok-build` `main` at `780d138`
+  (monorepo `SOURCE_REV` `64c4de99…`), basing this community revision on
+  upstream **0.2.118** while preserving Hyper multi-provider routing,
+  community-build branding, and isolated `hyper update` packaging.
+
 ### Fixed
+- **Multi-provider auth coexistence** — xAI `AuthManager::update` /
+  `save_without_enrichment` now take the same `auth.json.lock` exclusive flock
+  as Kimi / Codex / Claude writers before whole-map RMW, so logging into Grok
+  cannot drop sibling `oauth/*` scopes. Devbox recovery only clears broken xAI
+  scopes instead of deleting the entire `auth.json`.
+- **Worktree same-pass rebuild vs age GC** — discovery rebuild returns the exact
+  paths it just registered; auto-GC protects them for that pass so second-
+  resolution clocks cannot age-delete a freshly registered worktree under
+  `max_age_secs = 0`.
+- **Circuit-breaker half-open probe races** — probe lease timestamps use an
+  encoded sentinel (`0` = unpublished), and Open/HalfOpen generation changes
+  coordinate with probe reservation so concurrent callers cannot double-admit
+  probes or leak accounting across generations.
+- **PTY e2e welcome locale** — content-backed harness forces English UI
+  language and accepts localized quit labels so host OS locale cannot fail
+  welcome waits (e.g. Chinese `退出` vs English `Quit`).
 - **Community updater real release archives + transactional bundle deploy** —
   `hyper update` now accepts the producer contract used by GitHub Releases
   (`tar -C staging .` on Unix / Windows zip): root `hyper`/`hyper.exe`, optional
@@ -76,6 +100,12 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
   `kimi-code` now pushes the device verification URL through `AuthChannels`
   (same as Codex / GitHub Copilot) and opens the browser. Previously the flow
   only wrote the URL to stderr, which the fullscreen TUI does not display.
+- **Shortcuts-help search/history long-help aliasing** — unknown pseudo long-
+  help rows no longer fall through to redo help; only paste/undo/redo map to
+  locale keys.
+- **Community consumer paywall tests** — gate verification resolution seeds
+  deferred state directly so `community-build` soft-gate semantics stay covered
+  without false positives.
 
 ### Added
 - **Experimental Hypercore agent path (P0–P6)** — explicitly opted-in chat/agent
@@ -89,8 +119,19 @@ All notable changes to **Hyper** (`hyper` binary) are documented here.
 - **Telemetry:** `shell.turn.path` (`hypercore` vs `legacy` + reason).
 
 ### Notes
+- This is community revision `0.2.118-r1` on top of upstream `0.2.118`; it remains
+  a normal GitHub Release so installers and `hyper update` treat it as latest.
 - Legacy `process_conversation_turn` is **kept** as a per-round safety net; set
   `HYPERCORE_TURN=0` to force it. Not deleted in P6.
+- Linux release binaries continue to target **glibc ≥ 2.17** via cargo-zigbuild.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash
+# pin:
+curl -fsSL https://raw.githubusercontent.com/DaviRain-Su/hyper-grok-build/dev/install.sh | bash -s -- --version v0.2.118-r1
+```
 
 ## [0.2.114-r7] — 2026-07-31
 
